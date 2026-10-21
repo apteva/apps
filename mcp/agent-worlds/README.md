@@ -1,28 +1,45 @@
 # Agent Worlds
 
-Agent Worlds is a project-scoped Apteva sidecar for viewing live agent activity. It provides a project page with four presets: System Graph, Operations, Pixel Village, and Conversation. Every preset uses the same sanitized scene data, so changing views never changes the source.
+Agent Worlds is a project- or globally-installed Apteva sidecar for viewing live agent activity. It provides a project page with three representations selected from one compact toolbar: System Graph, Operations, and Pixel Village. Every preset uses the same sanitized scene data and shared focus state. App labels use the host directory’s `display_name`, resolved by installation ID and shared across all representations and details. The directory is refreshed once per minute; unavailable names fall back to the scene label, and remote identities are never relabeled from local installs. Instance → project → observed team → agent navigation stays inside the current view. Representation switches preserve project/team/agent focus, camera position, destination selection, page, and replay position. Breadcrumbs and Escape move back up.
+
+Global installations enumerate projects through `PlatformClient.ListProjects()` and fan out explicit project filters through the SDK observation APIs, with at most four projects being read concurrently. Project installations stay pinned to their own project. Empty authorized projects remain visible. Failed project reads produce a generic partial-data notice and never expose their metadata. The main source shows main-server agents; isolated runtimes remain separate sources in the same view.
+
+Teams are **observed collaboration groups**, computed once in the shared view model from content-free cross-agent handoff metadata (`target_agent_id`) within the current replay window. The platform does not expose explicit team records. Unlinked agents stay independent, and links never merge agents from different projects. With no recent handoffs, a project shows its agents directly.
+
+At instance scope, Village renders each project as its own complete village on the shared world map, with its actual app/integration houses, its own paths and scenery, and its own roaming agents. Selecting a village zooms into the project in the same view. The overview reuses the close-up renderer and shared destination selection, event history and clock; it never invents buildings for an empty project or mixes residents between projects. Generic tool activity does not create a fictional building. Observed teams remain neighborhoods within project navigation. It uses a clean, top-down pixel-art map: square tiles, orthogonal streets, compact rooms, and palette-indexed characters. Scenery, plants, masonry, furniture, and water are drawn entirely in SVG/TypeScript, without image assets, perspective transforms, blur filters, or external art dependencies. Houses are open cutaways by default, with visible furnished rooms. Agents roam independently along obstacle-aware routes, with varied speeds, garden detours, and rest stops. At closer range, actual tool calls interrupt a stroll, take the agent through the matching app/integration doorway, pause at a work spot, and return smoothly to the village. Calls to a different destination redirect the agent from its current position; before/call bursts share a visit and result events do not start a second trip. Active destinations are prioritized, expanding the map to eight houses when needed. Movement is a deterministic function of the shared scene clock, so polling does not restart it, pausing freezes the displayed positions, and replay seeks reproduce positions. Live animation buffers one polling cycle (3.5 seconds) so observed calls can enter the walking timeline smoothly. No additional server queries or per-agent timers are used; visitor drawing order keeps them visible above the floor and furniture. Static terrain/buildings are memoized. Ambient motion respects replay and reduced-motion preferences, and animation updates skip hidden tabs. Village uses the full panel width; PNG and video export preserve its landscape proportions. Every representation uses common pagination, so agents beyond the visible page remain reachable. The layout responds to its panel width, including when embedded in a narrow dashboard pane. The optional Details panel exposes activity, destinations, and the SDK thread inventory for the focused agent.
 
 ## Sources
 
-- **Main server:** agents come from `ListAgents`; a filtered `platform.telemetry.read` subscription supplies live events. The app keeps the most recent 600 events in memory. Main-server replay begins when the app starts, because the app telemetry bridge is ephemeral.
-- **Environments:** active isolated runtimes in the current project come from `RuntimeAPI`. The panel polls each runtime's recent agent telemetry. No environment agent is started or changed by this app.
-- **Remote server:** optionally configure `remote_url`, `remote_api_key`, and `remote_label` on this install. The app reads the remote server's `/api/agents` and `/api/telemetry` endpoints using the key on the backend. When the remote server has Environments installed, it also discovers running environment definitions and reads their inspection feed. Set `remote_project_id` and `remote_environments_install_id` when needed to identify the remote installation. The key is never returned by the app API. Use one Agent Worlds installation per remote server you want to configure.
+- **Main server:** `AppCtx.TelemetryAPI()` supplies project agents and retained activity through the generic observation API. Runtime agents are shown in their own sources.
+- **Environments:** `ListObservedRuntimes` and `GetObservedRuntime` expose authorized runtimes across installations. Discovery does not depend on the Environments app or grant execution access.
+- **Remote server:** optionally configure `remote_url`, `remote_api_key`, and `remote_label`. `sdk.NewTelemetryClient` uses the same inventory and history contracts as the local client. Set `remote_project_id` to narrow discovery. Without it, remote project IDs come from the SDK observation directory; remote empty projects and human-readable project names are not exposed by that directory. The key stays on the backend. The old `remote_environments_install_id` setting is no longer used.
+
+All sources use the same scene loader. Each nonempty project scene refresh makes one inventory request and one metadata history query, regardless of agent count. The SDK project directory is also read once. Thread and attachment inventories come from `GetAgentTopology` and are cached for 45 seconds per viewer, server credential, project, and agent (maximum 1,024 entries); this replaces app-owned runtime-catalog and integration discovery. App and integration destinations keep their project identity, even when names repeat across projects. The query reads at most 500 matching project/runtime events from the last 15 minutes; the scene displays up to 240 events per project belonging to its current agents. The main-server query shares this bounded project window with runtimes, so a busy runtime can reduce the main-source history shown. There is no background collector, app-owned event log, or per-agent history polling. Replay uses server-retained history and survives app restarts. The panel polls scenes every 2.5 seconds after the previous request finishes, pauses scene refreshes for replay, and skips background polling in hidden tabs. Source/project changes cancel outstanding requests.
+
+The app requests `platform.telemetry.observe`, `platform.runtimes.observe`, and `platform.instances.read`. Activity is requested with the `metadata` projection and decoded using `TelemetryStreamEvent.Metadata()`; raw conversation content is unnecessary. Tool activity covers the recent history window; thread inventory comes from the generic topology API. Missing topology is reported and does not hide the agent scene.
 
 Event labels deliberately omit message text, thoughts, prompts, and tool arguments. A graph or exported clip conveys activity without copying private conversation content.
 
-## Refresh behavior
-
-Scene and source polling share a cancellable request path. Refreshes wait for the previous request to finish, source/project changes cancel outstanding requests, and hidden tabs skip background refreshes. Pausing the scene preserves its replay snapshot. Themes, destination spotlight, app/integration attribution, and exports are preserved from v0.1.6.
-
-This release uses the published SDK and existing server contracts. The local metadata-observation backend refactor is not included until its platform APIs are published.
-
 ## Build
+
+This refactor requires the generic telemetry observation APIs in the locally updated server and SDK. Those SDK additions are not yet in a published tag; use the workspace `go.work` overlay for development. The dependency is pinned to the latest published SDK tag by commit topology; standalone source installs require a subsequent SDK release containing these APIs and a dependency bump before publishing this app.
 
 ```sh
 cd apps
 bun run scripts/build-panels.ts --app agent-worlds
 cd mcp/agent-worlds
-go test ./...
+go test -race ./...
+bun run typecheck
+bun test ui/*.test.ts ui/*.test.tsx
 ```
 
+Scroll over the visualization to zoom around the pointer, drag to pan, or pinch with two fingers. Camera controls provide zoom buttons and a fit/reset action. When the visualization has keyboard focus, use arrows to pan, +/− to zoom, and 0 or Home to fit. The same camera controller serves all three representations and preserves the visible camera in exports. Navigating to another project, team, agent, page, or source resets the camera to fit. Source, focus, portrait, refresh, and export controls are available in the toolbar’s ⋯ menu.
+
 The panel exports a PNG or a 12-second WebM clip of the selected preset. Video capture requires browser `MediaRecorder` and canvas capture support.
+
+
+## Publishing
+
+Version 0.4.0-preview.1 is a native-package preview for servers that already provide the generic telemetry observation APIs described above. It includes checksummed macOS and Linux builds for arm64 and amd64, built with the local SDK observation additions. It does not release or update the server or SDK. Install this preview from its tagged manifest; the stable marketplace entry is unchanged.
+
+The published dependency pin remains v0.102.0, verified as the latest SDK tag by ancestry. That tag does not yet contain these observation APIs. Standalone source builds and source fallback are not supported for this preview; use the native packages on the four supported platforms, or the development workspace overlay when building from source. A stable release requires publishing those SDK/server APIs first.

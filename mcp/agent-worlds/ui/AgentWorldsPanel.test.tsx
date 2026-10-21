@@ -1,0 +1,94 @@
+import {afterAll,expect,test} from "bun:test";
+import {GlobalRegistrator} from "@happy-dom/global-registrator";
+import React,{act} from "react";
+import {createRoot} from "react-dom/client";
+import {fixture} from "./test-fixtures";
+import Panel from "./AgentWorldsPanel";
+GlobalRegistrator.register({url:"http://localhost:5280"});
+const win = window as any;
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
+let latest=structuredClone(fixture);
+const pending:{resolve:(response:any)=>void;signal:AbortSignal}[]=[];
+let timerId=0;
+const timers=new Map<number,{callback:()=>void;delay:number}>();
+win.setTimeout=((callback:()=>void,delay:number)=>{timers.set(++timerId,{callback,delay});return timerId}) as any;
+win.clearTimeout=((id:number)=>timers.delete(id)) as any;
+win.setInterval=win.setTimeout;win.clearInterval=win.clearTimeout;
+const originalFetch=globalThis.fetch;
+globalThis.fetch=((url:string,options:any)=>url.startsWith("/api/apps?") || url === "/api/apps" ? Promise.resolve({ok:true,json:async()=>[]}) : url.includes("/sources")?Promise.resolve({ok:true,json:async()=>[fixture.source]}):new Promise(resolve=>pending.push({resolve,signal:options.signal}))) as any;
+const response=()=>({ok:true,json:async()=>structuredClone(latest)});
+const host=win.document.createElement("div");win.document.body.append(host);
+const root=createRoot(host as any);
+const click=async(label:string)=>act(async()=>{
+ const el=[...host.querySelectorAll("button,[role=button]")].find(el=>el.getAttribute("aria-label")===label||el.textContent===label);
+ if(el){el.dispatchEvent(new win.MouseEvent("click",{bubbles:true}));return;}
+ const select=host.querySelector('select[aria-label="Visualization"]') as HTMLSelectElement;
+ const option=[...select.options].find(option=>option.textContent===label);expect(option,`control ${label}`).toBeTruthy();
+ select.value=option!.value;select.dispatchEvent(new win.Event("change",{bubbles:true}));
+});
+const crumb=()=>host.querySelector(".aw-breadcrumbs")!.textContent;
+const poll=async()=>act(async()=>{const entry=[...timers].find(([,t])=>t.delay===2500);expect(entry).toBeTruthy();timers.delete(entry![0]);entry![1].callback();});
+afterAll(async()=>{await act(async()=>root.unmount());globalThis.fetch=originalFetch;await GlobalRegistrator.unregister();});
+test("Village shares project/team/agent focus, replay and pagination with all renderers",async()=>{
+ await act(async()=>root.render(React.createElement(Panel,{installId:1})));
+ expect(pending.length).toBe(1);
+ await act(async()=>pending[0].resolve(response()));
+ await click("Pixel village");
+ expect(host.querySelectorAll('select[aria-label="Visualization"] option').length).toBe(3);
+ expect(host.querySelector('.aw-presets,.aw-summary,.aw-scene-head')).toBeNull();
+ const viewport=host.querySelector('.aw-canvas')!;
+ const svg=viewport.querySelector('svg')!;
+ svg.getBoundingClientRect=()=>({left:0,top:0,width:1280,height:760,right:1280,bottom:760,x:0,y:0,toJSON:()=>({})});
+ const wheel=new win.WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-100,clientX:640,clientY:380});
+ Object.defineProperties(wheel,{clientX:{value:640},clientY:{value:380}});
+ await act(async()=>{viewport.dispatchEvent(wheel)});
+ expect(wheel.defaultPrevented).toBe(true);expect(Number(viewport.getAttribute('data-camera-zoom'))).toBeGreaterThan(1);
+ const zoomedBox=svg.getAttribute('viewBox');
+ const pointer=(type:string,x:number,y:number)=>new win.PointerEvent(type,{bubbles:true,cancelable:true,pointerId:1,button:0,clientX:x,clientY:y});
+ await act(async()=>{viewport.dispatchEvent(pointer('pointerdown',600,380));viewport.dispatchEvent(pointer('pointermove',700,400));viewport.dispatchEvent(pointer('pointerup',700,400));});
+ expect(svg.getAttribute('viewBox')).not.toBe(zoomedBox);
+ // A drag ending over a project cannot navigate it; the next click still can.
+ await click("Zoom into project Growth");expect(crumb()).not.toContain('Growth');
+ await click('Fit visualization');expect(viewport.getAttribute('data-camera-zoom')).toBe('1');
+ expect(svg.getAttribute('viewBox')).toBe('0 0 1280 760');
+ expect(host.querySelectorAll('[data-world-node="project"]').length).toBe(3);
+ await click("Zoom into project Growth");
+ expect(crumb()).toContain("Growth");
+ await click("Zoom into team Coordinator + 1");
+ expect(crumb()).toContain("Observed team");
+ expect(host.querySelector('svg[aria-label="Pixel village of live agents"]')).toBeTruthy();
+ await click("Focus agent Researcher");
+ expect(crumb()).toContain("Researcher");
+ const before=crumb();
+ await poll(); // a request already in flight when the user pauses
+ const clockBeforePause=host.querySelector(".aw-village")!.getAttribute("data-clock");
+ const positionsBeforePause=[...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")]);
+ await click("Live");
+ expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
+ expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
+ const range=host.querySelector('input[type="range"]')!;
+ for(const preset of ["System graph","Operations","Pixel village"]){await click(preset);expect(crumb()).toBe(before);expect(host.querySelector('input[type="range"]')).toBe(range);}
+ expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
+ expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
+ // Late network responses may not mutate a paused world or reset its cursor.
+ latest={...latest,events:[],agents:[{...fixture.agents[0],name:"Changed while paused"}]};
+ await act(async()=>pending[1].resolve(response()));
+ expect(crumb()).toBe(before);expect(host.textContent).not.toContain("Changed while paused");
+ const count=pending.length;await poll();expect(pending.length).toBe(count);
+ await click("Zoom out");expect(crumb()).not.toContain("Researcher");expect(crumb()).toContain("Observed team");
+ await click("Growth");
+ await click("Paused");
+ latest={...fixture,events:[]};await poll();await act(async()=>pending.at(-1)!.resolve(response()));
+ expect(host.querySelectorAll('[data-world-node="team"]').length).toBe(0);
+ expect(host.querySelectorAll('svg [aria-label^="Focus agent"]').length).toBe(6);
+ await click("Next");expect(host.querySelectorAll('svg [aria-label^="Focus agent"]').length).toBe(2);
+ await click("Operations");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
+ await click("Pixel village");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
+ // Switching installation aborts the previous source and resets its scope.
+ await poll();const inflight=pending.at(-1)!;
+ await act(async()=>root.render(React.createElement(Panel,{installId:2,projectId:"growth"})));
+ expect(inflight.signal.aborted).toBe(true);
+ latest={...fixture,scope:"project",projects:[fixture.projects![0]],agents:fixture.agents.slice(0,8)};
+ await act(async()=>pending.at(-1)!.resolve(response()));
+ expect(crumb()).not.toContain("Instance");expect(crumb()).toContain("Growth");
+});

@@ -1,35 +1,49 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
+const sceneEventLimit = 240
+
+var sceneEventTypes = []string{
+	"thread.spawn", "thread.done", "thread.message", "thread.renamed",
+	"tool.call", "tool.result", "tool.before", "tool.after",
+	"llm.start", "llm.done", "llm.error", "iteration.done", "event.received",
+	"execution.waiting", "execution.released", "execution.cancelled",
+}
+
+type SceneProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type Source struct {
-	ID     string `json:"id"`
-	Label  string `json:"label"`
-	Kind   string `json:"kind"`
-	Status string `json:"status"`
-	Agents int    `json:"agents"`
+	ProjectID string `json:"project_id,omitempty"`
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	Kind      string `json:"kind"`
+	Status    string `json:"status"`
+	Agents    int    `json:"agents"`
 }
 
 type SceneAgent struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Model      string `json:"model,omitempty"`
-	MainThread string `json:"main_thread,omitempty"`
+	ProjectID string               `json:"project_id"`
+	Threads   []sdk.ObservedThread `json:"threads,omitempty"`
+	ID        string               `json:"id"`
+	Name      string               `json:"name"`
+	Status    string               `json:"status"`
+	Model     string               `json:"model,omitempty"`
 }
 
 type SceneApp struct {
@@ -38,348 +52,376 @@ type SceneApp struct {
 	Status string `json:"status"`
 }
 
-type SceneDestination struct {
-	ID        string     `json:"id"`
-	Kind      string     `json:"kind"`
-	Name      string     `json:"name"`
-	Status    string     `json:"status"`
-	Tools     []string   `json:"tools,omitempty"`
-	ToolCount int        `json:"tool_count"`
-	CallCount int        `json:"call_count"`
-	LastCall  *time.Time `json:"last_call,omitempty"`
-}
-
 type SceneEvent struct {
-	ID       string    `json:"id"`
-	AgentID  string    `json:"agent_id"`
-	ThreadID string    `json:"thread_id,omitempty"`
-	Type     string    `json:"type"`
-	Kind     string    `json:"kind"`
-	Label    string    `json:"label"`
-	Target   string    `json:"target,omitempty"`
-	TargetID string    `json:"target_id,omitempty"`
-	Success  *bool     `json:"success,omitempty"`
-	Time     time.Time `json:"time"`
-	toolName string
+	TargetAgentID string `json:"target_agent_id,omitempty"`
+	TargetID      string `json:"target_id,omitempty"`
+	Success       *bool  `json:"success,omitempty"`
+	toolName      string
+	ID            string    `json:"id"`
+	AgentID       string    `json:"agent_id"`
+	ThreadID      string    `json:"thread_id,omitempty"`
+	Type          string    `json:"type"`
+	Kind          string    `json:"kind"`
+	Label         string    `json:"label"`
+	Target        string    `json:"target,omitempty"`
+	Time          time.Time `json:"time"`
 }
 
 type Scene struct {
+	Scope        string             `json:"scope"`
+	Projects     []SceneProject     `json:"projects"`
+	Destinations []SceneDestination `json:"destinations"`
+	Warnings     []string           `json:"warnings,omitempty"`
 	Source       Source             `json:"source"`
 	Agents       []SceneAgent       `json:"agents"`
 	Apps         []SceneApp         `json:"apps"`
-	Destinations []SceneDestination `json:"destinations"`
 	Events       []SceneEvent       `json:"events"`
 	At           time.Time          `json:"at"`
 }
 
-func (a *App) sources() ([]Source, error) {
-	agents, err := sdk.ListAgentsVia(a.ctx.PlatformAPI(), a.ctx.CurrentProject())
+// A source only changes the SDK client, project and optional runtime filter.
+// Local and remote servers share discovery, history and metadata contracts.
+type sceneReader struct {
+	client      sdk.TelemetryClient
+	projectID   string
+	remote      bool
+	label       string
+	projectName string
+	worlds      *App
+	identity    string
+}
+
+func newSceneReader(app *sdk.AppCtx, remote bool) (sceneReader, error) {
+	reader := sceneReader{client: app.TelemetryAPI(), projectID: app.CurrentProject(), label: "Main server"}
+	if remote {
+		config := app.Config()
+		origin, key := strings.TrimSpace(config.Get("remote_url")), config.Get("remote_api_key")
+		if origin == "" || strings.TrimSpace(key) == "" {
+			return reader, errors.New("remote server is not configured")
+		}
+		var err error
+		reader.client, err = sdk.NewTelemetryClient(origin, key)
+		if err != nil {
+			return reader, err
+		}
+		reader.projectID = strings.TrimSpace(config.Get("remote_project_id"))
+		reader.label = strings.TrimSpace(config.Get("remote_label"))
+		if reader.label == "" {
+			reader.label = "Remote server"
+		}
+		reader.remote = true
+		reader.identity = fmt.Sprintf("%x", sha256.Sum256([]byte(origin+"\x00"+key)))
+	}
+	if reader.client == nil {
+		return reader, errors.New("telemetry observation API unavailable")
+	}
+	return reader, nil
+}
+
+func (r sceneReader) source(runtimeID, status string, agents int) Source {
+	source := Source{ID: "main", Label: r.label, Kind: "main", Status: status, Agents: agents, ProjectID: r.projectID}
+	if r.remote {
+		source.ID, source.Kind = "remote", "remote"
+	}
+	if runtimeID != "" {
+		source.ID, source.Kind = "runtime:"+runtimeID, "runtime"
+		source.Label = "Environment · " + runtimeID
+		if r.remote {
+			source.ID, source.Kind = "remote-runtime:"+runtimeID, "remote-runtime"
+			source.Label = r.label + " · " + runtimeID
+		}
+	}
+	return source
+}
+
+func (r sceneReader) sources(ctx context.Context) ([]Source, error) {
+	agents, err := r.client.ListObservedAgents(ctx, r.projectID)
 	if err != nil {
 		return nil, err
 	}
-	out := []Source{{ID: "main", Label: "Main server", Kind: "main", Status: "running", Agents: len(agents)}}
-	runtimes, err := a.ctx.RuntimeAPI().ListRuntimes()
+	count := 0
+	for _, agent := range agents {
+		if agent.RuntimeID == "" {
+			count++
+		}
+	}
+	runtimes, err := r.client.ListObservedRuntimes(ctx, r.projectID)
 	if err != nil {
 		return nil, err
 	}
-	for _, rt := range runtimes {
-		if rt.ProjectID != a.ctx.CurrentProject() {
-			continue
-		}
-		out = append(out, Source{ID: "runtime:" + rt.ID, Label: "Environment · " + rt.ID, Kind: "runtime", Status: rt.Status, Agents: len(rt.Agents)})
+	out := []Source{r.source("", "running", count)}
+	for _, runtime := range runtimes {
+		out = append(out, r.source(runtime.ID, runtime.Status, len(runtime.Agents)))
 	}
-	if a.hasRemote() {
-		status, count := "running", 0
-		if remote, err := a.remoteAgents(); err == nil {
-			count = len(remote)
-		} else {
-			status = "error"
-		}
-		label := strings.TrimSpace(a.ctx.Config().Get("remote_label"))
-		if label == "" {
-			label = "Remote server"
-		}
-		out = append(out, Source{ID: "remote", Label: label, Kind: "remote", Status: status, Agents: count})
-		if definitions, err := a.remoteDefinitions(); err == nil {
-			for _, definition := range definitions {
-				if definition.ActiveRun == nil || definition.Runtime == nil {
-					continue
+	return out, nil
+}
+
+func readers(ctx context.Context, app *sdk.AppCtx, remote bool) ([]sceneReader, error) {
+	r, err := newSceneReader(app, remote)
+	if err != nil {
+		return nil, err
+	}
+	if r.projectID != "" {
+		if !remote {
+			if projects, e := app.PlatformAPI().ListProjects(); e == nil {
+				for _, p := range projects {
+					if p.ID == r.projectID {
+						r.projectName = p.Name
+						break
+					}
 				}
-				if definition.ActiveRun.Status != "running" {
-					continue
-				}
-				out = append(out, Source{ID: "remote-run:" + definition.ActiveRun.ID, Label: label + " · " + definition.Name, Kind: "remote-runtime", Status: definition.Runtime.Status, Agents: len(definition.Runtime.Agents)})
 			}
+		}
+		return []sceneReader{r}, nil
+	}
+	var projects []sdk.PlatformProject
+	if !remote {
+		projects, err = app.PlatformAPI().ListProjects()
+	} else {
+		// API-key clients may enumerate their authorized observation directory. The
+		// public SDK carries project IDs; do not duplicate the remote REST client.
+		var agents []sdk.ObservedAgent
+		agents, err = r.client.ListObservedAgents(ctx, "")
+		seen := map[string]bool{}
+		for _, agent := range agents {
+			if agent.ProjectID != "" && !seen[agent.ProjectID] {
+				seen[agent.ProjectID] = true
+				projects = append(projects, sdk.PlatformProject{ID: agent.ProjectID, Name: agent.ProjectID})
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sceneReader, 0, len(projects))
+	for _, project := range projects {
+		if project.ID != "" {
+			copy := r
+			copy.projectID = project.ID
+			copy.projectName = project.Name
+			out = append(out, copy)
 		}
 	}
 	return out, nil
 }
 
-func (a *App) scene(sourceID string) (*Scene, error) {
-	if sourceID == "" {
-		sourceID = "main"
+func (a *App) sources(ctx context.Context, app *sdk.AppCtx) ([]Source, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	out := []Source{}
+	for _, remote := range []bool{false, true} {
+		if remote && strings.TrimSpace(app.Config().Get("remote_url")) == "" {
+			continue
+		}
+		group, err := readers(ctx, app, remote)
+		if err != nil {
+			if !remote {
+				return nil, err
+			}
+			out = append(out, Source{ID: "remote", Label: "Remote server", Kind: "remote", Status: "error"})
+			continue
+		}
+		main := Source{ID: "main", Label: "Main server", Kind: "main", Status: "running"}
+		if remote {
+			main.ID, main.Kind, main.Label = "remote", "remote", "Remote server"
+			if len(group) > 0 {
+				main.Label = group[0].label
+			}
+		}
+		runtimes := []Source{}
+		found, failures := readProjects(ctx, group, func(reader sceneReader) ([]Source, error) { return reader.sources(ctx) })
+		for i, items := range found {
+			if failures[i] != nil {
+				main.Status = "error"
+				continue
+			}
+			main.Label = group[i].label
+			main.Agents += items[0].Agents
+			if len(group) == 1 {
+				main.ProjectID = group[i].projectID
+			}
+			runtimes = append(runtimes, items[1:]...)
+		}
+		out = append(out, main)
+		out = append(out, runtimes...)
 	}
+	return out, nil
+}
+
+func (a *App) scene(ctx context.Context, app *sdk.AppCtx, sourceID string) (*Scene, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	var remote bool
+	var runtimeID string
 	switch {
-	case sourceID == "main":
-		return a.mainScene()
+	case sourceID == "" || sourceID == "main":
+	case sourceID == "remote":
+		remote = true
 	case strings.HasPrefix(sourceID, "runtime:"):
-		return a.runtimeScene(strings.TrimPrefix(sourceID, "runtime:"))
-	case sourceID == "remote" && a.hasRemote():
-		return a.remoteScene()
-	case strings.HasPrefix(sourceID, "remote-run:") && a.hasRemote():
-		return a.remoteRunScene(strings.TrimPrefix(sourceID, "remote-run:"))
+		runtimeID = strings.TrimPrefix(sourceID, "runtime:")
+		if runtimeID == "" {
+			return nil, errors.New("runtime ID required")
+		}
+	case strings.HasPrefix(sourceID, "remote-runtime:"):
+		remote = true
+		runtimeID = strings.TrimPrefix(sourceID, "remote-runtime:")
+		if runtimeID == "" {
+			return nil, errors.New("runtime ID required")
+		}
 	default:
 		return nil, fmt.Errorf("unknown source %q", sourceID)
 	}
-}
-
-func (a *App) mainScene() (*Scene, error) {
-	agents, err := sdk.ListAgentsVia(a.ctx.PlatformAPI(), a.ctx.CurrentProject())
+	group, err := readers(ctx, app, remote)
 	if err != nil {
 		return nil, err
 	}
-	scene := &Scene{Source: Source{ID: "main", Label: "Main server", Kind: "main", Status: "running", Agents: len(agents)}, Agents: make([]SceneAgent, 0, len(agents)), Apps: []SceneApp{}, Events: []SceneEvent{}, At: time.Now().UTC()}
-	allowed := make(map[int64]bool, len(agents))
-	for _, agent := range agents {
-		allowed[agent.ID] = true
-		scene.Agents = append(scene.Agents, SceneAgent{ID: strconv.FormatInt(agent.ID, 10), Name: agent.Name, Status: agent.Status, MainThread: agent.DefaultThreadID})
+	combined := &Scene{Source: Source{ID: sourceID, Label: "Main server", Kind: "main", Status: "running"}, Scope: "instance", Projects: []SceneProject{}, Agents: []SceneAgent{}, Apps: []SceneApp{}, Events: []SceneEvent{}, Destinations: []SceneDestination{}, At: time.Now().UTC()}
+	if sourceID == "" {
+		combined.Source.ID = "main"
 	}
-	a.mu.RLock()
-	for _, ev := range a.events {
-		if allowed[ev.AgentID] {
-			scene.Events = append(scene.Events, normalizeEvent(ev.ID, ev.AgentID, ev.ThreadID, ev.Type, ev.Time, ev.Data))
+	if remote {
+		combined.Source.Kind = "remote"
+		combined.Source.Label = "Remote server"
+	}
+	if (!remote && app.CurrentProject() != "") || (remote && app.Config().Get("remote_project_id") != "") || runtimeID != "" {
+		combined.Scope = "project"
+	}
+	parts, failures := readProjects(ctx, group, func(reader sceneReader) (*Scene, error) {
+		reader.worlds = a
+		if runtimeID != "" {
+			runtimes, e := reader.client.ListObservedRuntimes(ctx, reader.projectID)
+			if e != nil {
+				return nil, e
+			}
+			found := false
+			for _, rt := range runtimes {
+				if rt.ID == runtimeID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, nil
+			}
 		}
+		return reader.scene(ctx, runtimeID)
+	})
+	matched := false
+	var firstError error
+	for i, part := range parts {
+		reader := group[i]
+		if reader.projectName == "" {
+			reader.projectName = reader.projectID
+		}
+		if failures[i] != nil {
+			if firstError == nil {
+				firstError = failures[i]
+			}
+			if len(group) == 1 {
+				return nil, failures[i]
+			}
+			combined.Warnings = append(combined.Warnings, "Some projects could not be read; showing authorized, available projects.")
+			continue
+		}
+		if part == nil {
+			continue
+		}
+		matched = true
+		combined.Projects = append(combined.Projects, SceneProject{ID: reader.projectID, Name: reader.projectName})
+		combined.Agents = append(combined.Agents, part.Agents...)
+		combined.Apps = append(combined.Apps, part.Apps...)
+		combined.Events = append(combined.Events, part.Events...)
+		combined.Destinations = append(combined.Destinations, part.Destinations...)
+		combined.Warnings = append(combined.Warnings, part.Warnings...)
+		combined.Source = reader.source(runtimeID, part.Source.Status, 0)
 	}
-	a.mu.RUnlock()
-	finishScene(scene)
-	a.enrichScene(scene)
-	return scene, nil
+	if !matched && firstError != nil {
+		return nil, firstError
+	}
+	if runtimeID != "" && !matched {
+		return nil, errors.New("runtime not found in authorized projects")
+	}
+	if len(combined.Warnings) > 0 {
+		combined.Source.Status = "partial"
+	}
+	if combined.Scope == "instance" {
+		combined.Source.ProjectID = ""
+	}
+	combined.Source.Agents = len(combined.Agents)
+	finishScene(combined)
+	return combined, nil
 }
 
-func (a *App) runtimeScene(id string) (*Scene, error) {
-	if id == "" {
-		return nil, errors.New("runtime ID required")
-	}
-	rt, err := a.ctx.RuntimeAPI().GetRuntime(id)
-	if err != nil {
-		return nil, err
-	}
-	if rt.ProjectID != a.ctx.CurrentProject() {
-		return nil, errors.New("runtime is outside this project")
-	}
-	scene := &Scene{Source: Source{ID: "runtime:" + id, Label: "Environment · " + id, Kind: "runtime", Status: rt.Status, Agents: len(rt.Agents)}, Agents: []SceneAgent{}, Apps: []SceneApp{}, Events: []SceneEvent{}, At: time.Now().UTC()}
-	for _, app := range rt.Apps {
-		scene.Apps = append(scene.Apps, SceneApp{ID: app.Name, Name: app.Name, Status: app.Status})
-	}
-	for _, agent := range rt.Agents {
-		alias := agent.Alias
-		if alias == "" {
-			alias = strconv.FormatInt(agent.ID, 10)
-		}
-		scene.Agents = append(scene.Agents, SceneAgent{ID: strconv.FormatInt(agent.ID, 10), Name: alias, Status: agent.Status, Model: agent.Model, MainThread: "main"})
-		events, err := a.ctx.RuntimeAPI().ListRuntimeAgentTelemetry(id, alias, time.Now().Add(-15*time.Minute), 120)
+func (r sceneReader) scene(ctx context.Context, runtimeID string) (*Scene, error) {
+	scene := &Scene{Source: r.source(runtimeID, "running", 0), Agents: []SceneAgent{}, Apps: []SceneApp{}, Events: []SceneEvent{}, At: time.Now().UTC()}
+	if runtimeID == "" {
+		agents, err := r.client.ListObservedAgents(ctx, r.projectID)
 		if err != nil {
 			return nil, err
 		}
-		for _, ev := range events {
-			scene.Events = append(scene.Events, normalizeEvent(ev.ID, ev.AgentID, ev.ThreadID, ev.Type, ev.Time, ev.Data))
+		for _, agent := range agents {
+			if agent.RuntimeID == "" {
+				scene.Agents = append(scene.Agents, SceneAgent{ID: strconv.FormatInt(agent.ID, 10), Name: agent.Name, Status: agent.Status, ProjectID: r.projectID})
+			}
+		}
+	} else {
+		runtime, err := r.client.GetObservedRuntime(ctx, r.projectID, runtimeID)
+		if err != nil {
+			return nil, err
+		}
+		scene.Source.Status = runtime.Status
+		for _, app := range runtime.Apps {
+			id := app.Name
+			if app.InstallID != 0 {
+				id = strconv.FormatInt(app.InstallID, 10)
+			}
+			scene.Apps = append(scene.Apps, SceneApp{ID: id, Name: app.Name, Status: app.Status})
+		}
+		for _, agent := range runtime.Agents {
+			id := strconv.FormatInt(agent.ID, 10)
+			name := agent.Alias
+			if name == "" {
+				name = id
+			}
+			scene.Agents = append(scene.Agents, SceneAgent{ID: id, Name: name, Status: agent.Status, Model: agent.Model, ProjectID: r.projectID})
 		}
 	}
-	finishScene(scene)
-	a.enrichScene(scene)
-	return scene, nil
-}
-
-func (a *App) hasRemote() bool {
-	return strings.TrimSpace(a.ctx.Config().Get("remote_url")) != "" && a.ctx.Config().Get("remote_api_key") != ""
-}
-
-func (a *App) remoteBase() (*url.URL, error) {
-	raw := strings.TrimRight(strings.TrimSpace(a.ctx.Config().Get("remote_url")), "/")
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
-		return nil, errors.New("remote URL must be an origin without a path")
+	scene.Source.Agents = len(scene.Agents)
+	if len(scene.Agents) == 0 {
+		return scene, nil
 	}
-	host := u.Hostname()
-	ip := net.ParseIP(host)
-	loopback := strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
-	if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
-		return nil, errors.New("remote URL must use HTTPS (except loopback)")
-	}
-	return u, nil
-}
-
-func (a *App) remoteGET(path string, out any) error {
-	base, err := a.remoteBase()
-	if err != nil {
-		return err
-	}
-	endpoint := *base
-	relative, err := url.Parse(path)
-	if err != nil || !strings.HasPrefix(relative.Path, "/api/") {
-		return errors.New("invalid remote API path")
-	}
-	endpoint.Path = relative.Path
-	endpoint.RawQuery = relative.RawQuery
-	req, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.ctx.Config().Get("remote_api_key"))
-	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("remote server returned HTTP %d", resp.StatusCode)
-	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
-}
-
-type remoteAgent struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Status          string `json:"status"`
-	DefaultThreadID string `json:"default_thread_id"`
-}
-type remoteEvent struct {
-	ID       string          `json:"id"`
-	AgentID  int64           `json:"instance_id"`
-	ThreadID string          `json:"thread_id"`
-	Type     string          `json:"type"`
-	Time     time.Time       `json:"time"`
-	Data     json.RawMessage `json:"data"`
-}
-
-func (a *App) remoteAgents() ([]remoteAgent, error) {
-	var agents []remoteAgent
-	path := "/api/agents"
-	if project := strings.TrimSpace(a.ctx.Config().Get("remote_project_id")); project != "" {
-		path += "?project_id=" + url.QueryEscape(project)
-	}
-	err := a.remoteGET(path, &agents)
-	return agents, err
-}
-
-type remoteDefinition struct {
-	Name      string `json:"name"`
-	ActiveRun *struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	} `json:"active_run"`
-	Runtime *struct {
-		Status string             `json:"status"`
-		Apps   []sdk.RuntimeApp   `json:"apps"`
-		Agents []sdk.RuntimeAgent `json:"agents"`
-	} `json:"runtime"`
-}
-
-func (a *App) remoteEnvironmentPath(path string) string {
-	query := url.Values{}
-	if project := strings.TrimSpace(a.ctx.Config().Get("remote_project_id")); project != "" {
-		query.Set("project_id", project)
-	}
-	if install := strings.TrimSpace(a.ctx.Config().Get("remote_environments_install_id")); install != "" {
-		query.Set("install_id", install)
-	}
-	if len(query) == 0 {
-		return path
-	}
-	return path + "?" + query.Encode()
-}
-
-func (a *App) remoteDefinitions() ([]remoteDefinition, error) {
-	var definitions []remoteDefinition
-	err := a.remoteGET(a.remoteEnvironmentPath("/api/apps/environments/api/environments"), &definitions)
-	return definitions, err
-}
-
-func (a *App) remoteRunScene(runID string) (*Scene, error) {
-	definitions, err := a.remoteDefinitions()
+	// One bounded history request for the source, independent of agent count.
+	// The server owns retention and metadata projection; there is no app event log.
+	page, err := r.client.QueryTelemetry(ctx, sdk.TelemetryQuery{
+		ProjectID: r.projectID, RuntimeID: runtimeID, Events: sceneEventTypes,
+		Projection: "metadata", Since: scene.At.Add(-15 * time.Minute), Limit: 500,
+	})
 	if err != nil {
 		return nil, err
 	}
-	var selected *remoteDefinition
-	for index := range definitions {
-		if definitions[index].ActiveRun != nil && definitions[index].ActiveRun.ID == runID {
-			selected = &definitions[index]
-			break
-		}
+	allowed := make(map[string]bool, len(scene.Agents))
+	for _, agent := range scene.Agents {
+		allowed[agent.ID] = true
 	}
-	if selected == nil || selected.Runtime == nil {
-		return nil, errors.New("remote environment is not running")
-	}
-	label := strings.TrimSpace(a.ctx.Config().Get("remote_label"))
-	if label == "" {
-		label = "Remote server"
-	}
-	scene := &Scene{Source: Source{ID: "remote-run:" + runID, Label: label + " · " + selected.Name, Kind: "remote-runtime", Status: selected.Runtime.Status, Agents: len(selected.Runtime.Agents)}, Agents: []SceneAgent{}, Apps: []SceneApp{}, Events: []SceneEvent{}, At: time.Now().UTC()}
-	for _, app := range selected.Runtime.Apps {
-		scene.Apps = append(scene.Apps, SceneApp{ID: app.Name, Name: app.Name, Status: app.Status})
-	}
-	for _, agent := range selected.Runtime.Agents {
-		alias := agent.Alias
-		if alias == "" {
-			alias = strconv.FormatInt(agent.ID, 10)
-		}
-		scene.Agents = append(scene.Agents, SceneAgent{ID: strconv.FormatInt(agent.ID, 10), Name: alias, Status: agent.Status, Model: agent.Model, MainThread: "main"})
-		path := "/api/apps/environments/api/runs/" + url.PathEscape(runID) + "/inspect"
-		query := url.Values{"agent": {alias}}
-		if project := strings.TrimSpace(a.ctx.Config().Get("remote_project_id")); project != "" {
-			query.Set("project_id", project)
-		}
-		if install := strings.TrimSpace(a.ctx.Config().Get("remote_environments_install_id")); install != "" {
-			query.Set("install_id", install)
-		}
-		var inspected struct {
-			Telemetry []remoteEvent `json:"telemetry"`
-		}
-		if err := a.remoteGET(path+"?"+query.Encode(), &inspected); err != nil {
-			return nil, err
-		}
-		for _, ev := range inspected.Telemetry {
-			scene.Events = append(scene.Events, normalizeEvent(ev.ID, ev.AgentID, ev.ThreadID, ev.Type, ev.Time, ev.Data))
+	// History is newest-ingestion-first. Reverse before the stable time sort so
+	// events with the same timestamp keep their actual ingestion order.
+	for i := len(page.Events) - 1; i >= 0; i-- {
+		event := page.Events[i]
+		if event.RuntimeID == runtimeID && allowed[strconv.FormatInt(event.AgentID, 10)] {
+			scene.Events = append(scene.Events, normalizeEvent(event))
 		}
 	}
 	finishScene(scene)
-	a.enrichScene(scene)
+	if r.worlds != nil {
+		r.worlds.enrichScene(ctx, r, scene)
+	}
 	return scene, nil
 }
 
-func (a *App) remoteScene() (*Scene, error) {
-	agents, err := a.remoteAgents()
-	if err != nil {
-		return nil, err
-	}
-	label := strings.TrimSpace(a.ctx.Config().Get("remote_label"))
-	if label == "" {
-		label = "Remote server"
-	}
-	scene := &Scene{Source: Source{ID: "remote", Label: label, Kind: "remote", Status: "running", Agents: len(agents)}, Agents: []SceneAgent{}, Apps: []SceneApp{}, Events: []SceneEvent{}, At: time.Now().UTC()}
-	for _, agent := range agents {
-		scene.Agents = append(scene.Agents, SceneAgent{ID: strconv.FormatInt(agent.ID, 10), Name: agent.Name, Status: agent.Status, MainThread: agent.DefaultThreadID})
-		var events []remoteEvent
-		path := "/api/telemetry?" + url.Values{"agent_id": {strconv.FormatInt(agent.ID, 10)}, "limit": {"80"}}.Encode()
-		if err := a.remoteGET(path, &events); err != nil {
-			return nil, err
-		}
-		for _, ev := range events {
-			scene.Events = append(scene.Events, normalizeEvent(ev.ID, ev.AgentID, ev.ThreadID, ev.Type, ev.Time, ev.Data))
-		}
-	}
-	finishScene(scene)
-	a.enrichScene(scene)
-	return scene, nil
-}
-
-func normalizeEvent(id string, agentID int64, threadID, eventType string, at time.Time, raw json.RawMessage) SceneEvent {
-	var data map[string]any
-	_ = json.Unmarshal(raw, &data)
-	kind, label, target := "activity", eventType, ""
-	toolName := ""
-	switch eventType {
+func normalizeEvent(event sdk.TelemetryStreamEvent) SceneEvent {
+	metadata, _ := event.Metadata()
+	kind, label, target := "activity", event.Type, ""
+	switch event.Type {
 	case "thread.spawn":
 		kind, label = "spawn", "started a thread"
 	case "thread.done":
@@ -387,25 +429,16 @@ func normalizeEvent(id string, agentID int64, threadID, eventType string, at tim
 	case "thread.message":
 		kind, label = "message", "sent a message"
 	case "tool.call", "tool.before":
-		kind = "tool"
-		name, _ := data["name"].(string)
-		if name == "" {
-			name, _ = data["tool"].(string)
+		kind, target = "tool", cleanLabel(metadata.ToolName)
+		if target == "" {
+			target = "tool"
 		}
-		if name == "" {
-			name = "tool"
-		}
-		label = "called " + cleanLabel(name)
-		target = cleanLabel(name)
-		toolName = name
+		label = "called " + target
 	case "tool.result", "tool.after":
-		kind, label = "result", "tool returned"
-		name, _ := data["name"].(string)
-		if name == "" {
-			name, _ = data["tool"].(string)
+		kind, label, target = "result", "tool returned", cleanLabel(metadata.ToolName)
+		if metadata.Success != nil && !*metadata.Success {
+			kind, label = "error", "tool failed"
 		}
-		target = cleanLabel(name)
-		toolName = name
 	case "llm.start":
 		kind, label = "thinking", "started thinking"
 	case "llm.done", "iteration.done":
@@ -421,19 +454,15 @@ func normalizeEvent(id string, agentID int64, threadID, eventType string, at tim
 	case "execution.cancelled":
 		kind, label = "error", "execution cancelled"
 	}
-	if at.IsZero() {
-		at = time.Now().UTC()
+	id := event.ID
+	if event.ServerID != "" {
+		id = event.ServerID + ":" + id
 	}
-	if id == "" {
-		id = fmt.Sprintf("%d:%s:%s:%d", agentID, threadID, eventType, at.UnixNano())
+	targetAgent := ""
+	if metadata.TargetAgentID != 0 {
+		targetAgent = strconv.FormatInt(metadata.TargetAgentID, 10)
 	}
-	event := SceneEvent{ID: id, AgentID: strconv.FormatInt(agentID, 10), ThreadID: threadID, Type: eventType, Kind: kind, Label: label, Target: target, Time: at, toolName: toolName}
-	if kind == "result" {
-		if success, ok := data["success"].(bool); ok {
-			event.Success = &success
-		}
-	}
-	return event
+	return SceneEvent{TargetAgentID: targetAgent, Success: metadata.Success, toolName: metadata.ToolName, ID: id, AgentID: strconv.FormatInt(event.AgentID, 10), ThreadID: event.ThreadID, Type: event.Type, Kind: kind, Label: label, Target: target, Time: event.Time}
 }
 
 func cleanLabel(raw string) string {
@@ -451,9 +480,49 @@ func cleanLabel(raw string) string {
 }
 
 func finishScene(scene *Scene) {
-	sort.Slice(scene.Agents, func(i, j int) bool { return scene.Agents[i].Name < scene.Agents[j].Name })
-	sort.Slice(scene.Events, func(i, j int) bool { return scene.Events[i].Time.Before(scene.Events[j].Time) })
-	if len(scene.Events) > 240 {
-		scene.Events = scene.Events[len(scene.Events)-240:]
+	seenWarnings := map[string]bool{}
+	warnings := scene.Warnings[:0]
+	for _, warning := range scene.Warnings {
+		if !seenWarnings[warning] {
+			seenWarnings[warning] = true
+			warnings = append(warnings, warning)
+		}
 	}
+	scene.Warnings = warnings
+	sort.Slice(scene.Agents, func(i, j int) bool { return scene.Agents[i].Name < scene.Agents[j].Name })
+	sort.SliceStable(scene.Events, func(i, j int) bool { return scene.Events[i].Time.Before(scene.Events[j].Time) })
+	limit := sceneEventLimit
+	if scene.Scope == "instance" && len(scene.Projects) > 1 {
+		limit *= len(scene.Projects)
+	}
+	if len(scene.Events) > limit {
+		scene.Events = scene.Events[len(scene.Events)-limit:]
+	}
+}
+
+// Bound concurrent SDK work while preserving project order. Reads share the
+// caller's cancellation and never spawn a goroutine per project.
+func readProjects[T any](ctx context.Context, readers []sceneReader, load func(sceneReader) (T, error)) ([]T, []error) {
+	values, failures := make([]T, len(readers)), make([]error, len(readers))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for worker := 0; worker < 4 && worker < len(readers); worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					failures[i] = err
+					continue
+				}
+				values[i], failures[i] = load(readers[i])
+			}
+		}()
+	}
+	for i := range readers {
+		jobs <- i
+	}
+	close(jobs)
+	workers.Wait()
+	return values, failures
 }

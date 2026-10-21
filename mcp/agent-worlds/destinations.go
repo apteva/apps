@@ -1,206 +1,108 @@
 package main
 
 import (
-	"net/url"
+	"context"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-type cachedDestinations struct {
-	at    time.Time
-	items []SceneDestination
+type SceneDestination struct {
+	ID        string     `json:"id"`
+	ProjectID string     `json:"project_id"`
+	AgentIDs  []string   `json:"agent_ids,omitempty"`
+	Kind      string     `json:"kind"`
+	Name      string     `json:"name"`
+	Status    string     `json:"status"`
+	Tools     []string   `json:"tools,omitempty"`
+	ToolCount int        `json:"tool_count"`
+	CallCount int        `json:"call_count"`
+	LastCall  *time.Time `json:"last_call,omitempty"`
 }
 
-// destinationCatalog reads metadata only. Tool names are retained to establish
-// ownership; descriptions, credentials and invocation arguments never leave here.
-func (a *App) destinationCatalog(scene *Scene) []SceneDestination {
-	key := scene.Source.ID
-	a.destinationMu.Lock()
-	if cached, ok := a.destinationCache[key]; ok && time.Since(cached.at) < 45*time.Second {
-		a.destinationMu.Unlock()
-		return cloneDestinations(cached.items)
+type topologyCache struct {
+	at    time.Time
+	value *sdk.AgentTopology
+	err   error
+}
+
+func (a *App) topology(ctx context.Context, r sceneReader, id int64) (*sdk.AgentTopology, error) {
+	scope, _ := ctx.Value(viewerKey{}).(string)
+	key := r.identity + ":" + scope + ":" + r.source("", "", 0).ID + ":" + r.projectID + ":" + strconv.FormatInt(id, 10)
+	a.catalogMu.Lock()
+	cached, ok := a.catalog[key]
+	a.catalogMu.Unlock()
+	if ok && time.Since(cached.at) < 45*time.Second {
+		return cached.value, cached.err
 	}
-	a.destinationMu.Unlock()
-	var items []SceneDestination
-	switch scene.Source.Kind {
-	case "main":
-		items = a.mainDestinations(scene)
-	case "runtime":
-		items = a.runtimeDestinations(scene)
-	case "remote":
-		items = a.remoteDestinations()
-	case "remote-runtime":
-		for _, app := range scene.Apps {
-			items = append(items, SceneDestination{ID: "app:" + app.ID, Kind: "app", Name: app.Name, Status: app.Status})
+	value, err := r.client.GetAgentTopology(ctx, r.projectID, id)
+	a.catalogMu.Lock()
+	if a.catalog == nil {
+		a.catalog = map[string]topologyCache{}
+	}
+	for k, entry := range a.catalog {
+		if time.Since(entry.at) >= 45*time.Second {
+			delete(a.catalog, k)
 		}
 	}
-	a.destinationMu.Lock()
-	if a.destinationCache == nil {
-		a.destinationCache = make(map[string]cachedDestinations)
+	if len(a.catalog) < 1024 {
+		a.catalog[key] = topologyCache{at: time.Now(), value: value, err: err}
 	}
-	a.destinationCache[key] = cachedDestinations{at: time.Now(), items: cloneDestinations(items)}
-	a.destinationMu.Unlock()
-	return items
+	a.catalogMu.Unlock()
+	return value, err
 }
 
-func cloneDestinations(items []SceneDestination) []SceneDestination {
-	out := append([]SceneDestination(nil), items...)
-	for i := range out {
-		out[i].Tools = append([]string(nil), out[i].Tools...)
-	}
-	return out
-}
-
-func (a *App) mainDestinations(scene *Scene) []SceneDestination {
-	rt := a.ctx.RuntimeAPI()
-	catalog, _ := rt.ListRuntimeCatalogApps(a.ctx.CurrentProject())
-	byInstall := map[int64]sdk.RuntimeCatalogApp{}
-	for _, app := range catalog {
-		byInstall[app.InstallID] = app
-	}
+func (a *App) enrichScene(ctx context.Context, r sceneReader, scene *Scene) {
 	byID := map[string]*SceneDestination{}
-	for _, agent := range scene.Agents {
+	for _, app := range scene.Apps {
+		key := r.projectID + ":app:" + app.ID
+		byID[key] = &SceneDestination{ID: key, ProjectID: r.projectID, Kind: "app", Name: app.Name, Status: app.Status}
+	}
+	unavailable := false
+	for i := range scene.Agents {
+		agent := &scene.Agents[i]
 		id, err := strconv.ParseInt(agent.ID, 10, 64)
 		if err != nil {
 			continue
 		}
-		capabilities, err := rt.GetRuntimeAgentCapabilities(id)
+		topology, err := a.topology(ctx, r, id)
 		if err != nil {
+			unavailable = true
 			continue
 		}
-		for _, capability := range capabilities {
-			if capability.AppName == "" || capability.AppName == "agent-worlds" {
+		agent.Threads = topology.Threads
+		for _, attachment := range topology.Attachments {
+			if attachment.Name == "agent-worlds" {
 				continue
 			}
-			key := "app:" + capability.AppName
+			kind, identity := "integration", attachment.Name
+			if attachment.InstallID != 0 {
+				kind, identity = "app", strconv.FormatInt(attachment.InstallID, 10)
+			}
+			key := r.projectID + ":" + kind + ":" + identity
 			dest := byID[key]
 			if dest == nil {
-				meta := byInstall[capability.InstallID]
-				name := meta.DisplayName
-				if name == "" {
-					name = capability.AppName
-				}
-				status := meta.Status
-				if status == "" {
-					status = "bound"
-				}
-				dest = &SceneDestination{ID: key, Kind: "app", Name: name, Status: status}
+				dest = &SceneDestination{ID: key, ProjectID: r.projectID, Kind: kind, Name: attachment.Name, Status: "attached"}
 				byID[key] = dest
 			}
-			for _, tool := range capability.Tools {
-				if tool.Name != "" {
-					dest.Tools = append(dest.Tools, tool.Name)
-				}
-			}
+			dest.AgentIDs = append(dest.AgentIDs, agent.ID)
+			dest.Tools = append(dest.Tools, attachment.Tools...)
 		}
 	}
-	// Connections are project-scoped metadata; never request their credentials.
-	connections, err := a.ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: a.ctx.CurrentProject()})
-	if err == nil {
-		names := map[string]string{}
-		if integrations, err := rt.ListRuntimeCatalogIntegrations(); err == nil {
-			for _, item := range integrations {
-				names[item.Slug] = item.Name
-			}
-		}
-		for _, connection := range connections {
-			if connection.AppSlug == "" {
-				continue
-			}
-			key := "integration:" + connection.AppSlug
-			if dest := byID[key]; dest != nil {
-				if connection.Status == "connected" || connection.Status == "active" {
-					dest.Status = connection.Status
-				}
-				continue
-			}
-			name := names[connection.AppSlug]
-			if name == "" {
-				name = connection.AppSlug
-			}
-			dest := &SceneDestination{ID: key, Kind: "integration", Name: name, Status: connection.Status}
-			byID[key] = dest
-			if tools, err := rt.ListRuntimeCatalogIntegrationTools(connection.AppSlug); err == nil {
-				for _, tool := range tools {
-					if tool.Name != "" {
-						dest.Tools = append(dest.Tools, tool.Name)
-					}
-				}
-			}
-		}
+	if unavailable {
+		scene.Warnings = append(scene.Warnings, "Some agent topology is unavailable; showing observed activity.")
 	}
-	return destinationValues(byID)
-}
-
-func (a *App) runtimeDestinations(scene *Scene) []SceneDestination {
-	byID := map[string]*SceneDestination{}
-	runtimeID := strings.TrimPrefix(scene.Source.ID, "runtime:")
-	for _, app := range scene.Apps {
-		dest := &SceneDestination{ID: "app:" + app.ID, Kind: "app", Name: app.Name, Status: app.Status}
-		if tools, err := a.ctx.RuntimeAPI().ListRuntimeAppTools(runtimeID, app.ID); err == nil {
-			for _, tool := range tools {
-				if tool.Name != "" {
-					dest.Tools = append(dest.Tools, tool.Name)
-				}
-			}
-		}
-		byID[dest.ID] = dest
-	}
-	return destinationValues(byID)
-}
-
-func (a *App) remoteDestinations() []SceneDestination {
-	project := strings.TrimSpace(a.ctx.Config().Get("remote_project_id"))
-	query := ""
-	if project != "" {
-		query = "?project_id=" + url.QueryEscape(project)
-	}
-	var apps []struct {
-		Name        string `json:"name"`
-		DisplayName string `json:"display_name"`
-		Status      string `json:"status"`
-		Surfaces    struct {
-			MCPToolNames []string `json:"mcp_tool_names"`
-		} `json:"surfaces"`
-	}
-	byID := map[string]*SceneDestination{}
-	if a.remoteGET("/api/apps"+query, &apps) == nil {
-		for _, app := range apps {
-			if app.Name == "" || app.Name == "agent-worlds" {
-				continue
-			}
-			name := app.DisplayName
-			if name == "" {
-				name = app.Name
-			}
-			byID["app:"+app.Name] = &SceneDestination{ID: "app:" + app.Name, Kind: "app", Name: name, Status: app.Status, Tools: app.Surfaces.MCPToolNames}
-		}
-	}
-	var connections []struct {
-		AppSlug string `json:"app_slug"`
-		Status  string `json:"status"`
-	}
-	if a.remoteGET("/api/connections"+query, &connections) == nil {
-		for _, connection := range connections {
-			if connection.AppSlug == "" {
-				continue
-			}
-			key := "integration:" + connection.AppSlug
-			byID[key] = &SceneDestination{ID: key, Kind: "integration", Name: connection.AppSlug, Status: connection.Status}
-		}
-	}
-	return destinationValues(byID)
+	scene.Destinations = destinationValues(byID)
+	attributeEvents(scene)
 }
 
 func destinationValues(byID map[string]*SceneDestination) []SceneDestination {
 	out := make([]SceneDestination, 0, len(byID))
 	for _, dest := range byID {
 		seen := map[string]bool{}
-		tools := make([]string, 0, len(dest.Tools))
+		tools := []string{}
 		for _, tool := range dest.Tools {
 			if !seen[tool] {
 				seen[tool] = true
@@ -212,17 +114,9 @@ func destinationValues(byID map[string]*SceneDestination) []SceneDestination {
 		out = append(out, *dest)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
-		}
-		return out[i].Name < out[j].Name
+		return out[i].Name < out[j].Name || (out[i].Name == out[j].Name && out[i].ID < out[j].ID)
 	})
 	return out
-}
-
-func (a *App) enrichScene(scene *Scene) {
-	scene.Destinations = a.destinationCatalog(scene)
-	attributeEvents(scene)
 }
 
 func attributeEvents(scene *Scene) {
@@ -260,7 +154,7 @@ func attributeEvents(scene *Scene) {
 			}
 		} else {
 			unknown = true
-			event.TargetID = "other:tools"
+			event.TargetID = scene.Source.ProjectID + ":other:tools"
 			if event.Kind == "tool" {
 				counts[event.TargetID]++
 				if event.Time.After(last[event.TargetID]) {
@@ -270,7 +164,7 @@ func attributeEvents(scene *Scene) {
 		}
 	}
 	if unknown {
-		scene.Destinations = append(scene.Destinations, SceneDestination{ID: "other:tools", Kind: "other", Name: "Other tools", Status: "observed"})
+		scene.Destinations = append(scene.Destinations, SceneDestination{ID: scene.Source.ProjectID + ":other:tools", ProjectID: scene.Source.ProjectID, Kind: "other", Name: "Other tools", Status: "observed"})
 	}
 	for i := range scene.Destinations {
 		dest := &scene.Destinations[i]
