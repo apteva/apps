@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.41-rc.1
+version: 0.2.41
 description: |
   v0.2.41 supports up to 500 named operations within the existing definition
   byte limit, and dropdown selection by observed display labels and modes.
@@ -112,7 +112,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: codex/actors-membership-capacity
+    ref: actors/v0.2.41
     entry: mcp/actors
   port: 8080
   health_check: /health
