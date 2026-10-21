@@ -60,6 +60,7 @@ type sipJitterEvent struct {
 	DeliveryAgeMS     float64   `json:"relative_delivery_age_ms,omitempty"`
 	LocalQueueAgeMS   float64   `json:"local_queue_age_ms,omitempty"`
 	ConsumerGapMS     float64   `json:"consumer_interval_ms,omitempty"`
+	PreservedAudioMS  float64   `json:"preserved_audio_ms,omitempty"`
 	RequiredReserveMS int       `json:"required_reserve_ms,omitempty"`
 	Frames            int       `json:"frames"`
 }
@@ -96,6 +97,8 @@ type rtpJitterBuffer struct {
 	missingFilledSamples                                                atomic.Int64
 	concealedSamples                                                    atomic.Int64
 	silenceSamples                                                      atomic.Int64
+	tailPaddingNS                                                       int64 // protected by mu; separate from packet-loss concealment
+	tailPaddedFrames                                                    int64
 	driftAdjustedSamples                                                atomic.Int64
 	maxAgeMS                                                            int
 	maxDeliveryAgeMS                                                    float64
@@ -764,6 +767,9 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	}
 	if len(f.pendingPCM) < take {
 		if len(f.pendingPCM) < samples {
+			if out, ready := f.popPartialTail(m, now, samples); ready {
+				return out, f.jitter.generation.Load() == f.generation
+			}
 			f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
 			return nil, false
 		}
@@ -803,6 +809,38 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	if f.jitter.generation.Load() != f.generation {
 		return nil, false
 	}
+	return out, true
+}
+
+// Once playback has stopped, no future packet/PLC frame is guaranteed to finish
+// a decoded remainder. Emit its still-fresh samples on this ordinary playout
+// tick, with only the unused suffix padded. Do not change RTP sequence/source
+// clocks, drain additional frames, or bypass priming of actual queued packets.
+func (f *rtpAudioFramer) popPartialTail(m *sipRTPMedia, now time.Time, samples int) ([]int16, bool) {
+	if len(f.pendingPCM) == 0 {
+		return nil, false
+	}
+	b := f.jitter
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.primed || len(b.packets) != 0 || b.paused.Load() || b.generation.Load() != f.generation {
+		return nil, false
+	}
+	real := len(f.pendingPCM)
+	out := make([]int16, samples)
+	copy(out, f.pendingPCM)
+	padding := time.Duration(samples-real) * time.Second / time.Duration(m.sampleRate())
+	b.tailPaddingNS += int64(padding)
+	b.tailPaddedFrames++
+	// event() also coalesces adjacent events. Add the exact duration afterward
+	// to retain half-RTP-sample precision for decoded 16 kHz G.722.
+	b.event(now, "decoded_partial_padded", 0, 0, 0, 0)
+	e := &b.events[(b.eventHead+63)%len(b.events)]
+	e.DurationMS += float64(padding) / float64(time.Millisecond)
+	e.PreservedAudioMS += float64(real) * 1000 / float64(m.sampleRate())
+	f.pendingPCM = f.pendingPCM[:0]
+	f.segments = f.segments[:0]
+	b.pendingPCMSamples.Store(0)
 	return out, true
 }
 func (f *rtpAudioFramer) pop() ([]byte, bool) {
