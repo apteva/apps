@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.41
+version: 0.2.42
 description: |
+  v0.2.42 forwards explicit scroll-region targets and optional name/role guards
+  to Computer, so multi-pane pages do not require ambiguous document scrolling.
   v0.2.41 supports up to 500 named operations within the existing definition
   byte limit, and dropdown selection by observed display labels and modes.
   v0.2.40 adds opt-in text line-edge trimming for rendered saved-message copy,
@@ -112,7 +114,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.41
+    ref: actors/v0.2.42
     entry: mcp/actors
   port: 8080
   health_check: /health

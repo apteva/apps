@@ -84,6 +84,9 @@ type actorStep struct {
 	Key                string                `json:"key,omitempty"`
 	Direction          string                `json:"direction,omitempty"`
 	Amount             int                   `json:"amount,omitempty"`
+	TargetID           string                `json:"target_id,omitempty"`
+	ExpectedName       string                `json:"expected_name,omitempty"`
+	ExpectedRole       string                `json:"expected_role,omitempty"`
 	Action             string                `json:"action"`
 	URLQuery           map[string]string     `json:"url_query,omitempty"`
 	URL                string                `json:"url,omitempty"`
@@ -421,6 +424,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if step.Action != "scroll" && (step.TargetID != "" || step.ExpectedName != "" || step.ExpectedRole != "") {
+			return fmt.Errorf("steps[%d] target_id, expected_name and expected_role are scroll-only fields", i)
+		}
 		if err := validateEffectPhase(step); err != nil {
 			return fmt.Errorf("steps[%d]: %w", i, err)
 		}
@@ -550,6 +556,9 @@ func validateActorDefinition(def actorDefinition) error {
 		case "scroll":
 			if step.Direction != "up" && step.Direction != "down" && step.Direction != "left" && step.Direction != "right" {
 				return fmt.Errorf("steps[%d].direction is invalid", i)
+			}
+			if (step.ExpectedName != "" || step.ExpectedRole != "") && strings.TrimSpace(step.TargetID) == "" {
+				return fmt.Errorf("steps[%d] scroll identity guards require target_id", i)
 			}
 		case "assert_element":
 			if step.Locator.Selector == "" {

@@ -143,6 +143,15 @@ func (e *actorExecution) interact(step actorStep) error {
 	case "scroll":
 		args["direction"] = step.Direction
 		args["amount"] = boundedInt(step.Amount, 300, 1, 10000)
+		if step.TargetID != "" {
+			args["target_id"] = step.TargetID
+		}
+		if step.ExpectedName != "" {
+			args["expected_name"] = step.ExpectedName
+		}
+		if step.ExpectedRole != "" {
+			args["expected_role"] = step.ExpectedRole
+		}
 	}
 	var out map[string]any
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {

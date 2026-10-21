@@ -94,6 +94,14 @@ Login checks can be represented by `assert_url` / `assert_element`. Failure requ
 
 Click, key and pagination steps are not automatically retried because an uncertain action may already have changed the site. A full-run retry can still repeat side effects. This release provides no exactly-once guarantee for external writes.
 
+Scroll steps can forward an observed Computer scroll region using `target_id`,
+with optional `expected_name` and `expected_role` identity guards. For example,
+`{"action":"scroll","direction":"down","amount":450,"target_id":"scroll_document","expected_name":"Document","expected_role":"document"}`
+targets the observed document even when a rich-text editor is independently
+scrollable. Nested panes need their own current observed region ID. Actor does
+not infer a region when the fields are omitted, and Computer still rejects
+ambiguous, stale, or mismatched targets.
+
 ## Development
 
 ```sh
