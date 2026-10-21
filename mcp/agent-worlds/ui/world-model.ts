@@ -83,8 +83,10 @@ function destinationsForAgents(items: Destination[], agents: Agent[], projectId?
  return items.filter(dest => (!dest.project_id || !projectId || dest.project_id === projectId) &&
    (!dest.agent_ids?.length || dest.agent_ids.some(id => ids.has(id))));
 }
+export function contentsForAgents(agents: Agent[], destinations: Destination[], events: Event[], projectId?: string) {
+ const ids = new Set(agents.map(agent => agent.id));
+ return {agents, destinations:destinationsForAgents(destinations,agents,projectId), events:events.filter(event => ids.has(event.agent_id))};
+}
 export function contentsForNode(node: WorldNode, destinations: Destination[], events: Event[]) {
- const ids = new Set(node.agents.map(agent => agent.id));
- return {agents: node.agents, destinations: destinationsForAgents(destinations, node.agents, node.focus.projectId),
-   events: events.filter(event => ids.has(event.agent_id))};
+ return contentsForAgents(node.agents,destinations,events,node.focus.projectId);
 }

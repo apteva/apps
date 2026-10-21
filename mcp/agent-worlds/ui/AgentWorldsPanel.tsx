@@ -4,7 +4,7 @@ import VillageStage from "./village-stage";
 import SceneViewport from "./scene-viewport";
 import { withAppDisplayNames, type AppMetadata } from "./app-display-names";
 
-import { buildWorld, rootFocus, resolveFocus, projectWorld, PAGE_SIZE, featuredDestinations, villageDestinations } from "./world-model";
+import { buildWorld, rootFocus, resolveFocus, projectWorld, contentsForAgents, PAGE_SIZE, featuredDestinations, villageDestinations } from "./world-model";
 import type { Source, Agent, Destination, Event, Scene, Focus, WorldNode } from "./world-model";
 type Preset = "graph" | "operations" | "village";
 type Props = { installId: number; projectId?: string };
@@ -100,6 +100,8 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const [showInspector, setShowInspector] = useState(false);
   const [focus, setFocus] = useState<Focus>({});
   const [page, setPage] = useState(0);
+  const [selectedAgent, setSelectedAgentId] = useState("");
+  const inspectorRef = useRef<HTMLElement|null>(null);
   const [selectedDestination, setSelectedDestination] = useState("");
   const [live, setLive] = useState(true);
   const [replayIndex, setReplayIndex] = useState(0);
@@ -125,7 +127,7 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   useEffect(() => {
     if (sourceData.data) setSourceId(current => sourceData.data!.some(source => source.id === current) ? current : "main");
   }, [sourceData.data]);
-  useEffect(() => { setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setAnimationNow(Date.now() - VILLAGE_DELAY_MS); }, [sourceId, installId, projectId]);
+  useEffect(() => { setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setSelectedAgentId(""); setShowInspector(false); setAnimationNow(Date.now() - VILLAGE_DELAY_MS); }, [sourceId, installId, projectId]);
   useEffect(() => {
     if (!rawScene) return;
     setReplayIndex(rawScene.events.length);
@@ -138,7 +140,6 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const world = useMemo(() => scene ? buildWorld(scene,timelineEvents) : null, [scene,timelineEvents]);
   const currentFocus = scene && world ? resolveFocus(scene,world,focus) : {};
   const projection = scene && world ? projectWorld(scene,world,currentFocus) : null;
-  const selectedAgent = currentFocus.agentId || "";
   const visibleAgents = projection?.agents || [];
   const visibleIds = new Set(visibleAgents.map(agent => agent.id));
   useEffect(() => {
@@ -155,21 +156,29 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const stageAgents = visibleAgents.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE);
   const stageIds = new Set(stageAgents.map(agent => agent.id));
   const stageEvents = visibleEvents.filter(event => stageIds.has(event.agent_id));
-  const navigate = (next: Focus) => { setFocus(next); setPage(0); };
+  const inspectedAgent = visibleAgents.find(agent => agent.id === selectedAgent);
+  const closeDetails = () => { setShowInspector(false); setSelectedAgentId(""); setSelectedDestination(""); };
   const setSelectedAgent = (id: string) => {
-    if (!id) { navigate(scene ? rootFocus(scene) : {}); return; }
-    const agent = scene?.agents.find(agent => agent.id === id);
-    if (!agent || !world) return;
-    const team = world.teams.find(team => team.agentIds.includes(id));
-    navigate({projectId:world.projectOf(agent),teamId:team?.id,agentId:id});
+    if (!id) { closeDetails(); return; }
+    if (!visibleAgents.some(agent => agent.id === id)) return;
+    setSelectedAgentId(id); setSelectedDestination(""); setShowInspector(true);
   };
+  const inspectDestination = (id: string) => { setSelectedDestination(id); setSelectedAgentId(""); setShowInspector(true); };
+  // An agent is inspected inside the current world. Project/team navigation
+  // changes the scene; selection must not filter peers or reset the camera.
+  const navigate = (next: Focus) => {
+    if (next.agentId) { setSelectedAgent(next.agentId); return; }
+    setFocus(next); setPage(0); closeDetails();
+  };
+  useEffect(() => { if (inspectorRef.current) inspectorRef.current.scrollTop = 0; }, [selectedAgent, selectedDestination]);
+  useEffect(() => { if (scene && selectedAgent && !scene.agents.some(agent => agent.id === selectedAgent)) closeDetails(); }, [scene, selectedAgent]);
   const zoomOut = () => {
     if (currentFocus.agentId) navigate({projectId:currentFocus.projectId,teamId:currentFocus.teamId});
     else if (currentFocus.teamId) navigate({projectId:currentFocus.projectId});
     else if (scene?.scope === "instance") navigate({});
   };
   useEffect(() => {
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLSelectElement)) zoomOut(); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLSelectElement)) { if (showInspector) closeDetails(); else zoomOut(); } };
     window.addEventListener("keydown",escape); return () => window.removeEventListener("keydown",escape);
   });
 
@@ -249,6 +258,8 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const activePreset = presets.find(item => item.id === preset)!;
   const threadCount = new Set([...visibleAgents.flatMap(agent => (agent.threads || []).map(thread => `${agent.id}:${thread.id}`)),...visibleEvents.filter(event => event.thread_id).map(event => `${event.agent_id}:${event.thread_id}`)]).size;
   const runningCount = visibleAgents.filter(agent => agent.status === "running" || agent.status === "active").length;
+  const inspectorContent = inspectedAgent ? contentsForAgents([inspectedAgent], destinations, visibleEvents, currentFocus.projectId) : {destinations, events:visibleEvents};
+  const inspectorDestinations = inspectorContent.destinations, inspectorEvents = inspectorContent.events;
   const destination = destinations.find(item => item.id === selectedDestination);
   const destinationEvents = visibleEvents.filter(event => event.target_id === selectedDestination);
   return <div className="aw">
@@ -259,17 +270,16 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
         <select className="aw-visualization" aria-label="Visualization" value={preset} onChange={event => setPreset(event.target.value as Preset)}>{presets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
         <nav className="aw-breadcrumbs" aria-label="World focus">
           {scene?.scope === "instance" && <button onClick={() => navigate({})} aria-current={!currentFocus.projectId ? "location":undefined}>Instance</button>}
-          {currentFocus.projectId && <><span>/</span><button onClick={() => navigate({projectId:currentFocus.projectId})} aria-current={!currentFocus.teamId && !selectedAgent ? "location":undefined}>{world?.projects.find(project => project.id === currentFocus.projectId)?.name || currentFocus.projectId}</button></>}
-          {projection?.team && <><span>/</span><button onClick={() => navigate({projectId:currentFocus.projectId,teamId:currentFocus.teamId})} aria-current={!selectedAgent ? "location":undefined}>Observed team · {projection.team.name}</button></>}
-          {selectedAgent && <><span>/</span><button aria-current="location" onClick={() => {}}>{visibleAgents[0]?.name}</button></>}
+          {currentFocus.projectId && <><span>/</span><button onClick={() => navigate({projectId:currentFocus.projectId})} aria-current={!currentFocus.teamId ? "location":undefined}>{world?.projects.find(project => project.id === currentFocus.projectId)?.name || currentFocus.projectId}</button></>}
+          {projection?.team && <><span>/</span><button onClick={() => navigate({projectId:currentFocus.projectId,teamId:currentFocus.teamId})} aria-current="location">Observed team · {projection.team.name}</button></>}
           {(currentFocus.agentId || currentFocus.teamId || (scene?.scope === "instance" && currentFocus.projectId)) && <button className="aw-zoom-out" onClick={zoomOut}>Zoom out</button>}
         </nav>
       </div>
       <button className={`aw-button aw-live ${live ? "is-live" : ""}`} onClick={() => { if (live) setFrozenScene(scene); setLive(!live); setReplayIndex(scene?.events.length || 0); }}><span className="aw-dot" />{live ? "Live" : "Paused"}</button>
-      <button className="aw-button" aria-pressed={showInspector} onClick={() => setShowInspector(!showInspector)}>Details</button>
+      <button className="aw-button" aria-pressed={showInspector} onClick={() => { if (showInspector) closeDetails(); else setShowInspector(true); }}>Details</button>
       <details className="aw-options"><summary className="aw-button" aria-label="More controls">⋯</summary><div className="aw-options-menu">
         <label className="aw-field"><span>Source</span><select aria-label="Source" value={sourceId} onChange={event => setSourceId(event.target.value)}>{sources.map(source => <option key={source.id} value={source.id}>{source.label} · {source.agents} agents</option>)}</select></label>
-        <label className="aw-field"><span>Focus</span><select aria-label="Focus" value={selectedAgent} onChange={event => setSelectedAgent(event.target.value)}><option value="">All agents</option>{visibleAgents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+        <label className="aw-field"><span>Inspect agent</span><select aria-label="Inspect agent" value={selectedAgent} onChange={event => setSelectedAgent(event.target.value)}><option value="">Choose an agent</option>{visibleAgents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
         <button className="aw-button" onClick={sceneData.refresh} disabled={!live}>Refresh</button>
         <label className="aw-portrait"><input type="checkbox" checked={portraitChoice} onChange={event => setPortrait(event.target.checked)} /> Portrait</label>
         <button className="aw-button" onClick={savePNG} disabled={!scene}>Export PNG</button>
@@ -283,16 +293,23 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
         <div className={`aw-content ${portrait ? "is-portrait" : ""} ${preset === "village" ? "is-village" : ""}`}>
           <section className="aw-scene" aria-label={activePreset.name}>
             <SceneViewport hostRef={canvasHost} stageRef={stageRef} width={portrait ? 540 : 1280} height={portrait ? 960 : preset === "village" ? 760 : 560} sceneKey={JSON.stringify([installId,projectId,sourceId,currentFocus,currentPage])} status={`${visibleAgents.length} agents · ${runningCount} running`}>
-              {scene ? projection?.nodes.length ? <HierarchyStage refNode={stageRef} nodes={projection.nodes.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE)} preset={preset} portrait={portrait} destinations={destinations} events={visibleEvents} onFocus={navigate} palette={palette} live={live} now={animationNow} /> : preset === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={stageAgents} destinations={destinations} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} onSelect={setSelectedAgent} onSelectDestination={id => { setSelectedDestination(id); setShowInspector(true); }} palette={palette} /> : preset === "village" ? <VillageStage showChrome={false} refNode={stageRef} agents={stageAgents} destinations={villageDestinations(destinations, selectedDestination, stageEvents)} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} now={animationNow} live={live} onSelect={setSelectedAgent} onSelectDestination={id => { setSelectedDestination(id); setShowInspector(true); }} /> : <OperationsStage refNode={stageRef} agents={stageAgents} events={stageEvents} portrait={portrait} onSelect={setSelectedAgent} palette={palette} /> : <div className="aw-loading">Connecting to the scene…</div>}
+              {scene ? projection?.nodes.length ? <HierarchyStage refNode={stageRef} nodes={projection.nodes.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE)} preset={preset} portrait={portrait} destinations={destinations} events={visibleEvents} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onFocus={navigate} palette={palette} live={live} now={animationNow} /> : preset === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={stageAgents} destinations={destinations} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} palette={palette} /> : preset === "village" ? <VillageStage showChrome={false} refNode={stageRef} agents={stageAgents} destinations={villageDestinations(destinations, selectedDestination, stageEvents)} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} now={animationNow} live={live} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} /> : <OperationsStage refNode={stageRef} agents={stageAgents} events={stageEvents} portrait={portrait} selectedAgent={selectedAgent} onSelect={setSelectedAgent} palette={palette} /> : <div className="aw-loading">Connecting to the scene…</div>}
 
             </SceneViewport>
             {pages > 1 && <div className="aw-pages" aria-label="Scene pages"><button className="aw-button" disabled={currentPage === 0} onClick={() => setPage(currentPage-1)}>Previous</button><span>{currentPage+1} / {pages}</span><button className="aw-button" disabled={currentPage+1 === pages} onClick={() => setPage(currentPage+1)}>Next</button></div>}
           </section>
-          {showInspector && <aside className="aw-sidebar">
-            <section className="aw-side-destinations"><div className="aw-side-head"><h3>Apps &amp; integrations</h3><span>{destinations.length}</span></div><div className="aw-destination-list">{destinations.map(item => <button key={item.id} className={`aw-destination-row ${selectedDestination === item.id ? "is-selected" : ""}`} onClick={() => setSelectedDestination(selectedDestination === item.id ? "" : item.id)}><span className={`aw-destination-icon is-${item.kind}`}>{item.kind === "app" ? "▣" : item.kind === "integration" ? "⌁" : "◇"}</span><span><strong>{item.name}</strong><small>{scene?.scope === "instance" && !currentFocus.projectId ? `${world?.projects.find(project => project.id === item.project_id)?.name || item.project_id || "Source"} · ` : ""}{item.kind} · {item.status}</small></span><em>{item.call_count}</em></button>)}{!destinations.length && <div className="aw-plain-empty">No apps or integrations available for this source.</div>}</div>{destination && <div className="aw-destination-detail"><strong>{destination.name}</strong><span>{destination.kind} · {destination.status} · {destinationEvents.filter(event => event.kind === "tool").length} visible calls</span><span>{[...new Set(destinationEvents.map(event => scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id))].join(", ") || "No agents have visited yet"}</span>{destination.tools?.length ? <small>{destination.tool_count} mapped tools · {destination.tools.slice(0, 3).join(", ")}{destination.tool_count > 3 ? "…" : ""}</small> : null}{destinationEvents.filter(event => event.kind === "tool").slice(-3).reverse().map(event => <small key={event.id}>{clock(event.time)} · {scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id} · {short(event.target || "tool", 24)}</small>)}</div>}</section>
-            <section className="aw-side-agents"><div className="aw-side-head"><h3>Agents</h3><span>{visibleAgents.length}</span></div><div className="aw-agent-list">{visibleAgents.map(agent => <button key={agent.id} onClick={() => setSelectedAgent(selectedAgent === agent.id ? "" : agent.id)} className={`aw-agent-row ${selectedAgent === agent.id ? "is-selected" : ""}`}><span className="aw-agent-avatar">{agent.name.slice(0,1).toUpperCase()}</span><span className="aw-agent-name"><strong>{agent.name}</strong><small>{agent.model || agent.main_thread || agent.status}</small></span><span className="aw-agent-status" style={{ background: statusColor(agent.status, palette) }} title={agent.status} /></button>)}{!visibleAgents.length && <div className="aw-plain-empty">No agents in this source</div>}</div></section>
-            {selectedAgent && <section className="aw-side-threads"><div className="aw-side-head"><h3>Threads</h3><span>{visibleAgents[0]?.threads?.length || 0}</span></div>{visibleAgents[0]?.threads?.length ? visibleAgents[0].threads.map(thread => <div className="aw-thread-row" key={thread.id}><strong>{thread.id}</strong><span>{thread.status || "Observed"}{thread.parent_id ? ` · parent ${thread.parent_id}`:""}</span></div>) : <div className="aw-plain-empty">No thread inventory available.</div>}</section>}
-            <section className="aw-side-activity"><div className="aw-side-head"><h3>Activity</h3><span>{live ? "Live feed" : "Replay"}</span></div><div className="aw-activity-list">{visibleEvents.slice(-10).reverse().map(event => <div key={event.id} className="aw-event"><span className="aw-event-mark" style={{ background: eventColor(event.kind, palette) }} /><div><div className="aw-event-line"><b>{scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id}</b> {event.label}</div><div className="aw-event-meta">{clock(event.time)}{event.thread_id ? ` · ${short(event.thread_id, 18)}` : ""}</div></div></div>)}{!visibleEvents.length && <div className="aw-plain-empty">Activity appears as agents work.</div>}</div></section>
+          {showInspector && <aside ref={inspectorRef} className="aw-sidebar" aria-label={inspectedAgent ? "Agent details" : destination ? "App details" : "World details"}>
+            <div className="aw-inspector-head"><h2>{inspectedAgent?.name || destination?.name || "World details"}</h2><button className="aw-close" aria-label="Close details" onClick={closeDetails}>×</button></div>
+            {inspectedAgent && <section className="aw-agent-detail" data-agent-details={inspectedAgent.id}>
+              <span className="aw-inspected-status" style={{color:statusColor(inspectedAgent.status,palette)}}><span className="aw-dot"/>{inspectedAgent.status}</span>
+              <dl><dt>Project</dt><dd>{world?.projects.find(project => project.id === world.projectOf(inspectedAgent))?.name || inspectedAgent.project_id || scene?.source.label}</dd>{inspectedAgent.model && <><dt>Model</dt><dd>{inspectedAgent.model}</dd></>}<dt>Latest activity</dt><dd>{inspectorEvents.at(-1)?.label || "No recent activity"}</dd></dl>
+            </section>}
+            {inspectedAgent && <section className="aw-side-threads"><div className="aw-side-head"><h3>Threads</h3><span>{inspectedAgent.threads?.length || 0}</span></div>{inspectedAgent.threads?.length ? inspectedAgent.threads.map(thread => <div className="aw-thread-row" key={thread.id}><strong>{thread.id}</strong><span>{thread.status || "Observed"}{thread.parent_id ? ` · parent ${thread.parent_id}`:""}</span></div>) : <div className="aw-plain-empty">No thread inventory available.</div>}</section>}
+            <section className="aw-side-destinations"><div className="aw-side-head"><h3>Apps &amp; integrations</h3><span>{inspectorDestinations.length}</span></div><div className="aw-destination-list">{inspectorDestinations.map(item => <button key={item.id} className={`aw-destination-row ${selectedDestination === item.id ? "is-selected" : ""}`} onClick={() => inspectDestination(selectedDestination === item.id ? "" : item.id)}><span className={`aw-destination-icon is-${item.kind}`}>{item.kind === "app" ? "▣" : item.kind === "integration" ? "⌁" : "◇"}</span><span><strong>{item.name}</strong><small>{scene?.scope === "instance" && !currentFocus.projectId ? `${world?.projects.find(project => project.id === item.project_id)?.name || item.project_id || "Source"} · ` : ""}{item.kind} · {item.status}</small></span><em>{item.call_count}</em></button>)}{!inspectorDestinations.length && <div className="aw-plain-empty">No apps or integrations available for this source.</div>}</div>{destination && <div className="aw-destination-detail"><strong>{destination.name}</strong><span>{destination.kind} · {destination.status} · {destinationEvents.filter(event => event.kind === "tool").length} visible calls</span><span>{[...new Set(destinationEvents.map(event => scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id))].join(", ") || "No agents have visited yet"}</span>{destination.tools?.length ? <small>{destination.tool_count} mapped tools · {destination.tools.slice(0, 3).join(", ")}{destination.tool_count > 3 ? "…" : ""}</small> : null}{destinationEvents.filter(event => event.kind === "tool").slice(-3).reverse().map(event => <small key={event.id}>{clock(event.time)} · {scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id} · {short(event.target || "tool", 24)}</small>)}</div>}</section>
+            <section className="aw-side-activity"><div className="aw-side-head"><h3>Activity</h3><span>{live ? "Live feed" : "Replay"}</span></div><div className="aw-activity-list">{inspectorEvents.slice(-10).reverse().map(event => <div key={event.id} className="aw-event"><span className="aw-event-mark" style={{ background: eventColor(event.kind, palette) }} /><div><div className="aw-event-line"><b>{scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id}</b> {event.label}</div><div className="aw-event-meta">{clock(event.time)}{event.thread_id ? ` · ${short(event.thread_id, 18)}` : ""}</div></div></div>)}{!inspectorEvents.length && <div className="aw-plain-empty">Activity appears as agents work.</div>}</div></section>
+            <section className="aw-side-agents"><div className="aw-side-head"><h3>Agents</h3><span>{visibleAgents.length}</span></div><div className="aw-agent-list">{visibleAgents.map(agent => <button key={agent.id} onClick={() => setSelectedAgent(agent.id)} className={`aw-agent-row ${selectedAgent === agent.id ? "is-selected" : ""}`}><span className="aw-agent-avatar">{agent.name.slice(0,1).toUpperCase()}</span><span className="aw-agent-name"><strong>{agent.name}</strong><small>{agent.model || agent.main_thread || agent.status}</small></span><span className="aw-agent-status" style={{ background: statusColor(agent.status, palette) }} title={agent.status} /></button>)}{!visibleAgents.length && <div className="aw-plain-empty">No agents in this source</div>}</div></section>
+
+
           </aside>}
         </div>
         {!live && <div className="aw-replay"><div><strong>Replay</strong><span>{lastEvent ? clock(lastEvent.time) : "Start"}</span></div><input aria-label="Replay position" type="range" min={0} max={scene?.events.length || 0} value={replayIndex} onChange={event => {
@@ -307,7 +324,7 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
 
 function SvgText({ x, y, children, size = 14, fill = "currentColor", anchor = "start", weight = 400 }: { x: number; y: number; children: React.ReactNode; size?: number; fill?: string; anchor?: "start" | "middle" | "end"; weight?: number }) { return <text x={x} y={y} fill={fill} fontSize={size} fontWeight={weight} textAnchor={anchor}>{children}</text>; }
 
-function SystemGraph({ refNode, source, agents, destinations, selectedDestination, events, portrait, onSelect, onSelectDestination, palette }: { refNode: React.RefObject<SVGSVGElement | null>; source: Source; agents: Agent[]; destinations: Destination[]; selectedDestination: string; events: Event[]; portrait: boolean; onSelect: (id: string) => void; onSelectDestination: (id: string) => void; palette: Palette }) {
+function SystemGraph({ refNode, source, agents, destinations, selectedDestination, selectedAgent, events, portrait, onSelect, onSelectDestination, palette }: { refNode: React.RefObject<SVGSVGElement | null>; source: Source; agents: Agent[]; destinations: Destination[]; selectedDestination: string; selectedAgent: string; events: Event[]; portrait: boolean; onSelect: (id: string) => void; onSelectDestination: (id: string) => void; palette: Palette }) {
   const width = portrait ? 540 : 1280, height = portrait ? 960 : 560;
   const shownAgents = agents.slice(0, portrait ? 8 : 9), shownDestinations = featuredDestinations(destinations, portrait ? 8 : 9, selectedDestination);
   const latest = latestByAgent(events);
@@ -326,17 +343,17 @@ function SystemGraph({ refNode, source, agents, destinations, selectedDestinatio
     {!portrait && shownAgents.map(agent => { const pos = agentPositions.get(agent.id)!; return <path key={`hub:${agent.id}`} d={`M ${pos.x+cardW} ${pos.y+cardH/2} L ${hubX-115} ${hubY}`} stroke={palette.border} fill="none" strokeWidth="1" />; })}
     <rect x={hubX-115} y={hubY-49} width="230" height="98" rx="8" fill={palette.card} stroke={palette.accent} strokeWidth="1.7" /><rect x={hubX-115} y={hubY-49} width="4" height="98" fill={palette.accent} />
     <SvgText x={hubX-94} y={hubY-17} size={10} fill={palette.accent} weight={700}>APTEVA · {source.kind.includes("runtime") ? "ENVIRONMENT" : "SERVER"}</SvgText><SvgText x={hubX-94} y={hubY+11} size={17} weight={700}>{short(source.label, 20)}</SvgText><SvgText x={hubX-94} y={hubY+31} size={10} fill={palette.dim}>{agents.length} connected agents</SvgText>
-    {shownAgents.map(agent => { const pos=agentPositions.get(agent.id)!; return <g key={agent.id} {...svgAction(`Focus agent ${agent.name}`, () => onSelect(agent.id))}><rect x={pos.x} y={pos.y} width={cardW} height={cardH} rx="5" fill={palette.card} stroke={palette.border}/><rect x={pos.x} y={pos.y} width="3" height={cardH} fill={statusColor(agent.status,palette)}/><SvgText x={pos.x+14} y={pos.y+20} size={12} weight={700}>{short(agent.name,portrait?22:24)}</SvgText><SvgText x={pos.x+14} y={pos.y+cardH-10} size={10} fill={palette.dim}>{short(latest.get(agent.id)?.label || agent.status,portrait?30:33)}</SvgText></g>; })}
+    {shownAgents.map(agent => { const pos=agentPositions.get(agent.id)!; return <g key={agent.id} data-selected={selectedAgent===agent.id} aria-pressed={selectedAgent===agent.id} {...svgAction(`Inspect agent ${agent.name}`, () => onSelect(agent.id))}><rect x={pos.x} y={pos.y} width={cardW} height={cardH} rx="5" fill={palette.card} stroke={palette.border}/><rect x={pos.x} y={pos.y} width="3" height={cardH} fill={statusColor(agent.status,palette)}/><SvgText x={pos.x+14} y={pos.y+20} size={12} weight={700}>{short(agent.name,portrait?22:24)}</SvgText><SvgText x={pos.x+14} y={pos.y+cardH-10} size={10} fill={palette.dim}>{short(latest.get(agent.id)?.label || agent.status,portrait?30:33)}</SvgText></g>; })}
     {shownDestinations.map(item => { const pos=destinationPositions.get(item.id)!; const color=item.kind === "integration" ? palette.info : item.kind === "app" ? palette.accent : palette.dim; return <g key={item.id} {...svgAction(`Inspect destination ${item.name}`, () => onSelectDestination(item.id))}><rect x={pos.x} y={pos.y} width={cardW} height={cardH} rx="5" fill={palette.card} stroke={palette.border}/><rect x={pos.x} y={pos.y} width="3" height={cardH} fill={color}/><SvgText x={pos.x+14} y={pos.y+20} size={12} weight={700}>{short(item.name,portrait?19:22)}</SvgText><SvgText x={pos.x+14} y={pos.y+cardH-10} size={10} fill={palette.dim}>{item.kind} · {item.call_count} calls</SvgText></g>; })}
     {!destinations.length && <SvgText x={destinationX+10} y={portrait?315:135} size={12} fill={palette.dim}>No destinations found</SvgText>}
     {(agents.length>shownAgents.length || destinations.length>shownDestinations.length) && <SvgText x={width-22} y={height-17} size={10} fill={palette.dim} anchor="end">Showing {shownAgents.length} agents · {shownDestinations.length} destinations</SvgText>}
   </svg>;
 }
 
-function OperationsStage({ refNode, agents, events, portrait, onSelect, palette }: { refNode: React.RefObject<SVGSVGElement | null>; agents: Agent[]; events: Event[]; portrait: boolean; onSelect: (id:string) => void; palette: Palette }) {
+function OperationsStage({ refNode, agents, selectedAgent, events, portrait, onSelect, palette }: { refNode: React.RefObject<SVGSVGElement | null>; agents: Agent[]; selectedAgent: string; events: Event[]; portrait: boolean; onSelect: (id:string) => void; palette: Palette }) {
   const width = portrait ? 540 : 1280, height = portrait ? 960 : 560;
   const latest = latestByAgent(events), columns = portrait ? 1 : 2, cardWidth = portrait ? 480 : 592, cardHeight = portrait ? 104 : 96;
-  return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="group" aria-label="Agent operations board" style={{ color: palette.text, background: palette.subtle, fontFamily: palette.font }}><rect width={width} height={height} fill={palette.subtle} /><SvgText x={30} y={48} size={22} weight={700}>Operations</SvgText><SvgText x={30} y={72} size={11} fill={palette.dim}>{agents.length} AGENTS · CURRENT STATUS</SvgText><line x1={30} y1={88} x2={width-30} y2={88} stroke={palette.border} />{agents.slice(0, portrait ? 7 : 8).map((agent, index) => { const x = 30 + (index % columns) * (cardWidth + 36), y = 110 + Math.floor(index / columns) * (cardHeight + 16), item = latest.get(agent.id); return <g key={agent.id} {...svgAction(`Focus agent ${agent.name}`, () => onSelect(agent.id))}><rect x={x} y={y} width={cardWidth} height={cardHeight} rx="7" fill={palette.card} stroke={palette.border} /><rect x={x} y={y} width="4" height={cardHeight} fill={statusColor(agent.status, palette)} /><SvgText x={x + 20} y={y + 27} size={15} weight={700}>{short(agent.name, 25)}</SvgText><circle cx={x + cardWidth - 80} cy={y + 22} r="4" fill={statusColor(agent.status, palette)} /><SvgText x={x + cardWidth - 17} y={y + 26} size={10} fill={statusColor(agent.status, palette)} anchor="end">{agent.status.toUpperCase()}</SvgText><line x1={x + 20} y1={y + 40} x2={x + cardWidth - 20} y2={y + 40} stroke={palette.border} /><SvgText x={x + 20} y={y + 64} size={12} fill={palette.muted}>{short(item?.label || "No recent activity", 47)}</SvgText><SvgText x={x + 20} y={y + 86} size={10} fill={palette.dim}>{item ? `${clock(item.time)} · ${item.thread_id || "main"}` : agent.model || "Waiting for events"}</SvgText></g>; })}{!agents.length && <SvgText x={width / 2} y={height / 2} size={15} fill={palette.dim} anchor="middle">No agents in this source yet</SvgText>}</svg>;
+  return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="group" aria-label="Agent operations board" style={{ color: palette.text, background: palette.subtle, fontFamily: palette.font }}><rect width={width} height={height} fill={palette.subtle} /><SvgText x={30} y={48} size={22} weight={700}>Operations</SvgText><SvgText x={30} y={72} size={11} fill={palette.dim}>{agents.length} AGENTS · CURRENT STATUS</SvgText><line x1={30} y1={88} x2={width-30} y2={88} stroke={palette.border} />{agents.slice(0, portrait ? 7 : 8).map((agent, index) => { const x = 30 + (index % columns) * (cardWidth + 36), y = 110 + Math.floor(index / columns) * (cardHeight + 16), item = latest.get(agent.id); return <g key={agent.id} data-selected={selectedAgent===agent.id} aria-pressed={selectedAgent===agent.id} {...svgAction(`Inspect agent ${agent.name}`, () => onSelect(agent.id))}><rect x={x} y={y} width={cardWidth} height={cardHeight} rx="7" fill={palette.card} stroke={palette.border} /><rect x={x} y={y} width="4" height={cardHeight} fill={statusColor(agent.status, palette)} /><SvgText x={x + 20} y={y + 27} size={15} weight={700}>{short(agent.name, 25)}</SvgText><circle cx={x + cardWidth - 80} cy={y + 22} r="4" fill={statusColor(agent.status, palette)} /><SvgText x={x + cardWidth - 17} y={y + 26} size={10} fill={statusColor(agent.status, palette)} anchor="end">{agent.status.toUpperCase()}</SvgText><line x1={x + 20} y1={y + 40} x2={x + cardWidth - 20} y2={y + 40} stroke={palette.border} /><SvgText x={x + 20} y={y + 64} size={12} fill={palette.muted}>{short(item?.label || "No recent activity", 47)}</SvgText><SvgText x={x + 20} y={y + 86} size={10} fill={palette.dim}>{item ? `${clock(item.time)} · ${item.thread_id || "main"}` : agent.model || "Waiting for events"}</SvgText></g>; })}{!agents.length && <SvgText x={width / 2} y={height / 2} size={15} fill={palette.dim} anchor="middle">No agents in this source yet</SvgText>}</svg>;
 }
 
 function svgAction(label: string, action: () => void) {
@@ -345,10 +362,10 @@ function svgAction(label: string, action: () => void) {
 
 // Every representation receives the same semantic nodes and focus callback.
 // Geometry belongs to the renderer; membership, visibility and paging do not.
-function HierarchyStage({refNode,nodes,preset,portrait,destinations,events,onFocus,palette,live,now}:{refNode:React.RefObject<SVGSVGElement|null>;nodes:WorldNode[];preset:Preset;portrait:boolean;destinations:Destination[];events:Event[];onFocus:(focus:Focus)=>void;palette:Palette;live:boolean;now:number}) {
+function HierarchyStage({refNode,nodes,preset,portrait,destinations,events,onFocus,palette,live,now,selectedAgent,onSelect}:{refNode:React.RefObject<SVGSVGElement|null>;nodes:WorldNode[];preset:Preset;portrait:boolean;destinations:Destination[];events:Event[];selectedAgent:string;onSelect:(id:string)=>void;onFocus:(focus:Focus)=>void;palette:Palette;live:boolean;now:number}) {
  const width = portrait ? 540 : 1280, height = portrait ? 960 : 560;
  const columns = portrait ? 2 : 3, cellW = (width-40)/columns, cellH = portrait ? 290 : 240;
- if (preset === "village") return <VillageStage showChrome={false} refNode={refNode} nodes={nodes} destinations={destinations} portrait={portrait} events={events} onFocus={onFocus} onSelect={() => {}} onSelectDestination={() => {}} live={live} now={now}/>;
+ if (preset === "village") return <VillageStage showChrome={false} refNode={refNode} nodes={nodes} destinations={destinations} portrait={portrait} events={events} onFocus={onFocus} selectedAgent={selectedAgent} onSelect={onSelect} onSelectDestination={() => {}} live={live} now={now}/>;
  return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="group" aria-label={`${presets.find(p => p.id === preset)?.name} · projects and observed teams`} style={{background:palette.subtle,fontFamily:palette.font,color:palette.text}}>
   <rect width={width} height={height} fill={palette.subtle}/>
   {nodes.map((node,index) => {
@@ -358,7 +375,7 @@ function HierarchyStage({refNode,nodes,preset,portrait,destinations,events,onFoc
    const working=node.agents.filter(agent=>["running","active"].includes(agent.status)).length;
    const detail=`${node.agents.length} agents · ${working} running`;
    const latest=activity[activity.length-1];
-   return <g key={node.id} data-world-node={node.kind} {...svgAction(`Zoom into ${node.kind} ${node.name}`,()=>onFocus(node.focus))}>
+   return <g key={node.id} data-world-node={node.kind} data-selected={node.kind === "agent" && selectedAgent === node.id} {...svgAction(node.kind === "agent" ? `Inspect agent ${node.name}` : `Zoom into ${node.kind} ${node.name}`,()=>onFocus(node.focus))}>
     <>
 
      {preset === "graph" ? <ellipse cx={x+w/2} cy={y+h/2} rx={w*.45} ry={h*.45} fill={palette.card} stroke={palette.border}/> : <rect x={x} y={y} width={w} height={h} rx="7" fill={palette.card} stroke={palette.border}/>}
@@ -366,7 +383,7 @@ function HierarchyStage({refNode,nodes,preset,portrait,destinations,events,onFoc
      <SvgText x={x+w/2} y={y+83} size={portrait?16:19} anchor="middle" weight={700}>{short(node.name,portrait?18:29)}</SvgText>
      <SvgText x={x+w/2} y={y+110} size={12} fill={palette.muted} anchor="middle">{detail}</SvgText>
      {preset !== "graph" && <SvgText x={x+w/2} y={y+142} size={12} fill={palette.muted} anchor="middle">{short(latest?.label || "No recent activity",portrait?22:38)}</SvgText>}
-     <SvgText x={x+w/2} y={y+h-28} size={12} fill={palette.accent} anchor="middle">Zoom in →</SvgText>
+     <SvgText x={x+w/2} y={y+h-28} size={12} fill={palette.accent} anchor="middle">{node.kind === "agent" ? "View details →" : "Zoom in →"}</SvgText>
     </>
    </g>;
   })}
