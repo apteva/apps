@@ -23,6 +23,12 @@ func (b *nativeBackend) inspectTarget(r nativeRequest) (sdk.RuntimeTargetInfo, e
 	if json.Unmarshal([]byte(nativeJSON(r.Options)), &opts) != nil {
 		return out, errors.New("invalid target options")
 	}
+	if opts.ControlPort != 0 && (opts.ControlPort < 1024 || opts.ControlPort > 65535) || opts.MinMemoryMB < 0 || opts.MinDiskMB < 0 {
+		return out, errors.New("invalid target options")
+	}
+	if err := nativePublicEndpoints(opts); err != nil {
+		return out, err
+	}
 	gateway := r.GatewayURL
 	if gateway == "" {
 		gateway = opts.GatewayURL

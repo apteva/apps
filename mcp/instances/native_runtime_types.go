@@ -32,6 +32,7 @@ type nativePort struct {
 	Exclusive bool   `json:"exclusive"`
 }
 type nativeExecution struct {
+	SnapshotSHA256   string            `json:"snapshot_sha256,omitempty"`
 	BrowserEndpoint  string            `json:"browser_endpoint,omitempty"`
 	Endpoints        map[string]string `json:"endpoints,omitempty"`
 	Handle           string            `json:"handle"`
@@ -107,6 +108,8 @@ type nativeArtifact struct {
 	AppCapabilities nativeAppCaps        `json:"app_capabilities"`
 }
 type nativeRecord struct {
+	Snapshot     *nativeSnapshotReceipt    `json:"snapshot,omitempty"`
+	Restore      *nativeRestore            `json:"restore,omitempty"`
 	PublicRoutes []sdk.RuntimeIngressRoute `json:"public_routes,omitempty"`
 	ID           string                    `json:"id"`
 	InstallID    int64                     `json:"install_id"`
@@ -178,7 +181,7 @@ func nativeGateway(v string) error {
 	return nil
 }
 func nativeCapabilities() any {
-	return map[string]any{"managed_ingress": true, "target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": false, "replicas": false, "fencing": false, "resource_controls": false,
+	return map[string]any{"target_listing": true, "managed_ingress": true, "target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": nativeSnapshotsSupported, "replicas": false, "fencing": false, "resource_controls": false,
 		"target_schema":  map[string]any{"type": "object", "required": []string{"app_install_id", "resource_type", "resource_id"}, "properties": map[string]any{"app_install_id": map[string]any{"type": "integer"}, "resource_type": map[string]any{"const": "instances.instance"}, "resource_id": map[string]any{"type": "string"}}},
 		"options_schema": map[string]any{"type": "object", "required": []string{"artifact_id", "gateway_url"}, "properties": map[string]any{"artifact_id": map[string]any{"type": "string"}, "gateway_url": map[string]any{"type": "string"}, "browser_endpoint": map[string]any{"type": "string"}, "endpoints": map[string]any{"type": "object", "maxProperties": 16, "additionalProperties": map[string]any{"type": "string"}}, "control_port": map[string]any{"type": "integer", "minimum": 1024, "maximum": 65535}}}}
 }

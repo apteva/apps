@@ -44,6 +44,8 @@ type nativeBackend struct {
 	jobs         map[string]context.CancelFunc
 	artifactMu   sync.Mutex
 	allocationMu sync.Mutex
+	stateMu      sync.Mutex
+	projectID    string
 }
 
 var nativeManagersMu sync.Mutex
@@ -64,7 +66,7 @@ func nativeFor(ctx *sdk.AppCtx) (*nativeBackend, error) {
 		return nil, e
 	}
 	life, cancel := context.WithCancel(context.Background())
-	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, transport: nativeSSH{}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
+	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
 	nativeManagers[ctx.AppDB()] = b
 	return b, nil
 }
@@ -383,12 +385,29 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 		lock := b.lock(d.ID)
 		lock.Lock()
 		defer lock.Unlock()
+		b.stateMu.Lock()
+		defer b.stateMu.Unlock()
 		defer func() { b.mu.Lock(); delete(b.jobs, d.ID); b.mu.Unlock() }()
 		current, e := b.record(d.ID)
 		if e != nil || current.Execution.State == "stopped" || current.Execution.State == "deleted" {
 			return
 		}
 		before := nativeJSON(current)
+		unlock, lockErr := nativeStateFileLock(b.root)
+		for lockErr != nil && c.Err() == nil {
+			select {
+			case <-c.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+			unlock, lockErr = nativeStateFileLock(b.root)
+		}
+		if lockErr != nil {
+			return
+		}
+		defer unlock()
+		if c.Err() != nil {
+			return
+		}
 		e = b.transport.Prepare(c, inst, current, b.artifactDir(current.Artifact.ID))
 		if e == nil && current.Options.Ingress != nil {
 			ingress, ok := b.transport.(nativeIngressTransport)
@@ -407,11 +426,22 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 	}()
 }
 func (b *nativeBackend) inspect(d nativeRecord, inst *Instance) nativeExecution {
-	before := nativeJSON(d)
 	out := d.Execution
 	out.Ready = false
 	c, cancel := context.WithTimeout(b.ctx, 12*time.Second)
 	defer cancel()
+	if e := b.reconcileRestore(c, inst, &d); e != nil {
+		out.State = "unknown"
+		out.StoppedConfirmed = false
+		return out
+	}
+	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
+	if d.Restore != nil && d.Execution.SnapshotSHA256 != d.Restore.SHA256 {
+		out.State = "unknown"
+		out.StoppedConfirmed = false
+		return out
+	}
+	before := nativeJSON(d)
 	obs, e := b.transport.Inspect(c, inst, d)
 	if e != nil {
 		out.State = "unknown"
@@ -621,6 +651,18 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeNative(w, nativeCapabilities())
 		return
 	}
+	if tail == "targets" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET required", 405)
+			return
+		}
+		b.listNativeTargets(w, r)
+		return
+	}
+	if tail == "snapshot" || tail == "restore" {
+		b.stateHTTP(w, r, tail)
+		return
+	}
 	if tail == "artifacts" || strings.HasPrefix(tail, "artifacts/") {
 		b.artifactHTTP(w, r, strings.TrimPrefix(strings.TrimPrefix(tail, "artifacts"), "/"))
 		return
@@ -639,7 +681,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "one JSON request required", 400)
 		return
 	}
-	if e := nativeEnvelope(req); e != nil {
+	if e := b.requestEnvelope(req, tail); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
@@ -700,6 +742,19 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lock.Unlock()
+	if !b.stateMu.TryLock() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "backend state operation busy", 409)
+		return
+	}
+	defer b.stateMu.Unlock()
+	unlock, eLock := nativeStateFileLock(b.root)
+	if eLock != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "state operation busy in another backend process", 409)
+		return
+	}
+	defer unlock()
 	var d nativeRecord
 	var inst *Instance
 	var e error
@@ -796,6 +851,10 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeNative(w, observed)
 	case "start":
+		if e := b.reconcileRestore(r.Context(), inst, &d); e != nil || d.Restore != nil && d.Execution.SnapshotSHA256 != d.Restore.SHA256 {
+			http.Error(w, "restore outcome requires inspection/retry", 409)
+			return
+		}
 		if req.Package != nil {
 			_, _, _, probe, err := b.validate(req)
 			if err != nil || probe.HostKey != d.Execution.HostKey {

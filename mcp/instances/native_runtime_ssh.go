@@ -103,7 +103,11 @@ func nativeOwned(d nativeRecord, create bool) string {
  for p in /var/lib/apteva-native "$(dirname "$(dirname "$data")")" "$(dirname "$data")" "$(dirname "$root")" "$root" "$data"; do test ! -L "$p"; done
  `
 	if create {
-		s += `mkdir -p "$root" "$data"
+		s += `mkdir -p "$root" "$(dirname "$data")"
+ test ! -L "$(dirname "$data")/.state-lock"
+ exec 8>"$(dirname "$data")/.state-lock"; flock -x 8
+ test ! -e "$(dirname "$data")/.restore-intent"
+ mkdir -p "$data"
  exec 9>"$root/.lock"; flock -x 9
  if test -e "$root/.owner"; then test "$(cat "$root/.owner")" = "$owner"; else
   test -z "$(find "$root" -mindepth 1 -maxdepth 1 ! -name .lock -print -quit)"
@@ -111,7 +115,9 @@ func nativeOwned(d nativeRecord, create bool) string {
  fi
  `
 	} else {
-		s += `test -f "$root/.owner"; test "$(cat "$root/.owner")" = "$owner"
+		s += `test ! -L "$(dirname "$data")/.state-lock"
+ exec 8>"$(dirname "$data")/.state-lock"; flock -x 8
+ test -f "$root/.owner"; test "$(cat "$root/.owner")" = "$owner"
  exec 9>"$root/.lock"; flock -x 9
  `
 	}
@@ -311,7 +317,8 @@ func (nativeSSH) Start(c context.Context, i *Instance, d nativeRecord, env map[s
 	if e := tw.Close(); e != nil {
 		return e
 	}
-	cmd := nativeOwned(d, false) + `test -e "$root/.prepared"; test ! -e "$root/.stopped"
+	cmd := nativeOwned(d, false) + `test ! -e "$(dirname "$data")/.restore-intent"
+ test -e "$root/.prepared"; test ! -e "$root/.stopped"
  cd "$root"; sha256sum -c .sha256 >/dev/null
  if test -e "$root/.start-intent"; then exit 0; fi
  ` + nativeUnitInactive() + nativeListener(d, false) + `

@@ -11,8 +11,8 @@ path) and `/manifest`. It uses existing SSH
 connections and private TCP forwarding; it does not provision hosts, install
 Docker, build applications, change Telephony dependencies, or migrate an existing
 local installation. Existing inventory, provisioning, storage and monitoring
-surfaces are preserved. Snapshot, replica, fencing and resource-limit capabilities
-are false. Container images, port remapping and extra storage mounts are rejected
+surfaces are preserved. Stopped state snapshot/restore is supported on Linux/macOS controllers; replica,
+fencing and resource-limit capabilities remain false. Container images, port remapping and extra storage mounts are rejected
 rather than silently ignored. Required tools on the target are `systemctl`, `ss`, `flock`, `tar`,
 `sha256sum`, `stat` and `curl`. Missing tools or unavailable resources reject validation;
 this backend does not silently install prerequisites.
@@ -39,10 +39,17 @@ rejected. This dedicated streaming path does not raise the existing 16 MiB MCP
 file-transfer limit. The release digest is the executable SHA-256; each additional file has its own
 digest. The advertised delivery format is `binary`. SDK `runtime.artifacts` entries
 are checksummed complete archives, whose digest is different; those manifests are
-rejected until a verified archive handoff is implemented. The first Telephony
-source-manifest trial has no such archive entry.
+accepted through the negotiated verified archive/package handoff: the approved
+archive checksum and executable checksum stay separate. Direct manual staging
+must provide matching package reference metadata for archive-based releases.
 
-A helper hashes and uploads an already-built package, without building it:
+Current Server builds negotiate `apteva.runtime-package/files-v1`, resolve the
+host through `inspect-target`, build or fetch the exact target-platform release,
+and publish/seal its package automatically. Release-owned `runtime.package`
+metadata supplies lifecycle capabilities and additional files; deployment never
+requires an already running copy to discover those capabilities.
+
+For legacy/manual handoffs, a helper hashes and uploads an already-built package:
 
 ```sh
 # APTEVA_APP_TOKEN is the Instances installation's control credential, supplied
@@ -98,14 +105,12 @@ Example placement (use actual installation/instance IDs):
 }
 ```
 
-The current Server does not put `placement.gateway_url` in `validate-target`'s
-request. Therefore repeat it in `options.gateway_url`. Start rejects an environment
-whose gateway differs from the validated option. A future explicit request
-`gateway_url` is also accepted. The gateway must reach **the trial Server that owns
-this deployment**. A remote host's `localhost` is not the operator's computer.
-For a local-only trial, an operator-managed reverse SSH tunnel can expose the local
-Server gateway on a remote loopback port; use that loopback URL consistently in
-placement and options. Instances does not create that callback tunnel in this scope.
+Current Server builds pass the gateway explicitly and populate backend options.
+Manual callers must supply consistent gateway values. The gateway must reach
+**the Server owning the deployment**, including authenticated callbacks. A remote
+host's localhost is not the operator's computer. For local-only trials, an
+operator-managed reverse SSH tunnel can expose the local Server gateway on a
+remote loopback port; this backend does not create the callback tunnel.
 
 Instances and Server must share the network namespace of the returned loopback
 control listener. Independently isolated sidecar containers need a separate secure
@@ -114,6 +119,14 @@ connectivity adapter; the current backend must not be advertised as container-re
 ## Lifecycle and persistence
 
 - `GET /describe`: exact capabilities and target/options schemas.
+- `GET /targets?project_id=...&q=...&cursor=...&limit=50`: protected namespaced
+  remote Linux/legacy-unknown-OS target inventory, without SSH fan-out. Localhost,
+  known non-Linux hosts, non-root SSH accounts and hosts that are not ready are
+  excluded. Architecture/ABI and actual connectivity remain authoritative in
+  `inspect-target`. Search and keyset pagination are bounded (limit 1–200).
+- `POST /inspect-target`: read-only contract/target/project/gateway/options
+  validation and host probing, without installation ID, deployment ID, generation
+  or artifact requirements. It creates no remote resources or execution records.
 - `POST /validate-target`: installation-scoped target, SSH/root/systemd,
   architecture, free memory/disk and reachable gateway health.
 - `POST /prepare`: durable record and private port allocation, then background
@@ -159,15 +172,58 @@ persistent data is the sibling `data/` directory. Units are named
 and do not restart automatically. No pre-existing service is adopted or stopped.
 A host cannot be destroyed or forgotten while it has retained native deployments.
 
-## Trial boundary
+## Integration boundary
 
-The separate Telephony 0.12.14 installation on DigitalOcean `test-render` is the
-intended first integration trial. It needs a staged exact-release package and a
-reachable gateway to the local trial Server. Test lifecycle, duplicate requests,
-lost responses, restart/tunnel recovery, retained data and unrelated services.
-SIP/RTP/public WebRTC connectivity and existing-installation migration are outside
-this increment. Instances 0.7.0 releases this backend for the API-first trial;
-the complete Telephony trial remains a separate integration check. No production
-deployment or dashboard change is part of this increment. Monitoring continues
-using the unchanged, checksum-pinned 0.6.5 collectors, so updating Instances does
-not reinstall monitoring software on tracked hosts.
+The API supports generic fresh deployments and stopped persistent-state transfer;
+Server owns migration ordering, rollback policy, credentials and routing. A real
+application migration still requires controller/application acceptance checks,
+including database version compatibility and any external SIP/RTP/WebRTC setup.
+The historical Telephony 0.12.14 examples illustrate package metadata only; there
+is no Telephony-specific branch in this backend. Monitoring keeps the released,
+checksum-pinned 0.6.5 collectors. No production installation is updated by this
+source change.
+
+## Stopped state transfer (0.8.0)
+
+`describe` advertises `target_listing: true` and, on Linux/macOS controllers,
+`snapshots: true`. All endpoints use the existing protected backend credential;
+ordinary public app proxy access remains blocked.
+
+- `GET /snapshot?deployment_id=...` returns canonical tar.gz and
+  `X-Apteva-Snapshot-SHA256`. Supply a bounded `Idempotency-Key`.
+- `POST /restore?deployment_id=...` accepts tar.gz with the same digest header
+  and an idempotency key; successful HTTP 200 echoes the verified digest.
+- Execution inspection returns `snapshot_sha256` only after verifying the remote
+  restore receipt. A lost reply is recovered without overwriting state again.
+
+Snapshots operate only on the record's persistent data directory. The addressed
+execution must be confirmed stopped or prepared without ever having started;
+all known executions sharing that physical data directory must also have
+inactive units and empty cgroups. Shared remote filesystem locks exclude starts
+and state transfers. Active/unknown writers reject the operation. Inspection of
+`inspect-target` remains read-only; execution inspection may finish an interrupted
+restore from its durable journal.
+
+The format preserves ordinary hidden files, SQLite databases, WAL, SHM and journal
+files. It rejects traversal, absolute paths, links, special files, conflicting
+entries and invalid gzip checksums. Transfer bytes and expanded canonical tar are
+each capped at 512 MiB, with 100,000 entry/path nodes, 4,096-byte paths and a 16 MiB
+path-metadata budget. Ownership/PAX metadata and unsafe permission bits are removed.
+Remote hosts require GNU tar/find for this feature. Backend software/routing is
+not part of a snapshot; Server owns app selection, drain/activation and routing.
+
+Restores are validated completely before remote mutation, extracted to a private
+sibling directory, synced and marked with a receipt, then swapped with the old
+data directory. The intent blocks starts until both rename and cleanup complete.
+Interrupted uploads retain the original data and can be retried with the same
+archive; interruptions between renames are completed through inspection. Different
+pending digests and conflicting idempotency keys reject safely. A backend-owned
+root receipt filename `.apteva-native-restore` is reserved and excluded from exports.
+
+A kernel-owned controller lock handles rolling process overlap and releases on
+process death. State transfers and lifecycle mutations are serialized within a
+backend; busy calls return 409/Retry-After. One local compressed snapshot/upload
+is retained, bounded to 512 MiB. Remote staging and its previous-data backup are
+bounded per installation (one stage and one backup); free space is checked before
+upload. Atomic replacement temporarily needs space for both old and new data.
+No new polling loop, collector update or monitoring schema change is introduced.

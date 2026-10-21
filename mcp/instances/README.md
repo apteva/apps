@@ -547,3 +547,13 @@ are verified from the sealed descriptor against the actual host before prepare
 and again before a new start. Existing manually staged artifacts remain supported.
 No cloud host, firewall, DNS or public media configuration is changed by these
 operations. Stop/delete still preserve installation data and unrelated services.
+
+
+## Native backend target discovery and stopped state transfer (0.8.0)
+
+The native backend exposes protected, paginated target discovery and read-only
+preflight without execution IDs. Linux/macOS controllers also support bounded,
+verified tar.gz snapshots/restores of stopped persistent data, including SQLite
+WAL state, durable restore receipts and interrupted-swap recovery. Server retains
+migration and routing decisions. Monitoring and collector 0.6.5 are unchanged.
+See [the protocol and limits](runtime/README.md#stopped-state-transfer-080).
