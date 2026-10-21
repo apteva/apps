@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-type nativeSSH struct{}
+type nativeSSH struct{ inspections *nativeInspectionPool }
 
 func nativeRun(c context.Context, i *Instance, cmd string) (string, error) {
 	clone := *i
@@ -90,9 +90,9 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 // Remote locking and immutable ownership markers protect lost-response recovery.
 func nativeOwned(d nativeRecord, create bool) string {
 	s := `set -eu; umask 077
- machine=$(cat /etc/machine-id)
- if test -f /etc/ssh/ssh_host_ed25519_key.pub; then hostpub=$(cat /etc/ssh/ssh_host_ed25519_key.pub); else hostpub=$(cat /etc/ssh/ssh_host_rsa_key.pub); fi
- identity=$(printf '%s\n%s' "$machine" "$hostpub" | sha256sum | awk '{print $1}')
+ IFS= read -r machine < /etc/machine-id
+ if test -f /etc/ssh/ssh_host_ed25519_key.pub; then IFS= read -r hostpub < /etc/ssh/ssh_host_ed25519_key.pub; else IFS= read -r hostpub < /etc/ssh/ssh_host_rsa_key.pub; fi
+ identity=$(printf '%s\n%s' "$machine" "$hostpub" | sha256sum); identity=${identity%% *}
  test "linux-systemd:$identity" = ` + quoteShellArg(d.Execution.HostKey) + `
 
  root=` + quoteShellArg(d.ReleaseDir) + `
@@ -148,15 +148,25 @@ func nativeListener(d nativeRecord, owned bool) string {
 // listeners must not prevent cleanup of a failed preparation or be stopped.
 func nativeReleasedListeners(d nativeRecord) string {
 	return `if test -e "$root/.start-intent"; then
+ :
  ` + nativeListener(d, false) + `fi
  `
 }
-func nativeUnitInactive() string {
-	return `state=$(systemctl show "$unit" -p ActiveState --value)
- pid=$(systemctl show "$unit" -p MainPID --value)
- case "$state" in inactive|failed|"") ;; *) exit 41;; esac
+
+// Read systemd's related properties from one consistent response.
+func nativeUnitProperties() string {
+	return `properties=$(systemctl show "$unit" -p ActiveState -p MainPID -p ControlGroup -p FragmentPath)
+ state=; pid=; cg=; fragment=
+ while IFS='=' read -r property value; do
+  case "$property" in ActiveState) state=$value;; MainPID) pid=$value;; ControlGroup) cg=$value;; FragmentPath) fragment=$value;; esac
+ done <<APTEVA_PROPERTIES
+$properties
+APTEVA_PROPERTIES
+ `
+}
+func nativeInactiveProperties() string {
+	return `case "$state" in inactive|failed|"") ;; *) exit 41;; esac
  test "$pid" = 0 -o -z "$pid"
- cg=$(systemctl show "$unit" -p ControlGroup --value)
  if test -n "$cg"; then
   for tasks in "/sys/fs/cgroup$cg/cgroup.procs" "/sys/fs/cgroup/systemd$cg/tasks"; do
    if test -f "$tasks"; then test -z "$(cat "$tasks")"; fi
@@ -164,6 +174,7 @@ func nativeUnitInactive() string {
  fi
  `
 }
+func nativeUnitInactive() string { return nativeUnitProperties() + nativeInactiveProperties() }
 func (nativeSSH) Prepare(c context.Context, i *Instance, d nativeRecord, dir string) error {
 	out, e := nativeRun(c, i, nativeOwned(d, true)+`test ! -e "$root/.stopped"
  if test -e "$root/.prepared"; then cd "$root"; sha256sum -c .sha256 >/dev/null; stat -Lc '%d:%i:%s:%y:%z' `+quoteShellArg(d.Artifact.Executable)+` > .exe-stat; printf 'prepared'; exit 0; fi
@@ -332,28 +343,10 @@ func (nativeSSH) Start(c context.Context, i *Instance, d nativeRecord, env map[s
  `
 	return nativeRunInput(c, i, cmd, &input)
 }
-func (nativeSSH) Inspect(c context.Context, i *Instance, d nativeRecord) (nativeObservation, error) {
-	cmd := `set -eu; root=` + quoteShellArg(d.ReleaseDir) + `
- if test ! -e "$root/.owner"; then printf 'unknown'; exit 0; fi
- ` + nativeOwned(d, false) + `
- if test -e "$root/.stopped"; then ` + nativeUnitInactive() + nativeReleasedListeners(d) + `printf 'stopped'; exit 0; fi
- if systemctl is-active --quiet "$unit"; then
-  test "$(systemctl show "$unit" -p FragmentPath --value)" = "$unitfile"
-  pid=$(systemctl show "$unit" -p MainPID --value); test "$pid" -gt 0
-  test "$(readlink "/proc/$pid/exe")" = ` + quoteShellArg(d.ReleaseDir+"/"+d.Artifact.Executable) + `
-  test "$(stat -Lc '%d:%i:%s:%y:%z' "/proc/$pid/exe")" = "$(cat "$root/.exe-stat")"
-  ` + nativeListener(d, true) + `printf 'running'; exit 0
- fi
- if test -e "$root/.start-intent"; then printf 'unknown'; exit 0; fi
- if test -e "$root/.prepared"; then printf 'prepared'; else printf 'preparing'; fi
- `
-	out, e := nativeRun(c, i, cmd)
-	if e != nil {
-		return nativeObservation{}, e
-	}
-	state := strings.TrimSpace(out)
-	return nativeObservation{State: state, Prepared: state == "prepared", Stopped: state == "stopped"}, nil
+func (s nativeSSH) Inspect(c context.Context, i *Instance, d nativeRecord) (nativeObservation, error) {
+	return s.InspectState(c, i, d, nil, false)
 }
+
 func (nativeSSH) Stop(c context.Context, i *Instance, d nativeRecord) error {
 	_, e := nativeRun(c, i, nativeOwned(d, true)+`
  if test -f "$unitfile"; then

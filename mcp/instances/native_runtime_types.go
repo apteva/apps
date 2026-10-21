@@ -137,9 +137,11 @@ type nativeProbe struct {
 	DiskMB          int64
 }
 type nativeObservation struct {
-	State    string
-	Prepared bool
-	Stopped  bool
+	RestorePending bool   `json:"restore_pending,omitempty"`
+	SnapshotSHA256 string `json:"snapshot_sha256,omitempty"`
+	State          string `json:"state"`
+	Prepared       bool   `json:"-"`
+	Stopped        bool   `json:"-"`
 }
 
 func nativeJSON(v any) string    { b, _ := json.Marshal(v); return string(b) }

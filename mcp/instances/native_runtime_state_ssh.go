@@ -72,7 +72,7 @@ func nativeRestoreVariables(d nativeRecord) string {
 
 // A receipt is placed INSIDE the staged data before any rename. The shared
 // intent blocks every start until recovery has completed both renames/cleanup.
-func nativeRestoreRecover(d nativeRecord, peers []nativeRecord) string {
+func nativeRestoreRecoverBody(d nativeRecord, peers []nativeRecord) string {
 	return nativeRestoreVariables(d) + `
  if test -e "$intent"; then
   test -f "$intent"; test "$(wc -c < "$intent")" -le 256; test "$(cat "$intent")" = "$expected"
@@ -86,7 +86,10 @@ func nativeRestoreRecover(d nativeRecord, peers []nativeRecord) string {
    rm -- "$intent"; sync
   fi
  fi
- if marker_matches "$data"; then printf '%s' ` + quoteShellArg(d.Restore.SHA256) + `; exit 0; fi
+ `
+}
+func nativeRestoreRecover(d nativeRecord, peers []nativeRecord) string {
+	return nativeRestoreRecoverBody(d, peers) + `if marker_matches "$data"; then printf '%s' ` + quoteShellArg(d.Restore.SHA256) + `; exit 0; fi
  `
 }
 func (nativeSSH) RestoreStatus(c context.Context, i *Instance, d nativeRecord, peers []nativeRecord) (string, error) {

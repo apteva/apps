@@ -16,9 +16,10 @@ import (
 // request preserves provider-only provisioning; an empty object discovers and
 // verifies an existing host without installing packages.
 type SetupOptions struct {
-	Baseline bool `json:"baseline"`
-	Docker   bool `json:"docker"`
-	Runtimes bool `json:"runtimes"`
+	SuppressDynamicMOTD bool `json:"suppress_dynamic_motd"`
+	Baseline            bool `json:"baseline"`
+	Docker              bool `json:"docker"`
+	Runtimes            bool `json:"runtimes"`
 }
 type HostFacts struct {
 	Platform     string `json:"platform"`
@@ -26,11 +27,12 @@ type HostFacts struct {
 	OS           string `json:"os"`
 }
 type SetupVerified struct {
-	SSH      bool `json:"ssh"`
-	Files    bool `json:"files"`
-	Metrics  bool `json:"metrics"`
-	Docker   bool `json:"docker"`
-	Runtimes bool `json:"runtimes"`
+	DynamicMOTDSuppressed bool `json:"dynamic_motd_suppressed,omitempty"`
+	SSH                   bool `json:"ssh"`
+	Files                 bool `json:"files"`
+	Metrics               bool `json:"metrics"`
+	Docker                bool `json:"docker"`
+	Runtimes              bool `json:"runtimes"`
 }
 type InstanceSetup struct {
 	Versions  map[string]string `json:"versions,omitempty"`
@@ -53,7 +55,8 @@ func initialSetupJSON(options *SetupOptions) string {
 }
 func setupSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "description": "Optional host setup. Empty object discovers OS and verifies SSH/files/metrics without installing packages. baseline installs common utilities; docker installs and verifies Docker; runtimes installs distribution-provided Node.js, npm, and Go. Installation is owned by Instances and runs through its SSH implementation. Ubuntu/Debian AMD64/ARM64 for package setup.", "properties": map[string]any{
-		"baseline": map[string]any{"type": "boolean"}, "docker": map[string]any{"type": "boolean"}, "runtimes": map[string]any{"type": "boolean"}}}
+		"suppress_dynamic_motd": map[string]any{"type": "boolean", "description": "Explicit host-wide Ubuntu option: add pam_motd noupdate for SSH sessions, avoiding dynamic login-message generation while retaining PAM authentication and session protections. Default false."},
+		"baseline":              map[string]any{"type": "boolean"}, "docker": map[string]any{"type": "boolean"}, "runtimes": map[string]any{"type": "boolean"}}}
 }
 func parseSetup(args map[string]any) (*SetupOptions, error) {
 	raw, present := args["setup"]
@@ -190,6 +193,20 @@ func prepareInstance(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		return dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"platform": facts.Platform})
 	}); err != nil {
 		return err
+	}
+	if options.SuppressDynamicMOTD {
+		if inst.Setup.Facts.Platform != "linux" || inst.Setup.Facts.OS != "ubuntu" {
+			return errors.New("suppress_dynamic_motd requires Ubuntu")
+		}
+		if err = step("Automation login", func() error {
+			_, e := setupCommand(ctx, inst, setupPrivilegeScript+"\n$SUDO sh -c "+quoteShellArg(automationMOTDCommand("/etc/pam.d/sshd")), 30*time.Second)
+			if e == nil {
+				inst.Setup.Verified.DynamicMOTDSuppressed = true
+			}
+			return e
+		}); err != nil {
+			return err
+		}
 	}
 	if options.Baseline {
 		if err = step("Baseline", func() error { _, e := setupCommand(ctx, inst, baselineSetupScript, 10*time.Minute); return e }); err != nil {

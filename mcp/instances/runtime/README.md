@@ -227,3 +227,37 @@ is retained, bounded to 512 MiB. Remote staging and its previous-data backup are
 bounded per installation (one stage and one backup); free space is checked before
 upload. Atomic replacement temporarily needs space for both old and new data.
 No new polling loop, collector update or monitoring schema change is introduced.
+
+
+## Routine inspection efficiency (0.8.1)
+
+Process status, executable identity, listeners and any required restore recovery
+are returned in one structured SSH result. A completed restore stores a durable
+completion flag and digest. An in-memory, bounded verification cache is rebuilt
+on controller restart; first inspection revalidates the remote receipt. Changes
+to target/SSH identity, pending intents or inconsistent observations invalidate
+verification. A healthy poll does not reread the completed restore receipt or
+scan sibling deployment records. The intent file is still checked on every poll.
+A partial upload remains retryable when writers are stopped; ordinary execution
+inspection stays unknown until recovery completes.
+
+Only routine inspection uses the persistent non-interactive SSH worker. Lifecycle
+commands, transfers and ingress tunnels retain independent connections. A timed
+out, disconnected or invalid-response worker is closed and replaced on the next
+inspection; commands are not automatically replayed. Workers expire after two
+minutes idle, are capped at 32 hosts, verify current SSH identity on reuse and
+close at backend shutdown. Related systemd properties use one `systemctl show`.
+No health observation is cached: stopped or mismatched processes/listeners still
+fail on the next inspection.
+
+Ubuntu host provisioning accepts an explicit `setup.suppress_dynamic_motd: true`
+through the existing create/register/wait-ready setup API. It adds the documented
+`noupdate` option only to optional `pam_motd.so` SSH session rules, preserving
+all authentication/account/session protections and making an original-file
+backup at `/etc/pam.d/sshd.apteva-before-motd`. It does not restart sshd. This is
+a **host-wide opt-in**, including interactive SSH sessions: messages remain,
+but their dynamic generation does not run on each SSH session. Default setup
+leaves PAM untouched. To undo the opt-in, review and restore the backed-up rules;
+setting the request flag false does not automatically revert host configuration.
+See [Ubuntu's pam_motd documentation](https://manpages.ubuntu.com/manpages/noble/man8/pam_motd.8.html)
+and [the staging comparison](inspection-performance.md).

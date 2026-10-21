@@ -21,9 +21,10 @@ const nativeStateLimit int64 = 512 << 20
 const nativeStateMarker = ".apteva-native-restore"
 
 type nativeRestore struct {
-	SHA256 string `json:"sha256"`
-	Key    string `json:"key"`
-	Bytes  int64  `json:"bytes,omitempty"`
+	Completed bool   `json:"completed,omitempty"`
+	SHA256    string `json:"sha256"`
+	Key       string `json:"key"`
+	Bytes     int64  `json:"bytes,omitempty"`
 }
 type nativeSnapshotReceipt struct {
 	Key    string `json:"key"`
@@ -59,7 +60,7 @@ func (b *nativeBackend) statePeers(d nativeRecord) ([]nativeRecord, error) {
 }
 
 func (b *nativeBackend) reconcileRestore(c context.Context, i *Instance, d *nativeRecord) error {
-	if d.Restore == nil {
+	if !b.restoreNeedsVerification(i, *d) {
 		return nil
 	}
 	t, ok := b.transport.(nativeStateTransport)
@@ -72,20 +73,88 @@ func (b *nativeBackend) reconcileRestore(c context.Context, i *Instance, d *nati
 	}
 	sha, e := t.RestoreStatus(c, i, *d, peers)
 	if e != nil {
+		b.invalidateRestore(*d)
 		return e
 	}
+	return b.confirmRestore(i, d, sha)
+}
+
+func (b *nativeBackend) restoreVerificationKey(i *Instance, d nativeRecord) string {
+	if d.Restore == nil {
+		return ""
+	}
+	return nativeHash(nativeJSON([]any{d.Fingerprint, d.Execution.HostKey, d.Restore.Key, d.Restore.SHA256, nativeInspectionIdentity(i)}))
+}
+func (b *nativeBackend) restoreNeedsVerification(i *Instance, d nativeRecord) bool {
+	if d.Restore == nil {
+		return false
+	}
+	return d.Execution.State == "unknown" || d.Execution.State == "failed" || !d.Restore.Completed || d.Execution.SnapshotSHA256 != d.Restore.SHA256 || b.restoreVerified[d.ID] != b.restoreVerificationKey(i, d)
+}
+func (b *nativeBackend) invalidateRestore(d nativeRecord) { delete(b.restoreVerified, d.ID) }
+func (b *nativeBackend) confirmRestore(i *Instance, d *nativeRecord, sha string) error {
+	if d.Restore == nil {
+		return nil
+	}
 	if sha == "" {
+		b.invalidateRestore(*d)
+		if d.Restore.Completed || d.Execution.SnapshotSHA256 == d.Restore.SHA256 {
+			return errors.New("completed restore receipt missing")
+		}
 		return nil
 	}
 	if sha != d.Restore.SHA256 {
 		return errors.New("restore digest differs from durable intent")
 	}
-	if d.Execution.SnapshotSHA256 != sha {
+	if !d.Restore.Completed || d.Execution.SnapshotSHA256 != sha {
 		before := nativeJSON(*d)
+		d.Restore.Completed = true
 		d.Execution.SnapshotSHA256 = sha
-		return b.saveCAS(before, *d)
+		if e := b.saveCAS(before, *d); e != nil {
+			return e
+		}
 	}
+	if b.restoreVerified == nil || len(b.restoreVerified) >= 1024 {
+		b.restoreVerified = map[string]string{}
+	}
+	b.restoreVerified[d.ID] = b.restoreVerificationKey(i, *d)
 	return nil
+}
+
+// The SSH implementation folds receipt recovery and process inspection into one
+// operation. Test/alternate transports can retain the separate primitive API.
+type nativeCombinedInspector interface {
+	InspectState(context.Context, *Instance, nativeRecord, []nativeRecord, bool) (nativeObservation, error)
+}
+
+func (b *nativeBackend) inspectRemote(c context.Context, i *Instance, d *nativeRecord) (nativeObservation, error) {
+	if transport, ok := b.transport.(nativeCombinedInspector); ok {
+		verify := b.restoreNeedsVerification(i, *d)
+		var peers []nativeRecord
+		var e error
+		if verify {
+			peers, e = b.statePeers(*d)
+			if e != nil {
+				return nativeObservation{}, e
+			}
+		}
+		obs, e := transport.InspectState(c, i, *d, peers, verify)
+		if obs.RestorePending {
+			b.invalidateRestore(*d)
+			return obs, errors.New("restore still pending")
+		}
+		if e != nil {
+			return obs, e
+		}
+		if verify {
+			e = b.confirmRestore(i, d, obs.SnapshotSHA256)
+		}
+		return obs, e
+	}
+	if e := b.reconcileRestore(c, i, d); e != nil {
+		return nativeObservation{}, e
+	}
+	return b.transport.Inspect(c, i, *d)
 }
 
 func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action string) {
@@ -304,6 +373,9 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 	restoreKey := nativeHash(key)
 	if d.Restore != nil && d.Restore.SHA256 == sha && d.Execution.SnapshotSHA256 != sha {
 		restoreKey = d.Restore.Key
+	}
+	for _, peer := range peers {
+		b.invalidateRestore(peer)
 	}
 	d.Restore = &nativeRestore{SHA256: sha, Key: restoreKey, Bytes: int64(expanded)}
 	if e = b.saveCAS(before, d); e != nil {
