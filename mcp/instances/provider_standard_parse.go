@@ -11,50 +11,7 @@ import (
 func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerType, error) {
 	switch provider {
 	case "vultr":
-		var v struct {
-			Plans []struct {
-				ID             string   `json:"id"`
-				VCPU           int      `json:"vcpu_count"`
-				VCPULegacy     int      `json:"vcpu"`
-				RAM            int      `json:"ram"`
-				Disk           int      `json:"disk"`
-				Type           string   `json:"type"`
-				MonthlyCost    float64  `json:"monthly_cost"`
-				HourlyCost     float64  `json:"hourly_cost"`
-				Locations      []string `json:"locations"`
-				DeployOnDemand *bool    `json:"deploy_ondemand"`
-				StorageType    string   `json:"storage_type"`
-			} `json:"plans"`
-		}
-		if err := json.Unmarshal(data, &v); err != nil {
-			return nil, fmt.Errorf("decode vultr plans: %w", err)
-		}
-		out := make([]ServerType, 0, len(v.Plans))
-		for _, p := range v.Plans {
-			cores := p.VCPU
-			if cores == 0 {
-				cores = p.VCPULegacy
-			}
-			if p.ID == "" {
-				continue
-			}
-			if p.DeployOnDemand != nil && !*p.DeployOnDemand {
-				continue
-			}
-			vx1 := p.Type == "vx1" || strings.HasPrefix(p.ID, "vx1-")
-			if vx1 && (p.Disk <= 0 || p.StorageType == "block_storage" || len(p.Locations) == 0) {
-				// Diskless VX1 needs a bootable block device, which the current
-				// adapter cannot provision or attach during server creation.
-				continue
-			}
-			plan := ServerType{Name: p.ID, Description: p.ID, Cores: cores, MemoryGB: float64(p.RAM) / 1024, DiskGB: p.Disk, CPUType: vultrCPUType(p.Type), Architecture: "x86", MonthlyPriceUSD: p.MonthlyCost, HourlyPriceUSD: p.HourlyCost, AvailableIn: p.Locations}
-			if vx1 {
-				plan.CPUType = "dedicated"
-				plan.BootStorage = []StorageConstraint{{StorageClass: "local", ProviderType: "local", MinSizeGB: p.Disk, MaxSizeGB: p.Disk, Technology: "nvme", Billing: "included"}}
-			}
-			out = append(out, plan)
-		}
-		return out, nil
+		return parseVultrPlans(data, false, "")
 	case "linode":
 		var v struct {
 			Data []struct {
@@ -349,7 +306,7 @@ func parseProviderImages(provider string, data json.RawMessage) ([]Image, error)
 		out := make([]Image, 0, len(v.OS))
 		for _, im := range v.OS {
 			id := anyToString(im.ID)
-			if id != "" && strings.ToLower(im.Family) != "windows" {
+			if id != "" && !containsString([]string{"windows", "iso", "snapshot", "backup", "application"}, strings.ToLower(im.Family)) {
 				out = append(out, Image{Name: id, Description: im.Name, OSFlavor: strings.ToLower(im.Family), OSVersion: imageVersion(im.Name), Architecture: normalizeArchitecture(im.Arch)})
 			}
 		}
@@ -471,7 +428,11 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 	// Select the resource envelope before considering identity fields. Never
 	// use request, action, network, image or nested volume IDs as host identity.
 	if obj, ok := root.(map[string]any); ok {
-		for _, key := range []string{"server", "instance", "droplet"} {
+		envelopes := []string{"server", "instance", "droplet"}
+		if provider == "vultr" {
+			envelopes = append(envelopes, "bare_metal")
+		}
+		for _, key := range envelopes {
 			if resource, ok := obj[key].(map[string]any); ok {
 				root = resource
 				break
@@ -982,7 +943,7 @@ func imageVersion(value string) string {
 }
 
 func vultrCPUType(value string) string {
-	if strings.EqualFold(value, "vx1") || strings.Contains(strings.ToLower(value), "dedicated") || strings.Contains(strings.ToLower(value), "vhf") {
+	if strings.EqualFold(value, "vx1") || strings.Contains(strings.ToLower(value), "dedicated") || strings.EqualFold(value, "voc") || strings.EqualFold(value, "vdc") {
 		return "dedicated"
 	}
 	return "shared"

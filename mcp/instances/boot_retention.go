@@ -34,6 +34,14 @@ func applyDestroyBootPolicy(ctx *sdk.AppCtx, inst *Instance, retain bool) error 
 		if retain {
 			return fmt.Errorf("%s does not support retaining boot storage through this adapter", inst.Provider)
 		}
+	case "vultr":
+		if request.Boot == nil || request.Boot.StorageClass != "block" {
+			if retain {
+				return fmt.Errorf("Vultr local boot disks cannot be retained; only boot block volumes support retention")
+			}
+			return nil
+		}
+		fallthrough
 	case "scaleway":
 		if request.Boot != nil {
 			if retain {

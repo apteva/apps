@@ -111,9 +111,10 @@ func storageCapabilities(provider string) StorageCapabilities {
 		cap.StorageClasses = []string{"block"}
 		cap.Tiers = []StorageTier{{Name: "provider-default", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb", Description: "DigitalOcean Block Storage"}}
 	case "vultr":
+		cap.BootSizeConfigurable = true
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize = true, true, true, true
-		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "storage_opt", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}, {Name: "performance", ProviderType: "high_perf", Technology: "nvme", Attachment: "network", Persistent: true, Billing: "per_gb"}}
+		cap.StorageClasses = []string{"local", "block"}
+		cap.Tiers = []StorageTier{{Name: "local", StorageClass: "local", ProviderType: "local", Billing: "included"}, {Name: "balanced", StorageClass: "block", ProviderType: "storage_opt", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}, {Name: "performance", StorageClass: "block", ProviderType: "high_perf", Technology: "nvme", Attachment: "network", Persistent: true, Billing: "per_gb"}}
 	case "aws-ec2":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
@@ -173,7 +174,7 @@ func validateStorageRequest(provider string, req InstanceStorageRequest) error {
 	if req.Boot.DeletePolicy != "with_instance" && req.Boot.DeletePolicy != "retain" {
 		return errors.New("storage.boot.delete_policy must be with_instance or retain")
 	}
-	if req.Boot.DeletePolicy == "retain" && provider != "scaleway" && provider != "aws-ec2" {
+	if req.Boot.DeletePolicy == "retain" && provider != "scaleway" && provider != "aws-ec2" && provider != "vultr" {
 		return fmt.Errorf("provider %q cannot retain boot storage through Instances", provider)
 	}
 	if req.Boot.Tier == "" {
@@ -449,6 +450,9 @@ func attachCreatedVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) err
 }
 
 func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) error {
+	if isVultrMetal(inst) {
+		return errors.New("Vultr bare metal does not support block-volume attachment")
+	}
 	if inst == nil || inst.ProviderID == "" {
 		return errors.New("target instance has no provider id")
 	}
@@ -710,6 +714,9 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 			return nil, fmt.Errorf("target instance is %s", inst.Status)
 		}
 
+		if isVultrMetal(inst) {
+			return nil, errors.New("Vultr block volumes attach to virtual compute; bare-metal plans use their included physical disks")
+		}
 		if inst.IsLocal() {
 			return nil, errors.New("provider volumes cannot attach to the local instance")
 		}

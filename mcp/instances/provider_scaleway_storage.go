@@ -151,7 +151,7 @@ func verifyAndPersistScalewayBootStorage(ctx *sdk.AppCtx, inst *Instance) (*scal
 			return nil, fmt.Errorf("Scaleway boot storage mismatch: requested %d GB, provider created %d GB", requested.SizeGB, actual.SizeGB)
 		}
 	}
-	if err := persistScalewayBootVolume(ctx.AppDB(), inst, actual, requested); err != nil {
+	if err := persistManagedBootVolume(ctx.AppDB(), inst, actual, requested); err != nil {
 		return nil, fmt.Errorf("persist verified Scaleway boot storage: %w", err)
 	}
 	return actual, nil
@@ -218,7 +218,7 @@ func bootStorageRequestFromInstance(inst *Instance) (*BootStorageRequest, error)
 	return storage.Boot, nil
 }
 
-func persistScalewayBootVolume(db *sql.DB, inst *Instance, actual *scalewayBootVolume, requested *BootStorageRequest) error {
+func persistManagedBootVolume(db *sql.DB, inst *Instance, actual *scalewayBootVolume, requested *BootStorageRequest) error {
 	if db == nil || inst == nil || actual == nil {
 		return errors.New("boot-volume persistence requires database, instance, and actual volume")
 	}

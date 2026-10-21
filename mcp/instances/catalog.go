@@ -28,21 +28,28 @@ import (
 // ServerType is the per-call shape returned to MCP + HTTP callers.
 // Fields that don't apply to a given provider stay zero.
 type ServerType struct {
-	Name            string           `json:"name"`
-	Description     string           `json:"description,omitempty"`
-	Cores           int              `json:"cores"`
-	MemoryGB        float64          `json:"memory_gb"`
-	DiskGB          int              `json:"disk_gb"`
-	CPUType         string           `json:"cpu_type,omitempty"`       // shared | dedicated
-	Architecture    string           `json:"architecture,omitempty"`   // x86 | arm
-	Platform        string           `json:"platform,omitempty"`       // linux | macos | windows
-	ResourceClass   string           `json:"resource_class,omitempty"` // virtual | bare_metal | container
-	Accelerators    []AcceleratorDef `json:"accelerators,omitempty"`
-	Deprecated      bool             `json:"deprecated,omitempty"`
-	MonthlyPriceEUR float64          `json:"monthly_price_eur,omitempty"`
-	HourlyPriceEUR  float64          `json:"hourly_price_eur,omitempty"`
-	MonthlyPriceUSD float64          `json:"monthly_price_usd,omitempty"`
-	HourlyPriceUSD  float64          `json:"hourly_price_usd,omitempty"`
+	ProviderFamily      string                  `json:"provider_family,omitempty"`
+	Available           *bool                   `json:"available,omitempty"`
+	UnavailableReason   string                  `json:"unavailable_reason,omitempty"`
+	PriceKnown          *bool                   `json:"price_known,omitempty"`
+	ConfigurableBoot    *bool                   `json:"configurable_boot,omitempty"`
+	RequiresBootStorage bool                    `json:"requires_boot_storage,omitempty"`
+	LocationPrices      map[string]catalogPrice `json:"location_prices,omitempty"`
+	Name                string                  `json:"name"`
+	Description         string                  `json:"description,omitempty"`
+	Cores               int                     `json:"cores"`
+	MemoryGB            float64                 `json:"memory_gb"`
+	DiskGB              int                     `json:"disk_gb"`
+	CPUType             string                  `json:"cpu_type,omitempty"`       // shared | dedicated
+	Architecture        string                  `json:"architecture,omitempty"`   // x86 | arm
+	Platform            string                  `json:"platform,omitempty"`       // linux | macos | windows
+	ResourceClass       string                  `json:"resource_class,omitempty"` // virtual | bare_metal | container
+	Accelerators        []AcceleratorDef        `json:"accelerators,omitempty"`
+	Deprecated          bool                    `json:"deprecated,omitempty"`
+	MonthlyPriceEUR     float64                 `json:"monthly_price_eur,omitempty"`
+	HourlyPriceEUR      float64                 `json:"hourly_price_eur,omitempty"`
+	MonthlyPriceUSD     float64                 `json:"monthly_price_usd,omitempty"`
+	HourlyPriceUSD      float64                 `json:"hourly_price_usd,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
 	AvailableIn        []string            `json:"available_in,omitempty"`
@@ -55,16 +62,17 @@ type ServerType struct {
 // clouds such as Scaleway, where DEV1 supports local SSD but POP2 is
 // block-only.
 type StorageConstraint struct {
-	StorageClass  string `json:"storage_class"`
-	ProviderType  string `json:"provider_type,omitempty"`
-	MinSizeGB     int    `json:"min_size_gb,omitempty"`
-	MaxSizeGB     int    `json:"max_size_gb,omitempty"`
-	Technology    string `json:"technology,omitempty"`
-	IOPS          int    `json:"iops,omitempty"`
-	BandwidthMbps int    `json:"bandwidth_mbps,omitempty"`
-	Persistent    bool   `json:"persistent"`
-	Replication   string `json:"replication,omitempty"`
-	Billing       string `json:"billing,omitempty"`
+	AllowedTiers  []string `json:"allowed_tiers,omitempty"`
+	StorageClass  string   `json:"storage_class"`
+	ProviderType  string   `json:"provider_type,omitempty"`
+	MinSizeGB     int      `json:"min_size_gb,omitempty"`
+	MaxSizeGB     int      `json:"max_size_gb,omitempty"`
+	Technology    string   `json:"technology,omitempty"`
+	IOPS          int      `json:"iops,omitempty"`
+	BandwidthMbps int      `json:"bandwidth_mbps,omitempty"`
+	Persistent    bool     `json:"persistent"`
+	Replication   string   `json:"replication,omitempty"`
+	Billing       string   `json:"billing,omitempty"`
 }
 
 // Location is one VPS region.
