@@ -238,6 +238,7 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	}
 	sources := []any{}
 	sourceExt := ""
+	sourceHash := ""
 	for i, fid := range row.SourceFileIDs {
 		id, err := strconv.ParseInt(fid, 10, 64)
 		if err != nil {
@@ -249,6 +250,7 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		}
 		if i == 0 {
 			sourceExt = filepath.Ext(file.Name)
+			sourceHash = file.SHA256
 		}
 		var evidence any
 		if media, err := getMedia(app.AppDB(), row.ProjectID, fid); err == nil {
@@ -256,7 +258,18 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		}
 		sources = append(sources, []any{fid, file.SHA256, file.SizeBytes, evidence})
 	}
-	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName, sourceExt)
+	planParams := row.Params
+	if row.Operation == "redact_audio" {
+		if len(row.ResolvedParams) > 0 {
+			planParams = row.ResolvedParams
+		}
+		// Include the frozen selection plan, since the same transcript text may
+		// later receive corrected word timing without a change in source bytes.
+		if len(sources) != 1 || verifyRedactionSource(planParams, sourceHash) != nil {
+			return "", "", ""
+		}
+	}
+	plan, err := buildPlan(row.Operation, row.SourceFileIDs, planParams, row.OutputName, sourceExt)
 	if err != nil {
 		return "", "", ""
 	}
@@ -269,6 +282,8 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	}
 	revision := renderAlgorithmVersion
 	switch row.Operation {
+	case "redact_audio":
+		revision += ":" + audioRedactionVersion + fmt.Sprintf(":%x", sha256.Sum256(planParams))
 	case "audio_filter":
 		revision += ":" + audioNormalizationVersion
 	case "trim":

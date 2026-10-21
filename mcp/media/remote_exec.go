@@ -202,6 +202,11 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		sourceNames = append(sourceNames, sanitizeFilename(meta.Name))
 		sourceSizes = append(sourceSizes, meta.SizeBytes)
 		sourceSHA256s = append(sourceSHA256s, strings.ToLower(strings.TrimSpace(meta.SHA256)))
+		if row.Operation == "redact_audio" {
+			if err := verifyRedactionSource(row.Params, meta.SHA256); err != nil {
+				return 0, err
+			}
+		}
 		if len(signedURLs) == 1 {
 			row.Params = verifySourceEvidenceIdentity(row.Params, meta.SHA256)
 		}
@@ -384,8 +389,8 @@ func (e *remoteExecutor) buildScript(
 	b.WriteString("echo $$ > pid\n")
 	b.WriteString(`if [ -f "$WORK/cancel.requested" ]; then echo 'REMOTE_CANCEL_REQUESTED'; exit 1; fi` + "\n")
 	b.WriteString(`curl_retry() { curl -sS --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors "$@"; }` + "\n")
-	if row.Operation == "audio_filter" && needsRenderRuntime(row.Operation, row.Params) {
-		b.WriteString("command -v python3 >/dev/null || { echo 'render_runtime_unavailable: Python 3 is required for two-pass normalization'; exit 1; }\n")
+	if (row.Operation == "audio_filter" || row.Operation == "redact_audio") && needsRenderRuntime(row.Operation, row.Params) {
+		b.WriteString("command -v python3 >/dev/null || { echo 'render_runtime_unavailable: Python 3 is required for guarded audio rendering'; exit 1; }\n")
 	}
 	b.WriteString(remoteSourceCacheScriptFragment)
 

@@ -68,6 +68,8 @@ func buildPlanBase(op string, sources []string, params json.RawMessage, outputNa
 		return planExtractReel(sources, params, outputName)
 	case "audio_extract":
 		return planAudioExtract(sources, params, outputName)
+	case "redact_audio":
+		return planAudioRedact(sources, params, outputName, sourceExt)
 	case "audio_filter":
 		return planAudioFilter(sources, params, outputName, sourceExt)
 	default:

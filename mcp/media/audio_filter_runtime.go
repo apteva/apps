@@ -12,7 +12,7 @@ import (
 )
 
 func prepareAudioFilterParams(db *sql.DB, projectID, operation string, sourceFileIDs []string, raw json.RawMessage) json.RawMessage {
-	if operation != "audio_filter" {
+	if operation != "audio_filter" && operation != "redact_audio" {
 		return raw
 	}
 	rate := lookupSourceSampleRate(db, projectID, sourceFileIDs)

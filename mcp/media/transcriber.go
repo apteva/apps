@@ -417,8 +417,8 @@ type parsedTranscript struct {
 //
 // We grab channels[0].alternatives[0].transcript for the plain text,
 // and walk paragraphs[].sentences[] when present for timed segments
-// (the segment shape we expose to callers). Words/diarisation aren't
-// requested by default so we don't try to lift them here.
+// (the segment shape we expose to callers). Preserve provider word boundaries
+// inside segments for deterministic audio editing; never infer them from text.
 func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
 	var env struct {
 		Metadata struct {
@@ -432,7 +432,9 @@ func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
 				Alternatives     []struct {
 					Transcript string `json:"transcript"`
 					Words      []struct {
-						End float64 `json:"end"`
+						End   float64 `json:"end"`
+						Start float64 `json:"start"`
+						Word  string  `json:"word"`
 					} `json:"words"`
 					Paragraphs struct {
 						Paragraphs []struct {
@@ -481,6 +483,28 @@ func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
 				EndMs:   int64(s.End * 1000),
 				Text:    s.Text,
 			})
+		}
+	}
+	// Keep each provider word once, even when sentence boundaries round differently.
+	var words []TranscriptWord
+	for _, w := range alt.Words {
+		if w.Word != "" {
+			words = append(words, TranscriptWord{int64(math.Round(w.Start * 1000)), int64(math.Round(w.End * 1000)), w.Word})
+		}
+	}
+	if len(words) > 0 {
+		if len(out.Segments) == 0 {
+			out.Segments = []TranscriptSegment{{StartMs: words[0].StartMs, EndMs: words[len(words)-1].EndMs, Text: out.Text}}
+		}
+		for _, w := range words {
+			index := len(out.Segments) - 1
+			for i, s := range out.Segments {
+				if w.StartMs < s.EndMs {
+					index = i
+					break
+				}
+			}
+			out.Segments[index].Words = append(out.Segments[index].Words, w)
 		}
 	}
 	return out, nil

@@ -108,6 +108,9 @@ func runGuardedFixture(t *testing.T, source, op string, params map[string]any, r
 		}
 	}
 	log, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		t.Logf("guarded runtime failed: %s", log)
+	}
 	var result map[string]any
 	rawResult := runtimeResultFromLog(string(log))
 	if len(rawResult) == 0 {

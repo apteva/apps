@@ -1,3 +1,32 @@
+## 0.14.41 — transcript-driven audio redaction
+
+Adds `media_redact_audio` using the existing asynchronous render queue and
+completion/failure/cancellation notifications. Select words with an optional
+1-based occurrence, or explicit source-time intervals. Room tone, mute, bleep
+and muffle support bounded padding, fades and short audio-only previews.
+Room tone requires a caller-reviewed background-only donor interval; muffle
+is an effect and does not guarantee unintelligibility.
+
+New Deepgram transcripts retain recorded word timing in `segments[].words`;
+imports can supply the same structure. Ambiguous matches, missing alignment,
+stale source identities and invalid ranges fail before queueing. Sentence
+boundaries are never interpolated into invented word timings. Existing untimed
+transcripts remain usable with explicit timestamp selections.
+
+Video is copied with packet/timestamp and presentation-boundary verification,
+retaining the final frame. Encoded audio must preserve channel count and sample
+rate and pass full decode, finite-signal and timeline validation before upload.
+Leading audio gaps are preserved as silence, with Deepgram word times mapped to
+the source timeline. Unsupported video container origins fail explicitly.
+Resolved plans and validation summaries remain traceable and bounded; caches
+include the resolved timing plan and source identity.
+
+Validation covers real FFmpeg on local and remote-script paths, all four effects,
+stereo and unchanged surrounding PCM, H.264/10-bit HEVC picture retention, AAC
+previews, delayed audio and MP3 priming, transcript identity, selection errors,
+cache identity and manifest/tool parity. Existing normalization, Smart Crop,
+weighted admission and cancellation behavior are retained.
+
 ## 0.14.32 — bounded Media worker memory
 
 Previews (including legacy), source sampling, indexing, transcription audio

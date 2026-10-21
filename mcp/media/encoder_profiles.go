@@ -54,7 +54,7 @@ func buildPlan(op string, sources []string, params json.RawMessage, name, source
 	if strings.HasPrefix(plan.ContentType, "image/") {
 		return plan, nil
 	}
-	if isAudioExt(filepath.Ext(plan.Filename)) || op == "concat" || op == "extract_frame" || op == "audio_extract" || op == "audio_filter" {
+	if isAudioExt(filepath.Ext(plan.Filename)) || op == "concat" || op == "extract_frame" || op == "audio_extract" || op == "audio_filter" || op == "redact_audio" {
 		return plan, nil
 	}
 	ext := strings.ToLower(filepath.Ext(plan.Filename))

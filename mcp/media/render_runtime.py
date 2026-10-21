@@ -611,6 +611,97 @@ def normalized_audio(req, info, diagnostics):
     diagnostics["audio_normalization"]["timeline_validated"] = True
 
 
+def redacted_audio(req, info, diagnostics):
+    p = req["params"]
+    plan = p.get("_redaction_plan", {})
+    audio = next((s for s in info["streams"] if s.get("codec_type") == "audio"), {})
+    rate = int(audio.get("sample_rate", 0))
+    if not rate or rate != p.get("_source_sample_rate", 48000):
+        raise ValueError("audio_redaction_failed: source sample rate differs from indexed selection plan")
+    extent = float(audio.get("duration", info.get("format", {}).get("duration", 0)))
+    origin = float(info.get("format", {}).get("start_time", 0))
+    audio_start = float(audio.get("start_time", 0)) - origin
+    has_video = any(s.get("codec_type") == "video" for s in info["streams"])
+    if (has_video and abs(origin) > .002) or abs(audio_start * 1000 - plan.get("audio_start_ms", 0)) > 2:
+        raise ValueError("audio_redaction_failed: source timeline differs from indexed selection plan; reindex or normalize timeline")
+    if extent <= 0 or any(r["start_ms"] < 0 or r["end_ms"] > (audio_start + extent) * 1000 + 2 for r in plan.get("ranges", [])):
+        raise ValueError("audio_redaction_failed: selected passage exceeds the actual audio stream")
+    donor = plan.get("room_tone")
+    if donor and (donor["start_ms"] < audio_start * 1000 - 2 or donor["end_ms"] > (audio_start + extent) * 1000 + 2):
+        raise ValueError("audio_redaction_failed: room-tone donor exceeds the actual audio stream")
+    args = list(req["args"])
+    codec = args[args.index("-c:a") + 1]
+    if codec == "libopus" and rate not in (8000, 12000, 16000, 24000, 48000):
+        raise ValueError("audio_redaction_failed: Opus cannot preserve this sample rate; choose WAV, FLAC or AAC")
+    source_video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
+    video_copied = bool(source_video and "-vn" not in args)
+    durations = None
+    if video_copied:
+        args[-1:-1] = color_args(source_video)
+        if os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4") and "mov" in info.get("format", {}).get("format_name", "").split(","):
+            scale, durations = presentation_durations(req["source"])
+            args[-1:-1] = ["-movie_timescale", str(scale * 1000 // math.gcd(scale, 1000) if scale < 1000 else scale)]
+            if "vide" not in durations:
+                durations = None
+    d = {"algorithm_version": "media-audio-redact-1", "method": plan["method"],
+        "preview": plan["preview"], "source_start_ms": plan["start_ms"], "source_end_ms": plan["end_ms"],
+        "ranges": plan["ranges"], "fade_ms": plan["fade_ms"], "sample_rate": rate,
+        "video_copied": video_copied, "leading_audio_silence_ms": round(audio_start * 1000), "validated": False}
+    if plan["method"] == "room_tone":
+        d["room_tone"] = plan["room_tone"]
+        d["limitations"] = ["Donor ambience is caller-selected; speech-free content must be reviewed."]
+    if plan["method"] == "muffle":
+        d["limitations"] = ["Muffle is an audio effect and does not guarantee unintelligible speech."]
+    diagnostics["audio_redaction"] = d
+    runtime_event(req, "encode", {"audio_redaction": d})
+    encode(req["ffmpeg"], args)
+    runtime_event(req, "validation")
+    if durations:
+        patch_presentation_end(req["output"], max(durations.values()), durations)
+    output_info = probe(req["ffprobe"], req["output"])
+    dst_audio = next((s for s in output_info["streams"] if s.get("codec_type") == "audio"), {})
+    if int(dst_audio.get("sample_rate", 0)) != rate:
+        raise ValueError("audio_redaction_failed: output sample rate changed")
+    if dst_audio.get("channels") != audio.get("channels"):
+        raise ValueError("audio_redaction_failed: output audio channel count changed")
+    # Check presentation extent independently of successful encoding.
+    expected_start = 0
+    expected_duration = (plan["end_ms"] - plan["start_ms"]) / 1000 if plan["preview"] else extent + audio_start
+    start_tolerance, duration_tolerance = (.03, .08) if codec in ("libmp3lame", "libopus") else (.002, .05)
+    d.update({"source_audio_start_seconds": float(audio.get("start_time", 0)), "output_audio_start_seconds": float(dst_audio.get("start_time", 0))})
+    if abs(float(dst_audio.get("start_time", 0)) - expected_start) > start_tolerance:
+        raise ValueError("audio_redaction_failed: audio timeline start changed")
+    if abs(float(dst_audio.get("duration", output_info.get("format", {}).get("duration", 0))) - expected_duration) > duration_tolerance:
+        raise ValueError("audio_redaction_failed: audio duration changed")
+    if video_copied:
+        dst_video = next((s for s in output_info["streams"] if s.get("codec_type") == "video"), {})
+        check_video_color(source_video, dst_video)
+        if abs(float(source_video.get("start_time", 0)) - float(dst_video.get("start_time", 0))) > .002:
+            raise ValueError("audio_redaction_failed: video timeline start changed")
+        if source_video.get("duration") and abs(float(source_video["duration"]) - float(dst_video.get("duration", 0))) > .002:
+            raise ValueError("audio_redaction_failed: video presentation duration changed")
+        signature = packet_signature(req["ffprobe"], req["source"])
+        if signature != packet_signature(req["ffprobe"], req["output"]):
+            raise ValueError("audio_redaction_failed: compressed video pictures or timestamps changed")
+        evidence = p.get("_validated_video_evidence", {})
+        reused = evidence.get("algorithm_version") == "media-shared-validation-1" and evidence.get("decode_ok") and evidence.get("frames_checked", 0) > 0 and evidence.get("packet_signature") == signature
+        frames_checked = evidence["frames_checked"] if reused else len(frame_hashes(req["ffmpeg"], req["output"]))
+        if not frames_checked:
+            raise ValueError("audio_redaction_failed: no decoded video pictures")
+        d.update({"video_pictures_match": True, "video_frames_checked": frames_checked, "video_validation_reused": bool(reused)})
+        diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
+            "frames_checked": frames_checked, "packet_signature": signature}
+    # Decode the complete encoded audio and reject invalid/non-finite samples.
+    _, log = run(req["ffmpeg"], ["-hide_banner", "-nostats", "-v", "info", "-xerror", "-i", req["output"], "-map", "0:a:0", "-vn", "-af", "astats=metadata=0:reset=0", "-f", "null", "-"])
+    counts = re.findall(r"Number of samples:\s*([0-9.e+]+)", log)
+    if not counts or not any(float(n) > 0 for n in counts):
+        raise ValueError("audio_redaction_failed: no decoded audio samples")
+    for name in ("Number of NaNs", "Number of Infs"):
+        if any(float(n) > 0 for n in re.findall(name + r":\s*([0-9.e+]+)", log)):
+            raise ValueError("audio_redaction_failed: non-finite encoded audio")
+    d.update({"decode_ok": True, "timeline_validated": True, "validated": True})
+
+
 def main(req, diagnostics):
     info = probe(req["ffprobe"], req["source"])
     if req["operation"] == "trim":
@@ -642,6 +733,8 @@ def main(req, diagnostics):
                 diagnostics["trim_validation_log"] = validation_log
                 diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
                     "frames_checked": len(frames), "packet_signature": packet_signature(req["ffprobe"], req["output"])}
+    elif req["operation"] == "redact_audio":
+        redacted_audio(req, info, diagnostics)
     else:
         normalized_audio(req, info, diagnostics)
 

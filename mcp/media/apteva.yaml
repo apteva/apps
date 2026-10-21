@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.40
+version: 0.14.41
 description: |
+  v0.14.41 adds transcript-driven audio redaction with source-bound word or
+  timestamp selections, room tone, mute, bleep and muffle, and bounded audio
+  previews. Encoded audio, copied video packets, final frames, sample rate and
+  timing are validated before upload. Recorded word timing is retained; delayed
+  audio is mapped to the source timeline. Existing render safeguards remain.
   v0.14.40 jointly corrects encoded loudness and peaks with a fixed measured
   normalization curve, bounded pre-limiter gain and native-rate limiting with
   compensated latency. AAC perceptual noise substitution is disabled to prevent
@@ -149,7 +154,7 @@ description: |
   codecs, bitrate, sample rate), generates canonical thumbnails for
   video/image and waveforms for audio, and runs on-demand edits
   (trim, resize, transcode, concat, crop, extract_frame,
-  audio_extract, audio_filter). Outputs land back in storage as new files so they
+  audio_extract, audio_filter, redact_audio). Outputs land back in storage as new files so they
   inherit the same visibility + signed-URL machinery.
 
   Two independent workstreams share the process: a light indexer
@@ -412,6 +417,20 @@ provides:
           match:
             render_id: "$result.render_id"
           expires_after: 24h
+    - name: media_redact_audio
+      description: Redact selected words or timed audio passages with room tone, mute, bleep or muffle. Uses recorded word timing; ambiguous text is rejected. Room tone requires an explicit background-only donor interval. Preview creates a bounded audio excerpt. Video and full-output timing are preserved. Returns render_id; use media_get_render for progress/results.
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
     - name: media_audio_filter
       description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
       async_result:
@@ -632,7 +651,7 @@ provides:
       description: A new render was submitted via a media_* tool (or POST /renders) and is awaiting a worker.
       payload:
         render_id: integer
-        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract | audio_filter
+        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract | audio_filter | redact_audio
         source_file_ids: array
         requested_by: string            # "agent:<id>" | "human:<id>" | integration name
         status: string                  # always "pending"
@@ -686,7 +705,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.40
+    ref: media/v0.14.41
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -44,7 +44,7 @@ func normalizeRenderOutputName(op string, params json.RawMessage, name, sourceEx
 				return "", invalidOutputFormat("%s: unsupported format %q", op, p.Format)
 			}
 		}
-	case "crop", "resize", "audio_filter":
+	case "crop", "resize", "audio_filter", "redact_audio":
 		if sourceExt != "" {
 			ext = strings.ToLower(sourceExt)
 		}
@@ -83,7 +83,7 @@ func validateRenderPlanOutput(op string, plan *opPlan) error {
 	if (op == "crop" || op == "resize") && isAudioExt(ext) {
 		return invalidOutputFormat("%s requires an image or video output", op)
 	}
-	if (op == "trim" || op == "concat" || op == "audio_filter") && isImageExt(ext) {
+	if (op == "trim" || op == "concat" || op == "audio_filter" || op == "redact_audio") && isImageExt(ext) {
 		return invalidOutputFormat("%s requires an audio or video output", op)
 	}
 	return nil
@@ -101,8 +101,24 @@ func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []stri
 	if err := validateSourceTimestamp(app, project, op, sources, params); err != nil {
 		return nil, err
 	}
+	var redactErr error
+	params, redactErr = prepareAudioRedactionSubmission(app, project, op, sources, params)
+	if redactErr != nil {
+		return nil, redactErr
+	}
+	if op == "redact_audio" {
+		var p audioRedactParams
+		_ = json.Unmarshal(params, &p)
+		if p.Preview {
+			if name == "" {
+				name = "redact-preview-" + sources[0] + ".m4a"
+			} else if filepath.Ext(name) == "" {
+				name += ".m4a"
+			}
+		}
+	}
 	ext := ""
-	if (op == "crop" || op == "resize" || op == "audio_filter") && filepath.Ext(name) == "" {
+	if (op == "crop" || op == "resize" || op == "audio_filter" || op == "redact_audio") && filepath.Ext(name) == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		ext = resolveSourceExt(ctx, newStorageClient(), app.AppDB(), project, sources)
@@ -123,6 +139,9 @@ func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []stri
 	if err != nil {
 		return nil, err
 	}
+	if op == "redact_audio" {
+		resolved = params
+	}
 	plan.SubmissionParams = resolved
 	return plan, nil
 }
@@ -140,7 +159,7 @@ func renderFailureCode(message string) string {
 	if strings.Contains(message, "REMOTE_CANCELLATION_FAILED") {
 		return "remote_cancellation_failed"
 	}
-	for _, code := range []string{"render_admission_timeout", "media_resource_exhausted", "media_processing_interrupted", "timestamp_out_of_range", "source_duration_unavailable", "crop_subject_unverified", "crop_action_exceeds_width", "invalid_crop_policy", "storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
+	for _, code := range []string{"invalid_audio_selection", "invalid_audio_method", "room_tone_required", "invalid_room_tone", "preview_too_wide", "audio_source_unverified", "word_timing_unavailable", "invalid_word_timing", "transcript_source_mismatch", "audio_selection_not_found", "ambiguous_audio_selection", "audio_redaction_failed", "render_admission_timeout", "media_resource_exhausted", "media_processing_interrupted", "timestamp_out_of_range", "source_duration_unavailable", "crop_subject_unverified", "crop_action_exceeds_width", "invalid_crop_policy", "storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
 		if strings.Contains(message, code+":") || strings.Contains(message, `"error_code":"`+code+`"`) {
 			return code
 		}

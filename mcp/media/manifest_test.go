@@ -37,8 +37,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		t.Errorf("runtime source must pin its immutable release tag, got %#v", m.Runtime.Source)
 	}
 	// Includes compact crop preview and explicit bounded evidence retrieval.
-	if len(m.Provides.MCPTools) != 36 {
-		t.Errorf("expected 36 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 37 {
+		t.Errorf("expected 37 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))

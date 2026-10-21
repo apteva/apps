@@ -17,11 +17,18 @@ import (
 // TranscriptSegment is one timed chunk inside Segments. The fields
 // follow the OpenAI/Whisper convention; Deepgram's response is
 // normalised into this shape by the worker before persisting.
-type TranscriptSegment struct {
+type TranscriptWord struct {
 	StartMs int64  `json:"start_ms"`
 	EndMs   int64  `json:"end_ms"`
 	Text    string `json:"text"`
-	Speaker string `json:"speaker,omitempty"` // empty when diarisation off
+}
+
+type TranscriptSegment struct {
+	Words   []TranscriptWord `json:"words,omitempty"`
+	StartMs int64            `json:"start_ms"`
+	EndMs   int64            `json:"end_ms"`
+	Text    string           `json:"text"`
+	Speaker string           `json:"speaker,omitempty"` // empty when diarisation off
 }
 
 type TranscriptRow struct {

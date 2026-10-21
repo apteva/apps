@@ -26,7 +26,7 @@ func needsRenderRuntime(op string, raw json.RawMessage) bool {
 	}
 	_ = json.Unmarshal(raw, &p)
 	p.Mode = strings.ToLower(strings.TrimSpace(p.Mode))
-	return op == "trim" && p.TrimMode == "auto" || op == "audio_filter" && (p.Mode == "" || p.Mode == "normalize" || p.Mode == "speech_clean")
+	return op == "redact_audio" || op == "trim" && p.TrimMode == "auto" || op == "audio_filter" && (p.Mode == "" || p.Mode == "normalize" || p.Mode == "speech_clean")
 }
 
 type runtimeRequest struct {
@@ -57,7 +57,7 @@ func makeRuntimeRequest(ctx context.Context, row *RenderRow, binary, source, out
 func localRuntimeCommand(ctx context.Context, row *RenderRow, dir, binary, source, output string, args []string) (*exec.Cmd, error) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
-		return nil, fmt.Errorf("render_runtime_unavailable: Python 3 is required for auto trim and two-pass normalization")
+		return nil, fmt.Errorf("render_runtime_unavailable: Python 3 is required for auto trim, audio redaction and two-pass normalization")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "render-runtime.py"), []byte(renderRuntimePython), 0600); err != nil {
 		return nil, err
@@ -117,7 +117,7 @@ func remoteRuntimeScript(row *RenderRow, binary, source, output string, args []s
 		}
 		script += "else\n" + guard + shellCommand(binary, args) + "\nprintf '%s\\n' " + shellQuote("APTEVA_RUNTIME:"+string(fallback)) + "\nTRIM_EXPECTED=" + formatSeconds(expectedProgressDurationMs(nil, row)) + "\nfi\n"
 	} else {
-		script += "else\necho 'render_runtime_unavailable: Python 3 is required for two-pass normalization'; exit 1\nfi\n"
+		script += "else\necho 'render_runtime_unavailable: Python 3 is required for guarded audio rendering'; exit 1\nfi\n"
 	}
 	return script
 }
@@ -134,6 +134,9 @@ func persistRuntimeResult(app *sdk.AppCtx, row *RenderRow, raw []byte) error {
 		params[k] = v
 	}
 	if d, ok := params["trim_diagnostics"].(map[string]any); ok {
+		d["app_version"] = app.Manifest().Version
+	}
+	if d, ok := params["audio_redaction"].(map[string]any); ok {
 		d["app_version"] = app.Manifest().Version
 	}
 	if d, ok := params["audio_normalization"].(map[string]any); ok {

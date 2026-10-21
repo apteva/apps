@@ -23,8 +23,13 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.40
+version: 0.14.41
 description: |
+  v0.14.41 adds transcript-driven audio redaction with source-bound word or
+  timestamp selections, room tone, mute, bleep and muffle, and bounded audio
+  previews. Encoded audio, copied video packets, final frames, sample rate and
+  timing are validated before upload. Recorded word timing is retained; delayed
+  audio is mapped to the source timeline. Existing render safeguards remain.
   v0.14.40 jointly corrects encoded loudness and peaks with a fixed measured
   normalization curve, bounded pre-limiter gain and native-rate limiting with
   compensated latency. AAC perceptual noise substitution is disabled to prevent
@@ -170,7 +175,7 @@ description: |
   codecs, bitrate, sample rate), generates canonical thumbnails for
   video/image and waveforms for audio, and runs on-demand edits
   (trim, resize, transcode, concat, crop, extract_frame,
-  audio_extract, audio_filter). Outputs land back in storage as new files so they
+  audio_extract, audio_filter, redact_audio). Outputs land back in storage as new files so they
   inherit the same visibility + signed-URL machinery.
 
   Two independent workstreams share the process: a light indexer
@@ -433,6 +438,20 @@ provides:
           match:
             render_id: "$result.render_id"
           expires_after: 24h
+    - name: media_redact_audio
+      description: Redact selected words or timed audio passages with room tone, mute, bleep or muffle. Uses recorded word timing; ambiguous text is rejected. Room tone requires an explicit background-only donor interval. Preview creates a bounded audio excerpt. Video and full-output timing are preserved. Returns render_id; use media_get_render for progress/results.
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
     - name: media_audio_filter
       description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
       async_result:
@@ -653,7 +672,7 @@ provides:
       description: A new render was submitted via a media_* tool (or POST /renders) and is awaiting a worker.
       payload:
         render_id: integer
-        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract | audio_filter
+        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract | audio_filter | redact_audio
         source_file_ids: array
         requested_by: string            # "agent:<id>" | "human:<id>" | integration name
         status: string                  # always "pending"
@@ -707,7 +726,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.40
+    ref: media/v0.14.41
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -1486,6 +1505,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
 		},
+		a.audioRedactTool(),
 		{
 			Name:        "media_audio_filter",
 			Description: "Modify audio in an audio or video file. Two-pass normalization measures first and validates finished loudness, true peak, sample rate and timing before upload. Requires Python 3 on the execution host. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
@@ -1612,12 +1632,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_set_transcript",
-			Description: "Upsert an externally-produced transcript (e.g. uploaded captions, third-party tool). Bypasses the auto pipeline. Args: file_id, text, language?, segments? (array of {start_ms, end_ms, text, speaker?}), provider?.",
+			Description: "Upsert an externally-produced transcript (e.g. uploaded captions, third-party tool). Bypasses the auto pipeline. Args: file_id, text, language?, segments? (array of {start_ms, end_ms, text, speaker?, words?: [{start_ms,end_ms,text}]}), provider?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":  map[string]any{"type": "string"},
 				"text":     map[string]any{"type": "string"},
 				"language": map[string]any{"type": "string"},
-				"segments": map[string]any{"type": "array"},
+				"segments": map[string]any{"type": "array", "description": "Timed sentences, optionally with words: [{start_ms,end_ms,text}] for precise audio redaction."},
 				"provider": map[string]any{"type": "string"},
 			}, []string{"file_id", "text"}),
 			Handler: a.toolSetTranscript,
@@ -3128,12 +3148,13 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		}
 		emitRenderQueued(ctx, id, pid, operation, sources, requestedBy)
 		return map[string]any{
-			"render_id":    id,
-			"status":       "pending",
-			"operation":    operation,
-			"output_name":  plan.Filename,
-			"content_type": plan.ContentType,
-			"composition":  cropCompositionForParams(plan.SubmissionParams),
+			"render_id":       id,
+			"status":          "pending",
+			"operation":       operation,
+			"output_name":     plan.Filename,
+			"content_type":    plan.ContentType,
+			"composition":     cropCompositionForParams(plan.SubmissionParams),
+			"audio_redaction": audioRedactionReceipt(plan.SubmissionParams),
 			"render_budget": func() renderBudget {
 				b, _ := describeRenderBudget(ctx, &RenderRow{ProjectID: pid, Operation: operation, SourceFileIDs: sources, Params: paramJSON}, parseConfigIntFallback(ctx.Config().Get("render_timeout_seconds"), 1800))
 				return b

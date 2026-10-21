@@ -111,7 +111,7 @@ func receiptValidation(raw []byte) map[string]any {
 }
 
 func compactRenderParams(raw []byte) map[string]any {
-	out := receiptScalars(raw, "target_ratio crop_mode crop_version smart_crop_engine smart_crop_framing fit_mode x y width height crop_x crop_y crop_w crop_h start_ms end_ms at_ms output_width output_height trim_mode max_start_drift_ms max_end_drift_ms runtime_error format codec bitrate fps encoder_profile hevc_preset hevc_crf timeout_seconds require_action_preservation crop_fallback target_lufs target_peak_dbtp filter")
+	out := receiptScalars(raw, "target_ratio crop_mode crop_version smart_crop_engine smart_crop_framing fit_mode x y width height crop_x crop_y crop_w crop_h start_ms end_ms at_ms output_width output_height trim_mode max_start_drift_ms max_end_drift_ms runtime_error format codec bitrate fps encoder_profile hevc_preset hevc_crf timeout_seconds require_action_preservation crop_fallback target_lufs target_peak_dbtp filter method preview padding_ms fade_ms")
 	var p map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &p)
 	if v, ok := p["crop_path"]; ok {
@@ -140,11 +140,39 @@ func compactRenderParams(raw []byte) map[string]any {
 		"trim_diagnostics":    "algorithm_version app_version mode requested_mode requested_start_ms requested_end_ms actual_start_ms actual_end_ms start_drift_ms end_drift_ms max_start_drift_ms max_end_drift_ms reencoded fallback_reason source_frames_expected copy_frames_checked source_endpoint_hashes_match audio_origin presentation_cutoff timeline_origin",
 		"render_budget":       "effective_timeout_seconds estimated_seconds estimated_encode_seconds estimate_basis estimated_encode_speed warning",
 		"audio_normalization": "algorithm_version passes target_lufs target_peak_dbtp internal_peak_dbtp effective_target_lufs measurement_target_lufs measurement_peak_dbtp loudnorm_peak_dbtp correction_gain_db max_correction_gain_db limiter_peak_dbtp limiter_latency_compensated audio_codec aac_perceptual_noise_substitution attempt max_attempts encoded_lufs encoded_peak_dbtp retry_count loudness_tolerance_lu peak_tolerance_db sample_rate validated timeline_validated decode_ok video_frames_expected video_frames_checked video_pictures_match video_validation_reused presentation_boundary_mode",
+		"audio_redaction":     "algorithm_version app_version method preview source_start_ms source_end_ms fade_ms sample_rate video_copied validated timeline_validated decode_ok video_pictures_match video_frames_checked video_validation_reused leading_audio_silence_ms source_audio_start_seconds output_audio_start_seconds",
 		"video_evidence":      "algorithm_version decode_ok frames_checked",
 	}
 	for k, keys := range sections {
 		if v, ok := p[k]; ok {
 			out[k] = receiptScalars(v, keys)
+		}
+	}
+
+	if v, ok := p["_redaction_plan"]; ok {
+		plan := receiptScalars(v, "algorithm_version method preview source_duration_ms start_ms end_ms fade_ms audio_start_ms")
+		var d map[string]json.RawMessage
+		_ = json.Unmarshal(v, &d)
+		if r, ok := d["ranges"]; ok {
+			a, n := receiptArray(r, "start_ms end_ms")
+			plan["ranges"] = a
+			plan["range_count"] = n
+			if n > 8 {
+				plan["details_omitted"] = true
+			}
+		}
+		out["audio_redaction_plan"] = plan
+	}
+	if v, ok := p["audio_redaction"]; ok {
+		var d map[string]json.RawMessage
+		_ = json.Unmarshal(v, &d)
+		if r, ok := d["ranges"]; ok {
+			a, n := receiptArray(r, "start_ms end_ms")
+			out["audio_redaction"].(map[string]any)["ranges"] = a
+			out["audio_redaction"].(map[string]any)["range_count"] = n
+		}
+		if r, ok := d["limitations"]; ok {
+			out["audio_redaction"].(map[string]any)["limitations"] = boundedCropValue(r)
 		}
 	}
 

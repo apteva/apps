@@ -116,9 +116,9 @@ type localExecutor struct {
 func (e *localExecutor) Name() string { return "local" }
 
 func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
-	if row.Operation == "audio_filter" && needsRenderRuntime(row.Operation, row.Params) {
+	if (row.Operation == "audio_filter" || row.Operation == "redact_audio") && needsRenderRuntime(row.Operation, row.Params) {
 		if _, err := exec.LookPath("python3"); err != nil {
-			return 0, fmt.Errorf("render_runtime_unavailable: Python 3 is required for two-pass normalization")
+			return 0, fmt.Errorf("render_runtime_unavailable: Python 3 is required for guarded audio rendering")
 		}
 	}
 	db := app.AppDB()
@@ -202,6 +202,11 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	row.Params = policyParams
 	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(db, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if row.Operation == "redact_audio" {
+		if err := verifyRedactionSource(row.Params, sourceMetadata[row.SourceFileIDs[0]].SHA256); err != nil {
+			return 0, err
+		}
+	}
 	if len(row.SourceFileIDs) == 1 {
 		row.Params = verifySourceEvidenceIdentity(row.Params, sourceMetadata[row.SourceFileIDs[0]].SHA256)
 	}
@@ -440,6 +445,13 @@ func progressPctFromOutTimeLine(line string, expectedDurationMs int64) int {
 func expectedProgressDurationMs(db *sql.DB, row *RenderRow) int64 {
 	if row == nil {
 		return 0
+	}
+	if row.Operation == "redact_audio" {
+		var p audioRedactParams
+		_ = json.Unmarshal(row.Params, &p)
+		if p.Plan != nil {
+			return p.Plan.EndMs - p.Plan.StartMs
+		}
 	}
 	if row.Operation == "trim" || row.Operation == "extract_reel" {
 		var p struct {
