@@ -93,6 +93,9 @@ func TestSIPPlaybackHealthyPCMMatchesCodecDecode(t *testing.T) {
 		if len(actual) == 0 || !bytes.Equal(pcm16ToBytes(actual), pcm16ToBytes(expected[:len(actual)])) {
 			t.Fatal("healthy codec audio changed", codec)
 		}
+		if j.tailPaddedFrames != 0 || j.tailPaddingNS != 0 {
+			t.Fatal("healthy continuous speech was padded", codec)
+		}
 	}
 }
 
