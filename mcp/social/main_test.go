@@ -3052,6 +3052,7 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
 	}
+	configureTestVideo(t, pf, 7, videoBytes)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3108,7 +3109,7 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 	}
 }
 
-func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
+func TestPublishTikTok_UsesValidatedBytesWhenDeliveryReady(t *testing.T) {
 	ready := true
 	pf := newRecordingPlatform()
 	pf.urlPropertyReady = &ready
@@ -3120,6 +3121,11 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 	)
 	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"publish_id":"pull_pub_1"}}`)}
 	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":["video_post_1"]}}`)}
+	configureTestVideo(t, pf, 17, 4194304)
+	upload := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusCreated) }))
+	t.Cleanup(upload.Close)
+	init, _ := json.Marshal(map[string]any{"data": map[string]any{"publish_id": "pull_pub_1", "upload_url": upload.URL}})
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: init}
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3136,11 +3142,8 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 		t.Fatalf("expected post_video: %+v", pf.nonCreatorInfoCalls())
 	}
 	source := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
-	if source["source"] != "PULL_FROM_URL" || source["video_url"] == "" {
-		t.Fatalf("expected PULL_FROM_URL input, got %+v", source)
-	}
-	if _, exists := source["video_size"]; exists {
-		t.Fatalf("pull input must not contain FILE_UPLOAD fields: %+v", source)
+	if source["source"] != "FILE_UPLOAD" || source["video_size"] != int64(4194304) {
+		t.Fatalf("expected verified bytes via FILE_UPLOAD, got %+v", source)
 	}
 }
 
@@ -3160,6 +3163,7 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
 	}
+	configureTestVideo(t, pf, 8, videoBytes)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3390,6 +3394,7 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
 	)
+	configureTestVideo(t, pf, 1, 24)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)

@@ -101,7 +101,12 @@ func TestTargetRetryReconcilesTikTokBeforeReplacement(t *testing.T) {
 			pf := newRecordingPlatform()
 			ctx, post, target := retryFixture(t, pf, "tiktok")
 			_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id='existing-operation' WHERE id=?`, target)
-			pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(fmt.Sprintf(`{"data":{"status":%q,"publicaly_available_post_id":["already-published"]}}`, remote))}
+			data := map[string]any{"status": remote}
+			if remote == "PUBLISH_COMPLETE" {
+				data["publicaly_available_post_id"] = []string{"already-published"}
+			}
+			raw, _ := json.Marshal(map[string]any{"data": data})
+			pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{Success: true, Data: raw}
 			out, err := (&App{}).toolPostRetry(ctx, map[string]any{"post_id": post, "target_id": target})
 			if err != nil {
 				t.Fatal(err)

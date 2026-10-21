@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.17.2
+version: 0.17.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -118,6 +118,9 @@ provides:
     - { name: post_draft_reject,          description: "Reject the exact revision in review with a reason." }
     - { name: post_draft_publish,         description: "Publish or schedule a stored draft with explicit mode and expected_revision." }
     - { name: post_list,                  description: "List stored posts with profile filters, pagination, and separate post/target totals." }
+    - { name: post_delivery_inspect, description: "Inspect one target and native operation without resubmitting." }
+    - { name: post_delivery_revalidate, description: "Audit source and remote state; prepare an expiring recovery decision." }
+    - { name: post_delivery_recover, description: "Explicitly consume one audited recovery decision for one target." }
     - { name: post_retry,                 description: "Retry transient failures only; deterministic duplicates fail once and return the existing post id." }
     - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
@@ -206,7 +209,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.17.2
+    ref: social/v0.17.3
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1004,6 +1007,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"to":         map[string]any{"type": "string", "description": "Exclusive RFC3339 lifecycle date bound."},
 			}, nil),
 			Handler: a.toolPostList,
+		},
+		{
+			Name:        "post_delivery_inspect",
+			Description: "Inspect one existing destination and its native operation without retrying or changing publication status. Args: post_id, target_id.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}}, []string{"post_id", "target_id"}),
+			Handler:     a.toolPostDeliveryInspect,
+		},
+		{
+			Name:        "post_delivery_revalidate",
+			Description: "Audit source, account, options and known remote state for one target. Returns decision, evidence and an expiring recovery_id; never publishes. Args: post_id, target_id.",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}}, []string{"post_id", "target_id"}),
+			Handler:     a.toolPostDeliveryRevalidate,
+		},
+		{
+			Name:        "post_delivery_recover",
+			Description: "Consume one audited recovery decision with confirm=true. Rechecks source and remote state, reconciles completed/pending operations, or retries only this eligible target once per revision. Never replaces unknown operations. Args: post_id, target_id, recovery_id, confirm.",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "recovery_id": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"}}, []string{"post_id", "target_id", "recovery_id", "confirm"}),
+			Handler:     a.toolPostDeliveryRecover,
 		},
 		{
 			Name:        "post_retry",
@@ -3341,6 +3363,15 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 			bodyField = def.PhotoBodyField
 		}
 	}
+	if isVideo && mediaField != "" {
+		prepared, err := a.prepareVideoSource(ctx, j, j.media[0], "PULL_FROM_URL")
+		if err != nil {
+			return "", "", err
+		}
+		defer prepared.Close()
+		j.media = append([]mediaItem(nil), j.media...)
+		j.media[0].URL = prepared.URL
+	}
 	input := map[string]any{bodyField: j.body}
 	if def.ExternalIDField != "" && j.extID != "" {
 		input[def.ExternalIDField] = j.extID
@@ -3370,19 +3401,48 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	ctx.Logger().Info("publishSingle: calling PostTool",
 		"platform", def.Platform, "tool", tool, "ext_id", j.extID,
 		"is_video", isVideo, "has_page_token", input[def.PostTokenInputField] != nil)
+	if isVideo {
+		d := loadDeliveryDiagnostics(ctx, j.targetID)
+		d.OperationState = "unknown"
+		if err := validatePreparedDestination(ctx, j); err != nil {
+			return "", "", err
+		}
+		if err := d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "provider_fetch_requested"}); err != nil {
+			return "", "", errors.New("could not persist upload initialization guard")
+		}
+	}
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, tool, input)
 	if err != nil {
 		ctx.Logger().Error("publishSingle: ExecuteIntegrationTool err",
-			"platform", def.Platform, "tool", tool, "err", err)
+			"platform", def.Platform, "tool", tool, "err", redactDeliverySecrets(err.Error()))
 		return "", "", err
 	}
 	if out == nil || !out.Success {
 		ue := upstreamError(out)
 		ctx.Logger().Error("publishSingle: upstream non-2xx",
-			"platform", def.Platform, "tool", tool, "err", ue)
+			"platform", def.Platform, "tool", tool, "err", redactDeliverySecrets(ue.Error()))
+		if isVideo {
+			d := loadDeliveryDiagnostics(ctx, j.targetID)
+			if out != nil && out.Status >= 400 && out.Status < 500 {
+				d.OperationState = "confirmed_failure"
+			}
+			captureProviderDiagnostics(&d, out)
+			d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", HTTPStatus: executeStatus(out), Result: "provider_rejected"})
+		}
 		return "", "", ue
 	}
 	id, url := extractPostIdentity(def.Platform, out.Data)
+	if isVideo && id == "" {
+		return "", "", errors.New("provider response has no video identity; verify the remote outcome before retrying")
+	}
+	if isVideo {
+		d := loadDeliveryDiagnostics(ctx, j.targetID)
+		d.OperationID = id
+		if id != "" {
+			d.OperationState = "published"
+		}
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "processing", Result: "provider_response_received"})
+	}
 	ctx.Logger().Info("publishSingle: published",
 		"platform", def.Platform, "platform_post_id", id, "platform_url", url)
 	return id, url, nil
@@ -3989,75 +4049,20 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 			"selfDeclaredMadeForKids": false,
 		},
 	}
-	ctx.Logger().Info("publishYoutube: init upload session",
-		"title", title, "visibility", visibility, "media_url", first.URL)
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
+	prepared, err := a.prepareVideoSource(ctx, j, first, "FILE_UPLOAD")
 	if err != nil {
-		return "", "", fmt.Errorf("upload_video_init: %w", err)
+		return "", "", err
 	}
-	if res == nil || !res.Success {
-		return "", "", upstreamError(res)
-	}
-	sessionURL := ""
-	if res.Headers != nil {
-		sessionURL = res.Headers["Location"]
-	}
-	if sessionURL == "" {
-		return "", "", errors.New("upload_video_init: no Location header (apteva-server may be older than the header-forwarding change — bump server)")
-	}
-	ctx.Logger().Info("publishYoutube: got session url",
-		"session_url_len", len(sessionURL))
-
-	// Step 2: stream bytes from storage's signed URL into a PUT to the
-	// session URL. Both calls happen on the social sidecar's own HTTP
-	// client. The signed URL is short-lived but we use it within the
-	// same function so freshness isn't a concern.
-	getReq, err := http.NewRequest(http.MethodGet, first.URL, nil)
+	defer prepared.Close()
+	ctx.Logger().Info("publishYoutube: prepared source", "file_id", first.ID, "correlation_id", prepared.Diagnostics.CorrelationID, "bytes", prepared.Size)
+	initInput["upload_content_type"] = prepared.MIME
+	initInput["upload_content_length"] = prepared.Size
+	videoID, err := a.uploadPreparedYouTube(ctx, def, j, prepared, initInput)
 	if err != nil {
-		return "", "", fmt.Errorf("build storage GET: %w", err)
+		return "", "", err
 	}
-	getResp, err := mediaHTTPClient.Do(getReq)
-	if err != nil {
-		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
-	}
-	defer getResp.Body.Close()
-	if getResp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("fetch media: storage returned %d", getResp.StatusCode)
-	}
-
-	putReq, err := http.NewRequest(http.MethodPut, sessionURL, getResp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("build upload PUT: %w", err)
-	}
-	mime := first.Mime
-	if mime == "" {
-		mime = "video/*"
-	}
-	putReq.Header.Set("Content-Type", mime)
-	if cl := getResp.ContentLength; cl > 0 {
-		putReq.ContentLength = cl
-	}
-	// Tighter timeout than http.DefaultClient (no timeout) so a stuck
-	// upload doesn't pin a worker forever. 30 minutes covers most
-	// reasonable YouTube videos at any practical bitrate.
-	putClient := &http.Client{Timeout: 30 * time.Minute}
-	putResp, err := putClient.Do(putReq)
-	if err != nil {
-		return "", "", fmt.Errorf("upload PUT: %w", err)
-	}
-	defer putResp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(putResp.Body, 1<<20))
-	if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("upload PUT %d: %s", putResp.StatusCode, string(body))
-	}
-	var resource struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(body, &resource)
-	if resource.ID == "" {
-		return "", "", fmt.Errorf("upload PUT returned no video id: %s", string(body))
-	}
-	url := "https://www.youtube.com/watch?v=" + resource.ID
+	resource := struct{ ID string }{ID: videoID}
+	url := "https://www.youtube.com/watch?v=" + videoID
 	if thumbnail != nil {
 		if err := a.setBinaryThumbnail(ctx, def, j.connID, resource.ID, *thumbnail); err != nil {
 			// The video is already uploaded at this point. Do not return
@@ -4065,8 +4070,8 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 			// surface this in logs so the user can edit the post and retry
 			// only the thumbnail later.
 			ctx.Logger().Warn("publishYoutube: thumbnail set failed",
-				"video_id", resource.ID, "thumbnail_id", thumbnail.ID, "err", err)
-			return resource.ID, url, &publishedWarningError{warning: "video published, but custom thumbnail failed: " + err.Error()}
+				"video_id", resource.ID, "thumbnail_id", thumbnail.ID, "err", redactDeliverySecrets(err.Error()))
+			return resource.ID, url, &publishedWarningError{warning: "video published, but custom thumbnail failed: " + redactDeliverySecrets(err.Error())}
 		}
 	}
 	ctx.Logger().Info("publishYoutube: upload complete",
@@ -4274,10 +4279,7 @@ func preflightTikTokPhotoURL(mediaURL string) error {
 //
 // Why we don't use PULL_FROM_URL by default: it requires the caller's
 // domain to be DNS-verified in the TikTok dev portal. FILE_UPLOAD has
-// no such requirement and works from a fresh OAuth grant. The
-// PULL_FROM_URL path is preserved as publishTikTokPullFromURL below
-// for callers that need it (verified-domain installs that want
-// TikTok's servers to do the fetch instead of streaming through us).
+// no such requirement and works from a fresh OAuth grant.
 func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	if len(j.media) > 1 {
 		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
@@ -4289,13 +4291,8 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	if !first.IsVideo() {
 		return "", "", errors.New("tiktok only accepts video files")
 	}
-	// Prefer provider pull once the Server confirms that this OAuth app's
-	// URL prefix is hosted and verified. Older servers (method unavailable)
-	// and unconfigured installs retain the established FILE_UPLOAD fallback.
-	if status, err := sdk.GetIntegrationURLProperty(ctx.PlatformAPI(), j.connID, "content_delivery"); err == nil && status.Ready && first.URL != "" {
-		ctx.Logger().Info("publishTikTok: using verified URL delivery")
-		return a.publishTikTokPullFromURL(ctx, def, j)
-	}
+	// Validate and upload the exact bytes locally. The server rewrites pull URLs
+	// after Social submits them, so that route cannot be preflighted here.
 	if first.Bytes <= 0 {
 		return "", "", errors.New("tiktok FILE_UPLOAD needs the video's byte size — storage didn't return size_bytes")
 	}
@@ -4325,6 +4322,22 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 		totalChunks = int(first.Bytes / chunkSize)
 	}
 
+	prepared, err := a.prepareVideoSource(ctx, j, first, "FILE_UPLOAD")
+	if err != nil {
+		return "", "", err
+	}
+	defer prepared.Close()
+	if prepared.Size != first.Bytes {
+		return "", "", &sourceDeliveryError{"video size differs from upload metadata", false}
+	}
+	d := prepared.Diagnostics
+	d.OperationState = "unknown"
+	if err := validatePreparedDestination(ctx, j); err != nil {
+		return "", "", err
+	}
+	if err := d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "request_started"}); err != nil {
+		return "", "", errors.New("could not persist upload initialization guard")
+	}
 	// Step 1: init upload via the integration to get upload_url +
 	// publish_id. The integration handles auth + URL building; we just
 	// pass the post_info / source_info shapes TikTok expects.
@@ -4351,43 +4364,37 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 		"video_size", first.Bytes, "chunk_size", chunkSize, "total_chunks", totalChunks)
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
 	if err != nil {
-		return "", "", fmt.Errorf("post_video init: %w", err)
+		return "", "", fmt.Errorf("TikTok init outcome unknown; verify the remote outcome: %s", redactDeliverySecrets(err.Error()))
 	}
 	if out == nil || !out.Success {
+		if out != nil && out.Status >= 400 && out.Status < 500 {
+			d.OperationState = "not_started"
+		}
+		captureProviderDiagnostics(&d, out)
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", HTTPStatus: executeStatus(out), Result: "provider_rejected"})
 		return "", "", upstreamError(out)
 	}
 	uploadURL, publishID := extractTikTokUploadInit(out.Data)
 	if uploadURL == "" || publishID == "" {
-		return "", "", fmt.Errorf("post_video init: missing upload_url or publish_id in response: %s", string(out.Data))
+		return "", "", errors.New("post_video init: missing upload_url or publish_id; verify the remote outcome before retrying")
 	}
 	if err := persistPublishOperation(ctx, j.targetID, publishID); err != nil {
 		return "", "", &publishedWarningError{warning: err.Error(), operationID: publishID, pending: true}
 	}
+	d.OperationID = publishID
+	d.OperationState = "pending"
+	captureProviderDiagnostics(&d, out)
+	d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "operation_persisted"})
 	ctx.Logger().Info("publishTikTok: init done",
 		"publish_id", publishID, "upload_url_len", len(uploadURL))
 
-	// Step 2: GET the bytes from storage as a single stream. We'll
-	// consume chunkBytes per iteration via io.LimitReader, leaving the
-	// rest of the stream for the next PUT.
-	getReq, err := http.NewRequest(http.MethodGet, first.URL, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("build storage GET: %w", err)
-	}
-	getResp, err := mediaHTTPClient.Do(getReq)
-	if err != nil {
-		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
-	}
-	defer getResp.Body.Close()
-	if getResp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("fetch media: storage returned %d", getResp.StatusCode)
-	}
-
+	// The complete source is already on a bounded, protected spool.
 	// Step 3: PUT each chunk. Sequential per TikTok's spec; each chunk
 	// returns 206 Partial Content except the last which returns 201
 	// Created. Tight per-chunk timeout so a stuck PUT doesn't pin a
 	// worker forever — 10 minutes per chunk covers 64 MB on slow
 	// uplinks (≈100 KB/s).
-	putClient := &http.Client{Timeout: 10 * time.Minute}
+	putClient := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	mime := first.Mime
 	if mime == "" {
 		mime = "video/mp4"
@@ -4405,7 +4412,7 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 		}
 		lastByte := firstByte + chunkBytes - 1
 
-		body := io.LimitReader(getResp.Body, chunkBytes)
+		body := io.NewSectionReader(prepared.File, firstByte, chunkBytes)
 		putReq, err := http.NewRequest(http.MethodPut, uploadURL, body)
 		if err != nil {
 			return "", "", fmt.Errorf("build chunk %d PUT: %w", i+1, err)
@@ -4419,10 +4426,13 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 			"range", fmt.Sprintf("%d-%d", firstByte, lastByte))
 		putResp, err := putClient.Do(putReq)
 		if err != nil {
-			return "", "", fmt.Errorf("chunk %d PUT: %w", i+1, err)
+			d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", Bytes: firstByte, Result: "interrupted"})
+			return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: "TikTok upload interrupted; inspect existing operation before recovery"}
 		}
 		respBody, _ := io.ReadAll(io.LimitReader(putResp.Body, 4<<10))
 		putResp.Body.Close()
+		d.TransferredBytes = lastByte + 1
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", HTTPStatus: putResp.StatusCode, Bytes: lastByte + 1, RequestID: responseRequestID(putResp.Header)})
 
 		// Intermediate chunks should return 206; the final chunk
 		// returns 201. Anything else is a fail.
@@ -4431,8 +4441,8 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 			expected = http.StatusCreated
 		}
 		if putResp.StatusCode != expected {
-			return "", "", fmt.Errorf("chunk %d/%d returned %d (expected %d): %s",
-				i+1, totalChunks, putResp.StatusCode, expected, string(respBody))
+			_ = respBody
+			return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: fmt.Sprintf("TikTok chunk upload returned HTTP %d; inspect existing operation before recovery", putResp.StatusCode)}
 		}
 	}
 
@@ -4466,7 +4476,7 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 				operationID: publishID,
 			}
 		case "FAILED":
-			return "", "", fmt.Errorf("TikTok publish failed: %s", failReason)
+			return "", "", &upstreamCallError{Status: 422, Body: "TikTok publish failed: " + safeRequestID(failReason)}
 		case "PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD":
 			// Keep polling below.
 		default:
@@ -4514,21 +4524,42 @@ func (id *exactJSONID) UnmarshalJSON(raw []byte) error {
 
 func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID string) (string, string, []string, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
-	if err != nil {
-		return "", "", nil, err
-	}
-	if res == nil || !res.Success {
-		return "", "", nil, upstreamError(res)
-	}
 	var payload struct {
 		Data struct {
 			Status  string        `json:"status"`
 			Fail    string        `json:"fail_reason"`
 			PostIDs []exactJSONID `json:"publicaly_available_post_id"`
 		} `json:"data"`
+		Error struct {
+			Code  string `json:"code"`
+			LogID string `json:"log_id"`
+		} `json:"error"`
 	}
-	if err := json.Unmarshal(res.Data, &payload); err != nil {
-		return "", "", nil, err
+	var parseErr error
+	if res != nil {
+		parseErr = json.Unmarshal(res.Data, &payload)
+	}
+	if parseErr != nil {
+		a.recordTikTokStatus(ctx, connID, publishID, "", "", "", "", res, parseErr)
+		return "", "", nil, errors.New("TikTok returned malformed operation status; outcome is unknown")
+	}
+	if payload.Data.Status != "PUBLISH_COMPLETE" && len(payload.Data.PostIDs) > 0 {
+		conflict := errors.New("TikTok returned a public identity with a non-complete status; outcome is unknown")
+		a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, conflict)
+		return "", "", nil, conflict
+	}
+	a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, err)
+	if err != nil {
+		return "", "", nil, errors.New(redactDeliverySecrets(err.Error()))
+	}
+	if res == nil || !res.Success {
+		return "", "", nil, upstreamError(res)
+	}
+	if payload.Error.Code != "" && payload.Error.Code != "ok" {
+		return "", "", nil, fmt.Errorf("TikTok status unavailable: %s (log %s)", safeRequestID(payload.Error.Code), safeRequestID(payload.Error.LogID))
+	}
+	if payload.Data.Status == "" {
+		return "", "", nil, errors.New("TikTok status response contains no operation state")
 	}
 	postIDs := make([]string, 0, len(payload.Data.PostIDs))
 	for _, id := range payload.Data.PostIDs {
@@ -4537,48 +4568,6 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 		}
 	}
 	return payload.Data.Status, payload.Data.Fail, postIDs, nil
-}
-
-// publishTikTokPullFromURL uses the Server's verified, redirect-free relay.
-// The integration runner rewrites the signed Storage URL immediately before
-// the provider request, so Social continues to use media_storage_ids as its
-// source of truth and never stores or copies provider-facing media URLs.
-func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
-	if len(j.media) == 0 {
-		return "", "", errors.New("tiktok requires a video URL")
-	}
-	input := map[string]any{
-		"post_info": map[string]any{
-			"title":         j.body,
-			"privacy_level": j.tiktokInfo["privacy_level"],
-		},
-		"source_info": map[string]any{
-			"source":    "PULL_FROM_URL",
-			"video_url": j.media[0].URL,
-		},
-	}
-	postInfo := input["post_info"].(map[string]any)
-	for k, v := range j.tiktokInfo {
-		postInfo[k] = v
-	}
-	if ms, ok := numericOption(j.options, "thumbnail_frame_ms"); ok {
-		postInfo["video_cover_timestamp_ms"] = ms
-	}
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
-	if err != nil {
-		return "", "", err
-	}
-	if out == nil || !out.Success {
-		return "", "", upstreamError(out)
-	}
-	pubID := extractTikTokPublishID(out.Data)
-	if pubID == "" {
-		return "", "", fmt.Errorf("post_video: missing publish_id in response: %s", string(out.Data))
-	}
-	if err := persistPublishOperation(ctx, j.targetID, pubID); err != nil {
-		return "", "", &publishedWarningError{warning: err.Error(), operationID: pubID, pending: true}
-	}
-	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
 
 // extractTikTokUploadInit pulls upload_url + publish_id out of the
@@ -4621,12 +4610,15 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) ([]int64, string) {
 // return size_bytes (older storage versions); strategies that need
 // it should error out clearly rather than guess.
 type mediaItem struct {
-	Duration float64
-	ID       int64
-	URL      string
-	Mime     string
-	Name     string
-	Bytes    int64
+	SHA256           string
+	StorageInstallID int64
+	MediaProjectID   string
+	Duration         float64
+	ID               int64
+	URL              string
+	Mime             string
+	Name             string
+	Bytes            int64
 }
 
 // IsVideo reports whether this is a video MIME type.
@@ -4670,11 +4662,13 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		// (image → /feed; video → /videos for FB; REELS for IG).
 		var meta struct {
 			File struct {
+				SHA256      string  `json:"sha256"`
 				ContentType string  `json:"content_type"`
 				Name        string  `json:"name"`
 				SizeBytes   int64   `json:"size_bytes"`
 				Duration    float64 `json:"duration_seconds"`
 			} `json:"file"`
+			SHA256      string  `json:"sha256"`
 			ContentType string  `json:"content_type"`
 			Name        string  `json:"name"`
 			SizeBytes   int64   `json:"size_bytes"`
@@ -4719,7 +4713,15 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		fullURL := absoluteStorageURL(rel)
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
-		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size})
+		checksum := meta.SHA256
+		if checksum == "" {
+			checksum = meta.File.SHA256
+		}
+		storageID := int64(0)
+		if bound := ctx.IntegrationFor("storage"); bound != nil {
+			storageID = bound.InstallID
+		}
+		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size, SHA256: checksum, StorageInstallID: storageID, MediaProjectID: projectID})
 	}
 	return out, nil
 }
@@ -5024,10 +5026,28 @@ func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 }
 
 func (a *App) markTargetError(ctx *sdk.AppCtx, targetID int64, err error) {
-	a.markTargetFailure(ctx, targetID, err.Error(), classifyPublishFailure(err))
+	failure := classifyPublishFailure(err)
+	d := loadDeliveryDiagnostics(ctx, targetID)
+	if d.OperationState == "unknown" || d.OperationState == "pending" && failure.Code != "upload_incomplete" {
+		failure.Code, failure.Retryable = "outcome_unknown", false
+	}
+	if d.CorrelationID != "" || d.OperationID != "" {
+		if failure.Code == "outcome_unknown" {
+			d.RetryEligibility = "blocked_unknown_outcome"
+		} else if failure.Code == "upload_incomplete" {
+			d.RetryEligibility = "resume_same_session"
+		} else if failure.Retryable {
+			d.RetryEligibility = "transient_retry"
+		} else {
+			d.RetryEligibility = "requires_revalidation"
+		}
+		_ = d.save(ctx, targetID)
+	}
+	a.markTargetFailure(ctx, targetID, redactDeliverySecrets(err.Error()), failure)
 }
 
 func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, failure publishFailure) {
+	msg = redactDeliverySecrets(msg)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='failed', last_error=?, failure_code=?, retryable=?,
@@ -5344,7 +5364,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,'')
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5360,12 +5380,13 @@ func loadTargetsFrom(db interface {
 			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw          string
 			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt              string
 			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider, deliveryRaw string
+			videoRaw, operationID                                                           string
 			attempts                                                                        int
 			retryable                                                                       int64
 			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5374,7 +5395,14 @@ func loadTargetsFrom(db interface {
 		}
 		var mediaDiagnostics []imageDeliveryDiagnostics
 		_ = json.Unmarshal([]byte(deliveryRaw), &mediaDiagnostics)
+		var videoDiagnostics map[string]any
+		_ = json.Unmarshal([]byte(redactDeliverySecrets(videoRaw)), &videoDiagnostics)
+		if operationID == "" {
+			operationID, _ = videoDiagnostics["operation_id"].(string)
+		}
 		out = append(out, map[string]any{
+			"publish_operation_id":        safeRequestID(operationID),
+			"delivery_diagnostics":        videoDiagnostics,
 			"media_delivery_diagnostics":  mediaDiagnostics,
 			"id":                          tid,
 			"social_account_id":           acctID,
@@ -5385,7 +5413,7 @@ func loadTargetsFrom(db interface {
 			"platform_post_id":            ppid,
 			"platform_url":                purl,
 			"attempts":                    attempts,
-			"last_error":                  lastErr,
+			"last_error":                  redactDeliverySecrets(lastErr),
 			"published_at":                pubAt,
 			"options":                     options,
 			"failure_code":                failureCode,
@@ -5470,7 +5498,7 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"retryable":        false,
 				"failure_code":     code,
 				"existing_post_id": existingID,
-				"error":            lastError,
+				"error":            redactDeliverySecrets(lastError),
 				"message":          "content or configuration must change before retrying",
 			}, nil
 		}

@@ -55,3 +55,87 @@ The broader audit suggestions for production observability, webhook adoption, au
 The 0.16.3 release candidate was rebased onto current apps/main and revalidated with the topology-latest SDK tag v0.74.1. The release changes the embedded and external manifest versions together and republishes the rebuilt frontend artifacts.
 
 SDK v0.74.1 release rerun: all 196 Go tests passed (3.858 seconds), the full race suite passed (143.931 seconds), all 27 UI tests passed, and build/vet plus source/binary vulnerability scans passed. Both manifests declare 0.16.3.
+
+## Video delivery and selected recovery (October 2026)
+
+Social keeps the worker contract `media_storage_ids` + `media_project_id`.
+The video preparation shared by native YouTube (including membership staging),
+TikTok and single-request URL publishing such as Facebook now:
+
+- Uses the bound Storage installation and exact project/file ID; mints fresh
+  signed URLs and attempts proxy delivery after recoverable source failures.
+- Downloads the complete response, checks MIME/container signatures, expected
+  length and available Storage SHA-256, and rejects HTML/truncated responses.
+  This validates delivery and container identity, not full codec decoding.
+- Uses protected temporary spools, limited to 32 GiB per video and two concurrent
+  preparations, with removal when the operation returns. No Catalog asset is
+  created. There are at most three source attempts before provider submission.
+- Records bounded stage/route/HTTP/byte/correlation diagnostics without signed
+  URL credentials or upload-session secrets. Initialization requires a durable
+  unknown-outcome guard and a fresh account/revision eligibility check.
+
+TikTok video delivery uses `FILE_UPLOAD` even when a URL property is verified.
+Social cannot independently inspect the relay URL rewritten inside the current
+server. Uploading the validated bytes avoids that path without server, SDK or
+integration JSON changes. Native operation IDs are retained immediately after
+initialization; interrupted TikTok transfers require reconciliation, not a new
+operation. Exact provider statuses/reasons, including opaque `internal`, remain
+visible in sanitized diagnostics. Provider operation IDs and public post IDs are
+separate fields. YouTube exposes a hash identifier instead of its secret session
+URL, probes retained sessions with an empty status PUT, and resumes accepted byte
+ranges without initializing another upload. Membership uploads retain their
+existing integration protocol and human audience-confirmation step.
+
+### Optional recovery tools
+
+1. `post_delivery_inspect(post_id, target_id)` reads stored diagnostics/history
+   and inspects a retained TikTok operation. It never submits a post or changes
+   publication status. Diagnostic observations may be saved.
+2. `post_delivery_revalidate(post_id, target_id)` checks current account,
+   connection/project, approval, options, full source and known remote state.
+   It stores the decision/evidence and returns a `recovery_id` expiring in ten
+   minutes. This call never publishes.
+3. `post_delivery_recover(post_id, target_id, recovery_id, confirm=true)` checks
+   the decision again and atomically consumes it. Only the selected target may
+   run. A retry/resume allowance is bounded to one per target revision; repeating
+   the same request returns its stored result. Original IDs, attempt count and
+   archived failures remain intact, and successful sibling targets stay put.
+
+Recovery can reconcile completed or processing operations without resubmission.
+A completed membership upload remains `awaiting_audience_setup`. Unknown outcomes,
+missing remote evidence, duplicates, inactive/wrong-project connections and
+content/authentication failures do not authorize a new publication. The explicit
+Facebook fetch rejection 389/1363057 and allowlisted remotely confirmed TikTok
+failures require full source revalidation; ordinary 400/422 handling remains
+terminal. Existing YouTube sessions may be resumed, never silently replaced.
+The existing `post_retry` entry point remains available for transient failures.
+
+### Read-only incident evidence
+
+Read-only incident investigation confirmed provider initialization before source
+retrieval, Facebook's explicit fetch rejections, and repeated Storage backend-read
+502 failures for the affected files. Records were not retried or modified.
+These logs locate the failed reads at Storage's backend but do not establish the
+backend outage's underlying cause or the cause of TikTok's opaque `internal`
+result. Restoring backend availability remains an operational task.
+
+Regression coverage includes protected/expired links, 502s and proxy fallback,
+HTML/container/size/checksum validation, operation retention after initialization,
+YouTube resume and membership staging, TikTok terminal/pending/unknown/completed
+states, cross-project and stale recovery decisions, duplicate/concurrent recovery,
+sibling preservation, migration history and secret redaction. Frontend validation
+also fixes a date-sensitive test to measure seven local calendar days across DST.
+
+Validation on this implementation: 365 Go tests/subtests passed (267 top-level,
+98 subtests), the full Go race suite passed, and a focused source-preparation race
+run also passed after adding persistent source summary fields. `go vet ./...` and
+a standalone `GOWORK=off go build` succeeded against the published SDK pin. Bun
+reported 43 UI tests passing; all 11 generated frontend bundles passed the host
+React import-surface check. No live publish/retry or production deployment was
+used for validation. Social 0.17.3 declares its own release tag in both manifest source refs.
+
+Release validation for 0.17.3 also updates the Social build to Go 1.26.10,
+DOMPurify to 3.4.17, source-map-js to 1.2.2, and the build-only Parcel watcher to
+2.6.0 (which removes the vulnerable braces dependency). Source/binary Go scans
+and the Bun dependency audit report no vulnerabilities. The watcher subscription
+API was smoke-tested and Social's generated bundle set remains unchanged.

@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
-    "dompurify": "^3.4.13",
+    "dompurify": "^3.4.17",
     "highlight.js": "^11.12.0",
     "hls.js": "1.7.2",
     "lucide-react": "^0.400.0",
@@ -37,5 +37,9 @@
     "@apteva/web-sdk": "0.7.0",
     "@tailwindcss/cli": "^4.1.0",
     "tailwindcss": "^4.1.0"
+  },
+  "overrides": {
+    "source-map-js": "^1.2.2",
+    "@parcel/watcher": "2.6.0"
   }
 }

@@ -23,6 +23,15 @@ func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (a
 		return mcpError("resolve the existing delivery before retrying"), true, nil
 	}
 	if operation != "" {
+		if platform == "youtube" && provider == "native" && failure == "upload_incomplete" {
+			var session string
+			if err := ctx.AppDB().QueryRow(`SELECT COALESCE(youtube_upload_session,'') FROM post_targets WHERE id=?`, targetID).Scan(&session); err != nil {
+				return nil, true, err
+			}
+			if validYouTubeSession(session) {
+				return nil, false, nil
+			} // Same session only; publisher probes before sending bytes.
+		}
 		if platform != "tiktok" || provider != "native" {
 			return mcpError("resolve the existing provider operation before retrying"), true, nil
 		}

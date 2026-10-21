@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -122,34 +121,17 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if err != nil {
 		return "", "", err
 	}
-	// Spool to a protected temporary file: retries need exact bytes and seeking,
-	// while gateway requests stay bounded to one 4 MiB chunk at a time.
-	req, err := http.NewRequest(http.MethodGet, j.media[0].URL, nil)
+	// Share scoped source preparation and bounded replayable spooling with
+	// ordinary uploads, while retaining this path's existing resumable protocol.
+	prepared, err := a.prepareVideoSource(ctx, j, j.media[0], "FILE_UPLOAD")
 	if err != nil {
 		return "", "", err
 	}
-	response, err := mediaHTTPClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("fetch video: storage returned %d", response.StatusCode)
-	}
-	file, err := os.CreateTemp("", "social-youtube-*.video")
-	if err != nil {
-		return "", "", err
-	}
-	defer os.Remove(file.Name())
-	defer file.Close()
+	defer prepared.Close()
+	file, total := prepared.File, prepared.Size
 	digest := sha256.New()
-	const maxVideoBytes int64 = 32 << 30
-	total, err := io.Copy(io.MultiWriter(file, digest), io.LimitReader(response.Body, maxVideoBytes+1))
-	if err != nil {
+	if _, err = io.Copy(digest, io.NewSectionReader(file, 0, total)); err != nil {
 		return "", "", err
-	}
-	if total == 0 || total > maxVideoBytes {
-		return "", "", errors.New("video must be nonempty and at most 32 GiB")
 	}
 	title := strOption(j.options, "title")
 	if title == "" {
@@ -178,26 +160,45 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if session != "" && (fingerprint != actualFingerprint || !validYouTubeSession(session)) {
 		return "", "", errors.New("stored upload does not match this video or connection; verify the remote outcome before creating another post")
 	}
+	d := prepared.Diagnostics
 	offset := int64(0)
 	if session == "" {
+		d.OperationState = "unknown"
+		if err := validatePreparedDestination(ctx, j); err != nil {
+			return "", "", err
+		}
+		if err := d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "request_started"}); err != nil {
+			return "", "", errors.New("could not persist upload initialization guard")
+		}
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
 		if err != nil {
 			return "", "", err
 		}
 		if res == nil || !res.Success {
+			captureProviderDiagnostics(&d, res)
+			if res != nil && res.Status >= 400 && res.Status < 500 {
+				d.OperationState = "not_started"
+			}
+			d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", HTTPStatus: executeStatus(res), Result: "provider_rejected"})
 			return "", "", upstreamError(res)
 		}
 		session = integrationHeader(res, "Location")
 		if !validYouTubeSession(session) {
-			return "", "", errors.New("upload_video_init: missing or invalid Google Location header")
+			return "", "", errors.New("upload_video_init: missing or invalid Google Location header; verify the remote outcome before retrying")
 		}
-		if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET youtube_upload_session=?,youtube_upload_fingerprint=? WHERE id=?`, session, actualFingerprint, j.targetID); err != nil {
-			return "", "", err
+		if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET youtube_upload_session=?,youtube_upload_fingerprint=?,publish_operation_id=? WHERE id=?`, session, actualFingerprint, youtubeSessionKey(session), j.targetID); err != nil {
+			return "", "", errors.New("session persistence failed; verify the remote outcome before retrying")
 		}
+		d.OperationID = youtubeSessionKey(session)
+		d.OperationState = "pending"
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "session_persisted"})
 	} else {
+		d.OperationID = youtubeSessionKey(session)
+		d.OperationState = "pending"
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "polling", Result: "session_probe"})
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "upload_video_status", map[string]any{"upload_url": session, "content_range": fmt.Sprintf("bytes */%d", total)})
 		if err != nil {
-			return "", "", uploadRetry("Check the existing upload session after updating the YouTube catalog/server: " + err.Error())
+			return "", "", uploadRetry("Check the existing upload session after updating the YouTube catalog/server: " + redactDeliverySecrets(err.Error()))
 		}
 		if res != nil && res.Success {
 			id = uploadedVideoID(res)
@@ -220,13 +221,16 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 		if _, err := file.ReadAt(chunk, offset); err != nil {
 			return "", "", err
 		}
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", Bytes: offset, Result: "chunk_started"})
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "upload_video_chunk", map[string]any{
 			"upload_url": session, "content_range": fmt.Sprintf("bytes %d-%d/%d", offset, offset+size-1, total),
 			"video": map[string]any{"_binary": true, "base64": base64.StdEncoding.EncodeToString(chunk), "mimeType": mime},
 		})
 		if err != nil {
-			return "", "", uploadRetry("Upload interrupted; retry will check the same session: " + err.Error())
+			return "", "", uploadRetry("Upload interrupted; retry will check the same session: " + redactDeliverySecrets(err.Error()))
 		}
+		d.TransferredBytes = offset + size
+		d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", HTTPStatus: executeStatus(res), Bytes: offset + size})
 		if res != nil && res.Success {
 			id = uploadedVideoID(res)
 			if id == "" {
@@ -253,6 +257,9 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if id == "" {
 		return "", "", uploadRetry("All video bytes were received but completion is uncertain; check the same session again")
 	}
+	d.OperationState = "published"
+	d.ProviderStatus = "complete"
+	d.event(ctx, j.targetID, deliveryEvent{Stage: "processing", Result: "awaiting_audience_setup"})
 	watch := "https://www.youtube.com/watch?v=" + url.QueryEscape(id)
 	// Save remote identity before any thumbnail call or final status write.
 	if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET platform_post_id=?,platform_url=?,audience_status='awaiting_setup',youtube_upload_retry_after=NULL WHERE id=?`, id, watch, j.targetID); err != nil {
