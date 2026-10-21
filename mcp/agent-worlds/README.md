@@ -10,6 +10,12 @@ Agent Worlds is a project-scoped Apteva sidecar for viewing live agent activity.
 
 Event labels deliberately omit message text, thoughts, prompts, and tool arguments. A graph or exported clip conveys activity without copying private conversation content.
 
+## Refresh behavior
+
+Scene and source polling share a cancellable request path. Refreshes wait for the previous request to finish, source/project changes cancel outstanding requests, and hidden tabs skip background refreshes. Pausing the scene preserves its replay snapshot. Themes, destination spotlight, app/integration attribution, and exports are preserved from v0.1.6.
+
+This release uses the published SDK and existing server contracts. The local metadata-observation backend refactor is not included until its platform APIs are published.
+
 ## Build
 
 ```sh

@@ -25,13 +25,41 @@ function apiURL(path: string, installId: number, projectId: string) {
   return url.pathname + url.search;
 }
 
-async function getJSON<T>(path: string, installId: number, projectId: string): Promise<T> {
-  const res = await fetch(apiURL(path, installId, projectId));
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+// Share one cancellable, sequential polling path for inventory and scenes.
+// Pausing stops network refreshes without throwing away the replay snapshot.
+function usePolledJSON<T>(path: string, installId: number, projectId: string, interval: number, polling = true) {
+  const url = apiURL(path, installId, projectId);
+  const [result, setResult] = useState<{ url: string; data: T | null; error: string }>({ url: "", data: null, error: "" });
+  const [revision, setRevision] = useState(0);
+  const pollingRef = useRef(polling);
+  pollingRef.current = polling;
+  const refresh = useCallback(() => setRevision(value => value + 1), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number;
+    const schedule = () => {
+      if (controller.signal.aborted) return;
+      timer = window.setTimeout(() => {
+        if (pollingRef.current && document.visibilityState !== "hidden") void load();
+        else schedule();
+      }, interval);
+    };
+    const load = async () => {
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        if (!controller.signal.aborted) setResult({ url, data: body, error: "" });
+      } catch (caught) {
+        if (!controller.signal.aborted) setResult(previous => ({ url, data: previous.url === url ? previous.data : null, error: (caught as Error).message }));
+      } finally { schedule(); }
+    };
+    void load();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [url, interval, revision]);
+
+  return { data: result.url === url ? result.data : null, error: result.url === url ? result.error : "", refresh };
 }
 
 const clock = (value: string) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -77,43 +105,36 @@ function featuredDestinations(items: Destination[], limit: number, selectedID: s
 
 export default function AgentWorldsPanel({ installId, projectId }: Props) {
   const palette = usePalette();
-  const [sources, setSources] = useState<Source[]>([]);
   const [sourceId, setSourceId] = useState("main");
-  const [scene, setScene] = useState<Scene | null>(null);
   const [preset, setPreset] = useState<Preset>("graph");
   const [selectedAgent, setSelectedAgent] = useState("");
   const [selectedDestination, setSelectedDestination] = useState("");
   const [live, setLive] = useState(true);
   const [replayIndex, setReplayIndex] = useState(0);
   const [portrait, setPortrait] = useState(false);
-  const [error, setError] = useState("");
+  const [exportError, setError] = useState("");
   const [recording, setRecording] = useState(false);
   const [animationNow, setAnimationNow] = useState(Date.now());
   const stageRef = useRef<SVGSVGElement | null>(null);
   const seenAtRef = useRef(new Map<string, number>());
-  const loadSources = useCallback(async () => {
-    try {
-      const next = await getJSON<Source[]>("/sources", installId, projectId);
-      setSources(next);
-      if (!next.some(item => item.id === sourceId)) setSourceId("main");
-    } catch (caught) { setError((caught as Error).message); }
-  }, [installId, projectId, sourceId]);
-  const loadScene = useCallback(async () => {
-    try {
-      const next = await getJSON<Scene>(`/scene?source=${encodeURIComponent(sourceId)}`, installId, projectId);
-      const seenAt = seenAtRef.current;
-      const valid = new Set(next.events.map(event => event.id));
-      for (const key of seenAt.keys()) if (!valid.has(key)) seenAt.delete(key);
-      for (const event of next.events) if (!seenAt.has(event.id)) seenAt.set(event.id, Date.now());
-      setScene(next);
-      setReplayIndex(next.events.length);
-      setError("");
-    } catch (caught) { setError((caught as Error).message); }
-  }, [installId, projectId, sourceId]);
+  const sourceData = usePolledJSON<Source[]>("/sources", installId, projectId, 15000);
+  const sceneData = usePolledJSON<Scene>(`/scene?source=${encodeURIComponent(sourceId)}`, installId, projectId, 2500, live);
+  const sources = sourceData.data || [];
+  const scene = sceneData.data;
+  const error = exportError || sceneData.error || sourceData.error;
 
-  useEffect(() => { void loadSources(); const timer = window.setInterval(loadSources, 15000); return () => window.clearInterval(timer); }, [loadSources]);
-  useEffect(() => { setScene(null); setSelectedAgent(""); setSelectedDestination(""); void loadScene(); }, [loadScene]);
-  useEffect(() => { if (!live) return; const timer = window.setInterval(loadScene, 2500); return () => window.clearInterval(timer); }, [live, loadScene]);
+  useEffect(() => {
+    if (sourceData.data) setSourceId(current => sourceData.data!.some(source => source.id === current) ? current : "main");
+  }, [sourceData.data]);
+  useEffect(() => { setSelectedAgent(""); setSelectedDestination(""); seenAtRef.current.clear(); }, [sourceId, installId, projectId]);
+  useEffect(() => {
+    if (!scene) return;
+    const seenAt = seenAtRef.current;
+    const valid = new Set(scene.events.map(event => event.id));
+    for (const key of seenAt.keys()) if (!valid.has(key)) seenAt.delete(key);
+    for (const event of scene.events) if (!seenAt.has(event.id)) seenAt.set(event.id, Date.now());
+    setReplayIndex(scene.events.length);
+  }, [scene]);
   useEffect(() => { if (!live || preset !== "village") return; const timer = window.setInterval(() => setAnimationNow(Date.now()), 120); return () => window.clearInterval(timer); }, [live, preset]);
 
   const visibleEvents = useMemo(() => {
@@ -137,6 +158,7 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
   }, []);
 
   const savePNG = useCallback(async () => {
+    setError("");
     try {
       const image = await serializeStage();
       const canvas = document.createElement("canvas");
@@ -154,6 +176,7 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
   }, [portrait, preset, serializeStage, palette.bg]);
 
   const recordClip = useCallback(async () => {
+    setError("");
     if (!HTMLCanvasElement.prototype.captureStream || !window.MediaRecorder) { setError("Video recording is not supported in this browser"); return; }
     setRecording(true);
     try {
@@ -211,7 +234,7 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
         <div className="aw-controls" aria-label="Scene controls">
           <label className="aw-field aw-source"><span>Source</span><select value={sourceId} onChange={event => setSourceId(event.target.value)}>{sources.map(source => <option key={source.id} value={source.id}>{source.label} · {source.agents} agents</option>)}</select></label>
           <label className="aw-field aw-agent"><span>Focus</span><select value={selectedAgent} onChange={event => setSelectedAgent(event.target.value)}><option value="">All agents</option>{scene?.agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
-          <div className="aw-control-actions"><button className={`aw-button aw-live ${live ? "is-live" : ""}`} onClick={() => { setLive(!live); setReplayIndex(scene?.events.length || 0); }}><span className="aw-dot" />{live ? "Live" : "Paused"}</button><button className="aw-button" onClick={loadScene}>Refresh</button><label className="aw-portrait"><input type="checkbox" checked={portrait} onChange={event => setPortrait(event.target.checked)} /> Portrait</label></div>
+          <div className="aw-control-actions"><button className={`aw-button aw-live ${live ? "is-live" : ""}`} onClick={() => { setLive(!live); setReplayIndex(scene?.events.length || 0); }}><span className="aw-dot" />{live ? "Live" : "Paused"}</button><button className="aw-button" onClick={sceneData.refresh}>Refresh</button><label className="aw-portrait"><input type="checkbox" checked={portrait} onChange={event => setPortrait(event.target.checked)} /> Portrait</label></div>
         </div>
         {error && <div className="aw-error" role="alert">{error}</div>}
         <nav className="aw-presets" aria-label="Visualization preset">{presets.map(item => <button key={item.id} type="button" onClick={() => setPreset(item.id)} aria-current={preset === item.id ? "page" : undefined} className={preset === item.id ? "is-active" : ""}>{item.name}</button>)}</nav>
