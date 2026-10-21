@@ -1,0 +1,4 @@
+{
+  "extends": "../softphone/tsconfig.json",
+  "include": ["*.ts", "../../frontend/src/assets.d.ts"]
+}

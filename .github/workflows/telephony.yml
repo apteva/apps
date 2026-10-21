@@ -62,6 +62,15 @@ jobs:
       - name: Compiled sidecar Chromium and TURN TCP recovery
         run: go test -tags integration -run '^TestTier2HeadlessBrowser$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony
+      - name: Outbound Chromium to SIP recovery smoke
+        run: go test -tags integration -run '^TestOutboundSIPBrowserSoak($|Metrics|SourceClock|PauseWindow)' -count=1 -timeout 4m -v . > /tmp/telephony-outbound-soak.log 2>&1
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_OUTBOUND_SOAK_OUTPUT: /tmp/telephony-outbound-soak
+          TELEPHONY_OUTBOUND_SOAK_SECONDS: '20'
+          TELEPHONY_OUTBOUND_SOAK_CALLS: '8'
+          TELEPHONY_OUTBOUND_SOAK_PAUSE_MS: '570'
+          TELEPHONY_OUTBOUND_SOAK_RECORDING: '1'
       - name: Long SIP recording import and playback
         run: go test -run '^TestLongSIPRecordingImportAndPlaybackMatrix$' -count=1 -timeout 10m -v . > /tmp/telephony-long-recordings.log
         working-directory: mcp/telephony
@@ -92,6 +101,8 @@ jobs:
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
             /tmp/telephony-chromium.log
+            /tmp/telephony-outbound-soak.log
+            /tmp/telephony-outbound-soak/
   browser-outages:
     name: Browser long-outage scenarios
     runs-on: ubuntu-latest

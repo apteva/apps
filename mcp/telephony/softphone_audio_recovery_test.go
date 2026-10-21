@@ -333,3 +333,57 @@ func TestRTCCaptureDiscardsVisibleToOperatorsInCorrectDirection(t *testing.T) {
 		t.Fatal("unsupported socket evidence reported zero loss")
 	}
 }
+
+// Preserve the source budget across the entire path, not only each isolated
+// queue. After a catch-up burst the released implementation retained ~240ms
+// source age forever, leaving no time for the carrier's next send tick.
+func TestRTCReleaseRecoveryLeavesCarrierHeadroom(t *testing.T) {
+	for _, pause := range []time.Duration{420 * time.Millisecond, 438 * time.Millisecond, 441 * time.Millisecond, 570 * time.Millisecond} {
+		t.Run(pause.String(), func(t *testing.T) {
+			now := time.Now()
+			stats := &rtcMediaStats{}
+			var q rtcAudioRelease
+			for i := 0; i < 16; i++ {
+				q.push(make([]int16, 480), now.Add(time.Duration(i)*20*time.Millisecond), stats, "operator_to_carrier")
+			}
+			at := now.Add(pause)
+			q.push(make([]int16, 480), at.Add(-60*time.Millisecond), stats, "operator_to_carrier")
+			f, ok := q.pop(at, stats, "operator_to_carrier")
+			if !ok || at.Sub(f.source) > 80*time.Millisecond {
+				t.Fatal("old release phase survived pause", ok, at.Sub(f.source))
+			}
+			for i := 1; i <= 3000; i++ {
+				at = at.Add(20 * time.Millisecond)
+				q.push(make([]int16, 480), at.Add(-60*time.Millisecond), stats, "operator_to_carrier")
+				f, ok = q.pop(at, stats, "operator_to_carrier")
+				if !ok || at.Add(60*time.Millisecond).Sub(f.source) >= liveAudioMaxAge {
+					t.Fatal("usable audio expired before carrier", i, ok, at.Sub(f.source))
+				}
+			}
+			if stats.snapshot().IngressDiscardedMS == 0 {
+				t.Fatal("recovery discard missing from diagnostics")
+			}
+		})
+	}
+}
+
+func TestRTCReleaseRecoveryPreservesHealthySpeech(t *testing.T) {
+	start := time.Now()
+	stats := &rtcMediaStats{}
+	var q rtcAudioRelease
+	pcm := make([]int16, 480)
+	for frame := 0; frame < 3000; frame++ {
+		for i := range pcm {
+			pcm[i] = int16(frame*17 + i*31)
+		}
+		source := start.Add(time.Duration(frame) * 20 * time.Millisecond)
+		q.push(pcm, source, stats, "operator_to_carrier")
+		got, ok := q.pop(source.Add(60*time.Millisecond), stats, "operator_to_carrier")
+		if !ok || !got.source.Equal(source) || !bytes.Equal(pcm16ToBytes(got.pcm), pcm16ToBytes(pcm)) {
+			t.Fatal("healthy speech changed", frame)
+		}
+	}
+	if stats.snapshot().IngressDiscardedMS != 0 {
+		t.Fatal("healthy speech was discarded")
+	}
+}

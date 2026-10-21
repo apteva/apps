@@ -40,6 +40,10 @@ func TestSIPMicrophoneProgressSourceBudget(t *testing.T) {
 				stats := &rtcMediaStats{}
 				var release rtcAudioRelease
 				packet := func(i int, at time.Time) sipRTPOutboundPacket {
+					if i >= 4 {
+						time.Sleep(max(0, time.Until(release.next)))
+						at = time.Now()
+					}
 					pcm := speech[i*480 : (i+1)*480]
 					release.push(pcm, at.Add(-age), stats, "operator_to_carrier")
 					f, ok := release.pop(at, stats, "operator_to_carrier")
