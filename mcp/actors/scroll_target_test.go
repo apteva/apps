@@ -10,6 +10,20 @@ func TestScrollForwardsObservedRegionAndIdentityGuards(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			plat := newFakePlatform()
+			observed := false
+			plat.readViewsResponse = func(tool string, args map[string]any) map[string]any {
+				if tool != "computer.computer_use" {
+					return nil
+				}
+				if args["action"] == "screenshot" && args["include_som"] == true {
+					observed = true
+					return map[string]any{"current_url": "https://example.com", "som_revision": "scroll-1", "scroll_regions": []map[string]any{{"id": "scroll_document", "name": "Document", "role": "document"}, {"id": "scroll_editor", "name": "Composer", "role": "textbox"}}}
+				}
+				if args["action"] == "scroll" && targeted && (!observed || args["som_revision"] != "scroll-1") {
+					return map[string]any{"success": false}
+				}
+				return nil
+			}
 			ctx, app := newTestCtx(t, plat)
 			step := map[string]any{"action": "scroll", "direction": "down", "amount": 450}
 			if targeted {
@@ -35,7 +49,7 @@ func TestScrollForwardsObservedRegionAndIdentityGuards(t *testing.T) {
 					t.Fatalf("scroll changed: %#v", call.args)
 				}
 				if targeted {
-					if call.args["target_id"] != "scroll_document" || call.args["expected_name"] != "Document" || call.args["expected_role"] != "document" {
+					if call.args["target_id"] != "scroll_document" || call.args["expected_name"] != "Document" || call.args["expected_role"] != "document" || call.args["som_revision"] != "scroll-1" {
 						t.Fatalf("region guards were dropped: %#v", call.args)
 					}
 				} else if call.args["target_id"] != nil || call.args["expected_name"] != nil || call.args["expected_role"] != nil {
@@ -46,6 +60,35 @@ func TestScrollForwardsObservedRegionAndIdentityGuards(t *testing.T) {
 				t.Fatal("scroll was not dispatched")
 			}
 		})
+	}
+}
+
+func TestScrollRejectsMissingOrChangedFreshRegionBeforeDispatch(t *testing.T) {
+	for _, region := range []map[string]any{
+		{"id": "other_region", "name": "Document", "role": "document"},
+		{"id": "scroll_document", "name": "Unexpected", "role": "document"},
+		{"id": "scroll_document", "name": "Document", "role": "textbox"},
+	} {
+		plat := newFakePlatform()
+		plat.readViewsResponse = func(tool string, args map[string]any) map[string]any {
+			if tool == "computer.computer_use" && args["action"] == "screenshot" {
+				return map[string]any{"current_url": "https://example.com", "som_revision": "fresh", "scroll_regions": []map[string]any{region}}
+			}
+			return nil
+		}
+		ctx, app := newTestCtx(t, plat)
+		rec := saveFixtureActor(t, ctx, app, map[string]any{"schema_version": 1, "allowed_hosts": []any{"example.com"}, "steps": []any{map[string]any{"action": "goto", "url": "https://example.com"}, map[string]any{"action": "scroll", "direction": "down", "target_id": "scroll_document", "expected_name": "Document", "expected_role": "document"}}})
+		if _, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if run := executeNext(t, ctx, app); run["status"] != "failed" {
+			t.Fatalf("changed or absent region accepted: %v", run)
+		}
+		for _, call := range plat.callsSnapshot() {
+			if call.args["action"] == "scroll" {
+				t.Fatal("scroll dispatched before validating its fresh region")
+			}
+		}
 	}
 }
 

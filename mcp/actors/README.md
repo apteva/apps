@@ -98,7 +98,9 @@ Scroll steps can forward an observed Computer scroll region using `target_id`,
 with optional `expected_name` and `expected_role` identity guards. For example,
 `{"action":"scroll","direction":"down","amount":450,"target_id":"scroll_document","expected_name":"Document","expected_role":"document"}`
 targets the observed document even when a rich-text editor is independently
-scrollable. Nested panes need their own current observed region ID. Actor does
+scrollable. Before a targeted scroll, Actor refreshes the observation, verifies
+the selected region and its identity guards, and forwards the new semantic
+revision. Nested panes need their own current observed region ID. Actor does
 not infer a region when the fields are omitted, and Computer still rejects
 ambiguous, stale, or mismatched targets.
 

@@ -26,6 +26,8 @@ For hosted video posts, enter `{{video_url}}` using semantic `fill` in the site'
 
 Form operations support semantic `set_checked` (`checked` boolean), `select_option` (exactly one of `value`, `values`, `text`, or `texts`, with optional `mode`), and `set_temporal` (`value` ISO date or displayed time). A `scroll` step accepts an observed scroll-region `target_id` and optional `expected_name`/`expected_role` guards. For the observed document region, use `target_id: "scroll_document"`, `expected_name: "Document"`, and `expected_role: "document"`; nested regions require their own current observed IDs. Omitted targets retain Computer's ambiguity checks. Extraction accepts `readability: false` to include navigation/dialogs and an optional field `pattern` (Go regexp; first capture becomes the extracted value before numeric conversion). A consequential `click` may include `once_key: "{{request_id}}"`. The key is reserved durably for that actor and operation before the attempt. Completed or uncertain attempts block later attempts using the same key, including explicit run retries; inspect the original run before intentionally issuing a different key. Keys do not guarantee the external site committed a click; use outcome waits.
 
+Targeted scrolls refresh their semantic observation automatically, require the selected region to remain present with the declared identity, and forward the current semantic revision to Computer. They never substitute a different region when the selected one disappears or changes.
+
 For library/account duplicate inspection, prefer named `read_only:true`
 operations using `observe_page` and `inspect_views` (Actors 0.2.16+). The engine
 rejects write actions in read-only operations. Sites and account/tier rules

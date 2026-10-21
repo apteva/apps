@@ -144,7 +144,25 @@ func (e *actorExecution) interact(step actorStep) error {
 		args["direction"] = step.Direction
 		args["amount"] = boundedInt(step.Amount, 300, 1, 10000)
 		if step.TargetID != "" {
+			shot, err := e.readScrollSnapshot()
+			if err != nil {
+				return fmt.Errorf("observe scroll region: %w", err)
+			}
+			matches := 0
+			for _, region := range shot.Regions {
+				if region.ID != step.TargetID {
+					continue
+				}
+				matches++
+				if (step.ExpectedName != "" && region.Name != step.ExpectedName) || (step.ExpectedRole != "" && region.Role != step.ExpectedRole) {
+					return errors.New("scroll target identity does not match the fresh observation")
+				}
+			}
+			if matches != 1 || shot.Revision == nil {
+				return errors.New("scroll target requires exactly one freshly observed region and a semantic revision")
+			}
 			args["target_id"] = step.TargetID
+			args["som_revision"] = shot.Revision
 		}
 		if step.ExpectedName != "" {
 			args["expected_name"] = step.ExpectedName

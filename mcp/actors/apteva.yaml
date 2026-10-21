@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.42
+version: 0.2.43
 description: |
+  v0.2.43 refreshes targeted scroll observations, verifies the named region,
+  and forwards its current semantic revision before dispatch.
   v0.2.42 forwards explicit scroll-region targets and optional name/role guards
   to Computer, so multi-pane pages do not require ambiguous document scrolling.
   v0.2.41 supports up to 500 named operations within the existing definition
@@ -114,7 +116,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.42
+    ref: actors/v0.2.43
     entry: mcp/actors
   port: 8080
   health_check: /health
