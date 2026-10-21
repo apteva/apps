@@ -355,6 +355,9 @@ func (d *sipLiveDiagnostics) event(kind, leg, detail string, status int) {
 			d.signal.BYEFailures++
 			d.signal.BYEError = sanitizeCarrierDetail(&d.row, detail)
 		}
+	case "sip_bye_crossed":
+		d.signal.BYEStatus = "peer_ended"
+		d.signal.BYEInitiator = "carrier"
 	case "sip_bye_received":
 		d.signal.BYEStatus = "peer_ended"
 		d.signal.BYEInitiator = "carrier"
@@ -372,7 +375,7 @@ func (d *sipLiveDiagnostics) event(kind, leg, detail string, status int) {
 	d.mu.Unlock()
 	e := carrierBridgeEvidence{AfterLocalCancel: d.ended.Load() && kind != "sip_end", Kind: kind, Leg: leg, Detail: sanitizeCarrierDetail(&d.row, detail), At: now, HTTPStatus: status, BridgeGeneration: d.id}
 	d.app.carrierTelemetry.enqueue(carrierTelemetryRecord{InstallID: d.app.installID, ProjectID: d.row.ProjectID, CallID: d.row.ID, Kind: "event", At: now, BridgeGeneration: d.id, Event: &e})
-	if kind == "sip_bye_result" {
+	if kind == "sip_bye_result" || kind == "sip_bye_crossed" {
 		d.app.carrierTelemetry.enqueue(d.sample(time.Now()))
 	}
 }

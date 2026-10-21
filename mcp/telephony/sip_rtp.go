@@ -186,7 +186,8 @@ func (s *sipPlaybackState) hasPending() bool {
 }
 
 type sipRTPOutboundPacket struct {
-	enqueuedAt time.Time
+	enqueuedAt time.Time // Original microphone source time; never refreshed on handoff.
+	queuedAt   time.Time // Local SIP queue entry, independent of source age.
 	payload    []byte
 	pcm        []int16
 	itemID     string
@@ -297,29 +298,10 @@ func (p *sipRTPPacer) run() {
 				lastFrame = frame
 				continue
 			}
-			select {
-			case packet := <-p.queue:
+			if packet, ok := p.dequeueLivePacket(now); ok {
 				failed := func() bool {
 					defer p.playback.pending.Add(-1)
 					if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
-						return false
-					}
-					if hold := p.media.hold.Load(); hold != nil {
-						packet.pcm = hold.frame(p.media.sampleRate() / 50)
-						packet.payload = nil
-						packet.itemID = ""
-						packet.enqueuedAt = now // Newly generated hold audio has no microphone queue age.
-					}
-					if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
-						p.droppedPackets.Add(1)
-						p.diagnostics.dropped("live_audio_age_limit", 20)
-						p.needsCrossfade.Store(true)
-						p.dropMu.Lock()
-						p.drops = append(p.drops, audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: 20})
-						if len(p.drops) > 100 {
-							p.drops = p.drops[len(p.drops)-100:]
-						}
-						p.dropMu.Unlock()
 						return false
 					}
 					if len(packet.pcm) > 0 {
@@ -372,7 +354,7 @@ func (p *sipRTPPacer) run() {
 				if failed {
 					return
 				}
-			default:
+			} else {
 				if hold := p.media.hold.Load(); hold != nil && p.media.remoteMode.Load() != 1 && p.media.remoteMode.Load() != 3 {
 					pcm := hold.frame(p.media.sampleRate() / 50)
 					wire := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: p.media.offer.PayloadType, SequenceNumber: p.sequence, Timestamp: baseTimestamp + uint32(frame)*sipRTPPacketSamples, SSRC: p.ssrc}, Payload: p.media.encodeAudio(pcm)}
@@ -399,6 +381,51 @@ func (p *sipRTPPacer) run() {
 		default:
 		}
 	}
+}
+
+// Expired frames do not consume media time. Drain only the bounded queue
+// present at this tick, then send at most one usable frame. Consuming one stale
+// frame per tick would preserve a backlog forever while new audio arrives.
+func (p *sipRTPPacer) dequeueLivePacket(now time.Time) (sipRTPOutboundPacket, bool) {
+	for remaining := len(p.queue); remaining > 0; remaining-- {
+		select {
+		case packet := <-p.queue:
+			if hold := p.media.hold.Load(); hold != nil {
+				packet.pcm = hold.frame(p.media.sampleRate() / 50)
+				packet.payload = nil
+				packet.itemID = ""
+				packet.enqueuedAt = now
+			}
+			sourceAge, residence := time.Duration(0), time.Duration(0)
+			if !packet.enqueuedAt.IsZero() {
+				sourceAge = max(0, now.Sub(packet.enqueuedAt))
+			}
+			if !packet.queuedAt.IsZero() {
+				residence = max(0, now.Sub(packet.queuedAt))
+			}
+			p.diagnostics.observeAge(sourceAge, residence)
+			if !p.dropStale || sourceAge < liveAudioMaxAge {
+				return packet, true
+			}
+			p.playback.pending.Add(-1)
+			p.droppedPackets.Add(1)
+			p.diagnostics.dropped("live_audio_age_limit", 20)
+			p.needsCrossfade.Store(true)
+			p.dropMu.Lock()
+			p.drops = append(p.drops, audioDropEvent{
+				Timestamp: now.UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+				Reason: "live_audio_age_limit", DurationMS: 20,
+				FrameAgeMS: float64(sourceAge) / float64(time.Millisecond), QueueResidenceMS: float64(residence) / float64(time.Millisecond),
+			})
+			if len(p.drops) > 100 {
+				p.drops = p.drops[len(p.drops)-100:]
+			}
+			p.dropMu.Unlock()
+		default:
+			return sipRTPOutboundPacket{}, false
+		}
+	}
+	return sipRTPOutboundPacket{}, false
 }
 
 func (p *sipRTPPacer) drain() int {
@@ -452,6 +479,7 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue overflow")
 	}
 	for _, packet := range packets {
+		packet.queuedAt = time.Now()
 		if packet.enqueuedAt.IsZero() {
 			packet.enqueuedAt = time.Now()
 		}

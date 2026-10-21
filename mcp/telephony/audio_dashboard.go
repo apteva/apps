@@ -216,6 +216,8 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["capture_muted_frames"] = max(m["capture_muted_frames"], float64(v.CaptureMutedFrames))
 		m["capture_muted_ms"] = max(m["capture_muted_ms"], float64(v.CaptureMutedMS))
 		m["carrier_max_write_ms"] = float64(v.CarrierPacer.MaxWriteMS)
+		m["carrier_pacer_max_source_age_ms"] = float64(v.CarrierPacer.MaxSourceAgeMS)
+		m["carrier_pacer_max_residence_ms"] = float64(v.CarrierPacer.MaxResidenceMS)
 		add("carrier_stall", "carrier_to_telephony", v.Reception.Stalls > 0 || v.Reception.GapsOverBudget > 0)
 		add("dropped_audio", "carrier_to_telephony", v.Reception.StaleDroppedMS > 0)
 		add("dropped_audio", "telephony_to_browser", m["server_browser_dropped_ms"] > 0)
