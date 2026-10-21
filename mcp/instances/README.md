@@ -557,3 +557,15 @@ verified tar.gz snapshots/restores of stopped persistent data, including SQLite
 WAL state, durable restore receipts and interrupted-swap recovery. Server retains
 migration and routing decisions. Monitoring and collector 0.6.5 are unchanged.
 See [the protocol and limits](runtime/README.md#stopped-state-transfer-080).
+
+
+## Efficient native inspection (0.8.1)
+
+Routine native deployment inspections use one isolated, reusable SSH session per
+host, combine remote process/restore checks, and query related systemd properties
+once. Verified restore completion is persisted; each controller revalidates it on
+first use and after identity changes or inconsistent observations. Partial restore
+retries and crash recovery remain supported. An explicit Ubuntu setup option,
+`suppress_dynamic_motd`, adds PAM's `noupdate` option without disabling authentication.
+It defaults to false and affects SSH login-message generation across that host.
+See [staging measurements and limits](runtime/inspection-performance.md).

@@ -32,20 +32,21 @@ type nativeTransport interface {
 	Logs(context.Context, *Instance, nativeRecord, string, int) ([]string, string, error)
 }
 type nativeBackend struct {
-	db           *sql.DB
-	root         string
-	installID    int64
-	transport    nativeTransport
-	tunnels      *tunnelRegistry
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.Mutex
-	locks        map[string]*sync.Mutex
-	jobs         map[string]context.CancelFunc
-	artifactMu   sync.Mutex
-	allocationMu sync.Mutex
-	stateMu      sync.Mutex
-	projectID    string
+	db              *sql.DB
+	root            string
+	installID       int64
+	transport       nativeTransport
+	tunnels         *tunnelRegistry
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.Mutex
+	locks           map[string]*sync.Mutex
+	jobs            map[string]context.CancelFunc
+	artifactMu      sync.Mutex
+	allocationMu    sync.Mutex
+	stateMu         sync.Mutex
+	projectID       string
+	restoreVerified map[string]string
 }
 
 var nativeManagersMu sync.Mutex
@@ -66,7 +67,7 @@ func nativeFor(ctx *sdk.AppCtx) (*nativeBackend, error) {
 		return nil, e
 	}
 	life, cancel := context.WithCancel(context.Background())
-	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
+	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{inspections: newNativeInspectionPool(life)}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
 	nativeManagers[ctx.AppDB()] = b
 	return b, nil
 }
@@ -430,23 +431,17 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance) nativeExecution 
 	out.Ready = false
 	c, cancel := context.WithTimeout(b.ctx, 12*time.Second)
 	defer cancel()
-	if e := b.reconcileRestore(c, inst, &d); e != nil {
-		out.State = "unknown"
-		out.StoppedConfirmed = false
-		return out
-	}
+	obs, e := b.inspectRemote(c, inst, &d)
 	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
-	if d.Restore != nil && d.Execution.SnapshotSHA256 != d.Restore.SHA256 {
+	if e != nil || d.Restore != nil && (!d.Restore.Completed || d.Execution.SnapshotSHA256 != d.Restore.SHA256) {
+		b.invalidateRestore(d)
 		out.State = "unknown"
 		out.StoppedConfirmed = false
 		return out
 	}
 	before := nativeJSON(d)
-	obs, e := b.transport.Inspect(c, inst, d)
-	if e != nil {
-		out.State = "unknown"
-		out.StoppedConfirmed = false
-		return out
+	if obs.State == "unknown" || obs.State == "failed" {
+		b.invalidateRestore(d)
 	}
 	switch {
 	case obs.Stopped:
@@ -512,6 +507,9 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance) nativeExecution 
 		if out.State == "" {
 			out.State = "unknown"
 		}
+	}
+	if out.State == "unknown" || out.State == "failed" {
+		b.invalidateRestore(d)
 	}
 	d.Execution = out
 	if b.saveCAS(before, d) != nil {
