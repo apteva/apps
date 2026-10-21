@@ -1,0 +1,16 @@
+{
+  "name": "@apteva/agent-worlds",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test ui/*.test.ts ui/*.test.tsx"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "20.9.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.2.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "^7.0.2"
+  }
+}
