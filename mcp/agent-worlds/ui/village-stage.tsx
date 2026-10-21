@@ -8,7 +8,7 @@ type Site = Point & { id: string; name: string; variant: number; scale: number; 
 type Props = {
   refNode: React.RefObject<SVGSVGElement | null>;
   agents?: Agent[]; nodes?: WorldNode[]; destinations?: Destination[];
-  selectedDestination?: string; events: Event[]; portrait: boolean;
+  selectedAgent?: string; selectedDestination?: string; events: Event[]; portrait: boolean;
   now: number; live: boolean;
   onSelect: (id: string) => void; onSelectDestination: (id: string) => void;
   onFocus?: (focus: Focus) => void;
@@ -177,7 +177,7 @@ export function sitesFor(nodes: WorldNode[], destinations: Destination[], portra
   }));
 }
 
-export default function VillageStage({ refNode, nodes = [], agents = [], destinations = [], selectedDestination = "", events, portrait, now, live, onSelect, onSelectDestination, onFocus, overview = false, showChrome = true, frame }: Props) {
+export default function VillageStage({ refNode, nodes = [], agents = [], destinations = [], selectedDestination = "", selectedAgent = "", events, portrait, now, live, onSelect, onSelectDestination, onFocus, overview = false, showChrome = true, frame }: Props) {
   const idRef = useRef<string | null>(null);
   if (!idRef.current) idRef.current = `aw-village-${++nextScene}`;
   const id = idRef.current, reducedMotion = useReducedMotion();
@@ -192,8 +192,8 @@ export default function VillageStage({ refNode, nodes = [], agents = [], destina
   const entities: { key: string; y: number; element: React.ReactNode }[] = [];
   for (const site of sites) {
     const detail = site.node ? `${site.node.kind === "team" ? "OBSERVED TEAM" : site.node.kind.toUpperCase()} · ${site.node.agents.length} AGENTS` : `${site.destination!.kind.toUpperCase()} · ${site.destination!.call_count} CALLS`;
-    const activate = () => site.node ? onFocus?.(site.node.focus) : onSelectDestination(site.id);
-    entities.push({ key: `site:${site.id}`, y: site.y, element: <g data-world-node={site.node?.kind} data-destination-id={site.destination?.id} {...(!overview ? action(site.node ? `Zoom into ${site.node.kind} ${site.name}` : `Inspect destination ${site.name}`, activate) : {})} className="aw-v-site"><title>{site.name}</title><rect x={site.x - 132} y={site.y - 185 * site.scale} width="264" height={185 * site.scale + 90} fill="transparent"/>{site.node?.kind === "project" && <g pointerEvents="none"><Building x={site.x - 68} y={site.y - 43} scale={site.scale * .52} variant={(site.variant + 1) % 4} selected={false} id={id}/><Building x={site.x + 68} y={site.y - 43} scale={site.scale * .52} variant={(site.variant + 3) % 4} selected={false} id={id}/></g>}<Building {...site} id={id}/><Nameplate x={site.x} y={site.y + (portrait ? 34 : 43)} name={site.name} detail={detail} portrait={portrait}/></g> });
+    const activate = () => site.node?.kind === "agent" ? onSelect(site.node.id) : site.node ? onFocus?.(site.node.focus) : onSelectDestination(site.id);
+    entities.push({ key: `site:${site.id}`, y: site.y, element: <g data-world-node={site.node?.kind} data-selected={site.node?.kind === "agent" && selectedAgent === site.node.id} data-destination-id={site.destination?.id} {...(!overview ? action(site.node?.kind === "agent" ? `Inspect agent ${site.name}` : site.node ? `Zoom into ${site.node.kind} ${site.name}` : `Inspect destination ${site.name}`, activate) : {})} className="aw-v-site"><title>{site.name}</title><rect x={site.x - 132} y={site.y - 185 * site.scale} width="264" height={185 * site.scale + 90} fill="transparent"/>{site.node?.kind === "project" && <g pointerEvents="none"><Building x={site.x - 68} y={site.y - 43} scale={site.scale * .52} variant={(site.variant + 1) % 4} selected={false} id={id}/><Building x={site.x + 68} y={site.y - 43} scale={site.scale * .52} variant={(site.variant + 3) % 4} selected={false} id={id}/></g>}<Building {...site} id={id}/><Nameplate x={site.x} y={site.y + (portrait ? 34 : 43)} name={site.name} detail={detail} portrait={portrait}/></g> });
     if (site.node) for (const agent of site.node.agents.slice(0, 4)) {
       const seed = seedFor(agent.id), cycle = 16000 + seed % 7000, phase = ((now + seed * 113) % cycle) / cycle;
       const points = [{x:site.x-46*site.scale,y:site.y-18*site.scale},{x:site.x-46*site.scale,y:site.y-58*site.scale},{x:site.x+22*site.scale,y:site.y-58*site.scale},{x:site.x+22*site.scale,y:site.y-18*site.scale},{x:site.x-46*site.scale,y:site.y-18*site.scale}];
@@ -206,7 +206,7 @@ export default function VillageStage({ refNode, nodes = [], agents = [], destina
     const history = events.filter(event => event.agent_id === agent.id), latest = history[history.length - 1];
     const position = motion.tracks.get(agent.id)!.at(now), site = sites.find(site => site.id === position.destination);
     const walking = live && !reducedMotion && position.walking;
-    entities.push({ key: `agent:${agent.id}`, y: site && !motion.streets.clear(position) ? site.y + 1 + position.y / 10000 : position.y, element: <g data-agent-id={agent.id} data-visit-destination={position.destination} data-inside={!!position.inside} data-walking={walking} data-x={snap(position.x)} data-y={snap(position.y)} {...(!overview ? action(`Focus agent ${agent.name}`, () => onSelect(agent.id)) : {})}><title>{`${agent.name} · ${position.destination ? `Visiting ${site?.name}` : latest?.label || agent.status}`}</title><rect x={position.x - 28} y={position.y - 57} width="56" height="68" fill="transparent"/><Character {...position} agent={agent} label={!overview} walking={walking} step={walking && Math.floor(now / 160 + hash(agent.id)) % 2 === 0}/></g> });
+    entities.push({ key: `agent:${agent.id}`, y: site && !motion.streets.clear(position) ? site.y + 1 + position.y / 10000 : position.y, element: <g data-agent-id={agent.id} aria-pressed={!overview ? selectedAgent === agent.id : undefined} data-visit-destination={position.destination} data-inside={!!position.inside} data-walking={walking} data-x={snap(position.x)} data-y={snap(position.y)} {...(!overview ? action(`Inspect agent ${agent.name}`, () => onSelect(agent.id)) : {})}><title>{`${agent.name} · ${position.destination ? `Visiting ${site?.name}` : latest?.label || agent.status}`}</title><rect x={position.x - 28} y={position.y - 57} width="56" height="68" fill="transparent"/>{selectedAgent === agent.id && !overview && <ellipse cx={position.x} cy={position.y+5} rx="20" ry="7" fill="#ffe08a" stroke="#b2732d" strokeWidth="2"/>}<Character {...position} agent={agent} label={!overview} walking={walking} step={walking && Math.floor(now / 160 + hash(agent.id)) % 2 === 0}/></g> });
   }
   entities.sort((a, b) => a.y - b.y || a.key.localeCompare(b.key));
   return <svg ref={refNode} className="aw-village" data-renderer="procedural-pixel" data-view="top-down" data-motion={live && !reducedMotion} data-paused={!live} data-clock={now} viewBox={`0 0 ${width} ${height}`} x={frame?.x} y={frame?.y} width={frame?.width ?? "100%"} height={frame?.height ?? "100%"} role={overview ? "presentation" : "group"} aria-hidden={overview || undefined} aria-label={nodes.length ? "Pixel village · projects and observed teams" : "Pixel village of live agents"} shapeRendering="crispEdges" style={{ background: "#91ae70", fontFamily: "ui-monospace, SFMono-Regular, monospace", ...(frame ? { width: frame.width, height: frame.height, aspectRatio: "auto" } : {}) }}>
@@ -281,6 +281,6 @@ function ProjectVillages({ refNode, nodes, destinations, events, portrait, now, 
 function VillageStyles() { return <style>{`
       .aw-village .aw-project-village{outline:none}.aw-village .aw-project-village:hover .aw-project-sign rect,.aw-village .aw-project-village:focus-visible .aw-project-sign rect{stroke:#b98a50;stroke-width:3}.aw-village .aw-v-site{outline:none}.aw-village .aw-v-site:hover .aw-v-nameplate rect,.aw-village .aw-v-site:focus-visible .aw-v-nameplate rect{stroke:#b98a50;stroke-width:3}
       .aw-village [role=button]:focus-visible>rect:first-of-type{stroke:#d9b76a;stroke-width:3;stroke-dasharray:4 4}
-      .aw-village .aw-v-water{animation:aw-v-water 5s steps(4,end) infinite alternate}.aw-village[data-motion=false] *{animation:none!important}
+      .aw-village [role=button]:focus{outline:none}.aw-village .aw-v-water{animation:aw-v-water 5s steps(4,end) infinite alternate}.aw-village[data-motion=false] *{animation:none!important}
       @keyframes aw-v-water{to{transform:translateX(4px)}}@media(prefers-reduced-motion:reduce){.aw-village *{animation:none!important}}
     `}</style>; }

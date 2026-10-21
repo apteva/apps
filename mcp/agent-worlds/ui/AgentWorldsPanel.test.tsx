@@ -29,7 +29,7 @@ const click=async(label:string)=>act(async()=>{
 const crumb=()=>host.querySelector(".aw-breadcrumbs")!.textContent;
 const poll=async()=>act(async()=>{const entry=[...timers].find(([,t])=>t.delay===2500);expect(entry).toBeTruthy();timers.delete(entry![0]);entry![1].callback();});
 afterAll(async()=>{await act(async()=>root.unmount());globalThis.fetch=originalFetch;await GlobalRegistrator.unregister();});
-test("Village shares project/team/agent focus, replay and pagination with all renderers",async()=>{
+test("Agent inspection keeps peers, camera, replay and pagination intact in every renderer",async()=>{
  await act(async()=>root.render(React.createElement(Panel,{installId:1})));
  expect(pending.length).toBe(1);
  await act(async()=>pending[0].resolve(response()));
@@ -54,12 +54,29 @@ test("Village shares project/team/agent focus, replay and pagination with all re
  expect(host.querySelectorAll('[data-world-node="project"]').length).toBe(3);
  await click("Zoom into project Growth");
  expect(crumb()).toContain("Growth");
+ const districts=host.querySelectorAll('.aw-canvas [data-world-node]').length;
+ for(const preset of ["System graph","Operations","Pixel village"]){
+  await click(preset);const beforeSelection=crumb(),box=host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox');
+  await click('Inspect agent Writer');
+  expect(host.querySelector('[data-agent-details="3"]')).toBeTruthy();
+  expect(host.querySelector('aside[aria-label="Agent details"] h2')!.textContent).toBe('Writer');
+  expect(host.querySelectorAll('.aw-canvas [data-world-node]').length).toBe(districts);
+  expect(crumb()).toBe(beforeSelection);expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(box);
+  await click('Close details');expect(host.querySelector('.aw-sidebar')).toBeNull();
+ }
  await click("Zoom into team Coordinator + 1");
  expect(crumb()).toContain("Observed team");
  expect(host.querySelector('svg[aria-label="Pixel village of live agents"]')).toBeTruthy();
- await click("Focus agent Researcher");
- expect(crumb()).toContain("Researcher");
  const before=crumb();
+ await click('Zoom in visualization');const teamCamera=host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox');
+ await click("Inspect agent Researcher");
+ expect(crumb()).toBe(before);
+ expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
+ expect(host.querySelector('.aw-side-threads')!.textContent).toContain('research-worker');
+ expect(host.querySelector('.aw-side-activity')!.textContent).toContain('called crm_search');
+ expect(host.querySelector('.aw-side-activity')!.textContent).not.toContain('sent a message');
+ expect(host.querySelectorAll('.aw-canvas [aria-label^="Inspect agent"]').length).toBe(2);
+ expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(teamCamera);
  await poll(); // a request already in flight when the user pauses
  const clockBeforePause=host.querySelector(".aw-village")!.getAttribute("data-clock");
  const positionsBeforePause=[...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")]);
@@ -67,7 +84,14 @@ test("Village shares project/team/agent focus, replay and pagination with all re
  expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
  expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
  const range=host.querySelector('input[type="range"]')!;
- for(const preset of ["System graph","Operations","Pixel village"]){await click(preset);expect(crumb()).toBe(before);expect(host.querySelector('input[type="range"]')).toBe(range);}
+ for(const preset of ["System graph","Operations","Pixel village"]){
+  await click(preset);expect(crumb()).toBe(before);expect(host.querySelector('input[type="range"]')).toBe(range);
+  expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
+  expect(host.querySelectorAll('.aw-canvas [aria-label^="Inspect agent"]').length).toBe(2);
+  await click('Inspect agent Coordinator');expect(host.querySelector('[data-agent-details="1"]')).toBeTruthy();
+  expect(host.querySelector('.aw-side-threads')!.textContent).toContain('coordinator-main');
+  await click('Inspect agent Researcher');
+ }
  expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
  expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
  // Late network responses may not mutate a paused world or reset its cursor.
@@ -75,14 +99,19 @@ test("Village shares project/team/agent focus, replay and pagination with all re
  await act(async()=>pending[1].resolve(response()));
  expect(crumb()).toBe(before);expect(host.textContent).not.toContain("Changed while paused");
  const count=pending.length;await poll();expect(pending.length).toBe(count);
- await click("Zoom out");expect(crumb()).not.toContain("Researcher");expect(crumb()).toContain("Observed team");
+ await act(async()=>window.dispatchEvent(new win.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
+ expect(host.querySelector('.aw-sidebar')).toBeNull();expect(crumb()).toBe(before);
+ expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(teamCamera);
  await click("Growth");
  await click("Paused");
  latest={...fixture,events:[]};await poll();await act(async()=>pending.at(-1)!.resolve(response()));
  expect(host.querySelectorAll('[data-world-node="team"]').length).toBe(0);
- expect(host.querySelectorAll('svg [aria-label^="Focus agent"]').length).toBe(6);
- await click("Next");expect(host.querySelectorAll('svg [aria-label^="Focus agent"]').length).toBe(2);
+ expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(6);
+ await click("Next");expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(2);
+ await click('Inspect agent Agent 7');expect(host.querySelector('[data-agent-details="7"]')).toBeTruthy();
+ expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(2);
  await click("Operations");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
+ expect(host.querySelector('[data-agent-details="7"]')).toBeTruthy();
  await click("Pixel village");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
  // Switching installation aborts the previous source and resets its scope.
  await poll();const inflight=pending.at(-1)!;
@@ -90,5 +119,5 @@ test("Village shares project/team/agent focus, replay and pagination with all re
  expect(inflight.signal.aborted).toBe(true);
  latest={...fixture,scope:"project",projects:[fixture.projects![0]],agents:fixture.agents.slice(0,8)};
  await act(async()=>pending.at(-1)!.resolve(response()));
- expect(crumb()).not.toContain("Instance");expect(crumb()).toContain("Growth");
+ expect(crumb()).not.toContain("Instance");expect(crumb()).toContain("Growth");expect(host.querySelector(".aw-sidebar")).toBeNull();
 });

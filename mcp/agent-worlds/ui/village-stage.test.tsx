@@ -25,7 +25,7 @@ describe("procedural open-house village",()=>{
  });
  test("a visiting agent is painted above the open room rather than hidden behind it",()=>{
   const html=render({now:now+12000,agents:fixture.agents.slice(0,2),destinations:fixture.destinations});
-  expect(html).toContain('data-agent-id="2" data-visit-destination="growth:app:crm"');
+  expect(html).toMatch(/data-agent-id="2"[^>]*data-visit-destination="growth:app:crm"/);
   expect(html.indexOf('data-agent-id="2"')).toBeGreaterThan(html.indexOf('aria-label="Inspect destination CRM"'));
  });
  test("districts and teams use the same open houses and focus semantics",()=>{
@@ -52,7 +52,7 @@ describe("procedural open-house village",()=>{
   expect(block("product")).not.toContain('data-agent-id="2"');
   expect(block("empty")).not.toContain('data-cutaway="open"');
   expect(block("empty")).not.toContain('data-agent-id=');
-  expect(html).not.toContain('aria-label="Focus agent');
+  expect(html).not.toContain('aria-label="Inspect agent');
   expect(html).not.toContain('aria-label="Inspect destination');
   expect((html.match(/aria-label="Zoom into project/g)||[]).length).toBe(3);
   expect(html).toContain("Each village is a project");
