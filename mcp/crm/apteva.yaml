@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.24
+version: 0.9.25
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -100,9 +100,9 @@ provides:
       description: Read-only project attribute definitions with keys, types, required flags and allowed enum_values, including built-in defaults without writes. Use before updating or promoting researched contacts.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
-      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. Existing email conversations inherit Re: <original subject> when subject is omitted/blank, before idempotency calculation; explicit nonblank subjects are preserved and unresolved blanks rejected. New standalone emails require a subject unless supplied by a template. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading and inherit Re: <original subject> if omitted/blank; preserve explicit nonblank subjects and reject unresolved blanks before dispatch and idempotency. Deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
     - name: contacts_send_test
       description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
@@ -509,7 +509,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.24
+    ref: crm/v0.9.25
     entry: mcp/crm
   port: 8080
   health_check: /health

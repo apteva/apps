@@ -160,6 +160,13 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Replies use the inbound message's Reply-To/From and receiving identity. Use
   `reply_to_activity_id` for a specific inbound message; do not work around a
   blocked reply route by silently sending to a different address.
+- Both `contacts_send_message` with an email `conversation_id` and
+  `contacts_reply` inherit `Re: <original subject>` for omitted/blank subject,
+  before dispatch and automatic idempotency. Existing Re: prefixes are not
+  duplicated. Nonblank explicit subjects are preserved; if the conversation
+  subject is also blank, supply an explicit subject instead of accepting a
+  subjectless send. Standalone templates still own their Messaging subject.
+  Never resend earlier deliveries merely to repair their subject.
 - For an explicitly requested SMS fallback to WhatsApp, call `contacts_reply`
   with `channel: "sms"`, `conversation_id`, and a verified SMS `from` from
   `messaging_senders_list`. It keeps the exact inbound phone and conversation;

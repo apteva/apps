@@ -466,12 +466,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, OMIT template_id, content_sid, template_vars, and other unused optional fields. A message may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, OMIT template_id, content_sid, template_vars, and other unused optional fields. A message may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject (standalone templates supply their own). With an email conversation_id, omitted or whitespace-only subject inherits Re: <original subject> without duplicating an existing Re: prefix; nonblank explicit subjects are preserved and unresolved blank subjects are rejected. Reply headers and subject are preserved for both this route and contacts_reply. Subject resolution happens before automatic idempotency calculation. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":                     map[string]any{"type": "integer", "minimum": 1},
 				"body":                   map[string]any{"type": "string"},
 				"channel":                map[string]any{"type": "string"},
-				"subject":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string", "description": "Email subject. With conversation_id, omitted/blank inherits Re: <original subject>; nonblank explicit subjects are preserved. If the conversation has no nonblank subject, supply one explicitly. New standalone email templates retain their Messaging-rendered subject."},
 				"body_html":              map[string]any{"type": "string"},
 				"from":                   map[string]any{"type": "string"},
 				"list_id":                map[string]any{"type": "integer"},
@@ -496,7 +496,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"body":                   map[string]any{"type": "string"},
 				"conversation_id":        map[string]any{"type": "integer"},
 				"reply_to_activity_id":   map[string]any{"type": "integer", "minimum": 1},
-				"subject":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string", "description": "Email subject. Omitted/blank inherits Re: <original subject> from the selected conversation without duplicating Re:. Nonblank explicit subjects are preserved; if the conversation subject is also blank, an explicit subject is required. Resolved before dispatch and automatic idempotency calculation."},
 				"body_html":              map[string]any{"type": "string"},
 				"from":                   map[string]any{"type": "string"},
 				"list_id":                map[string]any{"type": "integer"},

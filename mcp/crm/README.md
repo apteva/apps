@@ -1,4 +1,10 @@
-# CRM v0.9.24
+# CRM v0.9.25
+
+Release `crm/v0.9.25`: shared email subject inheritance for `contacts_send_message` and
+`contacts_reply`. Subject resolution precedes dispatch and automatic idempotency;
+explicit nonblank subjects are unchanged and unresolved blanks are rejected.
+SDK pin updated to v0.102.0 by commit topology. No migrations or Messaging
+changes; previously delivered emails are not rewritten or resent.
 
 Release `crm/v0.9.24`: adds the explicitly read-only MCP tool
 `contacts_attribute_definitions_list` to discover project attribute keys, types,
@@ -330,6 +336,17 @@ anchors, status, revision, authorship, attachments and durable retry state;
 it does not rewrite existing messages or conversations.
 
 ### Delivery and routing
+
+Both `contacts_send_message` with an existing email `conversation_id` and
+`contacts_reply` inherit `Re: <original subject>` when subject is omitted, empty
+or whitespace-only. An existing `Re:` prefix is recognized case-insensitively
+and is not duplicated. Nonblank explicit subjects remain unchanged. If the
+conversation has no nonblank subject, supply one explicitly, including when
+using a template in that existing conversation. Reply headers are retained.
+Resolution occurs before automatic idempotency calculation, so equivalent
+inherited and explicit subjects deduplicate across both tools. Standalone email
+templates still supply their subject through Messaging; SMS/WhatsApp behavior is
+unchanged. This does not rewrite or resend previously delivered messages.
 
 Bind Messaging in the platform's integration settings. Reading CRM Settings is
 read-only. Explicit routing repair uses CRM's `/messaging/routes` backend to set
