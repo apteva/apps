@@ -115,6 +115,8 @@ func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			config[key] = value
 		}
 	}
+	config["browser"] = selected.Browser
+	config["required_explicit_inputs"] = selected.RequiredExplicitInputs
 	if selected.Recovery != nil {
 		config["recovery"] = selected.Recovery
 	}
@@ -182,10 +184,17 @@ func actorOperationInputs(def actorDefinition) map[string]any {
 			}
 		}
 	}
+	for _, key := range def.RequiredExplicitInputs {
+		requiredKeys[key] = true
+	}
+	explicit := map[string]bool{}
+	for _, key := range def.RequiredExplicitInputs {
+		explicit[key] = true
+	}
 	missing := func(vars map[string]any) []string {
 		out := []string{}
 		for key := range requiredKeys {
-			if _, ok := actorVariable(vars, key); !ok {
+			if _, ok := actorVariable(vars, key); !ok || explicit[key] {
 				out = append(out, key)
 			}
 		}
@@ -201,7 +210,7 @@ func actorOperationInputs(def actorDefinition) map[string]any {
 	for name, values := range def.Presets {
 		byPreset[name] = missing(mergeActorMaps(def.Defaults, values))
 	}
-	return map[string]any{"template_variables": references, "required_inputs": missing(def.Defaults), "required_inputs_by_preset": byPreset, "assertion_steps": assertions, "precedence": []string{"defaults", "preset", "schedule_overrides", "input"}}
+	return map[string]any{"required_explicit_inputs": def.RequiredExplicitInputs, "template_variables": references, "required_inputs": missing(def.Defaults), "required_inputs_by_preset": byPreset, "assertion_steps": assertions, "precedence": []string{"defaults", "preset", "schedule_overrides", "input"}}
 }
 
 func actorOperationLimits(limits actorLimits) map[string]any {

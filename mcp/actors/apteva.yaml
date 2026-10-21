@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.43
+version: 0.2.44
 description: |
+  v0.2.44 adds operation-specific browser isolation and required explicit
+  inputs, checked before allocating a browser. Secret-backed fills resolve encrypted
+  install settings by project, context, HTTPS host and expiry without saving raw inputs.
   v0.2.43 refreshes targeted scroll observations, verifies the named region,
   and forwards its current semantic revision before dispatch.
   v0.2.42 forwards explicit scroll-region targets and optional name/role guards
@@ -116,7 +119,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.43
+    ref: actors/v0.2.44
     entry: mcp/actors
   port: 8080
   health_check: /health
@@ -125,6 +128,10 @@ db:
   path: /data/actors.db
   migrations: migrations/
 config_schema:
+  - name: browser_secrets
+    type: secret
+    label: Browser secret references
+    description: "Operator-managed JSON map of project ID to secret references. Each entry requires value, context_id, exact HTTPS host and expires_at (RFC3339). Stored in encrypted install settings; never put raw credentials in actor definitions or run input."
   - name: allow_private_networks
     type: bool
     default: false

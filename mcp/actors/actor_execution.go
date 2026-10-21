@@ -28,6 +28,8 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
+	secretNavigation     bool
+	secretInputUsed      bool
 	jsonEvidence         map[string]any
 	claimedReadRef       string
 	activeReadDiagnostic *actorReadDiagnostic
@@ -416,7 +418,7 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	} else if runErr != nil {
 		status = "failed"
 	}
-	if exec.session != nil {
+	if exec.session != nil && !exec.secretInputUsed {
 		if shot, shotErr := exec.storeCurrentScreenshot("final browser state"); shotErr == nil {
 			exec.screenshot = shot
 		} else {
@@ -532,6 +534,12 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	if err := json.Unmarshal([]byte(run.InputJSON), &runInput); err != nil {
 		return nil, fmt.Errorf("decode run input: %w", err)
 	}
+	for _, key := range def.RequiredExplicitInputs {
+		value, exists := runInput.Input[key]
+		if !exists || value == nil || (reflect.TypeOf(value).Kind() == reflect.String && strings.TrimSpace(value.(string)) == "") {
+			return nil, fmt.Errorf("explicit input %q is required; defaults, presets and schedule overrides cannot supply it", key)
+		}
+	}
 	vars := mergeActorMaps(nil, def.Defaults)
 	if runInput.Preset != "" {
 		preset, ok := def.Presets[runInput.Preset]
@@ -606,7 +614,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		var err error
 		for attempt := 0; attempt <= e.retries; attempt++ {
 			err = e.runStep(step)
-			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
+			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
 			if attempt < e.retries {
@@ -720,6 +728,10 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.clickVerified(step)
 	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "type", "key", "scroll":
 		return e.interact(step)
+	case "goto_secret":
+		return e.gotoSecret(step)
+	case "fill_secret":
+		return e.fillSecret(step)
 	case "upload_file":
 		return e.upload(step)
 	case "wait_for":
@@ -1375,6 +1387,9 @@ func (e *actorExecution) addTrace(action, status, message string, data map[strin
 }
 
 func (e *actorExecution) persistProgress(message string) error {
+	if e.secretNavigation {
+		return nil
+	}
 	progress := map[string]any{
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
@@ -1400,6 +1415,9 @@ func (e *actorExecution) persistProgress(message string) error {
 }
 
 func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary, error) {
+	if e.secretInputUsed {
+		return nil, errors.New("screenshots disabled after secret input")
+	}
 	if e.session == nil {
 		return nil, errors.New("screenshot requires an open browser")
 	}

@@ -39,19 +39,20 @@ const (
 )
 
 type actorDefinition struct {
-	RecoveryOnly  bool                      `json:"recovery_only,omitempty"`
-	ReadOnly      bool                      `json:"read_only,omitempty"`
-	Recovery      *actorRecoveryPolicy      `json:"recovery,omitempty"`
-	Operations    map[string]actorOperation `json:"operations,omitempty"`
-	SchemaVersion int                       `json:"schema_version"`
-	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
-	Defaults      map[string]any            `json:"defaults,omitempty"`
-	Presets       map[string]map[string]any `json:"presets,omitempty"`
-	Browser       actorBrowser              `json:"browser"`
-	AllowedHosts  []string                  `json:"allowed_hosts"`
-	Limits        actorLimits               `json:"limits"`
-	Steps         []actorStep               `json:"steps"`
-	OutputSchema  map[string]string         `json:"output_schema"`
+	RequiredExplicitInputs []string                  `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                      `json:"recovery_only,omitempty"`
+	ReadOnly               bool                      `json:"read_only,omitempty"`
+	Recovery               *actorRecoveryPolicy      `json:"recovery,omitempty"`
+	Operations             map[string]actorOperation `json:"operations,omitempty"`
+	SchemaVersion          int                       `json:"schema_version"`
+	Crawl                  *crawlDefinition          `json:"crawl,omitempty"`
+	Defaults               map[string]any            `json:"defaults,omitempty"`
+	Presets                map[string]map[string]any `json:"presets,omitempty"`
+	Browser                actorBrowser              `json:"browser"`
+	AllowedHosts           []string                  `json:"allowed_hosts"`
+	Limits                 actorLimits               `json:"limits"`
+	Steps                  []actorStep               `json:"steps"`
+	OutputSchema           map[string]string         `json:"output_schema"`
 }
 
 type actorBrowser struct {
@@ -74,6 +75,7 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	SecretRef          string                `json:"secret_ref,omitempty"`
 	Reveal             *actorReveal          `json:"reveal,omitempty"`
 	URLFromField       string                `json:"url_from_field,omitempty"`
 	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
@@ -299,6 +301,13 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	seenInputs := map[string]bool{}
+	for _, name := range def.RequiredExplicitInputs {
+		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) || seenInputs[name] {
+			return fmt.Errorf("invalid or duplicate required explicit input %q", name)
+		}
+		seenInputs[name] = true
+	}
 	if def.Recovery != nil {
 		if err := recoveryPolicyValid(def.Recovery); err != nil {
 			return err
@@ -348,6 +357,10 @@ func validateActorDefinition(def actorDefinition) error {
 			if operation.Limits != nil {
 				selected.Limits = *operation.Limits
 			}
+			if operation.Browser != nil {
+				selected.Browser = *operation.Browser
+			}
+			selected.RequiredExplicitInputs = append(append([]string{}, def.RequiredExplicitInputs...), operation.RequiredExplicitInputs...)
 			selected.Recovery = operation.Recovery
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
@@ -444,7 +457,18 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
 			}
 		}
+		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" {
+			return fmt.Errorf("steps[%d].secret_ref requires fill_secret or goto_secret", i)
+		}
 		switch step.Action {
+		case "goto_secret":
+			if strings.TrimSpace(step.SecretRef) == "" || step.URL != "" || step.Text != "" || step.Optional {
+				return fmt.Errorf("steps[%d]: goto_secret requires secret_ref without literal URL, text or optional", i)
+			}
+		case "fill_secret":
+			if !locatorHasTarget(step.Locator) || strings.TrimSpace(step.SecretRef) == "" || step.Text != "" || step.Value != "" || step.Optional || step.Mode != "" || step.NewlineMode != "" {
+				return fmt.Errorf("steps[%d]: fill_secret requires a locator and secret_ref, without literal text, value, optional or mode", i)
+			}
 		case "reveal_control":
 			if err := validateActorReveal(step); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)

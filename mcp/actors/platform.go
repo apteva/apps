@@ -28,12 +28,14 @@ func (e *actorExecution) lockContext() error {
 }
 
 type actorOperation struct {
-	RecoveryOnly bool                 `json:"recovery_only,omitempty"`
-	Recovery     *actorRecoveryPolicy `json:"recovery,omitempty"`
-	Limits       *actorLimits         `json:"limits,omitempty"`
-	ReadOnly     bool                 `json:"read_only,omitempty"`
-	Steps        []actorStep          `json:"steps"`
-	OutputSchema map[string]string    `json:"output_schema"`
+	Browser                *actorBrowser        `json:"browser,omitempty"`
+	RequiredExplicitInputs []string             `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                 `json:"recovery_only,omitempty"`
+	Recovery               *actorRecoveryPolicy `json:"recovery,omitempty"`
+	Limits                 *actorLimits         `json:"limits,omitempty"`
+	ReadOnly               bool                 `json:"read_only,omitempty"`
+	Steps                  []actorStep          `json:"steps"`
+	OutputSchema           map[string]string    `json:"output_schema"`
 }
 
 func selectOperation(def actorDefinition, name string) (actorDefinition, error) {
@@ -53,6 +55,10 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	if op.Limits != nil {
 		def.Limits = *op.Limits
 	}
+	if op.Browser != nil {
+		def.Browser = *op.Browser
+	}
+	def.RequiredExplicitInputs = append(append([]string{}, def.RequiredExplicitInputs...), op.RequiredExplicitInputs...)
 	def.Recovery = op.Recovery
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
