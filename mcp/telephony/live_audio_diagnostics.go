@@ -6,6 +6,7 @@ import (
 	"math"
 	"runtime/metrics"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -350,17 +351,25 @@ func sampleMediaProcess() mediaProcessSnapshot {
 
 // Pacer counters survive eviction of the bounded diagnostic event sample.
 type livePacerSnapshot struct {
-	SentMS       int64            `json:"sent_ms"`
-	DroppedMS    int64            `json:"dropped_ms"`
-	DropTotalsMS map[string]int64 `json:"drop_totals_ms"`
-	MaxQueueMS   int              `json:"max_queue_ms"`
-	MaxWriteMS   int64            `json:"max_write_ms"`
+	MaxSourceAgeMS int64            `json:"max_source_age_ms,omitempty"`
+	MaxResidenceMS int64            `json:"max_residence_ms,omitempty"`
+	SentMS         int64            `json:"sent_ms"`
+	DroppedMS      int64            `json:"dropped_ms"`
+	DropTotalsMS   map[string]int64 `json:"drop_totals_ms"`
+	MaxQueueMS     int              `json:"max_queue_ms"`
+	MaxWriteMS     int64            `json:"max_write_ms"`
 }
 type livePacerStats struct {
-	mu    sync.Mutex
-	value livePacerSnapshot
+	maxSourceAge atomic.Int64
+	maxResidence atomic.Int64
+	mu           sync.Mutex
+	value        livePacerSnapshot
 }
 
+func (p *livePacerStats) observeAge(source, residence time.Duration) {
+	atomicMax(&p.maxSourceAge, source.Milliseconds())
+	atomicMax(&p.maxResidence, residence.Milliseconds())
+}
 func (p *livePacerStats) dropped(reason string, ms int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -388,6 +397,8 @@ func (p *livePacerStats) snapshot() livePacerSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s := p.value
+	s.MaxSourceAgeMS = p.maxSourceAge.Load()
+	s.MaxResidenceMS = p.maxResidence.Load()
 	s.DropTotalsMS = map[string]int64{}
 	for k, v := range p.value.DropTotalsMS {
 		s.DropTotalsMS[k] = v

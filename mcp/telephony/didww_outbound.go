@@ -123,6 +123,7 @@ type outboundSIPSession struct {
 	cancel         context.CancelFunc
 	dialDeadline   time.Time
 	maxDuration    time.Duration
+	peerEnded      atomic.Bool
 	ended          atomic.Bool
 	mediaReady     atomic.Bool
 	signalMu       sync.Mutex
@@ -319,13 +320,10 @@ func (s *outboundSIPSession) waitAnswer() {
 			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
 			s.signalMu.Lock()
 			err := s.dialog.Bye(byeCtx)
-			s.terminationErr = err
+			s.terminationErr = sipTerminationResult(s.diagnostics, err,
+				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded)
 			s.signalMu.Unlock()
-			if err != nil {
-				s.diagnostics.event("sip_bye_result", "local", transportEvidenceError(err), 0)
-			} else {
-				s.diagnostics.event("sip_bye_result", "local", "", 200)
-			}
+
 			stopBye()
 		}
 		close(s.inviteDone)

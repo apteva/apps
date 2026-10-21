@@ -64,6 +64,7 @@ type sipSession struct {
 	local          sipLocalRuntime
 	recorder       atomic.Pointer[localCallRecorder]
 	answerMu       sync.Mutex
+	peerEnded      atomic.Bool // Set only after a validated in-dialog carrier BYE.
 	ended          atomic.Bool
 	mediaOnce      sync.Once
 	bridgeStarted  atomic.Bool
@@ -361,6 +362,7 @@ func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
 				_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 				return
 			}
+			outbound.peerEnded.Store(true)
 			outbound.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
 			outbound.finish("carrier", nil)
 			return
@@ -374,10 +376,9 @@ func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 			return
 		}
-		if session := g.sessionByProviderCall(providerCallID); session != nil {
-			session.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
-			session.finish("carrier", nil)
-		}
+		session.peerEnded.Store(true)
+		session.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
+		session.finish("carrier", nil)
 	}))
 	server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		// Matched CANCEL is handled by sipgo's INVITE transaction. An
@@ -744,11 +745,8 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 			s.answerMu.Unlock()
 			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
 			signalingErr = s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
-			if signalingErr != nil {
-				s.diagnostics.event("sip_bye_result", "local", transportEvidenceError(signalingErr), 0)
-			} else {
-				s.diagnostics.event("sip_bye_result", "local", "", 200)
-			}
+			signalingErr = sipTerminationResult(s.diagnostics, signalingErr,
+				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded)
 			cancel()
 			s.signalMu.Unlock()
 		} else if s.inviteTx != nil && s.dialog.LoadState() != sip.DialogStateEnded {
