@@ -183,10 +183,10 @@ func configureMembershipUpload(t *testing.T, pf *membershipPlatform) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
-		w.Write([]byte{0, 1, 2, 3, 4, 5})
+		w.Write(testMP4)
 	}))
 	t.Cleanup(server.Close)
-	meta, _ := json.Marshal(map[string]any{"id": 1, "content_type": "video/mp4", "name": "video.mp4", "size_bytes": 6})
+	meta, _ := json.Marshal(map[string]any{"id": 1, "content_type": "video/mp4", "name": "video.mp4", "size_bytes": len(testMP4)})
 	loc, _ := json.Marshal(map[string]any{"url": server.URL + "/video"})
 	pf.callAppResponses["storage:files_get"] = meta
 	pf.callAppResponses["storage:files_get_url"] = loc
@@ -233,7 +233,7 @@ func TestMembershipPublishStagesUnlistedAndResumesFromRange(t *testing.T) {
 			t.Fatal(call)
 		}
 		if call.Tool == "upload_video_init" {
-			if call.Input["status"].(map[string]any)["privacyStatus"] != "unlisted" || call.Input["upload_content_length"] != int64(6) || call.Input["snippet"].(map[string]any)["categoryId"] != "22" {
+			if call.Input["status"].(map[string]any)["privacyStatus"] != "unlisted" || call.Input["upload_content_length"] != int64(len(testMP4)) || call.Input["snippet"].(map[string]any)["categoryId"] != "22" {
 				t.Fatal(call)
 			}
 		}
@@ -241,11 +241,11 @@ func TestMembershipPublishStagesUnlistedAndResumesFromRange(t *testing.T) {
 			chunks = append(chunks, call)
 		}
 	}
-	if len(chunks) != 2 || chunks[0].Input["content_range"] != "bytes 0-5/6" || chunks[1].Input["content_range"] != "bytes 3-5/6" {
+	if len(chunks) != 2 || chunks[0].Input["content_range"] != "bytes 0-23/24" || chunks[1].Input["content_range"] != "bytes 3-23/24" {
 		t.Fatal(chunks)
 	}
 	bytes, _ := base64.StdEncoding.DecodeString(chunks[1].Input["video"].(map[string]any)["base64"].(string))
-	if string(bytes) != string([]byte{3, 4, 5}) {
+	if string(bytes) != string(testMP4[3:]) {
 		t.Fatal(bytes)
 	}
 	scheduled := a.publishScheduledPost(ctx, "test-proj", postID)

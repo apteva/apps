@@ -30,6 +30,10 @@ type publishFailure struct {
 
 func classifyPublishFailure(err error) publishFailure {
 	failure := publishFailure{Code: "upstream_error", Retryable: true}
+	var source *sourceDeliveryError
+	if errors.As(err, &source) {
+		return publishFailure{Code: "source_delivery", Retryable: source.Transient}
+	}
 	var resumable *youtubeUploadRetryError
 	if errors.As(err, &resumable) {
 		return publishFailure{Code: "upload_incomplete", Retryable: true}
