@@ -9,7 +9,7 @@ import (
 
 func TestNamedOperationCapacityPreservesLargeDefinitions(t *testing.T) {
 	d := actorDefinition{SchemaVersion: 1, AllowedHosts: []string{"example.com"}, Operations: map[string]actorOperation{}}
-	for i := 0; i < 100; i++ {
+	for i := 0; i < maxActorOperations; i++ {
 		d.Operations[fmt.Sprintf("operation_%d", i)] = actorOperation{Steps: []actorStep{{Action: "wait", Duration: 1}}}
 	}
 	if err := validateActorDefinition(d); err != nil {

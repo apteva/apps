@@ -115,8 +115,20 @@ func (e *actorExecution) interact(step actorStep) error {
 				}
 				return nil
 			}
-		} else if len(step.Values) > 0 && step.Action == "select_option" {
-			args["values"] = step.Values
+		} else if step.Action == "select_option" {
+			switch {
+			case len(step.Values) > 0:
+				args["values"] = step.Values
+			case len(step.Texts) > 0:
+				args["texts"] = step.Texts
+			case step.Text != "":
+				args["text"] = step.Text
+			default:
+				args["value"] = step.Value
+			}
+			if step.Mode != "" {
+				args["mode"] = step.Mode
+			}
 		} else {
 			args["value"] = step.Value
 		}

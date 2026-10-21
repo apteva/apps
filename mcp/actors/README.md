@@ -180,7 +180,9 @@ preset.
 
 ## Verified record and media recovery (0.2.19)
 
-Definitions support up to 100 named operations within the existing byte limit.
+Definitions support up to 500 named operations within the existing 1 MiB definition limit. This does not raise the 100-step limit for an individual operation or its runtime/dataset limits. Use `actors_get` with an exact revision and `operation` to retrieve only the operation needed for execution.
+
+`select_option` accepts exactly one of `value`, `values`, `text` or `texts`, so browser dropdowns can be selected using either internal values or observed display labels. Optional `mode` is forwarded to Computer (`replace`, `add`, `remove` or `toggle`); it defaults to Computer's normal replace behavior.
 A write operation may declare an `inspect_views` step with `read_only:true`;
 scoped read-only steps reject writes at validation and execution.
 `select_record` requires complete `inspect_views` coverage and selects exactly

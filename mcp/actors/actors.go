@@ -27,6 +27,7 @@ const (
 	maxActorItems           = 100000
 	maxActorSeconds         = 3600
 	maxActorSteps           = 100
+	maxActorOperations      = 500
 	maxActorTraceEvents     = 500
 	maxActorPreviewItems    = 20
 	maxActorFields          = 100
@@ -115,6 +116,7 @@ type actorStep struct {
 	Labels      any                  `json:"labels,omitempty"`
 	Value       string               `json:"value,omitempty"`
 	Values      []string             `json:"values,omitempty"`
+	Texts       []string             `json:"texts,omitempty"`
 	Readability *bool                `json:"readability,omitempty"`
 	OnceKey     string               `json:"once_key,omitempty"`
 	OnceScope   string               `json:"once_scope,omitempty"`
@@ -326,8 +328,11 @@ func validateActorDefinition(def actorDefinition) error {
 		return nil
 	}
 	if len(def.Operations) > 0 {
-		if len(def.Steps) > 0 || len(def.Operations) > 100 {
-			return errors.New("use either steps or up to 100 named operations")
+		if len(def.Steps) > 0 {
+			return errors.New("use either steps or named operations")
+		}
+		if len(def.Operations) > maxActorOperations {
+			return fmt.Errorf("definition.operations exceeds the %d named operation limit", maxActorOperations)
 		}
 		for name, operation := range def.Operations {
 			if !operationNamePattern.MatchString(name) {
@@ -499,7 +504,20 @@ func validateActorDefinition(def actorDefinition) error {
 				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
 					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
 				}
-			} else if step.Value == "" && (step.Action != "select_option" || len(step.Values) == 0) {
+			} else if step.Action == "select_option" {
+				choices := 0
+				for _, present := range []bool{step.Value != "", len(step.Values) > 0, step.Text != "", len(step.Texts) > 0} {
+					if present {
+						choices++
+					}
+				}
+				if choices != 1 {
+					return fmt.Errorf("steps[%d].select_option requires exactly one of value, values, text or texts", i)
+				}
+				if step.Mode != "" && !actorTemplateValue(step.Mode) && step.Mode != "replace" && step.Mode != "add" && step.Mode != "remove" && step.Mode != "toggle" {
+					return fmt.Errorf("steps[%d].select_option mode must be replace, add, remove or toggle", i)
+				}
+			} else if step.Value == "" {
 				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
 			}
 		case "upload_file":
