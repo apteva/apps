@@ -53,6 +53,9 @@ func (l *callListener) diagnostics() map[string]any {
 		result["media_transport"] = "webrtc"
 		result["rtp"] = map[string]rtcMediaSnapshot{"caller": l.rtc.stats[0].snapshot(), "adviser": l.rtc.stats[1].snapshot()}
 		result["coach_rtp"] = l.rtc.coachStats.snapshot()
+		if l.rtc.ice != nil {
+			result["ice_events"] = l.rtc.ice.snapshot()
+		}
 	} else {
 		result["media_transport"] = "websocket"
 	}
@@ -531,6 +534,27 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, 400, map[string]any{"code": "unsupported_media_transport"})
 		return
 	}
+	if transport != "webrtc" {
+		var principal string
+		if err = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal); err != nil {
+			http.Error(w, "listener policy unavailable", 503)
+			return
+		}
+		var identity phoneIdentity
+		if principal != "" && (json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid()) {
+			http.Error(w, "listener identity invalid", 403)
+			return
+		}
+		policy, e := a.resolvedTURNPolicy(row.ProjectID, identity, r.URL.Query())
+		if e != nil {
+			http.Error(w, "relay policy unavailable", 503)
+			return
+		}
+		if policy.ICEPolicy == "relay" {
+			writeJSONStatus(w, 426, map[string]any{"code": "turn_relay_required", "message": "Select WebRTC for the required relay policy"})
+			return
+		}
+	}
 	var rtcConfig softphoneRTCConfig
 	if transport == "webrtc" {
 		config := map[string]string{}
@@ -548,6 +572,23 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if transport == "webrtc" {
+		var principal string
+		if err = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal); err != nil {
+			http.Error(w, "listener unavailable", 503)
+			return
+		}
+		var identity phoneIdentity
+		if principal != "" && (json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid()) {
+			http.Error(w, "listener identity invalid", 403)
+			return
+		}
+		if err = a.configureManagedTURN(&rtcConfig, row, token, identity, true, r.URL.Query()); err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_turn_policy", "message": err.Error()})
+			return
+		}
+	}
+
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		return

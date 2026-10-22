@@ -6,6 +6,7 @@ import { loadAudioAsset, loadAudioModules, type AudioModules } from "./audio-ass
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions, type SoftphoneAudioOptions, PreviewResampler } from "../../ui/softphone-audio";
 
 export interface ListenerDiagnostics {
+  session_events?: import("./media-lease").MediaSessionEvent[];
   media_transport?: "websocket" | "webrtc";
   webrtc?: ReturnType<typeof import("./webrtc-audio").rtcStatistics>["webrtc"];
   dropped_ms: number[];
@@ -34,7 +35,7 @@ export interface ListenerPlaybackOptions extends Partial<SoftphoneAudioOptions> 
 
 /** A snapshot of the shared softphone profile, optionally overridden per listener. */
 export function listenerAudioOptions(defaults:Partial<SoftphoneAudioOptions> = {}, override:ListenerPlaybackOptions = {}): ListenerPlaybackOptions {
- const keys:[keyof ListenerPlaybackOptions,...Array<keyof ListenerPlaybackOptions>]=["mediaTransport","webrtcFec","inputDeviceId","outputDeviceId","outputVolume","echoCancellation","noiseSuppression","autoGainControl","inputGainDB","highpassFilter","playbackTargetMs","playbackMinMs","playbackMaxMs","playbackAdaptive","stereo"];
+ const keys:[keyof ListenerPlaybackOptions,...Array<keyof ListenerPlaybackOptions>]=["turnTransport","iceTransportPolicy","turnTLSPort","mediaTransport","webrtcFec","inputDeviceId","outputDeviceId","outputVolume","echoCancellation","noiseSuppression","autoGainControl","inputGainDB","highpassFilter","playbackTargetMs","playbackMinMs","playbackMaxMs","playbackAdaptive","stereo"];
  const result:ListenerPlaybackOptions={...DEFAULT_SOFTPHONE_AUDIO_OPTIONS};
  for(const source of [defaults,override])for(const key of keys){const value=(source as ListenerPlaybackOptions)[key];if(value!==undefined)(result as Record<string,unknown>)[key]=value;}
  playbackBufferOptions(result);result.mediaTransport=mediaTransport(result.mediaTransport);
@@ -44,7 +45,7 @@ export function listenerAudioOptions(defaults:Partial<SoftphoneAudioOptions> = {
 }
 
 /** Only auto may fall back, only before ready. Access/device denials do not downgrade. */
-export function selectableListenerAudio(callbacks:ListenerAudioCallbacks, choice:MediaTransport, websocket:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection, rtc:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection):ListenerAudioConnection {
+export function selectableListenerAudio(callbacks:ListenerAudioCallbacks, choice:MediaTransport, websocket:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection, rtc:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection,relayRequired=false):ListenerAudioConnection {
  let active:ListenerAudioConnection|undefined, stopped=false, activated=false, volume:number|undefined;
  const observed={...callbacks,onReady(transport?:"websocket"|"webrtc"){activated=true;callbacks.onReady(transport);}};
  return {
@@ -53,7 +54,7 @@ export function selectableListenerAudio(callbacks:ListenerAudioCallbacks, choice
    active=choice==="websocket"?websocket(observed):rtc(observed);
    try{await active.start(url,options);}catch(error){
     active.stop();
-    if(stopped||activated||choice!=="auto"||permanentRTCFailure(error))throw error;
+    if(stopped||activated||choice!=="auto"||permanentRTCFailure(error)||relayRequired)throw error;
     active=websocket(observed);await active.start(url,options);
    }
    if(stopped)active.stop();else if(volume!==undefined)active.setOutputVolume(volume);
@@ -67,7 +68,7 @@ export function selectableListenerAudio(callbacks:ListenerAudioCallbacks, choice
 export function createListenerAudio(app:AppHandle,options:ListenerPlaybackOptions = {}):ListenerAudioRuntime {
  const resolved=listenerAudioOptions({},options), choice=mediaTransport(resolved.mediaTransport);
  const websocket=createListenerWebSocketAudio(app,resolved), rtc=createListenerRTC(app,resolved);
- return {create(callbacks){return selectableListenerAudio(callbacks,choice,observed=>websocket.create(observed),observed=>rtc.create(observed));}};
+ return {create(callbacks){return selectableListenerAudio(callbacks,choice,observed=>websocket.create(observed),observed=>rtc.create(observed),resolved.iceTransportPolicy==="relay");}};
 }
 
 /** Validate the directional protocol before passing any samples to the renderer. */

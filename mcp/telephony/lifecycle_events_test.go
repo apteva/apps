@@ -101,7 +101,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	if !reflect.DeepEqual(disk.ConfigSchema, embedded.ConfigSchema) {
 		t.Fatalf("config schema declaration drift:\ndisk: %#v\nembedded: %#v", disk.ConfigSchema, embedded.ConfigSchema)
 	}
-	if len(disk.Requires.Integrations) != 2 || len(embedded.Requires.Integrations) != 2 {
+	if len(disk.Requires.Integrations) != 3 || len(embedded.Requires.Integrations) != 3 {
 		t.Fatalf("carrier dependency missing: disk=%#v embedded=%#v", disk.Requires.Integrations, embedded.Requires.Integrations)
 	}
 	if disk.Requires.Integrations[1].Role != "speech" || disk.Requires.Integrations[1].Required || !reflect.DeepEqual(disk.Requires.Integrations, embedded.Requires.Integrations) {

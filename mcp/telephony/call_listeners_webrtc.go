@@ -3,6 +3,7 @@ package main
 // A receive-only listening PC and a fresh send-only coaching PC per push-to-talk
 // share the authorized listener control socket. No carrier session is created.
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 )
 
 type listenerRTCConn struct {
+	ice *rtcICESession
 	net.Conn
 	stats      [2]*rtcMediaStats
 	coachStats *rtcMediaStats
@@ -183,21 +185,32 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 	// Passive listening negotiates two recvonly transceivers; no remote capture is
 	// accepted on this PC, even if a malicious browser adds a microphone.
 	pc.OnTrack(func(_ *webrtc.TrackRemote, _ *webrtc.RTPReceiver) { go stop() })
-	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate, "fec_requested": c.fecEnabled(), "listener": true})
-	if err = writer.Write(ws.OpText, config); err != nil {
+	setupContext, cancelSetup := context.WithTimeout(context.Background(), rtcSetupTimeout)
+	defer cancelSetup()
+	iceSession, err := newRTCICESession(setupContext, c, writer, done)
+	result.ice = iceSession
+	if err != nil {
 		return failSetup(err)
 	}
+	if err = writer.Write(ws.OpText, iceSession.initial(true)); err != nil {
+		return failSetup(err)
+	}
+
 	signal.SetReadDeadline(time.Now().Add(rtcSetupTimeout))
 	data, op, err := readWebSocketData(signalRead, ws.StateServerSide, writer)
 	if err != nil {
 		return failSetup(err)
 	}
 	var offer struct {
-		Type string `json:"type"`
-		SDP  string `json:"sdp"`
+		Type       string `json:"type"`
+		SDP        string `json:"sdp"`
+		ICEVersion int    `json:"ice_version"`
 	}
 	if op != ws.OpText || len(data) > 65536 || json.Unmarshal(data, &offer) != nil || offer.Type != "webrtc.offer" {
 		return failSetup(errors.New("invalid listener offer"))
+	}
+	if c.TURN != nil && offer.ICEVersion != 1 {
+		return failSetup(errors.New("managed TURN requires an updated listener"))
 	}
 	sdp, err := answerListenerRTC(pc, offer.SDP, c.fecEnabled(), done)
 	if err != nil {
@@ -224,6 +237,9 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 		return failSetup(errors.New("listener WebRTC timed out"))
 	}
 	signal.SetReadDeadline(time.Time{})
+	if c.TURN != nil {
+		go iceSession.run(writer)
+	}
 	for d := range tracks {
 		go sendRTCAudio(sourceReaders[d], sourceWriters[d], writer, tracks[d], c.Bitrate, result.stats[d], done, stop, c.fecEnabled(), listenerMaxAge, 200, nil, c.InputRate)
 	}
@@ -244,10 +260,45 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				Type       string `json:"type"`
 				Generation uint32 `json:"generation"`
 				SDP        string `json:"sdp"`
+				Revision   uint64 `json:"revision"`
 			}
 			if json.Unmarshal(data, &event) != nil {
 				return
 			}
+
+			if event.Type == "webrtc.ice_refresh" {
+				iceSession.requestRefresh()
+				continue
+			}
+			if event.Type == "webrtc.restart_offer" {
+				if !listenerRTCSDPDirection(event.SDP, "recvonly", 2) {
+					return
+				}
+				iceSession.restart(pc, event.SDP, event.Revision, writer, "webrtc.restart_answer", nil, func() bool {
+					select {
+					case <-l.done:
+						return false
+					default:
+						return true
+					}
+				})
+				continue
+			}
+			if event.Type == "coach.webrtc.restart_offer" {
+				if !listenerRTCCoachValid(l, event.Generation) || !listenerRTCSDPDirection(event.SDP, "sendonly", 1) {
+					continue
+				}
+				coachMu.Lock()
+				capture := coachPC
+				generation := coachGeneration
+				coachMu.Unlock()
+				if capture == nil || generation != event.Generation {
+					continue
+				}
+				iceSession.restart(capture, event.SDP, event.Revision, writer, "coach.webrtc.restart_answer", &generation, func() bool { return listenerRTCCoachValid(l, generation) })
+				continue
+			}
+
 			if event.Type == "coach.webrtc.offer" {
 				if !l.coaching.grant.Enabled {
 					return

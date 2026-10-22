@@ -134,6 +134,9 @@ func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 }
 func phoneAction(r *http.Request) string {
 	path := r.URL.Path
+	if path == "/softphone/turn-policy" && (r.Method == "GET" || r.Method == "POST") {
+		return "call.read"
+	}
 	if r.Method == "GET" && (path == "/calls" || path == "/calls/events") {
 		return "call.read"
 	}

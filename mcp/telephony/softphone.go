@@ -639,6 +639,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "unsupported_media_transport"})
 		return
 	}
+	if transport != "webrtc" {
+		policy, e := a.resolvedTURNPolicy(row.ProjectID, identity, r.URL.Query())
+		if e != nil {
+			http.Error(w, "relay policy unavailable", 503)
+			return
+		}
+		if policy.ICEPolicy == "relay" {
+			writeJSONStatus(w, 426, map[string]any{"code": "turn_relay_required", "message": "Select WebRTC for the required relay policy"})
+			return
+		}
+	}
 	var rtcConfig softphoneRTCConfig
 	if transport == "webrtc" {
 		config := map[string]string{}
@@ -653,6 +664,13 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		rtcConfig.FEC, err = parseRTCFECPreference(r.URL.Query())
 		if err != nil {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "invalid_webrtc_fec"})
+			return
+		}
+	}
+
+	if transport == "webrtc" {
+		if err = a.configureManagedTURN(&rtcConfig, row, token, identity, false, r.URL.Query()); err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_turn_policy", "message": err.Error()})
 			return
 		}
 	}
@@ -1047,6 +1065,23 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 	// pattern, so reject rather than treating it as an action.
 	if strings.HasPrefix(r.URL.Path, "/softphone/media/") {
 		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/softphone/turn-policy" {
+		if globalCtx == nil {
+			http.Error(w, "app context unavailable", 503)
+			return
+		}
+		project, e := a.panelProject(r)
+		if e != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		a.handleSelfTURNPolicy(w, r, project)
 		return
 	}
 	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {

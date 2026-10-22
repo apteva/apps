@@ -59,8 +59,8 @@ jobs:
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
         working-directory: mcp/telephony
-      - name: Compiled sidecar Chromium and TURN TCP recovery
-        run: go test -tags integration -run '^TestTier2HeadlessBrowser$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
+      - name: Compiled sidecar Chromium, TURN recovery and managed renewal
+        run: go test -tags integration -run '^Test(Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony
       - name: Outbound Chromium to SIP recovery smoke
         run: go test -tags integration -run '^TestOutboundSIPBrowserSoak($|Metrics|SourceClock|PauseWindow)' -count=1 -timeout 4m -v . > /tmp/telephony-outbound-soak.log 2>&1

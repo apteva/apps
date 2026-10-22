@@ -312,8 +312,9 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 		t.Fatal(e)
 	}
 	var config struct {
-		Type    string             `json:"type"`
-		Servers []webrtc.ICEServer `json:"ice_servers"`
+		Type    string                    `json:"type"`
+		Servers []webrtc.ICEServer        `json:"ice_servers"`
+		Policy  webrtc.ICETransportPolicy `json:"ice_transport_policy"`
 	}
 	if json.Unmarshal(data, &config) != nil || config.Type != "webrtc.config" {
 		t.Fatal(string(data))
@@ -322,7 +323,7 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 	if e != nil {
 		t.Fatal(e)
 	}
-	pc, e := api.NewPeerConnection(webrtc.Configuration{ICEServers: config.Servers})
+	pc, e := api.NewPeerConnection(webrtc.Configuration{ICEServers: config.Servers, ICETransportPolicy: config.Policy})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -375,7 +376,7 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 	case <-time.After(5 * time.Second):
 		t.Fatal("test ICE timeout")
 	}
-	text, _ := json.Marshal(map[string]string{"type": "webrtc.offer", "sdp": pc.LocalDescription().SDP})
+	text, _ := json.Marshal(map[string]any{"type": "webrtc.offer", "sdp": pc.LocalDescription().SDP, "ice_version": 1})
 	if e := wsutil.WriteClientText(socket, text); e != nil {
 		t.Fatal(e)
 	}

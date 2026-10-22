@@ -1,3 +1,4 @@
+import { RTCICEController, rtcICEConfiguration, applyRTCICEOptions, type RTCICEOptions } from "./rtc-ice";
 import { SOFTPHONE_CLIENT_VERSION } from "../../ui/client-version";
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
@@ -14,9 +15,9 @@ export function mediaTransport(value?: MediaTransport): MediaTransport {
   if (!["websocket", "webrtc", "auto"].includes(value)) throw new RangeError("Unsupported softphone media transport");
   return value;
 }
-export function rtcMediaURL(url: string, fec?: boolean): string {
+export function rtcMediaURL(url: string, fec?: boolean, options:RTCICEOptions = {}): string {
   if(fec!==undefined&&typeof fec!=="boolean")throw new RangeError("webrtcFec must be boolean");
-  const parsed = new URL(url); parsed.searchParams.set("transport", "webrtc");
+  const parsed = new URL(url); applyRTCICEOptions(parsed,options); parsed.searchParams.set("transport", "webrtc");
   parsed.searchParams.delete("webrtc_fec");
   if(fec!==undefined)parsed.searchParams.set("webrtc_fec",String(fec));
   return parsed.toString();
@@ -29,7 +30,7 @@ export function rtcRelayEvidence(value: unknown): string {
 }
 export function permanentRTCFailure(error: unknown): boolean {
   const failure=mediaFailure(error);
-  return failure.denied || failure.code==="media_session_changed" || failure.code==="call_ended" || failure.code==="call_not_attachable" || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
+  return ["turn_relay_unavailable","turn_client_update_required","turn_relay_required"].includes((error as any)?.code ?? failure.code) || failure.denied || failure.code==="media_session_changed" || failure.code==="call_ended" || failure.code==="call_not_attachable" || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
 }
 
 type RTCPrevious = { at:number;sent:number;received:number; counters?:Record<string,Record<string,number>>; pairID?:string;pathRevision?:number };
@@ -120,7 +121,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
   const sendBitrateBps=bitrate("bytesSent",sent),receiveBitrateBps=bitrate("bytesReceived",received);
   return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:metrics.receiver_jitter_buffer_interval_ms??0,
     metrics:transportMetrics({...metrics,send_bitrate_bps:sendBitrateBps,receive_bitrate_bps:receiveBitrateBps}),states:transportStates(states),
-    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealmentSupported?concealed:undefined,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0,jitterBufferIntervalMs:metrics.receiver_jitter_buffer_interval_ms}};
+    webrtc:{relayProtocol:states.relay_protocol,protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealmentSupported?concealed:undefined,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0,jitterBufferIntervalMs:metrics.receiver_jitter_buffer_interval_ms}};
 }
 
 export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date().toISOString()):AudioDropEvent[] {
@@ -135,6 +136,7 @@ export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date()
 
 /** Native WebRTC media; the socket carries authenticated signaling/control only. */
 export class WebRTCAudioConnection implements AudioConnection {
+ private ice?:RTCICEController;
   private stopped=false;
   private generation=0;
   private socket?: WebSocket;
@@ -251,10 +253,10 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.whisper=new AudioWorkletNode(context,"softphone-playback",{numberOfInputs:0,outputChannelCount:[1],processorOptions:playbackBufferOptions(options)});
     this.whisper.connect(this.speaker);
     this.gate();
-    const socket=new WebSocket(rtcMediaURL(url,options.webrtcFec));socket.binaryType="arraybuffer";this.socket=socket;
-    let connected=false,finished=false;
+    const socket=new WebSocket(rtcMediaURL(url,options.webrtcFec,options));socket.binaryType="arraybuffer";this.socket=socket;
+    let connected=false,finished=false,relayRequired=false;
     await measureAudioSetup("audio_transport", event=>this.recordSessionEvent(event), () => new Promise<void>((resolve,reject)=>{
-      const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(err):resolve();};
+      const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(relayRequired?Object.assign(err,{code:"turn_relay_required"}):err):resolve();};
       const timeout=setTimeout(()=>finish(new Error("WebRTC audio connection timed out")),18000);
       this.cancelSetup=()=>finish(new Error("Audio session cancelled"));
       const maybeReady=()=>{if(this.current(generation)&&this.ready&&connected){
@@ -265,12 +267,16 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(event.data instanceof ArrayBuffer){this.playWhisper(event.data);return;}
         if(typeof event.data!=="string")return;
         let value:any;try{value=JSON.parse(event.data);}catch{return;}
+        if(value.type==="webrtc.error"){finish(Object.assign(new Error("Required TURN relay is unavailable"),{code:value.code}));return;}
+        if(this.ice?.handle(value))return;
         if(value.type==="webrtc.config"){
+ relayRequired=value.ice_transport_policy==="relay";
           this.relayConfigured=typeof value.relay_configured==="boolean"?value.relay_configured:undefined;
           this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_configuration",outcome:rtcRelayEvidence(value.relay_configured)});
           if(this.pc){finish(new Error("Repeated WebRTC configuration"));return;}
           void (async()=>{
-            const pc=new RTCPeerConnection({iceServers:value.ice_servers??[]});this.pc=pc;
+            const pc=new RTCPeerConnection(rtcICEConfiguration(value));this.pc=pc;
+            this.ice?.stop();this.ice=new RTCICEController(v=>this.send(v),()=>this.current(generation),(outcome,evidence)=>this.recordSessionEvent({...evidence,timestamp:new Date().toISOString(),action:"ice_restart",outcome}),config=>{this.relayConfigured=config.iceServers?.some(s=>(typeof s.urls==="string"?[s.urls]:s.urls).some(u=>/^turns?:/.test(u)))??false;});this.ice.register("main",pc);
             this.destination!.stream.getAudioTracks().forEach(track=>{
               const sender=pc.addTrack(track,this.destination!.stream);
               this.uploadSender=sender;void this.applyUploadBitrate(sender,32000,generation);
@@ -299,7 +305,7 @@ export class WebRTCAudioConnection implements AudioConnection {
               const timer=setTimeout(()=>{pc.onicegatheringstatechange=null;reject(new Error("ICE gathering timed out"));},7000);
               pc.onicegatheringstatechange=()=>{if(pc.iceGatheringState==="complete"){clearTimeout(timer);pc.onicegatheringstatechange=null;resolve();}};
             });
-            this.guard(generation);socket.send(JSON.stringify({type:"webrtc.offer",sdp:pc.localDescription!.sdp}));
+            this.guard(generation);socket.send(JSON.stringify({type:"webrtc.offer",sdp:pc.localDescription!.sdp,ice_version:1}));
           })().catch(error=>finish(error instanceof Error?error:new Error("WebRTC setup failed")));
           return;
         }
@@ -477,7 +483,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     const socket=this.socket;this.socket=undefined;if(socket){
       if(socket.readyState===WebSocket.OPEN)try{socket.send(JSON.stringify({type:"media.shutdown",reason:this.stopped?"session_cleanup":"audio_error"}));}catch{/* observational only */}
       socket.onclose=socket.onmessage=socket.onerror=null;socket.close(1000,"client_shutdown");}
-    this.playbackReceiver=undefined;this.uploadSender=undefined;const pc=this.pc;this.pc=undefined;if(pc){pc.onconnectionstatechange=pc.ontrack=null;pc.close();}
+    this.ice?.stop();this.ice=undefined;this.playbackReceiver=undefined;this.uploadSender=undefined;const pc=this.pc;this.pc=undefined;if(pc){pc.onconnectionstatechange=pc.ontrack=null;pc.close();}
     if(this.remoteAudio){this.remoteAudio.pause();this.remoteAudio.srcObject=null;this.remoteAudio=undefined;}
     this.stream?.getTracks().forEach(t=>{t.onended=null;t.stop();});this.stream=undefined;
     this.destination?.stream.getTracks().forEach(t=>t.stop());this.destination=undefined;
@@ -496,7 +502,7 @@ export function selectableAudio(callbacks:SoftphoneCallbacks, websocket:()=>Audi
       const choice=mediaTransport(options.mediaTransport);
       const start=async(factory:()=>AudioConnection)=>{if(stopped)throw new Error("Audio session cancelled");const connection=factory();selected=connection;connection.setMuted(muted);try{for(const event of setupEvents.splice(0)){try{connection.recordSessionEvent?.(event);}catch{/* observational only */}}if(stopped)throw new Error("Audio session cancelled");await connection.start(url,options);if(stopped)throw new Error("Audio session cancelled");}catch(error){connection.stop();if(selected===connection)selected=undefined;throw error;}};
       if(choice==="websocket"){await start(websocket);return;}
-      try{await start(rtc);}catch(error){if(choice!=="auto"||stopped||permanentRTCFailure(error))throw error;safe(()=>callbacks.onSessionEvent?.({timestamp:new Date().toISOString(),action:"transport",outcome:"websocket_fallback"}));await start(websocket);}
+      try{await start(rtc);}catch(error){if(choice!=="auto"||stopped||options.iceTransportPolicy==="relay"||permanentRTCFailure(error))throw error;safe(()=>callbacks.onSessionEvent?.({timestamp:new Date().toISOString(),action:"transport",outcome:"websocket_fallback"}));await start(websocket);}
     },
     stop(){stopped=true;setupEvents.splice(0);selected?.stop();selected=undefined;},setMuted(value){muted=value;selected?.setMuted(value);},
     setOutputVolume(value){selected?.setOutputVolume(value);},sendDTMF(digits){selected?.sendDTMF(digits);},

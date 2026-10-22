@@ -85,6 +85,10 @@ requires:
       version: ">=0.8.1"
       optional: true
       reason: stores private durable copies of provider call recordings and optionally supplies signed hold music; without it recordings remain with the carrier and hold music requires a direct HTTPS URL
+    - name: turn
+      version: ">=0.3.0"
+      optional: true
+      reason: "Temporary TURN credentials for optional browser WebRTC relaying"
   integrations:
     - role: carrier
       kind: integration
@@ -104,6 +108,13 @@ requires:
       compatible_slugs: [elevenlabs, fish-audio, minimax-audio, venice-ai]
       required: false
       label: "Local SIP prompt speech"
+
+    - role: turn
+      kind: app
+      compatible_app_names: [turn]
+      required: false
+      label: "TURN relay (optional)"
+      hint: "Bind TURN 0.3.0 or newer to enable temporary browser relay credentials. Project and adviser policies control usage; unbound installations retain their existing ICE configuration."
 
 provides:
   http_routes:

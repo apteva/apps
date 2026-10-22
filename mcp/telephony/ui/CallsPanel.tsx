@@ -1,3 +1,4 @@
+import TurnSettings,{type TURNPolicyView} from "./TurnSettings";
 import RecordingPlayer from "./RecordingPlayer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -623,6 +624,7 @@ function AudioProcessingSettings({
       <div className="text-xs font-medium">Audio devices and processing</div>
       <div className="grid gap-2 mt-2 text-xs">
         <label>Audio transport <select disabled={disabled} value={value.mediaTransport ?? "websocket"} onChange={e=>onChange({...value,mediaTransport:e.target.value as SoftphoneAudioOptions["mediaTransport"]})} className="max-w-full border border-border bg-bg rounded p-2"><option value="websocket">WebSocket (default)</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
+        {(value.mediaTransport==="webrtc"||value.mediaTransport==="auto")&&<details><summary className="cursor-pointer">Relay test override for this softphone</summary><p className="my-1 text-xs text-text-muted">Requires project permission. Omit overrides to use your adviser/project policy. Applies to new connections.</p><select aria-label="Session ICE policy" disabled={disabled} value={value.iceTransportPolicy??"inherit"} onChange={e=>onChange({...value,iceTransportPolicy:e.target.value==="inherit"?undefined:e.target.value as "all"|"relay"})} className="border border-border bg-bg p-2"><option value="inherit">Use saved ICE policy</option><option value="all">Direct or relay</option><option value="relay">Force relay</option></select><select aria-label="Session TURN transport" disabled={disabled} value={value.turnTransport??"inherit"} onChange={e=>onChange({...value,turnTransport:e.target.value==="inherit"?undefined:e.target.value as "all"|"udp"|"tcp"|"tls",turnTLSPort:undefined})} className="ml-2 border border-border bg-bg p-2"><option value="inherit">Use saved TURN transport</option>{["all","udp","tcp","tls"].map(v=><option key={v} value={v}>{v.toUpperCase()}</option>)}</select>{value.turnTransport==="tls"&&<input aria-label="Session TURN TLS port" type="number" min={1} max={65535} placeholder="Configured TLS port" value={value.turnTLSPort??""} onChange={e=>onChange({...value,turnTLSPort:e.target.value?Number(e.target.value):undefined})} className="mt-2 w-full border border-border bg-bg p-2"/>}</details>}
         {value.mediaTransport === "webrtc" || value.mediaTransport === "auto" ? <div><label className="flex items-center gap-2"><input type="checkbox" disabled={disabled} checked={value.webrtcFec !== false} onChange={event=>onChange({...value,webrtcFec:event.target.checked})}/>WebRTC packet recovery (FEC)</label><p className="mt-1 text-text-muted">Helps recover short audio losses using extra bandwidth and processing. Applies to the next call or audio reconnect.</p></div> : null}
         <label>Microphone <select disabled={disabled} value={value.inputDeviceId || ""} onChange={e=>onChange({...value,inputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audioinput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Microphone ${i+1}`}</option>)}</select></label>
         {typeof AudioContext!=="undefined" && "setSinkId" in AudioContext.prototype ? <label>Speaker <select disabled={disabled} value={value.outputDeviceId || ""} onChange={e=>onChange({...value,outputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audiooutput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Speaker ${i+1}`}</option>)}</select></label> : <span>Speaker output follows your system settings in this browser.</span>}
@@ -1066,6 +1068,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     const sep = path.includes("?") ? "&" : "?";
     return `${API}${path}${sep}project_id=${encodeURIComponent(projectId)}`;
   }, [projectId]);
+
+ const selfTURNRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(withProject("/softphone/turn-policy"),body),[withProject]);
 
   const chooseFromNumber = useCallback((value: string) => {
     setFromNumber(value);
@@ -1539,7 +1543,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
               />
               <div className="border-t border-border p-4 space-y-4">
-                <ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+                <TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                   value={audioOptions}
                   disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -1649,7 +1653,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <LiveLevels sink={levelsSink} />
                   {diagnostics ? (
                     <div className="text-xs text-text-dim tabular-nums">
-                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.protocol ?? "negotiating"} · ` : "WebSocket / PCM · "}
+                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.candidateType ?? "negotiating"} ${diagnostics.webrtc?.protocol ?? ""}${diagnostics.webrtc?.relayProtocol ? ` (TURN ${diagnostics.webrtc.relayProtocol.toUpperCase()})` : ""} · ` : "WebSocket / PCM · "}
                       Browser ↔ app RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
                       {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
                       {` · underruns ${diagnostics.underruns}`}
@@ -1668,7 +1672,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
               ) : null}
 
-              <ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+              <TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                 value={audioOptions}
                 disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -2038,6 +2042,7 @@ function NumbersView({ projectId }: NativePanelProps) {
  const [outboundTransportDialog,setOutboundTransportDialog]=useState<{provider:string;connection:number;number?:string}>();
  const outboundTransportRequest=useCallback((body:Record<string,unknown>)=>postJSON<import("../frontend/src/client").OutboundTransportResult>(endpoint("/numbers/outbound-transport"),body),[endpoint]);
  const carrierMediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/carrier-media"),body),[endpoint]);
+ const turnRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(endpoint("/numbers/turn-policy"),body),[endpoint]);
  const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
   const loadConnected = useCallback(async (fresh = false) => {
@@ -2317,6 +2322,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </button>
           </header>
 
+          <div className="px-4 py-2"><TurnSettings request={turnRequest} admin/></div>
           <div className="px-4 py-2 flex flex-wrap gap-2">
             <button type="button" onClick={() => setSipSettings({route:"",label:"Project defaults"})} className="rounded border border-border px-2 py-1 text-xs">SIP media defaults</button>
             {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"

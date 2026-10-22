@@ -4,6 +4,7 @@ package main
 // The in-memory pipe speaks its existing framed PCM/control protocol. Carrier,
 // ownership, hold, recording, listener and coaching code retain one authority.
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,9 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	ClientICEServers []webrtc.ICEServer
+	ICEPolicy        string
+	TURN             *rtcTURNProvider
 	socketTelemetry  *rtcSocketTelemetry
 	NetworkContext   audioNetworkEvent
 	KnownVPNExits    string
@@ -438,10 +442,16 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		}
 		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled()) })
 	})
-	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "relay_configured": c.relayConfigured(), "bitrate": c.Bitrate, "fec_requested": c.fecEnabled()})
-	if err := signalWriter.Write(ws.OpText, config); err != nil {
+	setupContext, cancelSetup := context.WithTimeout(context.Background(), rtcSetupTimeout)
+	defer cancelSetup()
+	iceSession, err := newRTCICESession(setupContext, c, signalWriter, done)
+	if err != nil {
 		return fail(err)
 	}
+	if err := signalWriter.Write(ws.OpText, iceSession.initial(false)); err != nil {
+		return fail(err)
+	}
+
 	deadline := time.Now().Add(rtcSetupTimeout)
 	signal.SetReadDeadline(deadline)
 	data, op, err := readWebSocketData(signalRead, ws.StateServerSide, signalWriter)
@@ -449,11 +459,15 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		return fail(err)
 	}
 	var offer struct {
-		Type string `json:"type"`
-		SDP  string `json:"sdp"`
+		Type       string `json:"type"`
+		SDP        string `json:"sdp"`
+		ICEVersion int    `json:"ice_version"`
 	}
 	if op != ws.OpText || len(data) > 65536 || json.Unmarshal(data, &offer) != nil || offer.Type != "webrtc.offer" || len(offer.SDP) > 60000 || strings.Contains(offer.SDP, "m=video ") || strings.Contains(offer.SDP, "m=application ") {
 		return fail(errors.New("invalid audio SDP offer"))
+	}
+	if c.TURN != nil && offer.ICEVersion != 1 {
+		return fail(errors.New("managed TURN requires an updated softphone"))
 	}
 	if !c.fecEnabled() {
 		offer.SDP, err = disableRTCSDPFEC(offer.SDP)
@@ -498,6 +512,22 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 				stop()
 				return
 			}
+
+			var control struct {
+				Type     string `json:"type"`
+				SDP      string `json:"sdp"`
+				Revision uint64 `json:"revision"`
+			}
+			if json.Unmarshal(data, &control) == nil {
+				if control.Type == "webrtc.ice_refresh" {
+					iceSession.requestRefresh()
+					continue
+				}
+				if control.Type == "webrtc.restart_offer" {
+					iceSession.restart(pc, control.SDP, control.Revision, signalWriter, "webrtc.restart_answer", nil, func() bool { return true })
+					continue
+				}
+			}
 			if !input.queueControl(data) {
 				stop()
 				return
@@ -512,6 +542,9 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		return fail(errors.New("WebRTC connection timed out"))
 	}
 	signal.SetReadDeadline(time.Time{})
+	if c.TURN != nil {
+		go iceSession.run(signalWriter)
+	}
 	whispers := make(chan rtcWhisperFrame, 6)
 	queueWhisper := func(data []byte, valid func() bool) bool {
 		return queueRTCWhisper(whispers, data, valid, done)
