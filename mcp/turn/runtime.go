@@ -113,6 +113,9 @@ func (a *App) startOwnershipWatcher() {
 			}
 			own, status, err := a.fetchOwnership(ctx)
 			if a.applyOwnership(own, status, err, time.Now()) {
+				if a.tlsManager != nil && a.tlsManager.cancel != nil {
+					a.tlsManager.cancel()
+				}
 				a.stopNetwork()
 				return
 			}

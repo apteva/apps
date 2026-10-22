@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: turn
 display_name: TURN
-version: 0.1.0
+version: 0.2.0
 description: |
   Standalone authenticated STUN/TURN relay for WebRTC clients.
   Issues temporary project/session credentials and relays UDP media over UDP,
@@ -14,7 +14,16 @@ tags: [turn, stun, webrtc, networking]
 scopes: [project, global]
 min_apteva_version: "0.52.0"
 requires:
-  permissions: [net.egress]
+  permissions: [net.egress, db.write.app, platform.apps.call]
+  apps:
+    - {name: domains, version: ">=1.2.0", optional: true, reason: "Safe DNS mutations for managed TURN TLS"}
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains
+      hint: Bind for managed DNS and automatic TURN TLS issuance and renewal.
 provides:
   http_routes:
     - {prefix: /ready, method: GET, no_auth: true}
@@ -31,6 +40,7 @@ runtime:
   kind: source
   activation_strategy: exclusive
   startup_timeout_seconds: 30
+  database_upgrade: backward_compatible
   package:
     app_capabilities:
       passive_start: true
@@ -40,7 +50,7 @@ runtime:
       routing: stateless
   source:
     repo: github.com/apteva/apps
-    ref: turn/v0.1.0
+    ref: turn/v0.2.0
     entry: mcp/turn
   port: 8080
   health_check: /ready
@@ -112,7 +122,17 @@ runtime:
     - {name: relay-49221, container_port: 49221, host_port: 49221, protocol: udp}
     - {name: relay-49222, container_port: 49222, host_port: 49222, protocol: udp}
     - {name: relay-49223, container_port: 49223, host_port: 49223, protocol: udp}
+db:
+  driver: sqlite
+  path: /data/turn.db
+  migrations: migrations/
 config_schema:
+  - {name: tls_mode, type: select, default: "manual", options: [manual, managed], label: "TLS management"}
+  - {name: dns_zone, type: text, label: "Managed DNS zone", description: "Zone in the bound Domains app. TURN creates only its relay subdomain and temporary validation records; existing conflicting records are rejected."}
+  - {name: dns_project_id, type: text, label: "DNS project ID", description: "Required on global TURN installs; use the project that owns the DNS zone."}
+  - {name: acme_email, type: text, label: "Certificate contact email (optional)"}
+  - {name: acme_accept_terms, type: toggle, default: "false", label: "Accept Let's Encrypt subscriber agreement", description: "Required for automatic public certificate issuance."}
+  - {name: tls_storage_key, type: password, label: "Managed certificate storage key", description: "Stable random key of at least 32 characters. The TURN panel generates this on first managed setup. Keep it when moving the app; losing it makes stored ACME keys unreadable."}
   - {name: public_ip, type: text, required: true, label: "Relay public IPv4", description: "Public address of the instance actually running TURN, not the Apteva management server. One-to-one NAT must preserve the declared relay ports."}
   - {name: public_host, type: text, label: "TURN hostname", description: "DNS hostname or public IPv4 for client connections. Defaults to public_ip. Must point directly to the relay instance."}
   - {name: shared_secret, type: password, required: true, label: "Credential signing secret", description: "At least 32 random characters. Stored in platform install configuration. Never sent to clients. Changing it invalidates credentials."}

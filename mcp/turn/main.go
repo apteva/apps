@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,9 @@ var errRateLimited = errors.New("credential request rate exceeded")
 
 type App struct {
 	cfg         config
+	certificate atomic.Pointer[tls.Certificate]
+	tlsManager  *managedTLS
+	appCtx      *sdk.AppCtx
 	project     string
 	mu          sync.Mutex
 	state       string
@@ -79,6 +83,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err = a.initialize(cfg, ctx.CurrentProject()); err != nil {
 		return err
 	}
+	a.appCtx = ctx
+	if cfg.tlsMode == "managed" {
+		if err = a.initManagedTLS(ctx); err != nil {
+			return err
+		}
+	}
 	if err = a.prepareRuntime(); err != nil {
 		return err
 	}
@@ -89,11 +99,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if a.managed {
 		a.startOwnershipWatcher()
 	}
+	if a.tlsManager != nil {
+		a.tlsManager.start()
+	}
 	return nil
 }
 
 func (a *App) initialize(cfg config, project string) error {
 	a.cfg = cfg
+	a.certificate.Store(cfg.certificate)
 	a.project = project
 	a.state = "active"
 	a.relays = make(map[*relayConn]struct{})
@@ -104,6 +118,9 @@ func (a *App) initialize(cfg config, project string) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.tlsManager != nil {
+		a.tlsManager.stop()
+	}
 	if a.cancel != nil {
 		a.cancel()
 		<-a.done
@@ -121,6 +138,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/status", Handler: a.protected(a.handleStatus)},
 		{Method: "POST", Pattern: "/credentials", Handler: a.protected(a.handleCredentials)},
 		{Method: "POST", Pattern: "/settings/validate", Handler: a.protected(a.handleValidateSettings)},
+		{Method: "GET", Pattern: "/tls/domains", Handler: a.protected(a.handleTLSDomains)},
+		{Method: "POST", Pattern: "/tls/renew", Handler: a.protected(a.handleTLSRenew)},
 		{Pattern: "/_apteva/runtime/app/", Handler: a.protected(a.handleLifecycle)},
 	}
 }
@@ -229,16 +248,17 @@ func (a *App) status() map[string]any {
 		"public_host":        a.cfg.publicHost,
 		"public_ip":          a.cfg.publicIP.String(),
 		"port":               turnPort,
-		"transports":         a.cfg.transports(now),
+		"transports":         a.currentTLSConfig().transports(now),
 		"relay_port_min":     relayPortMin,
 		"relay_port_max":     relayPortMax,
 		"bytes_sent":         a.stats.sent.Load(),
 		"bytes_received":     a.stats.received.Load(),
 		"bytes_dropped":      a.stats.dropped.Load(),
 		"credentials_issued": a.stats.issued.Load(),
-		"tls":                a.cfg.tlsValid(now),
+		"tls":                a.currentTLSConfig().tlsValid(now),
 		"tls_port":           tlsPort,
-		"tls_certificate":    a.cfg.certificateStatus(now),
+		"tls_certificate":    a.currentTLSConfig().certificateStatus(now),
+		"managed_tls":        a.managedTLSStatus(),
 		"configuration":      a.cfg.publicSettings(),
 	}
 }
@@ -246,5 +266,5 @@ func (a *App) status() map[string]any {
 func (a *App) readyLocked(now time.Time) bool {
 	return a.server != nil && a.state != "stopped" && a.state != "fenced" &&
 		(!a.managed || a.leaseExpiry.IsZero() || now.Before(a.leaseExpiry)) &&
-		(a.cfg.certificate == nil || a.cfg.tlsValid(now))
+		(a.cfg.tlsMode == "managed" || a.cfg.certificate == nil || a.currentTLSConfig().tlsValid(now))
 }

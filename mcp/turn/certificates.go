@@ -99,3 +99,16 @@ func (c config) certificateStatus(now time.Time) map[string]any {
 	}
 	return out
 }
+
+// The TLS listener reads the current certificate on each new handshake. Existing
+// connections keep their negotiated keys while renewal atomically swaps the leaf.
+func (a *App) currentTLSConfig() config { c := a.cfg; c.certificate = a.certificate.Load(); return c }
+func (a *App) liveTLSConfig() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		c := a.currentTLSConfig()
+		if !c.tlsValid(time.Now()) {
+			return nil, errors.New("TURN TLS certificate is not ready")
+		}
+		return c.certificate, nil
+	}}
+}

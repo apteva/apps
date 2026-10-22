@@ -44,7 +44,7 @@ func (a *App) listenNetwork(address string) error {
 		_ = listener.Close()
 		return errors.New("could not bind TURN TLS listener")
 	}
-	a.tls = newClientListener(tlsSocket, a, a.cfg.tlsConfig())
+	a.tls = newClientListener(tlsSocket, a, a.liveTLSConfig())
 	if err := a.openPool(); err != nil {
 		_ = udp.Close()
 		_ = listener.Close()

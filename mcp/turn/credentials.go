@@ -77,7 +77,7 @@ func (a *App) issueCredentials(req credentialRequest, now time.Time) (credential
 	username := strconv.FormatInt(expires, 10) + ":" + shortHash(req.ProjectID) + ":" + shortHash(req.SessionID) + ":" + base64.RawURLEncoding.EncodeToString(nonce[:])
 	endpoint := "turn:" + a.cfg.publicHost + ":" + strconv.Itoa(turnPort)
 	urls := []string{endpoint + "?transport=udp", endpoint + "?transport=tcp"}
-	if a.cfg.tlsValid(now) {
+	if a.currentTLSConfig().tlsValid(now) {
 		urls = append(urls, "turns:"+a.cfg.publicHost+":"+strconv.Itoa(tlsPort)+"?transport=tcp")
 	}
 	out = credentials{ICEServers: []iceServer{{URLs: urls, Username: username, Credential: restPassword(a.cfg.secret, username)}}, ExpiresAt: expires, TTLSeconds: ttl}

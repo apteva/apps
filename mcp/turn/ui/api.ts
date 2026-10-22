@@ -6,6 +6,7 @@ export interface RelayStatus {
   relay_port_min: number; relay_port_max: number; bytes_sent: number; bytes_received: number;
   bytes_dropped: number; credentials_issued: number; tls: boolean; tls_certificate: CertificateStatus;
   configuration: Record<string, string>;
+  managed_tls: {mode: string; automatic: boolean; storage_key_configured: boolean; phase?: string; message?: string; next_check?: number; last_success?: number};
 }
 export interface Credentials { expires_at: number; ttl_seconds: number; ice_servers: { urls: string[]; username: string; credential: string }[] }
 
@@ -45,3 +46,10 @@ export async function saveSettings(props: PanelProps, patch: Record<string, stri
 }
 
 export function bytes(value: number): string { if (!value) return "0 B"; const unit = Math.min(3, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** unit).toFixed(unit ? 1 : 0)} ${["B", "KiB", "MiB", "GiB"][unit]}`; }
+
+export function managedSettings(patch: Record<string,string>, draft: Record<string,string>, storageKeyConfigured: boolean, projectId: string): Record<string,string> {
+  if (draft.tls_mode !== "managed") return patch;
+  if (!storageKeyConfigured) patch.tls_storage_key = Array.from(crypto.getRandomValues(new Uint8Array(48)), byte => byte.toString(16).padStart(2, "0")).join("");
+  if (!draft.dns_project_id && projectId) patch.dns_project_id = projectId;
+  return patch;
+}

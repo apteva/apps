@@ -6,6 +6,7 @@ require (
 	github.com/apteva/app-sdk v0.104.0
 	github.com/pion/logging v0.2.4
 	github.com/pion/turn/v5 v5.1.2
+	golang.org/x/crypto v0.48.0
 	golang.org/x/time v0.14.0
 )
 
@@ -20,7 +21,6 @@ require (
 	github.com/pion/transport/v5 v5.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.0 // indirect
