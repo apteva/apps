@@ -31,10 +31,14 @@ func (q analyticsQuery) cacheKey() string {
 	groups := canonicalDimensions(q.GroupBy)
 	sort.Strings(groups)
 	raw, _ := json.Marshal(struct {
-		Start, End         string
-		Filters            map[string][]string
-		Dimensions, Groups []string
-	}{start, end, filters, dims, groups})
+		Version                   int
+		Scope                     string
+		MaxPosts                  int
+		Compare, PublishedInRange bool
+		Start, End                string
+		Filters                   map[string][]string
+		Dimensions, Groups        []string
+	}{2, q.Scope, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
 	return string(raw)
 }
 func (q analyticsQuery) snapshotPeriod(metric string) string {

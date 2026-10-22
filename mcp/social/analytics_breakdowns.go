@@ -13,12 +13,19 @@ import (
 )
 
 type analyticsQuery struct {
-	RangeDays  int
-	StartDate  string
-	EndDate    string
-	Breakdowns []string
-	Filters    map[string][]string
-	GroupBy    []string
+	Scope            string
+	SortBy           string
+	Limit            int
+	MaxPosts         int
+	Compare          bool
+	PublishedInRange bool
+	ForceRefresh     bool
+	RangeDays        int
+	StartDate        string
+	EndDate          string
+	Breakdowns       []string
+	Filters          map[string][]string
+	GroupBy          []string
 }
 
 type analyticsCapabilityIssue struct {
@@ -27,8 +34,16 @@ type analyticsCapabilityIssue struct {
 }
 
 type analyticsCapabilities struct {
-	Available   []string                   `json:"available,omitempty"`
-	Unavailable []analyticsCapabilityIssue `json:"unavailable,omitempty"`
+	PublicationFilter bool                       `json:"publication_filter"`
+	Scopes            []string                   `json:"scopes,omitempty"`
+	ScopeLabels       map[string]string          `json:"scope_labels,omitempty"`
+	Metrics           []string                   `json:"metrics,omitempty"`
+	DateRanges        bool                       `json:"date_ranges"`
+	DailySeries       bool                       `json:"daily_series"`
+	PostDateRanges    bool                       `json:"post_date_ranges"`
+	BatchLimit        int                        `json:"batch_limit,omitempty"`
+	Available         []string                   `json:"available,omitempty"`
+	Unavailable       []analyticsCapabilityIssue `json:"unavailable,omitempty"`
 }
 
 type analyticsBreakdownRow struct {
@@ -60,6 +75,13 @@ func analyticsQueryFromArgs(args map[string]any) analyticsQuery {
 			q.RangeDays = n
 		}
 	}
+	q.Scope = strings.TrimSpace(toString(args["scope"]))
+	q.SortBy = strings.TrimSpace(toString(args["sort_by"]))
+	q.Limit = intArg(args, "limit", 20)
+	q.MaxPosts = intArg(args, "max_posts", 1000)
+	q.Compare = boolArg(args, "compare", false)
+	q.PublishedInRange = boolArg(args, "published_in_range", false)
+	q.ForceRefresh = boolArg(args, "refresh", false)
 	q.StartDate = dateArg(args, "start_date")
 	q.EndDate = dateArg(args, "end_date")
 	q.Breakdowns = canonicalDimensions(stringSliceArg(args, "breakdowns"))
@@ -135,7 +157,7 @@ func canonicalDimension(value string) string {
 		return "device"
 	case "os", "operating_system", "operatingsystem":
 		return "os"
-	case "country", "region", "city", "age", "gender", "video":
+	case "country", "region", "city", "age", "gender", "video", "post":
 		return value
 	case "traffic", "source", "traffic_source", "insighttrafficsourcetype":
 		return "traffic_source"
@@ -156,7 +178,13 @@ func (q analyticsQuery) dates() (string, string) {
 	if q.StartDate != "" && q.EndDate != "" {
 		return q.StartDate, q.EndDate
 	}
-	return metricsDateWindow(q.RangeDays)
+	days := q.RangeDays
+	if days <= 0 {
+		days = 28
+	}
+	end := time.Now().UTC()
+	start := end.AddDate(0, 0, -(days - 1))
+	return start.Format("2006-01-02"), end.Format("2006-01-02")
 }
 
 func (q analyticsQuery) period() string {
@@ -184,7 +212,21 @@ func analyticsCapabilitiesFor(platform, provider string) analyticsCapabilities {
 	case "instagram":
 		available = []string{"country", "city", "age", "gender"}
 	}
-	return analyticsCapabilities{Available: available}
+	caps := analyticsCapabilities{Available: available, Scopes: []string{"destination", "provider_account"}, ScopeLabels: map[string]string{"destination": "Destination", "provider_account": "Account"}}
+	if platform == "pinterest" && (provider == "" || provider == "native") {
+		caps.ScopeLabels = map[string]string{"destination": "Board", "provider_account": "Pinterest account"}
+		caps.DateRanges = true
+		caps.DailySeries = true
+		caps.PostDateRanges = true
+		caps.PublicationFilter = true
+		caps.BatchLimit = 100
+		caps.Metrics = []string{"impressions", "pin_clicks", "outbound_clicks", "saves", "engagements"}
+	}
+	if platform == "youtube" || platform == "facebook" || platform == "instagram" || provider == zernioProviderSlug {
+		caps.DateRanges = true
+		caps.DailySeries = true
+	}
+	return caps
 }
 
 func enrichAnalyticsCapabilities(capabilities analyticsCapabilities, requested []string) analyticsCapabilities {
@@ -193,7 +235,7 @@ func enrichAnalyticsCapabilities(capabilities analyticsCapabilities, requested [
 		available[dimension] = true
 	}
 	for _, dimension := range requested {
-		if dimension == "social_account" || available[dimension] {
+		if dimension == "social_account" || dimension == "post" || available[dimension] {
 			continue
 		}
 		capabilities.Unavailable = append(capabilities.Unavailable, analyticsCapabilityIssue{
@@ -233,6 +275,9 @@ func (a *App) addAccountBreakdowns(ctx *sdk.AppCtx, out *accountMetricsResult, c
 		available[dimension] = true
 	}
 	for _, dimension := range requested {
+		if dimension == "post" {
+			continue
+		}
 		if !available[dimension] {
 			out.Breakdowns = append(out.Breakdowns, analyticsBreakdown{
 				Dimension: dimension,
@@ -478,8 +523,48 @@ func aggregateAccountComparison(results []accountMetricsResult, metric string, f
 		metric = "views"
 	}
 	rows := make([]analyticsBreakdownRow, 0, len(results))
+	seen := map[string]bool{}
+	preferredKind := ""
+	if len(filters) == 0 {
+		for _, result := range results {
+			if _, ok := result.PeriodMetrics[metric]; ok {
+				preferredKind = "range"
+				break
+			}
+		}
+	}
 	for _, result := range results {
+		if result.Status != "" && result.Status != "ok" {
+			continue
+		}
+		if result.Report != nil {
+			if seen[result.Report.Identity] {
+				continue
+			}
+			seen[result.Report.Identity] = true
+			if _, periodMetric := result.PeriodMetrics[metric]; !containsFold(result.Available, metric) && !periodMetric {
+				continue
+			}
+		}
 		value := accountMetricValue(result, metric)
+		kind := ""
+		if result.Report != nil {
+			kind = result.Report.MetricInfo[metric].Kind
+		}
+		if len(filters) == 0 {
+			if ranged, ok := result.PeriodMetrics[metric]; ok {
+				value = ranged
+				kind = "range"
+			}
+			if result.Report != nil {
+				if preferredKind == "" {
+					preferredKind = kind
+				}
+				if kind != preferredKind {
+					continue
+				}
+			}
+		}
 		if len(filters) > 0 {
 			if !hasSupportedFilterBreakdown(result.Breakdowns, filters) {
 				continue
@@ -491,6 +576,7 @@ func aggregateAccountComparison(results []accountMetricsResult, metric string, f
 				"social_account": strconv.FormatInt(result.SocialAccountID, 10),
 				"account_name":   result.DisplayName,
 				"platform":       result.Platform,
+				"metric_kind":    kind,
 			},
 			Metrics: map[string]int64{metric: value},
 		})
@@ -517,6 +603,24 @@ func hasSupportedFilterBreakdown(breakdowns []analyticsBreakdown, filters map[st
 
 func accountMetricValue(result accountMetricsResult, metric string) int64 {
 	switch metric {
+	case "following":
+		return result.Following
+	case "posts":
+		return result.Posts
+	case "total_likes":
+		return result.TotalLikes
+	case "total_videos":
+		return result.TotalVideos
+	case "likes":
+		return result.Likes
+	case "comments":
+		return result.Comments
+	case "shares":
+		return result.Shares
+	case "sends":
+		return result.Sends
+	case "views":
+		return result.Views
 	case "followers":
 		return result.Followers
 	case "reach":
@@ -525,8 +629,18 @@ func accountMetricValue(result accountMetricsResult, metric string) int64 {
 		return result.Impressions
 	case "engagements":
 		return result.Engagements
+	case "saves":
+		return result.Saves
+	case "pin_clicks":
+		return result.PinClicks
+	case "outbound_clicks":
+		return result.OutboundClicks
+	case "video_views":
+		return result.VideoViews
+	case "clicks":
+		return result.Clicks
 	default:
-		return result.Views
+		return 0
 	}
 }
 

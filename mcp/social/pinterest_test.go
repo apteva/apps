@@ -158,7 +158,7 @@ func TestPinterestMetricsNormalizeClicksSavesAndImpressions(t *testing.T) {
 	out := (&App{}).getPostMetrics(ctx, metricsTarget{
 		TargetID: 1, SocialAccountID: 2, ConnID: 42, Platform: "pinterest", ExtPostID: "pin-1",
 	})
-	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Views != 120 || out.Metrics.Clicks != 3 || out.Metrics.Saves != 11 {
+	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Impressions != 120 || out.Metrics.Views != 0 || out.Metrics.PinClicks != 7 || out.Metrics.Clicks != 3 || out.Metrics.Saves != 11 {
 		t.Fatalf("metrics = %+v", out)
 	}
 }
