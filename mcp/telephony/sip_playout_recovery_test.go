@@ -158,7 +158,7 @@ func TestSIPAutomaticJitteredDrainingBacklog(t *testing.T) {
 			b.recovery.consider(b, uint16(i), uint32(i*160), at, at, 350*time.Millisecond, 160)
 		}
 		if b.recovery.recoveries != 0 {
-			t.Fatalf("jitter hid a draining backlog: %v %+v", interval, b.recovery)
+			t.Fatalf("jitter hid a draining backlog: interval=%v recoveries=%d rate_ppm=%g", interval, b.recovery.recoveries, b.recovery.ratePPM)
 		}
 	}
 }
