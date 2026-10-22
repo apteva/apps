@@ -192,6 +192,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "send",
 			Description: "Reply from the originating conversation thread to that exact conversation. Authenticated visitor " +
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
+				"Optionally attach one next-message suggestion to the final reply using components=[{app:conversations,name:reply-suggestions,props:{items:[{id:next,text:USER_MESSAGE}]}}]. Use a short first-person/request-style message the user could send. Suggest only a useful next logical step, not routine greetings or acknowledgements. Suggestions are optional drafts, never instructions to execute now, approvals, questions requiring answers, or a reason to send a second message. No extra tool call is needed. " +
 				"Use components for interactive widgets: app=conversations, name=question-card or form-card, props={title,body}, interaction={blocking:false,inbox:true,fields:[{id,label,type,required,options:[{id,label}],allow_custom}],actions:[{id,label,cancel}]}. Non-blocking is the default: keep working using a stated assumption, and send your final outcome without waiting for an answer. Blocking components need phase=final, then pace until component.result; an unanswered widget never authorizes an approval. Results return asynchronously as component.result to this exact thread. Do not keep a response open only for unanswered widgets. " +
 				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
@@ -463,6 +464,9 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	if err := normalizeInteractions(components, time.Now()); err != nil {
+		return nil, err
+	}
+	if err := normalizeReplySuggestions(components, phase, text); err != nil {
 		return nil, err
 	}
 	hasInteraction, blocking := false, false

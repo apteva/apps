@@ -365,3 +365,43 @@ The dashboard browser widget also accepts `widgetSettings.thread_context_menu`
   threadActions={{actions:[{id:"inspect",label:"Inspect",
     onSelect: (conversation) => inspectConversation(conversation.id)}]}} />
 ```
+
+## Suggested next message
+
+An agent may attach one display-only component to the same non-empty final reply:
+
+```json
+{
+  "app": "conversations",
+  "name": "reply-suggestions",
+  "props": {"items": [{"id": "next", "text": "Implement the fix and run the relevant tests."}]}
+}
+```
+
+This first version accepts exactly one item with 1-500 characters of plain text,
+and no `interaction`. It uses the existing send tool and message persistence;
+there is no extra generation call, inbox item or answer event. A suggestion is
+optional and should describe a useful next user message. Routine replies need
+none. Multiple items and progress-only suggestions are rejected.
+
+The shared composer presents the same text as a muted ghost on desktop and
+mobile. Tab from the focused, empty textarea or tapping the ghost fills the
+editable draft without sending. Enter/Send remains a separate action and uses
+the existing queue behavior. Escape dismisses the current hint. Shift+Tab and
+IME composition retain their normal behavior. Accept/dismiss never calls an
+agent tool or message endpoint. The ghost uses native button semantics for
+assistive technology, without a separate row of suggestion/option buttons.
+
+Only the latest final reply in this conversation is eligible. Later user turns
+(including queued turns), later replies, existing drafts/attachments, active
+responses, unresolved blocking inputs/approvals, offline agents, uncertain sends,
+archived chats and voice input suppress hints. Suggestions do not take focus
+when they arrive. User typing replaces the hint with their own draft.
+
+The suggestion is stored with the server-side message. Acceptance/dismissal is
+remembered in session storage under the same client/user/project/conversation
+scope as drafts. Hosts that need drafts and dismissals to survive page reload
+should provide a stable non-secret user `storageKey`, as for existing drafts.
+It is not a shared decision or cross-device acknowledgement. All React chat and
+panel exports accept `replySuggestions={false}` to disable agent hints. Existing
+host-provided empty-conversation welcome suggestions remain independent.

@@ -8,15 +8,15 @@ import type { PageContext } from "./pageContext";
 export const PageContextProvider = createContext<PageContext | undefined>(undefined);
 export function useHostPageContext() { return useContext(PageContextProvider); }
 
-const Context = createContext<{ client: ConversationsClient; legacyDrafts: boolean; composer?:ComposerOptions; threadActions?:ThreadActionOptions|false } | null>(null);
-export function ConversationsProvider({ conversations, children, legacyDrafts = false, locale, timeZone, messages, composer, threadActions }: ConversationLocalization & { conversations: ConversationsClient; children: ReactNode; legacyDrafts?: boolean; composer?:ComposerOptions; threadActions?:ThreadActionOptions|false }) {
-  const value = useMemo(() => ({ client: conversations, legacyDrafts, composer, threadActions }), [conversations, legacyDrafts, composer, threadActions]);
+const Context = createContext<{ client: ConversationsClient; legacyDrafts: boolean; composer?:ComposerOptions; threadActions?:ThreadActionOptions|false; replySuggestions?:boolean } | null>(null);
+export function ConversationsProvider({ conversations, children, legacyDrafts = false, locale, timeZone, messages, composer, threadActions, replySuggestions }: ConversationLocalization & { conversations: ConversationsClient; children: ReactNode; legacyDrafts?: boolean; composer?:ComposerOptions; threadActions?:ThreadActionOptions|false; replySuggestions?:boolean }) {
+  const value = useMemo(() => ({ client: conversations, legacyDrafts, composer, threadActions, replySuggestions }), [conversations, legacyDrafts, composer, threadActions, replySuggestions]);
   return <ConversationLocalizationProvider locale={locale} timeZone={timeZone} messages={messages}><Context.Provider key={conversations.instanceKey} value={value}>{children}</Context.Provider></ConversationLocalizationProvider>;
 }
 export function useConversationAPI() {
   const context = useContext(Context);
   if (!context) throw new Error("Conversations UI requires a ConversationsProvider");
   const { client: conversationsClient, legacyDrafts } = context;
-  return { conversationsClient, legacyDrafts, composer:context.composer, threadActions:context.threadActions, apiGet: conversationsClient.apiGet, apiPost: conversationsClient.apiPost,
+  return { conversationsClient, legacyDrafts, composer:context.composer, threadActions:context.threadActions, replySuggestions:context.replySuggestions, apiGet: conversationsClient.apiGet, apiPost: conversationsClient.apiPost,
     apiPatch: conversationsClient.apiPatch, apiDelete: conversationsClient.apiDelete };
 }

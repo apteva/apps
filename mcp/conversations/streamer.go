@@ -604,10 +604,14 @@ const (
 	telemetryRetryMax     = 30 * time.Second
 )
 
+type telemetrySubscriber interface {
+	SubscribeTelemetry(context.Context, sdk.TelemetrySubscription) (<-chan sdk.TelemetryStreamEvent, error)
+}
+
 // connectTelemetryFeed owns one filtered subscription. 403/404/405 mean the
 // permission or bridge is genuinely unavailable; other startup failures,
 // including 401 while registration settles, are retried with backoff.
-func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc sdk.TelemetryClient, feedCtx context.Context, sub sdk.TelemetrySubscription, voice bool) {
+func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc telemetrySubscriber, feedCtx context.Context, sub sdk.TelemetrySubscription, voice bool) {
 	backoff := telemetryRetryInitial
 	for {
 		if feedCtx.Err() != nil {

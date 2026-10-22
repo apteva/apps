@@ -1,3 +1,4 @@
+import {isReplySuggestion} from "./replySuggestion";
 import { createContext, useContext, useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { useConversationAPI } from "./context";
 import { useConversationLocalization } from "./i18n";
@@ -54,8 +55,9 @@ function InteractionCard({message,component,submit}:ConversationComponentProps) 
 }
 export function MessageComponents({message,onApprovalAction,onChanged,projectId}:{message:Message;onApprovalAction?:(id:number,action:string,note:string)=>Promise<void>;onChanged?:(message:Message)=>void;projectId?:string}) {
  const renderers=useContext(Registry);const {apiPost}=useConversationAPI();const {t}=useConversationLocalization();
- if(!message.components?.length)return null;
- return <div className="flex min-w-0 flex-col gap-2">{(message.components??[]).map((component,index)=>{
+ const components=(message.components??[]).filter(c=>!isReplySuggestion(c));
+ if(!components.length)return null;
+ return <div className="flex min-w-0 flex-col gap-2">{components.map((component,index)=>{
   const single={...message,components:[component]};
   const submit=async(action:string,values:Record<string,unknown>={})=>{const result=await apiPost<{message:Message}>("/message-action",{message_id:message.id,component_id:component.id,action_id:action,values},projectId);onChanged?.(result.message);return result.message};
   const key=component.id??`${component.app}/${component.name}/${index}`;

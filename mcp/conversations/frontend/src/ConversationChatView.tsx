@@ -20,6 +20,9 @@ export interface ConversationChatViewProps {
   emptyMessage?: string;
   welcomeText?: string;
   suggestions?: ComposerSuggestion[];
+  replySuggestion?:string;
+  onAcceptReplySuggestion?:()=>void;
+  onDismissReplySuggestion?:()=>void;
   onSuggestion?: (suggestion: ComposerSuggestion) => void;
   leadingAction?: ReactNode;
   agentIdentity?: ReactNode;
@@ -100,6 +103,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
   const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;
   const agentOffline = props.agentOnline === false;
+  const ghost=props.replySuggestion&&!props.draft.length&&!props.voiceActive&&!props.archived&&!props.sending&&!props.responseActive&&!agentOffline&&!props.attachments.items.length?props.replySuggestion:undefined;
   const statusLabel = t(agentOffline ? "chat.agentOffline" : props.connected ? "chat.live" : "chat.reconnectingHistory");
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
@@ -233,20 +237,32 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             data-layout={layout}
           >
             <ComposerAttachments controller={props.attachments}/>
+            <div className="chat-composer-entry">
             <textarea
               ref={props.inputRef}
               value={props.draft}
               disabled={props.voiceActive}
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
-              onKeyDown={props.onComposerKeyDown}
+              aria-description={ghost?t("replySuggestion.description",{text:ghost}):undefined}
+              onKeyDown={event=>{
+                if(ghost&&!event.nativeEvent.isComposing&&!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){
+                  if(event.key==="Tab"){event.preventDefault();props.onAcceptReplySuggestion?.();return}
+                  if(event.key==="Escape"){event.preventDefault();event.stopPropagation();props.onDismissReplySuggestion?.();return}
+                }
+                props.onComposerKeyDown(event);
+              }}
               rows={1}
-              placeholder={props.voiceActive ? t("voice.endToType") : agentOffline ? t("chat.agentOfflinePlaceholder") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
+              placeholder={ghost?"":props.voiceActive ? t("voice.endToType") : agentOffline ? t("chat.agentOfflinePlaceholder") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
               className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
                 window.matchMedia("(hover: hover) and (pointer: fine)").matches
               }
             />
+            {ghost&&<button type="button" className="chat-composer-ghost" aria-label={t("replySuggestion.use")} onClick={()=>props.onAcceptReplySuggestion?.()} onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();props.onDismissReplySuggestion?.();props.inputRef.current?.focus()}}}>
+              <span className="chat-composer-ghost-text">{ghost}</span><span className="chat-composer-ghost-hint">{t("replySuggestion.hint")}</span>
+            </button>}
+            </div>
             <div className="chat-composer-toolbar">{!props.voiceActive && <ComposerMenu controller={props.attachments}/>}{props.voiceControl}
             <button
               type={showBreak ? "button" : "submit"}

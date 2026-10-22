@@ -173,3 +173,35 @@ A fresh isolated Tier 3 `openai-codex` / `gpt-6.1-sol` run passed in 130.5 secon
 with 10 iterations and 147,422 total tokens, verifying optional and blocking
 widget flows again using the current local Server/Core binaries. No live user
 agents or production instances were restarted for this validation.
+
+## Suggested next message
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/20-suggested-reply.yaml
+```
+
+The scenario uses a disposable project/agent. It asks the real model for one
+suggested next user message alongside its final reply, checks durable reload,
+no inbox attention, idle activity and a quiet window without automatic work,
+then explicitly sends the suggested text as a user turn. It verifies exactly
+one continuation despite a send retry and no suggestion after closing the chat.
+The paired browser suite tests actual Tab and touch acceptance, proves no send
+or action endpoint is called until the user submits, and covers dismissal,
+reload, existing drafts/attachments, pending input/sends, active/queued turns,
+conversation switching, host opt-out, IME and ordinary keyboard navigation.
+These are complementary checks: the Tier 3 driver exercises the model/server
+handoff; the browser tests exercise the composer UI.
+
+Local model run on 2026-10-22 passed with actual `openai-codex` / `gpt-6.1-sol`
+telemetry: 95.2 seconds, 7 iterations and 102,433 total tokens. The run contains
+three conversation sends: the final with one suggestion, the response after
+actual user submission, and the closing response. No additional suggestion tool
+or generation request was introduced. The runner creates its own isolated
+Server/Core processes and leaves existing local and production agents alone.
+
+Final local validation passed: 108 Bun UI/client tests, all 107 Playwright
+browser tests (including actual touch/mobile viewport checks), consumer type
+checks, packaged UI builds, and `GOWORK=off go test -race -tags=integration ./...`.
+The dedicated real-model Tier 3 run above passed separately. These changes are
+unreleased; existing release tags and installed app versions are unchanged.

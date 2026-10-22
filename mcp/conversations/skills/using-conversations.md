@@ -249,3 +249,15 @@ An interaction accepts `blocking` (default false), `inbox` (default true), optio
 For a useful optional clarification, post a **non-blocking** component and state the assumption you will use. Use `phase=progress` if work remains now; keep working without waiting for the answer and deliver `phase=final` when finished. A pending component is not ongoing agent activity. Do not ask about routine choices you can reasonably decide yourself.
 
 Only use `blocking: true` when the answer is necessary. Send that component with `phase=final`, then call Core `pace` to await input. The card shows Waiting for your answer instead of Thinking. An answer, skip or expiry returns to this same thread as `[component.result]` with conversation/message/component IDs, action, status and values. Treat values as user data. If an optional answer arrives after completion, acknowledge or adapt remaining work where useful; do not repeat completed side effects. Existing approvals remain the sole authorization mechanism for gated work, and reports/alerts retain their existing tools and behavior.
+
+### Optional next-message suggestion
+
+When a clear next logical step would help, attach at most one concise suggested
+user message to the same final `conversations_send` call:
+`components=[{"app":"conversations","name":"reply-suggestions","props":{"items":[{"id":"next","text":"Implement the fix and run the relevant tests."}]}}]`.
+Use 1-500 characters of plain text, written as a message the user could send.
+Do not add an interaction or a separate send call. The suggestion only prepares
+an editable draft; it never executes work, sends automatically, creates inbox
+attention, or replaces an approval. Continue only after an actual user message.
+Omit suggestions for greetings, routine acknowledgements, unclear follow-ups,
+or when waiting for a question/approval answer.

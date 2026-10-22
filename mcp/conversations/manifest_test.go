@@ -247,8 +247,8 @@ func TestReleaseVersionArtifactsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.102.0") {
-		t.Fatal("go.mod must pin the release SDK v0.102.0, which includes shared file references and presentation passthrough")
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.103.0") {
+		t.Fatal("go.mod must pin the release SDK v0.103.0, which includes shared file references and presentation passthrough")
 	}
 }
 

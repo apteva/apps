@@ -1,3 +1,4 @@
+import {useReplySuggestion} from "./replySuggestion";
 import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
@@ -1332,7 +1333,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
 }, ref) => {
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
-  const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
+  const { conversationsClient, legacyDrafts, replySuggestions, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   const hostPage = useHostPageContext();
   const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
@@ -1435,6 +1436,17 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const appliedComposerRequests = useRef<Set<string>>(new Set());
+  const nextReply=useReplySuggestion(messages,conversation.id,storageKey);
+  const hasPendingSend=Boolean(pendingSendRef.current||(()=>{try{return sessionStorage.getItem(storageKey+":pending")}catch{return null}})());
+  const waitingForInput=messages.some(m=>(m.components??[]).some(c=>Boolean(c.interaction?.blocking&&c.interaction.status==="pending")||(c.app==="conversations"&&c.name==="approval-card"&&(c.props.status??"pending")==="pending")));
+  const replySuggestion=replySuggestions!==false&&!waitingForInput&&!hasPendingSend&&!archived&&!sending&&!voiceActive&&resolvedAgentOnline!==false&&connected&&!activeResponse&&!draft.length&&!attachments.items.length&&!messages.some(m=>m.queue_state==="queued")?nextReply.suggestion:null;
+  const acceptReplySuggestion=()=>{
+    if(!replySuggestion||draft.length||inputRef.current?.value||attachments.items.length||voiceActive||sending||archived)return;
+    nextReply.dismiss();
+    setDraft(current=>current.length?current:replySuggestion.text);
+    inputRef.current?.focus();
+  };
+
 
   const insertText = useCallback(async (text: string, options: ComposerInsertOptions = {}): Promise<ComposerInsertResult> => {
     const requestId = options.requestId || composerRequestId();
@@ -1649,6 +1661,9 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       emptyMessage={emptyMessage}
       welcomeText={welcomeText}
       suggestions={suggestions}
+      replySuggestion={replySuggestion?.text}
+      onAcceptReplySuggestion={acceptReplySuggestion}
+      onDismissReplySuggestion={nextReply.dismiss}
       onSuggestion={(suggestion) => { void insertText(suggestion.text); }}
       leadingAction={leadingAction}
       headerActions={headerActions}
@@ -1662,7 +1677,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       sendError={unconfirmedSendError ? t("chat.sendUnconfirmed", { error: unconfirmedSendError }) : sendError || (historyError ? t("chat.historyFailed", { error: historyError }) : "")}
       archiveBusy={archiveBusy}
       confirmDelete={confirmDelete}
-      onDraftChange={setDraft}
+      onDraftChange={(text)=>{if(text.length)nextReply.dismiss();setDraft(text)}}
       onComposerKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();

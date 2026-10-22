@@ -16,7 +16,11 @@ import (
 // to exit successfully with "no tests to run", or if a new workflow has no YAML.
 func TestScenarioCatalogCoversEveryWorkflow(t *testing.T) {
 	functions := map[string]bool{}
-	for _, path := range []string{"scenario_test.go", "scenario_ownership_test.go"} {
+	sources, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
 			t.Fatal(err)

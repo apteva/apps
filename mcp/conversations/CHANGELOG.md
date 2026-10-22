@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Allow one optional suggested next user message attached to a final reply through the existing send tool. Persist it with the reply and offer the same ghost text in the desktop/mobile web composer: Tab or tap prepares an editable draft; sending remains explicit.
+- Suppress stale or inappropriate suggestions during active/queued work, existing drafts/attachments, voice, pending approvals/forms and uncertain sends. Add per-client dismissal, host opt-out and live model/browser regression coverage.
+- Pin the released App SDK v0.103.0 and keep telemetry subscriptions compatible with its expanded client interface.
+
 ## 0.24.48 — 2026-10-14
 
 - Add shared thread context menus to the panel, browser widget and history drawer: rename, mark read, details, archive/restore and confirmed delete. Right-click never selects a thread or clears its unread state.

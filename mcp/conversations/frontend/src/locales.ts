@@ -1,6 +1,9 @@
 import { telegramCatalog } from "./telegramLocales";
 /** App-owned UI copy. Tuple order: English, French, Spanish. Never translate message content. */
 export const catalog = {
+  "replySuggestion.use": ["Use suggested reply", "Utiliser la réponse suggérée", "Usar respuesta sugerida"],
+  "replySuggestion.hint": ["Tab or tap to use", "Tab ou toucher pour utiliser", "Tab o toca para usar"],
+  "replySuggestion.description": ["Suggested reply: {text}. Press Tab to use it or Escape to dismiss. It will not be sent automatically.", "Réponse suggérée : {text}. Appuyez sur Tab pour l’utiliser ou Échap pour la masquer. Elle ne sera pas envoyée automatiquement.", "Respuesta sugerida: {text}. Pulsa Tab para usarla o Escape para descartarla. No se enviará automáticamente."],
   "thread.rename": ["Rename…", "Renommer…", "Renombrar…"],
   "thread.markRead": ["Mark as read", "Marquer comme lu", "Marcar como leído"],
   "thread.details": ["Conversation details…", "Détails de la conversation…", "Detalles de la conversación…"],
