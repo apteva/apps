@@ -314,6 +314,9 @@ func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
 			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"cleanup_error": err.Error()})
 		}
 	}()
+	if err = reconcileVultrBootStorage(ctx, inst); err != nil {
+		return err
+	}
 	if err = reconcileAWSBootStorage(ctx, inst); err != nil {
 		return err
 	}
@@ -338,6 +341,9 @@ func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		err = destroyProviderInstance(ctx, inst)
 	}
 	if err != nil {
+		return err
+	}
+	if err = finalizeVultrBootStorage(ctx, inst); err != nil {
 		return err
 	}
 	if err = finalizeAWSBootVolumes(ctx, inst); err != nil {

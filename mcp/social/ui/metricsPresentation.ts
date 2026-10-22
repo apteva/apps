@@ -8,6 +8,7 @@ export interface AccountMetricsFreshness {
 export interface MetricPoint {
   time?: string;
   value: number;
+  included?: number; expected?: number; partial?: boolean;
 }
 
 export function accountMetricsNeedRefresh(

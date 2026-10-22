@@ -206,9 +206,10 @@ restore from its durable journal.
 
 The format preserves ordinary hidden files, SQLite databases, WAL, SHM and journal
 files. It rejects traversal, absolute paths, links, special files, conflicting
-entries and invalid gzip checksums. Transfer bytes and expanded canonical tar are
-each capped at 512 MiB, with 100,000 entry/path nodes, 4,096-byte paths and a 16 MiB
-path-metadata budget. Ownership/PAX metadata and unsafe permission bits are removed.
+entries and invalid gzip checksums. Compressed archives and expanded file content have independent configurable
+limits (8 GiB defaults, 16 GiB hard ceilings), with a separate bounded tar metadata
+allowance, 100,000 entry/path nodes, 4,096-byte paths and a 16 MiB path-metadata budget.
+See [snapshot limits, headroom, progress and the Server handoff](snapshot-limits.md). Ownership/PAX metadata and unsafe permission bits are removed.
 Remote hosts require GNU tar/find for this feature. Backend software/routing is
 not part of a snapshot; Server owns app selection, drain/activation and routing.
 

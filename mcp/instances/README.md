@@ -3,6 +3,15 @@
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 
+## Native large-state transfer (0.10.0)
+
+The native backend implements Server's negotiated `state_transfer` contract with
+independent 8 GiB archive/expanded defaults, 16 GiB hard ceilings, streamed
+validation, state filesystem metadata, disk preflight and bounded progress.
+Existing restore ownership, stopped-writer, SHA-256, SQLite WAL and crash-recovery
+protections remain in force. Headerless clients keep the 512 MiB legacy policy.
+See [configuration, Server compatibility and progress](runtime/snapshot-limits.md).
+
 ## Why
 
 Several apps need to "run a workload somewhere": Live Link's self-vps
@@ -569,3 +578,18 @@ retries and crash recovery remain supported. An explicit Ubuntu setup option,
 `suppress_dynamic_motd`, adds PAM's `noupdate` option without disabling authentication.
 It defaults to false and affects SSH login-message generation across that host.
 See [staging measurements and limits](runtime/inspection-performance.md).
+
+## Full Vultr compute catalog (0.9.0)
+
+Vultr discovery now includes all virtual/GPU plan families and the separate
+bare-metal catalog, with shared metadata for hardware, stock, regional pricing
+and boot requirements. Bare metal uses the appropriate lifecycle API. Diskless
+VX1 boot blocks are explicitly sized, verified, inventoried and cleaned up or
+retained according to policy. Unavailable and preemptible-only plans remain
+visible with a reason. The UI uses the generic catalog fields for physical
+labels, accelerators, availability and required boot choices.
+
+Existing servers must refresh their Vultr integration catalog before upgrading;
+no Server binary rebuild is required. See [setup, scope and validation](runtime/vultr-catalog.md).
+Monitoring and the collector remain unchanged. No production update is performed
+by publishing this release.

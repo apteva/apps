@@ -1,6 +1,6 @@
 import { Area,AreaChart,ResponsiveContainer,Tooltip,XAxis,YAxis } from "recharts";
-import {metricTrendEntries} from "./metricsPresentation";
-export default function InsightCharts({ metrics }: { metrics: { insights?: Record<string, {time?: string; value: number}[]> } }) {
+import {metricTrendEntries,type MetricPoint} from "./metricsPresentation";
+export default function InsightCharts({ metrics }: { metrics: { insights?: Record<string, MetricPoint[]> } }) {
   const entries = metricTrendEntries(metrics.insights);
   if (entries.length === 0) {
     return <div className="py-6 text-center text-text-dim text-sm">No trend data yet.</div>;
@@ -19,6 +19,7 @@ export default function InsightCharts({ metrics }: { metrics: { insights?: Recor
             <div className="text-text-dim text-xs mt-1">
               {points.length} point{points.length !== 1 ? "s" : ""}
               {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
+              {latest.partial && ` · partial${latest.expected ? ` (${latest.included}/${latest.expected} posts)` : " or estimated"}`}
             </div>
           </div>
         );
@@ -27,7 +28,7 @@ export default function InsightCharts({ metrics }: { metrics: { insights?: Recor
   );
 }
 
-function Sparkline({ points, gradientId }: { points: { time?: string; value: number }[]; gradientId: string }) {
+function Sparkline({ points, gradientId }: { points: MetricPoint[]; gradientId: string }) {
   const data = points.map((point, index) => ({
     index,
     label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func nativeDataInactive(peers []nativeRecord) string {
@@ -18,16 +22,63 @@ func nativeDataInactive(peers []nativeRecord) string {
 	}
 	return out.String()
 }
-func nativeDataSafe() string {
-	return `test -d "$data"; test ! -L "$data"
- test -z "$(find "$data" -mindepth 1 ! -type f ! -type d -print -quit)"
- test -z "$(find "$data" -type f -links +1 -print -quit)"
- find "$data" -type f -printf '%s\n' | awk '{n++; total+=$1; if (total>536870912 || n>100000) exit 1}'
- test "$(find "$data" -mindepth 1 -printf 'x\n' | wc -l)" -le 100000
+func nativeDataSafe(policies ...nativeSnapshotLimits) string {
+	limits := defaultNativeSnapshotLimits()
+	if len(policies) > 0 {
+		limits = policies[0]
+	}
+	// Do not print filenames or materialize directory contents in memory. The END
+	// sentinel also detects find failures, even on shells without pipefail.
+	return `test -d "$data" && test ! -L "$data" || exit 74
+ marker="$data/.apteva-native-restore"
+ if test -e "$marker" || test -L "$marker"; then
+ test ! -L "$marker" && test -f "$marker" && test "$(stat -c %h "$marker")" -eq 1 && test "$(wc -c < "$marker")" -le 256 || exit 74
+ fi
+ state_summary=$( { find "$data" -mindepth 1 ! -path "$marker" -printf '%y %s %n\n' && printf 'END\n'; } | awk '
+ $1=="END" {complete=1; next}
+ {entries++; if ($1!="f" && $1!="d") bad=1; if ($1=="f") {bytes+=$2; if ($3>1) bad=1}; if (bytes>` + strconv.FormatInt(limits.StateBytes, 10) + `) {large=1; exit}; if (entries>` + strconv.FormatInt(nativeEntryLimit(limits), 10) + `) {bad=1; exit}; if (bad) exit}
+ END {if (large) exit 73; if (!complete || bad) exit 74; printf "%.0f %.0f\n", bytes,entries}') || { code=$?; exit "$code"; }
+ state_bytes=${state_summary%% *}
+ state_entries=${state_summary#* }
  `
+}
+func (nativeSSH) StateSpace(c context.Context, i *Instance, d nativeRecord, peers []nativeRecord) (nativeStateSpace, error) {
+	pendingCheck := `test ! -e "$(dirname "$data")/.restore-intent"
+ reclaimable=0
+ `
+	if d.Restore != nil {
+		pendingCheck = nativeRestoreVariables(d) + `reclaimable=0
+ if test -e "$intent"; then
+  test -f "$intent"; test "$(wc -c < "$intent")" -le 256; test "$(cat "$intent")" = "$expected"; test ! -e "$backup"
+  if test -d "$stage"; then reclaimable=$(du -sk -- "$stage" | awk '{printf "%.0f",$1*1024}'); fi
+ fi
+ `
+	}
+	cmd := nativeOwned(d, false) + pendingCheck + nativeDataInactive(peers) + nativeDataSafe(nativeLimitsFromContext(c)) + `parent=$(dirname "$data")
+ available=$(df -Pk "$parent" | awk 'NR==2 {printf "%.0f", $4*1024}')
+ test -n "$available"
+ allocation=$(stat -f -c %S "$parent")
+ test "$allocation" -ge 512; test "$allocation" -le 1048576
+ printf '{"bytes":%s,"entries":%s,"available_bytes":%s,"allocation_unit":%s}' "$state_bytes" "$state_entries" "$((available+reclaimable))" "$allocation"
+ `
+	out := &lockedWriter{max: 4096}
+	if e := nativeStateSSH(c, i, cmd, nil, out); e != nil {
+		return nativeStateSpace{}, e
+	}
+	var space nativeStateSpace
+	if json.Unmarshal([]byte(out.String()), &space) != nil || space.Bytes < 0 || space.Entries < 0 || space.Available < 0 || space.AllocationUnit < 512 || space.AllocationUnit > 1048576 {
+		return space, errors.New("invalid state space response")
+	}
+	return space, nil
 }
 
 func nativeOutput(c context.Context, i *Instance, cmd string, out io.Writer) error {
+	return nativeStateSSH(c, i, cmd, nil, out)
+}
+
+// State transfer has its own session: cancellation never closes a lifecycle or
+// inspection transport. Only stable codes are returned; raw remote output is private.
+func nativeStateSSH(c context.Context, i *Instance, cmd string, input io.Reader, out io.Writer) error {
 	client, e := dialAdministrativeSSH(i, 10*time.Second)
 	if e != nil {
 		return e
@@ -35,7 +86,7 @@ func nativeOutput(c context.Context, i *Instance, cmd string, out io.Writer) err
 	defer client.Close()
 	stop := context.AfterFunc(c, func() { _ = client.Close() })
 	defer stop()
-	timeout := 20 * time.Minute
+	timeout := 2 * time.Hour
 	if end, ok := c.Deadline(); ok {
 		timeout = time.Until(end)
 	}
@@ -44,16 +95,34 @@ func nativeOutput(c context.Context, i *Instance, cmd string, out io.Writer) err
 		return e
 	}
 	defer cleanup()
+	stderr := &lockedWriter{max: 4096}
 	session.Stdout = out
-	session.Stderr = &lockedWriter{max: 4096}
-	if e = session.Run(cmd); e != nil {
-		return errors.New("remote state transfer failed; inspect before retry")
+	session.Stderr = stderr
+	session.Stdin = input
+	if e = session.Run("export LC_ALL=C\n" + cmd); e != nil {
+		var exit *ssh.ExitError
+		if errors.As(e, &exit) {
+			switch exit.ExitStatus() {
+			case 72:
+				return errNativeDiskSpace
+			case 73:
+				return errNativeStateTooLarge
+			case 74:
+				return errNativeArchiveInvalid
+			}
+		}
+		// GNU tar reports ENOSPC/EDQUOT on stderr without a dedicated status.
+		if strings.Contains(stderr.String(), "No space left on device") || strings.Contains(stderr.String(), "Disk quota exceeded") {
+			return errNativeDiskSpace
+		}
+		return fmt.Errorf("remote state outcome unknown; inspect before retry: %w", e)
 	}
 	return nil
 }
+
 func (nativeSSH) Snapshot(c context.Context, i *Instance, d nativeRecord, peers []nativeRecord, out io.Writer) error {
 	cmd := nativeOwned(d, false) + `test ! -e "$(dirname "$data")/.restore-intent"
- ` + nativeDataInactive(peers) + nativeDataSafe() + `tar --sort=name --exclude=./.apteva-native-restore -cf - -C "$data" .`
+ ` + nativeDataInactive(peers) + nativeDataSafe(nativeLimitsFromContext(c)) + `tar --sort=name --exclude=./.apteva-native-restore -cf - -C "$data" .`
 	return nativeOutput(c, i, cmd, out)
 }
 func nativeRestoreVariables(d nativeRecord) string {
@@ -110,12 +179,15 @@ func (nativeSSH) Restore(c context.Context, i *Instance, d nativeRecord, peers [
 	if d.Restore == nil || !nativeDigest(d.Restore.SHA256) || !nativeDigest(d.Restore.Key) {
 		return errors.New("restore intent missing")
 	}
-	cmd := nativeOwned(d, false) + nativeRestoreRecover(d, peers) + nativeDataInactive(peers) + nativeDataSafe() + `
+	entries := d.Restore.Entries
+	if entries == 0 {
+		entries = nativeStateMaxEntries
+	} // compatibility with durable pre-limit receipts
+	cmd := nativeOwned(d, false) + nativeRestoreRecover(d, peers) + nativeDataInactive(peers) + nativeDataSafe(nativeLimitsFromContext(c)) + `
  if test -e "$intent"; then test "$(cat "$intent")" = "$expected"; test ! -e "$backup"; fi
  test ! -e "$backup"
- available=$(df -Pk "$parent" | awk 'NR==2 {print $4}')
- test "$available" -ge ` + strconv.FormatInt((d.Restore.Bytes+(16<<20)+1023)/1024, 10) + `
  rm -rf -- "$stage"
+ ` + nativeStateRestoreDiskCheck(d.Restore.Bytes, entries) + `
  test ! -L "$parent/.restore-intent.new"
  printf '%s' "$expected" > "$parent/.restore-intent.new"
  sync; mv -- "$parent/.restore-intent.new" "$intent"; sync
@@ -129,5 +201,19 @@ func (nativeSSH) Restore(c context.Context, i *Instance, d nativeRecord, peers [
  rm -rf -- "$backup"
  rm -- "$intent"; sync
  `
-	return nativeRunInput(c, i, cmd, input)
+	limits := nativeLimitsFromContext(c)
+	if d.Restore.Bytes < 0 || d.Restore.Bytes > limits.StateBytes+nativeStateTarOverhead {
+		return errNativeStateTooLarge
+	}
+	return nativeStateSSH(c, i, cmd, input, io.Discard)
+}
+
+func nativeStateRestoreDiskCheck(bytes, entries int64) string {
+	return `allocation=$(stat -f -c %S "$parent")
+ test "$allocation" -ge 512; test "$allocation" -le 1048576
+ available=$(df -Pk "$parent" | awk 'NR==2 {printf "%.0f",$4*1024}')
+ test -n "$available"
+ needed=$((` + strconv.FormatInt(bytes, 10) + ` + ` + strconv.FormatInt(entries, 10) + ` * allocation + ` + strconv.FormatInt(nativeStateReserve, 10) + `))
+ test "$available" -ge "$needed" || exit 72
+ `
 }

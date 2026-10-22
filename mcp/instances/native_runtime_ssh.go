@@ -30,6 +30,10 @@ func nativeRun(c context.Context, i *Instance, cmd string) (string, error) {
 	return out, nil
 }
 func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativeProbe, error) {
+	statePath := "/var/lib/apteva-native"
+	if path, ok := c.Value(nativeProbePathKey{}).(string); ok {
+		statePath = path
+	}
 	out, e := nativeRun(c, i, `set -eu
  test "$(uname -s)" = Linux; test "$(id -u)" = 0; test -d /run/systemd/system
  for tool in systemctl ss flock tar sha256sum curl stat; do command -v "$tool" >/dev/null; done
@@ -41,6 +45,10 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
  df -Pm /var/lib | awk 'NR==2 {print $4}'
  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then printf 'ABI=gnu\n'; elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then printf 'ABI=musl\n'; else printf 'ABI=unknown\n'; fi
  if command -v ldconfig >/dev/null; then ldconfig -p 2>/dev/null | awk '/=>/ {print "LIB=" $1}' | sort -u; fi
+ state_path=`+quoteShellArg(statePath)+`
+ while ! test -d "$state_path"; do state_path=$(dirname "$state_path"); done
+ set -- $(stat -f -c '%a %S' "$state_path")
+ printf 'STATE_AVAILABLE=%s\n' "$(( $1 * $2 ))"
 `)
 	if e != nil {
 		return nativeProbe{}, e
@@ -49,7 +57,7 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
 }
 func parseNativeTargetProbe(out string) (nativeProbe, error) {
 	v := strings.Split(strings.TrimSpace(out), "\n")
-	if len(v) < 6 || len(v) > 2054 || len(v[1]) != 32 || v[2] == "" {
+	if len(v) < 6 || len(v) > 2055 || len(v[1]) != 32 || v[2] == "" {
 		return nativeProbe{}, errors.New("invalid host identity probe")
 	}
 	platform := ""
@@ -74,7 +82,16 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 		return nativeProbe{}, errors.New("unsupported host ABI")
 	}
 	var libraries []string
+	var available *int64
 	for _, line := range v[6:] {
+		if strings.HasPrefix(line, "STATE_AVAILABLE=") {
+			n, e := strconv.ParseInt(strings.TrimPrefix(line, "STATE_AVAILABLE="), 10, 64)
+			if e != nil || n < 0 || available != nil {
+				return nativeProbe{}, errors.New("invalid state capacity")
+			}
+			available = &n
+			continue
+		}
 		if !strings.HasPrefix(line, "LIB=") {
 			return nativeProbe{}, errors.New("invalid library inventory")
 		}
@@ -84,7 +101,7 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 		}
 		libraries = append(libraries, lib)
 	}
-	return nativeProbe{ABI: abi, SystemLibraries: libraries, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
+	return nativeProbe{StateAvailableBytes: available, ABI: abi, SystemLibraries: libraries, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
 }
 
 // Remote locking and immutable ownership markers protect lost-response recovery.

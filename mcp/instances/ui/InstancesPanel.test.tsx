@@ -201,3 +201,30 @@ test("chart pointer mapping handles letterboxing and missing series stay missing
  expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("CPU average: 0.0%");
  expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Memory average: No observation");
 });
+
+test("generic catalog shows bare metal and unavailable offers, and requires diskless boot storage",async()=>{
+ globalThis.fetch=(async(input:any)=>{
+  const path=String(input);
+  if(path.includes("instances-providers"))return response({providers:[{provider:"vultr",connection_id:7,default:true}]});
+  if(path.includes("server-types"))return response({server_types:[
+   {name:"diskless",cores:4,memory_gb:16,disk_gb:0,monthly_price_usd:10,resource_class:"virtual",available:true,configurable_boot:true,requires_boot_storage:true,boot_storage:[{storage_class:"block",provider_type:"high_perf",allowed_tiers:["performance"]}]},
+   {name:"physical",cores:8,memory_gb:32,disk_gb:480,monthly_price_usd:100,resource_class:"bare_metal",platform:"linux",available:true,configurable_boot:false},
+   {name:"gpu-unavailable",available:false,unavailable_reason:"No available regions reported by Vultr"},
+  ]});
+  if(path.includes("locations"))return response({locations:[{name:"cdg"}]});
+  if(path.includes("images"))return response({images:[{name:"2284",description:"Ubuntu",architecture:"x86"}]});
+  return response({capabilities:{boot_size_configurable:true,storage_classes:["local","block"],tiers:[{name:"local",storage_class:"local",provider_type:"local"},{name:"balanced",storage_class:"block",provider_type:"storage_opt"},{name:"performance",storage_class:"block",provider_type:"high_perf"}]}});
+ }) as unknown as typeof fetch;
+ await render(<CreateDialog withParams={params} setError={()=>{}} onCreated={()=>{}} onClose={()=>{}}/>);
+ expect(container.textContent).toContain("required for this diskless plan; billed separately");
+ const custom=Array.from(container.querySelectorAll('input[type="checkbox"]')).find(e=>e.parentElement?.textContent?.includes("Custom boot volume")) as HTMLInputElement;
+ expect(custom.checked).toBe(true);expect(custom.disabled).toBe(true);
+ const storage=container.querySelector('select[aria-label="Boot storage class"]') as HTMLSelectElement;
+ expect(storage.value).toBe("block");
+ expect(container.textContent).toContain("physical cores");
+ expect(container.textContent).not.toContain("Mac mini bare metal");
+ const unavailable=container.querySelector('option[value="gpu-unavailable"]') as HTMLOptionElement;expect(unavailable.disabled).toBe(true);
+ const sizes=container.querySelector('option[value="physical"]')!.parentElement as HTMLSelectElement;
+ await act(async()=>{sizes.value="physical";sizes.dispatchEvent(new win.Event("change",{bubbles:true}) as any);});
+ expect(container.querySelector('select[aria-label="Boot storage class"]')).toBeNull();
+});

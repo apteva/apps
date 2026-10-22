@@ -26,6 +26,7 @@ import {
   accountMetricsNeedRefresh,
   metricTrendEntries,
 } from "./metricsPresentation";
+import { ReportNotice, RankedPosts, visibleMetricNames, comparableIdentity, type AnalyticsReport, type AnalyticsPostRow, type PeriodComparison } from "./analyticsReporting";
 import { platformPresentation } from "./platformPresentation";
 import {
   inboxAttachmentCapabilities,
@@ -5723,6 +5724,8 @@ interface PostMetrics {
 }
 
 interface TargetMetrics {
+  report?: AnalyticsReport;
+  updated_at?: string;
   target_id: number;
   social_account_id: number;
   platform: string;
@@ -5732,6 +5735,7 @@ interface TargetMetrics {
   reason?: string;
   error?: string;
   metrics?: {
+    impressions?: number; video_views?: number; pin_clicks?: number; outbound_clicks?: number; engagements?: number;
     views: number;
     reach?: number;
     likes: number;
@@ -5745,6 +5749,13 @@ interface TargetMetrics {
 }
 
 interface AccountMetrics {
+  period_metrics?:Record<string,number>;
+  period_window?: {start_date?:string;end_date?:string};
+  report?: AnalyticsReport;
+  post_rows?: AnalyticsPostRow[];
+  period_comparison?: PeriodComparison;
+  available?: string[];
+  video_views?: number; pin_clicks?: number; outbound_clicks?: number;
   social_account_id: number;
   profile_id?: number;
   platform: string;
@@ -5771,6 +5782,7 @@ interface AccountMetrics {
   insights?: Record<string, { time?: string; value: number }[]>;
   breakdowns?: AnalyticsBreakdown[];
   capabilities?: {
+    scopes?: string[]; scope_labels?: Record<string,string>; metrics?: string[]; date_ranges?: boolean; post_date_ranges?: boolean; publication_filter?:boolean;
     available?: string[];
     unavailable?: { dimension: string; reason: string }[];
   };
@@ -5824,11 +5836,17 @@ function MetricsView({
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
   const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
   const [analyticsRange, setAnalyticsRange] = useState(initialRange);
-  const [breakdownDimension, setBreakdownDimension] = useState("device");
+  const [breakdownDimension, setBreakdownDimension] = useState("");
+  const [analyticsScope, setAnalyticsScope] = useState("destination");
+  const [rankMetric, setRankMetric] = useState("impressions");
+  const [customStart,setCustomStart] = useState("");
+  const [customEnd,setCustomEnd] = useState("");
+  const [publishedInRange,setPublishedInRange] = useState(false);
+  useEffect(()=>setPublishedInRange(false),[activeAccountId,analyticsScope]);
   const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());
   const autoRefreshedAccounts = useRef<Set<string>>(new Set());
-  const queryIdentity = `${projectId}:${analyticsRange}:${breakdownDimension}`;
+  const queryIdentity = `${projectId}:${analyticsRange}:${customStart}:${customEnd}:${breakdownDimension}:${analyticsScope}:${rankMetric}:${publishedInRange}`;
   const queryRef = useRef(queryIdentity); queryRef.current = queryIdentity;
   const requestVersions = useRef<Record<number,number>>({});
   const accountIds = accounts.map((a) => a.id).join(",");
@@ -5854,6 +5872,7 @@ function MetricsView({
   }, [accounts, activeAccountId]);
 
   const loadAccount = async (id: number, refresh = false, background = false) => {
+    if (analyticsRange==="custom" && (!customStart || !customEnd)) return;
     const version = (requestVersions.current[id] || 0)+1; requestVersions.current[id]=version;
     const query = queryIdentity;
     const current = () => queryRef.current === query && requestVersions.current[id]===version;
@@ -5862,12 +5881,19 @@ function MetricsView({
     try {
       const params = new URLSearchParams({
         refresh: refresh ? "1" : "0",
-        range: analyticsRange,
-        breakdowns: breakdownDimension,
+        scope: analyticsScope,
+        sort_by: rankMetric,
+        compare: "true",
+        group_by: "post",
+        published_in_range: String(publishedInRange),
+        limit: "20",
+        ...(analyticsRange === "custom" ? { start_date: customStart, end_date: customEnd } : { range: analyticsRange }),
+        ...(breakdownDimension ? { breakdowns: breakdownDimension } : {}),
       });
       const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
+      const issue=mcpEnvelopeError(data);if(issue) throw new Error(issue);
       if (current()) setAccountFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
       if (!background && current()) {
@@ -5913,27 +5939,31 @@ function MetricsView({
   useEffect(() => {
     autoLoadedAccounts.current.clear();
     for (const account of accounts) {
-      const key = `${account.id}:${analyticsRange}:${breakdownDimension}`;
+      const key = `${account.id}:${queryIdentity}`;
       if (!autoLoadedAccounts.current.has(key)) {
         autoLoadedAccounts.current.add(key);
         loadAccount(account.id);
       }
     }
-  }, [accountIds, analyticsRange, breakdownDimension]);
+  }, [accountIds, queryIdentity]);
 
   useEffect(() => {
     setBreakdownFilter("all");
-  }, [analyticsRange, breakdownDimension]);
+  }, [queryIdentity]);
+
+  useEffect(()=> { setPostFor({}); setExpanded(null); },[queryIdentity]);
 
   const loadPost = async (id: number) => {
+    const query=queryIdentity;
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(appURL(`/posts/${id}/metrics`, projectId), { credentials: "same-origin" });
+      const params=new URLSearchParams(analyticsRange==="custom" ? {start_date:customStart,end_date:customEnd} : {range:analyticsRange});
+      const res = await fetch(appURL(`/posts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as PostMetrics;
-      setPostFor((prev) => ({ ...prev, [id]: data }));
+      if(queryRef.current===query) setPostFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
-      setPostFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      if(queryRef.current===query) setPostFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       setStatus("Metrics fetch failed: " + (e as Error).message);
     }
   };
@@ -5956,7 +5986,7 @@ function MetricsView({
     if (!activeAccount || !activeMetrics || activeMetrics === "loading" || "error" in activeMetrics) return;
     const refreshIfStale = () => {
       if (!accountMetricsNeedRefresh(activeMetrics)) return;
-      const key = `${activeAccount.id}:${activeMetrics.updated_at || "missing"}`;
+      const key = `${activeAccount.id}:${queryIdentity}:${activeMetrics.updated_at || "missing"}`;
       if (autoRefreshedAccounts.current.has(key)) return;
       autoRefreshedAccounts.current.add(key);
       loadAccount(activeAccount.id, true, true);
@@ -5972,7 +6002,7 @@ function MetricsView({
       Math.max(1000, updatedAt + ACCOUNT_METRICS_STALE_MS - Date.now()),
     );
     return () => window.clearTimeout(timer);
-  }, [activeAccount?.id, activeMetrics]);
+  }, [activeAccount?.id, activeMetrics,queryIdentity]);
 
   const activeBreakdown = activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics
     ? (activeMetrics.breakdowns || []).find((item) => item.dimension === breakdownDimension)
@@ -6024,7 +6054,7 @@ function MetricsView({
       {activeAccount && (
         <section className="flex flex-col gap-4 border-t border-border pt-4">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex-1 min-w-0">
+            <div className="flex-1 min-w-[180px]">
               <div className="text-text font-medium truncate">{activeAccount.display_name}</div>
               <div className="text-text-dim text-xs">{activeAccount.platform}</div>
               {activeMetrics && activeMetrics !== "loading" && !("error" in activeMetrics) && activeMetrics.updated_at && (
@@ -6049,6 +6079,11 @@ function MetricsView({
             </button>
           </div>
           <div className="flex flex-wrap items-end gap-2 border-y border-border py-3">
+            <label className="flex flex-col gap-1 text-xs">Scope
+              <select aria-label="Analytics scope" value={analyticsScope} onChange={e=>setAnalyticsScope(e.target.value)} className="h-9 bg-bg-input border border-border rounded px-2">
+                {["destination","provider_account"].map(scope=><option key={scope} value={scope}>{activeMetrics && typeof activeMetrics==="object" && "capabilities" in activeMetrics ? activeMetrics.capabilities?.scope_labels?.[scope] || (scope==="destination" ? "Destination" : "Account") : scope==="destination" ? "Destination" : "Account"}</option>)}
+              </select>
+            </label>
             <label className="flex flex-col gap-1">
               <span className="text-[10px] uppercase tracking-wide text-text-dim">Range</span>
               <select
@@ -6059,8 +6094,11 @@ function MetricsView({
                 <option value="7d">Last 7 days</option>
                 <option value="28d">Last 28 days</option>
                 <option value="90d">Last 90 days</option>
+                <option value="custom">Custom dates</option>
               </select>
             </label>
+            {analyticsRange==="custom" && <><label className="text-xs flex flex-col">From<input aria-label="Analytics start date" type="date" value={customStart} onChange={e=>setCustomStart(e.target.value)} className="bg-bg-input border border-border rounded p-1" /></label><label className="text-xs flex flex-col">Through<input aria-label="Analytics end date" type="date" value={customEnd} onChange={e=>setCustomEnd(e.target.value)} className="bg-bg-input border border-border rounded p-1" /></label></>}
+            <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={publishedInRange} disabled={analyticsScope!=="destination" || !(activeMetrics && typeof activeMetrics==="object" && "capabilities" in activeMetrics && activeMetrics.capabilities?.publication_filter)} onChange={e=>setPublishedInRange(e.target.checked)} />Published during this period</label>
             <label className="flex flex-col gap-1">
               <span className="text-[10px] uppercase tracking-wide text-text-dim">Breakdown</span>
               <select
@@ -6068,6 +6106,7 @@ function MetricsView({
                 onChange={(event) => setBreakdownDimension(event.target.value)}
                 className="h-9 min-w-[180px] bg-bg-input border border-border rounded px-2 text-sm"
               >
+                <option value="">None</option>
                 {ANALYTICS_BREAKDOWNS.map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
@@ -6095,7 +6134,10 @@ function MetricsView({
           ) : activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics ? (
             <>
               <div className="text-xs uppercase tracking-wide text-text-dim">Overview</div>
+              <ReportNotice report={activeMetrics.report} comparison={activeMetrics.period_comparison} />
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
+              {activeMetrics.period_metrics && activeMetrics.report?.window.kind!=="range" && <PeriodMetricsSummary metrics={activeMetrics} />}
+              {activeMetrics.post_rows && <RankedPosts rows={activeMetrics.post_rows} metric={rankMetric} onMetric={setRankMetric} metrics={activeMetrics.capabilities?.metrics || activeMetrics.available || []} />}
               {(activeMetrics as AccountMetrics).status === "ok" && (
                 <>
                   <div className="text-xs uppercase tracking-wide text-text-dim mt-1">Trends</div>
@@ -6134,7 +6176,7 @@ function MetricsView({
               const m = postFor[p.id];
               const isExpanded = expanded === p.id;
               const totals = (typeof m === "object" && m && "targets" in m)
-                ? aggregateTotals((m as PostMetrics).targets)
+                ? aggregateTotals((m as PostMetrics).targets.filter(t=>!activeAccount || t.social_account_id===activeAccount.id))
                 : null;
               return (
                 <div key={p.id} className="border border-border rounded">
@@ -6171,7 +6213,7 @@ function MetricsView({
                       )}
                       {typeof m === "object" && m && "targets" in m && (
                         <div className="flex flex-col gap-2">
-                          {(m as PostMetrics).targets.map((t) => (
+                          {(m as PostMetrics).targets.filter(t=>!activeAccount || t.social_account_id===activeAccount.id).map((t) => (
                             <TargetMetricsBlock key={t.target_id} target={t} />
                           ))}
                           <button
@@ -6224,19 +6266,22 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
   const stats = [
     ["followers", metrics.followers],
     ["following", metrics.following],
-    ["videos", metrics.total_videos],
+    ["total_videos", metrics.total_videos],
     ["posts", metrics.posts],
     ["likes", metrics.likes ?? metrics.total_likes],
     ["reach", metrics.reach],
     ["impressions", metrics.impressions],
     ["engagements", metrics.engagements],
     ["views", metrics.views],
+    ["video_views",metrics.video_views],
+    ["pin_clicks",metrics.pin_clicks],
+    ["outbound_clicks",metrics.outbound_clicks],
     ["comments", metrics.comments],
     ["shares", metrics.shares],
     ["saves", metrics.saves],
     ["sends", metrics.sends],
     ["clicks", metrics.clicks],
-  ].filter(([, value]) => value != null && Number(value) > 0) as [string, number][];
+  ].filter(([name, value]) => metrics.report ? visibleMetricNames(metrics.available,metrics.report).includes(String(name)) : value != null && Number(value) > 0).map(([name,value])=>[name,Number(value || 0)]) as [string, number][];
   if (metrics.engagement_rate != null && metrics.engagement_rate > 0) {
     stats.push(["engagement rate", metrics.engagement_rate]);
   }
@@ -6250,11 +6295,18 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
           <div className="text-text font-medium">
             {label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
           </div>
-          <div className="text-text-dim text-[10px] uppercase tracking-wide">{label}</div>
+          <div className="text-text-dim text-[10px] uppercase tracking-wide">{label.replace(/_/g," ")}</div>
+          {metrics.report?.metric_info[label]?.kind && <div className="text-text-dim text-xs">{metrics.report.metric_info[label].kind==="range" ? "Selected period" : metrics.report.metric_info[label].kind==="snapshot" ? "Current total" : "Lifetime"}</div>}
+          {metrics.report?.metric_info[label]?.kind==="range" && metrics.period_comparison?.change_percent && label in metrics.period_comparison.change_percent && <div className="text-xs text-text-dim">{metrics.period_comparison.change_percent[label]==null ? "No percentage baseline" : `${metrics.period_comparison.change_percent[label]!.toFixed(1)}% vs previous period`}</div>}
         </div>
       ))}
     </div>
   );
+}
+
+function PeriodMetricsSummary({metrics}:{metrics:AccountMetrics}) {
+ return <section><h3 className="text-xs uppercase text-text-dim mb-2">Period performance · {metrics.period_window?.start_date} – {metrics.period_window?.end_date}</h3>
+ <div className="grid grid-cols-2 md:grid-cols-4 gap-2">{Object.entries(metrics.period_metrics||{}).map(([name,value])=><div key={name} className="border border-border rounded p-3"><div>{formatNumber(value)}</div><div className="text-xs text-text-dim">{name.replace(/_/g," ")}</div>{metrics.period_comparison?.change_percent?.[name]!=null && <div className="text-xs text-text-dim">{metrics.period_comparison.change_percent[name]!.toFixed(1)}% vs previous period</div>}</div>)}</div></section>;
 }
 
 function AccountBreakdownComparison({
@@ -6268,9 +6320,11 @@ function AccountBreakdownComparison({
   dimension: string;
   filter: string;
 }) {
+  const seenIdentities=new Set<string>();
   const rows = accounts.flatMap((account) => {
     const metrics = accountFor[account.id];
     if (!metrics || metrics === "loading" || !("status" in metrics)) return [];
+    const identity=comparableIdentity(metrics.report,String(account.id)); if(seenIdentities.has(identity)) return []; seenIdentities.add(identity);
     const breakdown = (metrics.breakdowns || []).find((item) => item.dimension === dimension && item.status === "ok");
     if (!breakdown) return [];
     const matching = (breakdown.rows || []).filter((row) => filter === "all" || row.dimensions[dimension] === filter);
@@ -6365,17 +6419,8 @@ function analyticsLabel(value: string): string {
 
 const InsightCharts = lazy(() => import("./SocialCharts"));
 
-function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } }) {
-  return (
-    <div className="flex items-center gap-3 text-xs text-text-dim flex-shrink-0">
-      <Stat label="views" value={totals.views} />
-      <Stat label="likes" value={totals.likes} />
-      <Stat label="comments" value={totals.comments} />
-      <Stat label="shares" value={totals.shares} />
-      {totals.saves > 0 && <Stat label="saves" value={totals.saves} />}
-      {totals.clicks > 0 && <Stat label="clicks" value={totals.clicks} />}
-    </div>
-  );
+function MetricsRow({ totals }: { totals: Record<string,number> }) {
+  return <div className="flex flex-wrap items-center gap-3 text-xs text-text-dim">{Object.entries(totals).map(([name,value])=><Stat key={name} label={name.replace(/_/g," ")} value={value} />)}</div>;
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
@@ -6405,9 +6450,10 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
           {status === "skipped" && target.reason && <span className="ml-1">— {target.reason}</span>}
         </span>
       </div>
+      <ReportNotice report={target.report} />
       {target.metrics && (
         <div className="mt-2 flex items-center gap-4 text-xs">
-          {(target.metrics.available || ["views", "likes", "comments", "shares"]).map((name) => (
+          {visibleMetricNames(target.metrics.available || ["views", "likes", "comments", "shares"],target.report).map((name) => (
             <Stat key={name} label={name} value={Number(target.metrics?.[name as keyof typeof target.metrics]) || 0} />
           ))}
         </div>
@@ -6416,21 +6462,16 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
   );
 }
 
-function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } {
-  return targets.reduce(
-    (acc, t) => {
-      if (t.metrics) {
-        acc.views += t.metrics.views;
-        acc.likes += t.metrics.likes;
-        acc.comments += t.metrics.comments;
-        acc.shares += t.metrics.shares;
-        acc.saves += t.metrics.saves || 0;
-        acc.clicks += t.metrics.clicks || 0;
-      }
-      return acc;
-    },
-    { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, clicks: 0 }
-  );
+function aggregateTotals(targets: TargetMetrics[]): Record<string,number> {
+  const totals:Record<string,number>={};
+  for(const target of targets) if(target.status==="ok" && target.metrics) {
+    for(const name of visibleMetricNames(target.metrics.available,target.report)) {
+      if(target.report && !target.report.metric_info[name]?.additive) continue;
+      const value=target.metrics[name as keyof typeof target.metrics];
+      if(typeof value==="number") totals[name]=(totals[name] || 0)+value;
+    }
+  }
+  return totals;
 }
 
 function formatNumber(n: number): string {

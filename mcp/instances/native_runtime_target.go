@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"os"
 	"path/filepath"
@@ -13,8 +14,14 @@ import (
 	"time"
 )
 
-func (b *nativeBackend) inspectTarget(r nativeRequest) (sdk.RuntimeTargetInfo, error) {
-	var out sdk.RuntimeTargetInfo
+type nativeTargetInfo struct {
+	sdk.RuntimeTargetInfo
+	StateAvailableBytes *int64 `json:"state_available_bytes,omitempty"`
+}
+type nativeProbePathKey struct{}
+
+func (b *nativeBackend) inspectTarget(r nativeRequest) (nativeTargetInfo, error) {
+	var out nativeTargetInfo
 	inst, err := b.target(r)
 	if err != nil {
 		return out, err
@@ -41,14 +48,14 @@ func (b *nativeBackend) inspectTarget(r nativeRequest) (sdk.RuntimeTargetInfo, e
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
-	p, err := b.transport.Probe(ctx, inst, gateway)
+	p, err := b.transport.Probe(context.WithValue(ctx, nativeProbePathKey{}, fmt.Sprintf("/var/lib/apteva-native/%d", b.installID)), inst, gateway)
 	if err != nil {
 		return out, errors.New("target SSH/systemd/gateway validation failed")
 	}
 	if p.HostKey == "" || p.Platform != "linux-amd64" && p.Platform != "linux-arm64" {
 		return out, errors.New("unsupported target identity/platform")
 	}
-	return sdk.RuntimeTargetInfo{Platform: p.Platform, HostKey: p.HostKey, ABI: p.ABI, SystemLibraries: p.SystemLibraries, Formats: []string{"binary"}}, nil
+	return nativeTargetInfo{RuntimeTargetInfo: sdk.RuntimeTargetInfo{Platform: p.Platform, HostKey: p.HostKey, ABI: p.ABI, SystemLibraries: p.SystemLibraries, Formats: []string{"binary"}}, StateAvailableBytes: p.StateAvailableBytes}, nil
 }
 func (b *nativeBackend) verifyTargetPackage(r nativeRequest, a nativeArtifact, p nativeProbe) error {
 	if metadata := r.Manifest.Runtime.Package; metadata != nil && metadata.AppCapabilities != nil && nativeJSON(metadata.AppCapabilities) != nativeJSON(a.AppCapabilities) {

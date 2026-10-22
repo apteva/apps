@@ -475,7 +475,11 @@ func providerResourceState(provider string, data json.RawMessage) string {
 		return ""
 	}
 	obj := root
-	for _, key := range []string{"server", "instance", "droplet"} {
+	envelopes := []string{"server", "instance", "droplet"}
+	if provider == "vultr" {
+		envelopes = append(envelopes, "bare_metal")
+	}
+	for _, key := range envelopes {
 		if nested, ok := root[key].(map[string]any); ok {
 			obj = nested
 			break

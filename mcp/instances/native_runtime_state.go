@@ -8,29 +8,37 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-const nativeStateLimit int64 = 512 << 20
 const nativeStateMarker = ".apteva-native-restore"
 
 type nativeRestore struct {
-	Completed bool   `json:"completed,omitempty"`
-	SHA256    string `json:"sha256"`
-	Key       string `json:"key"`
-	Bytes     int64  `json:"bytes,omitempty"`
+	Completed    bool               `json:"completed,omitempty"`
+	SHA256       string             `json:"sha256"`
+	Key          string             `json:"key"`
+	Bytes        int64              `json:"bytes,omitempty"`
+	Entries      int64              `json:"entries,omitempty"`
+	Policy       *nativeStatePolicy `json:"policy,omitempty"`
+	StateBytes   int64              `json:"state_bytes,omitempty"`
+	ArchiveBytes int64              `json:"archive_bytes,omitempty"`
 }
 type nativeSnapshotReceipt struct {
-	Key    string `json:"key"`
-	SHA256 string `json:"sha256"`
+	Policy *nativeStatePolicy `json:"policy,omitempty"`
+	Key    string             `json:"key"`
+	SHA256 string             `json:"sha256"`
 }
 type nativeStateTransport interface {
+	StateSpace(context.Context, *Instance, nativeRecord, []nativeRecord) (nativeStateSpace, error)
 	Snapshot(context.Context, *Instance, nativeRecord, []nativeRecord, io.Writer) error
 	Restore(context.Context, *Instance, nativeRecord, []nativeRecord, io.Reader) error
 	RestoreStatus(context.Context, *Instance, nativeRecord, []nativeRecord) (string, error)
@@ -162,8 +170,14 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 		http.Error(w, "state transfer requires a Linux or macOS controller", 501)
 		return
 	}
-	if r.ContentLength > nativeStateLimit {
-		http.Error(w, "snapshot exceeds transfer limit", 413)
+	policy, e := b.stateHTTPPolicy(r)
+	if e != nil {
+		http.Error(w, e.Error(), 409)
+		return
+	}
+	limits := policy.limits()
+	if r.ContentLength > limits.ArchiveBytes {
+		writeNativeStateFailure(w, errNativeArchiveTooLarge)
 		return
 	}
 	expected := http.MethodGet
@@ -217,13 +231,20 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 		http.Error(w, "state transport unavailable", 503)
 		return
 	}
-	c, cancel := context.WithTimeout(r.Context(), 20*time.Minute)
+	c, cancel := context.WithTimeout(context.WithValue(r.Context(), nativeLimitsKey{}, limits), time.Duration(policy.TimeoutSeconds)*time.Second)
 	defer cancel()
 	controller := http.NewResponseController(w)
 	deadline, _ := c.Deadline()
 	_ = controller.SetReadDeadline(deadline)
 	_ = controller.SetWriteDeadline(deadline)
-	stopRead := context.AfterFunc(c, func() { _ = controller.SetReadDeadline(time.Now()) })
+	readStopped := make(chan struct{})
+	stopRead := context.AfterFunc(c, func() {
+		defer close(readStopped)
+		_ = controller.SetReadDeadline(time.Now())
+		if c.Err() != context.DeadlineExceeded {
+			_ = controller.SetWriteDeadline(time.Now())
+		}
+	})
 	defer stopRead()
 	stop := context.AfterFunc(b.ctx, cancel)
 	defer stop()
@@ -235,7 +256,15 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 		http.Error(w, "pending restore must finish first", 409)
 		return
 	}
+	if d.Snapshot != nil && action == "snapshot" && d.Snapshot.Key == nativeHash(key) && d.Snapshot.Policy != nil && *d.Snapshot.Policy != policy {
+		http.Error(w, "idempotency key conflicts with transfer policy", 409)
+		return
+	}
 	if action == "restore" {
+		if d.Restore != nil && d.Restore.Key == nativeHash(key) && d.Restore.Policy != nil && *d.Restore.Policy != policy {
+			http.Error(w, "idempotency key conflicts with transfer policy", 409)
+			return
+		}
 		sha := r.Header.Get("X-Apteva-Snapshot-SHA256")
 		if !nativeDigest(sha) {
 			http.Error(w, "valid snapshot SHA-256 required", 400)
@@ -246,6 +275,13 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 			return
 		}
 		if d.Execution.SnapshotSHA256 == sha {
+			if d.Restore != nil && (d.Restore.StateBytes > limits.StateBytes || d.Restore.ArchiveBytes > limits.ArchiveBytes || d.Restore.Entries > nativeEntryLimit(limits)) {
+				writeNativeStateFailure(w, errNativeStateTooLarge)
+				return
+			}
+			progress := b.newStateProgress(id, action, key)
+			progress.phase("verify_restore", 0)
+			progress.finish()
 			w.Header().Set("X-Apteva-Snapshot-SHA256", sha)
 			writeNative(w, map[string]any{"snapshot_sha256": sha})
 			return
@@ -265,6 +301,55 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 		http.Error(w, "state ownership unavailable", 503)
 		return
 	}
+	progress := b.newStateProgress(id, action, key)
+	progress.ctx = c
+	progress.phase("preflight", 0)
+	success := false
+	defer func() {
+		if !success && progress.failure == nil {
+			progress.fail(errors.New("state transfer failed"))
+		}
+		progress.finish()
+	}()
+	uncertain := d.Restore != nil && d.Execution.SnapshotSHA256 != d.Restore.SHA256
+	fail := func(e error) {
+		progress.fail(e)
+		// Leave a bounded window to report an upload timeout after its read deadline.
+		if c.Err() == context.DeadlineExceeded || nativeStateFailureFor(e).Code == "incomplete_transfer" {
+			if !stopRead() {
+				<-readStopped
+			}
+			_ = controller.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		}
+		writeNativeStateFailure(w, e, uncertain)
+	}
+	space, e := transport.StateSpace(c, i, d, peers)
+	if e != nil {
+		fail(e)
+		return
+	}
+	// A supplied expanded-size hint is checked against actual content later. When
+	// absent, reserve the configured worst case before receiving an unknown body.
+	expectedState := limits.StateBytes
+	hasExpectedState := false
+	if action == "restore" {
+		if raw := r.Header.Get("X-Apteva-Snapshot-Expanded-Bytes"); raw != "" {
+			expectedState, e = strconv.ParseInt(raw, 10, 64)
+			if e != nil || expectedState < 0 {
+				fail(errNativeArchiveInvalid)
+				return
+			}
+			if expectedState > limits.StateBytes {
+				fail(errNativeStateTooLarge)
+				return
+			}
+			hasExpectedState = true
+		}
+		if e = nativeRequireSpace(space.Available, nativeRestoreSpace(expectedState, nativeEntryLimit(limits), space.AllocationUnit)); e != nil {
+			fail(e)
+			return
+		}
+	}
 	cache := filepath.Join(b.root, "state-transfer")
 	if e = os.MkdirAll(cache, 0700); e != nil {
 		http.Error(w, "state staging unavailable", 503)
@@ -277,8 +362,20 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 	if action == "snapshot" {
 		meta := nativeSnapshotCache{}
 		if data, err := os.ReadFile(receipt); err == nil && json.Unmarshal(data, &meta) == nil && meta.Deployment == id && meta.Key == nativeHash(key) {
-			if sha, err := nativeStateFileHash(snapshot); err == nil && sha == meta.SHA256 {
-				serveNativeSnapshot(w, r, snapshot, sha)
+			progress.phase("verify_cache", 0)
+			if sha, err := nativeStateFileHashLimited(snapshot, limits, progress); err == nil && sha == meta.SHA256 {
+				var stats nativeArchiveStats
+				if err = readNativeArchiveContext(c, snapshot, nativeProgressWriter{io.Discard, progress}, limits, &stats); err != nil {
+					fail(err)
+					return
+				}
+				w.Header().Set("X-Apteva-Snapshot-Expanded-Bytes", strconv.FormatInt(stats.Bytes, 10))
+				progress.phase("download", meta.ArchiveBytes)
+				if e = serveNativeSnapshot(w, r, snapshot, sha, progress); e != nil {
+					progress.fail(errNativeTransferIncomplete)
+					return
+				}
+				success = true
 				return
 			}
 		}
@@ -294,6 +391,17 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 			return
 		}
 	}
+	archiveBudget := limits.ArchiveBytes
+	if action == "restore" && r.ContentLength >= 0 {
+		archiveBudget = r.ContentLength
+	}
+	if action == "snapshot" && space.Bytes+nativeStateTarOverhead+space.Bytes/100+(8<<20) < archiveBudget {
+		archiveBudget = space.Bytes + nativeStateTarOverhead + space.Bytes/100 + (8 << 20)
+	}
+	if e = b.localStateSpace(cache, archiveBudget+nativeStateReserve); e != nil {
+		fail(e)
+		return
+	}
 	f, e := os.OpenFile(snapshot, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if e != nil {
 		http.Error(w, "state staging unavailable", 503)
@@ -306,12 +414,14 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 			os.Remove(snapshot)
 		}
 	}()
+	var stats nativeArchiveStats
 	if action == "snapshot" {
+		progress.phase("create_snapshot", space.Bytes)
 		pipeR, pipeW := io.Pipe()
 		done := make(chan error, 1)
 		go func() { err := transport.Snapshot(c, i, d, peers, pipeW); pipeW.CloseWithError(err); done <- err }()
-		gz, _ := gzip.NewWriterLevel(&nativeLimitWriter{Writer: f, Remaining: nativeStateLimit}, gzip.BestSpeed)
-		e = canonicalNativeTar(pipeR, gz, true)
+		gz, _ := gzip.NewWriterLevel(&nativeLimitWriter{Writer: f, Remaining: limits.ArchiveBytes, LimitError: errNativeArchiveTooLarge}, gzip.BestSpeed)
+		e = canonicalNativeTarLimited(pipeR, nativeProgressWriter{gz, progress}, true, limits, &stats)
 		closeErr := gz.Close()
 		if e != nil || closeErr != nil {
 			cancel()
@@ -321,23 +431,44 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 		}
 		remoteErr := <-done
 		if e != nil || closeErr != nil || remoteErr != nil {
-			http.Error(w, "snapshot failed ownership, quiescence or archive validation", 409)
+			for _, err := range []error{e, closeErr, remoteErr} {
+				if err != nil {
+					e = err
+					if nativeStateFailureFor(err).Code != "state_transfer_failed" {
+						break
+					}
+				}
+			}
+			fail(e)
 			return
 		}
 	} else {
-		n, err := io.Copy(f, io.LimitReader(r.Body, nativeStateLimit+1))
-		if err != nil || n > nativeStateLimit {
-			http.Error(w, "snapshot upload incomplete or oversized", 400)
+		progress.phase("upload", r.ContentLength)
+		n, err := io.Copy(f, io.LimitReader(nativeProgressReader{nativeUploadReader{r.Body}, progress}, limits.ArchiveBytes+1))
+		if n > limits.ArchiveBytes {
+			fail(errNativeArchiveTooLarge)
+			return
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrUnexpectedEOF) || c.Err() != nil {
+				err = errNativeTransferIncomplete
+			}
+			fail(err)
+			return
+		}
+		if r.ContentLength >= 0 && n != r.ContentLength {
+			fail(errNativeTransferIncomplete)
 			return
 		}
 	}
 	if e = f.Sync(); e != nil {
-		http.Error(w, "state staging sync failed", 503)
+		fail(e)
 		return
 	}
-	sha, e := nativeStateFileHash(snapshot)
+	progress.phase("verify_checksum", 0)
+	sha, e := nativeStateFileHashLimited(snapshot, limits, progress)
 	if e != nil {
-		http.Error(w, "state digest unavailable", 503)
+		fail(e)
 		return
 	}
 	if action == "snapshot" {
@@ -346,27 +477,48 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 			return
 		}
 		before := nativeJSON(d)
-		d.Snapshot = &nativeSnapshotReceipt{nativeHash(key), sha}
+		d.Snapshot = &nativeSnapshotReceipt{Key: nativeHash(key), SHA256: sha, Policy: &policy}
 		if e = b.saveCAS(before, d); e != nil {
 			http.Error(w, "cannot persist snapshot receipt", 503)
 			return
 		}
-		if e = writeNativeStateJSON(receipt, nativeSnapshotCache{id, nativeHash(key), sha}); e != nil {
+		if e = writeNativeStateJSON(receipt, nativeSnapshotCache{Deployment: id, Key: nativeHash(key), SHA256: sha, ArchiveBytes: progress.value.Bytes}); e != nil {
 			http.Error(w, "snapshot receipt sync failed", 503)
 			return
 		}
 		valid = true
-		serveNativeSnapshot(w, r, snapshot, sha)
+		w.Header().Set("X-Apteva-Snapshot-Expanded-Bytes", strconv.FormatInt(stats.Bytes, 10))
+		progress.phase("download", progress.value.Bytes)
+		if e = serveNativeSnapshot(w, r, snapshot, sha, progress); e != nil {
+			progress.fail(errNativeTransferIncomplete)
+			return
+		}
+		success = true
 		return
 	}
 	if sha != r.Header.Get("X-Apteva-Snapshot-SHA256") {
-		http.Error(w, "snapshot checksum mismatch", 400)
+		fail(errNativeChecksum)
 		return
 	}
 	// Validate every entry and the gzip trailer before any remote mutation.
+	progress.phase("verify_archive", 0)
 	var expanded nativeByteCounter
-	if e = readNativeArchive(snapshot, &expanded); e != nil {
-		http.Error(w, "unsafe or oversized snapshot archive", 400)
+	if e = readNativeArchiveContext(c, snapshot, nativeProgressWriter{&expanded, progress}, limits, &stats); e != nil {
+		fail(e)
+		return
+	}
+	if hasExpectedState && stats.Bytes != expectedState {
+		fail(errNativeArchiveInvalid)
+		return
+	}
+	// Recheck just before transfer; available disk space can change during upload.
+	space, e = transport.StateSpace(c, i, d, peers)
+	if e != nil {
+		fail(e)
+		return
+	}
+	if e = nativeRequireSpace(space.Available, nativeRestoreSpace(stats.Bytes, stats.Entries, space.AllocationUnit)); e != nil {
+		fail(e)
 		return
 	}
 	before := nativeJSON(d)
@@ -377,55 +529,102 @@ func (b *nativeBackend) stateHTTP(w http.ResponseWriter, r *http.Request, action
 	for _, peer := range peers {
 		b.invalidateRestore(peer)
 	}
-	d.Restore = &nativeRestore{SHA256: sha, Key: restoreKey, Bytes: int64(expanded)}
+	archiveInfo, e := f.Stat()
+	if e != nil {
+		fail(e)
+		return
+	}
+	d.Restore = &nativeRestore{SHA256: sha, Key: restoreKey, Bytes: int64(expanded), Entries: stats.Entries, Policy: &policy, StateBytes: stats.Bytes, ArchiveBytes: archiveInfo.Size()}
 	if e = b.saveCAS(before, d); e != nil {
 		http.Error(w, "cannot persist restore intent", 503)
 		return
 	}
+	uncertain = true
+	progress.uncertain()
 	pipeR, pipeW := io.Pipe()
 	done := make(chan error, 1)
-	go func() { err := readNativeArchive(snapshot, pipeW); pipeW.CloseWithError(err); done <- err }()
+	progress.phase("restore", int64(expanded))
+	go func() {
+		err := readNativeArchiveContext(c, snapshot, nativeProgressWriter{pipeW, progress}, limits, nil)
+		pipeW.CloseWithError(err)
+		done <- err
+	}()
 	e = transport.Restore(c, i, d, peers, pipeR)
 	pipeR.CloseWithError(errors.New("restore transport closed"))
 	encodeErr := <-done
 	if e != nil || encodeErr != nil {
-		http.Error(w, "restore outcome unknown; inspect/retry", 503)
+		if e == nil {
+			e = encodeErr
+		}
+		fail(e)
 		return
 	}
+	progress.phase("verify_restore", 0)
 	if e = b.reconcileRestore(c, i, &d); e != nil || d.Execution.SnapshotSHA256 != sha {
-		http.Error(w, "restore digest unconfirmed; inspect/retry", 503)
+		if e == nil {
+			e = errors.New("restore digest unconfirmed")
+		}
+		fail(e)
 		return
 	}
+	success = true
 	w.Header().Set("X-Apteva-Snapshot-SHA256", sha)
 	writeNative(w, map[string]any{"snapshot_sha256": sha})
 }
 
-type nativeSnapshotCache struct{ Deployment, Key, SHA256 string }
+type nativeSnapshotCache struct {
+	Deployment, Key, SHA256 string
+	ArchiveBytes            int64
+}
 type nativeLimitWriter struct {
 	io.Writer
-	Remaining int64
+	Remaining  int64
+	LimitError error
 }
 
 func (w *nativeLimitWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > w.Remaining {
-		return 0, errors.New("snapshot exceeds size limit")
+		if w.LimitError != nil {
+			return 0, w.LimitError
+		}
+		return 0, errNativeStateTooLarge
 	}
 	n, e := w.Writer.Write(p)
 	w.Remaining -= int64(n)
 	return n, e
 }
 func nativeStateFileHash(name string) (string, error) {
+	return nativeStateFileHashLimited(name, defaultNativeSnapshotLimits(), nil)
+}
+func nativeStateFileHashLimited(name string, limits nativeSnapshotLimits, progress *nativeProgress) (string, error) {
 	f, e := os.Open(name)
 	if e != nil {
 		return "", e
 	}
 	defer f.Close()
 	info, e := f.Stat()
-	if e != nil || !info.Mode().IsRegular() || info.Size() > nativeStateLimit {
-		return "", errors.New("invalid state archive")
+	if e != nil {
+		return "", e
+	}
+	if !info.Mode().IsRegular() {
+		return "", errNativeArchiveInvalid
+	}
+	if info.Size() > limits.ArchiveBytes {
+		return "", errNativeArchiveTooLarge
 	}
 	h := sha256.New()
-	_, e = io.Copy(h, f)
+	var reader io.Reader = io.LimitReader(f, limits.ArchiveBytes+1)
+	if progress != nil {
+		reader = nativeProgressReader{reader, progress}
+	}
+	n, err := io.Copy(h, reader)
+	e = err
+	if n > limits.ArchiveBytes {
+		return "", errNativeArchiveTooLarge
+	}
+	if n != info.Size() {
+		return "", errNativeTransferIncomplete
+	}
 	return hex.EncodeToString(h.Sum(nil)), e
 }
 func writeNativeStateJSON(name string, v any) error {
@@ -454,41 +653,89 @@ func writeNativeStateJSON(name string, v any) error {
 	defer dir.Close()
 	return dir.Sync()
 }
-func serveNativeSnapshot(w http.ResponseWriter, r *http.Request, name, sha string) {
+func serveNativeSnapshot(w http.ResponseWriter, r *http.Request, name, sha string, progress *nativeProgress) error {
 	f, e := os.Open(name)
 	if e != nil {
 		http.Error(w, "snapshot unavailable", 503)
-		return
+		return e
 	}
 	defer f.Close()
 	w.Header().Set("X-Apteva-Snapshot-SHA256", sha)
 	w.Header().Set("Content-Type", "application/gzip")
-	http.ServeContent(w, r, "state.tar.gz", time.Time{}, f)
+	out := &nativeSnapshotResponse{ResponseWriter: w, progress: progress}
+	http.ServeContent(out, r, "state.tar.gz", time.Time{}, f)
+	return out.err
+}
+
+type nativeSnapshotResponse struct {
+	http.ResponseWriter
+	progress *nativeProgress
+	err      error
+}
+
+func (w *nativeSnapshotResponse) Write(p []byte) (int, error) {
+	if w.progress.ctx != nil && w.progress.ctx.Err() != nil {
+		w.err = w.progress.ctx.Err()
+		return 0, w.err
+	}
+	n, e := w.ResponseWriter.Write(p)
+	w.progress.add(n)
+	if e != nil {
+		w.err = e
+	}
+	return n, e
 }
 func readNativeArchive(name string, out io.Writer) error {
+	return readNativeArchiveLimited(name, out, defaultNativeSnapshotLimits(), nil)
+}
+func readNativeArchiveLimited(name string, out io.Writer, limits nativeSnapshotLimits, stats *nativeArchiveStats) error {
+	return readNativeArchiveContext(context.Background(), name, out, limits, stats)
+}
+func readNativeArchiveContext(c context.Context, name string, out io.Writer, limits nativeSnapshotLimits, stats *nativeArchiveStats) error {
 	f, e := os.Open(name)
 	if e != nil {
 		return e
 	}
 	defer f.Close()
-	gz, e := gzip.NewReader(f)
+	info, e := f.Stat()
 	if e != nil {
 		return e
 	}
+	if !info.Mode().IsRegular() {
+		return errNativeArchiveInvalid
+	}
+	if info.Size() > limits.ArchiveBytes {
+		return errNativeArchiveTooLarge
+	}
+	gz, e := gzip.NewReader(nativeContextReader{io.LimitReader(f, limits.ArchiveBytes+1), c})
+	if e != nil {
+		return fmt.Errorf("%w: %w", errNativeArchiveInvalid, e)
+	}
 	defer gz.Close()
-	return canonicalNativeTar(gz, out, false)
+	e = canonicalNativeTarLimited(gz, out, false, limits, stats)
+	if errors.Is(e, gzip.ErrChecksum) {
+		return errNativeChecksum
+	}
+	if e != nil && !errors.Is(e, errNativeStateTooLarge) && !errors.Is(e, errNativeArchiveTooLarge) && !errors.Is(e, io.ErrClosedPipe) && !errors.Is(e, syscall.ENOSPC) {
+		return fmt.Errorf("%w: %w", errNativeArchiveInvalid, e)
+	}
+	return e
 }
 
 // Re-encode trusted types only, removing ownership, PAX metadata and unsafe
 // permission bits. WAL, SHM, journals and ordinary hidden app files are retained.
 func canonicalNativeTar(input io.Reader, out io.Writer, fromHost bool) error {
-	limited := &io.LimitedReader{R: input, N: nativeStateLimit + 1}
+	return canonicalNativeTarLimited(input, out, fromHost, defaultNativeSnapshotLimits(), nil)
+}
+func canonicalNativeTarLimited(input io.Reader, out io.Writer, fromHost bool, limits nativeSnapshotLimits, stats *nativeArchiveStats) error {
+	limited := &io.LimitedReader{R: input, N: limits.StateBytes + nativeStateTarOverhead + 1}
 	tr := tar.NewReader(limited)
-	tw := tar.NewWriter(&nativeLimitWriter{Writer: out, Remaining: nativeStateLimit})
+	tw := tar.NewWriter(&nativeLimitWriter{Writer: out, Remaining: limits.StateBytes + nativeStateTarOverhead, LimitError: errNativeStateTooLarge})
 	seen := map[string]byte{}
 	var total int64
 	count := 0
 	var names int64
+	rootSeen, markerSeen := false, false
 	for {
 		h, e := tr.Next()
 		if e == io.EOF {
@@ -497,16 +744,27 @@ func canonicalNativeTar(input io.Reader, out io.Writer, fromHost bool) error {
 		if e != nil {
 			return e
 		}
-		count++
-		if count > 100000 || h.Size < 0 || h.Size > nativeStateLimit-total {
-			return errors.New("snapshot expansion exceeds limit")
+		if h.Size < 0 {
+			return errNativeArchiveInvalid
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(h.Name, "./"), "/")
 		if (h.Name == "." || h.Name == "./") && h.Typeflag == tar.TypeDir {
+			if rootSeen || h.Size != 0 {
+				return errNativeArchiveInvalid
+			}
+			rootSeen = true
 			continue
 		}
 		if name == nativeStateMarker && fromHost && h.Typeflag == tar.TypeReg {
+			if markerSeen || h.Size > 256 {
+				return errNativeArchiveInvalid
+			}
+			markerSeen = true
 			continue
+		}
+		count++
+		if count > int(nativeEntryLimit(limits)) || h.Size > limits.StateBytes-total {
+			return errNativeStateTooLarge
 		}
 		if name == "" || name == "." || len(name) > 4096 || name == nativeStateMarker || strings.ContainsAny(name, "\\\x00") || path.IsAbs(name) || path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") {
 			return errors.New("unsafe snapshot path")
@@ -538,7 +796,7 @@ func canonicalNativeTar(input io.Reader, out io.Writer, fromHost bool) error {
 			return errors.New("invalid snapshot directory")
 		}
 		seen[name] = kind
-		if len(seen) > 100000 {
+		if len(seen) > int(nativeEntryLimit(limits)) {
 			return errors.New("snapshot entry metadata exceeds limit")
 		}
 		total += h.Size
@@ -573,11 +831,15 @@ func canonicalNativeTar(input io.Reader, out io.Writer, fromHost bool) error {
 			return e
 		}
 		if limited.N <= 0 {
-			return errors.New("snapshot exceeds expanded size limit")
+			return errNativeStateTooLarge
 		}
 	}
 	if limited.N <= 0 {
-		return errors.New("snapshot exceeds expanded size limit")
+		return errNativeStateTooLarge
+	}
+	if stats != nil {
+		stats.Bytes = total
+		stats.Entries = int64(len(seen))
 	}
 	return tw.Close()
 }
