@@ -288,7 +288,9 @@ func TestAccountAdd_RollsBackPendingOnStartOAuthError(t *testing.T) {
 }
 
 func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{{ID: 42, AppSlug: platforms["facebook"].IntegrationSlug, ProjectID: "test-proj", Status: "active"}}
+	ctx := newSocialCtx(t, pf)
 	app := &App{}
 
 	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
@@ -337,7 +339,9 @@ func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
 }
 
 func TestHandleAccountsStart_ForwardsProfileID(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{{ID: 42, AppSlug: platforms["facebook"].IntegrationSlug, ProjectID: "test-proj", Status: "active"}}
+	ctx := newSocialCtx(t, pf)
 	app := &App{}
 
 	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})

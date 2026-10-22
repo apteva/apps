@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.19.0
+version: 0.19.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -100,6 +100,7 @@ provides:
     - { name: analytics_collector, schedule: "@every 1h" }
     - { name: provider_reconciler, schedule: "@every 15m" }
   mcp_tools:
+    - { name: account_list_connections, description: "Choose an active direct connection or connect another account." }
     - { name: destination_list, description: "List publishing destinations under an account." }
     - { name: destination_create, description: "Create a publishing destination when supported." }
     - { name: account_set_default_destination, description: "Set the default for new posts; existing targets retain their destination." }
@@ -212,7 +213,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.19.0
+    ref: social/v0.19.1
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -770,6 +771,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/audiences/accounts/", Handler: a.handleAudienceAccount},
 		{Pattern: "/audiences/confirm", Handler: a.handleAudienceConfirm},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
+		{Pattern: "/accounts/connections", Handler: a.handleAccountConnections},
 		{Method: http.MethodGet, Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone, NoAuth: true},
 		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
 		{Pattern: "/accounts/", Handler: a.handleAccountsItem}, // /accounts/:id (DELETE) and /accounts/:id/pages (GET)
@@ -811,7 +813,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "account_add",
 			Description: "Begin connecting a social account. " +
-				"For multi-page platforms (Facebook, Instagram, YouTube) with an existing active connection in this project, the call SKIPS OAuth — the existing access token already covers all the user's pages/channels — and returns a pending_account_id directly. The caller goes straight to account_list_pending_pages without opening a browser. " +
+				"Use account_list_connections to choose an existing direct connection, or force_new=true for a fresh OAuth login to another account. Multiple available grants require an explicit choice. " +
 				"Otherwise returns authorize_url + pending_account_id and the human must visit the URL. " +
 				"The integrations system handles token exchange + refresh; this app never sees the access token. " +
 				"To connect through an optional provider, pass provider='zernio'; Social starts the provider OAuth flow and imports the selected provider-backed account into this project. " +
@@ -821,6 +823,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider":            map[string]any{"type": "string", "enum": []string{"zernio"}},
 				"provider_profile_id": map[string]any{"type": "string"},
 				"force_new":           map[string]any{"type": "boolean"},
+				"connection_id":       map[string]any{"type": "integer", "minimum": 1, "description": "Active direct connection from account_list_connections; mutually exclusive with force_new."},
+				"profile_id":          map[string]any{"type": "integer"},
+				"profile":             map[string]any{"type": "string"},
 				"return_to": map[string]any{
 					"type":        "string",
 					"description": "Optional Social OAuth callback path; must be /api/apps/social/accounts/oauth_done, optionally with the matching project_id.",
@@ -1253,6 +1258,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, a.profileTools()...)
 	tools = append(tools, a.audienceTools()...)
 	tools = append(tools, destinationTools(a)...)
+	tools = append(tools, sdk.Tool{Name: "account_list_connections", Description: "List active direct connections for a platform in this project, with linked account and brand/profile labels. Choose one with account_add connection_id or connect another account with force_new=true. No credentials are returned.", InputSchema: schemaObject(map[string]any{"platform": map[string]any{"type": "string", "enum": platformKeys()}}, []string{"platform"}), Handler: a.toolAccountListConnections, Annotations: map[string]any{"readOnlyHint": true}})
 	return tools
 }
 
@@ -1282,6 +1288,9 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	plat, _ := args["platform"].(string)
 	provider := strings.ToLower(strings.TrimSpace(toString(args["provider"])))
 	if provider == zernioProviderSlug {
+		if _, present := args["connection_id"]; present {
+			return mcpError("connection_id is for direct connections; use provider account selection for Zernio"), nil
+		}
 		return a.startZernioAccountConnect(ctx, args)
 	}
 	def, ok := platforms[plat]
@@ -1302,88 +1311,40 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		profileID = projectDefaultProfileID(ctx, pid) // 0 if no default = leaves account unassigned
 	}
 
-	// Reuse path: if there's already an active social_account for this
-	// platform in this project, the underlying connection's access
-	// token already grants what we need (Facebook covers all the
-	// user's Pages, Google all the channels, etc.). Skip the OAuth
-	// dance entirely — create a pending_accounts row pre-linked to
-	// the existing connection, mark it ready, return without an
-	// authorize_url. The panel goes straight to the page picker.
-	//
-	// Skipped when:
-	//   - force_new=true (operator wants to switch to a different
-	//     provider-side account)
-	//   - the platform has no picker step (Twitter, LinkedIn-personal)
-	//     because reusing a connection doesn't add anything there;
-	//     a fresh OAuth is the right thing
-	if !forceNew && (def.ListPagesTool != "" || def.Platform == "pinterest") {
-		// Two reuse sources, in order:
-		//   1. A prior social_account in this project — its connection
-		//      was already vetted, just open the picker against it.
-		//   2. An operator-installed integration connection for this
-		//      platform's app_slug. The access token already grants
-		//      list_pages / list_channels / list_accounts, so there's
-		//      no point running another OAuth dance — fresh OAuth would
-		//      just produce a second connection with the same scope.
-		//
-		// Source #2 is critical for first-time use: the operator
-		// installs Facebook in Settings → Integrations, then opens the
-		// Social panel and clicks Add Account. Without #2 we'd force a
-		// pointless re-auth before showing pages they could already see.
-		var existingConnID int64
-		var reuseSrc string
-		err := ctx.AppDB().QueryRow(
-			`SELECT connection_id FROM social_accounts
-			 WHERE project_id=? AND platform=? AND status='active' AND COALESCE(provider_slug,'native')='native'
-			 ORDER BY id DESC LIMIT 1`,
-			pid, def.Platform,
-		).Scan(&existingConnID)
-		if err == nil && existingConnID > 0 {
-			reuseSrc = "social_accounts"
-		} else {
-			conns, lerr := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
-				ProjectID: pid,
-				AppSlug:   def.IntegrationSlug,
-			})
-			ctx.Logger().Info("account_add: probing operator connections",
-				"platform", plat, "slug", def.IntegrationSlug, "project_id", pid,
-				"count", len(conns), "list_err", lerr)
-			if lerr == nil {
-				for _, c := range conns {
-					ctx.Logger().Info("account_add: candidate connection",
-						"id", c.ID, "slug", c.AppSlug, "status", c.Status, "project_id", c.ProjectID)
-					if c.Status == "active" {
-						existingConnID = c.ID
-						reuseSrc = "operator"
-						break
-					}
+	var connectionID int64
+	if raw, present := args["connection_id"]; present {
+		var err error
+		text := strings.TrimSpace(toString(raw))
+		if number, ok := raw.(float64); ok {
+			text = strconv.FormatFloat(number, 'f', -1, 64)
+		}
+		connectionID, err = strconv.ParseInt(text, 10, 64)
+		if err != nil || connectionID <= 0 {
+			return mcpError("connection_id must be a positive integer"), nil
+		}
+	}
+	if forceNew && connectionID > 0 {
+		return mcpError("Choose connection_id or force_new, not both"), nil
+	}
+	if connectionID > 0 || (!forceNew && (def.ListPagesTool != "" || def.Platform == "pinterest")) {
+		choices, err := accountConnectionChoices(ctx, pid, def)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		if connectionID > 0 {
+			for _, choice := range choices {
+				if choice.ID == connectionID {
+					return pendingForExistingConnection(ctx, pid, def, connectionID, profileID)
 				}
 			}
+			return mcpError("connection not found, inactive, or unavailable for this platform/project; reload available connections"), nil
 		}
-		ctx.Logger().Info("account_add: reuse decision",
-			"platform", plat, "existing_conn_id", existingConnID, "reuse_source", reuseSrc)
-		if existingConnID > 0 {
-			res, err := ctx.AppDB().Exec(
-				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
-				 VALUES (?, ?, ?, ?, 'ready', ?, ?)`,
-				pid, def.Platform, def.IntegrationSlug, existingConnID,
-				pendingExpiry(time.Now().UTC().Add(10*time.Minute)), profileID,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("create pending account (reuse path): %w", err)
-			}
-			pendingID, _ := res.LastInsertId()
-			return map[string]any{
-				"pending_account_id": pendingID,
-				"platform":           def.Platform,
-				"reused_connection":  existingConnID,
-				"instructions": fmt.Sprintf(
-					"Reusing the existing %s connection — no new OAuth needed. Call account_list_pending_pages with pending_account_id=%d to see selectable items.",
-					def.DisplayName, pendingID,
-				),
-			}, nil
+		if len(choices) > 1 {
+			return map[string]any{"status": "select_connection", "platform": def.Platform, "connections": choices, "instructions": "Choose connection_id from this list or use force_new=true to connect another account."}, nil
 		}
-		// fall through to fresh OAuth path
+		if len(choices) == 1 {
+			return pendingForExistingConnection(ctx, pid, def, choices[0].ID, profileID)
+		}
 	}
 
 	// Both MCP and panel starts return to the same token-validated handoff.
@@ -1643,6 +1604,16 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if existingID > 0 {
+		var existingProfile int64
+		if err := tx.QueryRow(`SELECT COALESCE(profile_id,0) FROM social_accounts WHERE id=? AND project_id=?`, existingID, pid).Scan(&existingProfile); err != nil {
+			return nil, err
+		}
+		if existingProfile > 0 && profileID > 0 && existingProfile != profileID {
+			return mcpError("This account is already linked to another brand/profile. Switch to that profile, use the account Move action, or connect another account."), nil
+		}
+		if existingProfile > 0 {
+			profileID = existingProfile
+		}
 		if defaultDestination != "" {
 			if _, err := tx.Exec(`UPDATE social_accounts SET default_destination_id=?,default_destination_name=? WHERE id=? AND project_id=?`, defaultDestination, defaultDestinationName, existingID, pid); err != nil {
 				return nil, err
@@ -10273,6 +10244,8 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		ForceNew          bool   `json:"force_new"`
+		ConnectionID      *int64 `json:"connection_id"`
 		Platform          string `json:"platform"`
 		Provider          string `json:"provider"`
 		ProviderProfileID string `json:"provider_profile_id"`
@@ -10284,6 +10257,10 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := projectArgsFromRequest(r)
+	args["force_new"] = body.ForceNew
+	if body.ConnectionID != nil {
+		args["connection_id"] = *body.ConnectionID
+	}
 	args["platform"] = body.Platform
 	args["provider"] = body.Provider
 	args["provider_profile_id"] = body.ProviderProfileID
