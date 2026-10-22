@@ -3,6 +3,15 @@
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 
+## OVH catalog transfer (0.12.1)
+
+OVH's current dedicated catalog exceeds the gateway's regular 10 MB JSON cap.
+The integration's `*_catalog_download` tools carry JSON in a binary envelope;
+Instances enforces a 32 MiB decoded cap and caches a compact projection shared
+by concurrent catalog requests. Repeated per-option price arrays are omitted
+from the fleet catalog; the final provider quote still includes all charges.
+Refresh the OVH integration catalog to obtain the three download tools.
+
 ## OVH compute products (0.12.0)
 
 OVH now includes Public Cloud VMs, standalone VPS, standard dedicated servers and
