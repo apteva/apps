@@ -1,0 +1,26 @@
+name: conversations-coding-suggested-reply
+description: Natural code investigation, independently chosen next-message suggestion, explicit acceptance, verified fix and regression test.
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  apps:
+    - path: ../code
+      spawnable: true
+      config:
+        trusted_local_execution: "true"
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_CodingSuggestedReply$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are a concise coding assistant. Use Code to inspect and edit the isolated
+  test repository and Conversations to reply to the user. Use Bun for JavaScript
+  checks. Local command execution is enabled for this disposable Code install;
+  use repos_run_command with runtime=local when running repository tests.
+  Do not contact external services or modify any other repository.
+budget:
+  total_tokens: 500000
+trajectory_assert:
+  - tool_called: code_read_file
+  - tool_called: repos_run_command
+  - tool_called: conversations_send

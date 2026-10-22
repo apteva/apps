@@ -5,6 +5,7 @@
 - Allow one optional suggested next user message attached to a final reply through the existing send tool. Persist it with the reply and offer the same ghost text in the desktop/mobile web composer: Tab or tap prepares an editable draft; sending remains explicit.
 - Suppress stale or inappropriate suggestions during active/queued work, existing drafts/attachments, voice, pending approvals/forms and uncertain sends. Add per-client dismissal, host opt-out and live model/browser regression coverage.
 - Pin the released App SDK v0.103.0 and keep telemetry subscriptions compatible with its expanded client interface.
+- Add a natural coding Tier 3 scenario: independently suggest a shipping bug fix, wait for explicit acceptance, then verify the resulting code and prove the agent's regression tests catch the original defect. Greeting and closure cases must omit suggestions.
 
 ## 0.24.48 — 2026-10-14
 

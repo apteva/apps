@@ -181,8 +181,9 @@ GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
   --json scenarios/20-suggested-reply.yaml
 ```
 
-The scenario uses a disposable project/agent. It asks the real model for one
-suggested next user message alongside its final reply, checks durable reload,
+This lifecycle scenario uses a disposable project/agent. It explicitly supplies
+the suggested wording, so it proves the handoff rather than suggestion quality.
+It checks durable reload,
 no inbox attention, idle activity and a quiet window without automatic work,
 then explicitly sends the suggested text as a user turn. It verifies exactly
 one continuation despite a send retry and no suggestion after closing the chat.
@@ -199,6 +200,44 @@ three conversation sends: the final with one suggestion, the response after
 actual user submission, and the closing response. No additional suggestion tool
 or generation request was introduced. The runner creates its own isolated
 Server/Core processes and leaves existing local and production agents alone.
+
+For a natural coding task that tests relevance and usefulness, run:
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/21-coding-suggested-reply.yaml
+```
+
+This installs Code as a disposable test peer and seeds a small shipping-cost
+repository with an exact-threshold bug and passing tests that miss that boundary.
+The user asks only for an investigation; neither the prompt nor scenario directive
+mentions suggestions, their schema, or desired wording. The shipped Conversations
+guidance must lead the agent to attach one useful next message itself. The driver
+checks an explicit relevance rubric (a shipping/boundary fix plus regression
+coverage), durable history, unchanged source and a quiet window before acceptance.
+It then sends the exact generated text without extra instructions. Independent
+Bun checks verify the retrieved implementation at and around the threshold, and
+reintroducing the original bug must fail the agent's own regression suite. Natural
+greeting and closing messages must have no suggestions. This is evidence for one
+concrete coding workflow, not a general suggestion-quality benchmark.
+
+Local command execution is enabled only on this runner-owned Code install. No
+live app settings, installed local agents, or production resources are changed.
+
+The natural coding run on 2026-10-22 passed with verified `openai-codex` /
+`gpt-6.1-sol`: 160.1 seconds including startup/readiness, 19 iterations and
+322,479 total tokens. The model independently generated:
+
+> Fix the threshold comparison, add the exact-$50 regression test, and run the tests.
+
+It read all three fixture files and confirmed the existing two tests passed
+while `shippingCents(5000)` returned `499`. No source changed before the exact
+suggestion was sent as a user message. After acceptance, it added the boundary
+test, observed its failure, changed `>` to `>=`, and ran three passing tests.
+The driver's independent policy suite passed four tests with 11 assertions;
+restoring the original implementation produced two passing tests and the
+expected failing boundary regression. Greeting and closure had no suggestions.
+No production or installed-app update was performed.
 
 Final local validation passed: 108 Bun UI/client tests, all 107 Playwright
 browser tests (including actual touch/mobile viewport checks), consumer type
