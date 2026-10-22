@@ -268,6 +268,7 @@ func mergePlaybackUnderruns(previous, incoming []playbackUnderrunEvent) []playba
 }
 
 type browserWebRTCStats struct {
+	RelayProtocol           string   `json:"relayProtocol,omitempty"`
 	Protocol                string   `json:"protocol,omitempty"`
 	CandidateType           string   `json:"candidateType,omitempty"`
 	SendBitrateBPS          float64  `json:"sendBitrateBps"`
@@ -456,6 +457,7 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics, trustedPers
 			}
 		}
 		r.Protocol = enum(r.Protocol, "udp", "tcp")
+		r.RelayProtocol = enum(r.RelayProtocol, "udp", "tcp", "tls")
 		r.CandidateType = enum(r.CandidateType, "host", "srflx", "prflx", "relay")
 		if r.ConcealedMS != nil {
 			if math.IsNaN(*r.ConcealedMS) || math.IsInf(*r.ConcealedMS, 0) {

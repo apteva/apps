@@ -1,3 +1,5 @@
+import {safeMediaSessionEvent,type MediaSessionEvent} from "./media-lease";
+import {RTCICEController,rtcICEConfiguration} from "./rtc-ice";
 import type { AppHandle } from "@apteva/web-sdk";
 import type { ListenerAudioConnection, ListenerAudioRuntime, ListenerPlaybackOptions } from "./listener-audio";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions } from "../../ui/softphone-audio";
@@ -20,6 +22,8 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
   let keepalive:ReturnType<typeof setInterval>|undefined, sampleTimer:ReturnType<typeof setInterval>|undefined;
   let volume=audioOptions.outputVolume??1;
   let config:RTCConfiguration={}, bitrate=32000;
+ let ice:RTCICEController|undefined;
+ const iceEvents:MediaSessionEvent[]=[];
   let talkAck:((generation:number,error?:Error)=>void)|undefined, talkAnswer:((sdp:string,generation:number)=>void)|undefined;
   let cancelStart:(()=>void)|undefined, cancelTalk:(()=>void)|undefined;
   const elements:HTMLAudioElement[]=[];
@@ -28,6 +32,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
   const stopTalking=()=>{
    const stopped=++generation;talkWanted=talking=false;talkAck?.(stopped,new Error("Coaching cancelled"));cancelTalk?.();talkAnswer=undefined;
    if(keepalive)clearInterval(keepalive);keepalive=undefined;
+   ice?.remove("coach");
    if(uplink){uplink.onconnectionstatechange=null;uplink.close();uplink=undefined;}
    capture?.disconnect();capture=undefined;micSource?.disconnect();micSource=undefined;destination?.disconnect();destination=undefined;
    mic?.getTracks().forEach(t=>{t.onended=null;t.stop();});mic=undefined;
@@ -36,7 +41,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
   };
   const blur=()=>stopTalking(),visibility=()=>{if(document.visibilityState!=="visible")stopTalking();};
   const stop=()=>{
-   if(closed)return;stopTalking();closed=true;cancelStart?.();
+   if(closed)return;stopTalking();closed=true;ice?.stop();ice=undefined;cancelStart?.();
    window.removeEventListener("blur",blur);document.removeEventListener("visibilitychange",visibility);
    if(sampleTimer)clearInterval(sampleTimer);sampleTimer=undefined;
    if(socket){socket.onmessage=socket.onclose=socket.onerror=null;socket.close(1000,"listener_shutdown");}
@@ -65,20 +70,24 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
      ensure();speaker=context.createGain();speaker.gain.value=volume;speaker.connect(context.destination);
      context.onstatechange=()=>{if(context?.state==="suspended" || (context?.state as string)==="interrupted")fail("listener_audio_paused");};
      await new Promise<void>((resolve,reject)=>{
-      let finished=false, serverReady=false;
-      const finish=(error?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);cancelStart=undefined;error?reject(error):resolve();};
+      let finished=false, serverReady=false, relayRequired=false;
+      const finish=(error?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);cancelStart=undefined;error?reject(relayRequired?Object.assign(error,{code:"turn_relay_required"}):error):resolve();};
       const timeout=setTimeout(()=>finish(new Error("WebRTC listener timed out")),18000);
       const maybeReady=()=>{if(connected&&serverReady&&!closed&&!ready){ready=true;finish();callbacks.onReady("webrtc");}};
       cancelStart=()=>finish(new Error("Listening cancelled"));
-      socket=new WebSocket(rtcMediaURL(url,audioOptions.webrtcFec));
+      socket=new WebSocket(rtcMediaURL(url,audioOptions.webrtcFec,audioOptions));
       socket.onmessage=({data})=>{
        if(closed)return;
        if(typeof data!=="string"){finish(new Error("Invalid WebRTC listener frame"));fail("listener_protocol_error");return;}
        let event:any;try{event=JSON.parse(data);}catch{finish(new Error("Invalid listener control"));fail("listener_protocol_error");return;}
+       if(event.type==="webrtc.error"){finish(Object.assign(new Error("Required TURN relay is unavailable"),{code:event.code}));return;}
+       if(ice?.handle(event))return;
        if(event.type==="webrtc.config"){
+ relayRequired=event.ice_transport_policy==="relay";
         if(pc || event.listener!==true){finish(new Error("Invalid WebRTC listener configuration"));return;}
-        config={iceServers:event.ice_servers??[]};bitrate=event.bitrate??32000;
+        try{config=rtcICEConfiguration(event);}catch(error){finish(error as Error);return;}bitrate=event.bitrate??32000;
         pc=new RTCPeerConnection(config);const peer=pc;
+        ice=new RTCICEController(send,()=>!closed,(outcome,evidence)=>{iceEvents.push(safeMediaSessionEvent({...evidence,timestamp:new Date().toISOString(),action:"ice_restart",outcome}));if(iceEvents.length>50)iceEvents.shift();},value=>{config=value;});ice.register("main",peer);
         for(let d=0;d<2;d++)peer.addTransceiver("audio",{direction:"recvonly"});
         peer.ontrack=e=>{
          if(closed||!context||!speaker)return;
@@ -94,7 +103,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
          if(peer.connectionState==="connected"){connected=true;maybeReady();}
          if(peer.connectionState==="failed"||peer.connectionState==="closed"){finish(new Error("WebRTC listener connection failed"));if(finished&&ready)fail("listener_network_error");}
         };
-        void offer(peer,()=>!closed).then(sdp=>send({type:"webrtc.offer",sdp})).catch(error=>finish(error));return;
+        void offer(peer,()=>!closed).then(sdp=>send({type:"webrtc.offer",sdp,ice_version:1})).catch(error=>finish(error));return;
        }
        if(event.type==="webrtc.answer"){void pc?.setRemoteDescription({type:"answer",sdp:event.sdp}).catch(error=>finish(error));return;}
        if(event.type==="listener.ready"){if(coaching&&event.coaching!==true){finish(new Error("Coaching not authorized"));return;}serverReady=true;maybeReady();return;}
@@ -113,7 +122,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
       void pc.getStats().then(report=>{if(closed)return;const value=rtcStatistics(report,previous);previous=value.previous;
        quality.observe({...value.metrics,receiver_jitter:value.webrtc.jitterMs/1000});
        for(const receiver of receivers)if("jitterBufferTarget" in receiver)try{(receiver as RTCRtpReceiver&{jitterBufferTarget:number}).jitterBufferTarget=quality.target;}catch{/* optional browser hint */}
-       callbacks.onDiagnostics?.({media_transport:"webrtc",dropped_ms:[],played_ms:[],max_queue_ms:value.queueMs,max_late_ms:0,sequence_gaps:[],network_excess_ms:0,network_dropped_ms:[],webrtc:value.webrtc});
+       callbacks.onDiagnostics?.({session_events:iceEvents.slice(),media_transport:"webrtc",dropped_ms:[],played_ms:[],max_queue_ms:value.queueMs,max_late_ms:0,sequence_gaps:[],network_excess_ms:0,network_dropped_ms:[],webrtc:value.webrtc});
       }).catch(()=>{}).finally(()=>{sampling=false;});
      },1000);
     }catch(error){stop();throw error;}
@@ -133,7 +142,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
      keepalive=setInterval(()=>{if(current())try{send({type:"coach.keepalive",generation:gen});}catch{stopTalking();}},1000);
      capture=new AudioWorkletNode(context,"softphone-capture",{outputChannelCount:[1],processorOptions:{nativeOutput:true,inputGainDB:audioOptions.inputGainDB,highpassFilter:audioOptions.highpassFilter}});
      destination=context.createMediaStreamDestination();destination.channelCount=1;micSource=context.createMediaStreamSource(stream);micSource.connect(capture).connect(destination);
-     const peer=new RTCPeerConnection(config);uplink=peer;
+     const peer=new RTCPeerConnection(config);uplink=peer;ice?.register("coach",peer,current,gen);
      peer.addTransceiver(destination.stream.getAudioTracks()[0],{direction:"sendonly",streams:[destination.stream],sendEncodings:[{maxBitrate:bitrate}]});
      await new Promise<void>((resolve,reject)=>{
       let settled=false;const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timeout);cancelTalk=undefined;talkAnswer=undefined;error?reject(error):resolve();};

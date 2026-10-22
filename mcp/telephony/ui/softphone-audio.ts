@@ -1,3 +1,4 @@
+import {validateRTCICEOptions} from "../frontend/src/rtc-ice";
 import { SOFTPHONE_CLIENT_VERSION } from "./client-version";
 import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
@@ -113,6 +114,9 @@ export interface SoftphoneCallbacks {
 }
 
 export interface SoftphoneAudioOptions {
+  turnTransport?: "all"|"udp"|"tcp"|"tls";
+  iceTransportPolicy?: "all"|"relay";
+  turnTLSPort?:number;
 	/** Optional browser transport; existing PCM WebSocket remains the default. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
   /** WebRTC Opus redundancy. Default true when supported; false disables redundancy while retaining native Opus when available. Applied on start/reconnect. */
@@ -198,7 +202,7 @@ export interface SoftphoneDiagnostics {
   underrunEvents?: PlaybackUnderrunEvent[];
 	mediaTransport?: "websocket" | "webrtc";
 	codec?: "pcm16" | "opus";
-	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number; jitterBufferIntervalMs?:number };
+	webrtc?: { relayProtocol?:string; protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number; jitterBufferIntervalMs?:number };
   audioHealth?: SoftphoneAudioHealth;
   sessionEvents?: MediaSessionEvent[];
   coachingPlayedMs?: number;
@@ -238,6 +242,7 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
 
 export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
 	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
+  validateRTCICEOptions(options);
   if (options.webrtcFec !== undefined && typeof options.webrtcFec !== "boolean") throw new RangeError("webrtcFec must be boolean");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);

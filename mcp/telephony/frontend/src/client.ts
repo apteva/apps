@@ -350,6 +350,10 @@ export class TelephonyClient {
    * Transport changes affect new calls; credentials are write-only. */
   /** Operator-only optional carrier buffer. Off by default; shared resource scope.
    * apply defers while calls are active. Does not change local SIP recovery. */
+  /** The backend resolves project and adviser identity from authentication. */
+  turnPolicy(request:{policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/softphone/turn-policy"),request);}
+  /** Operator-only project/adviser relay configuration. */
+  configureTURNPolicy(request:{identity?:import("./turn-policy").TURNIdentity;policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/numbers/turn-policy"),request);}
   carrierMediaSettings(request:CarrierMediaSettingsRequest):Promise<CarrierMediaSettingsResult> {
     return this.post(this.path("/numbers/carrier-media"),request);
   }
