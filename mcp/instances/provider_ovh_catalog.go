@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,6 @@ type OVHAddonOffer struct {
 	Code           string             `json:"code"`
 	Description    string             `json:"description"`
 	Configurations []OVHConfiguration `json:"configurations,omitempty"`
-	Prices         []OVHOrderPrice    `json:"prices,omitempty"`
 }
 type OVHOffer struct {
 	Options        map[string]OVHAddonOffer `json:"options,omitempty"`
@@ -155,27 +155,95 @@ func ovhSubsidiary(ctx *sdk.AppCtx) (string, error) {
 	}
 	return sub, nil
 }
+
+// Large OVH catalogs exceed the integration executor's normal 10 MB JSON cap.
+// Download through its bounded binary envelope, project only fields we need and
+// cache the compact projection. Concurrent UI catalog calls share this load.
+const ovhCatalogLimit = 32 << 20
+
+func ovhCatalogJSON(data json.RawMessage) (json.RawMessage, error) {
+	if len(data) > base64.StdEncoding.EncodedLen(ovhCatalogLimit)+(1<<20) {
+		return nil, errors.New("OVH catalog response exceeds 32 MiB")
+	}
+	var envelope struct {
+		Binary bool   `json:"_binary"`
+		Base64 string `json:"base64"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	if !envelope.Binary {
+		if len(data) > ovhCatalogLimit {
+			return nil, errors.New("OVH catalog exceeds 32 MiB")
+		}
+		return data, nil
+	}
+	if len(envelope.Base64) > base64.StdEncoding.EncodedLen(ovhCatalogLimit) {
+		return nil, errors.New("OVH catalog exceeds 32 MiB")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Base64)
+	if err != nil {
+		return nil, fmt.Errorf("OVH catalog encoding: %w", err)
+	}
+	if len(decoded) > ovhCatalogLimit {
+		return nil, errors.New("OVH catalog exceeds 32 MiB")
+	}
+	return decoded, nil
+}
+func ovhTechnicalBlob(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields["technical"]) == 0 {
+		return nil
+	}
+	return mustMarshal(map[string]json.RawMessage{"technical": fields["technical"]})
+}
 func ovhLoadCatalog(ctx *sdk.AppCtx, product string) (ovhCatalog, error) {
-	sub, e := ovhSubsidiary(ctx)
-	if e != nil {
-		return ovhCatalog{}, e
+	sub, err := ovhSubsidiary(ctx)
+	if err != nil {
+		return ovhCatalog{}, err
 	}
-	data, e := executeProviderTool(ctx, "ovhcloud", ovhProductTool(product)+"_catalog", map[string]any{"ovhSubsidiary": sub})
-	if e != nil {
-		return ovhCatalog{}, e
+	bound, err := apiProviderBound(ctx, "ovhcloud")
+	if err != nil {
+		return ovhCatalog{}, err
 	}
-	var c ovhCatalog
-	e = json.Unmarshal(data, &c)
-	if e != nil {
-		return c, e
+	args := map[string]any{"ovhSubsidiary": sub}
+	encoded, err := cachedCatalog(ctx, bound.ConnectionID, "ovhcloud", "normalized_"+product+"_catalog", args, func() (json.RawMessage, error) {
+		data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, "ovhcloud", ovhProductTool(product)+"_catalog_download", args)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := ovhCatalogJSON(data)
+		if err != nil {
+			return nil, err
+		}
+		var cat ovhCatalog
+		if err = json.Unmarshal(raw, &cat); err != nil {
+			return nil, err
+		}
+		for i := range cat.Plans {
+			cat.Plans[i].Blobs = ovhTechnicalBlob(cat.Plans[i].Blobs)
+		}
+		for i := range cat.Addons {
+			cat.Addons[i].Blobs = nil
+		}
+		for i := range cat.Products {
+			cat.Products[i].Blobs = ovhTechnicalBlob(cat.Products[i].Blobs)
+		}
+		for i := range cat.Plans {
+			ovhEnrichPlan(&cat, cat.Plans[i].Product, &cat.Plans[i])
+		}
+		for i := range cat.Addons {
+			ovhEnrichPlan(&cat, cat.Addons[i].Product, &cat.Addons[i])
+		}
+		cat.Products = nil
+		return json.Marshal(cat)
+	})
+	if err != nil {
+		return ovhCatalog{}, err
 	}
-	for i := range c.Plans {
-		ovhEnrichPlan(&c, c.Plans[i].Product, &c.Plans[i])
-	}
-	for i := range c.Addons {
-		ovhEnrichPlan(&c, c.Addons[i].Product, &c.Addons[i])
-	}
-	return c, nil
+	var cat ovhCatalog
+	err = json.Unmarshal(encoded, &cat)
+	return cat, err
 }
 func ovhOfferForPlan(product string, p ovhPlan, currency string) OVHOffer {
 	o := OVHOffer{Product: product, PlanCode: p.PlanCode, Configurations: []OVHConfiguration{}, AddonFamilies: []OVHAddonFamily{}, Prices: []OVHOrderPrice{}}
@@ -222,7 +290,7 @@ func ovhContractTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
 					for _, a := range cat.Addons {
 						if a.PlanCode == code {
 							details := ovhOfferForPlan(product, a, cat.Locale.Currency)
-							offer.Options[code] = OVHAddonOffer{code, a.InvoiceName, details.Configurations, details.Prices}
+							offer.Options[code] = OVHAddonOffer{code, a.InvoiceName, details.Configurations}
 							break
 						}
 					}
@@ -334,16 +402,28 @@ func ovhLocations(ctx *sdk.AppCtx) ([]Location, error) {
 	if e != nil {
 		return nil, e
 	}
-	types, e := ovhContractTypes(ctx)
-	if e != nil && config["service_name"] == "" {
-		return nil, e
-	}
 	byID := map[string]Location{}
-	for _, t := range types {
-		for _, z := range t.AvailableIn {
-			_, zone, _ := strings.Cut(strings.TrimPrefix(z, ovhContractPrefix), "/")
-			byID[z] = Location{Name: z, Description: zone + " (" + t.ProviderFamily + ")", NetworkZone: zone}
+	failures := []string{}
+	for _, product := range ovhOrderProducts {
+		cat, err := ovhLoadCatalog(ctx, product)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
 		}
+		for _, plan := range cat.Plans {
+			for _, cfg := range plan.Configurations {
+				if cfg.Name != "vps_datacenter" && cfg.Name != "dedicated_datacenter" {
+					continue
+				}
+				for _, zone := range cfg.Values {
+					z := ovhRegion(product, zone)
+					byID[z] = Location{Name: z, Description: zone + " (" + product + ")", NetworkZone: zone}
+				}
+			}
+		}
+	}
+	if len(byID) == 0 && config["service_name"] == "" && len(failures) > 0 {
+		return nil, errors.New(strings.Join(failures, "; "))
 	}
 	if config["service_name"] != "" {
 		data, e := executeProviderTool(ctx, "ovhcloud", "list_regions", map[string]any{})
