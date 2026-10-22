@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.49 — 2026-10-22
 
 - Allow one optional suggested next user message attached to a final reply through the existing send tool. Persist it with the reply and offer the same ghost text in the desktop/mobile web composer: Tab or tap prepares an editable draft; sending remains explicit.
 - Suppress stale or inappropriate suggestions during active/queued work, existing drafts/attachments, voice, pending approvals/forms and uncertain sends. Add per-client dismissal, host opt-out and live model/browser regression coverage.

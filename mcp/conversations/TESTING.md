@@ -242,5 +242,5 @@ No production or installed-app update was performed.
 Final local validation passed: 108 Bun UI/client tests, all 107 Playwright
 browser tests (including actual touch/mobile viewport checks), consumer type
 checks, packaged UI builds, and `GOWORK=off go test -race -tags=integration ./...`.
-The dedicated real-model Tier 3 run above passed separately. These changes are
-unreleased; existing release tags and installed app versions are unchanged.
+The dedicated real-model Tier 3 run above passed separately. This validation
+covers the v0.24.49 release; publishing does not update installed apps automatically.
