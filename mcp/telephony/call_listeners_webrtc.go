@@ -281,7 +281,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 					default:
 						return true
 					}
-				})
+				}, result.stats[:]...)
 				continue
 			}
 			if event.Type == "coach.webrtc.restart_offer" {
@@ -295,7 +295,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				if capture == nil || generation != event.Generation {
 					continue
 				}
-				iceSession.restart(capture, event.SDP, event.Revision, writer, "coach.webrtc.restart_answer", &generation, func() bool { return listenerRTCCoachValid(l, generation) })
+				iceSession.restart(capture, event.SDP, event.Revision, writer, "coach.webrtc.restart_answer", &generation, func() bool { return listenerRTCCoachValid(l, generation) }, result.coachStats)
 				continue
 			}
 

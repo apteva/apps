@@ -97,7 +97,7 @@ func TestSIPPlaybackClockDoesNotAbsorbDeliveryStall(t *testing.T) {
 }
 
 func TestSIPPlaybackClockObservationSurvivesRejection(t *testing.T) {
-	b := newRTPJitterBuffer()
+	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Receiver: "reference"})
 	at := time.Unix(100, 0)
 	b.pushRTP(1, make([]byte, 160), 0, at)
 	b.pushRTP(2, make([]byte, 160), 160, at.Add(time.Second))

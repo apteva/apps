@@ -41,6 +41,9 @@ type sipClockRecoveryResult struct {
 func replaySIPClockRecovery(t *testing.T, codec, profile string, legacy bool, seconds int) sipClockRecoveryResult {
 	t.Helper()
 	b := newRTPJitterBuffer()
+	if legacy {
+		b.policy.Receiver = "reference"
+	} // The frozen clock baseline retains its source-age admission.
 	old := &v13SIPClockBuffer{b}
 	m := &sipRTPMedia{offer: sipMediaOffer{Codec: codec, PacketSamples: 160}}
 	f := newRTPAudioFramer(b, m.offer)
@@ -251,7 +254,7 @@ func TestSIPFreshPacketAfterConcealmentRebuffersWithoutClockReset(t *testing.T) 
 func TestSIPStartupReserveFitsRemainingAgeBudget(t *testing.T) {
 	for _, delay := range []time.Duration{140 * time.Millisecond, 190 * time.Millisecond} {
 		t.Run(delay.String(), func(t *testing.T) {
-			b := newRTPJitterBuffer()
+			b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Receiver: "reference"})
 			start := time.Unix(100, 0)
 			b.haveSourceAnchor = true
 			b.sourceAnchorAt = start
@@ -311,7 +314,7 @@ func TestSIPDecodedPartialDeadlineFollowsRetainedSamples(t *testing.T) {
 	}
 	f.pendingPCM = make([]int16, 320)
 	f.segments = []sipPCMSegment{{samples: 320, at: start, source: start, arrival: start.Add(160 * time.Millisecond)}}
-	if _, ready := f.popPCMAt(m, start.Add(400*time.Millisecond)); ready || b.expiredSamples != 160 {
+	if out, _ := f.popPCMAt(m, start.Add(400*time.Millisecond)); speechRMS(out) != 0 || b.expiredSamples != 160 {
 		t.Fatal("genuinely stale partial survived", b.expiredSamples)
 	}
 }
@@ -341,7 +344,7 @@ func TestSIPClockRecoveryDeliveryAtAgeBudgetEdge(t *testing.T) {
 	// assert lossless playback when delivery leaves insufficient headroom.
 	r := replaySIPClockRecovery(t, "G722", "age_budget_edge", false, 147)
 	t.Logf("%+v", r)
-	if r.Updates == 0 || math.Abs(r.PPM+249.938) > 60 || r.ExpiredMS == 0 {
-		t.Fatal("clock recovery or genuine age expiry missing", r)
+	if r.Updates == 0 || math.Abs(r.PPM+249.938) > 60 || r.ExpiredMS != 0 || r.LateMS != 0 || r.MaxQueueMS > 160 {
+		t.Fatal("clock recovery or local-residence isolation failed", r)
 	}
 }

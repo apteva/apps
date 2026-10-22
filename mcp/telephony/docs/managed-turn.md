@@ -100,12 +100,36 @@ packet, encoding or playback loop. Renewal failures retry with a bounded backoff
 (up to 30 seconds); duplicate browser refresh requests are debounced. Existing
 media stays active while credential service requests retry.
 
-A successful renewal updates `RTCPeerConnection` configuration and performs a
-controlled ICE restart. The peer, media tracks, microphone mute state and audio
-processing graph survive. Listening and coaching have separate peers;
-negotiation waits for initial signaling to finish and pins coaching generation.
-Canceled or replaced peers cannot apply late answers. A failed negotiation is
-rolled back where supported and browser retries are bounded.
+A successful credential refresh first updates `RTCPeerConnection` configuration.
+A healthy, selected **direct** path with policy `all` keeps its current ICE path;
+it emits `credentials_applied_direct`, without creating an offer or replacing
+sockets. A selected relay path, a nonconnected peer, or a policy change requiring
+relay still uses a controlled ICE restart.
+
+For relay renewal, Telephony's pinned local Pion ICE compatibility patch keeps
+one previous nominated media path active until the new pair is selected. It keeps
+the old receive sockets for another 250 ms to drain in-flight packets, then closes
+them. DTLS/SRTP, RTP sequence numbers, tracks, microphone mute and audio processing
+survive. No second encoder, audio replay queue or per-packet logging is added.
+Existing ICE failure/setup deadlines still apply to genuinely failed recovery.
+See `third_party/pion-ice/TELEPHONY-PATCH.md` for the pinned source, security bounds
+and maintenance requirements; upgrading to unpatched ICE v4.4.8 alone does not
+provide this behavior.
+
+Listening and coaching retain separate peers and coaching generation checks.
+Negotiation waits for initial signaling to finish. Canceled/replaced peers cannot
+apply late answers. A failed negotiation is rolled back where supported and
+credential retries remain bounded.
+
+Renewal evidence separates `credentials_refreshed`, `restart_started`,
+`restart_signaled` and `restart_completed`. **Signaling completion is not media
+completion.** Both browser and server require a newly selected pair and progress
+in the active RTP directions before recording `restart_completed`. The server
+reuses existing packet counters; it does not add a stats interceptor to RTP.
+A pending renewal alone samples progress at 100 ms, for at most ten seconds;
+steady media has no additional progress poller. Missing progress records a
+media timeout/failure. Main-call server events are available in
+`server.webrtc.ice_events`; listening events remain in listener diagnostics.
 
 With policy `all`, an initial credential-service outage still permits direct
 ICE setup. Forced relay fails closed with a safe, explicit error. This does not
@@ -131,6 +155,8 @@ bun test frontend/tests/rtc-ice.test.ts
 bun run typecheck
 # Requires local Playwright Chromium; no Docker or external services:
 GOWORK=off go test -tags integration -run '^TestTURNBrowserMediaCredentialRenewal$' -count=1 -timeout 3m .
+# Repeat the incident's 100-second duration for each direct/UDP/TCP path:
+GOWORK=off TELEPHONY_TURN_CONTINUITY_SECONDS=100 go test -tags integration -run '^TestTURNBrowserMediaCredentialRenewal$' -count=1 -timeout 6m -v .
 ```
 
 Tests cover optional defaults, binding/policy permissions, identity/project
@@ -138,11 +164,21 @@ isolation, ended-call rejection, concurrent issuance limits, cancellation,
 transport filtering, renewal, forced-relay failures, redaction and listening/
 coaching generation handling. Real loopback TURN/UDP and TURN/TCP WebRTC sessions
 exchange audio both ways and rotate credentials while preserving the attachment.
-Real Chromium also runs the shared softphone and microphone worklet through
-TURN/UDP and TURN/TCP and verifies credential rotation without replacing the
-peer/sender or losing mute. This check runs in the existing browser CI job.
+Real Chromium also runs the shared softphone and microphone worklet with direct
+ICE, TURN/UDP and TURN/TCP. It renews twice, checks peer/sender/mute preservation,
+requires remote RTCP loss evidence, and asserts no packet-loss increase in either
+direction. Relay tests deliberately delay answer application by 400 ms while
+requiring media to continue; success also needs server-side RTP evidence. The
+receive observation gap is sampled at 50 ms and is a continuity check, not an
+exact packet-capture inter-arrival measurement. This check runs in the existing browser CI job.
 A separate TURN/TLS test requires a trusted fixture certificate, rejects an
 untrusted certificate, and transfers media both ways. TLS is not bypassed.
+
+Relay renewal briefly needs ports/sockets for both candidate generations. Size
+the configured WebRTC UDP range with that overlap in mind. The patch does not
+duplicate codecs or media processing; a range exhausted by other calls remains
+a genuine resource failure. Packet continuity in local tests does not certify
+an external TURN deployment, firewall or production host capacity.
 
 These tests do not replace a staging browser-to-deployed-TURN check: trusted
 public TLS, public address separation, firewall reachability and real client

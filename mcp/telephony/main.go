@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.30
+version: 0.12.31
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -155,6 +155,7 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
     - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
+    - { name: telephony_sip_audio_profile, description: "Configure bounded SIP audio profiles for future calls, per project, direction, inbound route or outbound account/number." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
@@ -181,6 +182,7 @@ provides:
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
+    - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
     - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
@@ -390,7 +392,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.30
+    ref: telephony/v0.12.31
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -757,6 +759,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
+		{Name: "telephony_sip_audio_profile", Description: "Read, save or reset a bounded SIP audio profile for new calls. Scope by optional direction, route_id or outbound carrier_connection_id/phone_number. config includes preset (balanced/resilient/reference/custom), codecs and rtp_playback. expires_at optionally reverts a test within 24h. No carrier changes, restart or active-call mutation.", InputSchema: schemaObject(map[string]any{"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}}, "route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "expires_at": map[string]any{"type": "string"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}, "reset": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolSIPAudioProfile},
 		{
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
@@ -953,6 +956,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider_call_id": map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolCallGet,
+		},
+		{
+			Name:        "telephony_live_occupancy",
+			Description: "Read a complete current project snapshot of active human call owners, including connecting calls. Optional direction: inbound or outbound. No pagination. Observational only: retain routing reservations and atomic capacity checks.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			InputSchema: schemaObject(map[string]any{
+				"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}},
+			}, nil),
+			HandlerCtx: a.toolLiveOccupancy,
 		},
 		{Name: "telephony_decisions_list", Description: "List project-scoped routing decision requests, results, deadlines and fallback reasons for a call.", InputSchema: schemaObject(map[string]any{"call_id": map[string]any{"type": "string"}}, []string{"call_id"}), HandlerCtx: a.toolDecisionsList},
 		{

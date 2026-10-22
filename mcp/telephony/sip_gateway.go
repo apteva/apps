@@ -448,7 +448,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		respond(sip.StatusNotFound, "No Route")
 		return
 	}
-	settings, err := g.app.localMediaSettings(route.ProjectID, route.ID)
+	settings, err := g.app.localMediaSettingsForCall(route.ProjectID, route.ID, "inbound", route.CarrierConnectionID, route.PhoneNumber)
 	if err != nil {
 		respond(500, "Media Settings Unavailable")
 		return

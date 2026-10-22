@@ -21,6 +21,7 @@ import (
 // Real Chromium runs the shared softphone, microphone worklet and ICE controller
 // against Telephony's actual media endpoint. All services are local fixtures.
 func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
+	seconds := soakEnvInt(t, "TELEPHONY_TURN_CONTINUITY_SECONDS", 16, 16, 300)
 	bundle := filepath.Join(t.TempDir(), "turn-browser.js")
 	build := exec.CommandContext(t.Context(), "bun", "build", "./frontend/tests/turn-browser-entry.ts", "--target=browser", "--outfile="+bundle)
 	if out, e := build.CombinedOutput(); e != nil {
@@ -34,9 +35,13 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	for _, mode := range []string{"udp", "tcp"} {
+	for _, mode := range []string{"direct", "udp", "tcp"} {
 		t.Run(mode, func(t *testing.T) {
-			endpoint, _ := localTURNTestRelay(t, mode)
+			transport, policy := mode, "relay"
+			if mode == "direct" {
+				transport, policy = "udp", "all"
+			}
+			endpoint, _ := localTURNTestRelay(t, transport)
 			app, ctx, platform := turnTestFixture(t)
 			row := insertSoftphoneCall(t, app, "in-progress")
 			platform.response = func(sequence int64) rtcTURNCredentials {
@@ -46,7 +51,7 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 				}
 				return rtcTURNCredentials{ICEServers: []webrtc.ICEServer{{URLs: []string{endpoint}, Username: username, Credential: "local-test-password"}}, ExpiresAt: time.Now().Add(time.Hour).Unix(), TTLSeconds: 3600}
 			}
-			saveTURNTestPolicy(t, app, ctx, nil, phoneTURNPolicy{Source: "app", Transport: mode, ICEPolicy: "relay"})
+			saveTURNTestPolicy(t, app, ctx, nil, phoneTURNPolicy{Source: "app", Transport: transport, ICEPolicy: policy})
 			server := softphoneTestServer(t, app)
 			carrier := dialWS(t, server.URL+"/peer/"+row.ID+"/cb-secret")
 			done := make(chan struct{})
@@ -70,7 +75,7 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 						return
 					case <-timer.C:
 						carrier.SetWriteDeadline(time.Now().Add(time.Second))
-						if wsutil.WriteClientBinary(carrier, make([]byte, 960)) != nil {
+						if wsutil.WriteClientBinary(carrier, pcm16ToBytes(sinePCM(24000, 440, 480))) != nil {
 							return
 						}
 					}
@@ -80,7 +85,7 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/config":
-					writeJSON(w, map[string]any{"media_url": "ws" + strings.TrimPrefix(server.URL, "http") + "/softphone/media/" + row.ID + "/peer-secret?transport=webrtc"})
+					writeJSON(w, map[string]any{"mode": mode, "seconds": seconds, "media_url": "ws" + strings.TrimPrefix(server.URL, "http") + "/softphone/media/" + row.ID + "/peer-secret?transport=webrtc"})
 				case "/module.js":
 					w.Header().Set("Content-Type", "text/javascript")
 					w.Write(source)
@@ -95,7 +100,11 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 			defer origin.Close()
 			command := exec.CommandContext(t.Context(), "bun", "frontend/tests/turn-browser-run.ts")
 			command.Env = append(os.Environ(), "TELEPHONY_TURN_BROWSER_ORIGIN="+origin.URL)
+			started := time.Now()
+			cpuStart, _ := rtcProcessCPUSeconds()
 			out, e := command.CombinedOutput()
+			cpuEnd, _ := rtcProcessCPUSeconds()
+			t.Logf("Telephony fixture CPU %.2f%% of one core over %.2fs", 100*(cpuEnd-cpuStart)/time.Since(started).Seconds(), time.Since(started).Seconds())
 			if e != nil {
 				t.Fatalf("browser managed TURN: %v\n%s", e, out)
 			}
@@ -107,13 +116,24 @@ func TestTURNBrowserMediaCredentialRenewal(t *testing.T) {
 					RelayProtocol string `json:"relayProtocol"`
 				} `json:"path"`
 			}
-			if json.Unmarshal(out, &result) != nil || !result.PeerPreserved || !result.MutePreserved || result.Path.CandidateType != "relay" || result.Path.RelayProtocol != mode {
+			if json.Unmarshal(out, &result) != nil || !result.PeerPreserved || !result.MutePreserved || (mode != "direct" && (result.Path.CandidateType != "relay" || result.Path.RelayProtocol != mode)) || (mode == "direct" && result.Path.CandidateType == "relay") {
 				t.Fatalf("unexpected relay evidence: %s", out)
 			}
-			if platform.calls.Load() != 2 {
+			if platform.calls.Load() != 3 {
 				t.Fatal("unexpected credential requests", platform.calls.Load())
 			}
-			t.Logf("Chromium TURN/%s kept its peer, sender and mute across credential rotation", mode)
+			if mode != "direct" {
+				completed := 0
+				for _, event := range app.softphones.lookup(row.ID).serverAudioSnapshot().WebRTC.ICEEvents {
+					if event.Outcome == "restart_completed" {
+						completed++
+					}
+				}
+				if completed != 2 {
+					t.Fatalf("server did not verify resumed RTP for both renewals: %d", completed)
+				}
+			}
+			t.Logf("Chromium renewal continuity %s: %s", mode, out)
 		})
 	}
 }

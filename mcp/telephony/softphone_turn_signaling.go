@@ -173,7 +173,7 @@ func (s *rtcICESession) answer(pc *webrtc.PeerConnection, sdp string, revision u
 
 // At most one negotiation per PC and three retained peer states. Control reads
 // remain responsive to lease renewal, mute and coaching deadman messages.
-func (s *rtcICESession) restart(pc *webrtc.PeerConnection, offer string, revision uint64, writer *websocketWriterPump, kind string, generation *uint32, valid func() bool) {
+func (s *rtcICESession) restart(pc *webrtc.PeerConnection, offer string, revision uint64, writer *websocketWriterPump, kind string, generation *uint32, valid func() bool, media ...*rtcMediaStats) {
 	if revision == 0 || revision != s.revision.Load() || !valid() {
 		return
 	}
@@ -206,7 +206,15 @@ func (s *rtcICESession) restart(pc *webrtc.PeerConnection, offer string, revisio
 		start := time.Now()
 		attemptID := newAudioSessionID()
 		s.record("restart_started", revision, attemptID, start, 0)
-		defer func() { s.mu.Lock(); attempt.busy = false; s.mu.Unlock() }()
+		release := func() {
+			s.mu.Lock()
+			if attempt.revision == revision {
+				attempt.busy = false
+			}
+			s.mu.Unlock()
+		}
+		defer release()
+		before := rtcRestartPeerProgress(pc, media...)
 		answer, err := s.answer(pc, offer, revision)
 		if !valid() {
 			return
@@ -216,7 +224,7 @@ func (s *rtcICESession) restart(pc *webrtc.PeerConnection, offer string, revisio
 			return
 		default:
 		}
-		outcome := "restart_completed"
+		outcome := "restart_signaled"
 		if err != nil {
 			outcome = "restart_failed"
 		}
@@ -229,6 +237,70 @@ func (s *rtcICESession) restart(pc *webrtc.PeerConnection, offer string, revisio
 			value["generation"] = *generation
 		}
 		raw, _ := json.Marshal(value)
-		writer.queueControl(raw)
+		if !writer.queueControl(raw) || err != nil {
+			return
+		}
+		release() // Media observation does not own the signaling negotiation slot.
+		// Signaling success is not media success. Sample only while a renewal is
+		// pending, outside the RTP path; do not create a permanent per-call poller.
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-s.done:
+				return
+			case <-timer.C:
+				s.record("restart_media_timeout", revision, attemptID, start, 0)
+				return
+			case <-tick.C:
+				if !valid() || s.revision.Load() != revision {
+					return
+				}
+				if pc.ConnectionState() == webrtc.PeerConnectionStateConnected && rtcRestartMediaResumed(before, rtcRestartPeerProgress(pc, media...)) {
+					s.record("restart_completed", revision, attemptID, start, 0)
+					return
+				}
+			}
+		}
 	}()
+}
+
+type rtcRestartMediaProgress struct {
+	pair           string
+	sent, received uint64
+	send, receive  bool
+}
+
+// Pion's generic GetStats omits selected-pair and outbound RTP counters in
+// this pinned version. Reuse its selected-pair API and our existing atomics;
+// installing another per-packet stats interceptor would add unnecessary work.
+func rtcRestartPeerProgress(pc *webrtc.PeerConnection, media ...*rtcMediaStats) rtcRestartMediaProgress {
+	pairID := ""
+	if sctp := pc.SCTP(); sctp != nil && sctp.Transport() != nil {
+		if pair, ok := sctp.Transport().ICETransport().GetSelectedCandidatePairStats(); ok {
+			pairID = pair.ID
+		}
+	}
+	return rtcRestartProgress(pairID, media...)
+}
+func rtcRestartProgress(pair string, media ...*rtcMediaStats) rtcRestartMediaProgress {
+	p := rtcRestartMediaProgress{pair: pair}
+	for _, stats := range media {
+		if stats == nil {
+			continue
+		}
+		attempts, failed := stats.rtp.attempts.Load(), stats.rtp.errors.Load()
+		if attempts > failed {
+			p.sent += attempts - failed
+		}
+		p.received += stats.ingress.packets.Load()
+	}
+	p.send, p.receive = p.sent > 0, p.received > 0
+	return p
+}
+
+func rtcRestartMediaResumed(before, after rtcRestartMediaProgress) bool {
+	return after.pair != "" && after.pair != before.pair && (before.send || before.receive) && (!before.send || after.sent > before.sent) && (!before.receive || after.received > before.received)
 }

@@ -18,7 +18,7 @@ func TestSIPPlaybackPolicyValidation(t *testing.T) {
 			t.Fatal(p, err)
 		}
 	}
-	for _, p := range []sipPlaybackPolicy{{TargetMS: 20}, {TargetMS: 101}, {TargetMS: 80, MaxTargetMS: 60}, {CapacityMS: 120}, {CapacityMS: 201}, {MaxAgeMS: 300}, {CapacityMS: 200, MaxAgeMS: 160}} {
+	for _, p := range []sipPlaybackPolicy{{TargetMS: 20}, {TargetMS: 121}, {TargetMS: 80, MaxTargetMS: 60}, {CapacityMS: 120}, {CapacityMS: 401}, {MaxAgeMS: 401}, {CapacityMS: 200, MaxAgeMS: 160}} {
 		if err := validateLocalMediaSettings(localMediaSettings{RTPPlayback: &p}); err == nil {
 			t.Fatal("unsafe policy accepted", p)
 		}

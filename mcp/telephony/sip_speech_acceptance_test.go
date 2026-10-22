@@ -294,7 +294,16 @@ func replaySIPSpeech(t *testing.T, id, hash, codec, profile string, resync bool)
 		packets = append(packets, productionAudioPacket{arrival, processed, uint16(65000 + i), uint32(0xffffff00 + uint64(i)*160), payload})
 	}
 	sort.SliceStable(packets, func(i, j int) bool { return packets[i].processed < packets[j].processed })
-	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &resync})
+	policy := sipPlaybackPolicy{Resynchronize: &resync}
+	if raw := os.Getenv("TELEPHONY_SIP_SPEECH_POLICY"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+			t.Fatal(err)
+		}
+		if err := policy.validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := newRTPJitterBufferWithPolicy(policy)
 	f := newRTPAudioFramer(b, media.offer)
 	base := time.Unix(100, 0)
 	var output []sipSpeechFrame
@@ -338,6 +347,9 @@ func replaySIPSpeech(t *testing.T, id, hash, codec, profile string, resync bool)
 		r.Mode = "resync_enabled"
 	}
 	r.DiscardedMS = float64(b.droppedSamples+b.lateDroppedSamples) / 8
+	if profile == "80ms_batch" {
+		t.Logf("receiver=%s epochs=%d source_resets=%d decoder_resets=%d decoder_warmups=%d target=%d", b.policy.Receiver, b.generation.Load(), b.clockResets, b.decodeResets, b.decodeWarmups, b.targetMS)
+	}
 	r.ReplacementMS = float64(b.missingFilledSamples.Load()) / 8
 	r.CompleteHealthyPCMIdentical = len(actual) >= speechSampleCount && bytes.Equal(pcm16ToBytes(actual[:speechSampleCount]), pcm16ToBytes(reference[:speechSampleCount]))
 	if dir := os.Getenv("TELEPHONY_SPEECH_ACCEPTANCE_AUDIO_DIR"); dir != "" && codec == "G722" && !resync && id == sipSpeechFixtures[0].id {

@@ -89,7 +89,11 @@ func genericOutboundSIPSettings(provider string, fields map[string]string) (didw
 	if cfg.AuthMode == "digest" && !validSIPDigestCredentials(secret) {
 		return didwwSIPSettings{}, errors.New("SIP digest credentials required")
 	}
-	return didwwSIPSettings{host: cfg.Host, port: 5061, username: secret.Username, password: secret.Password, secure: cfg.MediaEncryption == "srtp_sdes", codecs: cfg.Codecs, scheme: "sip", e164: true}, nil
+	settings := didwwSIPSettings{host: cfg.Host, port: 5061, username: secret.Username, password: secret.Password, secure: cfg.MediaEncryption == "srtp_sdes", codecs: cfg.Codecs, scheme: "sip", e164: true}
+	if provider == "telnyx" && cfg.AuthMode == "digest" {
+		settings.anchorUsername = secret.Username
+	}
+	return settings, nil
 }
 func buildOutboundSIPOffer(cfg sipGatewayConfig, settings didwwSIPSettings, port int, key []byte) ([]byte, error) {
 	codecs := settings.codecs

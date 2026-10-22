@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import CarrierJitterBufferControls, {type CarrierBufferRequest} from "./CarrierJitterBufferControls";
+import SIPAudioProfileControls, {type SIPAudioProfileRequest} from "./SIPAudioProfileControls";
 
 interface MediaSettings {
   codecs?: string[];
@@ -11,10 +12,11 @@ interface MediaSettings {
   voicemail_max_seconds?: number;
 }
 
-export default function SIPMediaDialog({ routeId, label, request, carrierRequest, onClose }: {
+export default function SIPMediaDialog({ routeId, label, request, carrierRequest, profileRequest, onClose }: {
   routeId: string; label: string;
   request: (body: Record<string, unknown>) => Promise<{ config?: MediaSettings }>;
   carrierRequest?: CarrierBufferRequest;
+  profileRequest?: SIPAudioProfileRequest;
   onClose: () => void;
 }) {
   const [config, setConfig] = useState<MediaSettings>({});
@@ -54,7 +56,8 @@ export default function SIPMediaDialog({ routeId, label, request, carrierRequest
         <select className="mt-1 w-full rounded border border-border bg-bg p-2" disabled={busy || !loaded} value={(config.codecs ?? ["G722", "PCMU", "PCMA"]).join(",")} onChange={e => setConfig({ ...config, codecs: e.target.value.split(",") })}>
           <option value="G722,PCMU,PCMA">Wideband preferred, G.711 fallback</option>
           <option value="PCMU,PCMA">G.711 only</option><option value="PCMA,PCMU">G.711 A-law preferred</option><option value="G722">Require G.722 wideband</option>
-          {config.codecs?.length && !["G722,PCMU,PCMA", "PCMU,PCMA", "PCMA,PCMU", "G722"].includes(config.codecs.join(",")) ? <option value={config.codecs.join(",")}>{config.codecs.join(" → ")}</option> : null}
+          <option value="PCMA">PCMA only</option><option value="PCMU">PCMU only</option>
+          {config.codecs?.length && !["G722,PCMU,PCMA", "PCMU,PCMA", "PCMA,PCMU", "G722", "PCMA", "PCMU"].includes(config.codecs.join(",")) ? <option value={config.codecs.join(",")}>{config.codecs.join(" → ")}</option> : null}
         </select>
       </label>
       <div className="grid grid-cols-2 gap-3">
@@ -69,6 +72,7 @@ export default function SIPMediaDialog({ routeId, label, request, carrierRequest
         <label className="block text-sm">Prerecorded prompts (JSON)<textarea className="my-1 w-full rounded border border-border bg-bg p-2 font-mono text-xs" disabled={busy || !loaded} rows={4} value={prompts} onChange={e => setPrompts(e.target.value)}/></label>
       </details>
       <p className="text-xs text-text-muted">SIP playback recovery is automatic; legacy resynchronize settings do not disable it.</p>
+      {profileRequest ? <SIPAudioProfileControls target={routeId?{route_id:routeId}:{}} request={profileRequest}/> : null}
       {carrierRequest ? <CarrierJitterBufferControls target={{route_id:routeId}} request={carrierRequest}/> : null}
       {error ? <p role="alert" className="text-sm text-error">{error}</p> : null}
       <footer className="flex gap-2">{routeId ? <button disabled={busy || !loaded} type="button" className="rounded border border-border px-3 py-2 text-sm disabled:opacity-40" onClick={() => void save(true)}>Use project defaults</button> : null}<button disabled={busy || !loaded} type="button" className="ml-auto rounded border border-border px-3 py-2 text-sm disabled:opacity-40" onClick={() => void save()}>Save</button></footer>

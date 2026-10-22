@@ -34,6 +34,9 @@ func TestSIPDecodedPartialTailPreserved(t *testing.T) {
 				if !reflect.DeepEqual(out[:len(real)], real) {
 					t.Fatal("padding changed real speech samples")
 				}
+				if !f.frameArrival.Equal(at) {
+					t.Fatal("padding renewed the trailing samples' forwarding age")
+				}
 				for _, sample := range out[len(real):] {
 					if sample != 0 {
 						t.Fatal("tail was stretched or filled with repeated speech")
@@ -63,7 +66,7 @@ func TestSIPDecodedPartialTailPreserved(t *testing.T) {
 					t.Fatal("dashboard counted tail padding as an audio failure", summary)
 				}
 				for tick := 2; tick <= 15; tick++ {
-					if _, ready := f.popPCMAt(m, at.Add(time.Duration(tick)*20*time.Millisecond)); ready {
+					if out, _ := f.popPCMAt(m, at.Add(time.Duration(tick)*20*time.Millisecond)); speechRMS(out) != 0 {
 						t.Fatal("tail replayed during silence")
 					}
 				}

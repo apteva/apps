@@ -53,3 +53,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/pion/ice/v4 => ./third_party/pion-ice

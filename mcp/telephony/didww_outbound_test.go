@@ -371,11 +371,22 @@ func runOutboundSIPPeerScenario(t *testing.T, provider, codec string, secureAnsw
 		readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 	}
 	settings := didwwSIPSettings{host: "127.0.0.1", port: port, username: "test-user", password: "test-password", secure: true, e164: provider != "didww", scheme: "sip", codecs: []string{codec}}
+	if provider == "telnyx" {
+		settings.anchorUsername = "test-user"
+	}
 	if err := g.startSIPOutbound(&row, settings, 5, 60); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case invite := <-inviteSeen:
+		header := invite.GetHeader("X-Telnyx-Username")
+		if provider == "telnyx" {
+			if header == nil || header.Value() != "test-user" {
+				t.Fatal("first Telnyx INVITE omitted AnchorSite credential identity")
+			}
+		} else if header != nil {
+			t.Fatal("Telnyx identity header leaked to another provider")
+		}
 		from, to := "33123456780", "33123456789"
 		if provider != "didww" {
 			from, to = "+"+from, "+"+to

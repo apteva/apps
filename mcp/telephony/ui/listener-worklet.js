@@ -39,7 +39,12 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       if (trimmed || (last.start + last.frame.length) * 1000 / sampleRate > now + this.capacityMS) {
         // Rebase only this listener's backlog. Keep a small cushion and a hard
         // upper bound instead of letting repeated catch-up bursts build delay.
-        let next = Math.round((now + Math.max(40, this.targetMS - 20)) * sampleRate / 1000);
+        // Overflow must make progress immediately. Repeated arrivals must not
+        // re-prime the queue into the future before its first sample can play.
+        // Never postpone an already scheduled head, including a partially
+        // played frame when only the tail exceeded the scheduling bound.
+        const head = queue[0];
+        let next = Math.min(head.start + (head.played || 0), Math.round((now + (trimmed ? 0 : Math.max(40, this.targetMS - 20))) * sampleRate / 1000));
         for (const item of queue) {
           if (item.played) { item.frame = item.frame.subarray(item.played); item.played = 0; }
           item.start = next; next += item.frame.length;
