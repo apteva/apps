@@ -84,7 +84,7 @@ func nextProviderPage(root map[string]any, args map[string]any) map[string]any {
 			return map[string]any{"page": current + 1}
 		}
 	}
-	next := firstNonEmpty(nestedMapString(root, "links", "pages", "next"), nestedMapString(root, "meta", "links", "next"))
+	next := firstNonEmpty(nestedMapString(root, "links", "pages", "next"), nestedMapString(root, "meta", "links", "next"), nestedMapString(root, "links", "next"))
 	if next != "" {
 		if u, err := url.Parse(next); err == nil {
 			out := map[string]any{}

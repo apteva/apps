@@ -42,13 +42,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.10.0
+version: 0.11.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
   Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
-  Linode, OVHcloud, and RunPod. Foundation layer
+  Clouding.io, UpCloud, Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
 author: Apteva
@@ -73,7 +73,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS providers
       hint: |
         Optional — local instance always available. Bind one or more VPS integrations
@@ -215,7 +215,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.10.0
+    ref: instances/v0.11.0
     entry: mcp/instances
   port: 8080
   health_check: /health

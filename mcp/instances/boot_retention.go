@@ -30,7 +30,7 @@ func applyDestroyBootPolicy(ctx *sdk.AppCtx, inst *Instance, retain bool) error 
 			}
 		}
 		return fmt.Errorf("AWS root disk policy is unverified")
-	case "huawei-cloud", "runpod":
+	case "huawei-cloud", "runpod", "clouding", "upcloud":
 		if retain {
 			return fmt.Errorf("%s does not support retaining boot storage through this adapter", inst.Provider)
 		}

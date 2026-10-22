@@ -19,7 +19,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "instance_create",
-			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
+			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
 				"Args: name (req), provider? (defaults to the configured default binding), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{

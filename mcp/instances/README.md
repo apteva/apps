@@ -78,7 +78,7 @@ with a 30s default timeout. `instance_upload_file` writes under
 
 An install can bind multiple cloud providers at once and choose one per
 catalog or provisioning request; the configured default is used when no
-provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
+provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Clouding.io, UpCloud, Contabo, Vultr,
 AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
 provisioning, SSH readiness, recovery, and deletion are normalized into the
 same instance contract.
@@ -593,3 +593,16 @@ Existing servers must refresh their Vultr integration catalog before upgrading;
 no Server binary rebuild is required. See [setup, scope and validation](runtime/vultr-catalog.md).
 Monitoring and the collector remain unchanged. No production update is performed
 by publishing this release.
+
+
+## Clouding.io and UpCloud (0.11.0)
+
+Bind the new `clouding` or `upcloud` integration to the `provider` role. Server must refresh its integration catalog after updating; the definitions live in `apteva/integrations`. Existing instances and monitoring are unchanged.
+
+Both adapters provide Linux host catalogs, provisioning, generated SSH access, readiness/restart recovery, optional setup, monitoring, file transfer, commands, tunnels and destruction through the existing API/MCP/UI. The native deployment backend can use these hosts once SSH/systemd readiness is verified. Windows and UpCloud GPU/diskless plans are excluded. Account/provider quotas still apply.
+
+Clouding is physically in Barcelona (`barcelona`). It uses live CPU/RAM flavors, including fractional vCPU allocations, a separately selected boot disk from its volume-size catalog, and Linux images supporting public-key authentication without uploading private keys. Configure an existing `firewall_id` on the provider connection, or let Instances select an existing firewall allowing public SSH. Instances never modifies shared firewall rules. Its generated public key is tracked and removed only after server deletion and key-ownership verification. Separate data volumes are not supported by this adapter.
+
+UpCloud discovers public zones (including Madrid when returned by the account), MaxIOPS-backed non-GPU plans and eligible Linux templates. It supports configurable boot disks and managed data-volume creation/attach/detach/growth/deletion. Guest formatting is deliberately unavailable because the guest serial does not contain the complete storage UUID. Destroy confirms shutdown, retains unrelated attached disks, and removes only the boot disk identified by a durable unique ownership marker and recorded UUID. It never uses blanket attached-storage deletion. Interrupted delete responses can be retried; unknown create outcomes retain inventory for operator reconciliation rather than creating duplicates.
+
+Complete provider quotes are unavailable in this increment: catalog `price_known` is false and costs are not fabricated from CPU-only prices. Clouding compute/disk pricing is separate and UpCloud pricing is zone-specific. Raw provider cost APIs are available in their integration catalogs.

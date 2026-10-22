@@ -208,7 +208,7 @@ function formatCPUDetail(cpu: MetricsWire["cpu"]): string {
 }
 
 function providerCurrencySymbol(provider?: string): string {
-  return ["digitalocean", "runpod", "vultr", "aws-ec2", "huawei-cloud", "linode", "ovhcloud"].includes(provider || "") ? "$" : "€";
+  return ["digitalocean", "runpod", "upcloud", "vultr", "aws-ec2", "huawei-cloud", "linode", "ovhcloud"].includes(provider || "") ? "$" : "€";
 }
 
 function formatProviderPrice(cents: number, provider?: string): string {
@@ -1013,7 +1013,7 @@ function UpgradeDialog({
   const selected = serverTypes.find((t) => t.name === size);
   const typeLabel = (t: ServerTypeWire) => {
     const specs = [
-      t.cores ? `${t.cores} ${t.cpu_type === "dedicated" ? "dedicated vCPU" : "vCPU"}` : "",
+      (t.vcpus || t.cores) ? `${t.vcpus ?? t.cores} ${t.cpu_type === "dedicated" ? "dedicated vCPU" : "vCPU"}` : "",
       t.memory_gb ? `${t.memory_gb} GB RAM` : "",
       t.disk_gb ? `${t.disk_gb} GB disk` : "",
     ].filter(Boolean).join(", ");
@@ -1196,7 +1196,7 @@ export function InstanceCard({
   const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
-  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
+  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "clouding", "upcloud", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
   const deleteLocked = deletionLockLabel(inst);
   const resources = resourceSummary(inst);
   const memPct = metrics?.mem?.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
@@ -1560,6 +1560,7 @@ interface ServerTypeWire {
   name: string;
   description?: string;
   cores: number;
+  vcpus?: number;
   memory_gb: number;
   disk_gb: number;
   cpu_type?: string;
@@ -1850,7 +1851,7 @@ export function CreateDialog({
   // the dropdown. Falls through to whatever fields are present.
   const sizeLabel = (t: ServerTypeWire): string => {
     const parts: string[] = [];
-    if (t.cores) parts.push(`${t.cores} ${t.resource_class === "bare_metal" ? "physical cores" : t.cpu_type === "dedicated" ? "vCPU dedicated" : "vCPU"}`);
+    if (t.vcpus || t.cores) parts.push(`${t.vcpus ?? t.cores} ${t.resource_class === "bare_metal" ? "physical cores" : t.cpu_type === "dedicated" ? "vCPU dedicated" : "vCPU"}`);
     for (const accelerator of t.accelerators || []) parts.push(`${accelerator.count ? `${accelerator.count}× ` : ""}${accelerator.model || accelerator.kind}${accelerator.memory_gb ? ` ${accelerator.memory_gb} GB each` : ""}`);
     if (t.memory_gb) parts.push(`${t.memory_gb} GB`);
     if (t.disk_gb) parts.push(`${t.disk_gb} GB disk`);

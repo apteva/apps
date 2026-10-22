@@ -29,6 +29,8 @@ func readProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) (*observedVolume, er
 	tool := ""
 	args := map[string]any{}
 	switch v.Provider {
+	case "upcloud":
+		tool, args = "get_volume", map[string]any{"volume_id": v.ProviderVolumeID}
 	case "hetzner":
 		tool = "volume_get"
 		args["id"] = atoiAny(v.ProviderVolumeID)
@@ -79,7 +81,7 @@ func parseObservedVolume(v *InstanceVolume, data json.RawMessage) (*observedVolu
 		return nil, err
 	}
 	obj := root
-	for _, key := range []string{"volume", "block_storage", "networkVolume"} {
+	for _, key := range []string{"volume", "block_storage", "networkVolume", "storage"} {
 		if nested, ok := root[key].(map[string]any); ok {
 			obj = nested
 			break
@@ -98,6 +100,9 @@ func parseObservedVolume(v *InstanceVolume, data json.RawMessage) (*observedVolu
 		}
 	}
 	id := mapString(obj, "id")
+	if v.Provider == "upcloud" {
+		id = mapString(obj, "uuid")
+	}
 	if v.Provider == "aws-ec2" {
 		id = mapString(obj, "volumeId")
 	}
@@ -122,6 +127,13 @@ func parseObservedVolume(v *InstanceVolume, data json.RawMessage) (*observedVolu
 		}
 	}
 	switch v.Provider {
+	case "upcloud":
+		result.Ready = state == "online"
+		if servers, ok := obj["servers"].(map[string]any); ok {
+			for _, id := range mapStringSlice(servers, "server") {
+				add(id)
+			}
+		}
 	case "hetzner":
 		add(mapString(obj, "server"))
 	case "digitalocean":
