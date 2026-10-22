@@ -14,6 +14,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRequestGate } from "./requestIdentity";
+import {DestinationPicker,type DestinationCapabilities} from "./destinations";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
@@ -96,6 +97,10 @@ interface NativePanelProps {
 }
 
 interface SocialAccount {
+ destination_capabilities?:DestinationCapabilities;
+ default_destination_id?:string;
+ default_destination_name?:string;
+ account_kind?:string;
   id: number;
   platform: string;
   connection_id: number;
@@ -136,6 +141,7 @@ interface PostTarget {
   existing_post_id?: string;
   provider_sync_status?: string;
   audience_capabilities?: AudienceCapabilities;
+  destination_capabilities?: DestinationCapabilities;
   audience_status?: string;
   audience_confirmed_at?: string;
   audience_setup_url?: string;
@@ -498,7 +504,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Live updates — account adds/removals + per-target publish events
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
-    if (ev.topic === "account.added" || ev.topic === "account.removed" ||
+    if (ev.topic === "destinations.updated" || ev.topic === "account.added" || ev.topic === "account.removed" ||
         ev.topic === "account.disconnected" || ev.topic === "account.deleted") {
       loadAccounts();
     }
@@ -2413,6 +2419,7 @@ function AccountCard({
   const [hardDelete, setHardDelete] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
+ const [destinationsOpen,setDestinationsOpen]=useState(false);
   const [syncingProvider, setSyncingProvider] = useState(false);
   const doRemove = async (hard = false) => {
     try {
@@ -2541,6 +2548,7 @@ function AccountCard({
             <option value="full_history">Full history</option>
           </select>
         )}
+        {account.destination_capabilities?.list&&<button type="button" onClick={()=>setDestinationsOpen(value=>!value)} className="text-xs border border-border rounded px-2 py-1">{account.destination_capabilities.label||"Destinations"}s</button>}
         <button
           onClick={doCheck}
           disabled={checking}
@@ -2567,6 +2575,7 @@ function AccountCard({
           ×
         </button>
       </div>
+      {destinationsOpen&&<div className="border border-border rounded p-3"><DestinationPicker accountId={account.id} projectId={projectId} capabilities={account.destination_capabilities} defaultId={account.default_destination_id} manage onDefaultChanged={onChange}/>{account.account_kind==="destination_preset"&&<div className="text-xs text-text-dim mt-2">Saved destination preset from an earlier connection. Other destinations on the account are also available.</div>}</div>}
       {confirming && (
         <ConfirmDialog
           title={`Disconnect ${account.display_name}?`}
@@ -3492,7 +3501,7 @@ function ComposeDialog({
             {accounts.map((a) => {
               const isSelected = selected.has(a.id);
               const fields = (fieldsByPlatform[a.platform] || []).map(field => field.name === "privacy_level" ? {...field, options:creatorInfo[a.id]?.privacy_level_options || []} : field);
-              const hasCustomization = fields.length > 0 || (a.audience_capabilities?.publishing !== "unsupported" && !!a.audience_capabilities);
+              const hasCustomization = !!a.destination_capabilities?.list || fields.length > 0 || (a.audience_capabilities?.publishing !== "unsupported" && !!a.audience_capabilities);
               const isExpanded = expanded === a.id || (isSelected && a.platform === "tiktok" && (!a.provider_slug || a.provider_slug === "native"));
               const customized = isCustomized(a.id);
               return (
@@ -3540,6 +3549,7 @@ function ComposeDialog({
                       </button>
                     )}
                   </div>
+                  {isSelected && a.destination_capabilities?.list && <div className="border-t border-border px-3 py-3"><DestinationPicker accountId={a.id} projectId={projectId} capabilities={a.destination_capabilities} value={accountOptions[a.id]?.destination_id || accountOptions[a.id]?.board_id || accountOptions[a.id]?.boardId || ""} defaultId={a.default_destination_id} onChange={value=>setAccountOptions(previous=>{const next:Record<string,any>={...previous[a.id],destination_id:value};delete next.board_id;delete next.boardId;return {...previous,[a.id]:next}})} /></div>}
                   {isSelected && hasCustomization && isExpanded && (
                     <div className="border-t border-border px-3 py-3 flex flex-col gap-3 bg-bg/40">
                       <MembershipAudience accountId={a.id} projectId={projectId} capabilities={a.audience_capabilities} value={accountOptions[a.id]?.audience} onChange={value => {setAccountOption(a.id,"audience",value.type === "standard" ? undefined : value);if(value.type==="members")setAccountOption(a.id,"visibility",undefined);}} />
@@ -5378,11 +5388,12 @@ function EditPostDialog({
       }));
       if (targets.length > 0) {
         payload.targets = draftLike
-          ? post.targets.map((target) => ({
-              social_account_id: target.social_account_id,
-              ...(target.options || {}),
-              ...(targetOptions[target.social_account_id] || {}),
-            }))
+          ? post.targets.map((target) => {
+              const overrides=targetOptions[target.social_account_id] || {};
+              const next:Record<string,any>={social_account_id:target.social_account_id,...(target.options || {}),...overrides};
+              if(Object.prototype.hasOwnProperty.call(overrides,"destination_id")){delete next.board_id;delete next.boardId;}
+              return next;
+            })
           : targets;
       }
       if (draftLike) payload.expected_revision = post.revision;
@@ -5471,6 +5482,7 @@ function EditPostDialog({
                         </span>
                       )}
                     </div>
+                    {draftLike && t.destination_capabilities?.list && <DestinationPicker accountId={t.social_account_id} projectId={projectId} capabilities={t.destination_capabilities} value={targetOptions[t.social_account_id]?.destination_id ?? t.options?.destination_id ?? t.options?.board_id ?? t.options?.boardId ?? ""} onChange={value=>setTargetOptions(previous=>({...previous,[t.social_account_id]:{...previous[t.social_account_id],destination_id:value}}))}/>}
                     {draftLike && <MembershipAudience accountId={t.social_account_id} projectId={projectId} capabilities={t.audience_capabilities} value={targetOptions[t.social_account_id]?.audience || t.options?.audience} onChange={value => {setOpt(t.social_account_id,"audience",value);if(value.type==="members")setOpt(t.social_account_id,"visibility","unlisted");}} />}
                     {editable && t.platform === "facebook" && (
                       <FieldText
@@ -5837,7 +5849,9 @@ function MetricsView({
   const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
   const [analyticsRange, setAnalyticsRange] = useState(initialRange);
   const [breakdownDimension, setBreakdownDimension] = useState("");
-  const [analyticsScope, setAnalyticsScope] = useState("destination");
+  const [analyticsScope, setAnalyticsScope] = useState("provider_account");
+ const [analyticsDestination,setAnalyticsDestination]=useState("");
+ useEffect(()=>setAnalyticsDestination(""),[activeAccountId]);
   const [rankMetric, setRankMetric] = useState("impressions");
   const [customStart,setCustomStart] = useState("");
   const [customEnd,setCustomEnd] = useState("");
@@ -5846,7 +5860,7 @@ function MetricsView({
   const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());
   const autoRefreshedAccounts = useRef<Set<string>>(new Set());
-  const queryIdentity = `${projectId}:${analyticsRange}:${customStart}:${customEnd}:${breakdownDimension}:${analyticsScope}:${rankMetric}:${publishedInRange}`;
+  const queryIdentity = `${projectId}:${analyticsRange}:${customStart}:${customEnd}:${breakdownDimension}:${analyticsScope}:${analyticsDestination}:${rankMetric}:${publishedInRange}`;
   const queryRef = useRef(queryIdentity); queryRef.current = queryIdentity;
   const requestVersions = useRef<Record<number,number>>({});
   const accountIds = accounts.map((a) => a.id).join(",");
@@ -5882,6 +5896,7 @@ function MetricsView({
       const params = new URLSearchParams({
         refresh: refresh ? "1" : "0",
         scope: analyticsScope,
+        ...(analyticsDestination&&id===activeAccountId?{destination_id:analyticsDestination}:{}),
         sort_by: rankMetric,
         compare: "true",
         group_by: "post",
@@ -6078,6 +6093,7 @@ function MetricsView({
               {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
             </button>
           </div>
+          {analyticsScope==="destination"&&activeAccount.destination_capabilities?.list&&<DestinationPicker accountId={activeAccount.id} projectId={projectId} capabilities={activeAccount.destination_capabilities} value={analyticsDestination} defaultId={activeAccount.default_destination_id} onChange={setAnalyticsDestination}/>}
           <div className="flex flex-wrap items-end gap-2 border-y border-border py-3">
             <label className="flex flex-col gap-1 text-xs">Scope
               <select aria-label="Analytics scope" value={analyticsScope} onChange={e=>setAnalyticsScope(e.target.value)} className="h-9 bg-bg-input border border-border rounded px-2">

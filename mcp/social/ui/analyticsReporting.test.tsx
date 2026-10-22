@@ -27,6 +27,6 @@ test("Social metrics forwards scope, date window and ranking while zero cards st
  return Response.json({items:[],unread:0});}) as typeof fetch;
  await render(<SocialPanel projectId="test-project"/>);
  expect(browser.document.body.textContent).toContain("Post ranking");expect(browser.document.body.textContent).toContain("saves");
- const metrics=requests.filter(url=>url.pathname.includes("/metrics"));expect(metrics.length).toBeGreaterThan(0);expect(metrics.every(url=>url.searchParams.get("scope")==="destination"&&url.searchParams.get("project_id")==="test-project"&&url.searchParams.get("range")==="28d")).toBe(true);
- const scope=browser.document.querySelector('select[aria-label="Analytics scope"]') as HTMLSelectElement;expect(scope.textContent).toContain("Board");await act(async()=>{scope.value="provider_account";scope.dispatchEvent(new browser.Event("change",{bubbles:true}))});expect(requests.at(-1)?.searchParams.get("scope")).toBe("provider_account");
+ const metrics=requests.filter(url=>url.pathname.includes("/metrics"));expect(metrics.length).toBeGreaterThan(0);expect(metrics.every(url=>url.searchParams.get("scope")==="provider_account"&&url.searchParams.get("project_id")==="test-project"&&url.searchParams.get("range")==="28d")).toBe(true);
+ const scope=browser.document.querySelector('select[aria-label="Analytics scope"]') as HTMLSelectElement;expect(scope.textContent).toContain("Board");await act(async()=>{scope.value="destination";scope.dispatchEvent(new browser.Event("change",{bubbles:true}))});expect(requests.at(-1)?.searchParams.get("scope")).toBe("destination");
 });

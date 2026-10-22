@@ -182,12 +182,15 @@ type widgetMetricPoint struct {
 	Accounts int    `json:"accounts"`
 }
 type widgetAccount struct {
-	ID        int64                   `json:"id"`
-	Name      string                  `json:"name"`
-	Platform  string                  `json:"platform"`
-	UpdatedAt string                  `json:"updated_at"`
-	Metrics   map[string]widgetMetric `json:"metrics"`
-	daily     map[string]map[string]int64
+	ID                 int64                   `json:"id"`
+	Name               string                  `json:"name"`
+	Platform           string                  `json:"platform"`
+	UpdatedAt          string                  `json:"updated_at"`
+	Metrics            map[string]widgetMetric `json:"metrics"`
+	AggregateExclusion string                  `json:"aggregate_exclusion_reason,omitempty"`
+	binding            string
+	accountKind        string
+	daily              map[string]map[string]int64
 }
 
 var widgetMetricNames = []string{"followers", "views", "impressions", "interactions"}
@@ -213,7 +216,7 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 	}
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	start, previous := today.AddDate(0, 0, -days), today.AddDate(0, 0, -2*days)
-	q, args := `SELECT id,display_name,platform FROM social_accounts WHERE project_id=? AND status='active'`, []any{scope.projectID}
+	q, args := `SELECT id,display_name,platform,COALESCE(provider_slug,'native')||':'||connection_id||':'||COALESCE(provider_account_id,''),account_kind FROM social_accounts WHERE project_id=? AND status='active'`, []any{scope.projectID}
 	if scope.profileID > 0 {
 		q += ` AND profile_id=?`
 		args = append(args, scope.profileID)
@@ -232,7 +235,7 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 	accounts := []widgetAccount{}
 	for rows.Next() {
 		var acct widgetAccount
-		if err := rows.Scan(&acct.ID, &acct.Name, &acct.Platform); err != nil {
+		if err := rows.Scan(&acct.ID, &acct.Name, &acct.Platform, &acct.binding, &acct.accountKind); err != nil {
 			rows.Close()
 			http.Error(w, err.Error(), 500)
 			return
@@ -251,12 +254,19 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 		acct.Metrics = map[string]widgetMetric{}
 		// Read daily observations separately from range snapshots. A YouTube
 		// lifetime view count must never become views for the selected period.
+		pointScope := "account"
+		if acct.Platform == "pinterest" {
+			pointScope = "provider_account"
+			if b, err := loadDestinationAccount(globalCtx, scope.projectID, acct.ID); err == nil && b.Kind == "destination_preset" {
+				pointScope = "destination:" + b.DefaultID
+			}
+		}
 		points, err := globalCtx.AppDB().Query(`SELECT metric,period,point_time,value FROM social_metric_points
-			WHERE project_id=? AND social_account_id=? AND scope='account' AND status='ok' AND dimensions_key=''
+			WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key=''
 			AND ((period='day' AND metric IN ('views','impressions','page_impressions','likes','comments','shares') AND date(point_time)>=date(?) AND date(point_time)<date(?))
-			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope='account' AND status='ok' AND dimensions_key='' AND period='snapshot' AND metric='followers' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1)
-			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope='account' AND status='ok' AND dimensions_key='' AND metric='_refresh' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1))
-			ORDER BY datetime(created_at) DESC,datetime(point_time) DESC,id DESC`, scope.projectID, acct.ID, previous.Format("2006-01-02"), today.Format("2006-01-02"), scope.projectID, acct.ID, scope.projectID, acct.ID)
+			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key='' AND period='snapshot' AND metric='followers' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1)
+			OR id=(SELECT id FROM social_metric_points WHERE project_id=? AND social_account_id=? AND scope=? AND status='ok' AND dimensions_key='' AND metric='_refresh' ORDER BY datetime(point_time) DESC,id DESC LIMIT 1))
+			ORDER BY datetime(created_at) DESC,datetime(point_time) DESC,id DESC`, scope.projectID, acct.ID, pointScope, previous.Format("2006-01-02"), today.Format("2006-01-02"), scope.projectID, acct.ID, pointScope, scope.projectID, acct.ID, pointScope)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -314,13 +324,30 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			acct.Metrics[name] = summarizeWidgetMetric([]widgetAccount{*acct}, name, start, today, previous)
 		}
 	}
+	// A board preset and its parent account overlap. Show both rows, but
+	// aggregate only the parent when it is included in this widget scope.
+	parentBindings := map[string]bool{}
+	for _, acct := range accounts {
+		if acct.Platform == "pinterest" && acct.accountKind != "destination_preset" {
+			parentBindings[acct.binding] = true
+		}
+	}
+	summaryAccounts := []widgetAccount{}
+	for i := range accounts {
+		acct := &accounts[i]
+		if acct.Platform == "pinterest" && acct.accountKind == "destination_preset" && parentBindings[acct.binding] {
+			acct.AggregateExclusion = "Board metrics are shown separately and excluded from totals because their parent account is selected."
+		} else {
+			summaryAccounts = append(summaryAccounts, *acct)
+		}
+	}
 	metrics := map[string]widgetMetric{}
 	var updated string
 	for _, name := range widgetMetricNames {
 		if name == "followers" {
 			m := widgetMetric{Trend: []widgetMetricPoint{}}
 			var total int64
-			for _, acct := range accounts {
+			for _, acct := range summaryAccounts {
 				if v := acct.Metrics[name].Value; v != nil {
 					total += *v
 					m.Accounts++
@@ -331,10 +358,10 @@ func (a *App) handlePerformanceWidget(w http.ResponseWriter, r *http.Request) {
 			}
 			metrics[name] = m
 		} else {
-			metrics[name] = summarizeWidgetMetric(accounts, name, start, today, previous)
+			metrics[name] = summarizeWidgetMetric(summaryAccounts, name, start, today, previous)
 		}
 	}
-	for _, acct := range accounts {
+	for _, acct := range summaryAccounts {
 		if acct.UpdatedAt != "" && (updated == "" || acct.UpdatedAt < updated) {
 			updated = acct.UpdatedAt
 		}

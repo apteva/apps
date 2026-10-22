@@ -32,13 +32,13 @@ func (q analyticsQuery) cacheKey() string {
 	sort.Strings(groups)
 	raw, _ := json.Marshal(struct {
 		Version                   int
-		Scope                     string
+		Scope, DestinationID      string
 		MaxPosts                  int
 		Compare, PublishedInRange bool
 		Start, End                string
 		Filters                   map[string][]string
 		Dimensions, Groups        []string
-	}{2, q.Scope, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
+	}{3, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
 	return string(raw)
 }
 func (q analyticsQuery) snapshotPeriod(metric string) string {

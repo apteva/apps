@@ -9,7 +9,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-func TestPinterestPlatformDefinitionIsNativeAndBoardScoped(t *testing.T) {
+func TestPinterestPlatformDefinitionIsNativeAndAccountScoped(t *testing.T) {
 	def, ok := platforms["pinterest"]
 	if !ok {
 		t.Fatal("pinterest missing from native platform registry")
@@ -17,7 +17,7 @@ func TestPinterestPlatformDefinitionIsNativeAndBoardScoped(t *testing.T) {
 	if def.IntegrationSlug != "pinterest" || def.Strategy != "pinterest" || def.ExternalIDField != "board_id" {
 		t.Fatalf("unexpected pinterest definition: %+v", def)
 	}
-	if !def.MediaRequired || def.ListPagesTool != "list_boards" || def.DeleteTool != "delete_pin" {
+	if !def.MediaRequired || def.ListPagesTool != "" || def.DeleteTool != "delete_pin" {
 		t.Fatalf("incomplete pinterest lifecycle: %+v", def)
 	}
 }
@@ -30,7 +30,9 @@ func TestFetchPagesSupportsPinterestItemsAndBookmark(t *testing.T) {
 	}
 	ctx := newSocialCtx(t, pf)
 
-	pages, err := (&App{}).fetchPages(ctx, 42, platforms["pinterest"])
+	legacyDef := platforms["pinterest"]
+	legacyDef.ListPagesTool = "list_boards"
+	pages, err := (&App{}).fetchPages(ctx, 42, legacyDef)
 	if err != nil {
 		t.Fatal(err)
 	}

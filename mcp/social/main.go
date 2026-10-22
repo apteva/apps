@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.18.0
+version: 0.19.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -100,6 +100,9 @@ provides:
     - { name: analytics_collector, schedule: "@every 1h" }
     - { name: provider_reconciler, schedule: "@every 15m" }
   mcp_tools:
+    - { name: destination_list, description: "List publishing destinations under an account." }
+    - { name: destination_create, description: "Create a publishing destination when supported." }
+    - { name: account_set_default_destination, description: "Set the default for new posts; existing targets retain their destination." }
     - { name: account_add,                description: "Begin OAuth for a platform." }
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
@@ -170,7 +173,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      refresh_topics: [metrics.updated, destinations.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
       settings_schema:
         type: object
         properties:
@@ -209,7 +212,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.18.0
+    ref: social/v0.19.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -672,14 +675,14 @@ var platforms = map[string]platformDef{
 	"pinterest": {
 		Platform:                     "pinterest",
 		IntegrationSlug:              "pinterest",
-		DisplayName:                  "Pinterest board",
+		DisplayName:                  "Pinterest",
 		Strategy:                     "pinterest",
 		PostTool:                     "create_pin",
 		BodyField:                    "description",
 		ExternalIDField:              "board_id",
 		MediaRequired:                true,
 		MediaType:                    "any",
-		ListPagesTool:                "list_boards",
+		ListPagesTool:                "",
 		PageIDField:                  "id",
 		PageNameField:                "name",
 		PageAvatarField:              "media.image_cover_url",
@@ -763,6 +766,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// Account management
 		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
+		{Pattern: "/destinations/accounts/", Handler: a.handleDestinationAccount},
 		{Pattern: "/audiences/accounts/", Handler: a.handleAudienceAccount},
 		{Pattern: "/audiences/confirm", Handler: a.handleAudienceConfirm},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
@@ -834,7 +838,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_finalize",
-			Description: "Commit a pending account into the active social_accounts list. For destination-based platforms (Facebook, Instagram, Pinterest) supply page_id from account_list_pending_pages; for personal platforms page_id is optional. Args: pending_account_id, page_id?, name?.",
+			Description: "Commit a pending account into the active social_accounts list. For identity-selection platforms (Facebook, Instagram) supply page_id from account_list_pending_pages; for personal platforms page_id is optional. Args: pending_account_id, page_id?, name?.",
 			InputSchema: schemaObject(map[string]any{
 				"pending_account_id": map[string]any{"type": "integer"},
 				"page_id":            map[string]any{"type": "string"},
@@ -911,6 +915,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. Optional target audience={type:members,level_ids?:[]} requests membership staging; omitted audience preserves ordinary publishing. Membership uploads require the updated YouTube catalog/server and completion in Studio. " +
+				"Destination-capable accounts accept destination_id per target; omitted uses the saved default, frozen when the post is created. Pinterest boards can be listed/created with destination_list/destination_create on both native and Zernio connections. " +
 				"X accepts {body, allow_longform}; normal posts are validated against X's 280-character weighted limit before media is uploaded. " +
 				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
@@ -1078,6 +1083,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "account_metrics",
 			Description: "Fetch normalized totals, history, and provider-supported audience breakdowns. Use social_account_id for the backward-compatible single-account response. Use social_account_ids or profile_id with group_by=['social_account'] to compare channels; filters such as {device:['tv']} rank only matching views. Unsupported dimensions are reported explicitly and never treated as zero. YouTube supports device, OS, country, traffic source, audience type, content type, sharing service, and video; Instagram supports available audience demographics; organic X currently exposes temporal metrics but no device breakdown. Optional scope=destination|provider_account, group_by=[post], sort_by, limit, compare, published_in_range. Pinterest destinations aggregate current board Pins with explicit coverage; provider-account results must not be counted once per board.",
 			InputSchema: schemaObject(map[string]any{
+				"destination_id":     map[string]any{"type": "string", "description": "Optional publishing destination to report on; native Pinterest board ID."},
 				"scope":              map[string]any{"type": "string", "enum": []string{"destination", "provider_account"}},
 				"compare":            map[string]any{"type": "boolean", "description": "Compare with the preceding equal-length period where supported."},
 				"published_in_range": map[string]any{"type": "boolean", "description": "Restrict destination inventory to posts published in the reporting window."},
@@ -1246,6 +1252,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	tools = append(tools, a.profileTools()...)
 	tools = append(tools, a.audienceTools()...)
+	tools = append(tools, destinationTools(a)...)
 	return tools
 }
 
@@ -1309,7 +1316,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	//   - the platform has no picker step (Twitter, LinkedIn-personal)
 	//     because reusing a connection doesn't add anything there;
 	//     a fresh OAuth is the right thing
-	if !forceNew && def.ListPagesTool != "" {
+	if !forceNew && (def.ListPagesTool != "" || def.Platform == "pinterest") {
 		// Two reuse sources, in order:
 		//   1. A prior social_account in this project — its connection
 		//      was already vetted, just open the picker against it.
@@ -1531,6 +1538,16 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	displayName, _ := args["name"].(string)
 	avatar := ""
 	pageCredsJSON := ""
+	defaultDestination, defaultDestinationName := "", ""
+	if def.Platform == "pinterest" && pageID != "" {
+		selected, e := findDestination(ctx, destinationAccount{Platform: row.platform, Provider: "native", ConnID: row.connectionID}, pageID)
+		if e != nil {
+			return mcpError(e.Error()), nil
+		}
+		defaultDestination = selected.ID
+		defaultDestinationName = selected.Name
+		pageID = ""
+	}
 
 	if def.ListPagesTool != "" {
 		// Multi-page platform — page_id is required; resolve display
@@ -1626,6 +1643,11 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if existingID > 0 {
+		if defaultDestination != "" {
+			if _, err := tx.Exec(`UPDATE social_accounts SET default_destination_id=?,default_destination_name=? WHERE id=? AND project_id=?`, defaultDestination, defaultDestinationName, existingID, pid); err != nil {
+				return nil, err
+			}
+		}
 		if _, err := tx.Exec(
 			`UPDATE social_accounts
 			    SET display_name=?, avatar_url=?, status='active', page_credentials=?, profile_id=?
@@ -1664,6 +1686,11 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, fmt.Errorf("insert social_account: %w", err)
 	}
 	id, _ := res.LastInsertId()
+	if defaultDestination != "" {
+		if _, err := tx.Exec(`UPDATE social_accounts SET default_destination_id=?,default_destination_name=? WHERE id=? AND project_id=?`, defaultDestination, defaultDestinationName, id, pid); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
 		return nil, err
 	}
@@ -1703,7 +1730,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	             COALESCE(last_check_error,''), COALESCE(last_check_details,''),
 	             COALESCE(provider_slug,'native'), COALESCE(provider_account_id,''),
 	             COALESCE(provider_profile_id,''), COALESCE(capabilities,''),
-	             COALESCE(provider_import_mode,'managed_only')
+	             COALESCE(provider_import_mode,'managed_only'),default_destination_id,default_destination_name,account_kind
 	      FROM social_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -1729,13 +1756,14 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, connID, profID                                    int64
-			platform, externalID, name, avatar, status, createdAt string
-			checkAt, checkStatus, checkError, checkDetails        string
-			providerSlug, providerAccountID, providerProfileID    string
-			capabilitiesRaw, providerImportMode                   string
+			id, connID, profID                                      int64
+			platform, externalID, name, avatar, status, createdAt   string
+			checkAt, checkStatus, checkError, checkDetails          string
+			providerSlug, providerAccountID, providerProfileID      string
+			capabilitiesRaw, providerImportMode                     string
+			defaultDestination, defaultDestinationName, accountKind string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw, &providerImportMode); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw, &providerImportMode, &defaultDestination, &defaultDestinationName, &accountKind); err != nil {
 			continue
 		}
 		var details any
@@ -1753,25 +1781,27 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 		}
 		out = append(out, map[string]any{
-			"id":                    id,
-			"platform":              platform,
-			"connection_id":         connID,
-			"external_account_id":   externalID,
-			"display_name":          name,
-			"avatar_url":            avatar,
-			"status":                status,
-			"created_at":            createdAt,
-			"profile_id":            profID,
-			"last_check_at":         checkAt,
-			"last_check_status":     checkStatus,
-			"last_check_error":      checkError,
-			"last_check_details":    details,
-			"provider_slug":         providerSlug,
-			"audience_capabilities": adapterForAudience(platform, providerSlug).Capabilities,
-			"provider_account_id":   providerAccountID,
-			"provider_profile_id":   providerProfileID,
-			"provider_import_mode":  providerImportMode,
-			"capabilities":          capabilities,
+			"id":                       id,
+			"platform":                 platform,
+			"connection_id":            connID,
+			"external_account_id":      externalID,
+			"display_name":             name,
+			"avatar_url":               avatar,
+			"status":                   status,
+			"created_at":               createdAt,
+			"profile_id":               profID,
+			"last_check_at":            checkAt,
+			"last_check_status":        checkStatus,
+			"last_check_error":         checkError,
+			"last_check_details":       details,
+			"provider_slug":            providerSlug,
+			"audience_capabilities":    adapterForAudience(platform, providerSlug).Capabilities,
+			"destination_capabilities": adapterForDestinations(platform, providerSlug),
+			"default_destination_id":   defaultDestination, "default_destination_name": defaultDestinationName, "account_kind": accountKind,
+			"provider_account_id":  providerAccountID,
+			"provider_profile_id":  providerProfileID,
+			"provider_import_mode": providerImportMode,
+			"capabilities":         capabilities,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
@@ -2239,7 +2269,7 @@ func (a *App) validateTargetOptions(ctx *sdk.AppCtx, pid string, targets []targe
 		def := platforms[platform]
 		// Build the set of accepted keys: every platform implicitly
 		// accepts `body` as an override; OptionFields adds the rest.
-		ok := map[string]bool{"body": true, "audience": true}
+		ok := map[string]bool{"body": true, "audience": true, "destination_id": true, "board_id": true, "boardId": true}
 		for _, f := range def.OptionFields {
 			ok[f.Name] = true
 		}
@@ -2326,6 +2356,9 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(targets) > 0 {
 		targetProfiles, err = validatePostTargets(ctx, pid, targets)
 		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		if err := freezeTargetDestinations(ctx, pid, targets, mode != postModeDraft); err != nil {
 			return mcpError(err.Error()), nil
 		}
 		a.validateTargetOptions(ctx, pid, targets)
@@ -3094,10 +3127,11 @@ const pinterestVideoMaxBytes int64 = 2 * 1024 * 1024 * 1024
 
 // publishPinterest maps Social's generic post and media model onto
 // Pinterest's nested media_source contract. A connected Pinterest account
-// represents one board, so external_account_id is always the board_id.
+// publishes to the frozen target destination, with legacy board presets supported.
 func (a *App) publishPinterest(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
-	if j.extID == "" {
-		return "", "", errors.New("pinterest account has no board id stored — reconnect and select a board")
+	boardID, err := resolvePinterestBoard(j)
+	if err != nil {
+		return "", "", err
 	}
 	if len(j.media) == 0 {
 		return "", "", errors.New("pinterest requires at least one image or video")
@@ -3175,7 +3209,7 @@ func (a *App) publishPinterest(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	}
 
 	input := map[string]any{
-		def.ExternalIDField: j.extID,
+		def.ExternalIDField: boardID,
 		def.BodyField:       j.body,
 		"media_source":      mediaSource,
 	}
@@ -5430,6 +5464,7 @@ func loadTargetsFrom(db interface {
 			"provider_sync_status":        providerSyncStatus,
 			"provider_updated_at":         providerUpdatedAt,
 			"audience_capabilities":       adapterForAudience(platform, targetProvider).Capabilities,
+			"destination_capabilities":    adapterForDestinations(platform, targetProvider),
 			"audience_status":             audienceStatus,
 			"audience_confirmed_at":       audienceConfirmedAt,
 			"audience_confirmation_actor": audienceActor,
@@ -6542,6 +6577,13 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		}
 	}
 	if providerSlug != "" && providerSlug != "native" {
+		if platform == "pinterest" && query.Scope == "destination" {
+			out.Status = "unsupported"
+			out.Reason = "Zernio exposes account analytics here; board analytics require provider support. Use scope=provider_account."
+			out.Capabilities = analyticsCapabilitiesFor(platform, providerSlug)
+			decorateAccountReport(&out, connID, providerSlug, providerAccountID, extID, query)
+			return out
+		}
 		result = a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform, query)
 		a.addAccountBreakdowns(ctx, &result, connID, providerSlug, providerAccountID, extID, pageCreds, query)
 		decorateAccountReport(&result, connID, providerSlug, providerAccountID, extID, query)
@@ -6564,7 +6606,19 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		result = a.getInstagramAccountMetrics(ctx, out, connID, extID, pageCreds, period, query)
 	case "pinterest":
 		if query.Scope == "destination" {
-			result = a.getPinterestBoardMetrics(ctx, out, connID, extID, query)
+			boardID := query.DestinationID
+			if boardID == "" {
+				if b, e := loadDestinationAccount(ctx, pid, accountID); e == nil {
+					boardID = b.DefaultID
+				}
+			}
+			if boardID == "" {
+				out.Status = "unsupported"
+				out.Reason = "Select destination_id or set a default board; account statistics use scope=provider_account"
+				result = out
+			} else {
+				result = a.getPinterestBoardMetrics(ctx, out, connID, boardID, query)
+			}
 		} else {
 			result = a.getPinterestAccountMetrics(ctx, out, connID, query)
 		}
@@ -7218,10 +7272,14 @@ func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppC
 			continue
 		}
 		query := analyticsQuery{RangeDays: 28, Filters: map[string][]string{}}
-		var platform, provider string
-		_ = app.AppDB().QueryRow(`SELECT platform, COALESCE(provider_slug,'native') FROM social_accounts WHERE id=? AND project_id=?`, id, pid).Scan(&platform, &provider)
-		if platform == "pinterest" && (provider == "native" || provider == "") {
-			query.Scope = "destination"
+		var platform string
+		_ = app.AppDB().QueryRow(`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`, id, pid).Scan(&platform)
+		if platform == "pinterest" {
+			query.Scope = "provider_account"
+			if b, err := loadDestinationAccount(app, pid, id); err == nil && b.Kind == "destination_preset" {
+				query.Scope = "destination"
+				query.DestinationID = b.DefaultID
+			}
 			query.Compare = true
 			query.GroupBy = []string{"post"}
 		}
@@ -7503,7 +7561,7 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64,
 	var raw, refreshed string
 	if err := ctx.AppDB().QueryRow(`SELECT result,refreshed_at FROM account_metric_cache WHERE project_id=? AND social_account_id=? AND query_key=?`, pid, accountID, query.cacheKey()).Scan(&raw, &refreshed); err == nil {
 		var cached accountMetricsResult
-		if json.Unmarshal([]byte(raw), &cached) == nil && cached.Report != nil && cached.Report.BindingKey == accountReportBinding(connID, providerSlug, providerAccountID, externalID) {
+		if json.Unmarshal([]byte(raw), &cached) == nil && cached.Report != nil && cached.Report.BindingKey == accountReportBinding(connID, providerSlug, providerAccountID, externalID)+":"+query.DestinationID {
 			cached.ProfileID = profileID
 			cached.DisplayName = displayName
 			cached.UpdatedAt = refreshed
@@ -7565,6 +7623,16 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 	pointScope := "account"
 	if res.Platform == "pinterest" && res.Report != nil && res.Report.Scope == "provider_account" {
 		pointScope = "provider_account"
+	} else if res.Platform == "pinterest" && query.Scope == "destination" {
+		if query.DestinationID == "" {
+			if b, err := loadDestinationAccount(ctx, pid, res.SocialAccountID); err == nil {
+				query.DestinationID = b.DefaultID
+			}
+		}
+		if query.DestinationID == "" {
+			return nil
+		}
+		pointScope = "destination:" + query.DestinationID
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	profileID := res.ProfileID
@@ -7802,7 +7870,7 @@ func latestAccountMetricsRefresh(ctx *sdk.AppCtx, pid string, accountID int64) (
 	err := ctx.AppDB().QueryRow(
 		`SELECT COALESCE(MAX(point_time),'')
 		   FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account'
+		  WHERE project_id=? AND social_account_id=? AND (scope='account' OR scope='provider_account' OR scope LIKE 'destination:%')
 		    AND (metric='_refresh' OR period='snapshot')`,
 		pid, accountID,
 	).Scan(&latest)
@@ -8209,7 +8277,20 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	identities := map[string]int64{}
 	aliases := map[int64]int64{}
 	for _, accountID := range ids {
-		result := presentAccountReport(a.collectAndStoreAccountMetrics(ctx, pid, accountID, providerPeriod, query), query)
+		accountQuery := query
+		if accountQuery.Scope == "destination" {
+			if b, e := loadDestinationAccount(ctx, pid, accountID); e == nil && adapterForDestinations(b.Platform, b.Provider).Kind != "" {
+				if accountQuery.DestinationID == "" {
+					accountQuery.DestinationID = b.DefaultID
+				}
+				if accountQuery.DestinationID != "" && accountQuery.DestinationID != b.DefaultID {
+					if _, e := findDestination(ctx, b, accountQuery.DestinationID); e != nil {
+						return mcpError(e.Error()), nil
+					}
+				}
+			}
+		}
+		result := presentAccountReport(a.collectAndStoreAccountMetrics(ctx, pid, accountID, providerPeriod, accountQuery), accountQuery)
 		if !boolArg(args, "include_raw", false) {
 			result.Raw = nil
 		}
@@ -8521,10 +8602,7 @@ func (a *App) importPinterestPosts(
 	accountID, connID int64, boardID string,
 	profileID int64, limit int,
 ) importResult {
-	if boardID == "" {
-		out.Status, out.Error = "failed", "pinterest account has no board id stored"
-		return out
-	}
+
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
@@ -8535,11 +8613,16 @@ func (a *App) importPinterestPosts(
 		if pageSize > 250 {
 			pageSize = 250
 		}
-		args := map[string]any{"board_id": boardID, "page_size": pageSize}
+		args := map[string]any{"page_size": pageSize}
+		tool := "list_pins"
+		if boardID != "" {
+			args["board_id"] = boardID
+			tool = "list_board_pins"
+		}
 		if bookmark != "" {
 			args["bookmark"] = bookmark
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_board_pins", args)
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, args)
 		if err != nil {
 			out.Status, out.Error = "failed", err.Error()
 			return out
@@ -8557,6 +8640,7 @@ func (a *App) importPinterestPosts(
 				Link           string         `json:"link"`
 				AltText        string         `json:"alt_text"`
 				BoardSectionID string         `json:"board_section_id"`
+				BoardID        string         `json:"board_id"`
 				Media          map[string]any `json:"media"`
 			} `json:"items"`
 			Bookmark string `json:"bookmark"`
@@ -8576,7 +8660,7 @@ func (a *App) importPinterestPosts(
 			options := map[string]any{}
 			for key, value := range map[string]string{
 				"title": pin.Title, "link": pin.Link, "alt_text": pin.AltText,
-				"board_section_id": pin.BoardSectionID,
+				"board_section_id": pin.BoardSectionID, "destination_id": nonEmpty(pin.BoardID, boardID),
 			} {
 				if value != "" {
 					options[key] = value
@@ -10380,14 +10464,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
 		args := scopedQueryArgs(r, "period", "range", "start_date", "end_date", "breakdowns", "group_by", "metric", "refresh",
-			"scope", "sort_by", "limit", "compare", "published_in_range", "max_posts", "include_raw", "device", "os", "country", "region", "city", "age", "gender", "traffic_source", "audience_type", "content_type", "sharing_service", "video")
+			"scope", "destination_id", "sort_by", "limit", "compare", "published_in_range", "max_posts", "include_raw", "device", "os", "country", "region", "city", "age", "gender", "traffic_source", "audience_type", "content_type", "sharing_service", "video")
 		if err := validateAnalyticsQuery(args, analyticsQueryFromArgs(args)); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		refresh := strings.TrimSpace(strings.ToLower(toString(args["refresh"])))
 		if refresh == "0" || refresh == "false" || refresh == "stored" {
-			out := presentAccountReport(a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, analyticsQueryFromArgs(args)), analyticsQueryFromArgs(args))
+			query := analyticsQueryFromArgs(args)
+			if query.Scope == "destination" && query.DestinationID == "" {
+				if b, e := loadDestinationAccount(globalCtx, projectScope(globalCtx, args), id); e == nil {
+					query.DestinationID = b.DefaultID
+				}
+			}
+			out := presentAccountReport(a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, query), query)
 			writeJSON(w, out)
 			return
 		}
