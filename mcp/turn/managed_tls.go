@@ -100,7 +100,7 @@ func (a *App) initManagedTLS(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil || ctx.PlatformAPI() == nil {
 		return errors.New("managed TLS requires the app database and platform API")
 	}
-	if b := ctx.IntegrationFor("domains"); b == nil || b.Kind != "app" {
+	if !domainsBound(ctx) {
 		return errors.New("bind the Domains app before enabling managed TLS")
 	}
 	project := a.project
@@ -615,4 +615,24 @@ func (a *App) handleTLSRenew(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 	writeJSON(w, 202, map[string]any{"queued": true})
+}
+
+// requires.apps provides one Domains picker and its exact install binding.
+func domainsBound(ctx *sdk.AppCtx) bool {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return false
+	}
+	id, err := ctx.PlatformAPI().WhoAmI()
+	if err != nil || id == nil {
+		return false
+	}
+	switch v := id.Bindings["domains"].(type) {
+	case float64:
+		return v > 0
+	case int:
+		return v > 0
+	case int64:
+		return v > 0
+	}
+	return false
 }
