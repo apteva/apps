@@ -87,7 +87,7 @@ func (c config) tlsConfig() *tls.Config {
 }
 
 func (c config) certificateStatus(now time.Time) map[string]any {
-	out := map[string]any{"configured": c.certificate != nil, "valid": c.tlsValid(now), "hostname": c.publicHost, "port": tlsPort}
+	out := map[string]any{"configured": c.certificate != nil, "valid": c.tlsValid(now), "hostname": c.publicHost, "port": c.tlsPorts[0], "ports": c.tlsPorts}
 	if c.certificate != nil {
 		leaf := c.certificate.Leaf
 		sum := sha256.Sum256(leaf.Raw)

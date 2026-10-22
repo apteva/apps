@@ -50,7 +50,7 @@ func TestManifestDeploymentContract(t *testing.T) {
 	if !caps.PassiveStart || !caps.Drain || caps.ReplicaSafe || caps.Routing != "stateless" {
 		t.Fatal("incorrect deployment capabilities")
 	}
-	if len(m.Runtime.Ports) != 3+relayPortMax-relayPortMin+1 {
+	if len(m.Runtime.Ports) != relayPortMax-relayPortMin+1 {
 		t.Fatal("relay port reservation is incomplete")
 	}
 	ports := map[string]bool{}
@@ -60,9 +60,7 @@ func TestManifestDeploymentContract(t *testing.T) {
 		}
 		ports[fmt.Sprintf("%s/%d", p.Protocol, p.HostPort)] = true
 	}
-	if !ports["tcp/3478"] || !ports["udp/3478"] || !ports["tcp/5349"] {
-		t.Fatal("TURN listener missing")
-	}
+	// Client listeners are app-configured and readiness-gated; the media pool is statically reserved.
 	for p := relayPortMin; p <= relayPortMax; p++ {
 		if !ports[fmt.Sprintf("udp/%d", p)] {
 			t.Fatalf("unreserved relay port %d", p)

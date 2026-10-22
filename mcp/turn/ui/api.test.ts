@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { bytes, endpoint, request, saveSettings, settingsPatch, managedSettings } from "./api";
+import { bytes, connectionOptions, transportRequest, relayTestConfiguration, endpoint, request, saveSettings, settingsPatch, managedSettings } from "./api";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -56,4 +56,31 @@ test("managed TLS generates a stable storage key only during first setup", () =>
  expect(initial.dns_project_id).toBe("p");
  expect(managedSettings({}, draft, true, "")).toEqual({});
  expect(managedSettings({}, {tls_mode:"manual"}, false, "p")).toEqual({});
+});
+
+test("transport presets isolate each configured TLS listener and force relay for comparison", () => {
+ const options = connectionOptions({tls:true,tls_ports:[5349,443,8443]});
+ expect(options.map(option => option.value)).toEqual(["all","udp","tcp","tls:5349","tls:443","tls:8443"]);
+ expect(connectionOptions({tls:false,tls_ports:[443]}).map(option=>option.value)).toEqual(["all","udp","tcp"]);
+ expect(transportRequest("udp")).toEqual({transport:"udp"});
+ expect(transportRequest("tls:443")).toEqual({transport:"tls",tls_port:443});
+ expect(()=>transportRequest("tls:0")).toThrow();
+ const result = {ice_servers:[{urls:["turns:example.com:443?transport=tcp"],username:"temporary",credential:"temporary"}],expires_at:1,ttl_seconds:60};
+ expect(relayTestConfiguration(result)).toEqual({iceServers:result.ice_servers,iceTransportPolicy:"relay"});
+});
+
+test("managed save confirms stop before changing settings and never writes after a failed stop", async () => {
+ for (const failed of [false,true]) {
+   const calls:string[]=[];
+   globalThis.fetch = (async(url:string) => {
+     calls.push(url);
+     if(url.includes("/settings/validate")) return Response.json({valid:true,stop_before_save:true});
+     if(url.endsWith("/stop")) return Response.json({id:"stop-id"});
+     if(url.endsWith("/stop-id")) return Response.json({status:failed?"failed":"succeeded"});
+     return Response.json({restarted:true});
+   }) as typeof fetch;
+   const save = saveSettings({appName:"turn",installId:42,projectId:""},{tls_ports:"443,5349"});
+   if(failed) { await expect(save).rejects.toThrow("not saved");expect(calls.some(url=>url.endsWith("/config"))).toBe(false); }
+   else { expect(await save).toBe(true);expect(calls).toEqual(["/api/apps/turn/_install/42/settings/validate","/api/apps/installs/42/deployment/stop","/api/apps/installs/42/deployment/operations/stop-id","/api/apps/installs/42/config"]); }
+ }
 });

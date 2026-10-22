@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,7 +26,7 @@ func (c config) publicSettings() sdk.Config {
 	for _, peer := range c.allowedPeers {
 		peers = append(peers, peer.String())
 	}
-	return sdk.Config{"tls_mode": c.tlsMode, "dns_zone": c.dnsZone, "dns_project_id": c.dnsProject, "acme_email": c.acmeEmail, "acme_accept_terms": strconv.FormatBool(c.acmeTerms), "public_ip": c.publicIP.String(), "public_host": c.publicHost, "bind_ip": c.bindIP, "realm": c.realm, "credential_ttl_seconds": strconv.Itoa(int(c.ttl / time.Second)), "max_allocations": strconv.Itoa(c.maxAllocations), "allocations_per_credential": strconv.Itoa(c.perCredential), "bytes_per_second": strconv.Itoa(c.bytesPerSecond), "allowed_peer_cidrs": strings.Join(peers, ",")}
+	return sdk.Config{"udp_port": strconv.Itoa(c.udpPort), "tcp_port": strconv.Itoa(c.tcpPort), "tls_ports": c.tlsPortsText(), "tls_mode": c.tlsMode, "dns_zone": c.dnsZone, "dns_project_id": c.dnsProject, "acme_email": c.acmeEmail, "acme_accept_terms": strconv.FormatBool(c.acmeTerms), "public_ip": c.publicIP.String(), "public_host": c.publicHost, "bind_ip": c.bindIP, "realm": c.realm, "credential_ttl_seconds": strconv.Itoa(int(c.ttl / time.Second)), "max_allocations": strconv.Itoa(c.maxAllocations), "allocations_per_credential": strconv.Itoa(c.perCredential), "bytes_per_second": strconv.Itoa(c.bytesPerSecond), "allowed_peer_cidrs": strings.Join(peers, ",")}
 }
 
 func (a *App) handleValidateSettings(w http.ResponseWriter, r *http.Request) {
@@ -80,5 +82,47 @@ func (a *App) handleValidateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Keep the existing managed certificate storage key when changing settings", 400)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"valid": true, "tls_certificate": cfg.certificateStatus(time.Now())})
+	if err := a.validateListenerAvailability(cfg); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"valid": true, "stop_before_save": a.managed, "tls_certificate": cfg.certificateStatus(time.Now())})
+}
+
+func (c config) tlsPortsText() string {
+	parts := make([]string, len(c.tlsPorts))
+	for i, port := range c.tlsPorts {
+		parts[i] = strconv.Itoa(port)
+	}
+	return strings.Join(parts, ",")
+}
+
+// Unchanged sockets belong to this execution. Probe newly requested sockets so
+// the panel can report conflicts before saving. Startup remains authoritative.
+func (a *App) validateListenerAvailability(c config) error {
+	if c.bindIP != a.cfg.bindIP {
+		return nil
+	} // A bind-address change needs exclusive restart.
+	if c.udpPort != a.cfg.udpPort {
+		socket, err := net.ListenPacket("udp4", net.JoinHostPort(c.bindIP, strconv.Itoa(c.udpPort)))
+		if err != nil {
+			return fmt.Errorf("UDP port %d is unavailable on this instance", c.udpPort)
+		}
+		_ = socket.Close()
+	}
+	owned := map[int]bool{a.cfg.tcpPort: true}
+	for _, port := range a.cfg.tlsPorts {
+		owned[port] = true
+	}
+	for _, port := range append([]int{c.tcpPort}, c.tlsPorts...) {
+		if owned[port] {
+			continue
+		}
+		socket, err := net.Listen("tcp4", net.JoinHostPort(c.bindIP, strconv.Itoa(port)))
+		if err != nil {
+			return fmt.Errorf("TCP/TLS port %d is unavailable on this instance (possibly used by HTTPS)", port)
+		}
+		_ = socket.Close()
+	}
+	return nil
 }

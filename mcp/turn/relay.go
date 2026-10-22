@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -16,46 +17,73 @@ import (
 )
 
 func (a *App) startNetwork() error {
-	return a.listenNetwork(net.JoinHostPort(a.cfg.bindIP, strconv.Itoa(turnPort)))
+	address := func(port int) string { return net.JoinHostPort(a.cfg.bindIP, strconv.Itoa(port)) }
+	tlsAddresses := make([]string, 0, len(a.cfg.tlsPorts))
+	for _, port := range a.cfg.tlsPorts {
+		tlsAddresses = append(tlsAddresses, address(port))
+	}
+	return a.listenListeners(address(a.cfg.udpPort), address(a.cfg.tcpPort), tlsAddresses)
 }
 
-// listenNetwork accepts an alternate address only for in-process tests. The
-// production entry point always uses the exact ports declared in the manifest.
+// Tests use ephemeral listeners without changing the advertised configuration.
 func (a *App) listenNetwork(address string) error {
-	udp, err := net.ListenPacket("udp4", address)
-	if err != nil {
-		return errors.New("could not bind TURN UDP listener")
-	}
-	tcp, err := net.Listen("tcp4", address)
-	if err != nil {
-		_ = udp.Close()
-		return errors.New("could not bind TURN TCP listener")
-	}
-	listener := newClientListener(tcp, a, nil)
-	a.udp = udp
-	a.tcp = listener
-	tlsAddress := net.JoinHostPort(a.cfg.bindIP, strconv.Itoa(tlsPort))
+	tlsAddress := net.JoinHostPort(a.cfg.bindIP, strconv.Itoa(a.cfg.tlsPorts[0]))
 	if _, port, _ := net.SplitHostPort(address); port == "0" {
 		tlsAddress = net.JoinHostPort(a.cfg.bindIP, "0")
 	}
-	tlsSocket, err := net.Listen("tcp4", tlsAddress)
+	return a.listenListeners(address, address, []string{tlsAddress})
+}
+
+// Every configured listener and the media pool must bind before readiness.
+// Roll back every socket on failure, including a later TLS listener conflict.
+func (a *App) listenListeners(udpAddress, tcpAddress string, tlsAddresses []string) (err error) {
+	udp, err := net.ListenPacket("udp4", udpAddress)
 	if err != nil {
-		_ = udp.Close()
-		_ = listener.Close()
-		return errors.New("could not bind TURN TLS listener")
+		return fmt.Errorf("could not bind TURN UDP %s: %w", udpAddress, err)
 	}
-	a.tls = newClientListener(tlsSocket, a, a.liveTLSConfig())
-	if err := a.openPool(); err != nil {
+	var listeners []*clientListener
+	defer func() {
+		if err == nil {
+			return
+		}
 		_ = udp.Close()
-		_ = listener.Close()
-		_ = a.tls.Close()
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		for _, port := range a.pool {
+			_ = port.socket.Close()
+		}
+		a.poolReaders.Wait()
+	}()
+	tcp, err := net.Listen("tcp4", tcpAddress)
+	if err != nil {
+		return fmt.Errorf("could not bind TURN TCP %s: %w", tcpAddress, err)
+	}
+	a.udp, a.tcp = udp, newClientListener(tcp, a, nil)
+	listeners = append(listeners, a.tcp)
+	for _, address := range tlsAddresses {
+		socket, bindErr := net.Listen("tcp4", address)
+		if bindErr != nil {
+			return fmt.Errorf("could not bind TURN TLS %s: %w", address, bindErr)
+		}
+		listener := newClientListener(socket, a, a.liveTLSConfig())
+		listeners = append(listeners, listener)
+		a.tlsListeners = append(a.tlsListeners, listener)
+	}
+	if len(a.tlsListeners) > 0 {
+		a.tls = a.tlsListeners[0]
+	}
+	if err = a.openPool(); err != nil {
 		return err
 	}
 	generator := &relayGenerator{app: a}
 	permission := func(_ net.Addr, ip net.IP) bool { return a.allowPeer(ip) }
 	factory := logging.NewDefaultLoggerFactory()
-	// Credentials and client addresses must never appear in library packet logs.
 	factory.DefaultLogLevel = logging.LogLevelDisabled
+	configs := make([]turn.ListenerConfig, 0, len(listeners))
+	for _, listener := range listeners {
+		configs = append(configs, turn.ListenerConfig{Listener: listener, RelayAddressGenerator: generator, PermissionHandler: permission})
+	}
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm: a.cfg.realm, AuthHandler: a.authenticate, LoggerFactory: factory,
 		QuotaHandler: func(user, _ string, _ net.Addr) bool {
@@ -65,12 +93,9 @@ func (a *App) listenNetwork(address string) error {
 		},
 		AllocationLifetime: 10 * time.Minute,
 		PacketConnConfigs:  []turn.PacketConnConfig{{PacketConn: &admissionPacketConn{PacketConn: udp, app: a}, RelayAddressGenerator: generator, PermissionHandler: permission}},
-		ListenerConfigs:    []turn.ListenerConfig{{Listener: listener, RelayAddressGenerator: generator, PermissionHandler: permission}, {Listener: a.tls, RelayAddressGenerator: generator, PermissionHandler: permission}},
+		ListenerConfigs:    configs,
 	})
 	if err != nil {
-		_ = udp.Close()
-		_ = listener.Close()
-		_ = a.tls.Close()
 		return errors.New("TURN server initialization failed")
 	}
 	a.mu.Lock()
@@ -112,8 +137,8 @@ func (a *App) stopNetwork() {
 			if a.tcp != nil {
 				_ = a.tcp.Close()
 			}
-			if a.tls != nil {
-				_ = a.tls.Close()
+			for _, listener := range a.tlsListeners {
+				_ = listener.Close()
 			}
 		}
 		for _, c := range relays {
