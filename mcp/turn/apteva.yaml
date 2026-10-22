@@ -1,0 +1,128 @@
+schema: apteva-app/v1
+name: turn
+display_name: TURN
+version: 0.1.0
+description: |
+  Standalone authenticated STUN/TURN relay for WebRTC clients.
+  Issues temporary project/session credentials and relays UDP media over UDP,
+  TCP or TLS client connections. Includes a native management panel and runs
+  independently of Telephony, including on a separate managed instance.
+author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [turn, stun, webrtc, networking]
+scopes: [project, global]
+min_apteva_version: "0.52.0"
+requires:
+  permissions: [net.egress]
+provides:
+  http_routes:
+    - {prefix: /ready, method: GET, no_auth: true}
+    - {prefix: /}
+    - {prefix: /_apteva/runtime/app/}
+  mcp_tools:
+    - {name: turn_status, description: "Read relay readiness, endpoint configuration, capacity and aggregate traffic counters. No credentials."}
+    - name: turn_credentials
+      exposure: app_only
+      description: "Issue temporary WebRTC ICE credentials for the authenticated calling project and a session. Consumers must authorize their end user before calling."
+  ui_panels:
+    - {slot: project.page, label: TURN, icon: network, entry: /ui/TurnPanel.mjs}
+runtime:
+  kind: source
+  activation_strategy: exclusive
+  startup_timeout_seconds: 30
+  package:
+    app_capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: stateless
+  source:
+    repo: github.com/apteva/apps
+    ref: turn/v0.1.0
+    entry: mcp/turn
+  port: 8080
+  health_check: /ready
+  ports:
+    - {name: turn-udp, container_port: 3478, host_port: 3478, protocol: udp}
+    - {name: turn-tcp, container_port: 3478, host_port: 3478, protocol: tcp}
+    - {name: turn-tls, container_port: 5349, host_port: 5349, protocol: tcp}
+    - {name: relay-49160, container_port: 49160, host_port: 49160, protocol: udp}
+    - {name: relay-49161, container_port: 49161, host_port: 49161, protocol: udp}
+    - {name: relay-49162, container_port: 49162, host_port: 49162, protocol: udp}
+    - {name: relay-49163, container_port: 49163, host_port: 49163, protocol: udp}
+    - {name: relay-49164, container_port: 49164, host_port: 49164, protocol: udp}
+    - {name: relay-49165, container_port: 49165, host_port: 49165, protocol: udp}
+    - {name: relay-49166, container_port: 49166, host_port: 49166, protocol: udp}
+    - {name: relay-49167, container_port: 49167, host_port: 49167, protocol: udp}
+    - {name: relay-49168, container_port: 49168, host_port: 49168, protocol: udp}
+    - {name: relay-49169, container_port: 49169, host_port: 49169, protocol: udp}
+    - {name: relay-49170, container_port: 49170, host_port: 49170, protocol: udp}
+    - {name: relay-49171, container_port: 49171, host_port: 49171, protocol: udp}
+    - {name: relay-49172, container_port: 49172, host_port: 49172, protocol: udp}
+    - {name: relay-49173, container_port: 49173, host_port: 49173, protocol: udp}
+    - {name: relay-49174, container_port: 49174, host_port: 49174, protocol: udp}
+    - {name: relay-49175, container_port: 49175, host_port: 49175, protocol: udp}
+    - {name: relay-49176, container_port: 49176, host_port: 49176, protocol: udp}
+    - {name: relay-49177, container_port: 49177, host_port: 49177, protocol: udp}
+    - {name: relay-49178, container_port: 49178, host_port: 49178, protocol: udp}
+    - {name: relay-49179, container_port: 49179, host_port: 49179, protocol: udp}
+    - {name: relay-49180, container_port: 49180, host_port: 49180, protocol: udp}
+    - {name: relay-49181, container_port: 49181, host_port: 49181, protocol: udp}
+    - {name: relay-49182, container_port: 49182, host_port: 49182, protocol: udp}
+    - {name: relay-49183, container_port: 49183, host_port: 49183, protocol: udp}
+    - {name: relay-49184, container_port: 49184, host_port: 49184, protocol: udp}
+    - {name: relay-49185, container_port: 49185, host_port: 49185, protocol: udp}
+    - {name: relay-49186, container_port: 49186, host_port: 49186, protocol: udp}
+    - {name: relay-49187, container_port: 49187, host_port: 49187, protocol: udp}
+    - {name: relay-49188, container_port: 49188, host_port: 49188, protocol: udp}
+    - {name: relay-49189, container_port: 49189, host_port: 49189, protocol: udp}
+    - {name: relay-49190, container_port: 49190, host_port: 49190, protocol: udp}
+    - {name: relay-49191, container_port: 49191, host_port: 49191, protocol: udp}
+    - {name: relay-49192, container_port: 49192, host_port: 49192, protocol: udp}
+    - {name: relay-49193, container_port: 49193, host_port: 49193, protocol: udp}
+    - {name: relay-49194, container_port: 49194, host_port: 49194, protocol: udp}
+    - {name: relay-49195, container_port: 49195, host_port: 49195, protocol: udp}
+    - {name: relay-49196, container_port: 49196, host_port: 49196, protocol: udp}
+    - {name: relay-49197, container_port: 49197, host_port: 49197, protocol: udp}
+    - {name: relay-49198, container_port: 49198, host_port: 49198, protocol: udp}
+    - {name: relay-49199, container_port: 49199, host_port: 49199, protocol: udp}
+    - {name: relay-49200, container_port: 49200, host_port: 49200, protocol: udp}
+    - {name: relay-49201, container_port: 49201, host_port: 49201, protocol: udp}
+    - {name: relay-49202, container_port: 49202, host_port: 49202, protocol: udp}
+    - {name: relay-49203, container_port: 49203, host_port: 49203, protocol: udp}
+    - {name: relay-49204, container_port: 49204, host_port: 49204, protocol: udp}
+    - {name: relay-49205, container_port: 49205, host_port: 49205, protocol: udp}
+    - {name: relay-49206, container_port: 49206, host_port: 49206, protocol: udp}
+    - {name: relay-49207, container_port: 49207, host_port: 49207, protocol: udp}
+    - {name: relay-49208, container_port: 49208, host_port: 49208, protocol: udp}
+    - {name: relay-49209, container_port: 49209, host_port: 49209, protocol: udp}
+    - {name: relay-49210, container_port: 49210, host_port: 49210, protocol: udp}
+    - {name: relay-49211, container_port: 49211, host_port: 49211, protocol: udp}
+    - {name: relay-49212, container_port: 49212, host_port: 49212, protocol: udp}
+    - {name: relay-49213, container_port: 49213, host_port: 49213, protocol: udp}
+    - {name: relay-49214, container_port: 49214, host_port: 49214, protocol: udp}
+    - {name: relay-49215, container_port: 49215, host_port: 49215, protocol: udp}
+    - {name: relay-49216, container_port: 49216, host_port: 49216, protocol: udp}
+    - {name: relay-49217, container_port: 49217, host_port: 49217, protocol: udp}
+    - {name: relay-49218, container_port: 49218, host_port: 49218, protocol: udp}
+    - {name: relay-49219, container_port: 49219, host_port: 49219, protocol: udp}
+    - {name: relay-49220, container_port: 49220, host_port: 49220, protocol: udp}
+    - {name: relay-49221, container_port: 49221, host_port: 49221, protocol: udp}
+    - {name: relay-49222, container_port: 49222, host_port: 49222, protocol: udp}
+    - {name: relay-49223, container_port: 49223, host_port: 49223, protocol: udp}
+config_schema:
+  - {name: public_ip, type: text, required: true, label: "Relay public IPv4", description: "Public address of the instance actually running TURN, not the Apteva management server. One-to-one NAT must preserve the declared relay ports."}
+  - {name: public_host, type: text, label: "TURN hostname", description: "DNS hostname or public IPv4 for client connections. Defaults to public_ip. Must point directly to the relay instance."}
+  - {name: shared_secret, type: password, required: true, label: "Credential signing secret", description: "At least 32 random characters. Stored in platform install configuration. Never sent to clients. Changing it invalidates credentials."}
+  - {name: tls_certificate_pem, type: text, label: "TLS certificate chain", description: "PEM certificate chain or base64-encoded PEM, covering public_host. Configure using the TURN panel's multiline certificate editor. TLS stays unavailable until a valid certificate and key are supplied."}
+  - {name: tls_private_key_pem, type: password, label: "TLS private key", description: "Matching unencrypted PEM private key or base64-encoded PEM. Stored in encrypted install configuration; never returned by TURN APIs."}
+  - {name: realm, type: text, default: "apteva", label: "Authentication realm"}
+  - {name: bind_ip, type: text, default: "0.0.0.0", label: "Relay bind IPv4"}
+  - {name: credential_ttl_seconds, type: text, default: "3600", label: "Maximum credential lifetime", description: "60 to 86400 seconds. Clients must obtain new credentials before expiry."}
+  - {name: max_allocations, type: text, default: "64", label: "Maximum active allocations", description: "1 to 64; bounded by this release's reserved UDP relay pool."}
+  - {name: allocations_per_credential, type: text, default: "4", label: "Allocations per credential", description: "1 to 16. Each issued credential identifies one project/session."}
+  - {name: bytes_per_second, type: text, default: "1048576", label: "Bytes per second per allocation", description: "Combined upload/download limit, 65536 to 104857600 bytes/s. Excess datagrams are dropped."}
+  - {name: allowed_peer_cidrs, type: text, label: "Allowed peer networks", description: "Optional comma-separated IPv4 CIDRs narrowing public peers. Private, loopback, link-local, metadata and reserved destinations are always denied."}
+upgrade_policy: manual
