@@ -405,7 +405,11 @@ func TestDestinationWidgetDoesNotAddBoardAndParentTotals(t *testing.T) {
 	ctx := newSocialCtx(t, pf)
 	parent := destinationTestAccount(t, ctx, "native", "")
 	legacy := analyticsAccount(t, ctx, "test-proj", "pinterest", "board")
-	_, err := ctx.AppDB().Exec(`UPDATE social_accounts SET provider_account_id='' WHERE id=?; UPDATE social_accounts SET account_kind='destination_preset',default_destination_id='board' WHERE id=?`, parent, legacy)
+	_, err := ctx.AppDB().Exec(`UPDATE social_accounts SET provider_account_id='' WHERE id=?`, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ctx.AppDB().Exec(`UPDATE social_accounts SET account_kind='destination_preset',default_destination_id='board' WHERE id=?`, legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
