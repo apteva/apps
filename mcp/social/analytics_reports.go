@@ -168,7 +168,7 @@ func decorateAccountReport(out *accountMetricsResult, connID int64, provider, pr
 		}
 		out.Report.Identity = out.Platform + ":" + provider + ":" + id
 	}
-	out.Report.BindingKey = accountReportBinding(connID, provider, providerID, externalID)
+	out.Report.BindingKey = accountReportBinding(connID, provider, providerID, externalID) + ":" + q.DestinationID
 	if out.Available == nil {
 		for _, name := range reportMetricNames {
 			if accountMetricKnown(*out, name) || accountMetricValue(*out, name) != 0 {

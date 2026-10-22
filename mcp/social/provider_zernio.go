@@ -294,9 +294,19 @@ func (a *App) upsertZernioSocialAccount(ctx *sdk.AppCtx, pid string, connID int6
 			  WHERE project_id=? AND provider_slug=? AND provider_account_id=?`,
 			pid, zernioProviderSlug, za.AccountID,
 		).Scan(&row.ID)
-		return row, nil
+	} else {
+		row.ID, _ = res.LastInsertId()
 	}
-	row.ID, _ = res.LastInsertId()
+	if za.Platform == "pinterest" {
+		id := firstDeepString(za.Raw, "defaultBoardId", "default_board_id", "boardId")
+		name := firstDeepString(za.Raw, "defaultBoardName", "boardName")
+		if id != "" {
+			_, err = ctx.AppDB().Exec(`UPDATE social_accounts SET default_destination_id=?,default_destination_name=? WHERE id=? AND project_id=? AND default_destination_id=''`, id, name, row.ID, pid)
+			if err != nil {
+				return row, err
+			}
+		}
+	}
 	return row, nil
 }
 
@@ -620,6 +630,11 @@ func (a *App) finalizeZernioAccount(ctx *sdk.AppCtx, args map[string]any, row *p
 	rowOut, err := a.upsertZernioSocialAccount(ctx, pid, row.connectionID, profileID, *chosen)
 	if err != nil {
 		return nil, err
+	}
+	if row.platform == "pinterest" && pageID != "" {
+		if _, err := ctx.AppDB().Exec(`UPDATE social_accounts SET default_destination_id=? WHERE id=? AND project_id=?`, pageID, rowOut.ID, pid); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE pending_accounts SET status='finalized' WHERE id=? AND project_id=? AND status='finalizing'`,
@@ -958,6 +973,16 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 			},
 		},
 	}
+	if j.platform == "pinterest" {
+		id, e := resolvePinterestBoard(publishJob{options: j.options})
+		if e != nil {
+			return "", "", e
+		}
+		if j.options == nil {
+			j.options = map[string]any{}
+		}
+		j.options["destination_id"] = id
+	}
 	if title := strings.TrimSpace(toString(j.options["title"])); title != "" {
 		input["title"] = title
 	}
@@ -995,6 +1020,11 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	if psd := zernioPlatformSpecificData(j.options); len(psd) > 0 {
 		platforms := input["platforms"].([]any)
 		platform := platforms[0].(map[string]any)
+		if j.platform == "pinterest" {
+			if title := strOption(j.options, "title"); title != "" {
+				psd["title"] = title
+			}
+		}
 		platform["platformSpecificData"] = psd
 	}
 	ctx.Logger().Info("publishZernio: calling create_post",
@@ -2132,6 +2162,10 @@ func zernioPlatformSpecificData(opts map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range opts {
 		switch k {
+		case "destination_id", "board_id":
+			out["boardId"] = v
+		case "board_section_id":
+			out["boardSectionId"] = v
 		case "body", "title", "visibility", "thumbnail_storage_id", "thumbnail_project_id", "thumbnail_frame_ms", "tags":
 			continue
 		default:

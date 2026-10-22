@@ -13,6 +13,7 @@ import (
 )
 
 type analyticsQuery struct {
+	DestinationID    string
 	Scope            string
 	SortBy           string
 	Limit            int
@@ -76,6 +77,7 @@ func analyticsQueryFromArgs(args map[string]any) analyticsQuery {
 		}
 	}
 	q.Scope = strings.TrimSpace(toString(args["scope"]))
+	q.DestinationID = strings.TrimSpace(toString(args["destination_id"]))
 	q.SortBy = strings.TrimSpace(toString(args["sort_by"]))
 	q.Limit = intArg(args, "limit", 20)
 	q.MaxPosts = intArg(args, "max_posts", 1000)

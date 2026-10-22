@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.18.0
+version: 0.19.0
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -74,6 +74,9 @@ provides:
     - name: provider_reconciler
       schedule: "@every 15m"
   mcp_tools:
+    - { name: destination_list, description: "List publishing destinations under an account." }
+    - { name: destination_create, description: "Create a publishing destination when supported." }
+    - { name: account_set_default_destination, description: "Set the default for new posts; existing targets retain their destination." }
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels/boards (including Pinterest boards)." }
     - { name: account_finalize,            description: "Commit a pending account into the active account list. For destination-based platforms, supply page_id." }
@@ -144,7 +147,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      refresh_topics: [metrics.updated, destinations.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
       settings_schema:
         type: object
         properties:
@@ -184,7 +187,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.18.0
+    ref: social/v0.19.0
     entry: mcp/social
   port: 8080
   health_check: /health

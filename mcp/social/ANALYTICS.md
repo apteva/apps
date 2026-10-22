@@ -1,7 +1,7 @@
 # Social analytics
 
-`account_metrics` and `post_metrics` share reporting metadata. Publishing and
-account connection inputs are unchanged; all reporting options are optional.
+`account_metrics` and `post_metrics` share reporting metadata. All reporting options are optional. The publishing destination model is
+described in [DESTINATIONS.md](DESTINATIONS.md).
 
 ## Scopes
 
@@ -13,7 +13,7 @@ account connection inputs are unchanged; all reporting options are optional.
 - `post`: one published target (Pin, video, Reel, etc.).
 
 Existing Pinterest calls without `scope` retain whole-account behavior and now
-label it explicitly. The dashboard requests destination scope by default.
+label it explicitly. The dashboard starts with account scope; select destination scope for board reports.
 Multi-account results deduplicate whole-account identities and include
 `account_aliases` mapping additional Social account IDs to the returned account.
 
@@ -109,3 +109,11 @@ Migration 025 creates the post report cache and relabels existing Pinterest
 whole-account history as `provider_account`, preventing old totals from being
 used as board or home-widget performance. No server, SDK implementation or
 integration catalog changes are required.
+
+## Account connections and child destinations
+
+Pinterest is connected once per native account. Board reports can select an
+explicit `destination_id` independently of the publishing default. Changing a
+default cannot reuse another board's cached report or mix its time series. See
+[DESTINATIONS.md](DESTINATIONS.md) for the shared native/provider contract and
+legacy board preset compatibility.
