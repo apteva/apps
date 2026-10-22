@@ -88,6 +88,14 @@ exact output receipts rather than replacing them with remembered context.
 Workers use `step_claim` before acting and inspect `step_update.done`: call the
 native done tool immediately when true; otherwise follow `next_action`: continue
 the current step after progress, or await the next app event after completion.
+When no delivered ready work or active child work remains, park with
+`pace(clear_wake=true)` to clear automatic wakes and retain context until an
+event arrives. Never set periodic sleep timers to check Processes state.
+Processes durably stops run workers on completion, failure or cancellation,
+with retries and recovery after restart; main does not need to kill them.
+Main receives a compact terminal event and can reread the saved outcome once.
+Cancellation preserves saved receipts and history. Reconcile any external action
+already accepted before cancellation rather than assuming it was rolled back.
 Reuse prepared state and tools; do not spawn another worker, forward steps,
 repeat completed actions, or send per-step reports to main. Human approval can
 only be completed by the authorized project operator.

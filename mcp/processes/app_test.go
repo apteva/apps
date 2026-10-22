@@ -29,6 +29,8 @@ type fakeTasks struct {
 	profiles        []sdk.ThreadEnsureRequest
 	profileError    error
 	threads         []sdk.ThreadSpawnRequest
+	kills           []sdk.ThreadRef
+	killError       error
 }
 
 func (f *fakeTasks) EnsureAppToolsAttached(req sdk.EnsureAppToolsRequest) (*sdk.EnsureAppToolsResult, error) {
@@ -349,4 +351,9 @@ func TestManifestAndPanel(t *testing.T) {
 	if len(a.MCPTools()) != len(m.Provides.MCPTools) {
 		t.Fatal("tool manifest drift")
 	}
+}
+
+func (f *fakeTasks) KillThread(agent int64, thread string) error {
+	f.kills = append(f.kills, sdk.ThreadRef{AgentID: agent, ThreadID: thread})
+	return f.killError
 }

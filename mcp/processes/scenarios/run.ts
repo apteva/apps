@@ -1,3 +1,4 @@
+import { WORKER_CLEANUP, observeWorkerCleanup, verifyWorkerCleanup } from "./worker-cleanup";
 import { COMPACT_HANDOFFS, verifyCompactHandoffs } from "./compact-handoffs";
 import { PROCESS_PATCH, verifyProcessPatch } from "./process-patch";
 import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
@@ -167,9 +168,13 @@ const compactDb = databases.get(COMPACT_HANDOFFS);
 const compactApproval = compactDb ? confirmWhenWaiting(compactDb,{stepKey:"approve",output:CONTINUITY_APPROVAL,signal:operatorAbort.signal,log:message=>console.log(message)}).catch((error:Error)=>error) : Promise.resolve(null);
 const memoryDb=databases.get(RUN_MEMORY);
 const memoryApprovals=memoryDb?(async()=>{const approvals:ConfirmationReport[]=[];for(let i=0;i<2;i++)approvals.push(await confirmWhenWaiting(memoryDb,{stepKey:"approve",output:"MEMORY-APPROVED",signal:operatorAbort.signal,log:message=>console.log(message)}));return approvals;})().catch((error:Error)=>error):Promise.resolve(null);
+const cleanupDb=databases.get(WORKER_CLEANUP);
+const cleanupObserved=cleanupDb?observeWorkerCleanup(cleanupDb,operatorAbort.signal,message=>console.log(message)).catch((error:Error)=>{console.error(`Worker cleanup observer failed: ${error.stack}`);return error}):Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
 const exit = await child.exited;
 operatorAbort.abort();
+const cleanupEvidence=await cleanupObserved;
+await Bun.write(resolve(outputDir,"worker-cleanup-evidence.json"),JSON.stringify(cleanupEvidence instanceof Error?{error:cleanupEvidence.message}:cleanupEvidence,null,2));
 const confirmed = await operatorConfirmation;
 const continuityConfirmed = await continuityConfirmation;
 const parallelConfirmed = await parallelConfirmation;
@@ -225,6 +230,16 @@ for (const scenario of report.results) {
       direct_runs: runs.filter((r) => r.backend === "agent"),
       runs: runs.filter((r) => r.backend === "tasks"),
     };
+    if (scenario.scenario === WORKER_CLEANUP) {
+      check(cleanupEvidence && !(cleanupEvidence instanceof Error), `Worker cleanup observation failed: ${cleanupEvidence}`);
+      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Worker cleanup tier 3 must observe GPT-6.1 Sol");
+      const cleanup = db.query("SELECT * FROM process_worker_cleanup").all();
+      const notifications = db.query("SELECT * FROM process_run_terminal_events").all();
+      verifyWorkerCleanup(runs,cleanup,cleanupEvidence,notifications);
+      observed[scenario.scenario] = {...history, cleanup, notifications, observations: cleanupEvidence};
+      console.log(`PASS ${scenario.scenario}: completed, failed and sleeping cancelled workers stopped; history retained and no wake after deadline (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
     if (scenario.scenario === COMPACT_HANDOFFS) {
       check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Compact handoff tier 3 must observe GPT-6.1 Sol");
       check(compactConfirmed && !(compactConfirmed instanceof Error), `Compact approval failed: ${compactConfirmed}`);
@@ -248,7 +263,7 @@ for (const scenario of report.results) {
       fixtureDb.close();
       // Retain independently gathered evidence even if a new verifier check fails.
       await Bun.write(resolve(outputDir, "continuity-evidence.json"), JSON.stringify({ ...history, workers, fixture, operator_confirmation: continuityConfirmed }, null, 2));
-      verifyExecutorContinuity(scenario.tool_calls, runs, workers, fixture, continuityConfirmed as ConfirmationReport);
+      verifyExecutorContinuity(scenario.tool_calls, runs, workers, fixture, continuityConfirmed as ConfirmationReport, db.query("SELECT * FROM process_worker_cleanup").all());
       observed[scenario.scenario] = { ...history, workers, fixture, operator_confirmation: continuityConfirmed };
       console.log(`PASS ${scenario.scenario}: one worker, retained context/tools, exact receipts, validation join and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
@@ -264,7 +279,7 @@ for (const scenario of report.results) {
       fixtureDb.close();
       const evidence = {...history, workers, fixture, operator_confirmation: confirmation};
       await Bun.write(resolve(outputDir, "parallel-evidence.json"), JSON.stringify(evidence, null, 2));
-      verifyAIParallel(scenario.tool_calls, runs, workers, fixture, confirmation as ConfirmationReport);
+      verifyAIParallel(scenario.tool_calls, runs, workers, fixture, confirmation as ConfirmationReport, db.query("SELECT * FROM process_worker_cleanup").all());
       if (scenario.scenario === STEP_BY_STEP && controlled && !(controlled instanceof Error)) {
         const advances = db.query("SELECT * FROM process_run_advances WHERE run_id=?").all(runs[0].id) as any[];
         verifyControlEvidence(runs, advances, controlled);
@@ -307,7 +322,7 @@ for (const scenario of report.results) {
     verifyHistory(scenario.scenario, history);
     if (scenario.scenario === "processes-sequential-worker") {
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
-      verifySequentialWorker(scenario.tool_calls, runs[0], workers);
+      verifySequentialWorker(scenario.tool_calls, runs[0], workers, true, db.query("SELECT * FROM process_worker_cleanup").all());
     }
     if (scenario.scenario === "processes-browser-continuity") {
       check(runs.length === 1 && history.runs.length === 0, "Expected one direct browser run");

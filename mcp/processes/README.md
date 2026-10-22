@@ -225,7 +225,16 @@ cannot bypass a structured workflow: its outcome derives from its steps.
 Processes is the sole execution and history system. The Runs panel shows
 executors, dependencies, outputs, and step delivery details. It also
 lets the coordinator/operator call `run_cancel` with a reason.
-Cancellation stops future handoffs; work already dispatched may still finish.
+Cancellation stops future handoffs and queues worker termination in the same
+transaction. An independent cleanup worker stops all recorded run workers through
+Core, including pending wake timers and descendants, retrying with bounded
+backoff until acknowledged. Migration 020 backfills already terminal runs. Cleanup
+keeps run receipts, step ownership and worker history, and does not stop main.
+A separate durable terminal event notifies the coordinator even when app cleanup
+beats native `done`; notification retries preserve one stable event identity.
+External actions already accepted can still complete outside the worker; reconcile
+their exact operation identities before retrying. Blocked and approval-waiting
+workers retain context using `pace(clear_wake=true)` instead of periodic polling.
 Pausing a process or assignment stops future scheduled occurrences, not a run.
 
 Migration 004 adds `process_step_runs`, append-only `process_step_events`, and a

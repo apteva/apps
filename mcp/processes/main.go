@@ -18,10 +18,11 @@ var manifestYAML string
 var skillBody string
 
 type App struct {
-	ctx     *sdk.AppCtx
-	db      *sql.DB
-	mu      sync.Mutex
-	eventMu sync.Mutex
+	ctx       *sdk.AppCtx
+	db        *sql.DB
+	mu        sync.Mutex
+	eventMu   sync.Mutex
+	cleanupMu sync.Mutex
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -47,7 +48,9 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx, app.CurrentProject()) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx, app.CurrentProject()) }}, {Name: "process-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+	return []sdk.Worker{{Name: "worker-cleanup", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+		return a.cleanupWorkers(ctx, time.Now().UTC(), app.CurrentProject())
+	}}, {Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx, app.CurrentProject()) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx, app.CurrentProject()) }}, {Name: "process-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
 		return a.tickDirect(ctx, time.Now().UTC(), app.CurrentProject())
 	}}, {Name: "process-reconciliation", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx, app.CurrentProject()) }}}
 }

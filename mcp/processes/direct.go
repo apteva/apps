@@ -387,6 +387,9 @@ func (a *App) lifecycleHandlers() []sdk.EventHandler {
 		if r.TargetThreadID != "" && lifecycle.ThreadID != "" && r.TargetThreadID != lifecycle.ThreadID {
 			return errors.New("run lifecycle target mismatch; delivery requires explicit repair")
 		}
+		if terminal(r.State) {
+			return nil
+		}
 		if int64(lifecycle.Sequence) <= r.LifecycleSequence {
 			return nil
 		}

@@ -1,4 +1,4 @@
-import { check } from "./verify-outcomes";
+import { check, verifyWorkerFinished } from "./verify-outcomes";
 import type { ConfirmationReport } from "./operator-confirm";
 export const AI_PARALLEL = "processes-ai-parallel-steps";
 export const PARALLEL_APPROVAL =
@@ -9,6 +9,7 @@ export function verifyAIParallel(
   workers: any[],
   fixture: { contexts: any[]; operations: any[] },
   confirmation: ConfirmationReport,
+  cleanup: any[] = [],
 ) {
   check(
     runs.length === 1 && runs[0].state === "completed" && runs[0].workflow,
@@ -285,26 +286,36 @@ export function verifyAIParallel(
     ).length === children.size,
     "Children did not finish exactly once",
   );
-  const finish = calls.filter(
-    (c) => successful(c) && c.name === "done" && c.thread_id === owner,
+  const finalStep = calls.findIndex(
+    (c) =>
+      successful(c) &&
+      c.name === "processes_step_update" &&
+      c.args?.step_id === b.publish.id &&
+      c.args?.state === "completed",
   );
   check(
-    finish.length === 1 &&
-      children.size >= 1 &&
+    children.size >= 1 &&
       calls
         .filter(
           (c) =>
             successful(c) && c.name === "done" && children.has(c.thread_id),
         )
-        .every((c) => calls.indexOf(c) < calls.indexOf(finish[0])),
+        .every((c) => calls.indexOf(c) < finalStep),
     "Owner finished before children settled",
+  );
+  const finishIndex = verifyWorkerFinished(
+    calls,
+    r,
+    workers[0],
+    finalStep,
+    cleanup,
   );
   check(
     calls.some(
       (c) =>
         successful(c) &&
         c.name === "processes_runs" &&
-        calls.indexOf(c) > calls.indexOf(finish[0]),
+        calls.indexOf(c) > finishIndex,
     ),
     "Missing final history verification",
   );

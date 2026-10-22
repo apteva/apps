@@ -1,0 +1,55 @@
+name: processes-worker-cleanup
+description: Real persistent workers complete, fail and park; Processes stops terminal workers and their pending wake timers.
+timeout: 8m
+settle_for: 45s
+max_iterations: 65
+setup:
+  mode: autonomous
+  app: {path: ./, spawnable: true}
+directive: |
+  Test Processes worker cleanup in this isolated project. Your agent ID is
+  ${APTEVA_TEST_AGENT_ID}. Use only Processes and Core tools. No external actions.
+  Create exactly ONE procedure named Worker lifecycle regression, with a required
+  string parameter mode, and TWO required steps in order, both role executor:
+  - prepare, name Prepare, depends_on [], instructions: Complete with output exactly
+    PREPARED. All receipts in this fixture are simulated. Expected output: PREPARED.
+  - finish, name Finish, depends_on [prepare], instructions: Read the resolved mode
+    parameter. If complete, complete with output exactly FINAL-RECEIPT-123.
+    If fail, fail this step with error exactly FIXTURE-FAILURE and output exactly
+    ACCEPTED-OPERATION-456. Do not retry: this is the desired failure outcome.
+    If cancel, save state blocked, error WAIT-FOR-OPERATOR, output ACCEPTED-OPERATION-789.
+    Retain context and park using pace(clear_wake=true) until an operator event;
+    never poll, set a sleep timer, call done or redo a simulated operation.
+    Expected output: Exact completion, failure or blocked fixture receipt.
+  Shared instructions: Follow the Processes execution and lifetime contract. Workers
+  must claim before executing. Processes owns termination of terminal run workers.
+  Completion criteria: both required steps complete with their exact fixture receipts.
+  Create ONE assignment owner yourself, worker_continuity=per_executor,
+  follow_latest=true, parameter mode=complete, no schedule; activate it and the process.
+  Start exactly THREE runs with unique idempotency keys and parameter overrides:
+  cleanup-complete with mode complete, cleanup-fail with mode fail,
+  cleanup-cancel with mode cancel. Start all three without waiting between starts.
+  You are authorized to execute this isolated test. Processes provisions workers;
+  main must not claim or execute steps, spawn or kill threads, or cancel runs.
+  A test operator will cancel the blocked run and independently inspect Core.
+  Do not poll run status. After starting the three runs, wait for events using
+  pace(clear_wake=true). Do not create any more runs or change the definition.
+assert:
+  - tool_called: processes_step_claim
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: completed, output: FINAL-RECEIPT-123}
+      success: true
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: failed, error: FIXTURE-FAILURE, output: ACCEPTED-OPERATION-456}
+      success: true
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: blocked, error: WAIT-FOR-OPERATOR, output: ACCEPTED-OPERATION-789}
+      success: true
+  - tool_not_called: kill
+  - tool_not_called: processes_run_cancel
+budget:
+  total_tokens: 2000000
+  cost_usd: 7.50

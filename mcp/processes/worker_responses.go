@@ -61,12 +61,12 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 		return false, "Continue your claimed work and assess ready_steps for useful parallel delegation within max_parallel_steps. Await Processes events or child results when no eligible work remains; do not poll."
 	}
 	if s.State == "waiting" || s.State == "blocked" {
-		return false, "Retain this worker and await resolution of the recorded blocker; do not poll or repeat completed actions."
+		return false, "Retain this worker and await resolution of the recorded blocker; park using pace(clear_wake=true) until an event; do not set a sleep timer, poll or repeat completed actions."
 	}
 	if !terminal(s.State) {
 		return false, "Continue only this assigned step; use step_get if you need to recover its context or saved checkpoint."
 	}
-	return false, "Wait for the next Processes event without polling only when no delivered ready work remains; a new ready-step event takes precedence over this completion response."
+	return false, "Wait for the next Processes event only when no delivered ready work or active child work remains; park with pace(clear_wake=true) until the next Processes event; do not set a sleep timer. A new ready-step event takes precedence over this completion response."
 }
 
 // Acknowledgements never echo instructions or output receipts. They confirm

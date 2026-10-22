@@ -355,7 +355,7 @@ export function verifyStepWorkers(calls: any[], run: any) {
 }
 
 /** Check the optimization itself, using both persisted ownership and real calls. */
-export function verifySequentialWorker(calls: any[], run: any, workers: any[], requireDone = true) {
+export function verifySequentialWorker(calls: any[], run: any, workers: any[], requireDone = true, cleanup: any[] = []) {
   check(workers.length === 1 && workers[0].agent_id === run.assignment.owner_agent_id, "Expected one persisted run worker");
   const thread = workers[0].thread_id;
   check(thread && thread !== "main", "Run worker must be isolated");
@@ -389,6 +389,16 @@ export function verifySequentialWorker(calls: any[], run: any, workers: any[], r
     previous = doneIndex;
   }
   const done = calls.filter(c => c.name === "done" && isWorkerCall(c) && c.ok && c.completed);
-  if (requireDone) check(done.length === 1 && calls.indexOf(done[0]) > previous, "Worker must finish once after the final step");
+  if (requireDone) verifyWorkerFinished(calls,run,workers[0],previous,cleanup);
   else check(done.length <= 1 && (!done.length || calls.indexOf(done[0]) > previous), "Worker done was out of order");
+}
+
+// Native done may race the app's independent terminal cleanup. Require a
+// correctly ordered native finish or a durable shutdown acknowledgement.
+export function verifyWorkerFinished(calls:any[],run:any,worker:any,after:number,cleanup:any[]=[]):number {
+ const done=calls.filter(c=>c.name==="done"&&c.thread_id===worker.thread_id&&c.ok&&c.completed);
+ check(done.length<=1 && (!done.length || calls.indexOf(done[0])>after),"Worker must finish once after the final step; premature or repeated done");
+ const cleaned=cleanup.some(c=>c.run_id===run.id&&c.agent_id===worker.agent_id&&c.thread_id===worker.thread_id&&c.completed_at&&c.attempts>0&&!c.last_error&&run.steps.every((s:any)=>!s.completed_at||Date.parse(c.completed_at)>=Date.parse(s.completed_at)));
+ check(done.length===1||cleaned,"Worker must finish once after the final step or have acknowledged app cleanup");
+ return done.length?calls.indexOf(done[0]):after;
 }

@@ -56,7 +56,9 @@ directive: |
   for full exact receipts. step_update returns a compact acknowledgement: continue
   the current step after progress; await the next app event after completion.
   No polling loops or repeated domain actions. When step_update returns done=true,
-  call done immediately. After completion, main reads runs once to verify all
+  call done immediately if still running; Processes may stop the terminal worker
+  first and send a terminal event to main. After that event or native done, main
+  MUST call processes_runs once (not just run_get) to verify all
   SIX steps completed, then stops. It must not stop while the run is unfinished.
 assert:
   - tool_called: processes_runs

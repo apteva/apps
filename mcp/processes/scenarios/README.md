@@ -519,3 +519,40 @@ Two earlier post-run verification attempts hit Bun/macOS `SQLITE_CANTOPEN` after
 otherwise completed workflows because clean WAL sidecars were absent. The
 journal-capable, SQL-query-only inspection helper fixed this; fresh compact and
 controller runs above passed. It never ignores uncheckpointed WAL evidence.
+
+## Terminal worker cleanup
+
+```sh
+APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/17-worker-cleanup.yaml
+```
+
+One procedure runs three times with distinct frozen parameters: completion,
+explicit step failure, and an operator-cancelled blocked run. The independent
+watcher observes the real Core workers, verifies normal event-only parking, then
+injects an old worker's one-shot 12-second `pace` timer into the disposable blocked
+worker. It cancels through Processes HTTP before that timer fires. It requires
+acknowledged app cleanup and a durable coordinator notification for each exact
+run/agent/thread, no live worker or saved
+restart definition, retained worker history and exact receipts, rejected late
+Core events, and unchanged history after the cancelled timer's original deadline.
+The main agent remains alive throughout observation. Test runtime credentials
+are read only from the matching disposable server and never retained in reports.
+
+Migration and race regressions cover atomic cleanup intent, upgrade backfill,
+failed shutdown/backoff, recovery from a reopened database, stale delivery and
+lifecycle events, live blocked workers, and direct-run main-thread protection.
+The continuity verifiers accept either an ordered native `done` or an exact,
+durable app shutdown acknowledgement; premature worker completion still fails.
+
+Recorded on 2026-10-22 with `openai-codex` / `gpt-6.1-sol`: the cleanup
+scenario passed with three exact terminal outcomes, acknowledged shutdown and
+coordinator events, preserved history, and no activity after the cancelled wake.
+Report: `/private/tmp/processes-worker-cleanup-notice-tier3/run-XrJx4U`.
+The sequential regression passed with three ordered steps on one worker and a
+coordinator completion read:
+`/private/tmp/processes-worker-cleanup-sequential-final-tier3/run-dnYav3`.
+The six-step continuity regression passed with one preparation, one worker,
+exact artifacts, validation, real HTTP human approval and publication:
+`/private/tmp/processes-worker-cleanup-continuity-verified-tier3/run-ew4Jbr`.
+Full Go race tests, 139 Bun verifier tests and scenario TypeScript checks passed.
+These are individual live correctness runs, not a production cost benchmark.

@@ -1,4 +1,4 @@
-import { check } from "./verify-outcomes";
+import { check, verifyWorkerFinished } from "./verify-outcomes";
 import type { ConfirmationReport } from "./operator-confirm";
 
 export const EXECUTOR_CONTINUITY = "processes-executor-continuity";
@@ -8,7 +8,7 @@ export type FixtureState = { contexts: any[]; operations: any[] };
 /** Independent app receipts and thread ownership prevent a model claim from passing. */
 export function verifyExecutorContinuity(
   calls: any[], runs: any[], workers: any[], fixture: FixtureState,
-  confirmation: ConfirmationReport,
+  confirmation: ConfirmationReport, cleanup: any[] = [],
 ) {
   check(runs.length === 1 && runs[0].workflow && runs[0].state === "completed", "Expected one completed continuity run");
   const run = runs[0];
@@ -81,7 +81,6 @@ export function verifyExecutorContinuity(
   const firstDone = calls.findIndex(c => success(c) && c.name === "processes_step_update" && c.args?.step_id === byKey.inventory.id && c.args?.state === "completed");
   const discoveries = calls.filter(c => ["search_tools", "tool_search", "discover_tools"].includes(c.name) && success(c) && c.thread_id === thread && /test.continuity/.test(JSON.stringify(c.args).toLowerCase()));
   check(discoveries.every(c => calls.indexOf(c) < firstDone), "Rediscovered fixture tools after prepared context");
-  const finish = calls.filter(c => success(c) && c.name === "done" && c.thread_id === thread);
-  check(finish.length === 1 && calls.indexOf(finish[0]) > previous, "Worker must finish exactly once after its final step");
+  verifyWorkerFinished(calls,run,workers[0],previous,cleanup);
   check(calls.some((c,i) => i > previous && success(c) && c.name === "processes_runs"), "Missing final coordinator history verification");
 }

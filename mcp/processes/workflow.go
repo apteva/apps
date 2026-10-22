@@ -378,6 +378,11 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 
 }
 func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
+	if s.RunID != "" {
+		if e := a.workerRunActive(r.ID); e != nil {
+			return e
+		}
+	}
 	if !stepReleased(r, *s) || s.State == "pending" || s.State == "scheduled" || terminal(s.State) || s.Executor.Kind == "human" || s.DeliveredAt != "" || s.DeliverySuspended {
 		return nil
 	}
@@ -445,6 +450,11 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 }
 
 func (a *App) deliverStepToThread(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
+	if s.RunID != "" {
+		if e := a.workerRunActive(r.ID); e != nil {
+			return e
+		}
+	}
 	message := stepDeliveryMessage(a.stepContext(p, r, *s, all), s.DueAt)
 	if s.ThreadID == "" && persistentWorkerAgent(r, *s, all) != 0 {
 		worker, e := a.runWorker(r.ID, s.Executor.AgentID)
@@ -541,6 +551,9 @@ func (a *App) spawnProcessThread(project string, request sdk.ThreadSpawnRequest)
 }
 
 func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {
+	if err := a.workerRunActive(r.ID); err != nil {
+		return err
+	}
 	worker := s.ThreadID
 	if worker == "" {
 		worker = processWorkerID(*r, *s, false)
@@ -579,6 +592,9 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 }
 
 func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {
+	if err := a.workerRunActive(r.ID); err != nil {
+		return err
+	}
 	worker := s.ThreadID
 	if worker == "" {
 		worker = processWorkerID(*r, *s, true)
@@ -590,7 +606,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if s.DeliveryEventID != "" {
 		eventID = s.DeliveryEventID
 	}
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across your assigned steps, including timed waits and approval gates. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Retain context across assigned steps. When blocked, awaiting approval or waiting for a Processes event with no delivered ready work or active child work, call pace with clear_wake=true to park until an event. Never set a periodic sleep to check this run; Processes owns scheduling and recovery. Processes stops this worker when the run becomes terminal. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains. Before asking for approval, notifying a parent about a blocker, or calling pace, persist processes_step_update with state waiting or blocked, the exact reason and recoverable output. Never leave a paused step running.", r.ID)
 	if aiParallel(*r) {
 		directive = parallelWorkerDirective(*r)
 	}
@@ -1061,6 +1077,14 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	if event.SourceApp != "apteva-server" || event.InstanceID != s.Executor.AgentID || s.Executor.Kind != "agent" {
 		return errors.New("step lifecycle source mismatch")
 	}
+	if s.RunID != "" {
+		if err := a.workerRunActive(s.RunID); err != nil {
+			if errors.Is(err, errWorkerRunTerminal) {
+				return nil
+			}
+			return err
+		}
+	}
 	// A main-thread wake can settle after Processes has spawned the worker.
 	// Validate the event source first, then ignore only a valid but stale
 	// lifecycle so it cannot overwrite the worker delivery's execution state.
@@ -1210,7 +1234,7 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 	if e != nil {
 		return nil, e
 	}
-	_, e = tx.Exec(`UPDATE process_runs SET state='cancelled',error=?,current_step='Cancelled; already dispatched work may still finish' WHERE id=?`, reason, run)
+	_, e = tx.Exec(`UPDATE process_runs SET state='cancelled',error=?,current_step='Cancelled; worker shutdown queued. External actions already accepted may require reconciliation' WHERE id=?`, reason, run)
 	if e != nil {
 		return nil, e
 	}
