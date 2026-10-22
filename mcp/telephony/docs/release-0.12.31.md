@@ -14,6 +14,11 @@ Bounded diagnostics retain the outcome; credentials and SDP are excluded. The
 shared implementation also covers passive listening and private coaching.
 TURN remains optional and disabled by default.
 
+PCM/WebSocket listening also avoids repeatedly re-priming an overflowing playback
+queue. Overflow now makes playback progress immediately without increasing queue
+limits or postponing an already scheduled head. Deterministic regressions at
+24, 44.1 and 48 kHz fail against the original code and pass with this correction.
+
 ## SIP audio controls and live occupancy
 
 Adaptive SIP admission uses local packet residence to protect against genuinely
@@ -37,7 +42,7 @@ retain reservations and atomic capacity checks.
 ## Verification and limits
 
 - Full uncached Go suite: 1,824 passing test/subtest cases, 11 skips.
-- Frontend/UI: 323 tests passed; type checking, builds, vet and focused races passed.
+- Frontend/UI: 326 tests passed; type checking, builds, vet and focused races passed.
 - Complete bundled ICE suite passed, including socket cleanup and forged-consent
   rejection; CI now runs that nested module and renewal race tests explicitly.
 - Three real Chromium runs, 100 seconds each: direct, TURN/UDP and TURN/TCP.
