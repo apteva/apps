@@ -10,6 +10,23 @@ on:
 permissions:
   contents: read
 jobs:
+  ice-continuity:
+    name: Bundled ICE transport and renewal races
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp/telephony/third_party/pion-ice
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/third_party/pion-ice/go.sum
+      - run: go test -count=1 -timeout 7m ./...
+      - run: go test -race -count=1 -timeout 2m -run '^TestRestart(KeepsBidirectionalMedia|MediaRejects)' .
   telephony:
     runs-on: ubuntu-latest
     timeout-minutes: 35
