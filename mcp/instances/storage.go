@@ -102,6 +102,17 @@ func storageCapabilities(provider string) StorageCapabilities {
 	provider = normalizeProvider(provider)
 	cap := StorageCapabilities{Provider: provider}
 	switch provider {
+	case "clouding":
+		cap.BootSizeConfigurable = true
+		cap.StorageClasses = []string{"block"}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "ssd", Technology: "nvme", Attachment: "network", Persistent: true, Replication: "3 replicas", Billing: "per_gb"}}
+		cap.Notes = "Clouding boot disk size must match its live volume-size catalog. Separate managed data volumes are unavailable through this adapter."
+	case "upcloud":
+		cap.BootSizeConfigurable = true
+		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize = true, true, true, true
+		cap.StorageClasses = []string{"block"}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "maxiops", Attachment: "network", Persistent: true, Billing: "per_gb"}}
+		cap.Notes = "Plan boot disks use MaxIOPS storage. Managed data disks support creation, attachment, detachment and growth. Guest formatting is not supported; use the verified provider UUID for manual guest setup."
 	case "hetzner":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, false
 		cap.StorageClasses = []string{"block"}
@@ -153,6 +164,10 @@ func storageCapabilities(provider string) StorageCapabilities {
 			cap.GuestFilesystems = []string{"ext4", "xfs"}
 			break
 		}
+	}
+	if provider == "upcloud" || provider == "clouding" {
+		cap.GuestPrepare = false
+		cap.GuestFilesystems = nil
 	}
 	return cap
 }
@@ -349,6 +364,8 @@ func createProviderVolume(ctx *sdk.AppCtx, in CreateVolumeInput, inst *Instance)
 	providerType := providerTypeForTier(in.Provider, in.Tier, in.ProviderType)
 	tool, args, class := "", map[string]any{}, "block"
 	switch in.Provider {
+	case "upcloud":
+		tool, args = "create_volume", map[string]any{"storage": map[string]any{"title": in.Name, "zone": in.Region, "size": in.SizeGB, "tier": providerType}}
 	case "hetzner":
 		tool, args = "volume_create", map[string]any{"name": in.Name, "size": in.SizeGB, "location": in.Region, "labels": map[string]string{"managed-by": "apteva-instances"}}
 	case "digitalocean":
@@ -390,6 +407,13 @@ func createProviderVolume(ctx *sdk.AppCtx, in CreateVolumeInput, inst *Instance)
 }
 
 func providerVolumeID(provider string, data json.RawMessage) string {
+	if provider == "upcloud" {
+		var root map[string]any
+		if json.Unmarshal(data, &root) == nil {
+			return nestedMapString(root, "storage", "uuid")
+		}
+		return ""
+	}
 	if provider == "aws-ec2" {
 		return findJSONScalar(data, "volumeId")
 	}
@@ -459,6 +483,8 @@ func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) er
 	var tool string
 	args := map[string]any{}
 	switch v.Provider {
+	case "upcloud":
+		tool, args = "attach_volume", map[string]any{"server_id": inst.ProviderID, "storage_device": map[string]any{"storage": v.ProviderVolumeID, "type": "disk", "address": "scsi", "boot_disk": "0"}}
 	case "hetzner":
 		tool, args = "volume_attach", map[string]any{"id": atoiAny(v.ProviderVolumeID), "server": atoiAny(inst.ProviderID), "automount": false}
 	case "digitalocean":
@@ -529,6 +555,8 @@ func detachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	var tool string
 	args := map[string]any{}
 	switch v.Provider {
+	case "upcloud":
+		tool, args = "detach_volume", map[string]any{"server_id": inst.ProviderID, "storage_device": map[string]any{"storage": v.ProviderVolumeID}}
 	case "hetzner":
 		tool, args = "volume_detach", map[string]any{"id": atoiAny(v.ProviderVolumeID)}
 	case "digitalocean":
@@ -555,6 +583,8 @@ func resizeProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, sizeGB int) error 
 	var tool string
 	args := map[string]any{}
 	switch v.Provider {
+	case "upcloud":
+		tool, args = "resize_volume", map[string]any{"volume_id": v.ProviderVolumeID, "storage": map[string]any{"size": sizeGB}}
 	case "hetzner":
 		tool, args = "volume_resize", map[string]any{"id": atoiAny(v.ProviderVolumeID), "size": sizeGB}
 	case "digitalocean":
@@ -583,6 +613,8 @@ func deleteProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	var tool string
 	args := map[string]any{}
 	switch v.Provider {
+	case "upcloud":
+		tool, args = "delete_volume", map[string]any{"volume_id": v.ProviderVolumeID}
 	case "hetzner":
 		tool, args = "volume_delete", map[string]any{"id": atoiAny(v.ProviderVolumeID)}
 	case "digitalocean":
@@ -742,6 +774,9 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 	}
 	in.Provider = provider
 	cap := storageCapabilities(provider)
+	if in.Prepare != nil && !cap.GuestPrepare {
+		return nil, fmt.Errorf("provider %q does not support guest formatting", provider)
+	}
 	if !cap.DataVolumes {
 		return nil, fmt.Errorf("provider %q does not support attachable data volumes: %s", provider, cap.Notes)
 	}
@@ -931,6 +966,9 @@ func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 	v, err := dbGetVolume(ctx.AppDB(), int64Arg(args, "id"))
 	if err != nil {
 		return nil, err
+	}
+	if prepare != nil && !storageCapabilities(v.Provider).GuestPrepare {
+		return nil, fmt.Errorf("provider %q does not support guest formatting", v.Provider)
 	}
 	inst, err := dbGetInstance(ctx.AppDB(), int64Arg(args, "instance_id"))
 	if err != nil {

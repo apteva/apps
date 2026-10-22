@@ -37,6 +37,7 @@ type ServerType struct {
 	LocationPrices      map[string]catalogPrice `json:"location_prices,omitempty"`
 	Name                string                  `json:"name"`
 	Description         string                  `json:"description,omitempty"`
+	VCPUs               float64                 `json:"vcpus,omitempty"` // Fractional vCPU allocation where supported.
 	Cores               int                     `json:"cores"`
 	MemoryGB            float64                 `json:"memory_gb"`
 	DiskGB              int                     `json:"disk_gb"`

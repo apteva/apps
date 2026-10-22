@@ -18,6 +18,8 @@ import (
 // apiProviderSlugs are REST-backed VPS integrations that share the same
 // Instances lifecycle but expose different request and response shapes.
 var apiProviderSlugs = []string{
+	"clouding",
+	"upcloud",
 	"contabo",
 	"vultr",
 	"aws-ec2",
@@ -74,6 +76,9 @@ func executeProviderToolUncached(ctx *sdk.AppCtx, connectionID int64, provider, 
 }
 
 func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudServerTypes(ctx, provider)
+	}
 	if provider == "contabo" {
 		return contaboServerTypes(), nil
 	}
@@ -151,6 +156,9 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 }
 
 func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudLocations(ctx, provider)
+	}
 	if provider == "contabo" {
 		return contaboLocations(), nil
 	}
@@ -180,6 +188,9 @@ func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, err
 }
 
 func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudImages(ctx, provider)
+	}
 	tool, args := "", map[string]any{}
 	switch provider {
 	case "contabo":
@@ -339,6 +350,8 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 			"type": scalewayAppleID(in.Size), "os_id": scalewayAppleID(in.Image),
 			"commitment_type": "duration_24h", "enable_vpc": false, "enable_kext": false,
 		}
+	} else if provider == "clouding" || provider == "upcloud" {
+		tool, args, err = cloudingUpcloudCreateRequest(ctx, inst, in, pubKey)
 	} else {
 		tool, args, err = apiProviderCreateRequest(ctx, provider, in, pubKey)
 	}
@@ -370,6 +383,14 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		return nil, err
 	}
 	persistFields := map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6, "lifecycle_stage": "Boot"}
+	if provider == "upcloud" {
+		meta := cloudingUpcloudMeta(inst.ProviderMetadataJSON)
+		meta.BootID = upcloudOwnedBoot(data, meta.BootTitle)
+		encoded, _ := json.Marshal(meta)
+		inst.ProviderMetadataJSON = string(encoded)
+		persistFields["provider_metadata_json"] = string(encoded)
+	}
+
 	if appleMac {
 		for key, value := range scalewayAppleResponseFields(data) {
 			persistFields[key] = value
@@ -578,6 +599,9 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			}
 		}
 	}
+	if provider == "clouding" || provider == "upcloud" {
+		return validateCloudingUpcloudCreate(ctx, provider, in, selectedType)
+	}
 	if provider == "vultr" {
 		return validateVultrAvailability(ctx, in)
 	}
@@ -714,6 +738,9 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 
 func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	provider := normalizeProvider(inst.Provider)
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudDestroy(ctx, inst)
+	}
 	if isScalewayElasticMetalInstance(inst) {
 		return scalewayElasticMetalDestroy(ctx, inst)
 	}
@@ -983,6 +1010,10 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
+		if err = reconcileCloudingUpcloudBoot(ctx, fresh); err != nil {
+			failInstanceStage(ctx, id, "Storage", err)
+			return
+		}
 		if err = reconcileVultrBootStorage(ctx, fresh); err != nil {
 			failInstanceStage(ctx, id, "Storage", err)
 			return
@@ -1097,7 +1128,7 @@ func usesCloudInit(inst *Instance) bool {
 		return false
 	}
 	// Linode and OVH install keys through their native image/config APIs.
-	return inst.Provider != "linode" && inst.Provider != "ovhcloud"
+	return inst.Provider != "linode" && inst.Provider != "ovhcloud" && inst.Provider != "clouding" && inst.Provider != "upcloud"
 }
 
 func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
@@ -1142,6 +1173,10 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 
 func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
 	switch inst.Provider {
+	case "clouding":
+		return "get_server", map[string]any{"id": inst.ProviderID}, nil
+	case "upcloud":
+		return "get_server", map[string]any{"server_id": inst.ProviderID}, nil
 	case "contabo":
 		return "instance_get", map[string]any{"request_id": newRequestID(), "instanceId": numericOrString(inst.ProviderID)}, nil
 	case "vultr":

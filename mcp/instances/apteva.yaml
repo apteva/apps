@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.10.0
+version: 0.11.0
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
   Contabo, Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
-  Linode, OVHcloud, or RunPod; provider-specific
+  Clouding.io, UpCloud, Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
   Foundation layer for higher-level apps that run workloads
@@ -52,7 +52,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS providers
       hint: |
         Optional — local instance always available. Bind one or more VPS
@@ -252,7 +252,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.10.0
+    ref: instances/v0.11.0
     entry: mcp/instances
   port: 8080
   health_check: /health

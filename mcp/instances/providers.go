@@ -13,6 +13,8 @@ import (
 var compatibleProviderSlugs = []string{
 	"hetzner",
 	"digitalocean",
+	"clouding",
+	"upcloud",
 	"contabo",
 	"vultr",
 	"aws-ec2",

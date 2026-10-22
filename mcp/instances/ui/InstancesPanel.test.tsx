@@ -228,3 +228,18 @@ test("generic catalog shows bare metal and unavailable offers, and requires disk
  await act(async()=>{sizes.value="physical";sizes.dispatchEvent(new win.Event("change",{bubbles:true}) as any);});
  expect(container.querySelector('select[aria-label="Boot storage class"]')).toBeNull();
 });
+
+test("Clouding creation shows fractional vCPU allocation and Barcelona",async()=>{
+ globalThis.fetch=(async(input:any)=>{
+  const path=new URL(String(input),"http://localhost").pathname;
+  if(path.endsWith("instances-providers"))return response({providers:[{provider:"clouding",connection_id:7,default:true}]});
+  if(path.endsWith("server-types"))return response({server_types:[{name:"0.5x1",cores:0,vcpus:0.5,memory_gb:1,disk_gb:0,price_known:false,configurable_boot:true,requires_boot_storage:true,available_in:["barcelona"]}]});
+  if(path.endsWith("locations"))return response({locations:[{name:"barcelona",city:"Barcelona",country:"ES"}]});
+  if(path.endsWith("images"))return response({images:[{name:"ubuntu",description:"Ubuntu 24.04",architecture:"x86",platform:"linux"}]});
+  return response({capabilities:{boot_size_configurable:true,storage_classes:["block"],tiers:[{name:"balanced",provider_type:"ssd"}]}});
+ }) as unknown as typeof fetch;
+ await render(<CreateDialog withParams={params} setError={()=>{}} onCreated={()=>{}} onClose={()=>{}}/>);
+ expect(container.textContent).toContain("0.5 vCPU");
+ expect(container.textContent).toContain("Barcelona");
+ expect(container.textContent).not.toContain("$0.00/mo");
+});

@@ -421,6 +421,9 @@ func parseProviderImages(provider string, data json.RawMessage) ([]Image, error)
 }
 
 func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv6 string) {
+	if provider == "clouding" || provider == "upcloud" {
+		return parseCloudingUpcloudResource(provider, data)
+	}
 	var root any
 	if json.Unmarshal(data, &root) != nil {
 		return "", "", ""
