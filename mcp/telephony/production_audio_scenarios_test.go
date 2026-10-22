@@ -186,7 +186,13 @@ func TestProductionAudioScenarioMatrix(t *testing.T) {
 					if on.Recoveries != 2 || on.LateMS > 9000 {
 						t.Fatal("cooldown caused indefinite rejection or repeated resets")
 					}
-				case "startup_socket_residence_440ms", "local_handler_stall_283ms", "delivery_bursts_300_360_420":
+				case "delivery_bursts_300_360_420":
+					// Adaptive admission retains locally fresh burst packets; overflow
+					// still discards excess backlog within the unchanged 160ms cap.
+					if on.BufferMS == 0 || on.MaxQueueMS > 160 || on.Recoveries != 0 {
+						t.Fatal("burst backlog escaped bounded storage")
+					}
+				case "startup_socket_residence_440ms", "local_handler_stall_283ms":
 					if on.LateMS == 0 || on.Recoveries != 0 {
 						t.Fatal("real stale audio admitted by resync")
 					}

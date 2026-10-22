@@ -68,6 +68,7 @@ func (c *didwwCarrier) Hangup(_ *sdk.AppCtx, row *callRow) error {
 }
 
 type didwwSIPSettings struct {
+	anchorUsername           string
 	host, username, password string
 	port                     int
 	secure                   bool
@@ -177,7 +178,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 		(g.cfg.SRTPMode == sipSRTPDisabled && settings.secure) {
 		return errors.New("Outbound SIP TLS/SRTP settings conflict with the SIP gateway policy")
 	}
-	mediaSettings, err := g.app.localMediaSettings(row.ProjectID, row.RouteID)
+	mediaSettings, err := g.app.localMediaSettingsForCall(row.ProjectID, row.RouteID, "outbound", row.CarrierConnectionID, row.FromNumber)
 	if err != nil {
 		return fmt.Errorf("load outbound SIP media settings: %w", err)
 	}
@@ -187,6 +188,16 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	playbackPolicy := sipPlaybackPolicy{}
 	if mediaSettings.RTPPlayback != nil {
 		playbackPolicy = *mediaSettings.RTPPlayback
+	}
+	if mediaSettings.AudioProfileCodecs {
+		if row.CarrierSlug == "twilio" {
+			for _, codec := range mediaSettings.Codecs {
+				if codec == "G722" {
+					return errors.New("Twilio outbound SIP audio profile must use PCMU/PCMA")
+				}
+			}
+		}
+		settings.codecs = append([]string(nil), mediaSettings.Codecs...)
 	}
 	g.mu.Lock()
 	if g.stopping || g.outboundByCall[row.ID] != nil || g.outboundReserved[row.ID] {
@@ -257,7 +268,11 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	dialDeadline := time.Now().Add(time.Duration(max(5, min(timeoutSec, 120))) * time.Second)
 	inviteCtx, stopInvite := context.WithDeadline(ctx, dialDeadline)
 	defer stopInvite()
-	dialog, err := g.outboundDialogs.Invite(inviteCtx, recipient, body, from, sip.NewHeader("Content-Type", "application/sdp"), sip.NewHeader("Supported", "timer"), sip.NewHeader("Session-Expires", "1800;refresher=uac"))
+	headers := []sip.Header{from, sip.NewHeader("Content-Type", "application/sdp"), sip.NewHeader("Supported", "timer"), sip.NewHeader("Session-Expires", "1800;refresher=uac")}
+	if row.CarrierSlug == "telnyx" && settings.anchorUsername != "" {
+		headers = append(headers, sip.NewHeader("X-Telnyx-Username", settings.anchorUsername))
+	}
+	dialog, err := g.outboundDialogs.Invite(inviteCtx, recipient, body, headers...)
 	if err != nil {
 		cancel()
 		media.Close()

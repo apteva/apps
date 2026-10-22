@@ -17,6 +17,8 @@ import (
 // Atomic counters and a best-effort bounded timing window. Sampling cannot hold
 // an RTP reader/writer: contention only skips diagnostic sequence calculations.
 type sipRTPObservations struct {
+	kernelClockSteps     atomic.Int64
+	kernelClockUncertain atomic.Int64
 	streamLossBase       int64 // protected by timingMu, RTCP per-stream cumulative loss
 	receiveEvidence      sipReceiveWindow
 	firstReceived        atomic.Int64
@@ -161,6 +163,8 @@ func (o *sipRTPObservations) sentPacket(size int, now time.Time) {
 }
 
 type sipRTPSnapshot struct {
+	KernelClockSteps     int64                `json:"kernel_clock_steps"`
+	KernelClockUncertain int64                `json:"kernel_clock_uncertain_packets"`
 	ReceiveEvidence      []sipReceiveEvidence `json:"receive_evidence,omitempty"`
 	FirstPacketAt        string               `json:"first_packet_at,omitempty"`
 	FirstSentAt          string               `json:"first_sent_at,omitempty"`
@@ -206,6 +210,7 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 	s := sipRTPSnapshot{PreBridgeSocketDrops: o.earlyKernelDrops.Load(), ActivationDropped: o.activationDropped.Load(), KernelDrops: o.kernelDrops.Load(), KernelDropsAvailable: o.kernelDropsAvailable.Load(), EarlyPackets: o.earlyPackets.Load(), EarlyBytes: o.earlyBytes.Load(), Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
 	s.ReceiveEvidence = o.receiveEvidence.snapshot()
 	s.KernelTimestampAvailable = o.kernelTimestampAvailable.Load()
+	s.KernelClockSteps, s.KernelClockUncertain = o.kernelClockSteps.Load(), o.kernelClockUncertain.Load()
 	s.KernelTimestampPackets, s.KernelTimestampInvalid = o.kernelTimestampPackets.Load(), o.kernelTimestampInvalid.Load()
 	s.LastSocketWaitMS, s.MaxSocketWaitMS = float64(o.lastSocketWait.Load())/1e6, float64(o.maxSocketWait.Load())/1e6
 	if n := o.firstReceived.Load(); n > 0 {
@@ -225,16 +230,21 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 }
 
 type sipJitterSnapshot struct {
-	RecoveryPolicy           string  `json:"recovery_policy"`
-	RecoveryState            string  `json:"recovery_state"`
-	RecoveryReason           string  `json:"recovery_reason"`
-	RecoveryWindowMS         float64 `json:"recovery_window_ms"`
-	RecoveryVariationMS      float64 `json:"recovery_variation_ms"`
-	RecoveryRatePPM          float64 `json:"recovery_delivery_rate_ppm"`
-	RecoveryLocalResidenceMS float64 `json:"recovery_local_residence_ms"`
-	RecoveryDurationMS       float64 `json:"recovery_duration_ms"`
-	PlayoutOffsetMS          float64 `json:"playout_offset_ms"`
-	LegacyResynchronize      *bool   `json:"legacy_resynchronize_requested,omitempty"`
+	DecoderWarmupPackets     int                `json:"decoder_warmup_packets"`
+	DecoderStateResets       int                `json:"decoder_state_resets"`
+	PacketTiming             []sipPacketTiming  `json:"packet_timing,omitempty"`
+	PacketTimingAvailable    bool               `json:"packet_timing_available"`
+	EffectivePolicy          *sipPlaybackPolicy `json:"effective_policy,omitempty"`
+	RecoveryPolicy           string             `json:"recovery_policy"`
+	RecoveryState            string             `json:"recovery_state"`
+	RecoveryReason           string             `json:"recovery_reason"`
+	RecoveryWindowMS         float64            `json:"recovery_window_ms"`
+	RecoveryVariationMS      float64            `json:"recovery_variation_ms"`
+	RecoveryRatePPM          float64            `json:"recovery_delivery_rate_ppm"`
+	RecoveryLocalResidenceMS float64            `json:"recovery_local_residence_ms"`
+	RecoveryDurationMS       float64            `json:"recovery_duration_ms"`
+	PlayoutOffsetMS          float64            `json:"playout_offset_ms"`
+	LegacyResynchronize      *bool              `json:"legacy_resynchronize_requested,omitempty"`
 
 	Resynchronizations     int              `json:"playout_resynchronizations"`
 	RecoveryDiscardedMS    float64          `json:"recovery_discarded_ms"`
@@ -300,6 +310,7 @@ type sipSignalSnapshot struct {
 	Encryption          string                   `json:"encryption,omitempty"`
 }
 type sipLiveSnapshot struct {
+	Runtime            sipRuntimeEvidence     `json:"process_runtime"`
 	RTCP               sipRTCPSnapshot        `json:"rtcp"`
 	TransportState     string                 `json:"transport_state"`
 	ProcessingState    string                 `json:"processing_state"`
@@ -315,17 +326,20 @@ type sipLiveSnapshot struct {
 	ForwardAvailable   bool                   `json:"core_forward_available"`
 }
 type sipLiveDiagnostics struct {
-	app          *App
-	row          callRow
-	id           string
-	mu           sync.Mutex
-	signal       sipSignalSnapshot
-	media        atomic.Pointer[sipRTPMedia]
-	ended        atomic.Bool
-	lastIncident signatureSIPIncident
-	lastJitter   sipJitterSnapshot
-	lastPacer    livePacerSnapshot
-	lastForward  liveAudioQueueSnapshot
+	finalTraceCaptured bool
+	traceCaptures      int
+	nextTraceAt        time.Time
+	app                *App
+	row                callRow
+	id                 string
+	mu                 sync.Mutex
+	signal             sipSignalSnapshot
+	media              atomic.Pointer[sipRTPMedia]
+	ended              atomic.Bool
+	lastIncident       signatureSIPIncident
+	lastJitter         sipJitterSnapshot
+	lastPacer          livePacerSnapshot
+	lastForward        liveAudioQueueSnapshot
 }
 type signatureSIPIncident struct{ loss, errors, dropped, delayBucket int64 }
 
@@ -430,6 +444,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	signal := d.signal
 	d.mu.Unlock()
 	s := sipLiveSnapshot{At: ringTime(now), State: "healthy", Signal: signal, ReceiveExpectation: "silence_or_dtx_possible"}
+	s.Runtime = sipRuntimeTiming()
 	if d.ended.Load() {
 		s.State = "ended"
 	}
@@ -464,7 +479,16 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	// silent indefinitely. Confirmed read/write/security failures remain distinct.
 	if j := m.jitterTelemetry.Load(); j != nil && j.mu.TryLock() {
 		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+j.pendingPCMSamples.Load()) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		policy := j.policy
+		s.Jitter.EffectivePolicy = &policy
+		s.Jitter.DecoderWarmupPackets, s.Jitter.DecoderStateResets = j.decodeWarmups, j.decodeResets
+		if j.trace != nil {
+			s.Jitter.PacketTimingAvailable = true
+		}
 		s.Jitter.RecoveryPolicy = "automatic_rolling_playout_v1"
+		if policy.Receiver == "adaptive" {
+			s.Jitter.RecoveryPolicy = "local_residence_playout_v2"
+		}
 		s.Jitter.RecoveryState, s.Jitter.RecoveryReason = j.recovery.state, j.recovery.reason
 		s.Jitter.RecoveryWindowMS, s.Jitter.RecoveryVariationMS = j.recovery.windowMS, j.recovery.variationMS
 		s.Jitter.RecoveryRatePPM, s.Jitter.RecoveryLocalResidenceMS = j.recovery.ratePPM, j.recovery.localResidenceMS
@@ -501,7 +525,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		eventHead, eventCount := j.eventHead, j.eventCount
 
 		for seq, at := range j.arrivals {
-			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(max(now.Sub(at), now.Sub(j.playoutTime(j.timestamps[seq]))))/float64(time.Millisecond))
+			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(j.packetAge(now, at, j.timestamps[seq]))/float64(time.Millisecond))
 		}
 		j.mu.Unlock()
 		// Allocate/format the diagnostic history only after releasing the reader's lock.
@@ -586,6 +610,27 @@ func (d *sipLiveDiagnostics) sample(now time.Time) carrierTelemetryRecord {
 	r := carrierTelemetryRecord{InstallID: d.app.installID, ProjectID: d.row.ProjectID, CallID: d.row.ID, Kind: "sample", At: ringTime(now), BridgeGeneration: d.id, SIP: &s}
 	if incident {
 		r.Kind = "incident"
+	}
+	// Header rings are not serialized every second. Retain at most one
+	// incident's before/after context plus the final ring per opted-in call.
+	if m := d.media.Load(); m != nil {
+		if j := m.jitterTelemetry.Load(); j != nil && j.trace != nil {
+			d.mu.Lock()
+			ended := d.ended.Load()
+			capture := (ended && !d.finalTraceCaptured) || (!ended && ((incident && d.traceCaptures == 0) || (d.traceCaptures == 1 && !now.Before(d.nextTraceAt))))
+			if capture && ended {
+				d.finalTraceCaptured = true
+			}
+			if capture && !d.ended.Load() {
+				d.traceCaptures++
+				d.nextTraceAt = now.Add(2 * time.Second)
+			}
+			d.mu.Unlock()
+			if capture {
+				s.Jitter.PacketTiming = copySIPPacketTiming(j)
+				r.Kind = "incident"
+			}
+		}
 	}
 	return r
 }

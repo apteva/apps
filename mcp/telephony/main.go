@@ -155,6 +155,7 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
     - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
+    - { name: telephony_sip_audio_profile, description: "Configure bounded SIP audio profiles for future calls, per project, direction, inbound route or outbound account/number." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
@@ -758,6 +759,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
+		{Name: "telephony_sip_audio_profile", Description: "Read, save or reset a bounded SIP audio profile for new calls. Scope by optional direction, route_id or outbound carrier_connection_id/phone_number. config includes preset (balanced/resilient/reference/custom), codecs and rtp_playback. expires_at optionally reverts a test within 24h. No carrier changes, restart or active-call mutation.", InputSchema: schemaObject(map[string]any{"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}}, "route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "expires_at": map[string]any{"type": "string"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}, "reset": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolSIPAudioProfile},
 		{
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +

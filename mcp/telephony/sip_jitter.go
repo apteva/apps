@@ -12,17 +12,48 @@ import (
 // Settings are copied once for a new media bridge; no reporting or database
 // operation runs in push/pop. Capacity and age are independent hard bounds.
 type sipPlaybackPolicy struct {
-	TargetMS    int   `json:"target_ms,omitempty"`
-	MaxTargetMS int   `json:"max_target_ms,omitempty"`
-	CapacityMS  int   `json:"capacity_ms,omitempty"`
-	MaxAgeMS    int   `json:"max_age_ms,omitempty"`
-	Concealment *bool `json:"concealment,omitempty"`
-	ClockDrift  *bool `json:"clock_drift,omitempty"`
+	DiagnosticWindowMS int    `json:"diagnostic_window_ms,omitempty"`
+	Receiver           string `json:"receiver,omitempty"`
+	MaxRelativeMS      int    `json:"max_relative_lateness_ms,omitempty"`
+	RecoveryWindowMS   int    `json:"recovery_window_ms,omitempty"`
+	RecoveryWaitMS     int    `json:"recovery_wait_ms,omitempty"`
+	RecoveryCooldownMS int    `json:"recovery_cooldown_ms,omitempty"`
+	ConcealmentMS      int    `json:"concealment_ms,omitempty"`
+	CrossfadeMS        int    `json:"crossfade_ms,omitempty"`
+	ContinuousOutput   *bool  `json:"continuous_output,omitempty"`
+	ProfileRevision    string `json:"profile_revision,omitempty"`
+	TargetMS           int    `json:"target_ms,omitempty"`
+	MaxTargetMS        int    `json:"max_target_ms,omitempty"`
+	CapacityMS         int    `json:"capacity_ms,omitempty"`
+	MaxAgeMS           int    `json:"max_age_ms,omitempty"`
+	Concealment        *bool  `json:"concealment,omitempty"`
+	ClockDrift         *bool  `json:"clock_drift,omitempty"`
 	// Deprecated compatibility field. Automatic playout recovery is always active.
 	Resynchronize *bool `json:"resynchronize,omitempty"`
 }
 
 func (p sipPlaybackPolicy) resolved() sipPlaybackPolicy {
+	if p.Receiver == "" {
+		p.Receiver = "adaptive"
+	}
+	if p.MaxRelativeMS == 0 {
+		p.MaxRelativeMS = 1000
+	}
+	if p.RecoveryWindowMS == 0 {
+		p.RecoveryWindowMS = 1200
+	}
+	if p.RecoveryWaitMS == 0 {
+		p.RecoveryWaitMS = 600
+	}
+	if p.RecoveryCooldownMS == 0 {
+		p.RecoveryCooldownMS = 2000
+	}
+	if p.ConcealmentMS == 0 {
+		p.ConcealmentMS = 60
+	}
+	if p.CrossfadeMS == 0 {
+		p.CrossfadeMS = 5
+	}
 	if p.TargetMS == 0 {
 		p.TargetMS = 60
 	}
@@ -39,8 +70,17 @@ func (p sipPlaybackPolicy) resolved() sipPlaybackPolicy {
 }
 func (p sipPlaybackPolicy) validate() error {
 	p = p.resolved()
-	if p.TargetMS < 40 || p.TargetMS > 100 || p.MaxTargetMS < p.TargetMS || p.MaxTargetMS > 100 || p.CapacityMS < p.MaxTargetMS+40 || p.CapacityMS > 200 || p.MaxAgeMS < p.CapacityMS || p.MaxAgeMS > 200 {
-		return errors.New("SIP rtp_playback requires target_ms 40–100, max_target_ms target–100, capacity_ms max_target+40–200 and max_age_ms capacity–200")
+	if p.TargetMS < 40 || p.TargetMS > 120 || p.MaxTargetMS < p.TargetMS || p.MaxTargetMS > 160 || p.CapacityMS < p.MaxTargetMS+40 || p.CapacityMS > 400 || p.MaxAgeMS < p.CapacityMS || p.MaxAgeMS > 400 {
+		return errors.New("SIP rtp_playback requires target_ms 40–120, max_target_ms target–160, capacity_ms max_target+40–400 and max_age_ms capacity–400")
+	}
+	if p.Receiver != "adaptive" && p.Receiver != "reference" {
+		return errors.New("receiver must be adaptive or reference")
+	}
+	if p.DiagnosticWindowMS < 0 || p.DiagnosticWindowMS > 20000 {
+		return errors.New("diagnostic_window_ms must be 0–20000")
+	}
+	if p.MaxRelativeMS < p.MaxAgeMS || p.MaxRelativeMS > 2000 || p.RecoveryWindowMS < 200 || p.RecoveryWindowMS > 2400 || p.RecoveryWaitMS < 80 || p.RecoveryWaitMS > p.RecoveryWindowMS || p.RecoveryCooldownMS < 200 || p.RecoveryCooldownMS > 5000 || p.ConcealmentMS < 20 || p.ConcealmentMS > 120 || p.CrossfadeMS < 1 || p.CrossfadeMS > 20 {
+		return errors.New("invalid bounded SIP recovery/concealment policy")
 	}
 	return nil
 }
@@ -66,6 +106,16 @@ type sipJitterEvent struct {
 }
 
 type rtpJitterBuffer struct {
+	decoderGeneration                                                   atomic.Uint64
+	decodeSkipPending                                                   atomic.Bool
+	decodeUnknownFrom, decodeUnknownThrough                             uint32
+	lastPoppedTimestamp                                                 uint32
+	statefulCodec                                                       bool
+	decodeSkips                                                         [4]sipDecodeSkip
+	decodeSkipCount                                                     int
+	decodeSkipUnknown                                                   bool
+	decodeWarmups, decodeResets                                         int
+	trace                                                               *sipPacketTrace
 	lastPoppedPlayout                                                   time.Time
 	sourceKnown                                                         atomic.Bool
 	sourceSSRC                                                          atomic.Uint32
@@ -127,11 +177,27 @@ type rtpJitterBuffer struct {
 func newRTPJitterBuffer() *rtpJitterBuffer { return newRTPJitterBufferWithPolicy(sipPlaybackPolicy{}) }
 func newRTPJitterBufferWithPolicy(p sipPlaybackPolicy) *rtpJitterBuffer {
 	p = p.resolved()
+	if p.Concealment != nil {
+		v := *p.Concealment
+		p.Concealment = &v
+	}
+	if p.ClockDrift != nil {
+		v := *p.ClockDrift
+		p.ClockDrift = &v
+	}
+	if p.ContinuousOutput != nil {
+		v := *p.ContinuousOutput
+		p.ContinuousOutput = &v
+	}
 	if p.Resynchronize != nil {
 		v := *p.Resynchronize
 		p.Resynchronize = &v
 	}
-	return &rtpJitterBuffer{recovery: sipPlayoutRecovery{state: "observing", reason: "insufficient_observations"}, packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time), timestamps: make(map[uint16]uint32), controls: make(map[uint16]bool), policy: p, targetMS: p.TargetMS, packetSamples: 160}
+	b := &rtpJitterBuffer{recovery: sipPlayoutRecovery{state: "observing", reason: "insufficient_observations"}, packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time), timestamps: make(map[uint16]uint32), controls: make(map[uint16]bool), policy: p, targetMS: p.TargetMS, packetSamples: 160}
+	if p.DiagnosticWindowMS > 0 {
+		b.trace = newSIPPacketTrace(p.DiagnosticWindowMS)
+	}
+	return b
 }
 func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
 	b.pushRTP(sequence, payload, uint32(sequence)*160, time.Now())
@@ -176,6 +242,10 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 		clear(b.timestamps)
 		clear(b.controls)
 		b.seenValid = [64]bool{}
+		b.decodeSkips = [4]sipDecodeSkip{}
+		b.decodeSkipCount = 0
+		b.decodeSkipUnknown = false
+		b.decodeSkipPending.Store(false)
 		b.buffered = 0
 		b.pendingPCMSamples.Store(0)
 		b.started = false
@@ -189,6 +259,7 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 		b.driftPPM = 0
 		b.clock = sipSourceClock{}
 		b.clockResets++
+		b.decoderGeneration.Add(1)
 		b.generation.Add(1)
 		b.sourceSSRC.Store(ssrc)
 		b.mu.Unlock()
@@ -210,6 +281,11 @@ func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
 		return
 	}
 	b.paused.Store(paused)
+	b.decoderGeneration.Add(1)
+	b.decodeSkips = [4]sipDecodeSkip{}
+	b.decodeSkipCount = 0
+	b.decodeSkipUnknown = false
+	b.decodeSkipPending.Store(false)
 	b.lastDiscardNS.Store(0)
 	b.generation.Add(1)
 	b.holdSkippedSamples += b.buffered + int(b.pendingPCMSamples.Load())
@@ -248,6 +324,9 @@ func (b *rtpJitterBuffer) pruneControls() {
 }
 
 func (b *rtpJitterBuffer) event(now time.Time, reason string, seq uint16, ts uint32, samples int, age time.Duration) {
+	if b.trace != nil {
+		b.trace.decision(seq, ts, reason)
+	}
 	if samples > 0 {
 		switch reason {
 		case "source_delivery_age", "ingress_processing_age", "queue_age", "queue_overflow", "decoded_partial_age", "decoded_reserve_overflow", "oversized_packet", "playout_epoch_resynchronized":
@@ -283,13 +362,16 @@ func (b *rtpJitterBuffer) event(now time.Time, reason string, seq uint16, ts uin
 func (b *rtpJitterBuffer) remove(seq uint16, now time.Time, reason string) {
 	p := b.packets[seq]
 	ts := b.timestamps[seq]
+	if reason == "queue_overflow" && b.statefulCodec && b.policy.Receiver == "adaptive" {
+		b.rememberSkippedDecode(ts, p)
+	}
 	b.droppedSamples += len(p)
 	if reason == "queue_overflow" {
 		b.overflowSamples += len(p)
 	} else {
 		b.expiredSamples += len(p)
 	}
-	b.event(now, reason, seq, ts, len(p), max(now.Sub(b.arrivals[seq]), now.Sub(b.playoutTime(ts))))
+	b.event(now, reason, seq, ts, len(p), b.packetAge(now, b.arrivals[seq], ts))
 	b.buffered -= len(p)
 	delete(b.packets, seq)
 	delete(b.arrivals, seq)
@@ -329,6 +411,9 @@ func (b *rtpJitterBuffer) playoutTime(ts uint32) time.Time {
 // Caller holds mu. Preserve one output frame of latency headroom when the
 // relative delivery offset already consumes part of the configured age budget.
 func (b *rtpJitterBuffer) playbackTargetMS() int {
+	if b.policy.Receiver == "adaptive" {
+		return b.targetMS
+	}
 	if !b.haveArrival || !b.haveSourceAnchor {
 		return b.targetMS
 	}
@@ -377,7 +462,28 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 	if !b.haveSourceAnchor || b.haveArrival && int16(seq-b.lastSequence) > 0 && int32(ts-b.lastTimestamp) <= 0 {
 		if b.haveSourceAnchor {
 			b.clockResets++
-			b.event(now, "source_clock_restarted", seq, ts, 0, 0)
+			b.decoderGeneration.Add(1)
+			n := b.buffered + int(b.pendingPCMSamples.Load())
+			b.droppedSamples += n
+			b.resetDroppedSamples += n
+			b.event(now, "source_clock_restarted", seq, ts, n, 0)
+			clear(b.packets)
+			clear(b.arrivals)
+			clear(b.timestamps)
+			clear(b.controls)
+			b.buffered = 0
+			b.pendingPCMSamples.Store(0)
+			b.started = false
+			b.primed = false
+			b.missing = 0
+			b.primeTicks = 0
+			b.haveTimestamp = false
+			b.haveArrival = false
+			b.decodeSkips = [4]sipDecodeSkip{}
+			b.decodeSkipCount = 0
+			b.decodeSkipUnknown = false
+			b.decodeSkipPending.Store(false)
+			b.generation.Add(1)
 		}
 		b.sourceAnchorAt = now
 		b.sourceAnchorTS = ts
@@ -418,22 +524,29 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 		sourceAt = now
 	}
 	deliveryAge := now.Sub(sourceAt)
-	age := max(processed.Sub(now), processed.Sub(b.playoutTime(ts)))
+	age := b.packetAge(processed, now, ts)
 	if b.recovery.consider(b, seq, ts, now, processed, deliveryAge, len(payload)) {
 		sourceAt = b.sourceTime(ts)
 		deliveryAge = now.Sub(sourceAt)
-		age = max(processed.Sub(now), processed.Sub(b.playoutTime(ts)))
+		age = b.packetAge(processed, now, ts)
 	}
 	b.maxDeliveryAgeMS = max(b.maxDeliveryAgeMS, float64(deliveryAge)/float64(time.Millisecond))
-	if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
+	if b.trace != nil {
+		b.trace.ssrc = b.sourceSSRC.Load()
+		b.trace.insert(seq, ts, now, processed, len(payload), b.buffered+int(b.pendingPCMSamples.Load()), deliveryAge)
+	}
+	if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond || deliveryAge > time.Duration(b.policy.MaxRelativeMS)*time.Millisecond {
 		b.lateDroppedSamples += len(payload)
 		reason := "source_delivery_age"
-		if deliveryAge <= time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
+		if processed.Sub(now) > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
 			reason = "ingress_processing_age"
+		}
+		if reason == "source_delivery_age" {
+			age = max(age, deliveryAge)
 		}
 		b.event(processed, reason, seq, ts, len(payload), age)
 		e := &b.events[(b.eventHead+63)%len(b.events)]
-		e.SourceAgeMS = max(e.SourceAgeMS, float64(age)/float64(time.Millisecond))
+		e.SourceAgeMS = max(e.SourceAgeMS, float64(processed.Sub(sourceAt))/float64(time.Millisecond))
 		e.DeliveryAgeMS = max(e.DeliveryAgeMS, float64(deliveryAge)/float64(time.Millisecond))
 		e.LocalQueueAgeMS = max(e.LocalQueueAgeMS, float64(processed.Sub(now))/float64(time.Millisecond))
 		return
@@ -502,7 +615,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for seq, at := range b.arrivals {
-		age := max(now.Sub(at), now.Sub(b.playoutTime(b.timestamps[seq])))
+		age := b.packetAge(now, at, b.timestamps[seq])
 		b.maxAgeMS = max(b.maxAgeMS, int(age/time.Millisecond))
 		if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
 			b.remove(seq, now, "queue_age")
@@ -516,7 +629,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		// A valid delivery offset can consume part of the age budget. Do not
 		// wait for a reserve that would expire its own oldest packet forever.
 		oldest := b.oldest()
-		remaining := b.policy.MaxAgeMS - int(math.Ceil(float64(now.Sub(b.playoutTime(b.timestamps[oldest])))/float64(time.Millisecond)))
+		remaining := b.policy.MaxAgeMS - int(math.Ceil(float64(b.packetAge(now, b.arrivals[oldest], b.timestamps[oldest]))/float64(time.Millisecond)))
 		required := min(b.targetMS, max(20, b.buffered/8+max(0, remaining-20)))
 		// Normally require >=40ms. Only near the existing age limit may one
 		// fresh packet start directly: waiting for another would expire it.
@@ -566,8 +679,9 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		b.lastPoppedAt = b.arrivals[b.expected]
 		b.lastPoppedArrival = b.lastPoppedAt
 		b.lastPoppedSource = b.sourceTime(ts)
+		b.lastPoppedTimestamp = ts
 		b.lastPoppedPlayout = b.playoutTime(ts)
-		if sourceAt := b.playoutTime(ts); sourceAt.Before(b.lastPoppedAt) {
+		if sourceAt := b.playoutTime(ts); b.policy.Receiver == "reference" && sourceAt.Before(b.lastPoppedAt) {
 			b.lastPoppedAt = sourceAt
 		}
 		delete(b.packets, b.expected)
@@ -614,11 +728,12 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 }
 
 type sipPCMSegment struct {
-	playout time.Time
-	samples int
-	at      time.Time
-	arrival time.Time
-	source  time.Time
+	rtpTimestamp uint32
+	playout      time.Time
+	samples      int
+	at           time.Time
+	arrival      time.Time
+	source       time.Time
 }
 
 // A failed frame assembly may retain samples that were tentatively counted as
@@ -634,17 +749,21 @@ func (b *rtpJitterBuffer) storeDecodedReserve(samples int, now time.Time) {
 }
 
 type rtpAudioFramer struct {
-	lastProcessAt  time.Time
-	generation     uint64
-	segments       []sipPCMSegment
-	lastRealAt     time.Time
-	jitter         *rtpJitterBuffer
-	codec          string
-	missingSamples int
-	pending        []byte
-	pendingPCM     []int16
-	plc            sipPCMConcealer
-	correction     float64
+	decoderGeneration uint64
+	frameArrival      time.Time
+	activeOutput      bool
+	continuity        []int16
+	lastProcessAt     time.Time
+	generation        uint64
+	segments          []sipPCMSegment
+	lastRealAt        time.Time
+	jitter            *rtpJitterBuffer
+	codec             string
+	missingSamples    int
+	pending           []byte
+	pendingPCM        []int16
+	plc               sipPCMConcealer
+	correction        float64
 }
 
 func newRTPAudioFramer(j *rtpJitterBuffer, o sipMediaOffer) *rtpAudioFramer {
@@ -654,11 +773,16 @@ func newRTPAudioFramer(j *rtpJitterBuffer, o sipMediaOffer) *rtpAudioFramer {
 	}
 	j.mu.Lock()
 	j.packetSamples = n
+	j.statefulCodec = o.Codec == "G722"
+	if j.trace != nil {
+		j.trace.payloadType = int(o.PayloadType)
+	}
 	j.mu.Unlock()
 	return &rtpAudioFramer{jitter: j, codec: o.Codec, missingSamples: n}
 }
 func (f *rtpAudioFramer) popPCM(m *sipRTPMedia) ([]int16, bool) { return f.popPCMAt(m, time.Now()) }
 func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool) {
+	f.frameArrival = now
 	if !f.lastProcessAt.IsZero() {
 		interval := max(0, now.Sub(f.lastProcessAt).Nanoseconds())
 		f.jitter.consumerIntervalNS.Store(interval)
@@ -673,7 +797,17 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		f.lastRealAt = time.Time{}
 		f.correction = 0
 		f.generation = generation
+		f.activeOutput = false
 		f.jitter.pendingPCMSamples.Store(0)
+	}
+	if generation := f.jitter.decoderGeneration.Load(); generation != f.decoderGeneration {
+		f.decoderGeneration = generation
+		if f.jitter.policy.Receiver == "adaptive" && m.offer.Codec == "G722" {
+			m.resetReceiveDecoder()
+			f.jitter.mu.Lock()
+			f.jitter.decodeResets++
+			f.jitter.mu.Unlock()
+		}
 	}
 	if f.jitter.paused.Load() {
 		return nil, false
@@ -706,6 +840,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	if !f.lastRealAt.IsZero() && now.Sub(f.lastRealAt) > time.Duration(f.jitter.policy.MaxAgeMS)*time.Millisecond {
 		f.plc = sipPCMConcealer{}
 	}
+	f.plc.maxMS, f.plc.crossfadeMS = f.jitter.policy.ConcealmentMS, f.jitter.policy.CrossfadeMS
 	f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
 	f.jitter.mu.Lock()
 	ppm := 0.0
@@ -746,7 +881,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		if p == nil {
 			n := f.missingSamples * m.sampleRate() / 8000
 			f.jitter.missingFilledSamples.Add(int64(f.missingSamples))
-			continued := min(n, max(0, m.sampleRate()*60/1000-f.plc.lossSamples))
+			continued := min(n, max(0, m.sampleRate()*f.jitter.policy.ConcealmentMS/1000-f.plc.lossSamples))
 			pcm = f.plc.missing(n, m.sampleRate(), policyEnabled(f.jitter.policy.Concealment))
 			if f.plc.generated {
 				rtpContinued := continued * 8000 / m.sampleRate()
@@ -756,6 +891,9 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 				f.jitter.silenceSamples.Add(int64(f.missingSamples))
 			}
 		} else {
+			if m.offer.Codec == "G722" && f.jitter.policy.Receiver == "adaptive" {
+				f.jitter.warmDecoder(m)
+			}
 			pcm = m.decodeAudio(p)
 			if policyEnabled(f.jitter.policy.Concealment) {
 				pcm = f.plc.received(pcm, m.sampleRate())
@@ -769,25 +907,43 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		at := f.jitter.lastPoppedAt
 		arrival, source := f.jitter.lastPoppedArrival, f.jitter.lastPoppedSource
 		playout := f.jitter.lastPoppedPlayout
+		rtpTimestamp := f.jitter.expectedTimestamp - uint32(len(p))
 		f.jitter.mu.Unlock()
 		if p != nil {
 			f.lastRealAt = at
 		}
-		f.segments = append(f.segments, sipPCMSegment{samples: len(pcm), at: at, arrival: arrival, source: source, playout: playout})
+		f.segments = append(f.segments, sipPCMSegment{rtpTimestamp: rtpTimestamp, samples: len(pcm), at: at, arrival: arrival, source: source, playout: playout})
 	}
 	if len(f.pendingPCM) < take {
 		if len(f.pendingPCM) < samples {
 			if out, ready := f.popPartialTail(m, now, samples); ready {
+				f.activeOutput = true
 				f.jitter.noteRecoveryPlayout(now, f.generation)
 				return out, f.jitter.generation.Load() == f.generation
 			}
 			f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
+			if f.activeOutput && f.jitter.policy.Receiver == "adaptive" && policyEnabled(f.jitter.policy.ContinuousOutput) {
+				if len(f.continuity) != samples {
+					f.continuity = make([]int16, samples)
+				}
+				f.jitter.silenceSamples.Add(160)
+				return f.continuity, true
+			}
 			return nil, false
 		}
 		take = samples
 		adjust = 0
 	}
 	f.correction -= float64(adjust)
+	if len(f.segments) > 0 && !f.segments[0].arrival.IsZero() {
+		f.frameArrival = f.segments[0].arrival
+		if f.jitter.trace != nil {
+			f.jitter.mu.Lock()
+			f.jitter.trace.render(f.segments[0].rtpTimestamp, now)
+			f.jitter.mu.Unlock()
+		}
+	}
+	f.activeOutput = true
 	out := sipAdjustPCM(f.pendingPCM[:take], samples)
 	copy(f.pendingPCM, f.pendingPCM[take:])
 	f.pendingPCM = f.pendingPCM[:len(f.pendingPCM)-take]
@@ -809,6 +965,9 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 				segment.playout = segment.playout.Add(time.Duration(n) * time.Second / time.Duration(m.sampleRate()))
 			}
 			segment.at = segment.playout
+			if f.jitter.policy.Receiver == "adaptive" {
+				segment.at = segment.arrival
+			}
 			if !segment.arrival.IsZero() && segment.arrival.Before(segment.at) {
 				segment.at = segment.arrival
 			}
@@ -844,6 +1003,9 @@ func (f *rtpAudioFramer) popPartialTail(m *sipRTPMedia, now time.Time, samples i
 		return nil, false
 	}
 	real := len(f.pendingPCM)
+	if len(f.segments) > 0 && !f.segments[0].arrival.IsZero() {
+		f.frameArrival = f.segments[0].arrival
+	}
 	out := make([]int16, samples)
 	copy(out, f.pendingPCM)
 	padding := time.Duration(samples-real) * time.Second / time.Duration(m.sampleRate())
@@ -898,16 +1060,21 @@ func sipAdjustPCM(in []int16, n int) []int16 {
 // feeds fabricated compressed bytes to a decoder. At most 60 ms is continued;
 // the waveform fades to zero and recovery crossfades over 5 ms.
 type sipPCMConcealer struct {
-	history     []int16
-	lossSamples int
-	lastOutput  int16
-	pitch       int
-	generated   bool
+	maxMS, crossfadeMS int
+	history            []int16
+	lossSamples        int
+	lastOutput         int16
+	pitch              int
+	generated          bool
 }
 
 func (p *sipPCMConcealer) received(pcm []int16, rate int) []int16 {
 	if p.lossSamples > 0 && len(p.history) > 0 {
-		n := min(rate/200, len(pcm))
+		fade := p.crossfadeMS
+		if fade == 0 {
+			fade = 5
+		}
+		n := min(rate*fade/1000, len(pcm))
 		last := p.lastOutput
 		for i := 0; i < n; i++ {
 			w := float64(i+1) / float64(n)
@@ -929,7 +1096,11 @@ func (p *sipPCMConcealer) received(pcm []int16, rate int) []int16 {
 func (p *sipPCMConcealer) missing(n, rate int, enabled bool) []int16 {
 	out := make([]int16, n)
 	p.generated = false
-	if !enabled || len(p.history) < rate/100 || p.lossSamples >= rate*60/1000 {
+	maxMS := p.maxMS
+	if maxMS == 0 {
+		maxMS = 60
+	}
+	if !enabled || len(p.history) < rate/100 || p.lossSamples >= rate*maxMS/1000 {
 		p.lossSamples += n
 		p.lastOutput = 0
 		return out
@@ -955,7 +1126,7 @@ func (p *sipPCMConcealer) missing(n, rate int, enabled bool) []int16 {
 	}
 	for i := range out {
 		position := p.lossSamples + i
-		gain := max(0, 1-float64(position)/float64(rate*60/1000))
+		gain := max(0, 1-float64(position)/float64(rate*maxMS/1000))
 		out[i] = clampPCM16(float64(p.history[len(p.history)-p.pitch+position%p.pitch]) * gain)
 	}
 	p.lossSamples += n

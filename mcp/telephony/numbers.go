@@ -1242,6 +1242,8 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 			strings.TrimSpace(strArg(body, "profile_id", "")))
 	case "/numbers/carrier-media":
 		result, err = a.configureCarrierMedia(r.Context(), ctx, body)
+	case "/numbers/sip-audio-profile":
+		result, err = a.sipAudioProfileSettings(ctx, body)
 	case "/numbers/local-media":
 		routeID := strArg(body, "route_id", "")
 		if routeID != "" {
@@ -1258,7 +1260,7 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 		if body["config"] == nil {
 			var cfg localMediaSettings
 			cfg, err = a.localMediaSettings(ctx.CurrentProject(), routeID)
-			result = map[string]any{"config": cfg, "recovery_policy": "automatic_rolling_playout_v1", "legacy_resynchronize_deprecated": true}
+			result = map[string]any{"config": cfg, "recovery_policy": playbackPolicyName(cfg.RTPPlayback), "legacy_resynchronize_deprecated": true}
 		} else {
 			var cfg localMediaSettings
 			raw, _ := json.Marshal(body["config"])
@@ -1267,7 +1269,7 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 			if err = decoder.Decode(&cfg); err == nil {
 				err = a.saveLocalMediaSettings(ctx, routeID, cfg)
 			}
-			result = map[string]any{"ok": err == nil, "config": cfg, "recovery_policy": "automatic_rolling_playout_v1", "legacy_resynchronize_deprecated": true}
+			result = map[string]any{"ok": err == nil, "config": cfg, "recovery_policy": playbackPolicyName(cfg.RTPPlayback), "legacy_resynchronize_deprecated": true}
 		}
 	case "/numbers/transport":
 		var route *routeRow

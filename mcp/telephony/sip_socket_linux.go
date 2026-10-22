@@ -29,6 +29,19 @@ func enableSIPSocketTimestamps(conn *net.UDPConn) bool {
 	return err == nil && optionErr == nil
 }
 func (m *sipRTPMedia) readSocketPacket(buffer []byte) (int, *net.UDPAddr, error) {
+	for {
+		n, addr, err, uncertain := m.readSocketPacketOnce(buffer)
+		if err != nil || !uncertain {
+			return n, addr, err
+		}
+		// Do not feed a fabricated old arrival to the RTP clock estimator.
+		// The explicit clock-uncertainty counter retains this local discard.
+	}
+}
+func (m *sipRTPMedia) readSocketPacketOnce(buffer []byte) (int, *net.UDPAddr, error, bool) {
+	uncertain := false
+	before := time.Now()
+	m.kernelClock.sample(before, before.UnixNano())
 	n, oobn, flags, addr, err := m.conn.ReadMsgUDP(buffer, m.socketOOB[:])
 	m.readCompletedAt = time.Now()
 	m.readAt = m.readCompletedAt
@@ -57,8 +70,14 @@ func (m *sipRTPMedia) readSocketPacket(buffer []byte) (int, *net.UDPAddr, error)
 					m.observations.kernelTimestampInvalid.Add(1)
 					continue
 				}
-				at, valid := sipKernelArrival(int64(binary.NativeEndian.Uint64(payload)), int64(binary.NativeEndian.Uint64(payload[8:])), m.readCompletedAt)
+				at, valid := m.kernelClock.arrival(int64(binary.NativeEndian.Uint64(payload)), int64(binary.NativeEndian.Uint64(payload[8:])), m.readCompletedAt, m.readCompletedAt.UnixNano())
+				m.observations.kernelClockSteps.Store(m.kernelClock.steps)
+				m.observations.kernelClockUncertain.Store(m.kernelClock.uncertain)
 				if !valid {
+					// An uncertain boundary stamp is conservatively stale; normal
+					// malformed timestamps retain the existing read-time fallback.
+					m.readAt = at
+					uncertain = uncertain || !at.Equal(m.readCompletedAt)
 					m.observations.kernelTimestampInvalid.Add(1)
 					continue
 				}
@@ -70,5 +89,5 @@ func (m *sipRTPMedia) readSocketPacket(buffer []byte) (int, *net.UDPAddr, error)
 			}
 		}
 	}
-	return n, addr, err
+	return n, addr, err, uncertain
 }

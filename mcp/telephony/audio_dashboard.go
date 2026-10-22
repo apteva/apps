@@ -566,6 +566,9 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result := map[string]any{"carrier_transport_history": history, "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		if r.URL.Query().Get("include_packet_timing") == "true" {
+			result["sip_packet_timing"] = a.sipPacketTimingForCall(project, id)
+		}
 		if page != nil {
 			result["carrier_history"] = page
 		}

@@ -34,7 +34,16 @@ func TestSIPAutomaticCapturedTiming(t *testing.T) {
 		t.Run(codec, func(t *testing.T) {
 			base := time.Unix(100, 0)
 			yes := true
-			current := newRTPJitterBuffer()
+			policy := sipPlaybackPolicy{}
+			if raw := os.Getenv("TELEPHONY_SIP_CAPTURE_POLICY"); raw != "" {
+				if e := json.Unmarshal([]byte(raw), &policy); e != nil {
+					t.Fatal(e)
+				}
+				if e := policy.validate(); e != nil {
+					t.Fatal(e)
+				}
+			}
+			current := newRTPJitterBufferWithPolicy(policy)
 			released := v28NewRTPJitterBufferWithPolicy(v28SipPlaybackPolicy{Resynchronize: &yes})
 			current.sourceAnchorAt = base.Add(-time.Duration(trace.InitialAgeMS * float64(time.Millisecond)))
 			current.haveSourceAnchor = true
@@ -105,7 +114,15 @@ func TestSIPAutomaticCapturedTiming(t *testing.T) {
 			speech.Codec, oldSpeech.Codec = codec, codec
 			speech.DiscardedMS = float64(current.droppedSamples+current.lateDroppedSamples) / 8
 			oldSpeech.DiscardedMS = float64(released.droppedSamples+released.lateDroppedSamples) / 8
+			// Evaluate the smooth-speech flag explicitly; severe trace acceptance
+			// below is a separate bounded-damage contract, not a smoothness claim.
+			speech.Accepted = (sipSpeechBudget{coverage: .99, gapMS: 80, delayMS: 100}).accepts(speech)
+			oldSpeech.Accepted = (sipSpeechBudget{coverage: .99, gapMS: 80, delayMS: 100}).accepts(oldSpeech)
+			if speech.ActiveSpeechCoverage < .86 || speech.LongestDamagedSpeechMS > 240 || speech.LongestPlaybackInterruptionMS > 240 || speech.MaxAddedDelayMS > 420 || speech.DiscardedMS > 1400 {
+				t.Fatalf("captured trace exceeded explicit fault acceptance: %+v", speech)
+			}
 			t.Logf("speech candidate=%+v baseline=%+v", speech, oldSpeech)
+			t.Logf("discard late=%.3f overflow=%.3f expired=%.3f lost=%d corrected=%d", float64(current.lateDroppedSamples)/8, float64(current.overflowSamples)/8, float64(current.expiredSamples)/8, current.lost, current.driftAdjustedSamples.Load())
 			if speech.ActiveSpeechCoverage <= oldSpeech.ActiveSpeechCoverage || speech.LongestDamagedSpeechMS >= oldSpeech.LongestDamagedSpeechMS || speech.MaxAddedDelayMS > 550 {
 				t.Fatal("captured speech continuity/delay did not improve within bound")
 			}

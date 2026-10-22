@@ -108,6 +108,7 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
     - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
+    - { name: telephony_sip_audio_profile, description: "Configure bounded SIP audio profiles for future calls, per project, direction, inbound route or outbound account/number." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }

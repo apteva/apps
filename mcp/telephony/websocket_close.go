@@ -91,25 +91,26 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
-	activity        audioSocketActivity
-	whisperDropped  atomic.Int64
-	whisperSent     atomic.Int64
-	whisperMu       sync.Mutex
-	whisper         chan websocketWriteRequest
-	audioDropped    atomic.Int64
-	audioMu         sync.Mutex
-	audioBytes      int
-	audioStats      liveAudioQueueSnapshot
-	transportStats  websocketTransportSnapshot
-	diagnosticID    string
-	conn            net.Conn
-	state           ws.State
-	requests        chan websocketWriteRequest
-	audio           chan websocketWriteRequest
-	stop            chan struct{}
-	done            chan struct{}
-	stopOnce        sync.Once
-	forcedCloseOnce sync.Once
+	sipResidenceBudget atomic.Int64
+	activity           audioSocketActivity
+	whisperDropped     atomic.Int64
+	whisperSent        atomic.Int64
+	whisperMu          sync.Mutex
+	whisper            chan websocketWriteRequest
+	audioDropped       atomic.Int64
+	audioMu            sync.Mutex
+	audioBytes         int
+	audioStats         liveAudioQueueSnapshot
+	transportStats     websocketTransportSnapshot
+	diagnosticID       string
+	conn               net.Conn
+	state              ws.State
+	requests           chan websocketWriteRequest
+	audio              chan websocketWriteRequest
+	stop               chan struct{}
+	done               chan struct{}
+	stopOnce           sync.Once
+	forcedCloseOnce    sync.Once
 
 	enqueueMu           sync.Mutex
 	stateMu             sync.Mutex
@@ -234,7 +235,11 @@ func (p *websocketWriterPump) run() {
 				p.audioMu.Unlock()
 				continue
 			}
-			if age >= liveAudioMaxAge {
+			budget := liveAudioMaxAge
+			if n := p.sipResidenceBudget.Load(); n > 0 {
+				budget = time.Duration(n)
+			}
+			if age >= budget {
 				p.audioStats.StaleBytes += int64(request.pcmBytes)
 				p.recordWriteEventLocked(request, "queue_expired", 0, 0, 0)
 				p.audioMu.Unlock()

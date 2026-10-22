@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import CarrierJitterBufferControls, {type CarrierBufferRequest} from "./CarrierJitterBufferControls";
+import SIPAudioProfileControls, {type SIPAudioProfileRequest} from "./SIPAudioProfileControls";
 import type { OutboundSIPConfig, OutboundSIPSetupOptions, OutboundTransport } from "../frontend/src/client";
 
-export default function OutboundTransportDialog({ provider, connection, number, request, carrierRequest, onClose }: {
+export default function OutboundTransportDialog({ provider, connection, number, request, carrierRequest, profileRequest, onClose }: {
   provider: string; connection: number; number?: string;
   request: (body: Record<string, unknown>) => Promise<{ outbound_transport?: OutboundTransport; setup_options?: OutboundSIPSetupOptions }>;
   carrierRequest?: CarrierBufferRequest;
+  profileRequest?: SIPAudioProfileRequest;
   onClose: () => void;
 }) {
   const [transport, setTransport] = useState<OutboundTransport["transport"]>("programmable_websocket");
@@ -82,6 +84,7 @@ export default function OutboundTransportDialog({ provider, connection, number, 
         </>}
       </fieldset>
       {error && <p role="alert" className="text-sm text-error">{error}</p>}
+      {profileRequest ? <SIPAudioProfileControls target={{direction:"outbound",carrier_connection_id:connection,...(number?{phone_number:number}:{})}} request={profileRequest}/> : null}
       {provider==="telnyx" && existing?.transport==="sip_direct" && carrierRequest ? <CarrierJitterBufferControls target={{carrier_connection_id:connection,phone_number:number||""}} request={carrierRequest}/> : null}
       <footer className="flex flex-wrap justify-end gap-2"><button className="rounded border border-border px-3 py-2 text-sm" disabled={busy || !loaded} onClick={() => void save(true)}>{number ? "Use account default" : "Reset to Voice API default"}</button><button className="rounded border border-border px-3 py-2 text-sm" disabled={busy} onClick={onClose}>Cancel</button><button className="rounded bg-text text-bg px-3 py-2 text-sm" disabled={busy || !loaded} onClick={() => void save()}>{busy ? "Setting up…" : transport === "sip_direct" && automatic ? "Set up and enable SIP" : "Apply to new calls"}</button></footer>
     </section>

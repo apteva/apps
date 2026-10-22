@@ -246,6 +246,11 @@ func (r *carrierReception) snapshot(now float64, active bool) carrierReceptionSn
 
 func encodeSourceAudio(data []byte, src carrierSource, mapped, receipt float64, epoch uint32) []byte {
 	out := make([]byte, sourceAudioHeaderBytes+len(data))
+	writeSourceAudioHeader(out, src, mapped, receipt, epoch)
+	copy(out[sourceAudioHeaderBytes:], data)
+	return out
+}
+func writeSourceAudioHeader(out []byte, src carrierSource, mapped, receipt float64, epoch uint32) {
 	binary.LittleEndian.PutUint32(out, softphoneAudioFrameV3)
 	binary.LittleEndian.PutUint64(out[8:], math.Float64bits(receipt))
 	binary.LittleEndian.PutUint64(out[32:], math.Float64bits(src.TimestampMS))
@@ -255,8 +260,6 @@ func encodeSourceAudio(data []byte, src carrierSource, mapped, receipt float64, 
 	if src.Timed {
 		binary.LittleEndian.PutUint32(out[60:], 1)
 	}
-	copy(out[sourceAudioHeaderBytes:], data)
-	return out
 }
 
 func sourceAudioHeader(data []byte) int {

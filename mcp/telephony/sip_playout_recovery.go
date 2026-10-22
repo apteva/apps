@@ -80,7 +80,8 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 		return false
 	}
 	r.evaluated = 0
-	if r.offset == 0 && (r.lastLateAt.IsZero() || at.Sub(r.lastLateAt) > sipRecoveryWindow) {
+	window := time.Duration(b.policy.RecoveryWindowMS) * time.Millisecond
+	if r.offset == 0 && (r.lastLateAt.IsZero() || at.Sub(r.lastLateAt) > window) {
 		r.state, r.reason = "stable", "playout_within_budget"
 		return false
 	}
@@ -89,7 +90,7 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 	var first, prev sipRecoveryObservation
 	for i := 0; i < r.size; i++ {
 		q := r.observations[(r.head-r.size+i+len(r.observations))%len(r.observations)]
-		if at.Sub(q.at) > sipRecoveryWindow {
+		if at.Sub(q.at) > window {
 			continue
 		}
 		if n == 0 {
@@ -112,7 +113,7 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 	r.count = n
 	r.since = first.at
 	r.windowMS = float64(at.Sub(first.at)) / float64(time.Millisecond)
-	if n < 24 || at.Sub(first.at) < 600*time.Millisecond || nr < 20 {
+	if n < 4 || at.Sub(first.at) < time.Duration(b.policy.RecoveryWaitMS)*time.Millisecond || nr < 3 {
 		r.state, r.reason = "observing", "insufficient_observations"
 		return false
 	}
@@ -124,7 +125,7 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 	// while consistently fast delivery (including a 19.8ms/20ms draining stream)
 	// cannot qualify as a new live phase. This is a delivery test, not clock fit.
 	r.ratePPM = (rates[nr/4] + rates[nr*3/4]) / 2
-	if !r.lastRecovery.IsZero() && at.Sub(r.lastRecovery) < 2*time.Second {
+	if !r.lastRecovery.IsZero() && at.Sub(r.lastRecovery) < time.Duration(b.policy.RecoveryCooldownMS)*time.Millisecond {
 		r.state, r.reason = "stable", "recovery_hysteresis"
 		return false
 	}
@@ -154,29 +155,32 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 		r.state, r.reason = "waiting", "no_persistent_phase_shift"
 		return false
 	}
-	if next > time.Second {
+	if next > time.Duration(b.policy.MaxRelativeMS)*time.Millisecond {
 		r.state, r.reason = "waiting", "offset_exceeds_recovery_budget"
 		return false
 	}
 	// Invalidate retained raw/decoded/PLC reserve once, then rebuild a small
 	// reserve from current packets. Original physical arrival/source evidence and
 	// calibrated source clock are preserved. Never renew a retained packet's age.
-	retained := b.buffered + int(b.pendingPCMSamples.Load())
-	b.droppedSamples += retained
-	b.recoveryDiscardedSamples += retained
-	b.event(processed, "playout_epoch_resynchronized", seq, ts, retained, age)
-	clear(b.packets)
-	clear(b.arrivals)
-	clear(b.timestamps)
-	clear(b.controls)
-	b.buffered = 0
-	b.pendingPCMSamples.Store(0)
-	b.generation.Add(1)
-	b.started = false
-	b.primed = false
-	b.missing = 0
-	b.primeTicks = 0
-	b.haveTimestamp = false
+	retained := 0
+	if b.policy.Receiver == "reference" {
+		retained = b.buffered + int(b.pendingPCMSamples.Load())
+		b.droppedSamples += retained
+		b.recoveryDiscardedSamples += retained
+		b.event(processed, "playout_epoch_resynchronized", seq, ts, retained, age)
+		clear(b.packets)
+		clear(b.arrivals)
+		clear(b.timestamps)
+		clear(b.controls)
+		b.buffered = 0
+		b.pendingPCMSamples.Store(0)
+		b.generation.Add(1)
+		b.started = false
+		b.primed = false
+		b.missing = 0
+		b.primeTicks = 0
+		b.haveTimestamp = false
+	}
 	r.offset = next
 	r.lastRecovery = at
 	r.lastOffsetMS = float64(next) / float64(time.Millisecond)

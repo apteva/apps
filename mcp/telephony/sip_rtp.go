@@ -32,6 +32,7 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
+	kernelClock          sipKernelClock
 	rtcp                 sipRTCPState
 	rtcpConn             *net.UDPConn
 	readAt               time.Time // single receive owner only
@@ -113,6 +114,8 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 
 		media.observations.kernelDropsAvailable.Store(enableSIPSocketDropCounter(conn))
 		media.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(conn))
+		now := time.Now()
+		media.kernelClock.sample(now, now.UnixNano())
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -621,6 +624,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	coreWriter.sipResidenceBudget.Store(int64(time.Duration(session.playbackPolicy.resolved().MaxAgeMS) * time.Millisecond))
 	media.coreForwardTelemetry.Store(coreWriter)
 	defer media.coreForwardTelemetry.CompareAndSwap(coreWriter, nil)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -684,6 +688,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
 	var workers sync.WaitGroup
+	jitter := newRTPJitterBufferWithPolicy(session.playbackPolicy)
+	defer jitter.releaseTrace()
 	defer func() {
 		cancel()
 		media.Close()
@@ -691,7 +697,6 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		workers.Wait()
 		<-pacer.done
 	}()
-	jitter := newRTPJitterBufferWithPolicy(session.playbackPolicy)
 	media.jitterTelemetry.Store(jitter)
 	framer := newRTPAudioFramer(jitter, media.offer)
 	maxQueuedMS := 0
@@ -800,7 +805,11 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				}
 				recorder.Record(0, pcm24)
 				tap.publishPCM(0, pcm24)
-				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+				if humanHub != nil {
+					queueSIPHumanAudio(coreWriter, pcm24, framer.frameArrival, uint32(jitter.generation.Load()))
+				} else {
+					coreWriter.queueAudioAt(pcm16ToBytes(pcm24), 0, framer.frameArrival)
+				}
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					if err := coreWriter.Write(ws.OpText, control); err != nil {
@@ -1018,6 +1027,13 @@ func (m *sipRTPMedia) decodeAudio(p []byte) []int16 {
 	out := make([]int16, len(p)*2)
 	n := m.g722Decoder.Decode(out, p)
 	return out[:n]
+}
+
+func (m *sipRTPMedia) resetReceiveDecoder() {
+	m.initCodec()
+	if m.offer.Codec == "G722" {
+		m.g722Decoder = g722.NewDecoder(g722.Rate64000, 0)
+	}
 }
 func (m *sipRTPMedia) decodeSentAudio(p []byte) []int16 {
 	m.initCodec()

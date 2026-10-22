@@ -23,6 +23,7 @@ import (
 // Synthesis is independent of the carrier. A bound speech integration can
 // return PCM or WAV; prerecorded project Storage files need no synthesizer.
 type localMediaSettings struct {
+	AudioProfileCodecs   bool               `json:"-"`
 	RTPPlayback          *sipPlaybackPolicy `json:"rtp_playback,omitempty"`
 	Codecs               []string           `json:"codecs,omitempty"`
 	SpeechTool           string             `json:"speech_tool,omitempty"`
@@ -717,7 +718,7 @@ func (a *App) toolLocalMediaSettings(caller context.Context, ctx *sdk.AppCtx, ar
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	return map[string]any{"config": cfg, "applies_to": "new calls", "active_calls_retained": true, "recovery_policy": "automatic_rolling_playout_v1", "legacy_resynchronize_deprecated": true}, nil
+	return map[string]any{"config": cfg, "applies_to": "new calls", "active_calls_retained": true, "recovery_policy": playbackPolicyName(cfg.RTPPlayback), "legacy_resynchronize_deprecated": true}, nil
 }
 
 func (a *App) localSIPPlanRunning(call, node string) bool {
