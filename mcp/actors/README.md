@@ -157,7 +157,7 @@ uploads, generic clicks and consequential actions at validation and execution.
 `observe_page` takes a raw DOM extraction plus a fresh semantic observation and
 returns `current_url`, `page_title`, configured fields, `visible_navigation`
 (with observed URLs) and `visible_controls` (labels/roles). Raw extractions
-retry a larger HTML budget and fail explicitly if still truncated at 1 MB.
+retry a larger HTML budget and fail explicitly if still truncated at 5 MB.
 
 `inspect_views` is a generic read-only collection traversal. Its `read_views`
 configuration declares an entry URL, required creator/account identity link,
@@ -378,3 +378,7 @@ Named operations may declare `browser` to fully replace the actor browser config
 `fill_secret` resolves an expiring reference from encrypted install settings (`browser_secrets`, per project), requiring an exact saved context and HTTPS host. Only the reference is stored in actor definitions and inputs. Backend fill diagnostics are suppressed and Actors screenshots disabled after secret input. Provision these settings through the authenticated operator API; keep plaintext credentials and verification codes out of ordinary inputs, extraction selectors and logs. Computer/provider telemetry has its own retention policy.
 
 For an emailed verification link, `goto_secret` uses the same expiring secret reference after opening the bound saved context. It permits only HTTPS on the current bound host, suppresses URL-bearing errors and in-flight progress, and retains only the resulting origin (no path, query or fragment). Secret input and navigation steps are not automatically retried.
+
+## Larger extraction budget
+
+Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,000,000 up to a 5,000,000 response budget, stopping as soon as Computer returns a complete result. The bound applies to raw view inspection and crawl HTML. Computer must support the same larger ceiling; older Computer builds may still clamp the response at 1 MB, which Actors treats as incomplete. Per-record, dataset and exported-file bounds are unchanged.

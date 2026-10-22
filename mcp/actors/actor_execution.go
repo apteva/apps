@@ -1238,7 +1238,7 @@ func (e *actorExecution) extractStepDOM(step actorStep) (*browserExtractResult, 
 // Crawl extraction needs complete HTML; other representations share Computer's
 // response budget and are unnecessary for CSS-based dataset extraction.
 func (e *actorExecution) extractCrawlDOM() (*browserExtractResult, error) {
-	for _, limit := range []int{200000, 400000, 800000, 1000000} {
+	for _, limit := range actorHTMLReadBudgets {
 		doc, err := e.extractDOMOptions(map[string]any{"formats": []string{"html"}, "max_chars": limit, "wait_ms": 250})
 		if err != nil {
 			return nil, err
@@ -1247,7 +1247,7 @@ func (e *actorExecution) extractCrawlDOM() (*browserExtractResult, error) {
 			return doc, nil
 		}
 	}
-	return nil, errors.New("rendered HTML still truncated at the 1 MB response limit; narrow the extraction or update Computer to v0.7.92 or later")
+	return nil, errors.New("rendered HTML still truncated at the 5 MB response limit; narrow the extraction or check Computer supports the larger budget")
 }
 
 func (e *actorExecution) extractDOMOptions(options map[string]any) (*browserExtractResult, error) {

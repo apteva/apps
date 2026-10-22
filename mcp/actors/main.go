@@ -241,7 +241,7 @@ func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessio
 	extractArgs := withProjectID(ctx, map[string]any{
 		"session_id":  sessionID,
 		"formats":     formats,
-		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 1000000),
+		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, maxActorExtractChars),
 		"readability": true,
 	})
 	if value, ok := args["readability"].(bool); ok {

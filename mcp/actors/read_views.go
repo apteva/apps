@@ -333,7 +333,7 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 		}
 		var doc *browserExtractResult
 		var err error
-		for _, limit := range []int{200000, 400000, 800000, 1000000} {
+		for _, limit := range actorHTMLReadBudgets {
 			doc, err = e.extractDOMOptions(map[string]any{"formats": []string{"html"}, "readability": false, "max_chars": limit, "wait_ms": 250})
 			if err != nil {
 				return nil, err
@@ -343,7 +343,7 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 			}
 		}
 		if doc.Truncated {
-			return nil, errors.New("read view HTML truncated at 1 MB; coverage incomplete")
+			return nil, errors.New("read view HTML truncated at 5 MB; coverage incomplete")
 		}
 		root, err := html.Parse(strings.NewReader(doc.HTML))
 		if err != nil {
@@ -909,7 +909,7 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator, revealFrom ..
 }
 
 func (e *actorExecution) completeRawDOM() (*browserExtractResult, error) {
-	for _, limit := range []int{200000, 400000, 800000, 1000000} {
+	for _, limit := range actorHTMLReadBudgets {
 		doc, err := e.extractDOMOptions(map[string]any{"formats": []string{"html", "metadata"}, "readability": false, "max_chars": limit, "wait_ms": 250})
 		if err != nil {
 			return nil, err
@@ -918,7 +918,7 @@ func (e *actorExecution) completeRawDOM() (*browserExtractResult, error) {
 			return doc, nil
 		}
 	}
-	return nil, errors.New("rendered HTML truncated at 1 MB; inspection incomplete")
+	return nil, errors.New("rendered HTML truncated at 5 MB; inspection incomplete")
 }
 
 // Return actual visible SOM labels alongside exact observed anchor URLs. Raw
