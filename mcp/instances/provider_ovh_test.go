@@ -12,10 +12,10 @@ import (
 )
 
 type ovhFixture struct {
-	product                                                                     string
-	checkoutLost, installLost, missing, priceChanged, wrongPlan, recoveredOrder bool
-	terminated, confirmed, installs, purchases                                  int
-	calls                                                                       []string
+	product                                                                                     string
+	checkoutLost, installLost, missing, priceChanged, wrongPlan, recoveredOrder, missingOrderID bool
+	terminated, confirmed, installs, purchases                                                  int
+	calls                                                                                       []string
 }
 
 func (f *ovhFixture) call(_ int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
@@ -66,6 +66,9 @@ func (f *ovhFixture) call(_ int64, tool string, args map[string]any) (*sdk.Execu
 		return providerJSON(fmt.Sprintf(`{"orderId":%s,"prices":{"withTax":{"value":%d,"currencyCode":"EUR"}},"details":[{"description":"Server and hardware options","cartItemID":21}],"contracts":[]}`, orderID, amount)), nil
 	case "cart_checkout":
 		f.purchases++
+		if f.missingOrderID {
+			return providerJSON(`{}`), nil
+		}
 		if args["waiveRetractationPeriod"] != false || args["autoPayWithPreferredPaymentMethod"] != true {
 			return nil, errors.New("wrong payment flags")
 		}
@@ -453,5 +456,28 @@ func TestOVHProductMetadataAndMultipleOptionValidation(t *testing.T) {
 	}
 	if ovhOrderArg(map[string]any{"ovh": map[string]any{"request_key": "fixture-key", "addons": map[string]any{"memory": "wrong-type"}}}) != nil {
 		t.Fatal("malformed option input silently accepted")
+	}
+}
+
+func TestOVHMissingCheckoutIdentityRetainsUnknownState(t *testing.T) {
+	ctx, f, in := newOVHTest(t, "vps")
+	q, e := ovhQuote(ctx, in)
+	if e != nil {
+		t.Fatal(e)
+	}
+	in.OVH.QuoteID = q.ID
+	f.missingOrderID = true
+	inst, e := provisionInstance(ctx, in)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if inst.LifecycleStage != "OrderUnknown" || inst.ErrorMessage == "" || !inst.CreatePending {
+		t.Fatal("missing checkout identity was not retained as unknown")
+	}
+	if _, e = provisionInstance(ctx, in); e != nil {
+		t.Fatal(e)
+	}
+	if f.purchases != 1 {
+		t.Fatal("missing checkout acknowledgement caused a second payment")
 	}
 }

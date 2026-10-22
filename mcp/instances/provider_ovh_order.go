@@ -617,7 +617,11 @@ func ovhContractProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	}
 	r.State.OrderID = anyToInt64JSON(response, "orderId")
 	if r.State.OrderID <= 0 {
-		return inst, errors.New("OVH checkout returned no order ID; retain inventory for recovery")
+		r.State.Error = "OVH checkout returned no order identity; outcome is unknown. Inventory retained; checkout will not be repeated."
+		_ = ovhSaveOrder(ctx, r)
+		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "OrderUnknown", "error_message": r.State.Error})
+		kickOVHContract(ctx, inst.ID)
+		return dbGetInstance(ctx.AppDB(), inst.ID)
 	}
 	r.State.Phase = "delivery"
 	if e = ovhSaveOrder(ctx, r); e != nil {
