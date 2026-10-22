@@ -353,7 +353,11 @@ func (a *App) carrierBufferForCall(row *callRow) *carrierJitterBufferView {
 	if row == nil || row.CarrierSlug != "telnyx" || row.CarrierConnectionID <= 0 {
 		return nil
 	}
-	target, err := a.carrierMediaTarget(row.ProjectID, row.RouteID, row.CarrierConnectionID, row.FromNumber)
+	routeID := row.RouteID
+	if row.Direction == "outbound" {
+		routeID = ""
+	}
+	target, err := a.carrierMediaTarget(row.ProjectID, routeID, row.CarrierConnectionID, row.FromNumber)
 	if err != nil {
 		return nil
 	}

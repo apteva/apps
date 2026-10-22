@@ -258,3 +258,15 @@ func TestCarrierMediaUnsupportedProviderDoesNotMutate(t *testing.T) {
 		t.Fatal("unsupported carrier buffer enabled")
 	}
 }
+
+func TestCarrierMediaOutboundCorrelationUsesOutboundResource(t *testing.T) {
+	a, _, _ := carrierMediaFixture(t, "outbound")
+	inbound := routeRow{ID: "originating-route", ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 10, PhoneNumber: "+12025550101", AgentID: 7, Enabled: true, Secret: "test", InboundTransport: inboundTransportSIPDirect, TransportConfig: `{"fqdn_connection_id":"different-inbound-resource"}`}
+	if err := a.db().insertRoute(inbound); err != nil {
+		t.Fatal(err)
+	}
+	view := a.carrierBufferForCall(&callRow{Direction: "outbound", RouteID: inbound.ID, ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 10, FromNumber: "+12025550101"})
+	if view == nil || view.ResourceID != "sip-1" || view.ResourceType != "credential_connection" {
+		t.Fatal("outbound metadata came from originating inbound route", view)
+	}
+}
