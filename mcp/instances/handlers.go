@@ -259,6 +259,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 		Storage              InstanceStorageRequest `json:"storage"`
 		RetainForDiagnosis   *bool                  `json:"retain_for_diagnosis"`
 		ElasticMetal         *ElasticMetalConfig    `json:"elastic_metal"`
+		OVH                  *OVHOrderOptions       `json:"ovh"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -271,7 +272,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	in := CreateInstanceInput{
 		Setup: body.Setup, Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
-		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage, ElasticMetal: body.ElasticMetal,
+		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage, ElasticMetal: body.ElasticMetal, OVH: body.OVH,
 	}
 	if body.RetainForDiagnosis != nil {
 		in.RetainOnFailureSet = true

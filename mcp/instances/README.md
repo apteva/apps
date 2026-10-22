@@ -3,6 +3,65 @@
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 
+## OVH compute products (0.12.0)
+
+OVH now includes Public Cloud VMs, standalone VPS, standard dedicated servers and
+Eco bare metal. Catalogs come from the account's current billing subsidiary;
+locations, hardware options and available Linux images stay provider-driven.
+Product metadata supplies hardware facts. Catalog availability is indicative:
+OVH validates the selected plan, options and stock during quoting/checkout.
+
+Refresh the `ovhcloud` integration catalog before updating/using this release.
+The catalog preserves existing Public Cloud tool names and adds order carts,
+service delivery, VPS/dedicated installation and cancellation operations. Select
+EU, CA or US in the connection's public `api_endpoint` field (EU default).
+`service_name` remains the Public Cloud project ID and is optional for standalone
+VPS/dedicated-only accounts. Tokens must allow the chosen product APIs and, for
+contract orders, `/me` and the relevant order/billing routes. Project-only tokens
+can still use Public Cloud when contract/catalog permissions are unavailable.
+An unavailable product family does not hide the others on that endpoint.
+
+Provisioning in the panel first displays **Review order**, including OVH's
+itemized total, taxes, hardware/license choices, commitment and contract terms.
+**Place order** checks that the quote is unchanged, then charges the configured
+OVH payment method. It does not waive the cooling-off period. Delivery can take
+hours or await payment/account verification. Linux installation and generated
+SSH-key access happen only on the service identified by that exact paid order.
+Normal setup, monitoring, commands, file transfer, tunnels and native deployment
+then use the existing host paths. Physical/VPS disks use their offer options;
+Public Cloud block volumes cannot attach to standalone VPS/dedicated hosts.
+
+API/MCP callers use `instance_quote` with a unique `ovh.request_key`, then send the
+same input and returned `ovh.quote_id` to `instance_create`. Contract size IDs are
+`ovh/vps/<plan>`, `ovh/baremetalServers/<plan>` or `ovh/eco/<plan>`, and locations
+use `ovh/<product>/<datacenter>`. `ovh.addons` maps family names to arrays of option
+plan codes (one entry for an exclusive family). Optional per-addon configuration
+is under `ovh.addon_configurations[optionCode]`. All fields and human descriptions
+are discovered in `server_types[].ovh_offer`; no plan codes are hardcoded.
+
+The durable order journal handles duplicate requests and restart recovery.
+Uncertain checkout or reinstall responses are never replayed automatically.
+Recovery inspects the recorded cart/order/task and generated SSH identity; if OVH
+cannot expose an unambiguous result, the row stays pending for operator
+reconciliation. Cancellation can require the token OVH emails its account
+administrator: the panel and `instance_order_status action=confirm_termination`
+consume it without storing it. Inventory remains until provider absence is
+verified; cancelling an undelivered order never installs the eventual server.
+Unused local quote records expire after seven days and are capped per account;
+paid/unresolved orders are retained. Provider carts expire independently.
+
+This release does not add a common app API for provider VM snapshots, S3 buckets
+or paid hardware upgrades; the integration exposes their provider primitives,
+while existing native app-data snapshots and Public Cloud data volumes continue
+to work. Dedicated OSes requiring custom images or Windows credentials are not
+advertised as eligible Linux installations.
+
+Validation uses official API schemas/public catalogs and local provider fixtures,
+including UI review, duplicate purchase prevention, interrupted checkout/install,
+exact service ownership, regional permissions, cancellation/token redaction and
+provider comparison. No paid OVH resources were ordered and production was not
+updated during release validation.
+
 ## Native large-state transfer (0.10.0)
 
 The native backend implements Server's negotiated `state_transfer` contract with

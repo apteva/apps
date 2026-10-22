@@ -76,6 +76,9 @@ func executeProviderToolUncached(ctx *sdk.AppCtx, connectionID int64, provider, 
 }
 
 func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
+	if provider == "ovhcloud" {
+		return ovhServerTypes(ctx)
+	}
 	if provider == "clouding" || provider == "upcloud" {
 		return cloudingUpcloudServerTypes(ctx, provider)
 	}
@@ -156,6 +159,9 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 }
 
 func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
+	if provider == "ovhcloud" {
+		return ovhLocations(ctx)
+	}
 	if provider == "clouding" || provider == "upcloud" {
 		return cloudingUpcloudLocations(ctx, provider)
 	}
@@ -188,6 +194,9 @@ func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, err
 }
 
 func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
+	if provider == "ovhcloud" {
+		return ovhImages(ctx)
+	}
 	if provider == "clouding" || provider == "upcloud" {
 		return cloudingUpcloudImages(ctx, provider)
 	}
@@ -738,6 +747,9 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 
 func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	provider := normalizeProvider(inst.Provider)
+	if isOVHContract(inst) {
+		return ovhContractDestroy(ctx, inst, "")
+	}
 	if provider == "clouding" || provider == "upcloud" {
 		return cloudingUpcloudDestroy(ctx, inst)
 	}
@@ -978,6 +990,10 @@ func scalewaySSHProbeError(ctx *sdk.AppCtx, inst *Instance, probeErr error) erro
 }
 
 func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
+	if inst, e := dbGetInstance(ctx.AppDB(), id); e == nil && isOVHContract(inst) {
+		kickOVHContract(ctx, id)
+		return
+	}
 	if !finishInstanceCreation(ctx, id) {
 		return
 	}
@@ -1124,7 +1140,7 @@ func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
 }
 
 func usesCloudInit(inst *Instance) bool {
-	if inst.Platform == "macos" || isScalewayDediboxInstance(inst) {
+	if inst.Platform == "macos" || isScalewayDediboxInstance(inst) || isOVHContract(inst) {
 		return false
 	}
 	// Linode and OVH install keys through their native image/config APIs.
@@ -1172,6 +1188,14 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 }
 
 func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
+	if isOVHContract(inst) {
+		product, _ := ovhSizeParts(inst.Size)
+		prefix := "dedicated"
+		if product == "vps" {
+			prefix = "vps"
+		}
+		return prefix + "_get", map[string]any{"serviceName": inst.ProviderID}, nil
+	}
 	switch inst.Provider {
 	case "clouding":
 		return "get_server", map[string]any{"id": inst.ProviderID}, nil
@@ -1216,6 +1240,10 @@ func reconcileAPIProviderProvisioning(ctx *sdk.AppCtx) {
 			continue
 		}
 		for _, inst := range rows {
+			if isOVHContract(inst) {
+				kickOVHContract(ctx, inst.ID)
+				continue
+			}
 			if isScalewayDediboxInstance(inst) {
 				kickScalewayDediboxProvisioning(ctx, inst.ID)
 				continue

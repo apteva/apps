@@ -11,6 +11,8 @@ import (
 
 func (a *App) MCPTools() []sdk.Tool {
 	return append(monitoringTools(), []sdk.Tool{
+		{Name: "instance_quote", Description: "Prepare and review a priced OVH VPS/dedicated/Eco order without purchasing. Use a unique ovh.request_key; pass the returned quote_id to instance_create only after reviewing prices and contracts.", InputSchema: ovhQuoteSchema(), Handler: a.toolInstanceQuote},
+		{Name: "instance_order_status", Description: "Inspect or resume an owned OVH order. confirm_termination consumes the provider email token without storing it. Never repeats checkout or an unknown installation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "action": map[string]any{"type": "string", "enum": []string{"inspect", "resume", "confirm_termination"}}, "token": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolOrderStatus},
 		{
 			Name:        "instance_list_providers",
 			Description: "List all VPS provider connections bound to this Instances install and identify the configured default. Read-only and does not call a provider API.",
@@ -32,6 +34,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tags_json":              map[string]any{"type": "string"},
 				"retain_for_diagnosis":   map[string]any{"type": "boolean", "description": "Keep a failed provider resource for diagnostics instead of automatic rollback; defaults to true"},
 				"setup":                  setupSchema(),
+				"ovh":                    ovhOrderOptionsSchema(),
 				"elastic_metal": map[string]any{"type": "object", "description": "Optional Scaleway Elastic Metal install settings", "properties": map[string]any{
 					"raid_level":          map[string]any{"type": "string", "enum": []string{"raid0", "raid1", "raid5", "raid6", "raid10"}},
 					"partitioning_schema": map[string]any{"type": "object", "description": "Explicit Scaleway partitioning schema; validated before server creation"},
@@ -317,7 +320,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Name:  name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
 		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
 		Storage:      storageRequestArg(args),
-		ElasticMetal: elasticMetalConfigArg(args),
+		ElasticMetal: elasticMetalConfigArg(args), OVH: ovhOrderArg(args),
 	}
 	if value, present := args["retain_for_diagnosis"]; present {
 		in.RetainOnFailureSet = true

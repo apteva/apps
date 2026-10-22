@@ -102,6 +102,29 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 	} else {
 		_, result.ProviderIPv4, result.ProviderIPv6 = parseProviderResource(inst.Provider, data)
 	}
+	if isOVHContract(inst) {
+		product, _ := ovhSizeParts(inst.Size)
+		prefix := "dedicated"
+		if product == "vps" {
+			prefix = "vps"
+		}
+		ips, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "ovhcloud", prefix+"_ips", map[string]any{"serviceName": inst.ProviderID})
+		if err != nil {
+			return nil, err
+		}
+		var values []string
+		if err = json.Unmarshal(ips, &values); err != nil {
+			return nil, err
+		}
+		result.ProviderIPv4 = firstPublicIP(values, 4)
+		result.ProviderIPv6 = firstPublicIP(values, 6)
+		if result.ProviderIPv4 == "" {
+			result.ProviderIPv4 = usableProviderIP(jsonStringAt(data, "ip"), 4)
+		}
+		if product != "vps" {
+			result.ProviderState = strings.ToLower(firstNonEmpty(jsonStringAt(data, "powerState"), jsonStringAt(data, "state")))
+		}
+	}
 	if inst.PublicIPv4 != result.ProviderIPv4 {
 		result.Differences = append(result.Differences, fmt.Sprintf("IPv4 differs: app=%s provider=%s", inst.PublicIPv4, result.ProviderIPv4))
 	}

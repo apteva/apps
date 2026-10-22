@@ -1283,6 +1283,7 @@ export function InstanceCard({
         </button>
       </div>
 
+      {inst.provider === "ovhcloud" && inst.size?.startsWith("ovh/") && <OVHOrderStatus instance={inst} withParams={withParams}/> }
       {inst.setup && <div className="px-3 py-2 text-xs text-text-muted border-t border-border">Setup: {inst.setup.stage} · {inst.setup.status}{inst.setup.facts?.os ? ` · ${inst.setup.facts.os} / ${inst.setup.facts.architecture}` : ""}{inst.setup.verified?.docker ? " · Docker ✓" : ""}{inst.setup.verified?.runtimes ? " · Language tools ✓" : ""}</div>}
       {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
 	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${(!comparison.complete || comparison.differences?.length) ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : comparison.complete ? "matches checked state" : "comparison incomplete"}</div>}
@@ -1555,7 +1556,18 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
   );
 }
 
+interface OVHOfferWire {
+ product: string; plan_code: string;
+ configurations: Array<{name:string;required:boolean;custom?:boolean;values?:string[]}>;
+ addon_families: Array<{name:string;required:boolean;exclusive:boolean;default?:string;options:string[]}>;
+ prices: Array<{mode:string;duration:string;amount:number;currency:string;commitment_months?:number}>;
+ options?: Record<string,{code:string;description:string;configurations?:Array<{name:string;required:boolean;custom?:boolean;values?:string[]}>}>;
+ images?: string[];
+}
+interface OVHMoney { value:number;currencyCode:string;text?:string }
+interface OVHQuoteWire { quote_id:string; status:string; expires_at:string; error?:string; quote?: { prices?:{withTax?:OVHMoney;withoutTax?:OVHMoney;tax?:OVHMoney};details?:Array<{description:string;quantity?:number;totalPrice?:OVHMoney}>;contracts?:Array<{name:string;content?:string;url?:string}> } }
 interface ServerTypeWire {
+ ovh_offer?: OVHOfferWire;
  available?: boolean; unavailable_reason?: string; provider_family?: string; configurable_boot?: boolean; requires_boot_storage?: boolean; price_known?: boolean;
   name: string;
   description?: string;
@@ -1655,6 +1667,21 @@ export function CreateDialog({
 	const [elasticRAID, setElasticRAID] = useState("");
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
+  const ovhOffer = selectedType?.ovh_offer;
+  const ovhContract = provider === "ovhcloud" && size.startsWith("ovh/");
+  const [ovhConfigs, setOVHConfigs] = useState<Record<string,string>>({});
+  const [ovhAddons, setOVHAddons] = useState<Record<string,string[]>>({});
+  const [ovhAddonConfigs,setOVHAddonConfigs]=useState<Record<string,Record<string,string>>>({});
+  const [ovhPrice, setOVHPrice] = useState("");
+  const [ovhQuote, setOVHQuote] = useState<OVHQuoteWire | null>(null);
+  const [ovhRequestKey, setOVHRequestKey] = useState(() => crypto.randomUUID());
+  const [ovhSubmittedPayload, setOVHSubmittedPayload] = useState<any>(null);
+  useEffect(() => {
+    setOVHConfigs({}); setOVHAddons({}); setOVHAddonConfigs({}); setOVHPrice("");
+  }, [size, providerConnectionID]);
+  useEffect(() => {
+    setOVHQuote(null); setOVHRequestKey(crypto.randomUUID()); setOVHSubmittedPayload(null);
+  }, [providerConnectionID, name, size, region, image, ovhConfigs, ovhAddons, ovhAddonConfigs, ovhPrice, hostSetup]);
 
   const bootStorageOptions: Array<{storage_class: string; min_size_gb?: number; max_size_gb?: number; allowed_tiers?: string[]; billing?: string}> = selectedType?.boot_storage?.length
     ? selectedType.boot_storage
@@ -1667,6 +1694,14 @@ export function CreateDialog({
     !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
   );
   const compatibleImages = images.filter((candidate) => {
+    if (provider === "ovhcloud") {
+      if (size.startsWith("ovh/vps/") && !candidate.name.startsWith("ovh-vps/")) return false;
+      if (size.startsWith("ovh/") && !size.startsWith("ovh/vps/")) {
+        if (!candidate.name.startsWith("ovh-dedicated/")) return false;
+        if (ovhOffer?.images?.length && !ovhOffer.images.includes(candidate.name)) return false;
+      }
+      if (!size.startsWith("ovh/") && candidate.name.startsWith("ovh-")) return false;
+    }
     if (selectedType?.architecture && candidate.architecture && normalizeArchitecture(selectedType.architecture) !== normalizeArchitecture(candidate.architecture)) return false;
     if (selectedType?.resource_class && candidate.resource_class && candidate.resource_class !== selectedType.resource_class) return false;
     if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
@@ -1827,16 +1862,24 @@ export function CreateDialog({
     setLocalError("");
     setBusy(true);
     try {
+      const [pricingMode, duration] = (ovhPrice || (ovhOffer?.prices[0] ? `${ovhOffer.prices[0].mode}|${ovhOffer.prices[0].duration}` : "default|P1M")).split("|");
+      const payload = {
+        setup: hostSetup.baseline || hostSetup.docker || hostSetup.runtimes ? hostSetup : undefined,
+        name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
+        storage: customBootStorage ? {boot:{size_gb:bootSizeGB,storage_class:bootStorageClass,tier:bootTier,delete_policy:"with_instance"}} : undefined,
+        elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? {raid_level:elasticRAID} : undefined,
+        ovh: ovhContract ? {request_key:ovhRequestKey,pricing_mode:pricingMode,duration,configurations:ovhConfigs,addons:ovhAddons,addon_configurations:ovhAddonConfigs} : undefined,
+      };
+      if (ovhContract && (!ovhQuote || JSON.stringify(payload)!==JSON.stringify(ovhSubmittedPayload))) {
+        const review = await fetch(`${API}/instances-quote?${withParams()}`, {method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+        if (!review.ok) throw new Error(`${review.status}: ${await review.text()}`);
+        const quote = await review.json() as OVHQuoteWire;
+        if (quote.status !== "quoted") throw new Error(quote.error || `Quote is ${quote.status}; no purchase was made. Change configuration to request another quote.`);
+        setOVHQuote(quote); setOVHSubmittedPayload(payload); return;
+      }
       const r = await fetch(`${API}/instances?${withParams()}`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          setup: hostSetup.baseline || hostSetup.docker || hostSetup.runtimes ? hostSetup : undefined,
-          name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
-          storage: customBootStorage ? { boot: { size_gb: bootSizeGB, storage_class: bootStorageClass, tier: bootTier, delete_policy: "with_instance" } } : undefined,
-		  elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? { raid_level: elasticRAID } : undefined,
-        }),
+        method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(ovhContract ? {...ovhSubmittedPayload,ovh:{...ovhSubmittedPayload.ovh,quote_id:ovhQuote!.quote_id}} : payload),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -1858,7 +1901,7 @@ export function CreateDialog({
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
     const specs = parts.join(", ");
     const price = formatCatalogMonthlyPrice(t);
-    const displayName = t.name.startsWith("dedibox/")
+    const displayName = t.ovh_offer ? (t.description || t.ovh_offer.plan_code) : t.name.startsWith("dedibox/")
       ? (t.description?.split(" — ")[0] || t.name.replace(/^dedibox\//, "Dedibox "))
 	  : t.name.startsWith("elastic-metal/")
 		? (t.description?.split(" — ")[0] || t.name.replace(/^elastic-metal\//, "Elastic Metal "))
@@ -1898,8 +1941,9 @@ export function CreateDialog({
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
         className="bg-bg border border-border rounded p-5 space-y-4"
-        style={{ width: "min(480px, 100%)" }}
+        style={{ width: "min(640px, 100%)", maxHeight:"90vh", overflowY:"auto" }}
       >
+        <fieldset disabled={busy} className="space-y-4">
         <h2 className="text-text font-semibold">Provision a new instance</h2>
         {localError && <p role="alert" className="text-xs text-red">{localError}</p>}
         {catalogError ? (
@@ -2054,6 +2098,38 @@ export function CreateDialog({
 			</select>
 		  </div>
 		)}
+        {ovhContract && <fieldset disabled={busy} className="rounded border border-border p-3 space-y-3 text-xs">
+          <legend>OVH contract order</legend>
+          <p className="text-text-muted">OVH validates stock and compatibility at order time. Delivery can take hours. Cancellation may require the token emailed by OVH. Review the complete price and contract terms before purchase.</p>
+          {ovhOffer && <>
+            <label className="block">Billing period and commitment
+              <select aria-label="OVH billing period" className="w-full bg-bg-input border border-border rounded p-1" value={ovhPrice || (ovhOffer.prices[0] ? `${ovhOffer.prices[0].mode}|${ovhOffer.prices[0].duration}` : "")} onChange={event=>setOVHPrice(event.target.value)}>
+                {ovhOffer.prices.map((price,index)=><option key={index} value={`${price.mode}|${price.duration}`}>{price.mode} · {price.duration} · {price.amount.toFixed(2)} {price.currency}{price.commitment_months ? ` · ${price.commitment_months} month commitment` : ""} (base price)</option>)}
+              </select>
+            </label>
+            {ovhOffer.configurations.filter(config=>!["vps_datacenter","vps_os","dedicated_datacenter","dedicated_os"].includes(config.name)).map(config=><label key={config.name} className="block">{config.name.replaceAll("_"," ")}{config.required ? " *" : ""}
+              {config.custom ? <input aria-label={`OVH ${config.name}`} className="w-full bg-bg-input border border-border rounded p-1" value={ovhConfigs[config.name] || ""} onChange={event=>setOVHConfigs({...ovhConfigs,[config.name]:event.target.value})}/> : <select aria-label={`OVH ${config.name}`} className="w-full bg-bg-input border border-border rounded p-1" value={ovhConfigs[config.name] || (config.required && config.values?.length===1 ? config.values[0] : "")} onChange={event=>setOVHConfigs({...ovhConfigs,[config.name]:event.target.value})}>
+                <option value="">{config.required ? "Select value" : "Provider default"}</option>{config.values?.map(value=><option key={value} value={value}>{value}</option>)}
+              </select>}
+            </label>)}
+            {ovhOffer.addon_families.map(family=><label key={family.name} className="block">{family.name.replaceAll("_"," ")}{family.required ? " *" : ""}
+              <select aria-label={`OVH option ${family.name}`} className="w-full bg-bg-input border border-border rounded p-1" multiple={!family.exclusive} value={family.exclusive ? ovhAddons[family.name]?.[0] ?? (family.required ? family.default || (family.options.length===1 ? family.options[0] : "") : "") : ovhAddons[family.name] || []} onChange={event=>setOVHAddons({...ovhAddons,[family.name]:family.exclusive ? event.target.value ? [event.target.value] : [] : Array.from(event.target.selectedOptions,option=>option.value)})}>
+                {family.exclusive && <option value="">{family.required ? "Select option" : "No additional option"}</option>}{family.options.map(option=><option key={option} value={option}>{ovhOffer.options?.[option]?.description || option}</option>)}
+              </select>
+            </label>)}
+          </>}
+          {ovhOffer?.addon_families.flatMap(family => ovhAddons[family.name] || (family.required && family.default ? [family.default] : [])).flatMap(code => (ovhOffer.options?.[code]?.configurations || []).map(config => <label key={`${code}:${config.name}`} className="block">{ovhOffer.options?.[code]?.description || code}: {config.name.replaceAll("_"," ")}{config.required ? " *" : ""}
+            {config.custom ? <input aria-label={`OVH addon ${code} ${config.name}`} className="w-full bg-bg-input border border-border rounded p-1" value={ovhAddonConfigs[code]?.[config.name] || ""} onChange={event=>setOVHAddonConfigs({...ovhAddonConfigs,[code]:{...ovhAddonConfigs[code],[config.name]:event.target.value}})}/> : <select aria-label={`OVH addon ${code} ${config.name}`} className="w-full bg-bg-input border border-border rounded p-1" value={ovhAddonConfigs[code]?.[config.name] || ""} onChange={event=>setOVHAddonConfigs({...ovhAddonConfigs,[code]:{...ovhAddonConfigs[code],[config.name]:event.target.value}})}><option value="">Inherit from main offer</option>{config.values?.map(value=><option key={value} value={value}>{value}</option>)}</select>}
+          </label>))}
+          {ovhQuote && <div role="status" className="space-y-2">
+            <strong>OVH final order quote</strong>
+            <p>Includes the selected options, setup fees and contract terms. Expires {new Date(ovhQuote.expires_at).toLocaleTimeString()}.</p>
+            <OVHQuoteDetails quote={ovhQuote}/>
+
+            <p>Place order charges the configured OVH payment method. The cooling-off period is not waived.</p>
+            <button type="button" className="underline" onClick={()=>{setOVHQuote(null);setOVHRequestKey(crypto.randomUUID());}}>Request a fresh quote</button>
+          </div>}
+        </fieldset>}
         <HostSetupOptions value={hostSetup} onChange={setHostSetup} disabled={busy} />
         <div className="flex justify-end gap-2 pt-1">
           {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
@@ -2069,8 +2145,9 @@ export function CreateDialog({
             type="submit"
             disabled={busy || !name.trim() || !provider || catalogLoading || !size || !region || !image || selectedType?.available === false}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
-          >{busy ? "Provisioning…" : "Provision"}</button>
+          >{busy ? ovhContract && !ovhQuote ? "Fetching quote…" : "Provisioning…" : ovhContract ? ovhQuote ? "Place order" : "Review order" : "Provision"}</button>
         </div>
+        </fieldset>
       </form>
     </div>
   );
@@ -2201,5 +2278,35 @@ export function HostOnboardingDialog({ initial, withParams, onClose, onChange }:
         </>}
       </div>
     </div>
+  </div>;
+}
+
+function OVHOrderStatus({instance,withParams}:{instance:Instance;withParams:()=>string}) {
+  const [result,setResult]=useState<any>(null);
+  const [token,setToken]=useState("");
+  const [busy,setBusy]=useState(false);
+  const check=async(action="")=>{
+    setBusy(true);
+    try {
+      const response=await fetch(`${API}/instances-order?${withParams()}`,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:instance.id,action,token:action==="confirm_termination" ? token : undefined})});
+      if(!response.ok)throw new Error(await response.text());
+      setResult(await response.json());
+    }catch(error){setResult({message:(error as Error).message});}
+    finally{setToken("");setBusy(false);}
+  };
+  return <div className="px-3 py-2 text-xs border-t border-border space-y-2">
+    <button type="button" className="underline" disabled={busy} onClick={()=>check()}>OVH order status</button>
+    {instance.status!=="ready" && <button type="button" className="underline ml-3" disabled={busy} onClick={()=>check("resume")}>Resume inspection</button>}
+    {result && <p role="status">{result.destroyed ? "OVH service deletion confirmed" : [result.order?.status || result.status,result.order_id ? `Order ${result.order_id}` : "",result.service_name,result.message,result.error].filter(Boolean).join(" · ")}</p>}
+    {instance.status==="destroying" && <div className="flex gap-2"><input type="password" autoComplete="off" aria-label="OVH termination email token" placeholder="Token from OVH email" value={token} onChange={event=>setToken(event.target.value)} className="bg-bg-input border border-border rounded p-1"/><button type="button" disabled={busy || !token} onClick={()=>check("confirm_termination")}>Confirm OVH cancellation</button></div>}
+  </div>;
+}
+
+function OVHQuoteDetails({quote}:{quote:OVHQuoteWire}) {
+  const money=(price?:OVHMoney)=>price ? `${price.value.toFixed(2)} ${price.currencyCode}` : "Not supplied";
+  return <div className="space-y-2">
+    <p>Total due now: <strong>{money(quote.quote?.prices?.withTax)}</strong> · Before tax: {money(quote.quote?.prices?.withoutTax)} · Tax: {money(quote.quote?.prices?.tax)}</p>
+    <ul>{quote.quote?.details?.map((line,index)=><li key={index}>{line.description}{line.quantity ? ` ×${line.quantity}` : ""}{line.totalPrice ? ` — ${money(line.totalPrice)}` : ""}</li>)}</ul>
+    {quote.quote?.contracts?.map((contract,index)=><details key={index}><summary>{contract.name}</summary>{contract.url?.startsWith("https://") && <a href={contract.url} target="_blank" rel="noopener noreferrer" className="underline">Read OVH contract</a>}{contract.content && <p className="whitespace-pre-wrap max-h-40 overflow-auto">{contract.content}</p>}</details>)}
   </div>;
 }

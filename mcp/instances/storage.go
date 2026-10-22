@@ -474,6 +474,9 @@ func attachCreatedVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) err
 }
 
 func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) error {
+	if isOVHContract(inst) {
+		return errors.New("OVH Public Cloud block volumes cannot attach to standalone VPS or dedicated products")
+	}
 	if isVultrMetal(inst) {
 		return errors.New("Vultr bare metal does not support block-volume attachment")
 	}
@@ -746,6 +749,9 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 			return nil, fmt.Errorf("target instance is %s", inst.Status)
 		}
 
+		if isOVHContract(inst) {
+			return nil, errors.New("OVH standalone VPS/dedicated disks are configured through offer options, not Public Cloud volumes")
+		}
 		if isVultrMetal(inst) {
 			return nil, errors.New("Vultr block volumes attach to virtual compute; bare-metal plans use their included physical disks")
 		}
