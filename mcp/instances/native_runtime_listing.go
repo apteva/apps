@@ -16,6 +16,11 @@ func (b *nativeBackend) projectAccess(project string) error {
 	return nil
 }
 func (b *nativeBackend) requestEnvelope(r nativeRequest, action string) error {
+	if r.StateTransfer != nil {
+		if err := b.validateStatePolicy(*r.StateTransfer); err != nil {
+			return err
+		}
+	}
 	if err := b.projectAccess(r.ProjectID); err != nil {
 		return err
 	}

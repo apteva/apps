@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.9.0
+version: 0.10.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -83,6 +83,23 @@ requires:
         whose API only schedules contract cancellation. Scaleway Dedibox orders
         physical hardware and installs Linux after delivery; macOS hosts have a
         mandatory 24-hour minimum allocation before Destroy is enabled.
+config_schema:
+  - name: native_snapshot_max_archive_bytes
+    label: Native snapshot archive limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum compressed archive size. Default 8 GiB; hard maximum 16 GiB (17179869184 bytes). Applies after app restart."
+  - name: native_snapshot_max_state_bytes
+    label: Native snapshot expanded-state limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum cumulative file content and individual file size. Default 8 GiB; hard maximum 16 GiB. Tar metadata has a separate bounded allowance."
+  - name: native_snapshot_timeout_seconds
+    label: Native snapshot operation timeout (seconds)
+    type: text
+    default: "7200"
+    description: "Complete snapshot or restore deadline, from 60 to 21600 seconds. Default 2 hours. Server must use a compatible deadline."
+
 provides:
   http_routes:
     - prefix: /
@@ -198,7 +215,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.9.0
+    ref: instances/v0.10.0
     entry: mcp/instances
   port: 8080
   health_check: /health

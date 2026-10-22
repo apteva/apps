@@ -31,6 +31,9 @@ type nativeStateFake struct {
 	failStatus  bool
 }
 
+func (f *nativeStateFake) StateSpace(context.Context, *Instance, nativeRecord, []nativeRecord) (nativeStateSpace, error) {
+	return nativeStateSpace{Available: 64 << 30}, nil
+}
 func (f *nativeStateFake) Snapshot(_ context.Context, _ *Instance, _ nativeRecord, _ []nativeRecord, w io.Writer) error {
 	tw := tar.NewWriter(w)
 	for name, body := range f.data {
@@ -82,6 +85,7 @@ func stateRequest(b *nativeBackend, action, id, key, sha string, body []byte) *h
 	}
 	req := httptest.NewRequest(method, nativePrefix+"/"+action+"?deployment_id="+id, bytes.NewReader(body))
 	req.Header.Set("Idempotency-Key", key)
+	req.Header.Set("X-Apteva-State-Transfer-Policy", nativeJSON(b.statePolicy()))
 	if sha != "" {
 		req.Header.Set("X-Apteva-Snapshot-SHA256", sha)
 	}
@@ -392,7 +396,7 @@ func TestNativeStateLimitsAndCorruption(t *testing.T) {
 	// Oversized declared entries are rejected before allocating or reading bodies.
 	var raw bytes.Buffer
 	tw := tar.NewWriter(&raw)
-	if e := tw.WriteHeader(&tar.Header{Name: "huge", Typeflag: tar.TypeReg, Size: nativeStateLimit + 1}); e != nil {
+	if e := tw.WriteHeader(&tar.Header{Name: "huge", Typeflag: tar.TypeReg, Size: nativeDefaultStateLimit + 1}); e != nil {
 		t.Fatal(e)
 	}
 	if e := canonicalNativeTar(bytes.NewReader(raw.Bytes()), io.Discard, false); e == nil {
@@ -412,7 +416,7 @@ func TestNativeStateLimitsAndCorruption(t *testing.T) {
 	}
 	b, _, r := newNativeTest(t)
 	req := httptest.NewRequest("POST", nativePrefix+"/restore?deployment_id="+r.DeploymentID, strings.NewReader("tiny"))
-	req.ContentLength = nativeStateLimit + 1
+	req.ContentLength = nativeDefaultStateLimit + 1
 	w := httptest.NewRecorder()
 	b.serveHTTP(w, req)
 	if w.Code != 413 {
