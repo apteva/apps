@@ -1314,7 +1314,11 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	var connectionID int64
 	if raw, present := args["connection_id"]; present {
 		var err error
-		connectionID, err = strconv.ParseInt(strings.TrimSpace(toString(raw)), 10, 64)
+		text := strings.TrimSpace(toString(raw))
+		if number, ok := raw.(float64); ok {
+			text = strconv.FormatFloat(number, 'f', -1, 64)
+		}
+		connectionID, err = strconv.ParseInt(text, 10, 64)
 		if err != nil || connectionID <= 0 {
 			return mcpError("connection_id must be a positive integer"), nil
 		}

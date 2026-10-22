@@ -180,3 +180,16 @@ func TestPinterestTwoConnectionsKeepSeparateBoardsAndProfiles(t *testing.T) {
 		t.Fatal("existing brand account changed")
 	}
 }
+
+func TestAccountConnectionNumericJSONIDDoesNotUseExponentFormatting(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{connectionFixture(2000000, "pinterest", "test-proj", "active")}
+	ctx := newSocialCtx(t, pf)
+	out, err := (&App{}).toolAccountAdd(ctx, map[string]any{"platform": "pinterest", "connection_id": float64(2000000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, ok := out.(map[string]any); !ok || result["reused_connection"] != int64(2000000) {
+		t.Fatal(out)
+	}
+}
