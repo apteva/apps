@@ -84,8 +84,10 @@ stable continuation, matched active-speech coverage improves from **75–78% to
 85–89%**. Longest damaged speech improves from **560–680 ms to 520 ms**. Estimated
 maximum matched-speech delay rises from approximately **160 ms to 300 ms** as
 more delayed but locally fresh speech is preserved. This severe burst scenario
-is **not classified as smooth speech**, and initial words already absent from
-this capture cannot be recovered. Healthy/no-fault acceptance continues to
+is **not classified as smooth speech**. The replay starts inside an already
+shifted phase, and opening speech is discarded while recovery collects evidence;
+first-word preservation is not achieved in this fault scenario.
+Healthy/no-fault acceptance continues to
 require exact complete decoded PCM, first-word preservation and zero discards.
 
 On a local Apple M1 Pro, recovery evaluation costs about **31 ns/packet healthy**

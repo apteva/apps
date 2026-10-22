@@ -102,6 +102,9 @@ func TestSIPAutomaticCapturedTiming(t *testing.T) {
 			}
 			speech := analyzeSIPSpeech(reference, cm.sampleRate(), output, positions, 40-trace.InitialAgeMS)
 			oldSpeech := analyzeSIPSpeech(reference, cm.sampleRate(), oldOutput, oldPositions, 40-trace.InitialAgeMS)
+			speech.Codec, oldSpeech.Codec = codec, codec
+			speech.DiscardedMS = float64(current.droppedSamples+current.lateDroppedSamples) / 8
+			oldSpeech.DiscardedMS = float64(released.droppedSamples+released.lateDroppedSamples) / 8
 			t.Logf("speech candidate=%+v baseline=%+v", speech, oldSpeech)
 			if speech.ActiveSpeechCoverage <= oldSpeech.ActiveSpeechCoverage || speech.LongestDamagedSpeechMS >= oldSpeech.LongestDamagedSpeechMS || speech.MaxAddedDelayMS > 550 {
 				t.Fatal("captured speech continuity/delay did not improve within bound")
