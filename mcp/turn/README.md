@@ -39,7 +39,7 @@ tunnel. An HTTP ingress proxy alone cannot transport the TURN data plane.
 
 The manifest declares a CGO-disabled portable package, protected runtime
 lifecycle endpoints, exclusive activation, and every additional network port.
-No coturn installation, system libraries, database, Docker socket, host-specific
+No coturn installation, system libraries, external database, Docker socket, host-specific
 path, or shared Telephony filesystem is required. Signing configuration remains
 in Apteva's encrypted installation settings and is injected at runtime.
 
@@ -118,28 +118,61 @@ idempotency key. Server owns the build, package delivery, execution credentials,
 port reservations, HTTP routing, rollback, and lifecycle ordering. This app does
 not create infrastructure or change firewall rules itself.
 
-The release manifest pins its source to the immutable `turn/v0.1.0` tag. The
+The release manifest pins its source to the immutable `turn/v0.2.0` tag. The
 registry entry, manifest and icon resolve to that same tag. Installing the app
 does not deploy it into an existing Telephony instance or change another app.
 
 ## TURN over TLS
 
-TLS requires a certificate chain and matching private key covering `public_host`.
-Use a publicly trusted certificate for browser clients, or a private CA trusted
-by every intended client. The server enforces TLS 1.2 or newer and validates
-the key pair, certificate hostname, current validity and server-auth usage.
-Configure and renew certificate material through the native TURN settings panel;
-Apteva encrypts the install configuration and supplies it on the selected target.
-Combined certificate/key input is limited to 64 KiB. No certificate file mount
-or shared management-host filesystem is required.
+Choose **Automatic through Domains and Let's Encrypt** in the native Settings panel.
+Bind Domains 1.2.0 or newer in the TURN installation's dependencies, set
+`public_host` to a fresh subdomain and select its `dns_zone`. For a global
+installation, set `dns_project_id` to the project owning that zone. Accept the
+Let's Encrypt subscriber agreement (`acme_accept_terms=true`). Contact email
+(`acme_email`) is optional.
+
+TURN calls Domains through the authenticated Apteva SDK; provider credentials
+stay with the management platform. It creates the subdomain's A record pointing
+to `public_ip`, creates a temporary DNS-01 TXT record, waits for both public
+resolvers to see the correct values, and obtains a public certificate. It
+rejects conflicting A, AAAA and CNAME records instead of replacing them. When
+moving to a new public IPv4, it updates only its own journaled A record using
+the exact provider ID and previous-value snapshot. DNS
+challenge records use append-only creation; cleanup targets only the exact
+record ID and value this installation created. Failed cleanup is journaled and
+retried. Existing challenge delegations are preserved and reported as a conflict.
+The A record stays in DNS when TURN is stopped or removed; inspect it before
+manually deleting a retired relay hostname.
+
+The panel generates `tls_storage_key` when managed TLS is first enabled. Keep
+this stable secret in encrypted installation settings. ACME account and private
+certificate keys are AES-GCM encrypted with it in the app's private SQLite DB.
+Keep both the storage key and app data when moving or restoring the installation.
+Changing the credential signing secret does not affect TLS encryption. There is
+no shared filesystem or private-key export from another app.
+
+Only the active execution performs issuance and renewal. Certificates are checked
+hourly and renewed with less than 30 days remaining. Failures retain the previous
+certificate and use a one-hour retry backoff; the UI shows the current phase.
+Renewal atomically replaces the leaf for new TLS handshakes without interrupting
+existing connections or allocations. TCP/UDP continue to work during initial
+issuance and renewal failures. No public HTTP port or ingress proxy is required
+for DNS-01 validation. The management gateway and Domains app must remain reachable.
+
+**Import a certificate** remains available for operators supplying their own
+certificate chain and matching private key. The server enforces TLS 1.2 or newer
+and validates the key pair, hostname, current validity and server-auth usage.
+Combined certificate/key input is limited to 64 KiB. Manual certificates must
+be renewed by the operator.
 
 TCP 5349 remains bound even before certificates are configured, preserving
 managed port ownership. Without valid material, TLS handshakes fail and no
 `turns:` URL is advertised. The panel clearly reports setup required; UDP/TCP
 remain usable. Once configured, credential responses include
 `turns:<public_host>:5349?transport=tcp`. Expired material is refused on new
-handshakes and fails readiness. Renew before expiry; an invalid replacement is
-rejected by settings validation. Certificate renewal is manual in this release.
+handshakes. Expired imported material also fails readiness; managed mode keeps
+UDP/TCP ready so automatic renewal can recover. An invalid replacement is
+rejected by settings validation. Managed mode renews automatically; imported certificates require manual replacement.
 
 The protocol tests establish a trusted test CA, verify hostname and chain with
 the client, allocate through TLS, relay audio both ways, and confirm fencing
@@ -236,7 +269,9 @@ deployment identity with the gateway before accepting lifecycle mutations.
 TURN allocations and network sockets cannot move between hosts. Schedule moves
 or upgrades after draining, give the destination its correct public IP/DNS
 settings, and have consumers obtain credentials for new sessions. This app has
-no persistent database or local key file to transfer. No zero-interruption call
+no persistent media session state to transfer. Managed TLS account/certificate
+state is stored in the app database and must move with the installation and its
+unchanged `tls_storage_key`. No zero-interruption call
 migration is promised.
 
 ## Development and verification

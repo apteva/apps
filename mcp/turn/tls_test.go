@@ -98,6 +98,7 @@ func TestRealTLSRelayWithVerifiedCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.certificate.Store(a.cfg.certificate)
 	a.cfg.tlsCertificatePEM = chain
 	a.cfg.tlsPrivateKeyPEM = key
 	a.cfg.publicIP = netip.MustParseAddr("127.0.0.1")
@@ -133,6 +134,19 @@ func TestRealTLSRelayWithVerifiedCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer relay.Close()
+	echoThroughRelay(t, relay)
+	// Rotation changes new TLS handshakes without closing the existing allocation.
+	renewedChain, renewedKey, renewedRoots := testCertificate(t, a.cfg.publicHost, now.Add(-time.Minute), now.Add(90*24*time.Hour))
+	renewed, err := parseCertificate(renewedChain, renewedKey, a.cfg.publicHost, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.certificate.Store(renewed)
+	next, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp4", a.tls.Addr().String(), &tls.Config{MinVersion: tls.VersionTLS12, ServerName: a.cfg.publicHost, RootCAs: renewedRoots})
+	if err != nil {
+		t.Fatal("renewed certificate not served", err)
+	}
+	next.Close()
 	echoThroughRelay(t, relay)
 	if bad, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp4", a.tls.Addr().String(), &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "wrong.example.com", RootCAs: roots}); err == nil {
 		bad.Close()

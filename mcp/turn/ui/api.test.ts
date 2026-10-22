@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { bytes, endpoint, request, saveSettings, settingsPatch } from "./api";
+import { bytes, endpoint, request, saveSettings, settingsPatch, managedSettings } from "./api";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -46,4 +46,14 @@ test("relay requests do not cache credentials and surface bounded errors", async
   globalThis.fetch = (async () => new Response("x".repeat(1000), { status: 503 })) as typeof fetch;
   try { await request("/test"); throw new Error("expected rejection"); } catch (error) { expect((error as Error).message.length).toBe(400); }
   expect(bytes(1048576)).toBe("1.0 MiB");
+});
+
+
+test("managed TLS generates a stable storage key only during first setup", () => {
+ const draft = {tls_mode:"managed", dns_zone:"example.com"};
+ const initial = managedSettings({}, draft, false, "p");
+ expect(initial.tls_storage_key).toMatch(/^[0-9a-f]{96}$/);
+ expect(initial.dns_project_id).toBe("p");
+ expect(managedSettings({}, draft, true, "")).toEqual({});
+ expect(managedSettings({}, {tls_mode:"manual"}, false, "p")).toEqual({});
 });

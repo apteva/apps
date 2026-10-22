@@ -20,13 +20,15 @@ const (
 )
 
 type config struct {
-	publicIP                                      netip.Addr
-	publicHost, bindIP, realm, secret             string
-	ttl                                           time.Duration
-	maxAllocations, perCredential, bytesPerSecond int
-	allowedPeers                                  []netip.Prefix
-	certificate                                   *tls.Certificate
-	tlsCertificatePEM, tlsPrivateKeyPEM           string
+	publicIP                                            netip.Addr
+	publicHost, bindIP, realm, secret                   string
+	ttl                                                 time.Duration
+	maxAllocations, perCredential, bytesPerSecond       int
+	allowedPeers                                        []netip.Prefix
+	certificate                                         *tls.Certificate
+	tlsCertificatePEM, tlsPrivateKeyPEM                 string
+	tlsMode, dnsProject, dnsZone, acmeEmail, storageKey string
+	acmeTerms                                           bool
 }
 
 func parseConfig(values sdk.Config) (config, error) {
@@ -43,10 +45,38 @@ func parseConfig(values sdk.Config) (config, error) {
 	if !validHost(c.publicHost) {
 		return c, errors.New("public_host must be an IPv4 address or DNS hostname without a scheme, path or port")
 	}
-	c.tlsCertificatePEM, c.tlsPrivateKeyPEM = values.Get("tls_certificate_pem"), values.Get("tls_private_key_pem")
-	c.certificate, err = parseCertificate(c.tlsCertificatePEM, c.tlsPrivateKeyPEM, c.publicHost, time.Now())
-	if err != nil {
-		return c, err
+	c.tlsMode = values.Get("tls_mode")
+	if c.tlsMode == "" {
+		c.tlsMode = "manual"
+	}
+	if c.tlsMode != "manual" && c.tlsMode != "managed" {
+		return c, errors.New("tls_mode must be manual or managed")
+	}
+	c.dnsProject, c.dnsZone = strings.TrimSpace(values.Get("dns_project_id")), strings.ToLower(strings.TrimSpace(values.Get("dns_zone")))
+	c.acmeEmail, c.storageKey = strings.TrimSpace(values.Get("acme_email")), values.Get("tls_storage_key")
+	c.acmeTerms = values.Get("acme_accept_terms") == "true"
+	if c.tlsMode == "managed" {
+		if _, err := netip.ParseAddr(c.publicHost); err == nil || !strings.Contains(c.publicHost, ".") || strings.ToLower(c.publicHost) != c.publicHost {
+			return c, errors.New("managed TLS requires a lowercase DNS hostname")
+		}
+		if !validHost(c.dnsZone) || !strings.HasSuffix(c.publicHost, "."+c.dnsZone) {
+			return c, errors.New("managed TLS requires a DNS zone containing the relay subdomain (zone apex is not supported)")
+		}
+		if !c.acmeTerms {
+			return c, errors.New("accept the Let's Encrypt subscriber agreement to enable managed TLS")
+		}
+		if len(c.storageKey) < 32 || len(c.storageKey) > 1024 {
+			return c, errors.New("managed TLS requires a stable tls_storage_key of 32 to 1024 characters")
+		}
+		if c.acmeEmail != "" && (!strings.Contains(c.acmeEmail, "@") || strings.ContainsAny(c.acmeEmail, " \r\n")) {
+			return c, errors.New("invalid ACME contact email")
+		}
+	} else {
+		c.tlsCertificatePEM, c.tlsPrivateKeyPEM = values.Get("tls_certificate_pem"), values.Get("tls_private_key_pem")
+		c.certificate, err = parseCertificate(c.tlsCertificatePEM, c.tlsPrivateKeyPEM, c.publicHost, time.Now())
+		if err != nil {
+			return c, err
+		}
 	}
 	c.bindIP = values.Get("bind_ip")
 	if c.bindIP == "" {
