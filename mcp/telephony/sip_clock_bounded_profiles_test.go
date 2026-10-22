@@ -66,7 +66,7 @@ func TestSIPClockBoundedVariableProfiles(t *testing.T) {
 		}
 	}
 }
-func TestSIPClockStableDelayStillRejected(t *testing.T) {
+func TestSIPAutomaticStablePhaseRecovers(t *testing.T) {
 	b := newRTPJitterBuffer()
 	start := time.Unix(100, 0)
 	payload := make([]byte, 160)
@@ -80,8 +80,8 @@ func TestSIPClockStableDelayStillRejected(t *testing.T) {
 		b.popAt(at)
 	}
 	t.Logf("stable 240ms delivery step: rejected_ms=%g phase_withheld=%d queue_ms=%g", float64(b.lateDroppedSamples)/8, b.clock.phaseRejected, float64(b.buffered)/8)
-	if b.lateDroppedSamples < 28000*160 {
-		t.Fatal("stale-audio protection unexpectedly absorbed the delay")
+	if b.recovery.recoveries != 1 || b.lateDroppedSamples == 0 || b.lateDroppedSamples > 16000 {
+		t.Fatal("stable phase did not recover within a bounded interruption", b.recovery.recoveries, b.lateDroppedSamples)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestSIPClockTwoHourVariableDelivery(t *testing.T) {
 	}
 }
 
-func TestSIPClockDelayProtectionUsesConfiguredAgeLimit(t *testing.T) {
+func TestSIPAutomaticConfiguredAgeRetainsLocalBound(t *testing.T) {
 	for _, age := range []int{120, 160, 200} {
 		b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{TargetMS: 60, MaxTargetMS: 60, CapacityMS: age, MaxAgeMS: age})
 		start := time.Unix(100, 0)
@@ -159,8 +159,11 @@ func TestSIPClockDelayProtectionUsesConfiguredAgeLimit(t *testing.T) {
 			b.pushRTP(uint16(i), payload, uint32(i*160), at)
 			b.popAt(at)
 		}
-		if b.lateDroppedSamples < 28000*160 {
-			t.Errorf("configured age %dms: genuine backlog became fresh (late %.0fms)", age, float64(b.lateDroppedSamples)/8)
+		if b.recovery.recoveries != 1 || b.lateDroppedSamples == 0 || b.lateDroppedSamples > 16000 {
+			t.Errorf("configured age %dms: stable phase did not recover (late %.0fms, recoveries %d)", age, float64(b.lateDroppedSamples)/8, b.recovery.recoveries)
+		}
+		if b.buffered+int(b.pendingPCMSamples.Load()) > b.policy.CapacityMS*8 {
+			t.Fatal("local queue budget exceeded")
 		}
 	}
 }

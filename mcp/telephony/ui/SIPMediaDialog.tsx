@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import CarrierJitterBufferControls, {type CarrierBufferRequest} from "./CarrierJitterBufferControls";
 
 interface MediaSettings {
   codecs?: string[];
@@ -10,9 +11,10 @@ interface MediaSettings {
   voicemail_max_seconds?: number;
 }
 
-export default function SIPMediaDialog({ routeId, label, request, onClose }: {
+export default function SIPMediaDialog({ routeId, label, request, carrierRequest, onClose }: {
   routeId: string; label: string;
   request: (body: Record<string, unknown>) => Promise<{ config?: MediaSettings }>;
+  carrierRequest?: CarrierBufferRequest;
   onClose: () => void;
 }) {
   const [config, setConfig] = useState<MediaSettings>({});
@@ -66,6 +68,8 @@ export default function SIPMediaDialog({ routeId, label, request, onClose }: {
         <label className="block text-sm">Raw PCM sample rate<select className="my-1 w-full rounded border border-border bg-bg p-2" disabled={busy || !loaded} value={config.sample_rate || 0} onChange={e => setConfig({ ...config, sample_rate: Number(e.target.value) })}><option value={0}>WAV/MP3 supplies its rate</option>{[8000,16000,24000,48000].map(rate => <option key={rate} value={rate}>{rate} Hz</option>)}</select></label>
         <label className="block text-sm">Prerecorded prompts (JSON)<textarea className="my-1 w-full rounded border border-border bg-bg p-2 font-mono text-xs" disabled={busy || !loaded} rows={4} value={prompts} onChange={e => setPrompts(e.target.value)}/></label>
       </details>
+      <p className="text-xs text-text-muted">SIP playback recovery is automatic; legacy resynchronize settings do not disable it.</p>
+      {carrierRequest ? <CarrierJitterBufferControls target={{route_id:routeId}} request={carrierRequest}/> : null}
       {error ? <p role="alert" className="text-sm text-error">{error}</p> : null}
       <footer className="flex gap-2">{routeId ? <button disabled={busy || !loaded} type="button" className="rounded border border-border px-3 py-2 text-sm disabled:opacity-40" onClick={() => void save(true)}>Use project defaults</button> : null}<button disabled={busy || !loaded} type="button" className="ml-auto rounded border border-border px-3 py-2 text-sm disabled:opacity-40" onClick={() => void save()}>Save</button></footer>
     </section>

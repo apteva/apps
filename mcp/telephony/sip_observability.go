@@ -17,6 +17,7 @@ import (
 // Atomic counters and a best-effort bounded timing window. Sampling cannot hold
 // an RTP reader/writer: contention only skips diagnostic sequence calculations.
 type sipRTPObservations struct {
+	streamLossBase       int64 // protected by timingMu, RTCP per-stream cumulative loss
 	receiveEvidence      sipReceiveWindow
 	firstReceived        atomic.Int64
 	firstSent            atomic.Int64
@@ -99,6 +100,7 @@ func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Tim
 	if !o.have || o.stream != packet.SSRC {
 		o.have = true
 		o.stream = packet.SSRC
+		o.streamLossBase = o.loss.Load()
 		o.highest = int64(packet.SequenceNumber)
 		o.first = o.highest
 		o.seen = [256]int64{}
@@ -223,6 +225,17 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 }
 
 type sipJitterSnapshot struct {
+	RecoveryPolicy           string  `json:"recovery_policy"`
+	RecoveryState            string  `json:"recovery_state"`
+	RecoveryReason           string  `json:"recovery_reason"`
+	RecoveryWindowMS         float64 `json:"recovery_window_ms"`
+	RecoveryVariationMS      float64 `json:"recovery_variation_ms"`
+	RecoveryRatePPM          float64 `json:"recovery_delivery_rate_ppm"`
+	RecoveryLocalResidenceMS float64 `json:"recovery_local_residence_ms"`
+	RecoveryDurationMS       float64 `json:"recovery_duration_ms"`
+	PlayoutOffsetMS          float64 `json:"playout_offset_ms"`
+	LegacyResynchronize      *bool   `json:"legacy_resynchronize_requested,omitempty"`
+
 	Resynchronizations     int              `json:"playout_resynchronizations"`
 	RecoveryDiscardedMS    float64          `json:"recovery_discarded_ms"`
 	LastRecoveryOffsetMS   float64          `json:"last_recovery_offset_ms"`
@@ -266,26 +279,28 @@ type sipJitterSnapshot struct {
 	MissingFilledMS        float64          `json:"missing_audio_filled_ms"`
 }
 type sipSignalSnapshot struct {
-	Negotiation      *sipCodecEvidence `json:"codec_negotiation,omitempty"`
-	BYEStatus        string            `json:"bye_status,omitempty"`
-	BYEFailures      int64             `json:"bye_failures"`
-	BYEError         string            `json:"bye_error,omitempty"`
-	DialogID         string            `json:"dialog_id"`
-	State            string            `json:"state"`
-	InviteAt         string            `json:"invite_at,omitempty"`
-	AnswerAt         string            `json:"answer_at,omitempty"`
-	ACKAt            string            `json:"ack_at,omitempty"`
-	RefreshAttempts  int64             `json:"refresh_attempts"`
-	RefreshSuccesses int64             `json:"refresh_successes"`
-	RefreshFailures  int64             `json:"refresh_failures"`
-	LastRefreshAt    string            `json:"last_refresh_at,omitempty"`
-	BYEInitiator     string            `json:"bye_initiator,omitempty"`
-	EndReason        string            `json:"end_reason,omitempty"`
-	TimeoutCause     string            `json:"timeout_cause,omitempty"`
-	Codec            string            `json:"codec,omitempty"`
-	Encryption       string            `json:"encryption,omitempty"`
+	CarrierJitterBuffer *carrierJitterBufferView `json:"carrier_jitter_buffer,omitempty"`
+	Negotiation         *sipCodecEvidence        `json:"codec_negotiation,omitempty"`
+	BYEStatus           string                   `json:"bye_status,omitempty"`
+	BYEFailures         int64                    `json:"bye_failures"`
+	BYEError            string                   `json:"bye_error,omitempty"`
+	DialogID            string                   `json:"dialog_id"`
+	State               string                   `json:"state"`
+	InviteAt            string                   `json:"invite_at,omitempty"`
+	AnswerAt            string                   `json:"answer_at,omitempty"`
+	ACKAt               string                   `json:"ack_at,omitempty"`
+	RefreshAttempts     int64                    `json:"refresh_attempts"`
+	RefreshSuccesses    int64                    `json:"refresh_successes"`
+	RefreshFailures     int64                    `json:"refresh_failures"`
+	LastRefreshAt       string                   `json:"last_refresh_at,omitempty"`
+	BYEInitiator        string                   `json:"bye_initiator,omitempty"`
+	EndReason           string                   `json:"end_reason,omitempty"`
+	TimeoutCause        string                   `json:"timeout_cause,omitempty"`
+	Codec               string                   `json:"codec,omitempty"`
+	Encryption          string                   `json:"encryption,omitempty"`
 }
 type sipLiveSnapshot struct {
+	RTCP               sipRTCPSnapshot        `json:"rtcp"`
 	TransportState     string                 `json:"transport_state"`
 	ProcessingState    string                 `json:"processing_state"`
 	At                 string                 `json:"at"`
@@ -316,6 +331,7 @@ type signatureSIPIncident struct{ loss, errors, dropped, delayBucket int64 }
 
 func (a *App) newSIPDiagnostics(row *callRow, dialog string) *sipLiveDiagnostics {
 	d := &sipLiveDiagnostics{app: a, row: *row, id: newCallID(), signal: sipSignalSnapshot{DialogID: boundedContextValue(dialog), State: "inviting"}}
+	d.signal.CarrierJitterBuffer = a.carrierBufferForCall(row)
 	a.carrierTelemetry.register(d)
 	d.event("sip_invite", "signaling", "", 0)
 	return d
@@ -425,6 +441,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		return s
 	}
 	s.RTP = m.observations.snapshot(now)
+	s.RTCP = m.rtcp.snapshot()
 	if mode := m.remoteMode.Load(); mode == 2 || mode == 3 || m.hold.Load() != nil {
 		s.ReceiveExpectation = "intentional_hold"
 		if !d.ended.Load() {
@@ -447,6 +464,16 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	// silent indefinitely. Confirmed read/write/security failures remain distinct.
 	if j := m.jitterTelemetry.Load(); j != nil && j.mu.TryLock() {
 		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+j.pendingPCMSamples.Load()) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		s.Jitter.RecoveryPolicy = "automatic_rolling_playout_v1"
+		s.Jitter.RecoveryState, s.Jitter.RecoveryReason = j.recovery.state, j.recovery.reason
+		s.Jitter.RecoveryWindowMS, s.Jitter.RecoveryVariationMS = j.recovery.windowMS, j.recovery.variationMS
+		s.Jitter.RecoveryRatePPM, s.Jitter.RecoveryLocalResidenceMS = j.recovery.ratePPM, j.recovery.localResidenceMS
+		s.Jitter.RecoveryDurationMS = j.recovery.recoveryMS
+		s.Jitter.PlayoutOffsetMS = float64(j.recovery.offset) / float64(time.Millisecond)
+		if j.policy.Resynchronize != nil {
+			v := *j.policy.Resynchronize
+			s.Jitter.LegacyResynchronize = &v
+		}
 		s.Jitter.Resynchronizations = j.recovery.recoveries
 		s.Jitter.RecoveryDiscardedMS = float64(j.recoveryDiscardedSamples) / 8
 		s.Jitter.LastRecoveryOffsetMS = j.recovery.lastOffsetMS
@@ -474,7 +501,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		eventHead, eventCount := j.eventHead, j.eventCount
 
 		for seq, at := range j.arrivals {
-			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(max(now.Sub(at), now.Sub(j.sourceTime(j.timestamps[seq]))))/float64(time.Millisecond))
+			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(max(now.Sub(at), now.Sub(j.playoutTime(j.timestamps[seq]))))/float64(time.Millisecond))
 		}
 		j.mu.Unlock()
 		// Allocate/format the diagnostic history only after releasing the reader's lock.

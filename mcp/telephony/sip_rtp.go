@@ -32,6 +32,8 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
+	rtcp                 sipRTCPState
+	rtcpConn             *net.UDPConn
 	readAt               time.Time // single receive owner only
 	readCompletedAt      time.Time // socket dequeue, distinct from kernel arrival
 	socketOOB            [128]byte
@@ -71,18 +73,43 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 	if start < cfg.RTPPortMin || start > cfg.RTPPortMax {
 		start = cfg.RTPPortMin
 	}
-	count := (cfg.RTPPortMax-cfg.RTPPortMin)/2 + 1
+	count := (cfg.RTPPortMax - cfg.RTPPortMin + 1) / 2
+	// Internal local harnesses can request ephemeral sockets. Runtime validation
+	// requires an explicit nonzero range; both paths still reserve an even pair.
+	ephemeral := cfg.RTPPortMin == 0 && cfg.RTPPortMax == 0
+	if ephemeral {
+		count = 128
+	}
 	for offset := 0; offset < count; offset++ {
-		port := cfg.RTPPortMin + ((start-cfg.RTPPortMin)/2+offset)%count*2
+		port := 0
+		if !ephemeral {
+			port = cfg.RTPPortMin + ((start-cfg.RTPPortMin)/2+offset)%count*2
+		}
 		local := net.UDPAddrFromAddrPort(netip.AddrPortFrom(cfg.RTPBindIP, uint16(port)))
 		conn, err := net.ListenUDP("udp4", local)
 		if err != nil {
 			continue
 		}
-		media := &sipRTPMedia{
-			conn: conn, offer: offer, security: security, remote: remote, localPort: port,
+		if ephemeral {
+			port = conn.LocalAddr().(*net.UDPAddr).Port
+			if port%2 != 0 || port == 65535 {
+				conn.Close()
+				continue
+			}
 		}
-		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
+		rtcpLocal := net.UDPAddrFromAddrPort(netip.AddrPortFrom(cfg.RTPBindIP, uint16(port+1)))
+		rtcpConn, err := net.ListenUDP("udp4", rtcpLocal)
+		if err != nil {
+			_ = conn.Close()
+			continue
+		}
+		media := &sipRTPMedia{
+			rtcpConn: rtcpConn,
+			conn:     conn, offer: offer, security: security, remote: remote, localPort: port,
+		}
+		if !ephemeral {
+			sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
+		}
 
 		media.observations.kernelDropsAvailable.Store(enableSIPSocketDropCounter(conn))
 		media.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(conn))
@@ -97,6 +124,9 @@ func (m *sipRTPMedia) Close() {
 		return
 	}
 	m.closeOnce.Do(func() {
+		if m.rtcpConn != nil {
+			_ = m.rtcpConn.Close()
+		}
 		if m.conn != nil {
 			_ = m.conn.Close()
 		}
@@ -128,6 +158,7 @@ func (m *sipRTPMedia) decodePacketAt(raw []byte, at time.Time) (*rtp.Packet, err
 		m.observations.decodeErrors.Add(1)
 		return nil, errors.New("invalid RTP payload size")
 	}
+	m.startRTCP()
 	m.observations.received(&packet, len(raw), at, packet.PayloadType == m.offer.PayloadType)
 	if !m.readCompletedAt.IsZero() {
 		m.observations.receiveEvidence.observe(packet.SequenceNumber, packet.Timestamp, packet.SSRC, at, m.readCompletedAt, time.Now())
@@ -136,6 +167,7 @@ func (m *sipRTPMedia) decodePacketAt(raw []byte, at time.Time) (*rtp.Packet, err
 }
 
 func (m *sipRTPMedia) writePacket(packet *rtp.Packet) (result error) {
+	m.startRTCP()
 	startedAt := time.Now()
 	defer func() {
 		atomicMax(&m.observations.maxSend, int64(time.Since(startedAt)))
@@ -166,6 +198,10 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) (result error) {
 	_, err = m.conn.WriteToUDP(raw, m.remote)
 	if err == nil {
 		m.observations.sentPacket(len(raw), time.Now())
+		m.rtcp.localSSRC.Store(packet.SSRC)
+		m.rtcp.lastRTP.Store(packet.Timestamp)
+		m.rtcp.lastSentNS.Store(time.Now().UnixNano())
+		m.rtcp.payloadOctets.Add(uint32(len(packet.Payload)))
 	}
 	if timeline := m.liveTimeline.Load(); timeline != nil {
 		stage := "carrier_send"

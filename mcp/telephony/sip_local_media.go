@@ -717,7 +717,7 @@ func (a *App) toolLocalMediaSettings(caller context.Context, ctx *sdk.AppCtx, ar
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	return map[string]any{"config": cfg, "applies_to": "new calls", "active_calls_retained": true}, nil
+	return map[string]any{"config": cfg, "applies_to": "new calls", "active_calls_retained": true, "recovery_policy": "automatic_rolling_playout_v1", "legacy_resynchronize_deprecated": true}, nil
 }
 
 func (a *App) localSIPPlanRunning(call, node string) bool {

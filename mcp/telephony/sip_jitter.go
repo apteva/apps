@@ -18,7 +18,7 @@ type sipPlaybackPolicy struct {
 	MaxAgeMS    int   `json:"max_age_ms,omitempty"`
 	Concealment *bool `json:"concealment,omitempty"`
 	ClockDrift  *bool `json:"clock_drift,omitempty"`
-	// Opt-in: resume a stable shifted live timeline without replaying retained audio.
+	// Deprecated compatibility field. Automatic playout recovery is always active.
 	Resynchronize *bool `json:"resynchronize,omitempty"`
 }
 
@@ -66,6 +66,7 @@ type sipJitterEvent struct {
 }
 
 type rtpJitterBuffer struct {
+	lastPoppedPlayout                                                   time.Time
 	sourceKnown                                                         atomic.Bool
 	sourceSSRC                                                          atomic.Uint32
 	resetDroppedSamples                                                 int
@@ -130,7 +131,7 @@ func newRTPJitterBufferWithPolicy(p sipPlaybackPolicy) *rtpJitterBuffer {
 		v := *p.Resynchronize
 		p.Resynchronize = &v
 	}
-	return &rtpJitterBuffer{packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time), timestamps: make(map[uint16]uint32), controls: make(map[uint16]bool), policy: p, targetMS: p.TargetMS, packetSamples: 160}
+	return &rtpJitterBuffer{recovery: sipPlayoutRecovery{state: "observing", reason: "insufficient_observations"}, packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time), timestamps: make(map[uint16]uint32), controls: make(map[uint16]bool), policy: p, targetMS: p.TargetMS, packetSamples: 160}
 }
 func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
 	b.pushRTP(sequence, payload, uint32(sequence)*160, time.Now())
@@ -288,7 +289,7 @@ func (b *rtpJitterBuffer) remove(seq uint16, now time.Time, reason string) {
 	} else {
 		b.expiredSamples += len(p)
 	}
-	b.event(now, reason, seq, ts, len(p), max(now.Sub(b.arrivals[seq]), now.Sub(b.sourceTime(ts))))
+	b.event(now, reason, seq, ts, len(p), max(now.Sub(b.arrivals[seq]), now.Sub(b.playoutTime(ts))))
 	b.buffered -= len(p)
 	delete(b.packets, seq)
 	delete(b.arrivals, seq)
@@ -321,13 +322,17 @@ func (b *rtpJitterBuffer) sourceTime(ts uint32) time.Time {
 	return b.sourceAnchorAt.Add(time.Duration(elapsed * float64(time.Second)))
 }
 
+func (b *rtpJitterBuffer) playoutTime(ts uint32) time.Time {
+	return b.sourceTime(ts).Add(b.recovery.offset)
+}
+
 // Caller holds mu. Preserve one output frame of latency headroom when the
 // relative delivery offset already consumes part of the configured age budget.
 func (b *rtpJitterBuffer) playbackTargetMS() int {
 	if !b.haveArrival || !b.haveSourceAnchor {
 		return b.targetMS
 	}
-	deliveryMS := max(0, float64(b.lastArrival.Sub(b.sourceTime(b.lastTimestamp)))/float64(time.Millisecond))
+	deliveryMS := max(0, float64(b.lastArrival.Sub(b.playoutTime(b.lastTimestamp)))/float64(time.Millisecond))
 	return min(b.targetMS, max(20, b.policy.MaxAgeMS-int(math.Ceil(deliveryMS))-20))
 }
 
@@ -379,6 +384,7 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 		b.haveSourceAnchor = true
 		b.driftPPM = 0
 		b.clock = sipSourceClock{}
+		b.recovery.resetCandidate()
 	}
 	previousArrival, previousTimestamp, previousSequence, hadArrival := b.lastArrival, b.lastTimestamp, b.lastSequence, b.haveArrival
 	if b.haveArrival && int16(seq-b.lastSequence) > 0 {
@@ -412,11 +418,11 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 		sourceAt = now
 	}
 	deliveryAge := now.Sub(sourceAt)
-	age := max(deliveryAge, processed.Sub(sourceAt))
+	age := max(processed.Sub(now), processed.Sub(b.playoutTime(ts)))
 	if b.recovery.consider(b, seq, ts, now, processed, deliveryAge, len(payload)) {
 		sourceAt = b.sourceTime(ts)
 		deliveryAge = now.Sub(sourceAt)
-		age = max(deliveryAge, processed.Sub(sourceAt))
+		age = max(processed.Sub(now), processed.Sub(b.playoutTime(ts)))
 	}
 	b.maxDeliveryAgeMS = max(b.maxDeliveryAgeMS, float64(deliveryAge)/float64(time.Millisecond))
 	if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
@@ -496,7 +502,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for seq, at := range b.arrivals {
-		age := max(now.Sub(at), now.Sub(b.sourceTime(b.timestamps[seq])))
+		age := max(now.Sub(at), now.Sub(b.playoutTime(b.timestamps[seq])))
 		b.maxAgeMS = max(b.maxAgeMS, int(age/time.Millisecond))
 		if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
 			b.remove(seq, now, "queue_age")
@@ -510,7 +516,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		// A valid delivery offset can consume part of the age budget. Do not
 		// wait for a reserve that would expire its own oldest packet forever.
 		oldest := b.oldest()
-		remaining := b.policy.MaxAgeMS - int(math.Ceil(float64(now.Sub(b.sourceTime(b.timestamps[oldest])))/float64(time.Millisecond)))
+		remaining := b.policy.MaxAgeMS - int(math.Ceil(float64(now.Sub(b.playoutTime(b.timestamps[oldest])))/float64(time.Millisecond)))
 		required := min(b.targetMS, max(20, b.buffered/8+max(0, remaining-20)))
 		// Normally require >=40ms. Only near the existing age limit may one
 		// fresh packet start directly: waiting for another would expire it.
@@ -560,7 +566,8 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		b.lastPoppedAt = b.arrivals[b.expected]
 		b.lastPoppedArrival = b.lastPoppedAt
 		b.lastPoppedSource = b.sourceTime(ts)
-		if sourceAt := b.sourceTime(ts); sourceAt.Before(b.lastPoppedAt) {
+		b.lastPoppedPlayout = b.playoutTime(ts)
+		if sourceAt := b.playoutTime(ts); sourceAt.Before(b.lastPoppedAt) {
 			b.lastPoppedAt = sourceAt
 		}
 		delete(b.packets, b.expected)
@@ -577,6 +584,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		b.lastPoppedMissing = true
 		b.lastPoppedAt = now
 		b.lastPoppedArrival, b.lastPoppedSource = now, now
+		b.lastPoppedPlayout = now
 		if needed >= 0 {
 			b.pendingPCMSamples.Add(int64(max(0, b.packetSamples-needed)))
 		}
@@ -606,6 +614,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 }
 
 type sipPCMSegment struct {
+	playout time.Time
 	samples int
 	at      time.Time
 	arrival time.Time
@@ -759,15 +768,17 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		f.jitter.mu.Lock()
 		at := f.jitter.lastPoppedAt
 		arrival, source := f.jitter.lastPoppedArrival, f.jitter.lastPoppedSource
+		playout := f.jitter.lastPoppedPlayout
 		f.jitter.mu.Unlock()
 		if p != nil {
 			f.lastRealAt = at
 		}
-		f.segments = append(f.segments, sipPCMSegment{samples: len(pcm), at: at, arrival: arrival, source: source})
+		f.segments = append(f.segments, sipPCMSegment{samples: len(pcm), at: at, arrival: arrival, source: source, playout: playout})
 	}
 	if len(f.pendingPCM) < take {
 		if len(f.pendingPCM) < samples {
 			if out, ready := f.popPartialTail(m, now, samples); ready {
+				f.jitter.noteRecoveryPlayout(now, f.generation)
 				return out, f.jitter.generation.Load() == f.generation
 			}
 			f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
@@ -792,7 +803,12 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 			// residence still expires even after this source-time correction.
 			segment := &f.segments[0]
 			segment.source = segment.source.Add(time.Duration(n) * time.Second / time.Duration(m.sampleRate()))
-			segment.at = segment.source
+			if segment.playout.IsZero() {
+				segment.playout = segment.source
+			} else {
+				segment.playout = segment.playout.Add(time.Duration(n) * time.Second / time.Duration(m.sampleRate()))
+			}
+			segment.at = segment.playout
 			if !segment.arrival.IsZero() && segment.arrival.Before(segment.at) {
 				segment.at = segment.arrival
 			}
@@ -809,7 +825,8 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	if f.jitter.generation.Load() != f.generation {
 		return nil, false
 	}
-	return out, true
+	f.jitter.noteRecoveryPlayout(now, f.generation)
+	return out, f.jitter.generation.Load() == f.generation
 }
 
 // Once playback has stopped, no future packet/PLC frame is guaranteed to finish
