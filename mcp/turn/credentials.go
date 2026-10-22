@@ -18,6 +18,8 @@ type credentialRequest struct {
 	ProjectID  string `json:"project_id"`
 	SessionID  string `json:"session_id"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+	Transport  string `json:"transport,omitempty"`
+	TLSPort    int    `json:"tls_port,omitempty"`
 }
 
 type iceServer struct {
@@ -59,6 +61,10 @@ func (a *App) issueCredentials(req credentialRequest, now time.Time) (credential
 	if ttl < 60 || ttl > int(a.cfg.ttl/time.Second) {
 		return out, errors.New("ttl_seconds must be between 60 and the configured credential lifetime")
 	}
+	urls, err := a.credentialURLs(req, now)
+	if err != nil {
+		return out, err
+	}
 	a.mu.Lock()
 	admit := a.admittingLocked(now)
 	limited := admit && !a.issuance.AllowN(now, 1)
@@ -75,11 +81,7 @@ func (a *App) issueCredentials(req credentialRequest, now time.Time) (credential
 	}
 	expires := now.Unix() + int64(ttl)
 	username := strconv.FormatInt(expires, 10) + ":" + shortHash(req.ProjectID) + ":" + shortHash(req.SessionID) + ":" + base64.RawURLEncoding.EncodeToString(nonce[:])
-	endpoint := "turn:" + a.cfg.publicHost + ":" + strconv.Itoa(turnPort)
-	urls := []string{endpoint + "?transport=udp", endpoint + "?transport=tcp"}
-	if a.currentTLSConfig().tlsValid(now) {
-		urls = append(urls, "turns:"+a.cfg.publicHost+":"+strconv.Itoa(tlsPort)+"?transport=tcp")
-	}
+
 	out = credentials{ICEServers: []iceServer{{URLs: urls, Username: username, Credential: restPassword(a.cfg.secret, username)}}, ExpiresAt: expires, TTLSeconds: ttl}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -119,4 +121,45 @@ func (a *App) authenticate(ra *turn.RequestAttributes) (string, []byte, bool) {
 		return "", nil, false
 	}
 	return ra.Username, turn.GenerateAuthKey(ra.Username, a.cfg.realm, restPassword(a.cfg.secret, ra.Username)), true
+}
+
+// Selecting a transport restricts returned URLs. Browser tests must also set
+// iceTransportPolicy=relay to prevent ICE from selecting a direct candidate.
+func (a *App) credentialURLs(req credentialRequest, now time.Time) ([]string, error) {
+	transport := req.Transport
+	if transport == "" {
+		transport = "all"
+	}
+	if transport != "all" && transport != "udp" && transport != "tcp" && transport != "tls" {
+		return nil, errors.New("transport must be all, udp, tcp or tls")
+	}
+	if req.TLSPort != 0 && transport != "tls" {
+		return nil, errors.New("tls_port requires transport tls")
+	}
+	if transport == "tls" && !a.currentTLSConfig().tlsValid(now) {
+		return nil, errors.New("TURN over TLS requires a valid certificate")
+	}
+	url := func(scheme string, port int, protocol string) string {
+		return scheme + ":" + a.cfg.publicHost + ":" + strconv.Itoa(port) + "?transport=" + protocol
+	}
+	urls := []string{}
+	if transport == "all" || transport == "udp" {
+		urls = append(urls, url("turn", a.cfg.udpPort, "udp"))
+	}
+	if transport == "all" || transport == "tcp" {
+		urls = append(urls, url("turn", a.cfg.tcpPort, "tcp"))
+	}
+	if (transport == "all" || transport == "tls") && a.currentTLSConfig().tlsValid(now) {
+		found := false
+		for _, port := range a.cfg.tlsPorts {
+			if req.TLSPort == 0 || port == req.TLSPort {
+				urls = append(urls, url("turns", port, "tcp"))
+				found = true
+			}
+		}
+		if !found {
+			return nil, errors.New("tls_port is not a configured TLS listener")
+		}
+	}
+	return urls, nil
 }

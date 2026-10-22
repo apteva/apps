@@ -26,33 +26,34 @@ var errNotAdmitting = errors.New("TURN execution is not admitting new sessions")
 var errRateLimited = errors.New("credential request rate exceeded")
 
 type App struct {
-	cfg         config
-	certificate atomic.Pointer[tls.Certificate]
-	tlsManager  *managedTLS
-	appCtx      *sdk.AppCtx
-	project     string
-	mu          sync.Mutex
-	state       string
-	managed     bool
-	deployment  string
-	generation  int64
-	armed       bool
-	leaseExpiry time.Time
-	server      *turn.Server
-	udp         net.PacketConn
-	tcp         *clientListener
-	tls         *clientListener
-	relays      map[*relayConn]struct{}
-	pool        []*relayPort
-	poolReaders sync.WaitGroup
-	users       map[string]int
-	issuance    *rate.Limiter
-	stopOnce    sync.Once
-	cancel      context.CancelFunc
-	done        chan struct{}
-	http        *http.Client
-	stats       trafficStats
-	peerFilter  func(net.IP) bool
+	cfg          config
+	certificate  atomic.Pointer[tls.Certificate]
+	tlsManager   *managedTLS
+	appCtx       *sdk.AppCtx
+	project      string
+	mu           sync.Mutex
+	state        string
+	managed      bool
+	deployment   string
+	generation   int64
+	armed        bool
+	leaseExpiry  time.Time
+	server       *turn.Server
+	udp          net.PacketConn
+	tcp          *clientListener
+	tls          *clientListener
+	tlsListeners []*clientListener
+	relays       map[*relayConn]struct{}
+	pool         []*relayPort
+	poolReaders  sync.WaitGroup
+	users        map[string]int
+	issuance     *rate.Limiter
+	stopOnce     sync.Once
+	cancel       context.CancelFunc
+	done         chan struct{}
+	http         *http.Client
+	stats        trafficStats
+	peerFilter   func(net.IP) bool
 }
 
 type trafficStats struct {
@@ -159,7 +160,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "turn_status", Description: "Read TURN relay status and aggregate counters.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.status(), nil }},
 		{Name: "turn_credentials", Description: "Issue temporary credentials for an authorized project/session.", Exposure: sdk.ToolExposureAppOnly,
-			InputSchema: map[string]any{"type": "object", "required": []string{"session_id"}, "additionalProperties": false, "properties": map[string]any{"session_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400}}},
+			InputSchema: map[string]any{"type": "object", "required": []string{"session_id"}, "additionalProperties": false, "properties": map[string]any{"transport": map[string]any{"type": "string", "enum": []string{"all", "udp", "tcp", "tls"}}, "tls_port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535}, "session_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400}}},
 			Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				session, _ := args["session_id"].(string)
 				raw, err := json.Marshal(args)
@@ -247,7 +248,10 @@ func (a *App) status() map[string]any {
 		"max_allocations":    a.cfg.maxAllocations,
 		"public_host":        a.cfg.publicHost,
 		"public_ip":          a.cfg.publicIP.String(),
-		"port":               turnPort,
+		"port":               a.cfg.udpPort,
+		"udp_port":           a.cfg.udpPort,
+		"tcp_port":           a.cfg.tcpPort,
+		"tls_ports":          a.cfg.tlsPorts,
 		"transports":         a.currentTLSConfig().transports(now),
 		"relay_port_min":     relayPortMin,
 		"relay_port_max":     relayPortMax,
@@ -256,7 +260,7 @@ func (a *App) status() map[string]any {
 		"bytes_dropped":      a.stats.dropped.Load(),
 		"credentials_issued": a.stats.issued.Load(),
 		"tls":                a.currentTLSConfig().tlsValid(now),
-		"tls_port":           tlsPort,
+		"tls_port":           a.cfg.tlsPorts[0],
 		"tls_certificate":    a.currentTLSConfig().certificateStatus(now),
 		"managed_tls":        a.managedTLSStatus(),
 		"configuration":      a.cfg.publicSettings(),

@@ -4,8 +4,8 @@ Standalone STUN/TURN infrastructure app for Apteva. It runs its own Pion TURN
 server and issues temporary WebRTC ICE credentials. It has no dependency on
 Telephony or any other app, and imports no Server internals.
 
-Version 0.1 provides IPv4 UDP relay allocations through UDP/TCP client
-connections on port 3478 and TURN over TLS on TCP 5349. IPv6 and RFC 6062 TCP
+Version 0.3 provides IPv4 UDP relay allocations through configurable UDP/TCP
+client connections (default 3478) and multiple TURN over TLS listeners (default 5349). IPv6 and RFC 6062 TCP
 relay allocations are not implemented. TCP/TLS are client-to-relay transports;
 media between TURN and its peer remains UDP. WebRTC media retains its own
 DTLS/SRTP encryption.
@@ -78,7 +78,17 @@ The pool is deliberately fixed for this release. Every UDP pool socket is bound
 on startup and remains bound between allocations and in standby/drain. This
 satisfies the native backend's per-port/PID readiness and confirmed-stop checks.
 Any occupied pool port aborts startup and releases the partially acquired pool.
-Changing an install setting cannot bind ports omitted from the manifest.
+Client listeners are configured by `udp_port`, `tcp_port` and `tls_ports` (up to
+8 comma-separated TLS ports). These app-configured sockets are bound during
+mount and gate readiness; they are not statically reserved by Apteva. Any bind
+failure aborts startup and closes all partially opened sockets. The fixed media
+pool remains declared in the manifest and reserved by the native backend.
+Use native/host networking or explicitly publish every configured client port
+when running containers; declaring a setting does not publish a container port.
+Changing listeners restarts the relay; drain calls first. The TURN panel validates settings, then confirms stop through Apteva before
+persisting changes and restarting managed deployments. For API changes or
+upgrades on native targets, stop TURN first and wait for confirmed stop. The fixed media pool prevents preparing
+a second execution alongside the current one on the same host.
 
 Only one installation can own this port set per host. Use another host/public IP
 for another independent relay. This release is not replica-safe and does not
@@ -118,7 +128,7 @@ idempotency key. Server owns the build, package delivery, execution credentials,
 port reservations, HTTP routing, rollback, and lifecycle ordering. This app does
 not create infrastructure or change firewall rules itself.
 
-The release manifest pins its source to the immutable `turn/v0.2.1` tag. The
+The release manifest pins its source to the immutable `turn/v0.3.0` tag. The
 registry entry, manifest and icon resolve to that same tag. Installing the app
 does not deploy it into an existing Telephony instance or change another app.
 
@@ -165,11 +175,10 @@ and validates the key pair, hostname, current validity and server-auth usage.
 Combined certificate/key input is limited to 64 KiB. Manual certificates must
 be renewed by the operator.
 
-TCP 5349 remains bound even before certificates are configured, preserving
-managed port ownership. Without valid material, TLS handshakes fail and no
+All configured TLS sockets remain bound even before certificates are configured. Without valid material, TLS handshakes fail and no
 `turns:` URL is advertised. The panel clearly reports setup required; UDP/TCP
 remain usable. Once configured, credential responses include
-`turns:<public_host>:5349?transport=tcp`. Expired material is refused on new
+`turns:<public_host>:<tls_port>?transport=tcp` for every configured TLS port. Expired material is refused on new
 handshakes. Expired imported material also fails readiness; managed mode keeps
 UDP/TCP ready so automatic renewal can recover. An invalid replacement is
 rejected by settings validation. Managed mode renews automatically; imported certificates require manual replacement.
@@ -177,6 +186,28 @@ rejected by settings validation. Managed mode renews automatically; imported cer
 The protocol tests establish a trusted test CA, verify hostname and chain with
 the client, allocate through TLS, relay audio both ways, and confirm fencing
 closes encrypted sessions and releases the TLS listener.
+
+## Comparing transports
+
+Settings → Listener ports supports separate UDP and TCP ports and a TLS list
+such as `5349,443,8443`. Port 443 must be free; a web server using HTTPS on the
+same address prevents a second TCP listener. Use a dedicated relay instance or
+another available port; this app does not reconfigure HTTPS or firewalls.
+The same automatically renewed certificate serves every configured TLS port.
+
+Credentials → Test transport selects all transports, UDP only, TCP only, or one
+TLS port. **Copy forced-relay test configuration** emits a browser RTCConfiguration
+with `iceTransportPolicy: "relay"`; using a TURN URL alone still permits direct
+ICE. Apply this configuration in a test client, make a new call per option and
+compare inbound RTP packet loss, jitter, round-trip time and perceived audio on
+the same network. This panel configures tests and does not itself measure calls
+or change the Telephony softphone.
+
+HTTP and app-only MCP credentials accept optional `transport` (`all`, `udp`,
+`tcp`, `tls`; default `all`) and `tls_port` (a configured port, only with `tls`).
+TLS-only requests fail clearly without a valid certificate. Returned credentials
+have the same permissions across listeners; transport selection filters the
+advertised ICE URLs and is not an authentication restriction.
 
 ## API and future consumers
 

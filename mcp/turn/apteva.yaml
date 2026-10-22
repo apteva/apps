@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: turn
 display_name: TURN
-version: 0.2.1
+version: 0.3.0
 description: |
   Standalone authenticated STUN/TURN relay for WebRTC clients.
   Issues temporary project/session credentials and relays UDP media over UDP,
@@ -43,14 +43,11 @@ runtime:
       routing: stateless
   source:
     repo: github.com/apteva/apps
-    ref: turn/v0.2.1
+    ref: turn/v0.3.0
     entry: mcp/turn
   port: 8080
   health_check: /ready
   ports:
-    - {name: turn-udp, container_port: 3478, host_port: 3478, protocol: udp}
-    - {name: turn-tcp, container_port: 3478, host_port: 3478, protocol: tcp}
-    - {name: turn-tls, container_port: 5349, host_port: 5349, protocol: tcp}
     - {name: relay-49160, container_port: 49160, host_port: 49160, protocol: udp}
     - {name: relay-49161, container_port: 49161, host_port: 49161, protocol: udp}
     - {name: relay-49162, container_port: 49162, host_port: 49162, protocol: udp}
@@ -120,6 +117,9 @@ db:
   path: /data/turn.db
   migrations: migrations/
 config_schema:
+  - {name: udp_port, type: text, default: "3478", label: "TURN UDP port", description: "Client listener, 1–65535. Must be free on the execution host and outside the relay pool."}
+  - {name: tcp_port, type: text, default: "3478", label: "TURN TCP port", description: "Plain TCP client listener, 1–65535. Must differ from TLS ports."}
+  - {name: tls_ports, type: text, default: "5349", label: "TURN TLS ports", description: "Up to 8 comma-separated ports, e.g. 5349,443,8443. Each must be free on the execution host. Open them in its firewall; HTTP proxies cannot carry TURN."}
   - {name: tls_mode, type: select, default: "manual", options: [manual, managed], label: "TLS management"}
   - {name: dns_zone, type: text, label: "Managed DNS zone", description: "Zone in the bound Domains app. TURN creates only its relay subdomain and temporary validation records; existing conflicting records are rejected."}
   - {name: dns_project_id, type: text, label: "DNS project ID", description: "Required on global TURN installs; use the project that owns the DNS zone."}

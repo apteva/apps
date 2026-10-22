@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,8 @@ const (
 )
 
 type config struct {
+	udpPort, tcpPort                                    int
+	tlsPorts                                            []int
 	publicIP                                            netip.Addr
 	publicHost, bindIP, realm, secret                   string
 	ttl                                                 time.Duration
@@ -85,6 +88,44 @@ func parseConfig(values sdk.Config) (config, error) {
 	bind, err := netip.ParseAddr(c.bindIP)
 	if err != nil || !bind.Is4() || bind.IsMulticast() {
 		return c, errors.New("bind_ip must be a local IPv4 address")
+	}
+	c.udpPort, err = configInt(values, "udp_port", turnPort, 1, 65535)
+	if err != nil {
+		return c, err
+	}
+	c.tcpPort, err = configInt(values, "tcp_port", turnPort, 1, 65535)
+	if err != nil {
+		return c, err
+	}
+	ports := strings.TrimSpace(values.Get("tls_ports"))
+	if ports == "" {
+		ports = strconv.Itoa(tlsPort)
+	}
+	if len(strings.Split(ports, ",")) > 8 {
+		return c, errors.New("at most 8 TLS ports are supported")
+	}
+	seen := map[int]bool{c.tcpPort: true}
+	for _, text := range strings.Split(ports, ",") {
+		port, parseErr := strconv.Atoi(strings.TrimSpace(text))
+		if parseErr != nil || port < 1 || port > 65535 {
+			return c, errors.New("tls_ports must be comma-separated ports between 1 and 65535")
+		}
+		if seen[port] {
+			return c, errors.New("TCP and TLS listener ports must be distinct")
+		}
+		seen[port] = true
+		c.tlsPorts = append(c.tlsPorts, port)
+	}
+	control, _ := strconv.Atoi(os.Getenv("APTEVA_APP_PORT"))
+	for _, port := range append([]int{c.udpPort, c.tcpPort}, c.tlsPorts...) {
+		if port >= relayPortMin && port <= relayPortMax {
+			return c, errors.New("listener ports must be outside the UDP relay pool 49160–49223")
+		}
+	}
+	for port := range seen {
+		if port == control {
+			return c, errors.New("TCP/TLS listener conflicts with the app HTTP control port")
+		}
 	}
 	c.secret = values.Get("shared_secret")
 	if len(c.secret) < 32 || len(c.secret) > 1024 {
