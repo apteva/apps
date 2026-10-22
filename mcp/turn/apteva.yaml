@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: turn
 display_name: TURN
-version: 0.2.0
+version: 0.2.1
 description: |
   Standalone authenticated STUN/TURN relay for WebRTC clients.
   Issues temporary project/session credentials and relays UDP media over UDP,
@@ -17,13 +17,6 @@ requires:
   permissions: [net.egress, db.write.app, platform.apps.call]
   apps:
     - {name: domains, version: ">=1.2.0", optional: true, reason: "Safe DNS mutations for managed TURN TLS"}
-  integrations:
-    - role: domains
-      kind: app
-      required: false
-      compatible_app_names: [domains]
-      label: Domains
-      hint: Bind for managed DNS and automatic TURN TLS issuance and renewal.
 provides:
   http_routes:
     - {prefix: /ready, method: GET, no_auth: true}
@@ -50,7 +43,7 @@ runtime:
       routing: stateless
   source:
     repo: github.com/apteva/apps
-    ref: turn/v0.2.0
+    ref: turn/v0.2.1
     entry: mcp/turn
   port: 8080
   health_check: /ready

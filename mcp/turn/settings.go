@@ -63,7 +63,7 @@ func (a *App) handleValidateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.tlsMode == "managed" {
-		if a.appCtx == nil || a.appCtx.IntegrationFor("domains") == nil {
+		if !domainsBound(a.appCtx) {
 			http.Error(w, "Bind Domains before enabling managed TLS", 400)
 			return
 		}

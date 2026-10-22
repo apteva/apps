@@ -118,7 +118,7 @@ idempotency key. Server owns the build, package delivery, execution credentials,
 port reservations, HTTP routing, rollback, and lifecycle ordering. This app does
 not create infrastructure or change firewall rules itself.
 
-The release manifest pins its source to the immutable `turn/v0.2.0` tag. The
+The release manifest pins its source to the immutable `turn/v0.2.1` tag. The
 registry entry, manifest and icon resolve to that same tag. Installing the app
 does not deploy it into an existing Telephony instance or change another app.
 

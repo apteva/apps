@@ -103,6 +103,6 @@ export default function TurnPanel(props: PanelProps) {
       {tab === "settings" && <Settings props={props} status={status} notify={setNotice} />}
       {tab === "credentials" && <CredentialForm props={props} status={status} copy={copy} />}
     </div>}
-    <footer className="turn-foot">TURN 0.2.0 · {updated ? `Updated ${new Date(updated).toLocaleTimeString()} · Refreshes every 5 seconds` : "Waiting for the relay"}</footer>
+    <footer className="turn-foot">TURN 0.2.1 · {updated ? `Updated ${new Date(updated).toLocaleTimeString()} · Refreshes every 5 seconds` : "Waiting for the relay"}</footer>
   </main></div></div>;
 }

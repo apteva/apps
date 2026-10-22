@@ -1,5 +1,6 @@
-# TURN 0.2.0
+# TURN 0.2.1
 
+- Domains appears once in setup and declares its minimum version.
 - Managed DNS and public TLS: bind Domains, choose a relay subdomain and zone, and accept the Let's Encrypt subscriber agreement. TURN creates a direct A record and uses ACME DNS-01 for issuance and automatic renewal on the execution host.
 - Renewed certificates load atomically without restarting connections. Only the active execution can mutate DNS; passive starts use persisted certificates.
 - Account/private keys are encrypted in the app database with a stable install-config storage key. Preserve app data and this key for migration/restore.
