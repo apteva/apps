@@ -16,22 +16,26 @@ import (
 const sipSDESCryptoSuite = "AES_CM_128_HMAC_SHA1_80"
 
 type sipMediaOffer struct {
-	RemoteAddress   netip.Addr
-	RemotePort      int
-	PayloadType     uint8
-	Codec           string
-	Direction       string
-	PacketSamples   int
-	Secure          bool
-	RemoteKey       []byte
-	DTMFPayloadType int
-	CryptoTag       string
+	RemoteAddress     netip.Addr
+	RemotePort        int
+	RemoteRTCPPort    int
+	RemoteRTCPAddress netip.Addr
+	PayloadType       uint8
+	Codec             string
+	Direction         string
+	PacketSamples     int
+	Secure            bool
+	RemoteKey         []byte
+	DTMFPayloadType   int
+	CryptoTag         string
 }
 
 type sipMediaSecurity struct {
 	RemoteContext *srtp.Context
 	LocalContext  *srtp.Context
 	LocalKey      []byte
+	RemoteRTCP    *srtp.Context
+	LocalRTCP     *srtp.Context
 }
 
 func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error) {
@@ -104,6 +108,29 @@ func parseSIPMediaOfferOptions(body []byte, cfg sipGatewayConfig, codecs []strin
 			PacketSamples:   packetTimeMS * 8,
 			DTMFPayloadType: negotiatedSIPTelephoneEvent(media),
 			Secure:          secure,
+		}
+		for _, attribute := range media.Attributes {
+			if attribute.Key == "rtcp-mux-only" {
+				return sipMediaOffer{}, errors.New("SIP RTCP mux-only is not supported; offer RTP+1")
+			}
+			if attribute.Key == "rtcp" {
+				fields := strings.Fields(attribute.Value)
+				if len(fields) != 1 && len(fields) != 4 {
+					return sipMediaOffer{}, errors.New("invalid SDP RTCP address")
+				}
+				port, e := strconv.Atoi(fields[0])
+				if e != nil || port < 1 || port > 65535 {
+					return sipMediaOffer{}, errors.New("invalid SDP RTCP port")
+				}
+				offer.RemoteRTCPPort = port
+				if len(fields) == 4 {
+					ip, e := netip.ParseAddr(fields[3])
+					if e != nil || fields[1] != "IN" || fields[2] != "IP4" || !ip.Is4() || ip.IsMulticast() || ip.IsUnspecified() || !cfg.sourceAllowed(ip.String()) {
+						return sipMediaOffer{}, errors.New("SDP RTCP address is not allowed")
+					}
+					offer.RemoteRTCPAddress = ip
+				}
+			}
 		}
 		if secure {
 			offer.CryptoTag, offer.RemoteKey, err = parseSDESCrypto(media.Attributes)
@@ -233,7 +260,15 @@ func newSIPMediaSecurityWithLocalKey(offer sipMediaOffer, localKey []byte) (*sip
 	if err != nil {
 		return nil, fmt.Errorf("create outbound SRTP context: %w", err)
 	}
-	return &sipMediaSecurity{RemoteContext: remoteContext, LocalContext: localContext, LocalKey: localKey}, nil
+	remoteRTCP, err := srtp.CreateContext(offer.RemoteKey[:16], offer.RemoteKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80, srtp.SRTCPReplayProtection(128))
+	if err != nil {
+		return nil, err
+	}
+	localRTCP, err := srtp.CreateContext(localKey[:16], localKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+	if err != nil {
+		return nil, err
+	}
+	return &sipMediaSecurity{RemoteContext: remoteContext, LocalContext: localContext, LocalKey: localKey, RemoteRTCP: remoteRTCP, LocalRTCP: localRTCP}, nil
 }
 
 func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort int, security *sipMediaSecurity) ([]byte, error) {
@@ -242,6 +277,7 @@ func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort in
 		sdp.NewAttribute("rtpmap", fmt.Sprintf("%d %s/8000", offer.PayloadType, offer.Codec)),
 		sdp.NewPropertyAttribute(sipAnswerDirection(offer.Direction)),
 		sdp.NewAttribute("ptime", "20"),
+		sdp.NewAttribute("rtcp", fmt.Sprintf("%d IN IP4 %s", localPort+1, cfg.PublicIP.String())),
 	}
 	if offer.DTMFPayloadType > 0 {
 		attributes = append(attributes, sdp.NewAttribute("rtpmap", fmt.Sprintf("%d telephone-event/8000", offer.DTMFPayloadType)), sdp.NewAttribute("fmtp", fmt.Sprintf("%d 0-16", offer.DTMFPayloadType)))

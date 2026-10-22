@@ -112,7 +112,7 @@ func productionAudioPackets(p productionAudioProfile, payload []byte) []producti
 }
 func runProductionAudioProfile(t *testing.T, p productionAudioProfile, codec, version string) productionAudioResult {
 	t.Helper()
-	enabled := version == "local_resync_on"
+	enabled := version == "automatic_legacy_flag_true"
 	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
 	old := &v21SIPClockBuffer{rtpJitterBuffer: b}
 	m := &sipRTPMedia{offer: sipMediaOffer{Codec: codec, PacketSamples: 160}}
@@ -169,8 +169,8 @@ func TestProductionAudioScenarioMatrix(t *testing.T) {
 		for _, p := range profiles {
 			t.Run(codec+"/"+p.name, func(t *testing.T) {
 				before := runProductionAudioProfile(t, p, codec, "0.12.21_timing_reference")
-				off := runProductionAudioProfile(t, p, codec, "0.12.23_default")
-				on := runProductionAudioProfile(t, p, codec, "local_resync_on")
+				off := runProductionAudioProfile(t, p, codec, "automatic_legacy_flag_false")
+				on := runProductionAudioProfile(t, p, codec, "automatic_legacy_flag_true")
 				results = append(results, before, off, on)
 				t.Logf("before=%+v default=%+v resync=%+v", before, off, on)
 				switch p.name {
@@ -179,7 +179,7 @@ func TestProductionAudioScenarioMatrix(t *testing.T) {
 						t.Fatal("healthy bounded delivery was degraded")
 					}
 				case "stable_shift", "stable_shift_small_jitter", "stable_shift_alternating_12ms":
-					if off.LateMS < 30000 || on.LateMS > 1600 || on.Recoveries != 1 {
+					if off.LateMS > 1600 || on.LateMS > 1600 || off.Recoveries != 1 || on.Recoveries != 1 {
 						t.Fatal("stable live shift did not recover within bound")
 					}
 				case "second_shift_during_cooldown":

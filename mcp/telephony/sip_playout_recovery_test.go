@@ -64,14 +64,14 @@ func TestSIPControlledPlayoutRecovery(t *testing.T) {
 					if maxQueue > 160*8 {
 						t.Fatal("queue bound exceeded")
 					}
-					if mode == "stable_shift" && enabled {
+					if mode == "stable_shift" {
 						if b.recovery.recoveries != 1 || tailDrops > 0 {
 							t.Fatal("stable live phase did not recover", b.recovery.recoveries, tailDrops)
 						}
 					} else if b.recovery.recoveries != 0 {
 						t.Fatal("burst/jitter/local stall rebased")
 					}
-					if (mode == "bursts" || mode == "local_stall" || mode == "stable_shift" && !enabled) && b.lateDroppedSamples == 0 {
+					if (mode == "bursts" || mode == "local_stall") && b.lateDroppedSamples == 0 {
 						t.Fatal("stale audio accepted")
 					}
 				})
@@ -149,16 +149,52 @@ func TestSIPRecoveryWindowRejectsDrainingBacklog(t *testing.T) {
 	}
 }
 
+func TestSIPAutomaticJitteredDrainingBacklog(t *testing.T) {
+	for _, interval := range []time.Duration{15 * time.Millisecond, 19800 * time.Microsecond} {
+		b := newRTPJitterBuffer()
+		base := time.Unix(100, 0)
+		for i := 0; i < 1500; i++ {
+			at := base.Add(time.Duration(i)*interval + time.Duration(i%2)*6*time.Millisecond)
+			b.recovery.consider(b, uint16(i), uint32(i*160), at, at, 350*time.Millisecond, 160)
+		}
+		if b.recovery.recoveries != 0 {
+			t.Fatalf("jitter hid a draining backlog: %v %+v", interval, b.recovery)
+		}
+	}
+}
+
+func TestSIPAutomaticLocalResidenceNeverRebased(t *testing.T) {
+	b := newRTPJitterBuffer()
+	base := time.Unix(100, 0)
+	for i := 0; i < 400; i++ {
+		at := base.Add(time.Duration(i) * 20 * time.Millisecond)
+		b.pushRTPAt(uint16(i), make([]byte, 160), uint32(i*160), at, at.Add(300*time.Millisecond))
+	}
+	if b.recovery.recoveries != 0 || b.lateDroppedSamples != 400*160 || b.buffered != 0 {
+		t.Fatal("local stale packets escaped hard expiry")
+	}
+}
+
 func BenchmarkSIPRecoveryEligibility(b *testing.B) {
-	for _, enabled := range []bool{false, true} {
-		b.Run(map[bool]string{false: "disabled", true: "stable_shift_jitter"}[enabled], func(b *testing.B) {
-			j := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
+	for _, profile := range []string{"automatic_healthy", "automatic_shift_jitter", "v28_shift_jitter"} {
+		b.Run(profile, func(b *testing.B) {
+			j := newRTPJitterBuffer()
+			yes := true
+			old := v28NewRTPJitterBufferWithPolicy(v28SipPlaybackPolicy{Resynchronize: &yes})
 			base := time.Unix(100, 0)
+			age := 240 * time.Millisecond
+			if profile == "automatic_healthy" {
+				age = 20 * time.Millisecond
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				at := base.Add(time.Duration(i)*20*time.Millisecond + time.Duration(i%2)*12*time.Millisecond)
-				j.recovery.consider(j, uint16(i), uint32(i*160), at, at, 240*time.Millisecond, 160)
+				if profile == "v28_shift_jitter" {
+					old.recovery.consider(old, uint16(i), uint32(i*160), at, at, age, 160)
+				} else {
+					j.recovery.consider(j, uint16(i), uint32(i*160), at, at, age, 160)
+				}
 			}
 		})
 	}

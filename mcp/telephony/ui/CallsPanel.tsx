@@ -2037,6 +2037,7 @@ function NumbersView({ projectId }: NativePanelProps) {
 
  const [outboundTransportDialog,setOutboundTransportDialog]=useState<{provider:string;connection:number;number?:string}>();
  const outboundTransportRequest=useCallback((body:Record<string,unknown>)=>postJSON<import("../frontend/src/client").OutboundTransportResult>(endpoint("/numbers/outbound-transport"),body),[endpoint]);
+ const carrierMediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/carrier-media"),body),[endpoint]);
  const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
   const loadConnected = useCallback(async (fresh = false) => {
@@ -2707,8 +2708,8 @@ function NumbersView({ projectId }: NativePanelProps) {
           </button>
         </section>
       ) : null}
-      {outboundTransportDialog?<OutboundTransportDialog {...outboundTransportDialog} request={outboundTransportRequest} onClose={()=>{setOutboundTransportDialog(undefined);void loadConnected(true)}}/>:null}
-      {sipSettings ? <SIPMediaDialog routeId={sipSettings.route} label={sipSettings.label} request={mediaRequest} onClose={() => setSipSettings(null)}/> : null}
+      {outboundTransportDialog?<OutboundTransportDialog {...outboundTransportDialog} request={outboundTransportRequest} carrierRequest={carrierMediaRequest} onClose={()=>{setOutboundTransportDialog(undefined);void loadConnected(true)}}/>:null}
+      {sipSettings ? <SIPMediaDialog routeId={sipSettings.route} label={sipSettings.label} request={mediaRequest} carrierRequest={carrierMediaRequest} onClose={() => setSipSettings(null)}/> : null}
     </div>
   );
 }

@@ -62,13 +62,20 @@ func TestSIPPlaybackClockDoesNotAbsorbDeliveryStall(t *testing.T) {
 			}
 			before := b.lateDroppedSamples
 			// Sustained delayed delivery, not just a single old batch. Even when
-			// all estimator windows become delayed it must retain the age limit.
+			// all estimator windows become delayed, source-clock evidence must remain.
+			// A bounded live-phase recovery is separate from that original clock.
 			for i := 3000; i < 12000; i++ {
 				now := at.Add(time.Duration(i)*20*time.Millisecond + delay)
 				b.pushRTP(uint16(i), payload, uint32(i*160), now)
 				b.popAt(now)
 			}
-			if b.lateDroppedSamples-before != 9000*160 || b.clock.rejected == 0 {
+			if b.clock.rejected == 0 || math.Abs(b.driftPPM) > 1 || b.maxDeliveryAgeMS < float64(delay/time.Millisecond)-1 {
+				t.Fatal("source-clock evidence was erased by recovery", b.driftPPM, b.maxDeliveryAgeMS)
+			}
+			if delay <= time.Second && (b.recovery.recoveries != 1 || b.lateDroppedSamples-before > 160*50) {
+				t.Fatal("bounded phase failed to recover")
+			}
+			if delay > time.Second && (b.lateDroppedSamples-before != 9000*160 || b.recovery.recoveries != 0) {
 				t.Fatal("genuine stale delivery absorbed into clock", b.lateDroppedSamples-before, b.driftPPM)
 			}
 			// Fresh packets resume immediately; rejected packets did not freeze

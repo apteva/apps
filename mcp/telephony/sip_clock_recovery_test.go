@@ -145,13 +145,13 @@ func TestSIPClockRecoveryV13Comparison(t *testing.T) {
 	}
 }
 
-func TestSIPClockRecoveryStaleBacklogStillExpires(t *testing.T) {
+func TestSIPClockRecoveryPersistentPhaseRecoversAndReturnsFresh(t *testing.T) {
 	for _, codec := range []string{"PCMU", "PCMA", "G722"} {
 		t.Run(codec, func(t *testing.T) {
 			r := replaySIPClockRecovery(t, codec, "stale_recovery", false, 180)
 			t.Logf("%+v", r)
-			if r.LateMS < 55000 || r.TailDroppedMS != 0 || r.PhaseWithheld == 0 {
-				t.Fatal("stale delivery absorbed or fresh recovery failed", r)
+			if r.LateMS == 0 || r.LateMS > 2000 || r.TailDroppedMS != 0 || r.PhaseWithheld == 0 {
+				t.Fatal("persistent phase failed to recover or new fresh delivery was rejected", r)
 			}
 		})
 	}

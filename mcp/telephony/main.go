@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.28
+version: 0.12.29
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -142,6 +142,7 @@ provides:
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Agents own what they create; API keys and panel sessions pass agent_id. Args: phone_number?, phone_number_id?, agent_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
+    - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
     - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
@@ -378,7 +379,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.28
+    ref: telephony/v0.12.29
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -437,45 +438,46 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	legacyAdmission   atomic.Uint32
-	legacyWork        atomic.Int64
-	recordingWriters  atomic.Int64
-	legacyLifecycleMu sync.Mutex
-	legacyDeployment  string
-	legacyGeneration  int64
-	runtime           *telephonyRuntime
-	runtimeBrowsers   runtimeBrowserSessions
-	mediaDiagnostics  mediaDiagnosticRegistry
-	aiPolicies        aiPolicyRegistry
-	mediaBridges      carrierBridgeRegistry
-	callReads         callReadCache
-	idleWorkers       idleWorkerGate
-	dashboardExtras   dashboardExtrasCache
-	inventoryReads    inventoryReadCache
-	policyReads       phonePolicyCache
-	outboundHints     outboundInventoryHints
-	admissionMu       sync.RWMutex
-	audioPeerHasher   audioPeerHasher
-	audioNetworks     audioNetworkCollector
-	notifications     callNotificationQueue
-	audioTransports   audioTransportCollector
-	carrierTelemetry  carrierTelemetryCollector
-	audioAlerts       audioAlertCorrelator
-	decisionWG        sync.WaitGroup
-	decisionStopping  bool
-	aiRecovering      map[string]bool
-	dispatchMu        sync.Mutex
-	dispatchCancel    context.CancelFunc
-	burstMu           sync.Mutex
-	dispatcher        *routingDispatcher
-	callChanges       callChangeHub
-	installID         int64
-	sip               sipRuntimeHolder
-	softphones        softphoneRegistry
-	phoneAttachments  phoneAttachmentCache
-	listeners         callListenerRegistry
-	preparations      realtimePreparations
-	eventDispatcher   *routingDispatcher
+	legacyAdmission    atomic.Uint32
+	legacyWork         atomic.Int64
+	recordingWriters   atomic.Int64
+	legacyLifecycleMu  sync.Mutex
+	legacyDeployment   string
+	legacyGeneration   int64
+	runtime            *telephonyRuntime
+	runtimeBrowsers    runtimeBrowserSessions
+	mediaDiagnostics   mediaDiagnosticRegistry
+	aiPolicies         aiPolicyRegistry
+	mediaBridges       carrierBridgeRegistry
+	callReads          callReadCache
+	idleWorkers        idleWorkerGate
+	dashboardExtras    dashboardExtrasCache
+	inventoryReads     inventoryReadCache
+	policyReads        phonePolicyCache
+	outboundHints      outboundInventoryHints
+	admissionMu        sync.RWMutex
+	carrierMediaDrains sync.Map
+	audioPeerHasher    audioPeerHasher
+	audioNetworks      audioNetworkCollector
+	notifications      callNotificationQueue
+	audioTransports    audioTransportCollector
+	carrierTelemetry   carrierTelemetryCollector
+	audioAlerts        audioAlertCorrelator
+	decisionWG         sync.WaitGroup
+	decisionStopping   bool
+	aiRecovering       map[string]bool
+	dispatchMu         sync.Mutex
+	dispatchCancel     context.CancelFunc
+	burstMu            sync.Mutex
+	dispatcher         *routingDispatcher
+	callChanges        callChangeHub
+	installID          int64
+	sip                sipRuntimeHolder
+	softphones         softphoneRegistry
+	phoneAttachments   phoneAttachmentCache
+	listeners          callListenerRegistry
+	preparations       realtimePreparations
+	eventDispatcher    *routingDispatcher
 }
 
 const (
@@ -820,8 +822,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolRoutesSetTransport,
 		},
 		{
+			Name:        "telephony_carrier_media_settings",
+			Description: "Read or configure optional carrier jitter buffering. Disabled by default. Select route_id for inbound or carrier_connection_id and optional phone_number for outbound. Shared carrier resource scope: affects all numbers/routes using it. carrier_jitter_buffer={enabled,min_ms,max_ms}; Telnyx supports 40–400ms, defaults 60–200ms. apply=true patches only while the binding is idle, otherwise returns pending; retry apply when idle. fresh=true verifies current carrier settings. Platform principals only. Does not change local automatic SIP recovery.",
+			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "carrier_jitter_buffer": map[string]any{"type": "object", "properties": map[string]any{"enabled": map[string]any{"type": "boolean"}, "min_ms": map[string]any{"type": "integer", "minimum": 40, "maximum": 400}, "max_ms": map[string]any{"type": "integer", "minimum": 40, "maximum": 400}}}, "fresh": map[string]any{"type": "boolean"}, "apply": map[string]any{"type": "boolean"}}, nil),
+			HandlerCtx:  a.toolCarrierMedia,
+		},
+		{
 			Name:        "telephony_local_media_settings",
-			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds, voicemail_max_seconds and bounded rtp_playback (target_ms, max_target_ms, capacity_ms, max_age_ms, concealment, clock_drift, resynchronize). resynchronize defaults false; enable in staging to resume a stable shifted timeline after dropping old reserve. inherit=true removes a route override.",
+			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds, voicemail_max_seconds and bounded rtp_playback (target_ms, max_target_ms, capacity_ms, max_age_ms, concealment, clock_drift, resynchronize). SIP playout recovery is automatic. Legacy resynchronize values remain readable but no longer disable recovery. Physical residence and queue bounds remain enforced. inherit=true removes a route override.",
 			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "inherit": map[string]any{"type": "boolean"}}, nil),
 			HandlerCtx:  a.toolLocalMediaSettings,
 		},

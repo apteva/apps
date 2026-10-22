@@ -18,6 +18,9 @@ var errInboundDisabled = errors.New("inbound_disabled: new inbound calls are dis
 // These checks apply only at admission. Access grants, media leases, callbacks,
 // and idempotent replay of existing calls remain independent.
 func (a *App) checkOutboundAdmission(project, provider string, connection int64, number string) error {
+	if _, busy := a.carrierMediaDrains.Load(connection); busy {
+		return errOutboundDisabled
+	}
 	var count int
 	err := a.db().db.QueryRow(`SELECT
  (SELECT COUNT(*) FROM outbound_admission_rules WHERE project_id=? AND
@@ -33,6 +36,9 @@ func (a *App) checkOutboundAdmission(project, provider string, connection int64,
 }
 
 func (a *App) checkInboundAdmission(route *routeRow) error {
+	if _, busy := a.carrierMediaDrains.Load(route.CarrierConnectionID); busy {
+		return errInboundDisabled
+	}
 	var enabled, draining int
 	err := a.db().db.QueryRow(`SELECT enabled,(SELECT COUNT(*) FROM carrier_binding_drains WHERE connection_id=inbound_routes.carrier_connection_id) FROM inbound_routes WHERE id=?`, route.ID).Scan(&enabled, &draining)
 	if err != nil {

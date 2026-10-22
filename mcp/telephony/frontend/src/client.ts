@@ -68,6 +68,14 @@ export interface CallSession {
   lease_started_ms?: number;
   coaching?: boolean;
 }
+export interface CarrierJitterBufferPolicy { enabled:boolean; min_ms?:number; max_ms?:number }
+export interface CarrierMediaSettingsRequest {
+ route_id?:string; carrier_connection_id?:number; phone_number?:string;
+ carrier_jitter_buffer?:CarrierJitterBufferPolicy; apply?:boolean; fresh?:boolean;
+}
+export interface CarrierMediaSettingsResult {
+ ok:boolean; carrier_jitter_buffer:{requested:CarrierJitterBufferPolicy;effective?:CarrierJitterBufferPolicy;state:string;verified_at?:string;scope:string;resource_type:string;resource_id:string;shared_connection:boolean;message?:string};
+}
 export interface OutboundSIPConfig {
  host:string; resource_id:string; resource_type?:"credential_connection"|"ip_connection"|"fqdn_connection"|"elastic_sip_trunk";
  auth_mode:"digest"|"ip"; media_encryption:"srtp_sdes"|"disabled"; codecs?:Array<"G722"|"PCMU"|"PCMA">;
@@ -340,6 +348,11 @@ export class TelephonyClient {
 
   /** Operator-only configuration. Never available through adviser app-user grants.
    * Transport changes affect new calls; credentials are write-only. */
+  /** Operator-only optional carrier buffer. Off by default; shared resource scope.
+   * apply defers while calls are active. Does not change local SIP recovery. */
+  carrierMediaSettings(request:CarrierMediaSettingsRequest):Promise<CarrierMediaSettingsResult> {
+    return this.post(this.path("/numbers/carrier-media"),request);
+  }
   outboundTransport(request:OutboundTransportRequest):Promise<OutboundTransportResult> {
     return this.post(this.path("/numbers/outbound-transport"),request);
   }
