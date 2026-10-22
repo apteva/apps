@@ -30,6 +30,23 @@ export function applyRTCICEOptions(url:URL,options:RTCICEOptions):void {
  if(options.iceTransportPolicy!==undefined)url.searchParams.set("ice_policy",options.iceTransportPolicy);
  if(options.turnTLSPort!==undefined)url.searchParams.set("turn_tls_port",String(options.turnTLSPort));
 }
+export interface RTCICEMediaProgress {pairID:string;direct:boolean;sent:number;received:number;send:boolean;receive:boolean}
+// Control-plane snapshots only: no sampling timer is added to steady audio.
+export function rtcICEMediaProgress(report:RTCStatsReport):RTCICEMediaProgress {
+ const v:RTCICEMediaProgress={pairID:"",direct:false,sent:0,received:0,send:false,receive:false};
+ report.forEach((s:any)=>{
+  if(s.type==="transport"&&s.selectedCandidatePairId)v.pairID=s.selectedCandidatePairId;
+  if(s.type==="outbound-rtp"&&!s.isRemote){v.sent+=s.packetsSent??0;v.send=true;}
+  if(s.type==="inbound-rtp"&&!s.isRemote){v.received+=s.packetsReceived??0;v.receive=true;}
+ });
+ if(!v.pairID)report.forEach((s:any)=>{if(s.type==="candidate-pair"&&s.nominated&&s.state==="succeeded")v.pairID=s.id;});
+ const pair=report.get(v.pairID),local=pair&&report.get(pair.localCandidateId),remote=pair&&report.get(pair.remoteCandidateId);
+ const direct=(c:any)=>c&&["host","srflx","prflx"].includes(c.candidateType);
+ v.direct=Boolean(pair&&direct(local)&&direct(remote));return v;
+}
+export function rtcICEMediaResumed(before:RTCICEMediaProgress,after:RTCICEMediaProgress):boolean {
+ return Boolean(after.pairID&&after.pairID!==before.pairID&&(before.send||before.receive)&&(!before.send||after.sent>before.sent)&&(!before.receive||after.received>before.received));
+}
 interface ICEPeer {
  pc:RTCPeerConnection; current:()=>boolean; offerType:string; answerType:string; generation?:number;
  revision:number; cancellation:AbortController; pending?:{revision:number;resolve:()=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>};
@@ -77,6 +94,16 @@ export class RTCICEController {
   }).catch(()=>{this.report("restart_failed");this.retry();});
   return true;
  }
+ private mediaStats(peer:ICEPeer,current:()=>boolean):Promise<RTCStatsReport>{
+  return new Promise((resolve,reject)=>{
+   const cleanup=()=>{clearTimeout(timer);peer.cancellation.signal.removeEventListener("abort",aborted);};
+   const aborted=()=>{cleanup();reject(new Error("ICE peer removed"));};
+   const timer=setTimeout(()=>{cleanup();reject(new Error("ICE media statistics timed out"));},1500);
+   peer.cancellation.signal.addEventListener("abort",aborted,{once:true});
+   if(!current()){aborted();return;}
+   Promise.resolve().then(()=>peer.pc.getStats()).then(report=>{cleanup();current()?resolve(report):reject(new Error("ICE peer replaced"));},()=>{cleanup();reject(new Error("ICE media statistics unavailable"));});
+  });
+ }
  private retry(){
   if(this.retryTimer||this.retries>=3||!this.alive())return;
   this.retryTimer=setTimeout(()=>{this.retryTimer=undefined;if(this.alive()){this.retries++;try{this.send({type:"webrtc.ice_refresh"});}catch{this.report("refresh_request_failed");}}},15000);
@@ -100,6 +127,12 @@ export class RTCICEController {
   });
   if(!current())return;
   peer.pc.setConfiguration({...peer.pc.getConfiguration(),...config});
+  const before=rtcICEMediaProgress(await this.mediaStats(peer,current));
+  if(!current())return;
+  if(config.iceTransportPolicy!=="relay"&&peer.pc.connectionState==="connected"&&before.direct){
+   peer.revision=revision;this.report("credentials_applied_direct",evidence());return;
+  }
+  // The server keeps its nominated sockets alive while the new pair connects.
   // Track senders/receivers and AudioContext survive this operation.
   const offer=await peer.pc.createOffer({iceRestart:true});if(!current())return;
   await peer.pc.setLocalDescription(offer);if(!current())return;
@@ -119,8 +152,25 @@ export class RTCICEController {
    peer.pending={revision,resolve,reject,timer};
    try{this.send({type:peer.offerType,revision,generation:peer.generation,sdp:peer.pc.localDescription!.sdp});}catch{clearTimeout(timer);peer.pending=undefined;reject(new Error("ICE signaling unavailable"));}
   });
-  if(current())this.report("restart_completed",evidence());
+  if(current())this.report("restart_signaled",evidence());
+  const deadline=performance.now()+10000;
+  while(current()){
+   const progress=rtcICEMediaProgress(await this.mediaStats(peer,current));
+   if(!current())return;
+   if(peer.pc.connectionState==="connected"&&rtcICEMediaResumed(before,progress)){
+    peer.revision=revision;this.report("restart_completed",evidence());return;
+   }
+   if(performance.now()>=deadline)throw new Error("ICE media did not resume");
+   await new Promise<void>((resolve,reject)=>{
+    const cleanup=()=>{clearTimeout(timer);peer.cancellation.signal.removeEventListener("abort",aborted);};
+    const aborted=()=>{cleanup();reject(new Error("ICE peer removed"));};
+    const timer=setTimeout(()=>{cleanup();resolve();},100);
+    peer.cancellation.signal.addEventListener("abort",aborted,{once:true});
+    if(!current())aborted();
+   });
+  }
   } catch(error) {
+   if(!current())return;
    // A failed or superseded exchange must leave the peer able to accept the
    // next refresh without recreating tracks or touching the carrier call.
    if(current()&&peer.pc.signalingState==="have-local-offer")try{await peer.pc.setLocalDescription({type:"rollback"});}catch{/* next refresh remains bounded */}

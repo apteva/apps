@@ -7,10 +7,12 @@ import {validateTURNPolicy,turnPolicyUpdate} from "../../ui/TurnSettings";
 
 class FakePeer extends EventTarget {
  connectionState="connected";signalingState="stable";iceGatheringState="complete";localDescription:any;
+ sent=100;received=100;pair="pair-1";candidateType="relay";autoResume=true;
+ async getStats(){return new Map([["t",{type:"transport",selectedCandidatePairId:this.pair}],[this.pair,{type:"candidate-pair",localCandidateId:"l",remoteCandidateId:"r"}],["l",{candidateType:this.candidateType}],["r",{candidateType:"host"}],["out",{type:"outbound-rtp",packetsSent:this.sent}],["in",{type:"inbound-rtp",packetsReceived:this.received}]]);}
  configuration:RTCConfiguration={iceServers:[]};senders=[{track:{enabled:false,id:"same-microphone"}}];closed=false;offers:any[]=[];answers:any[]=[];
  setConfiguration(c:RTCConfiguration){this.configuration=c;}getConfiguration(){return this.configuration;}
  async createOffer(options:any){this.offers.push(options);return {type:"offer",sdp:"new-ice-offer"};}
- async setLocalDescription(d:any){this.localDescription=d;}async setRemoteDescription(d:any){this.answers.push(d);}
+ async setLocalDescription(d:any){this.localDescription=d;}async setRemoteDescription(d:any){this.answers.push(d);this.pair=`pair-${this.answers.length+1}`;if(this.autoResume){this.sent++;this.received++;}}
  close(){this.closed=true;}
 }
 const refresh=(revision=2)=>({type:"webrtc.ice_config",revision,expires_at:Date.now()/1000+3600,ice_servers:[{urls:["turns:relay.example:8443?transport=tcp"],username:"secret-user",credential:"secret-password"}],ice_transport_policy:"relay"});
@@ -108,4 +110,27 @@ test("editing an inherited adviser policy cannot grant override permissions",()=
  expect(turnPolicyUpdate(inherited,"adviser").allow_user_overrides).toBeUndefined();
  expect(turnPolicyUpdate(inherited,"project").allow_user_overrides).toBe(true);
  expect(inherited.allow_user_overrides).toBe(true);
+});
+
+
+test("healthy direct paths refresh configuration without ICE restart",async()=>{
+ const p=new FakePeer(),messages:any[]=[],events:string[]=[];p.candidateType="host";
+ const c=new RTCICEController(v=>messages.push(v),()=>true,v=>events.push(v));c.register("main",p as any);
+ c.handle({...refresh(),ice_transport_policy:"all"});await tick();
+ expect(messages).toHaveLength(0);expect(p.offers).toHaveLength(0);
+ expect(p.configuration.iceServers?.[0].username).toBe("secret-user");
+ expect(events).toContain("credentials_applied_direct");expect(events).not.toContain("restart_completed");c.stop();
+});
+test("signaling and a connected peer cannot report renewal success without resumed RTP",async()=>{
+ const p=new FakePeer(),events:string[]=[];p.autoResume=false;
+ const c=new RTCICEController(()=>{},()=>true,v=>events.push(v));c.register("main",p as any);
+ c.handle(refresh());await tick();c.handle({type:"webrtc.restart_answer",revision:2,sdp:"answer"});await tick();
+ expect(events).toContain("restart_signaled");expect(events).not.toContain("restart_completed");
+ p.sent++;await new Promise(r=>setTimeout(r,120));expect(events).not.toContain("restart_completed");
+ p.received++;await new Promise(r=>setTimeout(r,120));expect(events).toContain("restart_completed");c.stop();
+});
+test("relay policy changes still restart a direct path",async()=>{
+ const p=new FakePeer(),messages:any[]=[];p.candidateType="host";
+ const c=new RTCICEController(v=>messages.push(v),()=>true);c.register("main",p as any);
+ c.handle(refresh());await tick();expect(messages).toHaveLength(1);expect(p.offers).toHaveLength(1);c.stop();
 });

@@ -157,26 +157,28 @@ func (c *rtcHubConn) queueWhisper(data []byte, valid func() bool) bool {
 }
 
 type rtcMediaSnapshot struct {
-	Ingress                rtcIngressSnapshot `json:"rtp_ingress"`
-	CoachingMixedMS        int64              `json:"coaching_mixed_ms,omitempty"`
-	IngressConcealedMS     int64              `json:"ingress_concealed_ms"`
-	Encoder                *rtcEncoderState   `json:"encoder,omitempty"`
-	EncoderControlErrors   uint64             `json:"encoder_control_errors"`
-	RTP                    rtcSendSnapshot    `json:"rtp_send"`
-	IngressDiscardedMS     int64              `json:"ingress_discarded_ms"`
-	CaptureMaxQueueMS      int64              `json:"capture_max_queue_ms"`
-	IngressRejectedPackets int64              `json:"ingress_rejected_packets"`
-	IngressQueueDrops      int64              `json:"ingress_queue_drops"`
-	IngressPaddingPackets  int64              `json:"ingress_padding_packets"`
-	DecodeErrors           int64              `json:"decode_errors"`
-	OutboundDroppedMS      int64              `json:"outbound_dropped_ms"`
-	PacingSkippedMS        int64              `json:"pacing_skipped_ms"`
-	PartialFlushedFrames   uint64             `json:"partial_flushed_frames"`
-	PartialPaddedMS        float64            `json:"partial_padded_ms"`
-	MaxQueueMS             int                `json:"max_queue_ms"`
-	Events                 []audioDropEvent   `json:"events,omitempty"`
+	ICEEvents              []mediaSessionEvent `json:"ice_events,omitempty"`
+	Ingress                rtcIngressSnapshot  `json:"rtp_ingress"`
+	CoachingMixedMS        int64               `json:"coaching_mixed_ms,omitempty"`
+	IngressConcealedMS     int64               `json:"ingress_concealed_ms"`
+	Encoder                *rtcEncoderState    `json:"encoder,omitempty"`
+	EncoderControlErrors   uint64              `json:"encoder_control_errors"`
+	RTP                    rtcSendSnapshot     `json:"rtp_send"`
+	IngressDiscardedMS     int64               `json:"ingress_discarded_ms"`
+	CaptureMaxQueueMS      int64               `json:"capture_max_queue_ms"`
+	IngressRejectedPackets int64               `json:"ingress_rejected_packets"`
+	IngressQueueDrops      int64               `json:"ingress_queue_drops"`
+	IngressPaddingPackets  int64               `json:"ingress_padding_packets"`
+	DecodeErrors           int64               `json:"decode_errors"`
+	OutboundDroppedMS      int64               `json:"outbound_dropped_ms"`
+	PacingSkippedMS        int64               `json:"pacing_skipped_ms"`
+	PartialFlushedFrames   uint64              `json:"partial_flushed_frames"`
+	PartialPaddedMS        float64             `json:"partial_padded_ms"`
+	MaxQueueMS             int                 `json:"max_queue_ms"`
+	Events                 []audioDropEvent    `json:"events,omitempty"`
 }
 type rtcMediaStats struct {
+	ice             atomic.Pointer[rtcICESession]
 	captureMaxQueue atomic.Int64
 	ingress         rtcIngressTelemetry
 	direction       string
@@ -190,6 +192,9 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.value
+	if ice := s.ice.Load(); ice != nil {
+		v.ICEEvents = ice.snapshot()
+	}
 	v.CaptureMaxQueueMS = s.captureMaxQueue.Load()
 	v.Encoder = s.voice.codec.Load()
 	v.EncoderControlErrors = s.voice.configurationErrors.Load()
@@ -221,6 +226,13 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	}
 }
 func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
+	if len(b.ICEEvents) > 0 {
+		events := append(append([]mediaSessionEvent(nil), a.ICEEvents...), b.ICEEvents...)
+		if len(events) > 50 {
+			events = events[len(events)-50:]
+		}
+		a.ICEEvents = events
+	}
 	a.CoachingMixedMS += b.CoachingMixedMS
 	a.IngressConcealedMS += b.IngressConcealedMS
 	if b.Encoder != nil {
@@ -448,6 +460,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	if err != nil {
 		return fail(err)
 	}
+	stats.ice.Store(iceSession)
 	if err := signalWriter.Write(ws.OpText, iceSession.initial(false)); err != nil {
 		return fail(err)
 	}
@@ -524,7 +537,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 					continue
 				}
 				if control.Type == "webrtc.restart_offer" {
-					iceSession.restart(pc, control.SDP, control.Revision, signalWriter, "webrtc.restart_answer", nil, func() bool { return true })
+					iceSession.restart(pc, control.SDP, control.Revision, signalWriter, "webrtc.restart_answer", nil, func() bool { return true }, stats)
 					continue
 				}
 			}

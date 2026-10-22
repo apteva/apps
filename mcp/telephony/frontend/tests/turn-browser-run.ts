@@ -6,7 +6,7 @@ try {
  const page=await browser.newPage({permissions:["microphone"]});
  const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
  await page.goto(origin);await page.waitForFunction(()=>typeof(window as any).runTURNTest==="function");
- const result=await page.evaluate(async()=>{const {media_url}=await(await fetch("/config")).json();return await(window as any).runTURNTest(media_url);});
+ const result=await page.evaluate(async()=>{const {media_url,mode,seconds}=await(await fetch("/config")).json();return await(window as any).runTURNTest(media_url,mode,seconds);});
  if(errors.length)throw new Error("Unexpected browser page errors: "+errors.join(","));
  console.log(JSON.stringify({browser:browser.version(),...result}));
 }finally{await browser.close();}
