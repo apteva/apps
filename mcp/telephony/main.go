@@ -181,6 +181,7 @@ provides:
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
+    - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
     - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
@@ -953,6 +954,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider_call_id": map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolCallGet,
+		},
+		{
+			Name:        "telephony_live_occupancy",
+			Description: "Read a complete current project snapshot of active human call owners, including connecting calls. Optional direction: inbound or outbound. No pagination. Observational only: retain routing reservations and atomic capacity checks.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			InputSchema: schemaObject(map[string]any{
+				"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}},
+			}, nil),
+			HandlerCtx: a.toolLiveOccupancy,
 		},
 		{Name: "telephony_decisions_list", Description: "List project-scoped routing decision requests, results, deadlines and fallback reasons for a call.", InputSchema: schemaObject(map[string]any{"call_id": map[string]any{"type": "string"}}, []string{"call_id"}), HandlerCtx: a.toolDecisionsList},
 		{

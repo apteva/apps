@@ -411,7 +411,7 @@ func (a *App) runtimeDrainStatus() (map[string]any, error) {
 func (a *App) runtimeTool(name string, next func(context.Context, *sdk.AppCtx, map[string]any) (any, error)) func(context.Context, *sdk.AppCtx, map[string]any) (any, error) {
 	return func(c context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		newWork := true
-		if name == "telephony_hangup" || name == "telephony_reject_call" || name == "telephony_answer_call" || strings.HasSuffix(name, "_get") || strings.HasSuffix(name, "_list") || name == "telephony_active_calls" || name == "telephony_pending_calls" {
+		if name == "telephony_hangup" || name == "telephony_reject_call" || name == "telephony_answer_call" || strings.HasSuffix(name, "_get") || strings.HasSuffix(name, "_list") || name == "telephony_active_calls" || name == "telephony_pending_calls" || name == "telephony_live_occupancy" {
 			newWork = false
 		}
 		done, err := a.runtimeBegin(newWork)

@@ -158,6 +158,12 @@ side effects; use TTLs and reconcile outcomes.
 
 ## Offers, capacity and recovery
 
+For a lightweight snapshot of existing human call owners, use
+[`telephony_live_occupancy`](live-occupancy.md), optionally filtered to outbound
+calls. It returns all matching owners in one consistent indexed read. Keep the
+function's reservation ledger and the atomic capacity checks described below;
+the snapshot does not reserve an adviser.
+
 A result, capacity reservation and one-member ring offer commit atomically.
 Duplicate provider callbacks never create another independent decision. A restart
 expires uncertain running work at its original deadline instead of invoking it
