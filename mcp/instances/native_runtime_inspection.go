@@ -187,7 +187,7 @@ func (p *nativeInspectionPool) runWorker(c context.Context, id int64, w *nativeI
 	}
 }
 
-func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestore bool) string {
+func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestore bool, measure ...bool) string {
 	cmd := `set -eu
  root=` + quoteShellArg(d.ReleaseDir) + `
  if test ! -e "$root/.owner"; then printf '{"state":"unknown"}\n'; exit 0; fi
@@ -218,12 +218,15 @@ func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestor
  if test -e "$root/.prepared"; then printf prepared; else printf preparing; fi
  }
  observed=$(inspect_execution)
- printf '{"state":"%s","snapshot_sha256":"%s","restore_pending":%s}\n' "$observed" "$snapshot_sha" "$restore_pending"
+ `
+	cmd += nativeInspectionMetadataScript(len(measure) > 0 && measure[0])
+	cmd += `printf '{"state":"%s","snapshot_sha256":"%s","restore_pending":%s,"state_bytes":%s,"state_entries":%s,"state_available_bytes":%s}\n' "$observed" "$snapshot_sha" "$restore_pending" "$metadata_bytes" "$metadata_entries" "$metadata_available"
  `
 	return cmd
 }
 func (s nativeSSH) InspectState(c context.Context, i *Instance, d nativeRecord, peers []nativeRecord, recoverRestore bool) (nativeObservation, error) {
-	cmd := nativeInspectionCommand(d, peers, recoverRestore)
+	measure, _ := c.Value(nativeMetadataKey{}).(bool)
+	cmd := nativeInspectionCommand(d, peers, recoverRestore, measure)
 	var out string
 	var e error
 	if s.inspections != nil {
@@ -246,7 +249,63 @@ func (s nativeSSH) InspectState(c context.Context, i *Instance, d nativeRecord, 
 	if obs.SnapshotSHA256 != "" && !nativeDigest(obs.SnapshotSHA256) {
 		return obs, errors.New("invalid inspection digest")
 	}
+	for _, n := range []*int64{obs.StateBytes, obs.StateEntries, obs.StateAvailableBytes} {
+		if n != nil && *n < 0 {
+			return obs, errors.New("invalid state metadata")
+		}
+	}
 	obs.Prepared = obs.State == "prepared"
 	obs.Stopped = obs.State == "stopped"
 	return obs, nil
+}
+
+type nativeMetadataKey struct{}
+type nativeMetadataCache struct {
+	Identity       string
+	At             time.Time
+	Bytes, Entries *int64
+}
+
+func (b *nativeBackend) metadataContext(c context.Context, i *Instance, d nativeRecord, force bool) (context.Context, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cache, ok := b.stateMetadata[d.ID]
+	identity := nativeInspectionIdentity(i) + d.Execution.HostKey + d.DataDir
+	measure := force || !ok || cache.Identity != identity || time.Since(cache.At) > time.Minute || d.Execution.StoppedConfirmed || !d.Started
+	return context.WithValue(c, nativeMetadataKey{}, measure), measure
+}
+func (b *nativeBackend) mergeStateMetadata(i *Instance, d nativeRecord, obs *nativeObservation, measured bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stateMetadata == nil {
+		b.stateMetadata = map[string]nativeMetadataCache{}
+	}
+	if measured {
+		if len(b.stateMetadata) >= 1024 {
+			b.stateMetadata = map[string]nativeMetadataCache{}
+		}
+		b.stateMetadata[d.ID] = nativeMetadataCache{nativeInspectionIdentity(i) + d.Execution.HostKey + d.DataDir, time.Now(), obs.StateBytes, obs.StateEntries}
+	} else if cached, ok := b.stateMetadata[d.ID]; ok {
+		obs.StateBytes, obs.StateEntries = cached.Bytes, cached.Entries
+	}
+}
+func nativeInspectionMetadataScript(measure bool) string {
+	script := `metadata_bytes=null;metadata_entries=null;metadata_available=null
+ if capacity=$(stat -f -c '%a %S' "$data" 2>/dev/null); then
+  set -- $capacity
+  if test "$#" = 2; then metadata_available=$(( $1 * $2 )); fi
+ fi
+ `
+	if measure {
+		// Live estimates are refreshed at most once/minute. Transfers and stopped
+		// targets request fresh measurements. Unsafe/unreadable data blocks migration
+		// through null metadata without breaking ordinary service health inspection.
+		walk := "set -eu\n" + nativeDataSafe(nativeSnapshotLimits{ArchiveBytes: nativeStateHardLimit, StateBytes: nativeStateHardLimit, MaxEntries: nativeStateMaxEntries}) + `printf '%s %s' "$state_bytes" "$state_entries"`
+		// A slow tree must not turn a healthy app into an inspection failure.
+		script += `if command -v timeout >/dev/null && metadata=$(data="$data" timeout 2 sh -c ` + quoteShellArg(walk) + ` 2>/dev/null); then
+  set -- $metadata;metadata_bytes=$1;metadata_entries=$2
+ fi
+ `
+	}
+	return script
 }

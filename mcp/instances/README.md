@@ -3,6 +3,15 @@
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 
+## Native large-state transfer (0.10.0)
+
+The native backend implements Server's negotiated `state_transfer` contract with
+independent 8 GiB archive/expanded defaults, 16 GiB hard ceilings, streamed
+validation, state filesystem metadata, disk preflight and bounded progress.
+Existing restore ownership, stopped-writer, SHA-256, SQLite WAL and crash-recovery
+protections remain in force. Headerless clients keep the 512 MiB legacy policy.
+See [configuration, Server compatibility and progress](runtime/snapshot-limits.md).
+
 ## Why
 
 Several apps need to "run a workload somewhere": Live Link's self-vps

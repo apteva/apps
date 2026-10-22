@@ -47,6 +47,11 @@ type nativeBackend struct {
 	stateMu         sync.Mutex
 	projectID       string
 	restoreVerified map[string]string
+	stateLimits     nativeSnapshotLimits
+	stateTimeout    time.Duration
+	stateEpoch      string
+	stateMetadata   map[string]nativeMetadataCache
+	stateDiskFree   func(string) (int64, error)
 }
 
 var nativeManagersMu sync.Mutex
@@ -66,8 +71,14 @@ func nativeFor(ctx *sdk.AppCtx) (*nativeBackend, error) {
 	if e = os.MkdirAll(root, 0700); e != nil {
 		return nil, e
 	}
+	limits, timeout, e := loadNativeSnapshotLimits(ctx.Config())
+	if e != nil {
+		return nil, e
+	}
 	life, cancel := context.WithCancel(context.Background())
 	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{inspections: newNativeInspectionPool(life)}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
+	b.stateLimits, b.stateTimeout = limits, timeout
+	b.stateEpoch = nativeHash(strconv.FormatInt(time.Now().UnixNano(), 10))
 	nativeManagers[ctx.AppDB()] = b
 	return b, nil
 }
@@ -426,12 +437,16 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 		_, _ = b.db.Exec(`UPDATE native_deployments SET record=? WHERE id=? AND record=?`, nativeJSON(current), current.ID, before)
 	}()
 }
-func (b *nativeBackend) inspect(d nativeRecord, inst *Instance) nativeExecution {
+func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativeStatePolicy) nativeExecution {
 	out := d.Execution
 	out.Ready = false
 	c, cancel := context.WithTimeout(b.ctx, 12*time.Second)
 	defer cancel()
+	force := len(policy) > 0 && policy[0] != nil
+	c, measure := b.metadataContext(c, inst, d, force)
 	obs, e := b.inspectRemote(c, inst, &d)
+	b.mergeStateMetadata(inst, d, &obs, measure)
+	out.StateBytes, out.StateEntries, out.StateAvailableBytes = obs.StateBytes, obs.StateEntries, obs.StateAvailableBytes
 	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
 	if e != nil || d.Restore != nil && (!d.Restore.Completed || d.Execution.SnapshotSHA256 != d.Restore.SHA256) {
 		b.invalidateRestore(d)
@@ -646,7 +661,7 @@ func (a *App) handleNativeRuntime(w http.ResponseWriter, r *http.Request) {
 func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, nativePrefix+"/")
 	if tail == "describe" && r.Method == http.MethodGet {
-		writeNative(w, nativeCapabilities())
+		writeNative(w, nativeCapabilitiesFor(b.snapshotLimits(), b.snapshotTimeout()))
 		return
 	}
 	if tail == "targets" {
@@ -655,6 +670,10 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		b.listNativeTargets(w, r)
+		return
+	}
+	if tail == "state-progress" {
+		b.stateProgressHTTP(w, r)
 		return
 	}
 	if tail == "snapshot" || tail == "restore" {
@@ -705,7 +724,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		inst, _ := b.target(req)
 		writeNative(w, struct {
-			sdk.RuntimeTargetInfo
+			nativeTargetInfo
 			PublicIPv4 string `json:"public_ipv4"`
 		}{info, inst.PublicIPv4})
 		return
@@ -832,7 +851,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			writeNative(w, d.Execution)
 			return
 		}
-		writeNative(w, b.inspect(d, inst))
+		writeNative(w, b.inspect(d, inst, req.StateTransfer))
 	case "publish-ingress":
 		if d.Options.Ingress == nil {
 			writeNative(w, d.Execution)
