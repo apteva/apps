@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.11.0
+version: 0.12.0
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -86,6 +86,10 @@ provides:
     - prefix: /
     - prefix: /_apteva/runtime/backends/native
   mcp_tools:
+    - name: instance_quote
+      description: Review an OVH contract-product order and its prices before purchase.
+    - name: instance_order_status
+      description: Inspect or resume OVH delivery and confirm service cancellation with a provider email token.
     - name: instance_list_providers
       description: List the VPS provider connections bound to this Instances install and identify the default provider.
     - name: instance_create
@@ -252,7 +256,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.11.0
+    ref: instances/v0.12.0
     entry: mcp/instances
   port: 8080
   health_check: /health

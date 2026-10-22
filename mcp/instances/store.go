@@ -93,6 +93,7 @@ func (i *Instance) stripSecrets() *Instance {
 // ─── Inputs ────────────────────────────────────────────────────────
 
 type CreateInstanceInput struct {
+	OVH                  *OVHOrderOptions
 	Setup                *SetupOptions
 	Name                 string
 	Provider             string

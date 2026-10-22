@@ -496,7 +496,12 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 				ipv4, ipv6 = huaweiAddresses(obj)
 			}
 		case "ovhcloud":
-			candidateID = mapString(obj, "id")
+			if mapValue(obj, "model") != nil || mapValue(obj, "serverId") != nil {
+				candidateID = mapString(obj, "name")
+				ipv4 = mapString(obj, "ip")
+			} else {
+				candidateID = mapString(obj, "id")
+			}
 			if candidateID != "" && (mapValue(obj, "ipAddresses") != nil || mapValue(obj, "flavorId") != nil) {
 				ipv4, ipv6 = ovhAddresses(obj)
 			}

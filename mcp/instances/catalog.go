@@ -28,6 +28,7 @@ import (
 // ServerType is the per-call shape returned to MCP + HTTP callers.
 // Fields that don't apply to a given provider stay zero.
 type ServerType struct {
+	OVHOffer            *OVHOffer               `json:"ovh_offer,omitempty"`
 	ProviderFamily      string                  `json:"provider_family,omitempty"`
 	Available           *bool                   `json:"available,omitempty"`
 	UnavailableReason   string                  `json:"unavailable_reason,omitempty"`

@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.11.0
+version: 0.12.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -105,6 +105,10 @@ provides:
     - prefix: /
     - prefix: /_apteva/runtime/backends/native
   mcp_tools:
+    - name: instance_quote
+      description: Review an OVH contract-product order and its prices before purchase.
+    - name: instance_order_status
+      description: Inspect or resume OVH delivery and confirm service cancellation with a provider email token.
     - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
     - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
     - { name: instance_storage_capabilities, description: "Describe boot and data-volume capabilities for a bound provider." }
@@ -215,7 +219,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.11.0
+    ref: instances/v0.12.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -320,6 +324,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances-register", Handler: a.httpRegister},
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
+		{Pattern: "/api/instances-quote", Handler: a.handleInstanceQuote},
+		{Pattern: "/api/instances-order", Handler: a.handleOrderStatus},
 		{Pattern: "/api/instances-providers", Handler: a.handleListProviders},
 		// Live provider catalog. Sister surface to the MCP tools so the
 		// panel doesn't need an MCP client; ?provider= defaults to

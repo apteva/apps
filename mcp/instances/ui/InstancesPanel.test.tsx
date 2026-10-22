@@ -1,7 +1,8 @@
 import {afterEach, beforeAll, expect, test} from "bun:test";
 import {Window} from "happy-dom";
 import React, {act} from "react";
-import {createRoot, type Root} from "react-dom/client";
+import type {Root} from "react-dom/client";
+let createRoot:typeof import("react-dom/client").createRoot;
 import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
@@ -9,8 +10,9 @@ const win = new Window({url:"http://localhost"});
 let root: Root | undefined;
 let container: HTMLDivElement;
 const originalFetch = globalThis.fetch;
-beforeAll(() => {
+beforeAll(async () => {
   Object.assign(globalThis, {window:win, document:win.document, navigator:win.navigator, HTMLElement:win.HTMLElement, IS_REACT_ACT_ENVIRONMENT:true});
+  createRoot = (await import("react-dom/client")).createRoot;
 });
 afterEach(async () => {if(root) await act(async()=>root!.unmount()); root=undefined;container?.remove();globalThis.fetch=originalFetch;});
 async function render(element: React.ReactNode) {container=document.createElement("div");document.body.append(container);root=createRoot(container);await act(async()=>root!.render(element));}
@@ -242,4 +244,43 @@ test("Clouding creation shows fractional vCPU allocation and Barcelona",async()=
  expect(container.textContent).toContain("0.5 vCPU");
  expect(container.textContent).toContain("Barcelona");
  expect(container.textContent).not.toContain("$0.00/mo");
+});
+
+test("OVH contracts require review and reuse the reviewed payload for purchase",async()=>{
+ const posts:Array<{path:string;body:any}>=[];let created=0;
+ const size='ovh/vps/plan-1';
+ globalThis.fetch=(async(input:any,init:any)=>{
+  const path=String(input);
+  if(init?.method==='POST'){
+   posts.push({path,body:JSON.parse(init.body)});
+   if(path.includes('instances-quote'))return response({quote_id:'quote-1',status:'quoted',expires_at:new Date(Date.now()+60000).toISOString(),quote:{prices:{withTax:{value:14.52,currencyCode:'EUR'},withoutTax:{value:12,currencyCode:'EUR'},tax:{value:2.52,currencyCode:'EUR'}},details:[{description:'VPS setup and first month',totalPrice:{value:14.52,currencyCode:'EUR'}}],contracts:[{name:'OVH VPS terms',content:'Contract terms',url:'https://www.ovhcloud.com/terms'}]}});
+   return response({instance:{id:9}});
+  }
+  if(path.includes('instances-providers'))return response({providers:[{provider:'ovhcloud',connection_id:7,default:true}]});
+  if(path.includes('server-types'))return response({server_types:[{name:size,cores:2,memory_gb:4,disk_gb:80,resource_class:'virtual',available_in:['ovh/vps/MAD'],configurable_boot:false,ovh_offer:{product:'vps',plan_code:'plan-1',configurations:[],addon_families:[{name:'os',required:true,exclusive:true,default:'linux',options:['linux']}],prices:[{mode:'default',duration:'P1M',amount:12,currency:'EUR'}],options:{linux:{description:'Linux operating system'}}}}]});
+  if(path.includes('locations'))return response({locations:[{name:'ovh/vps/MAD'}]});
+  if(path.includes('images'))return response({images:[{name:'ovh-vps/Ubuntu 24.04',resource_class:'virtual',compatible_types:[size]}]});
+  return response({capabilities:{storage_classes:[],tiers:[]}});
+ }) as typeof fetch;
+ await render(<CreateDialog withParams={params} onCreated={()=>created++} onClose={()=>{}} setError={()=>{}}/>);
+ const name=container.querySelector('input[type="text"]') as HTMLInputElement;
+ await act(async()=>{const setter=Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value')!.set!;setter.call(name,'Madrid VPS');name.dispatchEvent(new win.Event('input',{bubbles:true}) as any);});
+ if(!(container.querySelector('button[type="submit"]') as HTMLButtonElement).disabled){
+  await act(async()=>container.querySelector('form')!.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}) as any));
+  expect(posts).toHaveLength(1);expect(posts[0].path).toContain('instances-quote');expect(created).toBe(0);
+  expect(container.textContent).toContain('14.52 EUR');expect(container.textContent).toContain('OVH VPS terms');expect(container.textContent).toContain('Place order');
+  await act(async()=>container.querySelector('form')!.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}) as any));
+  expect(posts).toHaveLength(2);expect(posts[1].body.ovh.quote_id).toBe('quote-1');expect(posts[1].body.ovh.request_key).toBe(posts[0].body.ovh.request_key);expect(created).toBe(1);
+ } else { throw new Error('Name change did not enable the order review form'); }
+});
+
+test("OVH cancellation sends its email token only in a POST and clears it",async()=>{
+ let sent:any;let url='';
+ globalThis.fetch=(async(input:any,init:any)=>{url=String(input);sent=init?.body?JSON.parse(init.body):undefined;return response({order:{status:'termination_pending'},message:'OVH service still exists'});}) as typeof fetch;
+ await render(<InstanceCard inst={{id:9,name:'OVH host',provider:'ovhcloud',size:'ovh/vps/p',status:'destroying',monthly_cost_cents:0} as any} withParams={params} busy={false} onUpgrade={()=>{}} onVolumes={()=>{}} onDestroy={()=>{}}/>);
+ const field=container.querySelector('input[type="password"]') as HTMLInputElement;
+ await act(async()=>{const setter=Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value')!.set!;setter.call(field,'email-secret');field.dispatchEvent(new win.Event('input',{bubbles:true}) as any);});
+ const button=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Confirm OVH cancellation')!;
+ await act(async()=>button.click());
+ expect(sent).toEqual({id:9,action:'confirm_termination',token:'email-secret'});expect(url).not.toContain('email-secret');expect(field.value).toBe('');expect(container.textContent).toContain('OVH service still exists');
 });

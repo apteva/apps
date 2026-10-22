@@ -194,6 +194,17 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.ProviderConnectionID = bound.ConnectionID
+	if provider == "ovhcloud" {
+		if in.Size == "" {
+			return nil, errors.New("OVH requires an explicit Public Cloud flavor or a reviewed VPS/dedicated offer")
+		}
+		if product, _ := ovhSizeParts(in.Size); product != "" {
+			return ovhContractProvision(ctx, in)
+		}
+		if strings.HasPrefix(in.Image, "ovh-") || strings.HasPrefix(in.Region, "ovh/") {
+			return nil, errors.New("OVH Public Cloud flavor requires a Public Cloud image and region")
+		}
+	}
 	ctx, releaseScope := scopedCatalog(ctx, catalogOptions{ConnectionID: bound.ConnectionID, Zone: in.Region})
 	defer releaseScope()
 	if err := validateStorageRequest(provider, in.Storage); err != nil {
@@ -285,6 +296,10 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 		return err
 	}
 	if fresh.CreatePending {
+		if isOVHContract(fresh) {
+			kickOVHContract(ctx, fresh.ID)
+			return errors.New("OVH order outcome/delivery must be reconciled before cancellation; inventory retained")
+		}
 		if !instanceCreateActive(ctx, fresh.ID) {
 			_ = dbUpdateInstance(ctx.AppDB(), fresh.ID, map[string]any{"cleanup_error": "Provider create outcome is unknown; reconcile the recorded account before deletion"})
 			return fmt.Errorf("provider create outcome is unknown; inventory retained for reconciliation")
