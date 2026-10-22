@@ -189,7 +189,7 @@ func TestHomeWidgetSidecarAuthentication(t *testing.T) {
 		t.Skip("builds an isolated sidecar")
 	}
 	sidecar := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
-	for _, path := range []string{"/widgets/performance", "/widgets/publishing-calendar", "/accounts", "/posts", "/destinations/accounts/1"} {
+	for _, path := range []string{"/widgets/performance", "/widgets/publishing-calendar", "/accounts", "/posts", "/destinations/accounts/1", "/accounts/connections?platform=pinterest"} {
 		response, err := http.Get(sidecar.URL() + path)
 		if err != nil {
 			t.Fatal(err)

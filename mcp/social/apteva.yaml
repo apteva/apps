@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.19.0
+version: 0.19.1
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -74,12 +74,13 @@ provides:
     - name: provider_reconciler
       schedule: "@every 15m"
   mcp_tools:
+    - { name: account_list_connections, description: "Choose an active direct connection or connect another account." }
     - { name: destination_list, description: "List publishing destinations under an account." }
     - { name: destination_create, description: "Create a publishing destination when supported." }
     - { name: account_set_default_destination, description: "Set the default for new posts; existing targets retain their destination." }
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
-    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels/boards (including Pinterest boards)." }
-    - { name: account_finalize,            description: "Commit a pending account into the active account list. For destination-based platforms, supply page_id." }
+    - { name: account_list_pending_pages,  description: "List selectable publishing identities (pages/channels) when required." }
+    - { name: account_finalize,            description: "Commit a pending account into the active account list. For identity-selection platforms, supply page_id." }
     - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio. Publishing remains available while automatic history import defaults to managed_only." }
     - { name: account_list,                description: "List connected social accounts in this project, including provider import mode." }
     - { name: account_provider_sync_update, description: "Set automatic provider synchronization to off, managed_only (safe default), or explicitly opted-in full_history without changing publishing access." }
@@ -187,7 +188,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.19.0
+    ref: social/v0.19.1
     entry: mcp/social
   port: 8080
   health_check: /health

@@ -51,7 +51,11 @@ test("Pinterest popup completes across origins through authenticated status poll
     if (path.endsWith("/platforms")) return json({ platforms: [{
       platform: "pinterest", display_name: "Pinterest", available: true, requires_picker: false,
     }] });
-    if (path.endsWith("/accounts/start")) return json({ pending_account_id: 42, authorize_url: "https://pinterest.example/authorize" });
+    if (path.endsWith("/accounts/connections")) return json({connections:[]});
+    if (path.endsWith("/accounts/start")) {
+      expect(JSON.parse(String(init?.body)).force_new).toBe(true);
+      return json({ pending_account_id: 42, authorize_url: "https://pinterest.example/authorize" });
+    }
     if (path.endsWith("/accounts/42/oauth_status")) return json({ status: ready ? "ready" : "pending_oauth" });
     if (path.endsWith("/accounts/42/pages")) return json({ pages: [], requires_picker: false });
     if (path.endsWith("/accounts/finalize") && init?.method === "POST") {
@@ -71,6 +75,7 @@ test("Pinterest popup completes across origins through authenticated status poll
   await click("Accounts");
   await click("+ Add account");
   await click("Direct");
+  await click("Connect another account");
   expect(popup.location.href).toBe("https://pinterest.example/authorize");
   expect(finalized).toBe(false);
 

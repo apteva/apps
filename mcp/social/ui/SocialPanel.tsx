@@ -15,6 +15,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRequestGate } from "./requestIdentity";
 import {DestinationPicker,type DestinationCapabilities} from "./destinations";
+import {AccountConnectionChooser} from "./AccountConnectionChooser";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
@@ -2624,7 +2625,7 @@ function HealthPill({ account }: { account: SocialAccount }) {
   return <span className="text-text-dim" title={account.last_check_error || when}>unsupported</span>;
 }
 
-function AddAccountDialog({
+export function AddAccountDialog({
   platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
@@ -2636,6 +2637,7 @@ function AddAccountDialog({
   onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [directPlatform,setDirectPlatform]=useState<PlatformInfo|null>(null);
   // Inline error inside the modal. The panel-header status used to
   // be the only failure surface, but the modal's fixed-inset overlay
   // sits on top of the header — so users never saw the message and
@@ -2644,31 +2646,14 @@ function AddAccountDialog({
   const zernioConnected = platforms.some((p) => !!p.zernio_available);
   const visiblePlatforms = zernioConnected ? platforms : platforms.filter((p) => !p.provider_only);
 
-  const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
+  const start = (p: PlatformInfo, provider: "native" | "zernio" = "native", connectionId?: number, forceNew=false) => {
     const canStart = provider === "zernio" ? !!p.zernio_available : p.available;
     if (!canStart) return;
     setErr("");
-    // Reuse-existing path: backend skips OAuth when a connection for
-    // this platform already exists. Detect that ahead of opening the
-    // popup so we don't pop a window only to immediately close it.
-    // We always open the popup synchronously below to dodge the
-    // popup-blocker; we close it without navigating in the reuse case.
-    // Open the popup SYNCHRONOUSLY in the click handler. Browsers
-    // block window.open() when called from an async continuation
-    // because the user-gesture context is gone by the time the fetch
-    // resolves — the popup gets silently dropped, no error surfaces,
-    // and from the user's perspective "nothing happens" when they
-    // click the platform button.
-    //
-    // Pattern: open the popup right away pointing at about:blank,
-    // then await the /accounts/start call and navigate the existing
-    // popup to the authorize URL once we have it. The popup carries
-    // the user gesture from the click; redirecting it later is fine.
-    const popup = window.open("about:blank", "social_oauth", "width=600,height=700");
-    if (!popup) {
-      setStatus("Popup blocked. Allow pop-ups for this site and try again.");
-      return;
-    }
+    // Selected existing grants need no popup. Fresh OAuth opens one here
+    // while the browser still has the click's user gesture.
+    const popup = connectionId ? null : window.open("about:blank", "social_oauth", "width=600,height=700");
+    if (!connectionId && !popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
     const busyKey = provider === "zernio" ? `${p.platform}:zernio` : p.platform;
     setBusy(busyKey);
     setStatus("Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
@@ -2677,12 +2662,14 @@ function AddAccountDialog({
         setErr(msg);
         setStatus(msg);
         setBusy(null);
-        try { popup.close(); } catch {}
+        try { popup?.close(); } catch {}
       };
       try {
         const payload: Record<string, any> = provider === "zernio"
           ? { platform: p.platform, provider: "zernio" }
           : { platform: p.platform };
+        if(connectionId) payload.connection_id=connectionId;
+        if(forceNew) payload.force_new=true;
         if (activeProfile?.id) payload.profile_id = activeProfile.id;
         const res = await fetch(appURL("/accounts/start", projectId), {
           method: "POST",
@@ -2711,12 +2698,12 @@ function AddAccountDialog({
         // the popup, hand control back to the parent so it opens the
         // page picker against the existing connection.
         if (!data.authorize_url && data.pending_account_id && data.reused_connection) {
-          try { popup.close(); } catch {}
+          try { popup?.close(); } catch {}
           setBusy(null);
           onReuseExisting(data.pending_account_id, data.reused_connection);
           return;
         }
-        if (!data.authorize_url) {
+        if (!data.authorize_url || !popup) {
           fail("Server didn't return authorize_url");
           return;
         }
@@ -2743,11 +2730,11 @@ function AddAccountDialog({
           <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="text-text-dim text-xs mb-3">
-          You'll be redirected to authorize. The access token is held by the platform; this app sees only opaque IDs.
+          Choose an existing connection or sign in to add another account.
         </div>
         {err && (
           <div className="mb-3 border border-error rounded p-2 bg-error/10">
-            <div className="text-error text-xs font-medium mb-1">Couldn't start OAuth</div>
+            <div className="text-error text-xs font-medium mb-1">Couldn't connect account</div>
             <div className="text-text-muted text-xs whitespace-pre-wrap break-words">{err}</div>
             {/missing client_id/i.test(err) && (
               <div className="text-text-dim text-[11px] mt-2">
@@ -2756,6 +2743,7 @@ function AddAccountDialog({
             )}
           </div>
         )}
+        {directPlatform ? <AccountConnectionChooser platform={directPlatform.platform} label={directPlatform.display_name} projectId={projectId} busy={busy!==null} onBack={()=>{setDirectPlatform(null);setErr("")}} onExisting={id=>start(directPlatform,"native",id)} onNew={()=>start(directPlatform,"native",undefined,true)}/> : (
         <div className="flex flex-col gap-1">
           {visiblePlatforms.map((p) => {
             const directDisabled = !p.available || !!busy;
@@ -2768,13 +2756,13 @@ function AddAccountDialog({
                 <div className="min-w-0">
                   <div className="text-text truncate">{p.display_name}</div>
                   <div className="text-text-dim text-xs">
-                    {p.provider_only ? "Provider-backed" : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Single account"}
+                    {p.provider_only ? "Provider-backed" : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Multiple accounts supported"}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {!p.provider_only && (
                     <button
-                      onClick={() => start(p)}
+                      onClick={() => {setDirectPlatform(p);setErr("")}}
                       disabled={directDisabled}
                       title={
                         !p.available
@@ -2801,6 +2789,7 @@ function AddAccountDialog({
             );
           })}
         </div>
+        )}
       </div>
     </div>
   );

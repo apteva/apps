@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,12 +29,12 @@ func (f *ovhFixture) call(_ int64, tool string, args map[string]any) (*sdk.Execu
 	switch tool {
 	case "get_account":
 		return providerJSON(`{"ovhSubsidiary":"ES"}`), nil
-	case "vps_catalog", "dedicated_catalog", "eco_catalog":
+	case "vps_catalog_download", "dedicated_catalog_download", "eco_catalog_download":
 		product := "vps"
-		if tool == "dedicated_catalog" {
+		if tool == "dedicated_catalog_download" {
 			product = "baremetalServers"
 		}
-		if tool == "eco_catalog" {
+		if tool == "eco_catalog_download" {
 			product = "eco"
 		}
 		dc, osName, osValue := "dedicated_datacenter", "dedicated_os", "none_64.en"
@@ -389,7 +391,7 @@ func TestOVHCatalogsAreFamilyScoped(t *testing.T) {
 func TestOVHRegionalProductAvailabilityDoesNotHideOtherFamilies(t *testing.T) {
 	f := &ovhFixture{product: "baremetalServers"}
 	ctx, _ := cloudingUpcloudTestCtx(t, "ovhcloud", func(id int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
-		if tool == "vps_catalog" || tool == "eco_catalog" {
+		if tool == "vps_catalog_download" || tool == "eco_catalog_download" {
 			return missingProviderResource(), nil
 		}
 		return f.call(id, tool, args)
@@ -479,5 +481,48 @@ func TestOVHMissingCheckoutIdentityRetainsUnknownState(t *testing.T) {
 	}
 	if f.purchases != 1 {
 		t.Fatal("missing checkout acknowledgement caused a second payment")
+	}
+}
+
+func TestOVHLargeCatalogProjectionAndCache(t *testing.T) {
+	var downloads atomic.Int32
+	raw := mustMarshal(map[string]any{"locale": map[string]any{"currencyCode": "EUR"}, "plans": []any{map[string]any{"planCode": "plan-1", "product": "cpu", "configurations": []any{}}}, "products": []any{map[string]any{"name": "cpu", "blobs": map[string]any{"meta": strings.Repeat("x", 10_000_100), "technical": map[string]any{"cpu": map[string]any{"cores": 8}}}}}})
+	envelope := mustMarshal(map[string]any{"_binary": true, "base64": base64.StdEncoding.EncodeToString(raw)})
+	ctx, _ := cloudingUpcloudTestCtx(t, "ovhcloud", func(_ int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
+		if tool == "get_account" {
+			return providerJSON(`{"ovhSubsidiary":"ES"}`), nil
+		}
+		if tool == "dedicated_catalog_download" {
+			downloads.Add(1)
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: envelope}, nil
+		}
+		return nil, errors.New("unexpected tool " + tool)
+	})
+	for i := 0; i < 2; i++ {
+		cat, e := ovhLoadCatalog(ctx, "baremetalServers")
+		if e != nil {
+			t.Fatal(e)
+		}
+		encoded, _ := json.Marshal(cat)
+		if len(encoded) > 4096 {
+			t.Fatalf("unneeded catalog metadata retained: %d bytes", len(encoded))
+		}
+		if len(cat.Plans) != 1 {
+			t.Fatal("plan missing")
+		}
+		var blob map[string]any
+		_ = json.Unmarshal(cat.Plans[0].Blobs, &blob)
+		if nestedInt(blob, "technical", "cpu", "cores") != 8 {
+			t.Fatal("hardware metadata lost")
+		}
+	}
+	if downloads.Load() != 1 {
+		t.Fatal("normalized catalog cache did not reuse the download")
+	}
+	if _, e := ovhCatalogJSON(json.RawMessage(`{"_binary":true,"base64":"broken-base64"}`)); e == nil {
+		t.Fatal("invalid catalog encoding accepted")
+	}
+	if _, e := ovhCatalogJSON(mustMarshal(map[string]any{"_binary": true, "base64": strings.Repeat("A", base64.StdEncoding.EncodedLen(ovhCatalogLimit)+4)})); e == nil {
+		t.Fatal("oversized encoded catalog accepted")
 	}
 }
