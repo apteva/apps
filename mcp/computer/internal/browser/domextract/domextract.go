@@ -298,8 +298,8 @@ func Run(ctx context.Context, opts computer.ExtractOptions) (computer.ExtractRes
 	if max <= 0 {
 		max = defaultMaxChars
 	}
-	if max > 1000000 {
-		max = 1000000
+	if max > computer.MaxExtractChars {
+		max = computer.MaxExtractChars
 	}
 	formats := opts.Formats
 	if formats == nil {
