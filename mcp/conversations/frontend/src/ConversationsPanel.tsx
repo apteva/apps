@@ -1,5 +1,6 @@
 import {useReplySuggestion} from "./replySuggestion";
 import { useConversationHost, type ConversationHost } from "./hostUI";
+import { voiceTranscriptMessages } from "./voiceTranscript";
 import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
@@ -1377,7 +1378,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
     ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
     : []);
-  const visibleMessages = messages.filter(message => message.queue_state !== "cancelled");
+  const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled"));
   const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const progressShowsThinking = (p: LiveResponseProgress) => {

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -334,13 +333,14 @@ func (a *App) ingestVoiceEvent(ev sdk.TelemetryStreamEvent) error {
 		return errors.New("voice telemetry lacks event id")
 	}
 	var payload struct {
-		Text string `json:"text"`
+		Text       string           `json:"text"`
+		Transcript *voiceTranscript `json:"transcript"`
 	}
 	if err := json.Unmarshal(ev.Data, &payload); err != nil {
 		return err
 	}
-	text := strings.TrimSpace(payload.Text)
-	if text == "" {
+	text := voiceTranscriptText(payload.Text, payload.Transcript)
+	if text == "" && (payload.Transcript == nil || payload.Transcript.Status != "blocked") {
 		return nil
 	}
 	var chatID string
@@ -357,11 +357,19 @@ func (a *App) ingestVoiceEvent(ev sdk.TelemetryStreamEvent) error {
 	if ev.Type == "realtime.user" {
 		role = "user"
 	}
-	m, inserted, err := a.store.AppendMessageIdempotent(&Message{ConversationID: chatID, Role: role, Content: text, AgentID: ev.AgentID, UserID: userID, ThreadID: ev.ThreadID, ClientID: "voice:" + ev.ID, Metadata: map[string]any{"source": "voice", "transcript_completeness": "best_effort"}, CreatedAt: time.Now().UTC()})
+	message := &Message{ConversationID: chatID, Role: role, Content: text, AgentID: ev.AgentID, UserID: userID, ThreadID: ev.ThreadID, ClientID: "voice:" + ev.ID, Metadata: map[string]any{"source": "voice", "transcript_completeness": "best_effort"}}
+	var m *Message
+	var changed bool
+	if payload.Transcript != nil {
+		m, changed, err = a.store.upsertVoiceTranscript(message, payload.Transcript, ev.Time)
+	} else {
+		// Older Core versions emit one complete turn without transcript identity.
+		m, changed, err = a.store.AppendMessageIdempotent(message)
+	}
 	if err != nil {
 		return err
 	}
-	if inserted {
+	if changed {
 		a.hub.publish(chatID, *m)
 	}
 	_, _ = a.store.db.Exec(`UPDATE conversation_voice_sessions SET last_event_at=CURRENT_TIMESTAMP WHERE thread_id=?`, ev.ThreadID)

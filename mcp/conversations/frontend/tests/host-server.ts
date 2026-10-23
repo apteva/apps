@@ -38,7 +38,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(url.pathname==="/append-message" && req.method==="POST") {
   const message=await req.json();const user=message.conversation_id.slice("chat-".length);
-  rows.set(user,[...(rows.get(user)??[]),message]);
+  rows.set(user,[...(rows.get(user)??[]).filter(row=>row.id!==message.id),message].sort((a,b)=>a.id-b.id));
   for(const c of streams) {try {c.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));}catch{streams.delete(c);}}
   return Response.json({ok:true});
  }

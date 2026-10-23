@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.51 — 2026-10-23
+
+- Persist live voice transcript checkpoints as revisions of one message per Core transcript identity. Preserve metadata, timestamps and stable message IDs; ignore stale updates and duplicate deliveries, and retain legacy Core compatibility.
+- Group adjacent same-speaker voice segments for readable live and reloaded history, without merging across speakers, typed messages, cards, sessions, generations or long gaps. Hide blocked transcripts.
+- Add captured GPT Live session replay, concurrent/out-of-order updates, shutdown, recovery, session isolation and browser regressions. Existing historical rows without transcript identities are preserved rather than guessed away.
+
 ## 0.24.50 — 2026-10-23
 
 - Use the optional scoped host UI API to hide the floating chat-assistant launcher on compact screens only while a conversation pane is open. Returning to the mobile list, leaving the pane or changing hosts releases the request.

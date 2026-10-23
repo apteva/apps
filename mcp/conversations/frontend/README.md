@@ -428,3 +428,23 @@ assistant's open conversation, drafts or voice session. No manifest `host_ui`
 default is declared. Older hosts without the capability retain their existing
 behavior; installing this app alone does not add the capability to an older
 Dashboard. No runtime import of the unreleased host SDK is required.
+
+## Live voice transcript revisions
+
+Core's `realtime.user` / `realtime.assistant` events may be cumulative updates
+for one `transcript.id`, rather than complete new messages. Conversations saves
+one row per conversation, voice thread, speaker, generation and transcript ID;
+later checkpoints update its content and metadata under the same message ID.
+The normal durable revision cursor and SSE message channel carry these edits.
+Voice transcript updates never become fresh inbound agent turns.
+
+The shared chat view groups adjacent same-speaker segments from the same voice
+session/generation when their recorded audio ranges are contiguous or separated
+by at most 1.5 seconds. Other speakers, typed messages, cards, attachments and
+longer gaps remain boundaries. Grouping is display-only; durable segment IDs,
+status and timing metadata remain intact. Blocked transcripts are hidden.
+
+Older Core events without transcript metadata retain event-level idempotency.
+Older saved rows without identities are left intact: similar text alone cannot
+distinguish repeated speech from the old capture defect. This release prevents
+new corruption rather than deleting or guessing away historical messages.

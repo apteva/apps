@@ -271,3 +271,28 @@ Playwright browser tests, consumer type checks, panel/frontend builds, the full
 `GOWORK=off go test -race -tags=integration ./...` suite, and the application
 build with the released App SDK v0.104.0. The platform host/dock checks passed
 30 tests separately; no platform source or installed agents were changed.
+
+## Voice transcript revisions (v0.24.51)
+
+`TestVoiceTranscriptCapturedSessionRevisions` replays the actual shape of the
+2026-10-23 GPT Live session: 13 cumulative checkpoints plus two six-event shutdown
+batches. It requires six stable message identities, preserved creation times,
+live revision publication, durable change-cursor recovery and clean context for
+a subsequent typed turn. No transcript event may dispatch an inbound agent turn
+or create a transport delivery.
+
+Additional race tests cover concurrent out-of-order checkpoints, duplicate
+deliveries, provider-final precedence, blocked transcript redaction, session/chat
+isolation and expired ownership. The pre-existing legacy voice test still
+exercises events without transcript metadata. Pure UI and built-bundle browser
+tests verify prefix replacement, readable adjacent fragments, reload, shutdown
+revisions and blocked speech across dashboard, app-served and package surfaces.
+
+These regressions use captured event structure and isolated fixtures, without
+opening a microphone or calling the paid voice provider. No Core, Server,
+provider settings or existing conversations are modified by the release.
+
+Release validation on 2026-10-23 passed: 113 Bun UI/client tests, all 117
+Playwright tests (plus the three voice cases rerun with blocked-history reload),
+frontend builds and consumer type checks, the complete Go race/integration suite
+(96.1 seconds), and a production application build with the pinned released SDK.
