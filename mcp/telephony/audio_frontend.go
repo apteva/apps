@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"math/bits"
 	"os"
 	"strings"
 	"sync"
@@ -82,6 +83,8 @@ type audioDiagnosticsLogger interface {
 // floor rejects steady background noise before the local fallback can barge in.
 type carrierAudioFrontend struct {
 	sampleRate     int
+	analysisOnly   bool
+	speechStartMS  int
 	frameSamples   int
 	vad            *webrtcvad.VAD
 	mode           localBargeInMode
@@ -92,6 +95,7 @@ type carrierAudioFrontend struct {
 	gapMS          int
 	silenceMS      int
 	active         bool
+	dynamicWindow  uint32
 	dynamicMS      int
 	featureValid   bool
 	lastFeature    speechFrameFeature
@@ -143,6 +147,9 @@ func (f *carrierAudioFrontend) process(pcm []int16) audioFrontendResult {
 		copy(f.buffer, f.buffer[f.frameSamples:])
 		f.buffer = f.buffer[:len(f.buffer)-f.frameSamples]
 
+		if f.analysisOnly {
+			out = append(out, frame...)
+		}
 		f.highPass(frame)
 		rms := pcmRMS(frame)
 		vadFrame := frame
@@ -166,11 +173,13 @@ func (f *carrierAudioFrontend) process(pcm []int16) audioFrontendResult {
 		// background. This protects the adaptive floor from hold music, tones,
 		// and speech-like audio that the aggressive VAD mode rejects.
 		f.updateNoiseFloor(rms, vadSpeech || feature.periodicity >= 0.16)
-		suppressed := f.suppress(frame, rms, speechLike)
+		suppressed := !f.analysisOnly && f.suppress(frame, rms, speechLike)
 		started := f.observeSpeechFrame(speechLike, dynamic)
 		f.recordFrame(rms, vadSpeech, suppressed, started)
 
-		out = append(out, frame...)
+		if !f.analysisOnly {
+			out = append(out, frame...)
+		}
 		result.SpeechActive = result.SpeechActive || speechLike
 		result.SpeechStarted = result.SpeechStarted || started
 		result.RMS = rms
@@ -229,6 +238,17 @@ func (f *carrierAudioFrontend) suppress(frame []int16, rms float64, speechLike b
 }
 
 func (f *carrierAudioFrontend) observeSpeechFrame(speechLike, dynamic bool) bool {
+	// Continuous callers need recent modulation, not rare changes accumulated
+	// across seconds of a steady tone. Keep legacy detector behavior unchanged.
+	if f.speechStartMS > 0 {
+		frames := max(10, f.speechStartMS/audioAnalysisFrameMS)
+		f.dynamicWindow = (f.dynamicWindow << 1) & ((uint32(1) << frames) - 1)
+		if speechLike && dynamic {
+			f.dynamicWindow |= 1
+		}
+		f.dynamicMS = bits.OnesCount32(f.dynamicWindow) * audioAnalysisFrameMS
+	}
+
 	if speechLike {
 		f.silenceMS = 0
 		f.gapMS = 0
@@ -236,10 +256,14 @@ func (f *carrierAudioFrontend) observeSpeechFrame(speechLike, dynamic bool) bool
 			return false
 		}
 		f.activationMS += audioAnalysisFrameMS
-		if dynamic {
+		if dynamic && f.speechStartMS == 0 {
 			f.dynamicMS += audioAnalysisFrameMS
 		}
-		if f.activationMS >= defaultSpeechStartMS && f.dynamicMS >= 80 {
+		startMS := f.speechStartMS
+		if startMS == 0 {
+			startMS = defaultSpeechStartMS
+		}
+		if f.activationMS >= startMS && f.dynamicMS >= 80 {
 			f.active = true
 			if f.mode == localBargeInFallback {
 				return true

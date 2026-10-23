@@ -131,6 +131,9 @@ func realtimePreparationReady(row *callRow) bool {
 }
 
 func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string) error {
+	if _, err := a.pinAgentAudioProfile(row); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(a.preparations.timeout())
 	for {
 		current, err := a.db().findCall(row.ID)

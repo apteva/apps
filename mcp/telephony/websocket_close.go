@@ -91,6 +91,7 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
+	maxWriteBudget     atomic.Int64
 	sipResidenceBudget atomic.Int64
 	activity           audioSocketActivity
 	whisperDropped     atomic.Int64
@@ -523,6 +524,11 @@ func (p *websocketWriterPump) Write(op ws.OpCode, payload []byte) error {
 func (p *websocketWriterPump) write(op ws.OpCode, payload []byte, timeout time.Duration) error {
 	if p == nil {
 		return net.ErrClosed
+	}
+	if budget := time.Duration(p.maxWriteBudget.Load()); budget > 0 {
+		if timeout <= 0 || timeout > budget {
+			timeout = budget
+		}
 	}
 	// Close replies (including protocol errors) cannot wait behind an active
 	// data write or a full control queue for the ordinary five-second budget.

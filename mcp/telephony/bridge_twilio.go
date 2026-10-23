@@ -87,6 +87,7 @@ type twilioOutbound struct {
 type twilioPlaybackProgress struct {
 	ItemID     string
 	AudioEndMS int
+	Generation int64
 }
 
 const twilioMediaPacketSamples = 160 // 20ms at Twilio's 8kHz media rate.
@@ -130,6 +131,7 @@ type twilioPlaybackTracker struct {
 	mu      sync.Mutex
 	next    uint64
 	pending map[string]twilioPlaybackProgress
+	evicted uint64
 }
 
 func newTwilioPlaybackTracker() *twilioPlaybackTracker {
@@ -137,14 +139,28 @@ func newTwilioPlaybackTracker() *twilioPlaybackTracker {
 }
 
 func (t *twilioPlaybackTracker) add(itemID string, audioEndMS int) string {
+	return t.addGeneration(itemID, 0, audioEndMS)
+}
+func (t *twilioPlaybackTracker) addGeneration(itemID string, generation int64, audioEndMS int) string {
 	if itemID == "" || audioEndMS <= 0 {
 		return ""
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(t.pending) >= 1024 {
+		for name, old := range t.pending {
+			if old.ItemID == itemID && old.Generation == generation {
+				delete(t.pending, name)
+				t.evicted++
+			}
+		}
+		if len(t.pending) >= 1024 {
+			return ""
+		}
+	}
 	t.next++
 	name := "apt-" + strconv.FormatUint(t.next, 10)
-	t.pending[name] = twilioPlaybackProgress{ItemID: itemID, AudioEndMS: audioEndMS}
+	t.pending[name] = twilioPlaybackProgress{Generation: generation, ItemID: itemID, AudioEndMS: audioEndMS}
 	return name
 }
 
@@ -174,12 +190,15 @@ func realtimeInterruptControl(data []byte) bool {
 }
 
 type realtimeBridgeControl struct {
-	Type       string `json:"type"`
-	ResponseID string `json:"response_id,omitempty"`
-	ItemID     string `json:"item_id,omitempty"`
-	AudioEndMS int    `json:"audio_end_ms,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	Generation    int64  `json:"session_generation,omitempty"`
+	Silence       bool   `json:"silence,omitempty"`
+	RequestedAtMS int64  `json:"requested_at_ms,omitempty"`
+	Type          string `json:"type"`
+	ResponseID    string `json:"response_id,omitempty"`
+	ItemID        string `json:"item_id,omitempty"`
+	AudioEndMS    int    `json:"audio_end_ms,omitempty"`
+	Source        string `json:"source,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 func parseRealtimeBridgeControl(data []byte) (realtimeBridgeControl, bool) {
@@ -255,7 +274,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := a.correlatedBridgeDialer(row)
+	dialer, response := a.agentBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
@@ -269,7 +288,14 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	if !bridge.bind(core) {
 		return
 	}
+	agentSession, err := a.newAgentAudioSession(row, response)
+	if err != nil {
+		_ = core.Close()
+		return
+	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	agentSession.configureWriter(coreWriter)
+	agentSession.configureWriter(twWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
@@ -307,6 +333,8 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(8000)
+	defer a.trackAgentAudio(row.ID, agentSession)()
+	agentSession.configureFrontend(audioFrontend)
 	inputSequences := &audioSequenceTracker{}
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
@@ -460,10 +488,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					continue
 				}
-				control, _ := json.Marshal(realtimeBridgeControl{
-					Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
-				})
-				err := coreWriter.Write(ws.OpText, control)
+				err := agentSession.progress(coreWriter, progress, "carrier_mark")
 				if err != nil {
 					bridge.socketError(mediaCloseLegCore, "write", err)
 					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write playback progress to realtime bridge")
@@ -485,7 +510,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maxQueuedMS := 0
-	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerPolicy := agentSession.policy()
+	pacerPolicy.onSent = func(silent bool) {
+		if !silent {
+			a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
+		}
+	}
 	pacerMode := "buffered"
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
@@ -498,7 +528,6 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		err := twWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
 		if err == nil {
 			observeSent(payload)
-			a.observeAIJSONOutput(row, payload, time.Now().UTC(), bridge.generation)
 		}
 		if humanHub != nil {
 			stage := "carrier_send"
@@ -533,7 +562,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
+			AgentAudio: agentSession.snapshot(), OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),
@@ -543,6 +572,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		}, bridge.generation)
 	}()
 
+	if err := agentSession.ready(coreWriter, "carrier_mark"); err != nil {
+		return
+	}
 	var nextFrame realtimeBridgeControl
 	for {
 		select {
@@ -567,9 +599,16 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				nextFrame = control
 			case "interrupt":
 				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
-				nextFrame = realtimeBridgeControl{}
+				if matchesAgentPlayback(nextFrame.ItemID, nextFrame.Generation, control) {
+					nextFrame = realtimeBridgeControl{}
+				}
 				interruptSource := audioFrontend.markInterrupt(control.Source)
-				clearedMS, err := pacer.clear(ctx)
+				agentSession.cancel(control.ItemID, control.Generation)
+				receipt, err := pacer.cancelPlayback(ctx, control)
+				clearedMS := receipt.LocalMS
+				if err == nil {
+					err = agentSession.cleared(coreWriter, control, receipt)
+				}
 				if err != nil {
 					closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear Twilio playback")
 					return
@@ -579,6 +618,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if op != ws.OpBinary || len(data) == 0 {
+			continue
+		}
+		if !agentSession.accept(nextFrame) {
+			nextFrame = realtimeBridgeControl{}
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
@@ -598,8 +641,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		queuedMS, droppedMS, err := pacer.enqueueWithDiagnostics(ctx, packets, frame)
 		if errors.Is(err, errTwilioPacerOverflow) {
 			globalCtx.Logger().Warn("twilio playback queue overflow", "call", callID, "item", frame.ItemID, "max_queued_ms", maxQueuedMS)
-			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
-			err = coreWriter.Write(ws.OpText, control)
+			err = agentSession.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow")
 			if err != nil {
 				bridge.socketError(mediaCloseLegCore, "write", err)
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "report playback overflow to realtime bridge")
@@ -713,4 +755,23 @@ func (a *App) rejectTwilioHandshake(w http.ResponseWriter, callID, reason, messa
 		globalCtx.Logger().Warn("twilio websocket handshake rejected", "call", callID, "reason", reason, "http_status", status)
 	}
 	http.Error(w, message, status)
+}
+
+func (t *twilioPlaybackTracker) affectedPlaybacks(item string, generation int64) (bool, []agentCollateralPlayback) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	target := false
+	others := map[agentPlaybackKey]bool{}
+	for _, p := range t.pending {
+		if item == "" || p.ItemID == item && (generation == 0 || p.Generation == generation) {
+			target = true
+		} else {
+			others[agentPlaybackKey{p.Generation, p.ItemID}] = true
+		}
+	}
+	out := []agentCollateralPlayback{}
+	for key := range others {
+		out = append(out, agentCollateralPlayback{ItemID: key.Item, Generation: key.Generation})
+	}
+	return target, out
 }

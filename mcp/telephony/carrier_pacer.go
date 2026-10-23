@@ -18,6 +18,8 @@ var (
 )
 
 type carrierPacedPacket struct {
+	Generation int64
+	Silence    bool
 	EnqueuedAt time.Time
 	PCM        []int16
 	ItemID     string
@@ -25,6 +27,7 @@ type carrierPacedPacket struct {
 }
 
 type carrierPacerResult struct {
+	receipt   agentClearReceipt
 	queuedMS  int
 	clearedMS int
 	droppedMS int
@@ -32,6 +35,8 @@ type carrierPacerResult struct {
 }
 
 type carrierPacerPolicy struct {
+	onSent             func(bool)
+	agentSession       *agentAudioSession
 	bufferMS           int
 	maxQueueMS         int
 	adaptiveMaxQueueMS int
@@ -65,6 +70,7 @@ func humanCarrierPacerPolicy(config sdk.Config) carrierPacerPolicy {
 }
 
 type carrierPacerCommand struct {
+	cancel   *realtimeBridgeControl
 	packets  []carrierPacedPacket
 	clear    bool
 	response chan carrierPacerResult
@@ -76,12 +82,14 @@ type estimatedPlaybackAck struct {
 }
 
 type carrierAudioSegment struct {
-	sourceAt time.Time
-	pcm      []int16
-	offset   int
-	itemID   string
-	startMS  int
-	endMS    int
+	generation int64
+	silence    bool
+	sourceAt   time.Time
+	pcm        []int16
+	offset     int
+	itemID     string
+	startMS    int
+	endMS      int
 }
 
 type carrierAudioPacketizer struct {
@@ -98,7 +106,7 @@ func (p *carrierAudioPacketizer) add(pcm []int16, pcm24Samples int, frame realti
 	return p.addAt(pcm, pcm24Samples, frame, time.Time{})
 }
 func (p *carrierAudioPacketizer) addAt(pcm []int16, pcm24Samples int, frame realtimeBridgeControl, at time.Time) []carrierPacedPacket {
-	if len(pcm) == 0 || p.packetSamples <= 0 {
+	if p.packetSamples <= 0 || len(pcm) == 0 && p.queuedSamples == 0 {
 		return nil
 	}
 	durationMS := 0
@@ -107,11 +115,20 @@ func (p *carrierAudioPacketizer) addAt(pcm []int16, pcm24Samples int, frame real
 		durationMS = (pcm24Samples*1000 + 12000) / 24000
 		startMS = max(0, frame.AudioEndMS-durationMS)
 	}
-	p.segments = append(p.segments, carrierAudioSegment{
-		sourceAt: at, pcm: append([]int16(nil), pcm...), itemID: frame.ItemID, startMS: startMS, endMS: frame.AudioEndMS,
-	})
-	p.queuedSamples += len(pcm)
-	packets := make([]carrierPacedPacket, 0, p.queuedSamples/p.packetSamples)
+	var boundary []carrierPacedPacket
+	if len(pcm) > 0 {
+		if len(p.segments) > 0 {
+			last := p.segments[len(p.segments)-1]
+			if last.itemID != frame.ItemID || last.generation != frame.Generation || last.silence != frame.Silence {
+				boundary = p.flushPartial()
+			}
+		}
+		p.segments = append(p.segments, carrierAudioSegment{
+			generation: frame.Generation, silence: frame.Silence, sourceAt: at, pcm: append([]int16(nil), pcm...), itemID: frame.ItemID, startMS: startMS, endMS: frame.AudioEndMS,
+		})
+		p.queuedSamples += len(pcm)
+	}
+	packets := boundary
 	for p.queuedSamples >= p.packetSamples {
 		packet := carrierPacedPacket{PCM: make([]int16, 0, p.packetSamples)}
 		remaining := p.packetSamples
@@ -130,6 +147,8 @@ func (p *carrierAudioPacketizer) addAt(pcm []int16, pcm24Samples int, frame real
 			segment.offset += take
 			remaining -= take
 			packet.ItemID = segment.itemID
+			packet.Generation = segment.generation
+			packet.Silence = segment.silence
 			if segment.endMS > 0 {
 				packet.AudioEndMS = segment.startMS
 				duration := max(0, segment.endMS-segment.startMS)
@@ -148,6 +167,28 @@ func (p *carrierAudioPacketizer) addAt(pcm []int16, pcm24Samples int, frame real
 		packets = append(packets, packet)
 	}
 	return packets
+}
+
+// flushPartial preserves real samples and their playback identity. Transports
+// that require fixed packets pad only when actually transmitting the tail.
+func (p *carrierAudioPacketizer) flushPartial() []carrierPacedPacket {
+	if p.queuedSamples == 0 {
+		return nil
+	}
+	packet := carrierPacedPacket{PCM: make([]int16, 0, p.queuedSamples)}
+	for _, segment := range p.segments {
+		packet.PCM = append(packet.PCM, segment.pcm[segment.offset:]...)
+		packet.ItemID, packet.Generation, packet.Silence, packet.AudioEndMS = segment.itemID, segment.generation, segment.silence, segment.endMS
+		source := segment.sourceAt
+		if !source.IsZero() {
+			source = source.Add(time.Duration(segment.offset) * 20 * time.Millisecond / time.Duration(p.packetSamples))
+			if packet.EnqueuedAt.IsZero() || source.Before(packet.EnqueuedAt) {
+				packet.EnqueuedAt = source
+			}
+		}
+	}
+	p.clear()
+	return []carrierPacedPacket{packet}
 }
 
 func (p *carrierAudioPacketizer) clear() {
@@ -363,6 +404,9 @@ func (p *jsonCarrierAudioPacer) run() {
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
 		p.pendingSamples.Store(int64(queuedSamples))
+		if p.policy.agentSession.rejects(packet.ItemID, packet.Generation) {
+			return nil
+		}
 		if p.policy.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
 			droppedSamples += len(packet.PCM)
 			needsCrossfade = true
@@ -381,6 +425,9 @@ func (p *jsonCarrierAudioPacer) run() {
 		if err := p.write(frame); err != nil {
 			return err
 		}
+		if p.policy.onSent != nil {
+			p.policy.onSent(packet.Silence)
+		}
 		p.diagnostics.sent(carrierSamplesToMS(len(packet.PCM), p.sampleRate), writeStarted)
 		duration := time.Duration(len(packet.PCM)) * time.Second / time.Duration(p.sampleRate)
 		if duration <= 0 {
@@ -393,7 +440,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		bufferedThrough = bufferedThrough.Add(duration)
 		tailSamples := min(len(pcm), max(1, p.sampleRate/200))
 		lastSentTail = append(lastSentTail[:0], pcm[len(pcm)-tailSamples:]...)
-		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
+		if markName := p.playback.addGeneration(packet.ItemID, packet.Generation, packet.AudioEndMS); markName != "" {
 			if p.marks {
 				mark, _ := json.Marshal(map[string]any{"event": "mark", "mark": map[string]string{"name": markName}})
 				if err := p.write(mark); err != nil {
@@ -451,6 +498,47 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 	}
 	handleCommand := func(command carrierPacerCommand) error {
+		if command.cancel != nil {
+			c := command.cancel
+			receipt := agentClearReceipt{Scope: "local"}
+			kept := queue[:0]
+			for _, packet := range queue {
+				if matchesAgentPlayback(packet.ItemID, packet.Generation, *c) {
+					receipt.LocalMS += carrierSamplesToMS(len(packet.PCM), p.sampleRate)
+					queuedSamples -= len(packet.PCM)
+				} else {
+					kept = append(kept, packet)
+				}
+			}
+			queue = kept
+			p.pendingSamples.Store(int64(queuedSamples))
+			remote, collateral := p.playback.affectedPlaybacks(c.ItemID, c.Generation)
+			remote = remote || c.ItemID == ""
+			var err error
+			if remote {
+				raw, _ := json.Marshal(buildCarrierClear(p.shape, p.streamID))
+				if string(raw) != "null" {
+					p.playback.clear()
+					estimated = nil
+					bufferedThrough = time.Time{}
+					receipt.Scope = "stream"
+					receipt.CollateralPlaybacks = collateral
+					for _, ref := range collateral {
+						receipt.Collateral = append(receipt.Collateral, ref.ItemID)
+					}
+					for _, ref := range collateral {
+						p.policy.agentSession.cancel(ref.ItemID, ref.Generation)
+					}
+					err = p.write(raw)
+					receipt.RemoteCommandSent = err == nil
+				}
+			}
+			if err == nil {
+				err = fillLead()
+			}
+			command.response <- carrierPacerResult{clearedMS: receipt.LocalMS, receipt: receipt, err: err}
+			return err
+		}
 		if command.clear {
 			clearedMS, err := clearPlayback()
 			command.response <- carrierPacerResult{clearedMS: clearedMS, err: err}
@@ -461,6 +549,10 @@ func (p *jsonCarrierAudioPacer) run() {
 			incoming += len(packet.PCM)
 		}
 		if !p.policy.dropStale && queuedSamples+incoming > maxQueuedSamples {
+			if p.policy.agentSession.continuous() {
+				command.response <- carrierPacerResult{err: errCarrierPacerOverflow}
+				return nil
+			}
 			clearedMS, err := clearPlayback()
 			if err == nil {
 				err = errCarrierPacerOverflow
@@ -584,4 +676,21 @@ func carrierSamplesToMS(samples, sampleRate int) int {
 		return 0
 	}
 	return (samples*1000 + sampleRate - 1) / sampleRate
+}
+
+func (p *jsonCarrierAudioPacer) cancelPlayback(ctx context.Context, c realtimeBridgeControl) (agentClearReceipt, error) {
+	p.policy.agentSession.cancel(c.ItemID, c.Generation)
+	r := p.command(ctx, carrierPacerCommand{clear: true, cancel: &c})
+	return r.receipt, r.err
+}
+func (p *carrierAudioPacketizer) cancelPlayback(c realtimeBridgeControl) {
+	kept := p.segments[:0]
+	p.queuedSamples = 0
+	for _, s := range p.segments {
+		if !matchesAgentPlayback(s.itemID, s.generation, c) {
+			kept = append(kept, s)
+			p.queuedSamples += len(s.pcm) - s.offset
+		}
+	}
+	p.segments = kept
 }

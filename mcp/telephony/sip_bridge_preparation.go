@@ -69,12 +69,13 @@ func (a *App) dialSIPBridge(ctx context.Context, row *callRow) (net.Conn, error)
 	if err != nil || u.Host == "" || (u.Scheme != "ws" && u.Scheme != "wss") {
 		return nil, errors.New("invalid SIP audio bridge address")
 	}
-	conn, buffered, _, err := a.correlatedBridgeDialer(row).Dial(ctx, u.String())
+	dialer, response := a.agentBridgeDialer(row)
+	conn, buffered, _, err := dialer.Dial(ctx, u.String())
 	if err != nil {
 		return nil, err
 	}
 	if buffered != nil {
 		conn = hijackedConn{Conn: conn, reader: buffered}
 	}
-	return conn, nil
+	return agentBridgeConn{Conn: conn, response: response}, nil
 }

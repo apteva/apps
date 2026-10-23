@@ -28,6 +28,8 @@ var (
 )
 
 type twilioPacedPacket struct {
+	Generation int64
+	Silence    bool
 	EnqueuedAt time.Time
 	PCM        []int16
 	ItemID     string
@@ -35,6 +37,7 @@ type twilioPacedPacket struct {
 }
 
 type twilioPacerResult struct {
+	receipt   agentClearReceipt
 	queuedMS  int
 	clearedMS int
 	droppedMS int
@@ -42,6 +45,7 @@ type twilioPacerResult struct {
 }
 
 type twilioPacerCommand struct {
+	cancel   *realtimeBridgeControl
 	packets  []twilioPacedPacket
 	clear    bool
 	response chan twilioPacerResult
@@ -52,6 +56,8 @@ type twilioPacerCommand struct {
 // carrier sees it. A short carrier lead absorbs network jitter; later packets
 // replenish that lead at absolute media deadlines.
 type twilioAudioPacer struct {
+	onSent                   func(bool)
+	agentSession             *agentAudioSession
 	pendingSamples           atomic.Int64
 	diagnostics              livePacerStats
 	ctx                      context.Context
@@ -93,7 +99,7 @@ func newTwilioAudioPacerWithPolicy(
 	onError func(error),
 ) *twilioAudioPacer {
 	p := &twilioAudioPacer{
-		ctx: ctx, commands: make(chan twilioPacerCommand), clearCommands: make(chan twilioPacerCommand), done: make(chan struct{}),
+		onSent: policy.onSent, agentSession: policy.agentSession, ctx: ctx, commands: make(chan twilioPacerCommand), clearCommands: make(chan twilioPacerCommand), done: make(chan struct{}),
 		streamSID: streamSID, playback: playback, write: write, onError: onError,
 		maxQueuedSamples:         twilioMediaSampleRate * policy.maxQueueMS / 1000,
 		adaptiveMaxQueuedSamples: twilioMediaSampleRate * policy.adaptiveMaxQueueMS / 1000,
@@ -145,7 +151,7 @@ func (p *twilioAudioPacer) enqueueWithDiagnostics(ctx context.Context, packets [
 		if at.IsZero() {
 			at = time.Now()
 		}
-		paced[i] = twilioPacedPacket{EnqueuedAt: at, PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
+		paced[i] = twilioPacedPacket{Generation: frame.Generation, Silence: frame.Silence, EnqueuedAt: at, PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
 	}
 	result := p.command(ctx, twilioPacerCommand{packets: paced})
 	return result.queuedMS, result.droppedMS, result.err
@@ -254,6 +260,9 @@ func (p *twilioAudioPacer) run() {
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
 		p.pendingSamples.Store(int64(queuedSamples))
+		if p.agentSession.rejects(packet.ItemID, packet.Generation) {
+			return 0, nil
+		}
 
 		if p.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
 			droppedSamples += len(packet.PCM)
@@ -274,8 +283,11 @@ func (p *twilioAudioPacer) run() {
 		if err := p.write(payload); err != nil {
 			return 0, err
 		}
+		if p.onSent != nil {
+			p.onSent(packet.Silence)
+		}
 		p.diagnostics.sent(carrierSamplesToMS(len(packet.PCM), twilioMediaSampleRate), writeStarted)
-		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
+		if markName := p.playback.addGeneration(packet.ItemID, packet.Generation, packet.AudioEndMS); markName != "" {
 			mark, _ := json.Marshal(map[string]any{
 				"event": "mark", "streamSid": p.streamSID, "mark": map[string]string{"name": markName},
 			})
@@ -315,6 +327,44 @@ func (p *twilioAudioPacer) run() {
 		return nil
 	}
 	handleCommand := func(command twilioPacerCommand) error {
+		if command.cancel != nil {
+			c := command.cancel
+			receipt := agentClearReceipt{Scope: "local"}
+			kept := queue[:0]
+			for _, packet := range queue {
+				if matchesAgentPlayback(packet.ItemID, packet.Generation, *c) {
+					receipt.LocalMS += samplesToMS(len(packet.PCM))
+					queuedSamples -= len(packet.PCM)
+				} else {
+					kept = append(kept, packet)
+				}
+			}
+			queue = kept
+			p.pendingSamples.Store(int64(queuedSamples))
+			remote, collateral := p.playback.affectedPlaybacks(c.ItemID, c.Generation)
+			remote = remote || c.ItemID == ""
+			var err error
+			if remote {
+				p.playback.clear()
+				bufferedThrough = time.Time{}
+				receipt.Scope = "stream"
+				receipt.CollateralPlaybacks = collateral
+				for _, ref := range collateral {
+					receipt.Collateral = append(receipt.Collateral, ref.ItemID)
+				}
+				for _, ref := range collateral {
+					p.agentSession.cancel(ref.ItemID, ref.Generation)
+				}
+				raw, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": p.streamSID})
+				err = p.write(raw)
+				receipt.RemoteCommandSent = err == nil
+			}
+			if err == nil {
+				err = fillCarrierLead()
+			}
+			command.response <- twilioPacerResult{clearedMS: receipt.LocalMS, receipt: receipt, err: err}
+			return err
+		}
 		if command.clear {
 			clearedMS, err := clear()
 			command.response <- twilioPacerResult{clearedMS: clearedMS, err: err}
@@ -325,6 +375,10 @@ func (p *twilioAudioPacer) run() {
 			incomingSamples += len(packet.PCM)
 		}
 		if !p.dropStale && queuedSamples+incomingSamples > p.maxQueuedSamples {
+			if p.agentSession.continuous() {
+				command.response <- twilioPacerResult{err: errTwilioPacerOverflow}
+				return nil
+			}
 			clearedMS, err := clear()
 			if err == nil {
 				err = errTwilioPacerOverflow
@@ -438,4 +492,10 @@ func (p *twilioAudioPacer) run() {
 
 func samplesToMS(samples int) int {
 	return (samples*1000 + twilioMediaSampleRate - 1) / twilioMediaSampleRate
+}
+
+func (p *twilioAudioPacer) cancelPlayback(ctx context.Context, c realtimeBridgeControl) (agentClearReceipt, error) {
+	p.agentSession.cancel(c.ItemID, c.Generation)
+	r := p.command(ctx, twilioPacerCommand{clear: true, cancel: &c})
+	return r.receipt, r.err
 }

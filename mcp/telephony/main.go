@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.32
+version: 0.12.33
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -155,6 +155,7 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
     - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
+    - { name: telephony_agent_audio_profile, description: "Configure continuous-agent audio policies for future calls." }
     - { name: telephony_sip_audio_profile, description: "Configure bounded SIP audio profiles for future calls, per project, direction, inbound route or outbound account/number." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
@@ -392,7 +393,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.32
+    ref: telephony/v0.12.33
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -461,6 +462,7 @@ type App struct {
 	runtimeBrowsers    runtimeBrowserSessions
 	mediaDiagnostics   mediaDiagnosticRegistry
 	aiPolicies         aiPolicyRegistry
+	agentAudioSessions sync.Map
 	mediaBridges       carrierBridgeRegistry
 	callReads          callReadCache
 	idleWorkers        idleWorkerGate
@@ -759,6 +761,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
+		{Name: "telephony_agent_audio_profile", Description: "Read, save or reset an agent audio policy for new calls. Project-local scopes: project, inbound/outbound, agent/id, route/id, account/id or number/E.164. Config: mode auto/traditional/continuous, interruption auto/local/provider/off, preprocessing analysis_only/noise_suppression, speech_start_ms, send_ahead_ms, backlog_ms. ttl_seconds optionally expires a test without restarting or changing active calls.", InputSchema: schemaObject(map[string]any{"scope": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "reset": map[string]any{"type": "boolean"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}}, nil), HandlerCtx: a.toolAgentAudioProfile},
 		{Name: "telephony_sip_audio_profile", Description: "Read, save or reset a bounded SIP audio profile for new calls. Scope by optional direction, route_id or outbound carrier_connection_id/phone_number. config includes preset (balanced/resilient/reference/custom), codecs and rtp_playback. expires_at optionally reverts a test within 24h. No carrier changes, restart or active-call mutation.", InputSchema: schemaObject(map[string]any{"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}}, "route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "expires_at": map[string]any{"type": "string"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}, "reset": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolSIPAudioProfile},
 		{
 			Name: "telephony_place_call",
@@ -1510,6 +1513,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+	if row.PeerKind == peerKindRealtime {
+		if _, err := a.pinAgentAudioProfile(row); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "agent audio profile unavailable")
+			unwind()
+			return err
+		}
 	}
 	if native, ok := carrier.(*sipOutboundCarrier); ok {
 		_, err := a.db().db.Exec(`INSERT INTO outbound_sip_calls(call_id,resource_id,host,codecs_json) VALUES(?,?,?,?)`, row.ID, native.fields["sip_resource_id"], native.fields["sip_host"], native.fields["sip_codecs"])
@@ -2684,7 +2694,7 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 		return a.peerLoopbackURL(row), nil
 	}
 	if row.MediaStatus != "disconnected" && row.MediaStatus != "error" {
-		return row.AudioBridgeURL, nil
+		return agentBridgeURL(row.AudioBridgeURL, row), nil
 	}
 	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
 		return "", errors.New("app context unavailable")
@@ -2700,7 +2710,7 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 		return "", fmt.Errorf("persist renewed audio bridge: %w", err)
 	}
 	row.AudioBridgeURL = renewed.AudioBridgeURL
-	return row.AudioBridgeURL, nil
+	return agentBridgeURL(row.AudioBridgeURL, row), nil
 }
 
 // ─── webhook + panel handlers ──────────────────────────────────────
