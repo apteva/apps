@@ -10,12 +10,14 @@ import (
 )
 
 type firewallFixture struct {
-	provider, name, id, server string
-	rules                      []map[string]any
-	attached                   []string
-	calls                      []string
-	creates, mutations         int
-	loseCreate, hideCreated    bool
+	createEnabled, enableRace, loseEnable, rejectEnable bool
+	enableCalls                                         int
+	provider, name, id, server                          string
+	rules                                               []map[string]any
+	attached                                            []string
+	calls                                               []string
+	creates, mutations                                  int
+	loseCreate, hideCreated                             bool
 }
 
 func (f *firewallFixture) group() map[string]any {
@@ -155,13 +157,33 @@ func (f *firewallFixture) hook(_ int64, tool string, args map[string]any) (*sdk.
 		delete(r, "id")
 		r["id"] = fmt.Sprint(len(f.rules) + 1)
 		if f.provider == "clouding" {
-			r["enabled"] = false
+			r["enabled"] = f.createEnabled
 		} else {
 			r["action"] = "accept"
 		}
 		f.rules = append(f.rules, r)
 		return answer(map[string]any{"id": r["id"]})
 	case "firewall_rule_enable":
+		f.enableCalls++
+		if f.rejectEnable {
+			return &sdk.ExecuteResult{Success: false, Status: 403}, nil
+		}
+		for _, r := range f.rules {
+			if fmt.Sprint(r["id"]) == strArg(args, "rule_id") {
+				if r["enabled"] == true {
+					return &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"errors":{"rule":["Security group rule is already enabled"]}}`)}, nil
+				}
+				r["enabled"] = true
+				if f.enableRace {
+					f.enableRace = false
+					return &sdk.ExecuteResult{Success: false, Status: 400}, nil
+				}
+				if f.loseEnable {
+					f.loseEnable = false
+					return nil, errors.New("enable response lost")
+				}
+			}
+		}
 		for _, r := range f.rules {
 			if fmt.Sprint(r["id"]) == strArg(args, "rule_id") {
 				r["enabled"] = true
@@ -599,5 +621,55 @@ func TestNativeFirewallDoesNotReuseTakeoverApproval(t *testing.T) {
 	}
 	if provider.mutations != before {
 		t.Fatal("changed new unrelated attachment")
+	}
+}
+
+func TestCloudingRulesCreatedEnabled(t *testing.T) {
+	ctx, inst, f := newFirewallTest(t, "clouding")
+	f.createEnabled = true
+	p := FirewallPolicy{Rules: []FirewallRule{fwRule("udp", 3478, 3478)}}
+	s, e := firewallSet(ctx, inst, "app", &p)
+	if e != nil || s.Phase != "applied" {
+		t.Fatal(s, e)
+	}
+	if f.enableCalls != 0 {
+		t.Fatal("already enabled rule redundantly enabled")
+	}
+	before := f.mutations
+	if _, e = firewallSet(ctx, inst, "app", &p); e != nil {
+		t.Fatal(e)
+	}
+	if f.mutations != before {
+		t.Fatal("retry changed active rules")
+	}
+}
+func TestCloudingEnableAcknowledgementRecovery(t *testing.T) {
+	for _, race := range []bool{false, true} {
+		t.Run(fmt.Sprint(race), func(t *testing.T) {
+			ctx, inst, f := newFirewallTest(t, "clouding")
+			f.enableRace = race
+			f.loseEnable = !race
+			p := FirewallPolicy{Rules: []FirewallRule{fwRule("udp", 3478, 3478)}}
+			s, e := firewallSet(ctx, inst, "app", &p)
+			if e != nil || s.Phase != "applied" {
+				t.Fatal(s, e)
+			}
+		})
+	}
+}
+func TestCloudingRejectedEnableRemainsUnconfirmed(t *testing.T) {
+	ctx, inst, f := newFirewallTest(t, "clouding")
+	f.rejectEnable = true
+	p := FirewallPolicy{Rules: []FirewallRule{fwRule("udp", 3478, 3478)}}
+	if _, e := firewallSet(ctx, inst, "app", &p); e == nil {
+		t.Fatal("rejected enable falsely confirmed")
+	}
+	s, _ := firewallLoad(ctx.AppDB(), inst.ID)
+	if s.Phase == "applied" || len(f.attached) > 0 {
+		t.Fatal("inactive policy attached")
+	}
+	f.rejectEnable = false
+	if _, e := firewallSet(ctx, inst, "app", &p); e != nil {
+		t.Fatal(e)
 	}
 }
