@@ -59,6 +59,7 @@ type twilioAudioPacer struct {
 	onSent                   func(bool)
 	agentSession             *agentAudioSession
 	pendingSamples           atomic.Int64
+	pendingSpeechSamples     atomic.Int64
 	diagnostics              livePacerStats
 	ctx                      context.Context
 	commands                 chan twilioPacerCommand
@@ -239,6 +240,7 @@ func (p *twilioAudioPacer) run() {
 		queue = nil
 		queuedSamples = 0
 		p.pendingSamples.Store(int64(queuedSamples))
+		p.pendingSpeechSamples.Store(0)
 		p.playback.clear()
 		payload, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": p.streamSID})
 		return samplesToMS(clearedSamples), p.write(payload)
@@ -260,6 +262,9 @@ func (p *twilioAudioPacer) run() {
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
 		p.pendingSamples.Store(int64(queuedSamples))
+		if !packet.Silence {
+			defer p.pendingSpeechSamples.Add(-int64(len(packet.PCM)))
+		}
 		if p.agentSession.rejects(packet.ItemID, packet.Generation) {
 			return 0, nil
 		}
@@ -283,11 +288,12 @@ func (p *twilioAudioPacer) run() {
 		if err := p.write(payload); err != nil {
 			return 0, err
 		}
+		p.agentSession.observeSent(packet.ItemID, packet.Generation, packet.Silence, time.Time{})
 		if p.onSent != nil {
 			p.onSent(packet.Silence)
 		}
 		p.diagnostics.sent(carrierSamplesToMS(len(packet.PCM), twilioMediaSampleRate), writeStarted)
-		if markName := p.playback.addGeneration(packet.ItemID, packet.Generation, packet.AudioEndMS); markName != "" {
+		if markName := p.playback.addPacket(packet.ItemID, packet.Generation, packet.AudioEndMS, packet.Silence); markName != "" {
 			mark, _ := json.Marshal(map[string]any{
 				"event": "mark", "streamSid": p.streamSID, "mark": map[string]string{"name": markName},
 			})
@@ -335,6 +341,9 @@ func (p *twilioAudioPacer) run() {
 				if matchesAgentPlayback(packet.ItemID, packet.Generation, *c) {
 					receipt.LocalMS += samplesToMS(len(packet.PCM))
 					queuedSamples -= len(packet.PCM)
+					if !packet.Silence {
+						p.pendingSpeechSamples.Add(-int64(len(packet.PCM)))
+					}
 				} else {
 					kept = append(kept, packet)
 				}
@@ -390,6 +399,11 @@ func (p *twilioAudioPacer) run() {
 			activeMaxQueuedSamples = p.maxQueuedSamples
 			adaptiveUntil = time.Time{}
 		}
+		for _, packet := range command.packets {
+			if !packet.Silence {
+				p.pendingSpeechSamples.Add(int64(len(packet.PCM)))
+			}
+		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
 		p.pendingSamples.Store(int64(queuedSamples))
@@ -412,6 +426,9 @@ func (p *twilioAudioPacer) run() {
 			}
 			for queuedSamples > p.trimToSamples && len(queue) > 0 {
 				droppedSamples += len(queue[0].PCM)
+				if !queue[0].Silence {
+					p.pendingSpeechSamples.Add(-int64(len(queue[0].PCM)))
+				}
 				queuedSamples -= len(queue[0].PCM)
 				p.pendingSamples.Store(int64(queuedSamples))
 				queue = queue[1:]

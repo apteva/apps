@@ -1,7 +1,7 @@
 # Continuous agent audio
 
 Local implementation, 23 October 2026. No staging/production configuration,
-deployment, or PSTN calls are part of this verification. Release version: 0.12.33. Registry publication does not deploy any instance.
+deployment, or PSTN calls are part of this verification. Release version: 0.12.34. Registry publication does not deploy any instance.
 
 ## Behavior
 
@@ -198,3 +198,24 @@ The first real-model attempt exposed an immediate-mark acknowledgement error
 in the carrier test fixture. The fixture now schedules marks at simulated
 playback completion. Failed-run evidence was retained. The final successful
 live run uses the corrected fixture, final detector and SDK v0.105.0.
+
+## 0.12.34 diagnostic and silence corrections
+
+AI/external carrier diagnostics are retained after the bridge ends, with the
+same generation fence as human reports. Pending silence still receives ordered
+transport/playback accounting but is excluded from speech-only interruption
+and inactivity decisions. Actual speech remains interruptible.
+
+`agent_audio.reply_timing` uses Telephony's receipt clock. After 200 ms of
+observed quiet, it pairs fresh voiced Core output with the last locally
+qualified caller speech, then records the first successful carrier write.
+These observational intervals include input/provider/Core work and local
+processing respectively; neither establishes physical playback time. Quiet
+detection does not gate PCM or alter model turn behavior. Up to 32 records and
+lifetime maxima are retained per bridge; cancellation before write remains
+explicit. Normal frames add no allocations or periodic work.
+
+For a deterministic opening language, specify it in the route's existing
+`directive` and `greeting`. An instruction to use the caller's language does not
+specify what to speak before the caller says anything. Telephone country codes
+must not be treated as a reliable language preference.

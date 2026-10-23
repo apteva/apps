@@ -371,8 +371,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
-				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				observedAt := time.Now()
+				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), bridge.generation)
+				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -487,7 +489,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			cancel()
 		},
 	)
-	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSamples.Load() > 0 || playback.hasPending() })
+	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSpeechSamples.Load() > 0 || playback.hasPendingSpeech() })
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -854,6 +856,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
 	agentSession.configureFrontend(audioFrontend)
+	playback := newTwilioPlaybackTracker()
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, provider, carrierCodecL16_16, 0, 0)
 		var preAnswerDroppedMS int64
@@ -892,14 +895,16 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			}
 			bridge.media()
 			processed := processCarrierInput(row, audioFrontend, bytesToPCM16(data))
-			if processed.SpeechStarted && agentSession.continuous() {
+			if processed.SpeechStarted && agentSession.continuous() && playback.hasPendingSpeech() {
 				audioFrontend.markLocalSignal()
 				control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 				if coreWriter.Write(ws.OpText, control) != nil {
 					return
 				}
 			}
-			a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
+			observedAt := time.Now()
+			agentSession.observeCaller(processed.SpeechActive, observedAt)
+			a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), bridge.generation)
 			pcm24 := inputResampler.Process(processed.PCM)
 			if len(pcm24) == 0 {
 				continue
@@ -915,7 +920,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	}()
 
 	if agentSession.continuous() {
-		a.bridgeContinuousBinaryAgent(row, bridge, core, coreWriter, vonageWriter, tap, audioFrontend, agentSession, provider)
+		a.bridgeContinuousBinaryAgent(row, bridge, core, coreWriter, vonageWriter, tap, audioFrontend, agentSession, provider, playback)
 		return
 	}
 	a.bindAIPlayback(row, bridge.generation, func() bool { return false })

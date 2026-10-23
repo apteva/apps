@@ -105,6 +105,10 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	m["carrier_send_dropped_ms"] = float64(c.DroppedStaleMS)
 	m["carrier_send_max_queue_ms"] = float64(c.MaxQueuedMS)
 	m["carrier_sequence_gaps"] = float64(c.CarrierSequenceGaps)
+	if c.AgentAudio != nil {
+		m["agent_reply_core_wait_ms"] = c.AgentAudio.ReplyTiming.MaxCoreWaitMS
+		m["agent_reply_dispatch_ms"] = c.AgentAudio.ReplyTiming.MaxDispatchMS
+	}
 	add("dropped_audio", "telephony_to_browser", b.PlaybackDroppedMS > 0)
 	add("sequence_gaps", "telephony_to_browser", b.PlaybackSequenceGaps > 0)
 	add("sequence_gaps", "browser_to_telephony", b.CaptureSequenceGaps > 0)
@@ -319,7 +323,9 @@ func (c *callsDB) refreshAudioDashboardAndNotify(ctx context.Context, notify fun
 				carrierRecord = &value
 			}
 		}
-		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman && carrierRecord == nil {
+		savedCarrier := strings.TrimSpace(r.CarrierAudioDiagnostics)
+		hasSavedCarrier := savedCarrier != "" && savedCarrier != "{}" && savedCarrier != "null"
+		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman && carrierRecord == nil && !hasSavedCarrier {
 			_, err = tx.ExecContext(ctx, `DELETE FROM telephony_audio_reports WHERE call_id=?`, id)
 		} else {
 			s := summarizeAudioDashboard(&r)

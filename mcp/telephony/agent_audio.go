@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,12 +47,13 @@ type agentClearReceipt struct {
 }
 
 type agentAudioSnapshot struct {
-	Capabilities agentAudioCapabilities `json:"capabilities"`
-	Profile      agentAudioProfile      `json:"profile"`
-	Evidence     string                 `json:"progress_evidence"`
-	LateFrames   int64                  `json:"late_cancelled_frames"`
-	SilentFrames int64                  `json:"silent_frames"`
-	Clears       []agentClearReceipt    `json:"clears,omitempty"`
+	Capabilities agentAudioCapabilities   `json:"capabilities"`
+	Profile      agentAudioProfile        `json:"profile"`
+	Evidence     string                   `json:"progress_evidence"`
+	LateFrames   int64                    `json:"late_cancelled_frames"`
+	SilentFrames int64                    `json:"silent_frames"`
+	Clears       []agentClearReceipt      `json:"clears,omitempty"`
+	ReplyTiming  agentReplyTimingSnapshot `json:"reply_timing"`
 }
 
 type agentAudioSession struct {
@@ -63,6 +65,8 @@ type agentAudioSession struct {
 	evidence                 string
 	lateFrames, silentFrames int64
 	clears                   []agentClearReceipt
+	timing                   agentReplyTimingState
+	waitingDispatch          atomic.Bool
 }
 
 func agentBridgeURL(raw string, row *callRow) string {
@@ -138,6 +142,7 @@ func (s *agentAudioSession) cancel(item string, generation int64) {
 		return
 	}
 	s.cancelled[k] = true
+	s.cancelReplyTimingLocked(item, generation)
 	s.order = append(s.order, k)
 	if len(s.order) > 256 {
 		delete(s.cancelled, s.order[0])
@@ -153,6 +158,10 @@ func (s *agentAudioSession) rejects(item string, generation int64) bool {
 	return s.cancelled[agentPlaybackKey{generation, item}] || s.cancelled[agentPlaybackKey{0, item}]
 }
 func (s *agentAudioSession) accept(f realtimeBridgeControl) bool {
+	return s.acceptAt(f, time.Time{})
+}
+
+func (s *agentAudioSession) acceptAt(f realtimeBridgeControl, at time.Time) bool {
 	if s == nil {
 		return true
 	}
@@ -165,6 +174,7 @@ func (s *agentAudioSession) accept(f realtimeBridgeControl) bool {
 	if f.Silence {
 		s.silentFrames++
 	}
+	s.observeCoreReplyLocked(f, at)
 	return true
 }
 func (s *agentAudioSession) ready(w *websocketWriterPump, evidence string) error {
@@ -231,7 +241,7 @@ func (s *agentAudioSession) snapshot() *agentAudioSnapshot {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return &agentAudioSnapshot{Capabilities: s.capabilities, Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...)}
+	return &agentAudioSnapshot{Capabilities: s.capabilities, Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
 }
 
 type agentBridgeConn struct {

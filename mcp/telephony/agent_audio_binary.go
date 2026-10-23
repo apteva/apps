@@ -8,13 +8,12 @@ import (
 	"time"
 )
 
-func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLease, core net.Conn, coreWriter, carrierWriter *websocketWriterPump, tap *callAudioTap, frontend *carrierAudioFrontend, session *agentAudioSession, provider string) {
+func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLease, core net.Conn, coreWriter, carrierWriter *websocketWriterPump, tap *callAudioTap, frontend *carrierAudioFrontend, session *agentAudioSession, provider string, tracker *twilioPlaybackTracker) {
 	ctx := bridge.ctx
 	shape := "vonage_binary"
 	if provider == "sinch" {
 		shape = "sinch_binary"
 	}
-	tracker := newTwilioPlaybackTracker()
 	policy := session.policy()
 	policy.onSent = func(silent bool) {
 		if !silent {
@@ -46,7 +45,7 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 	}, func(progress twilioPlaybackProgress) error {
 		return session.progress(coreWriter, progress, "estimated")
 	}, func(err error) { bridge.socketError(mediaCloseLegCarrier, "write", err); bridge.cancel() })
-	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSamples.Load() > 0 || tracker.hasPending() })
+	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSpeechSamples.Load() > 0 || tracker.hasPendingSpeech() })
 	if err := session.ready(coreWriter, "estimated"); err != nil {
 		return
 	}

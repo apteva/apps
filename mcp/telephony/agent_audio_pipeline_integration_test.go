@@ -277,6 +277,9 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 			}
 		}
 	}
+	stopProbe := probe.stop
+	var stopOnce sync.Once
+	probe.stop = func() { stopOnce.Do(stopProbe) }
 	t.Cleanup(probe.stop)
 	return a, &row, core, probe, output
 }
@@ -302,6 +305,7 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				stop := make(chan struct{})
 				micDone := make(chan struct{})
 				clips := make(chan []int16, 1)
+				var completedClips atomic.Int64
 				defer func() { close(stop); <-micDone }()
 				go func() {
 					defer close(micDone)
@@ -320,6 +324,10 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 							if position < len(clip) {
 								copy(pcm, clip[position:min(position+len(pcm), len(clip))])
 								position += len(pcm)
+								if position >= len(clip) {
+									completedClips.Add(1)
+									clip = nil
+								}
 							}
 							if probe.send(pcm) != nil {
 								return
@@ -332,6 +340,24 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				if !s.Capabilities.Continuous || !s.Capabilities.ScopedCancellation {
 					t.Fatal("capability handshake lost", s)
 				}
+				// Reproduce the reviewed call's risk: an actual caller speaks
+				// while the renderer has only continuous silence outstanding.
+				// Silence must still flow and produce receipts, without clear.
+				speech, err := readLocalPromptWAV("testdata/agent-audio/caller-interrupt-fr.wav")
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeQuiet := probe.frames.Load()
+				agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": "silence-only", "ms": 800, "silent": true}, nil)
+				waitAgentPipeline(t, 2*time.Second, func() bool { return probe.frames.Load() > beforeQuiet+2 })
+				clips <- newPCMResampler(24000, probe.sampleRate).Process(speech)
+				clipDuration := time.Duration(len(speech)) * time.Second / 24000
+				waitAgentPipeline(t, clipDuration+2*time.Second, func() bool { return completedClips.Load() == 1 })
+				if got := len(a.liveAgentAudio(row.ID).Clears); got != 0 {
+					t.Fatalf("caller speaking over silence cleared playback: %d", got)
+				}
+				rearmAt := time.Now().Add(500 * time.Millisecond)
+				waitAgentPipeline(t, time.Second, func() bool { return time.Now().After(rearmAt) })
 				for cycle := 0; cycle < 3; cycle++ {
 					before := probe.frames.Load()
 					id := fmt.Sprintf("old-%d", cycle)
@@ -357,10 +383,6 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 						return stats.Pending == 0 && stats.Awaiting == 0
 					})
 				}
-				speech, err := readLocalPromptWAV("testdata/agent-audio/caller-interrupt-fr.wav")
-				if err != nil {
-					t.Fatal(err)
-				}
 				before := probe.frames.Load()
 				agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": "natural-old", "ms": 600}, nil)
 				waitAgentPipeline(t, 2*time.Second, func() bool { return probe.frames.Load() > before+2 })
@@ -383,6 +405,16 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				if os.WriteFile(filepath.Join(output, "result.json"), raw, 0600) != nil {
 					t.Fatal("write result")
 				}
+				probe.stop()
+				retained, err := a.db().findCall(row.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var report carrierAudioDiagnostics
+				if json.Unmarshal([]byte(retained.CarrierAudioDiagnostics), &report) != nil || report.AgentAudio == nil || len(report.AgentAudio.Clears) != 4 {
+					t.Fatalf("AI diagnostics lost after bridge cleanup (%s): %s", provider, retained.CarrierAudioDiagnostics)
+				}
+
 			})
 		}
 	}

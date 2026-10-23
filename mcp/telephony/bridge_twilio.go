@@ -85,6 +85,7 @@ type twilioOutbound struct {
 }
 
 type twilioPlaybackProgress struct {
+	Silent     bool
 	ItemID     string
 	AudioEndMS int
 	Generation int64
@@ -128,10 +129,11 @@ func twilioAudioPackets(pcm8 []int16, pcm24Samples int, frame realtimeBridgeCont
 }
 
 type twilioPlaybackTracker struct {
-	mu      sync.Mutex
-	next    uint64
-	pending map[string]twilioPlaybackProgress
-	evicted uint64
+	mu            sync.Mutex
+	next          uint64
+	pending       map[string]twilioPlaybackProgress
+	pendingSpeech int
+	evicted       uint64
 }
 
 func newTwilioPlaybackTracker() *twilioPlaybackTracker {
@@ -142,6 +144,10 @@ func (t *twilioPlaybackTracker) add(itemID string, audioEndMS int) string {
 	return t.addGeneration(itemID, 0, audioEndMS)
 }
 func (t *twilioPlaybackTracker) addGeneration(itemID string, generation int64, audioEndMS int) string {
+	return t.addPacket(itemID, generation, audioEndMS, false)
+}
+
+func (t *twilioPlaybackTracker) addPacket(itemID string, generation int64, audioEndMS int, silent bool) string {
 	if itemID == "" || audioEndMS <= 0 {
 		return ""
 	}
@@ -151,6 +157,9 @@ func (t *twilioPlaybackTracker) addGeneration(itemID string, generation int64, a
 		for name, old := range t.pending {
 			if old.ItemID == itemID && old.Generation == generation {
 				delete(t.pending, name)
+				if !old.Silent {
+					t.pendingSpeech--
+				}
 				t.evicted++
 			}
 		}
@@ -160,7 +169,10 @@ func (t *twilioPlaybackTracker) addGeneration(itemID string, generation int64, a
 	}
 	t.next++
 	name := "apt-" + strconv.FormatUint(t.next, 10)
-	t.pending[name] = twilioPlaybackProgress{Generation: generation, ItemID: itemID, AudioEndMS: audioEndMS}
+	t.pending[name] = twilioPlaybackProgress{Generation: generation, ItemID: itemID, AudioEndMS: audioEndMS, Silent: silent}
+	if !silent {
+		t.pendingSpeech++
+	}
 	return name
 }
 
@@ -169,6 +181,9 @@ func (t *twilioPlaybackTracker) acknowledge(name string) (twilioPlaybackProgress
 	defer t.mu.Unlock()
 	progress, ok := t.pending[name]
 	delete(t.pending, name)
+	if ok && !progress.Silent {
+		t.pendingSpeech--
+	}
 	return progress, ok
 }
 
@@ -176,6 +191,13 @@ func (t *twilioPlaybackTracker) clear() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.pending)
+	t.pendingSpeech = 0
+}
+
+func (t *twilioPlaybackTracker) hasPendingSpeech() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.pendingSpeech > 0
 }
 
 func (t *twilioPlaybackTracker) hasPending() bool {
@@ -448,8 +470,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				processed := processCarrierInput(row, audioFrontend, ulawToPCM16(mu))
-				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				observedAt := time.Now()
+				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), bridge.generation)
+				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -543,7 +567,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "Twilio media writer failed")
 		cancel()
 	})
-	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSamples.Load() > 0 || playback.hasPending() })
+	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSpeechSamples.Load() > 0 || playback.hasPendingSpeech() })
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}

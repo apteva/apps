@@ -612,7 +612,7 @@ func (c *callsDB) updateCarrierAudioDiagnostics(id string, value carrierAudioDia
 		return err
 	}
 	_, err = c.db.Exec(`UPDATE calls SET carrier_audio_diagnostics = ?, updated_at = ?
-		WHERE id = ? AND peer_kind = 'human' AND (?='' OR media_generation=?)`, string(encoded), value.UpdatedAt, id, generation, generation)
+		WHERE id = ? AND peer_kind IN ('human','realtime','external') AND (?='' OR media_generation=?)`, string(encoded), value.UpdatedAt, id, generation, generation)
 	return err
 }
 
