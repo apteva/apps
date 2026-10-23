@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.53 — 2026-10-23
+
+- Render interrupted assistant captions after the caller using preserved provider-timed fragments, including delayed captions. Preserve durable message identities, legacy history, and separate voice sessions. Full ordering support requires the accompanying Core transcript changes.
+- Replace separately scheduled audio chunks with continuous AudioWorklet PCM playback and resampling, a 120 ms startup/rebuffer reserve, and smoothing at actual starts and stops. Preserve scoped cancellation, truthful playback receipts, silence handling, microphone streaming, and reconnection isolation.
+- Add the captured French interruption regression, sample-level continuity checks at 48 kHz and 44.1 kHz, browser output probing, and real GPT Live Tier 3 transcript-order assertions.
+- Validation: 128 Bun tests, 122 browser tests, full Conversations Go race/integration tests, Core realtime race tests, and two real GPT Live browser interruption runs passed.
+
 ## 0.24.52 — 2026-10-23
 
 - Advertise playback receipts at connection startup; report partial consumption

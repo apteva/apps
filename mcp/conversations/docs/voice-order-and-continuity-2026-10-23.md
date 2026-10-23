@@ -84,7 +84,8 @@ the speaking indicator active.
 
 The native run used a temporary test instance; it did not restart or install
 anything in the user's local instance or production. No credentials were saved
-in source or test fixtures. The source changes have not been released.
+in source or test fixtures. The Conversations changes ship in v0.24.53. The Core transcript changes are a
+separate runtime dependency and are not deployed by this app release.
 
 The sample and browser tests establish continuity for supplied PCM. A follow-up
 listening check on the user's Mac speakers is still needed to confirm that all
