@@ -76,6 +76,9 @@ the speaking indicator active.
   426 microphone frames continued during recovery; 110 consumption receipts were
   observed; the next reply correctly answered “mardi”, played, and was persisted
   after the caller transcript. No disconnect/error/missing-caption stop occurred.
+- A second paid native run against the final Core build also passed: correct
+  interruption/reply ordering, one scoped clear, 278 microphone frames during
+  recovery, 116 playback receipts, and no disconnect/error/missing-caption stop.
 - 128 Bun tests, all 122 browser tests, the full Conversations Go race/integration
   suite, and Core realtime race tests passed. The final Core binary also built.
 
