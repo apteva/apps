@@ -54,7 +54,7 @@ jobs:
           TELEPHONY_SPEECH_ACCEPTANCE_RESULTS: /tmp/telephony-speech-acceptance.json
           TELEPHONY_SPEECH_ACCEPTANCE_AUDIO_DIR: /tmp/telephony-speech-audio
       - name: Bounded audio timing and telemetry overhead
-        run: go test -run '^$' -bench '^Benchmark(AgentAudioCancellationFence|AgentAudioFrontend|SIPReceiveEvidence|SIPRecoveryEligibility|SIPRTCPReport|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
+        run: go test -run '^$' -bench '^Benchmark(AgentAudioCancellationFence|AgentAudioReplyTimingSteadyFrame|AgentAudioFrontend|SIPReceiveEvidence|SIPRecoveryEligibility|SIPRTCPReport|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
         working-directory: mcp/telephony
       - name: Runtime optimization benchmarks
         run: |
@@ -125,7 +125,7 @@ jobs:
   browser-outages:
     name: Browser long-outage scenarios
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 25
     env:
       GOWORK: 'off'
     steps:

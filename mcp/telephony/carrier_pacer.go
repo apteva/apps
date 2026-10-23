@@ -197,22 +197,23 @@ func (p *carrierAudioPacketizer) clear() {
 }
 
 type jsonCarrierAudioPacer struct {
-	pendingSamples atomic.Int64
-	diagnostics    livePacerStats
-	ctx            context.Context
-	commands       chan carrierPacerCommand
-	clearCommands  chan carrierPacerCommand
-	done           chan struct{}
-	sampleRate     int
-	codec          string
-	shape          string
-	streamID       string
-	marks          bool
-	playback       *twilioPlaybackTracker
-	write          func([]byte) error
-	onProgress     func(twilioPlaybackProgress) error
-	onError        func(error)
-	policy         carrierPacerPolicy
+	pendingSamples       atomic.Int64
+	pendingSpeechSamples atomic.Int64
+	diagnostics          livePacerStats
+	ctx                  context.Context
+	commands             chan carrierPacerCommand
+	clearCommands        chan carrierPacerCommand
+	done                 chan struct{}
+	sampleRate           int
+	codec                string
+	shape                string
+	streamID             string
+	marks                bool
+	playback             *twilioPlaybackTracker
+	write                func([]byte) error
+	onProgress           func(twilioPlaybackProgress) error
+	onError              func(error)
+	policy               carrierPacerPolicy
 
 	errMu  sync.Mutex
 	err    error
@@ -404,6 +405,9 @@ func (p *jsonCarrierAudioPacer) run() {
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
 		p.pendingSamples.Store(int64(queuedSamples))
+		if !packet.Silence {
+			defer p.pendingSpeechSamples.Add(-int64(len(packet.PCM)))
+		}
 		if p.policy.agentSession.rejects(packet.ItemID, packet.Generation) {
 			return nil
 		}
@@ -425,6 +429,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		if err := p.write(frame); err != nil {
 			return err
 		}
+		p.policy.agentSession.observeSent(packet.ItemID, packet.Generation, packet.Silence, time.Time{})
 		if p.policy.onSent != nil {
 			p.policy.onSent(packet.Silence)
 		}
@@ -440,7 +445,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		bufferedThrough = bufferedThrough.Add(duration)
 		tailSamples := min(len(pcm), max(1, p.sampleRate/200))
 		lastSentTail = append(lastSentTail[:0], pcm[len(pcm)-tailSamples:]...)
-		if markName := p.playback.addGeneration(packet.ItemID, packet.Generation, packet.AudioEndMS); markName != "" {
+		if markName := p.playback.addPacket(packet.ItemID, packet.Generation, packet.AudioEndMS, packet.Silence); markName != "" {
 			if p.marks {
 				mark, _ := json.Marshal(map[string]any{"event": "mark", "mark": map[string]string{"name": markName}})
 				if err := p.write(mark); err != nil {
@@ -467,6 +472,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		queue = nil
 		queuedSamples = 0
 		p.pendingSamples.Store(int64(queuedSamples))
+		p.pendingSpeechSamples.Store(0)
 		bufferedThrough = time.Time{}
 		estimated = nil
 		p.playback.clear()
@@ -484,6 +490,9 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 		for queuedSamples > targetSamples && len(queue) > 0 {
 			droppedSamples += len(queue[0].PCM)
+			if !queue[0].Silence {
+				p.pendingSpeechSamples.Add(-int64(len(queue[0].PCM)))
+			}
 			queuedSamples -= len(queue[0].PCM)
 			p.pendingSamples.Store(int64(queuedSamples))
 			queue = queue[1:]
@@ -506,6 +515,9 @@ func (p *jsonCarrierAudioPacer) run() {
 				if matchesAgentPlayback(packet.ItemID, packet.Generation, *c) {
 					receipt.LocalMS += carrierSamplesToMS(len(packet.PCM), p.sampleRate)
 					queuedSamples -= len(packet.PCM)
+					if !packet.Silence {
+						p.pendingSpeechSamples.Add(-int64(len(packet.PCM)))
+					}
 				} else {
 					kept = append(kept, packet)
 				}
@@ -563,6 +575,11 @@ func (p *jsonCarrierAudioPacer) run() {
 		if !adaptiveUntil.IsZero() && time.Now().After(adaptiveUntil) {
 			activeMaxQueuedSamples = maxQueuedSamples
 			adaptiveUntil = time.Time{}
+		}
+		for _, packet := range command.packets {
+			if !packet.Silence {
+				p.pendingSpeechSamples.Add(int64(len(packet.PCM)))
+			}
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming

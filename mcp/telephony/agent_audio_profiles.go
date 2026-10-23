@@ -161,6 +161,12 @@ func (a *App) toolAgentAudioProfile(c context.Context, ctx *sdk.AppCtx, args map
 	}
 	for key, value := range args {
 		switch key {
+		case "_project_id":
+			// Server/SDK transport metadata is not a caller-selected scope.
+			// All reads and writes below use the authenticated AppCtx project.
+			if supplied, ok := value.(string); !ok || supplied != project {
+				return nil, errors.New("project context mismatch")
+			}
 		case "scope":
 			if _, ok := value.(string); !ok {
 				return nil, errors.New("scope must be a string")

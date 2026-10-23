@@ -217,11 +217,19 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) (result error) {
 }
 
 type sipPlaybackState struct {
-	pending atomic.Int64
+	pending       atomic.Int64
+	pendingSpeech atomic.Int64
 }
 
 func (s *sipPlaybackState) hasPending() bool {
 	return s.pending.Load() > 0
+}
+func (s *sipPlaybackState) hasPendingSpeech() bool { return s.pendingSpeech.Load() > 0 }
+func (s *sipPlaybackState) adjust(packet sipRTPOutboundPacket, delta int64) {
+	s.pending.Add(delta)
+	if !packet.silence {
+		s.pendingSpeech.Add(delta)
+	}
 }
 
 type sipRTPOutboundPacket struct {
@@ -337,7 +345,7 @@ func (p *sipRTPPacer) run() {
 				select {
 				case packet := <-p.queue:
 					if matchesAgentPlayback(packet.itemID, packet.generation, command.control) {
-						p.playback.pending.Add(-1)
+						p.playback.adjust(packet, -1)
 						cleared += 20
 					} else {
 						kept = append(kept, packet)
@@ -378,7 +386,7 @@ func (p *sipRTPPacer) run() {
 			}
 			if packet, ok := p.dequeueLivePacket(now); ok {
 				failed := func() bool {
-					defer p.playback.pending.Add(-1)
+					defer p.playback.adjust(packet, -1)
 					if p.agentSession.rejects(packet.itemID, packet.generation) {
 						return false
 					}
@@ -420,6 +428,7 @@ func (p *sipRTPPacer) run() {
 						}
 						return true
 					}
+					p.agentSession.observeSent(packet.itemID, packet.generation, packet.silence, time.Time{})
 					if p.observeActivity != nil {
 						p.observeActivity(packet.silence)
 					}
@@ -496,7 +505,7 @@ func (p *sipRTPPacer) dequeueLivePacket(now time.Time) (sipRTPOutboundPacket, bo
 			if !p.dropStale || sourceAge < liveAudioMaxAge {
 				return packet, true
 			}
-			p.playback.pending.Add(-1)
+			p.playback.adjust(packet, -1)
 			p.droppedPackets.Add(1)
 			p.diagnostics.dropped("live_audio_age_limit", 20)
 			p.needsCrossfade.Store(true)
@@ -526,8 +535,8 @@ func (p *sipRTPPacer) drain() int {
 	count := 0
 	for {
 		select {
-		case <-p.queue:
-			p.playback.pending.Add(-1)
+		case packet := <-p.queue:
+			p.playback.adjust(packet, -1)
 			count++
 		default:
 			return count
@@ -568,8 +577,8 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 	trimQueue:
 		for len(p.queue) > targetPackets {
 			select {
-			case <-p.queue:
-				p.playback.pending.Add(-1)
+			case packet := <-p.queue:
+				p.playback.adjust(packet, -1)
 				p.droppedPackets.Add(1)
 			default:
 				break trimQueue
@@ -600,11 +609,11 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		}
 		// Count before publishing so a concurrently scheduled sender cannot
 		// consume a frame before it is counted. Keep it pending through writing.
-		p.playback.pending.Add(1)
+		p.playback.adjust(packet, 1)
 		select {
 		case p.queue <- packet:
 		default:
-			p.playback.pending.Add(-1)
+			p.playback.adjust(packet, -1)
 			return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue changed concurrently")
 		}
 	}
@@ -769,7 +778,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	})
 	media.pacer.Store(pacer)
 	defer media.pacer.CompareAndSwap(pacer, nil)
-	a.bindAIPlayback(row, policyGeneration, playback.hasPending)
+	a.bindAIPlayback(row, policyGeneration, playback.hasPendingSpeech)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -877,8 +886,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 					continue
 				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
-				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), policyGeneration)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				observedAt := time.Now()
+				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), policyGeneration)
+				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -1196,7 +1207,8 @@ func (p *sipRTPPacer) flushAgentTail() {
 		return
 	}
 	for _, frame := range p.packetizer.flushPartial() {
-		p.playback.pending.Add(1)
-		p.queue <- sipRTPOutboundPacket{pcm: frame.PCM, itemID: frame.ItemID, generation: frame.Generation, audioEndMS: frame.AudioEndMS, silence: frame.Silence, enqueuedAt: frame.EnqueuedAt, queuedAt: time.Now()}
+		packet := sipRTPOutboundPacket{pcm: frame.PCM, itemID: frame.ItemID, generation: frame.Generation, audioEndMS: frame.AudioEndMS, silence: frame.Silence, enqueuedAt: frame.EnqueuedAt, queuedAt: time.Now()}
+		p.playback.adjust(packet, 1)
+		p.queue <- packet
 	}
 }

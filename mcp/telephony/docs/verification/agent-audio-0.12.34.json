@@ -1,0 +1,70 @@
+{
+  "version": "0.12.34",
+  "sdk": "v0.105.0",
+  "local_checks": {
+    "go_suite": "pass (386.639 seconds; subsequent focused final-source checks and CI are separate)",
+    "frontend_tests": 326,
+    "focused_regressions": "pass",
+    "carrier_paths": 12,
+    "directions": [
+      "inbound",
+      "outbound"
+    ],
+    "carriers": [
+      "telnyx",
+      "twilio",
+      "sip-PCMA",
+      "sip-G722",
+      "vonage",
+      "sinch"
+    ],
+    "checks": [
+      "speech during silence does not clear",
+      "real speech remains interruptible",
+      "late cancelled output stays fenced",
+      "next reply plays",
+      "AI reports survive cleanup",
+      "replacement generation fences",
+      "authenticated profile context",
+      "bounded timing snapshots"
+    ],
+    "benchmark_steady_frame_ns": [
+      43.0,
+      32.88,
+      32.54
+    ],
+    "benchmark_allocs_per_frame": 0
+  },
+  "real_model_check": {
+    "model": "gpt-live-1",
+    "path": "local Telephony -> actual local Server fixture -> actual local Core fixture -> OpenAI Live",
+    "passed": true,
+    "caller_clip_start_to_clear_ms": 222.597041,
+    "reply_timing": {
+      "clock": "telephony_receipt",
+      "observed_quiet_ms": 200,
+      "reply_count": 1,
+      "max_speech_to_core_audio_ms": 1200.512833,
+      "max_core_audio_to_carrier_write_ms": 0.105333,
+      "recent": [
+        {
+          "item_id": "continuous-audio-084bad5e7b660264d2db60a3b335542b-1",
+          "session_generation": 2,
+          "last_caller_speech_observed_at": "2026-10-23T16:55:47.969308Z",
+          "first_core_audio_received_at": "2026-10-23T16:55:49.169823Z",
+          "first_carrier_write_at": "2026-10-23T16:55:49.169928Z",
+          "speech_to_core_audio_ms": 1200.512833,
+          "core_audio_to_carrier_write_ms": 0.105333,
+          "outcome": "carrier_write_succeeded"
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Local carrier fixtures do not certify PSTN audibility or capacity.",
+    "Clear/write evidence is not confirmation of handset playback.",
+    "Speech-to-Core interval is receipt-clock evidence, not isolated provider inference latency.",
+    "Opening language remains an explicit per-route instruction; no global language override.",
+    "Historical missing AI reports cannot be reconstructed from counters never saved."
+  ]
+}
