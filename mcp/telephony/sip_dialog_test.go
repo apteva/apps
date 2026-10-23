@@ -640,17 +640,24 @@ func TestSIPSDPStrictNegotiation(t *testing.T) {
 	}
 }
 func TestSIPJitterResumesShortDTXPause(t *testing.T) {
-	b := newRTPJitterBuffer()
-	start := time.Now()
-	for i := 0; i < 3; i++ {
-		b.pushRTP(uint16(i+1), bytes.Repeat([]byte{1}, 160), uint32(160*(i+1)), start)
+	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
+	start := time.Unix(100, 0)
+	// Drive real elapsed media time. Repeated pop() calls at one wall-clock
+	// instant cannot stand in for 20 ms of silence with a timestamp-aware queue.
+	for tick := 0; tick <= 140; tick += 20 {
+		if tick <= 40 {
+			i := tick / 20
+			b.pushRTP(uint16(i+1), bytes.Repeat([]byte{1}, 160), uint32(160*(i+1)), start.Add(time.Duration(tick)*time.Millisecond))
+		}
+		b.popAt(start.Add(time.Duration(tick) * time.Millisecond))
 	}
-	for i := 0; i < 8; i++ {
-		b.pop()
-	}
-	b.pushRTP(4, bytes.Repeat([]byte{2}, 160), 1600, start.Add(140*time.Millisecond))
 	for i := 0; i < 3; i++ {
-		if frame, ready := b.pop(); ready && len(frame) > 0 && frame[0] == 2 {
+		at := start.Add(time.Duration(160+i*20) * time.Millisecond)
+		b.pushRTP(uint16(4+i), bytes.Repeat([]byte{2}, 160), uint32(1600+i*160), at)
+		if frame, ready := b.popAt(at); ready && len(frame) > 0 && frame[0] == 2 {
+			if b.lateDroppedSamples != 0 || b.lost != 0 {
+				t.Fatal("DTX classified as loss", b.lateDroppedSamples, b.lost)
+			}
 			return
 		}
 	}

@@ -48,6 +48,7 @@ jobs:
       - run: go test -json ./... > /tmp/telephony-go.jsonl
         working-directory: mcp/telephony
         env:
+          TELEPHONY_SHORT_GAP_RESULTS: /tmp/telephony-short-source-gaps.json
           TELEPHONY_VARIABLE_DELIVERY_RESULTS: /tmp/telephony-variable-delivery.json
           TELEPHONY_PRODUCTION_SCENARIO_RESULTS: /tmp/telephony-production-scenarios.json
           TELEPHONY_SPEECH_ACCEPTANCE_RESULTS: /tmp/telephony-speech-acceptance.json
@@ -105,6 +106,7 @@ jobs:
           name: telephony-go-results
           path: |
             /tmp/telephony-go.jsonl
+            /tmp/telephony-short-source-gaps.json
             /tmp/telephony-variable-delivery.json
             /tmp/telephony-production-scenarios.json
             /tmp/telephony-speech-acceptance.json
@@ -246,7 +248,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
+            pattern: 'Test(SIPShortSourceGap|SIPSourceGap|SIPJitterResumesShortDTX|SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
           - group: lifecycle
             pattern: 'Test(SIPCrossedBYE|CarrierInventoryOutage|CarrierVerification|TemporaryCarrier|InventoryReads|AccountFailure|GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

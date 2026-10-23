@@ -101,6 +101,7 @@ type sipJitterEvent struct {
 	LocalQueueAgeMS   float64   `json:"local_queue_age_ms,omitempty"`
 	ConsumerGapMS     float64   `json:"consumer_interval_ms,omitempty"`
 	PreservedAudioMS  float64   `json:"preserved_audio_ms,omitempty"`
+	SourceGapMS       float64   `json:"source_timestamp_gap_ms,omitempty"`
 	RequiredReserveMS int       `json:"required_reserve_ms,omitempty"`
 	Frames            int       `json:"frames"`
 }
@@ -172,6 +173,11 @@ type rtpJitterBuffer struct {
 	recoveryDiscardedSamples                                            int
 	lastDiscardNS                                                       atomic.Int64
 	maxIngressProcessingMS, maxIngressLockMS                            float64
+	lastPoppedGapSamples                                                int
+	sourceGapKnown                                                      bool
+	sourceGapTarget                                                     uint32
+	sourceGapDeclaredSamples, sourceGapSkippedSamples                   int
+	sourceGapFilledSamples                                              atomic.Int64
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer { return newRTPJitterBufferWithPolicy(sipPlaybackPolicy{}) }
@@ -622,6 +628,7 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		}
 	}
 	if !b.primed {
+		b.sourceGapKnown = false
 		if len(b.packets) == 0 {
 			return nil, false
 		}
@@ -651,11 +658,13 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 	if len(b.packets) > 0 {
 		oldest := b.oldest()
 		ts := b.timestamps[oldest]
-		// A contiguous sequence with a timestamp jump is DTX, not missing audio.
+		// A contiguous sequence with a timestamp jump establishes a source-time
+		// gap, not its cause. Preserve short gaps without consuming speech or
+		// sequence numbers; large discontinuities still recover within bounds.
 		if oldest == b.expected && b.haveTimestamp && int32(ts-b.expectedTimestamp) > 0 {
-			b.expectedTimestamp = ts
-			b.dtxResumes++
-			b.event(now, "source_silence", oldest, ts, 0, 0)
+			if b.popSourceTimestampGap(now, oldest, ts, needed) {
+				return nil, true
+			}
 		}
 		// Telephone events can also occupy sequence numbers not captured by this
 		// reader; source timestamps distinguish those from missing speech.
@@ -695,10 +704,12 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		b.haveTimestamp = true
 		b.missing = 0
 	} else {
+		b.lastPoppedGapSamples = 0
 		b.lastPoppedMissing = true
 		b.lastPoppedAt = now
 		b.lastPoppedArrival, b.lastPoppedSource = now, now
 		b.lastPoppedPlayout = now
+		b.lastPoppedTimestamp = b.expectedTimestamp
 		if needed >= 0 {
 			b.pendingPCMSamples.Add(int64(max(0, b.packetSamples-needed)))
 		}
@@ -716,7 +727,12 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 			b.stableAt = now
 		}
 	}
-	b.expected++
+	// Empty playback cannot establish whether the next sequence was lost or
+	// the sender paused. Synthetic audio advances time, never an unobserved
+	// packet sequence. A future received packet still proves real sequence loss.
+	if ok || len(b.packets) > 0 || b.policy.Receiver == "reference" {
+		b.expected++
+	}
 	if b.missing >= 3 && len(b.packets) == 0 {
 		b.started = false
 		b.primed = false
@@ -879,16 +895,26 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		}
 		var pcm []int16
 		if p == nil {
-			n := f.missingSamples * m.sampleRate() / 8000
-			f.jitter.missingFilledSamples.Add(int64(f.missingSamples))
-			continued := min(n, max(0, m.sampleRate()*f.jitter.policy.ConcealmentMS/1000-f.plc.lossSamples))
-			pcm = f.plc.missing(n, m.sampleRate(), policyEnabled(f.jitter.policy.Concealment))
-			if f.plc.generated {
-				rtpContinued := continued * 8000 / m.sampleRate()
-				f.jitter.concealedSamples.Add(int64(rtpContinued))
-				f.jitter.silenceSamples.Add(int64(f.missingSamples - rtpContinued))
+			f.jitter.mu.Lock()
+			gapSamples := f.jitter.lastPoppedGapSamples
+			f.jitter.mu.Unlock()
+			if gapSamples > 0 {
+				// Source timestamp gaps are separate from packet-loss concealment.
+				// Never manufacture encoded G.722 data or reset its decoder here.
+				pcm = make([]int16, gapSamples*m.sampleRate()/8000)
+				f.plc = sipPCMConcealer{}
 			} else {
-				f.jitter.silenceSamples.Add(int64(f.missingSamples))
+				n := f.missingSamples * m.sampleRate() / 8000
+				f.jitter.missingFilledSamples.Add(int64(f.missingSamples))
+				continued := min(n, max(0, m.sampleRate()*f.jitter.policy.ConcealmentMS/1000-f.plc.lossSamples))
+				pcm = f.plc.missing(n, m.sampleRate(), policyEnabled(f.jitter.policy.Concealment))
+				if f.plc.generated {
+					rtpContinued := continued * 8000 / m.sampleRate()
+					f.jitter.concealedSamples.Add(int64(rtpContinued))
+					f.jitter.silenceSamples.Add(int64(f.missingSamples - rtpContinued))
+				} else {
+					f.jitter.silenceSamples.Add(int64(f.missingSamples))
+				}
 			}
 		} else {
 			if m.offer.Codec == "G722" && f.jitter.policy.Receiver == "adaptive" {
@@ -907,7 +933,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 		at := f.jitter.lastPoppedAt
 		arrival, source := f.jitter.lastPoppedArrival, f.jitter.lastPoppedSource
 		playout := f.jitter.lastPoppedPlayout
-		rtpTimestamp := f.jitter.expectedTimestamp - uint32(len(p))
+		rtpTimestamp := f.jitter.lastPoppedTimestamp
 		f.jitter.mu.Unlock()
 		if p != nil {
 			f.lastRealAt = at
