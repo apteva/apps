@@ -338,6 +338,13 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		return nil, err
 	}
 	defer trackInstanceCreation(ctx, inst.ID)()
+	if in.Firewall != nil {
+		if _, e := firewallReconcile(ctx, inst, true); e != nil {
+			finishInstanceCreation(ctx, inst.ID)
+			failInstanceStage(ctx, inst.ID, "Firewall", e)
+			return nil, e
+		}
+	}
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "ProviderCreate"})
@@ -367,6 +374,15 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if err != nil {
 		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
+	}
+	if s, e := firewallLoad(ctx.AppDB(), inst.ID); e == nil && s.ResourceID != "" {
+		switch provider {
+		case "vultr":
+			args["firewall_group_id"] = s.ResourceID
+		case "linode":
+			args["firewall_id"] = mustFirewallInt(s.ResourceID)
+			args["interface_generation"] = "legacy_config"
+		}
 	}
 	data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, tool, args)
 	if err != nil {
@@ -1126,6 +1142,9 @@ func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
 	cleanupErr := prepareVolumesForInstanceDestroy(ctx, id, true)
 	if cleanupErr == nil {
 		cleanupErr = destroyProviderInstance(ctx, inst)
+	}
+	if cleanupErr == nil {
+		cleanupErr = firewallDestroy(ctx, inst)
 	}
 	fields := map[string]any{"lifecycle_stage": stage}
 	if cleanupErr != nil {

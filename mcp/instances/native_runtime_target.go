@@ -36,6 +36,9 @@ func (b *nativeBackend) inspectTarget(r nativeRequest) (nativeTargetInfo, error)
 	if err := nativePublicEndpoints(opts); err != nil {
 		return out, err
 	}
+	if e := nativeFirewallValidation(inst, opts); e != nil {
+		return out, e
+	}
 	gateway := r.GatewayURL
 	if gateway == "" {
 		gateway = opts.GatewayURL

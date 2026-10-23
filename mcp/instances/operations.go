@@ -206,6 +206,9 @@ func reconcileRollbacks(ctx *sdk.AppCtx) {
 		if e == nil {
 			e = destroyProviderInstance(ctx, inst)
 		}
+		if e == nil {
+			e = firewallDestroy(ctx, inst)
+		}
 		fields := map[string]any{"lifecycle_stage": "Rollback", "create_pending": false}
 		if e != nil {
 			fields["cleanup_error"] = e.Error()

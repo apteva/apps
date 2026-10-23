@@ -674,3 +674,85 @@ Clouding is physically in Barcelona (`barcelona`). It uses live CPU/RAM flavors,
 UpCloud discovers public zones (including Madrid when returned by the account), MaxIOPS-backed non-GPU plans and eligible Linux templates. It supports configurable boot disks and managed data-volume creation/attach/detach/growth/deletion. Guest formatting is deliberately unavailable because the guest serial does not contain the complete storage UUID. Destroy confirms shutdown, retains unrelated attached disks, and removes only the boot disk identified by a durable unique ownership marker and recorded UUID. It never uses blanket attached-storage deletion. Interrupted delete responses can be retried; unknown create outcomes retain inventory for operator reconciliation rather than creating duplicates.
 
 Complete provider quotes are unavailable in this increment: catalog `price_known` is false and costs are not fabricated from CPU-only prices. Clouding compute/disk pricing is separate and UpCloud pricing is zone-specific. Raw provider cost APIs are available in their integration catalogs.
+
+### Managed provider firewalls (0.13.0)
+
+Firewall management is opt-in and provider-neutral. Clouding (IPv4), Hetzner
+Cloud, DigitalOcean, Vultr (VMs and bare metal), and Linode legacy-config hosts
+are implemented. Query `instance_firewall_capabilities` for the actual target;
+other providers/products, including Linode interface-based firewalls, return an
+explicit unsupported error. Provider API availability does not imply that every
+product has an Instances adapter.
+
+Policies are inbound allow lists with default-deny inbound and unrestricted
+outbound traffic. Rules specify `protocol` (`tcp`, `udp`, `icmp`), inclusive
+`port_start`/`port_end` for TCP/UDP, and explicit `source_cidrs`. IPv6 is checked
+against target capabilities. The effective rule count, including SSH and every
+workload owner, must fit the provider limit. Each host retains at most 64 owners
+and one managed firewall; policies are replaced in place rather than appended
+on every call.
+
+For example, callers can supply this optional field to `instance_create`:
+
+```json
+{
+  "firewall": {
+    "management_cidrs": ["203.0.113.10/32"],
+    "rules": [
+      {"protocol":"tcp", "port_start":8080, "source_cidrs":["0.0.0.0/0"]},
+      {"protocol":"udp", "port_start":10000, "port_end":10031, "source_cidrs":["0.0.0.0/0"]}
+    ]
+  }
+}
+```
+
+Use a reachable controller/admin CIDR, replacing the documentation address.
+Omitting `management_cidrs` preserves public SSH with key authentication
+(`0.0.0.0/0`, plus `::/0` where supported). The instance's actual SSH port is
+always retained. Management CIDRs are fixed at first adoption; changing them is
+an explicit host-administration task. ICMP can be allowed explicitly where
+required for network diagnostics or MTU discovery.
+
+- `instance_firewall_apply {id, owner, firewall}` sets that owner's desired rules.
+- `instance_firewall_release {id, owner}` removes only that owner's requirements.
+- `instance_firewall_get {id, refresh?}` reads intent; `refresh:true` also checks
+  provider rules and attachment without modifying anything.
+- HTTP equivalents: `GET/PUT/DELETE /api/instances/<id>/firewall` (`owner` query
+  parameter for DELETE), and `GET /api/instances-firewall-capabilities`.
+
+The instance-creation owner (`instance`) and backend-owned `native:<deployment>`
+owners are reserved. Overlapping requirements are deduplicated and retained
+until the final owner releases them. Releasing the last workload leaves the SSH
+baseline firewall attached. Destroying the host also cleans up its owned
+firewall. Existing shared profiles are never edited or deleted. Adopting an
+existing host with attached firewalls requires `replace_existing:true`; only
+that host's recorded attachments are replaced. Newly appearing attachments
+require a new explicit takeover request.
+
+The native backend advertises `firewall_policies:true` and accepts
+`options.firewall` using the same schema. `expose_declared_ports:true` explicitly
+allows manifest listeners publicly; extra `rules` can describe UDP/TCP ranges.
+The controller must supply this opt-in option—existing Server deployments do
+not silently gain public ports. Start applies and verifies the effective policy
+before starting the service; confirmed stop/delete releases that deployment's
+rules. The private control port is protected from every owner's policy. Target
+inspection and prepare do not alter provider firewall state.
+
+A desired policy and creation identity are journaled before provider mutations.
+Lost creation responses are recovered by the unique ownership name without
+replaying an uncertain create. Pending operations recover once after controller
+restart and through explicit retries. Rules are verified before replacing prior
+attachments, shared attachments prevent owned-group mutation, and pending
+provider rollout is not reported as confirmed. Applied policies are not polled
+by normal metrics or execution-health inspection.
+
+The Linux guest firewall remains externally managed: Instances does not flush
+iptables/nftables/UFW or claim that provider verification proves end-to-end
+reachability. Existing host rules must permit the requested traffic, and live
+connectivity still needs to be tested when a server is provisioned.
+
+Refresh the provider integration catalog before using these tools. Release
+0.13.0 requires the new `firewall_*` operations in the Clouding, Hetzner,
+DigitalOcean, Vultr and Linode definitions. Missing operations fail preflight
+before compute is ordered. No firewall is created for requests that omit the
+optional policy.

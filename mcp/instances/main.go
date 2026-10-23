@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.12.1
+version: 0.13.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -105,6 +105,14 @@ provides:
     - prefix: /
     - prefix: /_apteva/runtime/backends/native
   mcp_tools:
+    - name: instance_firewall_capabilities
+      description: Discover managed firewall capabilities for a provider or instance.
+    - name: instance_firewall_get
+      description: Read owned policies and optionally verify provider rules and attachments.
+    - name: instance_firewall_apply
+      description: Apply an owner-scoped inbound policy while retaining SSH and other owners.
+    - name: instance_firewall_release
+      description: Release one owner's rules while retaining other owners and SSH.
     - name: instance_quote
       description: Review an OVH contract-product order and its prices before purchase.
     - name: instance_order_status
@@ -219,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.12.1
+    ref: instances/v0.13.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -270,7 +278,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// because destroy must only target an upstream id recorded from
 	// the original create response.
 	startInstanceWorker(ctx, -1, func(work context.Context) {
-		for _, reconcile := range []func(*sdk.AppCtx){reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState, reconcileExternalHosts} {
+		for _, reconcile := range []func(*sdk.AppCtx){reconcilePendingFirewalls, reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState, reconcileExternalHosts} {
 			if work.Err() != nil {
 				return
 			}
@@ -333,6 +341,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
 		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
 		{Pattern: "/api/instances-images", Handler: a.handleListImages},
+		{Pattern: "/api/instances-firewall-capabilities", Handler: a.handleFirewallCapabilities},
 		{Pattern: "/api/instances-storage-capabilities", Handler: a.handleStorageCapabilities},
 		{Pattern: "/api/instance-volumes", Handler: a.handleVolumesCollection},
 		{Pattern: "/api/instance-volumes/", Handler: a.handleVolumeItem},

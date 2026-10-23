@@ -74,6 +74,13 @@ func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, 
 		return nil, err
 	}
 	defer trackInstanceCreation(ctx, inst.ID)()
+	if in.Firewall != nil {
+		if _, e := firewallReconcile(ctx, inst, true); e != nil {
+			finishInstanceCreation(ctx, inst.ID)
+			failInstanceStage(ctx, inst.ID, "Firewall", e)
+			return nil, e
+		}
+	}
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 

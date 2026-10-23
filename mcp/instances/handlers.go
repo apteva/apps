@@ -152,6 +152,8 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		default:
 			httpErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
 		}
+	case "firewall":
+		a.httpFirewall(w, r, id)
 	case "run":
 		a.httpRun(w, r, id)
 	case "upload":
@@ -248,6 +250,7 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request, id int64) {
 func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := appCtxForRequest(r)
 	var body struct {
+		Firewall             *FirewallPolicy        `json:"firewall"`
 		Setup                *SetupOptions          `json:"setup"`
 		Name                 string                 `json:"name"`
 		Provider             string                 `json:"provider"`
@@ -270,7 +273,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in := CreateInstanceInput{
-		Setup: body.Setup, Name: body.Name, Provider: body.Provider,
+		Firewall: body.Firewall, Setup: body.Setup, Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
 		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage, ElasticMetal: body.ElasticMetal, OVH: body.OVH,
 	}

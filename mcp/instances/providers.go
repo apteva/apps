@@ -194,6 +194,24 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.ProviderConnectionID = bound.ConnectionID
+	if in.Firewall != nil {
+		target := &Instance{ID: 1, Provider: provider, ResourceClass: in.ResourceClass, Size: in.Size}
+		if provider == "vultr" && strings.HasPrefix(in.Size, "vbm-") {
+			target.ResourceClass = "bare_metal"
+		}
+		if in.Firewall.ExposeDeclaredPorts {
+			return nil, errors.New("expose_declared_ports is only supported by native deployments")
+		}
+		if _, e := normalizeFirewallRules(in.Firewall.Rules, firewallCapabilities(target)); e != nil {
+			return nil, e
+		}
+		if _, e := firewallInitial(target, *in.Firewall); e != nil {
+			return nil, e
+		}
+		if _, e := (firewallDriver{ctx: ctx, inst: &Instance{ID: 1, Provider: provider, ProviderConnectionID: bound.ConnectionID}}).list(); e != nil {
+			return nil, fmt.Errorf("firewall integration preflight: %w", e)
+		}
+	}
 	if provider == "ovhcloud" {
 		if in.Size == "" {
 			return nil, errors.New("OVH requires an explicit Public Cloud flavor or a reviewed VPS/dedicated offer")
@@ -358,6 +376,9 @@ func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		err = destroyProviderInstance(ctx, inst)
 	}
 	if err != nil {
+		return err
+	}
+	if err = firewallDestroy(ctx, inst); err != nil {
 		return err
 	}
 	if err = finalizeVultrBootStorage(ctx, inst); err != nil {
