@@ -1242,6 +1242,12 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 			strings.TrimSpace(strArg(body, "profile_id", "")))
 	case "/numbers/carrier-media":
 		result, err = a.configureCarrierMedia(r.Context(), ctx, body)
+	case "/numbers/agent-audio-profile":
+		value, e := a.toolAgentAudioProfile(r.Context(), ctx, body)
+		err = e
+		if e == nil {
+			result = value.(map[string]any)
+		}
 	case "/numbers/sip-audio-profile":
 		result, err = a.sipAudioProfileSettings(ctx, body)
 	case "/numbers/local-media":

@@ -184,7 +184,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", cfg.Provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := a.correlatedBridgeDialer(row)
+	dialer, response := a.agentBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
@@ -198,7 +198,14 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	if !bridge.bind(core) {
 		return
 	}
+	agentSession, err := a.newAgentAudioSession(row, response)
+	if err != nil {
+		_ = core.Close()
+		return
+	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	agentSession.configureWriter(coreWriter)
+	agentSession.configureWriter(carrierWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
@@ -232,6 +239,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
+	defer a.trackAgentAudio(row.ID, agentSession)()
+	agentSession.configureFrontend(audioFrontend)
 	inputSequences := &audioSequenceTracker{}
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
@@ -405,8 +414,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if !ok {
 					continue
 				}
-				control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
-				err := coreWriter.Write(ws.OpText, control)
+				err := agentSession.progress(coreWriter, progress, "carrier_mark")
 				if err != nil {
 					bridge.socketError(mediaCloseLegCore, "write", err)
 					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write playback progress to realtime bridge")
@@ -436,7 +444,12 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	packetizer := newCarrierAudioPacketizer(sampleRate)
 	maxQueuedMS := 0
 	droppedStaleMS := 0
-	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerPolicy := agentSession.policy()
+	pacerPolicy.onSent = func(silent bool) {
+		if !silent {
+			a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
+		}
+	}
 	pacerMode := "buffered"
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
@@ -450,7 +463,6 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			err := carrierWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
 			if err == nil {
 				observeSent(payload)
-				a.observeAIJSONOutput(row, payload, time.Now().UTC(), bridge.generation)
 			}
 			if humanHub != nil {
 				stage := "carrier_send"
@@ -462,8 +474,11 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			return err
 		},
 		func(progress twilioPlaybackProgress) error {
-			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
-			return coreWriter.Write(ws.OpText, control)
+			evidence := "estimated"
+			if cfg.PlaybackMarks {
+				evidence = "carrier_mark"
+			}
+			return agentSession.progress(coreWriter, progress, evidence)
 		},
 		func(err error) {
 			globalCtx.Logger().Warn("carrier media writer failed", "provider", cfg.Provider, "call", callID, "err", err)
@@ -491,7 +506,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
+			AgentAudio: agentSession.snapshot(), OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),
@@ -503,6 +518,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		}
 	}()
 
+	evidence := "estimated"
+	if cfg.PlaybackMarks {
+		evidence = "carrier_mark"
+	}
+	if err := agentSession.ready(coreWriter, evidence); err != nil {
+		return
+	}
 	var nextFrame realtimeBridgeControl
 	for {
 		select {
@@ -527,10 +549,17 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				nextFrame = control
 			case "interrupt":
 				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
-				nextFrame = realtimeBridgeControl{}
+				if matchesAgentPlayback(nextFrame.ItemID, nextFrame.Generation, control) {
+					nextFrame = realtimeBridgeControl{}
+				}
 				interruptSource := audioFrontend.markInterrupt(control.Source)
-				packetizer.clear()
-				clearedMS, err := pacer.clear(ctx)
+				agentSession.cancel(control.ItemID, control.Generation)
+				packetizer.cancelPlayback(control)
+				receipt, err := pacer.cancelPlayback(ctx, control)
+				clearedMS := receipt.LocalMS
+				if err == nil {
+					err = agentSession.cleared(coreWriter, control, receipt)
+				}
 				if err != nil {
 					closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear carrier playback")
 					return
@@ -540,6 +569,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			continue
 		}
 		if op != ws.OpBinary || len(data) == 0 || len(data)%2 != 0 {
+			continue
+		}
+		if !agentSession.accept(nextFrame) {
+			nextFrame = realtimeBridgeControl{}
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
@@ -552,12 +585,14 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			continue
 		}
 		packets := packetizer.addAt(pcmCarrier, len(pcm24), nextFrame, sourceAt)
+		if agentSession.continuous() {
+			packets = append(packets, packetizer.flushPartial()...)
+		}
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
 		queuedMS, droppedMS, err := pacer.enqueue(ctx, packets)
 		if errors.Is(err, errCarrierPacerOverflow) {
-			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
-			err = coreWriter.Write(ws.OpText, control)
+			err = agentSession.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow")
 			if err != nil {
 				bridge.socketError(mediaCloseLegCore, "write", err)
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "report playback overflow to realtime bridge")
@@ -726,7 +761,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := a.correlatedBridgeDialer(row)
+	dialer, response := a.agentBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
@@ -734,6 +769,13 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		globalCtx.Logger().Warn("dial core audio bridge", "provider", provider, "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
+	agentSession, err := a.newAgentAudioSession(row, response)
+	if err != nil {
+		closeState.SetLeg(mediaCloseLegCore, ws.StatusPolicyViolation, err.Error())
+		core.Close()
+		return
+	}
+	defer a.trackAgentAudio(row.ID, agentSession)()
 	if buffered != nil {
 		core = hijackedConn{Conn: core, reader: buffered}
 	}
@@ -741,6 +783,8 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	agentSession.configureWriter(coreWriter)
+	agentSession.configureWriter(vonageWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
@@ -809,6 +853,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
+	agentSession.configureFrontend(audioFrontend)
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, provider, carrierCodecL16_16, 0, 0)
 		var preAnswerDroppedMS int64
@@ -816,7 +861,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
+			AgentAudio: agentSession.snapshot(), OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   provider, Codec: carrierCodecL16_16, SampleRate: 16000,
 			PacerMode: "direct_live", PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
@@ -847,6 +892,13 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			}
 			bridge.media()
 			processed := processCarrierInput(row, audioFrontend, bytesToPCM16(data))
+			if processed.SpeechStarted && agentSession.continuous() {
+				audioFrontend.markLocalSignal()
+				control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
+				if coreWriter.Write(ws.OpText, control) != nil {
+					return
+				}
+			}
 			a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
 			pcm24 := inputResampler.Process(processed.PCM)
 			if len(pcm24) == 0 {
@@ -862,6 +914,10 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}
 	}()
 
+	if agentSession.continuous() {
+		a.bridgeContinuousBinaryAgent(row, bridge, core, coreWriter, vonageWriter, tap, audioFrontend, agentSession, provider)
+		return
+	}
 	a.bindAIPlayback(row, bridge.generation, func() bool { return false })
 	outputResampler := newPCMResampler(24000, 16000)
 	listenResampler := newPCMResampler(16000, 24000)
@@ -1076,6 +1132,8 @@ func buildCarrierOutbound(shape, streamSID, payload string) any {
 
 func buildCarrierClear(shape, streamSID string) any {
 	switch shape {
+	case "sinch_binary":
+		return map[string]string{"command": "clear"}
 	case "bandwidth":
 		return map[string]string{"eventType": "clear"}
 	case "signalwire":

@@ -1,0 +1,73 @@
+package core
+
+// Local test-only overlay. Uses the actual thinker, bridge, delivery ledger,
+// interruption handler and (opt-in) real Live adapter. No PSTN calls are made.
+import (
+ "encoding/json"
+ "math"
+ "net/http"
+ "net/http/httptest"
+ "os"
+ "strings"
+ "sync"
+ "sync/atomic"
+ "testing"
+ "time"
+)
+type duplexCaptureSession struct{*fakeRealtimeSession;frames atomic.Int64;bytes atomic.Int64}
+func(s *duplexCaptureSession)SendAudio(pcm []byte)error{s.frames.Add(1);s.bytes.Add(int64(len(pcm)));return nil}
+func TestTelephonyInternalAudioCoreFixture(t *testing.T){
+ ready:=os.Getenv("TELEPHONY_INTERNAL_READY");if ready==""{t.Skip("local helper only")}
+ t.Setenv("TELEMETRY_URL","");t.Setenv("TELEMETRY_LIVE_URL","");t.Setenv("SERVER_URL","")
+ rt,fake:=completionFixture(t)
+ input:=make(chan []byte,64);output:=make(chan RealtimeAudioFrame,64);control:=make(chan string,16)
+ rt.audioIn,rt.audioOut,rt.audioControl=input,output,control
+ rt.bridgeConnected=false;rt.Thinker.threadID="voice"
+ capture:=&duplexCaptureSession{fakeRealtimeSession:fake};rt.replaceSession(capture)
+ rt.capabilities=RealtimeCapabilities{ContinuousConversation:true,RendererInterruption:true,CoreExecution:true}
+ parent:=newTestThinker();defer parent.Stop()
+ parent.threads.threads["voice"]=&Thread{ID:"voice",Realtime:rt,Thinker:rt.Thinker,IsRealtime:true,audioIn:input,audioOut:output,audioControl:control}
+ api:=&APIServer{thinker:parent}
+ runDone:=make(chan struct{})
+ var started bool;var mu sync.Mutex;var caller []byte
+ stop:=make(chan struct{});var once sync.Once
+ mux:=http.NewServeMux()
+ mux.HandleFunc("/new",func(w http.ResponseWriter,r *http.Request){
+  mu.Lock();defer mu.Unlock();if started{http.Error(w,"single fixture session",409);return}
+  var cfg struct{Live bool `json:"live"`};if json.NewDecoder(r.Body).Decode(&cfg)!=nil{http.Error(w,"invalid",400);return}
+  if cfg.Live {
+   if os.Getenv("TELEPHONY_AGENT_AUDIO_LIVE")!="1"||os.Getenv("OPENAI_API_KEY")==""{http.Error(w,"live opt-in required",403);return}
+   key:=os.Getenv("OPENAI_API_KEY")
+   caller=renderLiveCallerText(t,key,"Attendez, je voudrais simplement prendre rendez-vous mardi. Quel jour ai-je demandé ?")
+   backend:=NewOpenAINativeProvider(key);applyModelOverrides(backend,map[string]string{"large":"gpt-6.1-sol","medium":"gpt-6.1-sol","small":"gpt-6.1-sol"})
+   rt.Thinker.provider=backend;rt.pool=&ProviderPool{providers:map[string]LLMProvider{"openai":backend},default_:"openai",order:[]string{"openai"}}
+   rt.Thinker.directive="Vous êtes un accueil téléphonique générique. Parlez uniquement en français. Écoutez les interruptions, puis répondez brièvement. N'inventez aucune réservation. Ne terminez pas la conversation."
+   rt.messages[0].Content=rt.Thinker.directive
+   rt.provider=NewOpenAIRealtimeProvider(key);rt.opts.Model,rt.opts.Voice="gpt-live-1","brise"
+   rt.capabilities=capabilitiesForRealtime(rt.provider,rt.opts.Model);rt.registry=NewToolRegistry("")
+   rt.setInitialMessage("Bonjour, tous nos conseillers sont actuellement occupés. Je peux vous aider à prendre rendez-vous. Expliquez calmement en plusieurs phrases les renseignements à préparer pour un rendez-vous : le jour souhaité, l'heure, le nom et un moyen de contact. Puis écoutez.")
+   if err:=rt.openSession(false);err!=nil{http.Error(w,"live startup failed",502);return}
+  }
+  token:=registerAudioBridge("voice",input,output,control)
+  started=true;go func(){defer close(runDone);rt.Run()}()
+  _=json.NewEncoder(w).Encode(map[string]string{"thread":"voice","token":token})
+ })
+ mux.HandleFunc("/caller",func(w http.ResponseWriter,r *http.Request){mu.Lock();defer mu.Unlock();w.Header().Set("Content-Type","application/octet-stream");w.Write(caller)})
+ mux.HandleFunc("/emit",func(w http.ResponseWriter,r *http.Request){
+  var cfg struct{Item string `json:"item"`;MS int `json:"ms"`;Silent bool `json:"silent"`};if json.NewDecoder(r.Body).Decode(&cfg)!=nil||cfg.MS<=0||cfg.MS>800{http.Error(w,"invalid",400);return}
+  audio:=make([]byte,cfg.MS*48);for i:=0;i<len(audio)/2;i++{sample:=int16(10000*math.Sin(2*math.Pi*500*float64(i)/24000));if cfg.Silent{sample=0};audio[2*i]=byte(sample);audio[2*i+1]=byte(uint16(sample)>>8)}
+  fake.events<-RealtimeEvent{Type:RealtimeEventAudioOut,ItemID:cfg.Item,ResponseID:cfg.Item,Audio:audio,AudioSilence:cfg.Silent};w.WriteHeader(204)
+ })
+ mux.HandleFunc("/interrupt",func(w http.ResponseWriter,r *http.Request){rt.rendererSpeechStarted();w.WriteHeader(204)})
+ mux.HandleFunc("/stats",func(w http.ResponseWriter,r *http.Request){
+  pending,awaiting,delivery:=rt.delivery.snapshot()
+  rt.telemetry.mu.Lock();events:=append([]TelemetryEvent(nil),rt.telemetry.log...);rt.telemetry.mu.Unlock()
+  entries,_,_:=rt.Thinker.session.LoadAfter(0,100)
+  _=json.NewEncoder(w).Encode(map[string]any{"input_frames":capture.frames.Load(),"input_bytes":capture.bytes.Load(),"pending":pending,"awaiting":awaiting,"delivery":delivery,"events":events,"transcripts":entries})
+ })
+ mux.HandleFunc("/realtime/audio",api.realtimeAudioHandler)
+ mux.HandleFunc("/shutdown",func(w http.ResponseWriter,r *http.Request){once.Do(func(){close(stop)});w.WriteHeader(204)})
+ srv:=httptest.NewServer(mux);if !strings.HasPrefix(srv.URL,"http://127.0.0.1:"){t.Fatal("loopback only")}
+ if err:=os.WriteFile(ready,[]byte(srv.URL),0600);err!=nil{t.Fatal(err)}
+ <-stop;unregisterAudioBridge("voice");rt.Stop();rt.cancel();rt.Thinker.Stop();if started {select{case<-runDone:case<-time.After(3*time.Second):t.Error("Core worker did not stop")}};srv.Close()
+}

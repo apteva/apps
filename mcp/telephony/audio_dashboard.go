@@ -514,7 +514,7 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "load live diagnostics", 500)
 				return
 			}
-			writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "carrier_live": live})
+			writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
 			return
 		}
 		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
@@ -565,7 +565,7 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load carrier commands", 500)
 			return
 		}
-		result := map[string]any{"carrier_transport_history": history, "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		result := map[string]any{"carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
 		if r.URL.Query().Get("include_packet_timing") == "true" {
 			result["sip_packet_timing"] = a.sipPacketTimingForCall(project, id)
 		}

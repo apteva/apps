@@ -1,5 +1,5 @@
-github.com/apteva/app-sdk v0.104.0 h1:4zk+c3cb4DW84xyIAt6cg8lY25zYP7bXnZIWjmkZs+w=
-github.com/apteva/app-sdk v0.104.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
+github.com/apteva/app-sdk v0.105.0 h1:bQzNxPwSVzIPzVb60GsTKxYZuKfLNkRaxMoCVdgbH2M=
+github.com/apteva/app-sdk v0.105.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/ebitengine/purego v0.11.1 h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
@@ -43,8 +43,6 @@ github.com/pion/datachannel v1.6.3 h1:HZAYLpunVI0xi057ZiANl558d0uSpomcWw4UEPz3qX
 github.com/pion/datachannel v1.6.3/go.mod h1:oRmkXVVXxkUbqa8MatgdNHW29kvtQY3HUdjJQsfv2GE=
 github.com/pion/dtls/v3 v3.1.9 h1:rpeycmLIkc4krpk1IxP7+39o11QdCXbmV9+FGi9yZJ8=
 github.com/pion/dtls/v3 v3.1.9/go.mod h1:iKFQNYrjsN2TiA2YKKMqB9MOZaFpjFULBI/A4sW0eyc=
-github.com/pion/ice/v4 v4.4.4 h1:nPhqLkf8NoE9O8NBKd3Xo2NNc2PlBMdM07tWZ+IH/i8=
-github.com/pion/ice/v4 v4.4.4/go.mod h1:vkrbLwF98P/DJuCKoAmOQY4FJ7dJPI5VcBFOO3kyYx0=
 github.com/pion/interceptor v0.1.49 h1:iyBsNHRoLNNXZiJA/DdGvJgdyfS8YWDCzxIAlVjt5nY=
 github.com/pion/interceptor v0.1.49/go.mod h1:MZ6PJkja/TCo350HAnBrs/rUIyad9mWjpcvytrf3ViQ=
 github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=

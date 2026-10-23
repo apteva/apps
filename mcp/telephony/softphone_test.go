@@ -578,7 +578,7 @@ func TestSoftphoneMediaRejectsRealtimeCall(t *testing.T) {
 
 // mediaBridgeURL is the single seam every carrier bridge resolves through.
 // Human calls must short-circuit to loopback; realtime calls must keep their
-// existing behavior byte for byte.
+// existing destination and authorization, opting into the renderer contract.
 func TestMediaBridgeURLRoutesHumanCallsToLoopback(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
@@ -600,8 +600,8 @@ func TestMediaBridgeURLRoutesHumanCallsToLoopback(t *testing.T) {
 	}
 
 	realtime := &callRow{ID: "c2", PeerKind: peerKindRealtime, AudioBridgeURL: "wss://core.example/b", MediaStatus: "idle"}
-	if got, err := app.mediaBridgeURL(realtime); err != nil || got != "wss://core.example/b" {
-		t.Fatalf("realtime bridge url = %q, %v; want unchanged Core URL", got, err)
+	if got, err := app.mediaBridgeURL(realtime); err != nil || got != "wss://core.example/b?audio_protocol=1" {
+		t.Fatalf("realtime bridge url = %q, %v; want Core URL with media protocol negotiation", got, err)
 	}
 }
 

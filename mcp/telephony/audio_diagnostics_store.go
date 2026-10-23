@@ -331,6 +331,7 @@ func (event *audioDropEvent) UnmarshalJSON(data []byte) error {
 }
 
 type carrierAudioDiagnostics struct {
+	AgentAudio                   *agentAudioSnapshot    `json:"agent_audio,omitempty"`
 	OperatorInterrupts           int64                  `json:"operator_interrupts"`
 	LocalInterrupts              int64                  `json:"local_interrupts"`
 	ProviderCoreInterrupts       int64                  `json:"provider_or_core_interrupts"`
