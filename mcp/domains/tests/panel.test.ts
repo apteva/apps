@@ -120,6 +120,7 @@ beforeAll(async () => {
         }
         if(body.tool==="domain_sale_get") return Response.json(activeListing?{provider:"spaceship",state:soldListing?"sold":"on_sale",status:soldListing?"sold":"onSale",listed:!soldListing,snapshot:{state:soldListing?"sold":"on_sale",checked_at:"2026-10-14T10:00:00Z"},raw:{name:body.args.domain,status:soldListing?"sold":"onSale",binPriceEnabled:true,binPrice:{amount:"145",currency:"USD"}}}:{});
         if(body.tool==="domain_sale_history")return Response.json({history:activeListing?[{id:1,state:"on_sale",source:"worker",observed_at:"2026-10-14T10:00:00Z"}]:[],sales:soldListing?[{id:1,sold_at:"2026-10-14T10:10:00Z",sale_price:"145.00",payout:"130.50",currency:"USD"}]:[]});
+        if (body.tool === "domain_estimate_start") return Response.json({cached:storedValuation&&!body.args.force_new});
         if (body.tool === "domain_estimate_list") return Response.json({valuations:storedValuation?[{id:1,domain:body.args.domain,status:"succeeded",auction:0,marketplace:145,brokerage:457,created_at:"2026-10-14T09:15:37Z"}]:[]});
         if (spaceshipMode) {
           const purchase = {confirmation_token: "spaceship-token", status: spaceshipSubmitted ? "processing" : "prepared", domain: "fresh.example", provider:"spaceship", connection_id:1, years:2, auto_renew:true, whois_privacy:true, billing_mode:"account_rate", options:{contacts:{registrant:"1ZdMXpapqp9sle5dl8BlppTJXAzf5"}}, expires_at:"2030-01-01T00:00:00Z"};
@@ -438,4 +439,20 @@ test("a scoped bus sale event updates saved state and payout without a paid acti
   expect(await page.getByRole('button',{name:'Publish listing',exact:true}).isDisabled()).toBe(true);
   expect(calls.some(c=>['domain_sale_publish','domain_register','domain_estimate_start'].includes(c.tool))).toBe(false);
  }finally{activeListing=false;soldListing=false;await page.close()}
+});
+
+
+test("saved estimate reuse and explicit paid refresh remain separate actions",async()=>{
+ storedValuation=true;calls.length=0;const page=await loadPage();
+ try{
+  await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByRole("button",{name:"New paid estimate",exact:true}).waitFor();
+  expect(calls.some(c=>c.tool==="domain_estimate_start")).toBe(false);
+  await page.getByRole("button",{name:"Estimate with HumbleWorth",exact:true}).click();
+  await page.getByText("Reused a stored estimate; no new paid prediction.",{exact:true}).waitFor();
+  const first=calls.find(c=>c.tool==="domain_estimate_start");expect(first.args.force_new).toBeUndefined();
+  await page.getByRole("button",{name:"New paid estimate",exact:true}).click();
+  await page.getByText("Estimate submitted and stored.",{exact:true}).waitFor();
+  expect(calls.filter(c=>c.tool==="domain_estimate_start").at(-1).args.force_new).toBe(true);
+ }finally{storedValuation=false;await page.close()}
 });

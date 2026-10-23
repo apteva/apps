@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,13 +40,9 @@ func valuationConnection(ctx *sdk.AppCtx, args map[string]any) (*sdk.BoundIntegr
 }
 
 func valuationDomains(args map[string]any) ([]string, error) {
-	input := strArg(args, "domains")
-	if input == "" {
-		input = strArg(args, "domain")
-	}
-	parts := strings.Split(input, ",")
-	if len(parts) > 2560 {
-		return nil, errors.New("at most 2560 domains per estimate")
+	parts, err := domainInputs(args, 2560, true)
+	if err != nil {
+		return nil, err
 	}
 	out := []string{}
 	seen := map[string]bool{}
@@ -82,11 +79,48 @@ func (a *App) toolDomainEstimateStart(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	forceNew, err := optionalBool(args, "force_new")
+	if err != nil {
+		return nil, err
+	}
 	b, err := valuationConnection(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := providerCall(ctx, b, "appraise_domains", map[string]any{"domains": strings.Join(domains, ",")})
+	// Serialize overlapping starts for this account/project so concurrent
+	// default calls reuse the first saved prediction instead of buying twice.
+	unlock, err := acquireDNSMutation(ctx.Done(), fmt.Sprintf("valuation:%s:%d", pid, b.ConnectionID))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	reused := []map[string]any{}
+	newDomains := []string{}
+	for _, domain := range domains {
+		var id int64
+		var pred, status, at string
+		var auction, marketplace, brokerage *float64
+		if !forceNew {
+			err = ctx.AppDB().QueryRow(`SELECT id,prediction_id,status,created_at,auction,marketplace,brokerage FROM domain_valuations WHERE project_id=? AND connection_id=? AND provider_slug=? AND domain=? AND status IN ('starting','processing','succeeded') ORDER BY id DESC LIMIT 1`, pid, b.ConnectionID, b.AppSlug, domain).Scan(&id, &pred, &status, &at, &auction, &marketplace, &brokerage)
+			if err == nil {
+				reused = append(reused, map[string]any{"domain": domain, "valuation_id": id, "prediction_id": pred, "status": status, "created_at": at, "auction": auction, "marketplace": marketplace, "brokerage": brokerage})
+				continue
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+		}
+		newDomains = append(newDomains, domain)
+	}
+	if len(newDomains) == 0 {
+		out := map[string]any{"provider": b.AppSlug, "domain": strings.Join(domains, ","), "cached": true, "status": "reused", "reused": reused, "started_domains": newDomains}
+		if len(reused) == 1 {
+			out["status"] = reused[0]["status"]
+			out["prediction_id"] = reused[0]["prediction_id"]
+		}
+		return out, nil
+	}
+	raw, err := providerCall(ctx, b, "appraise_domains", map[string]any{"domains": strings.Join(newDomains, ",")})
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +134,12 @@ func (a *App) toolDomainEstimateStart(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	defer tx.Rollback()
-	for _, domain := range domains {
+	for _, domain := range newDomains {
 		if _, err = tx.Exec(`INSERT INTO domain_valuations(project_id,domain,provider_slug,status,prediction_id,raw_json,connection_id) VALUES(?,?,?,?,?,?,?)`, pid, domain, b.AppSlug, "starting", pred, string(raw), b.ConnectionID); err != nil {
 			return nil, err
 		}
 	}
-	for _, domain := range domains {
+	for _, domain := range newDomains {
 		if err = queueDomainEvent(tx, pid, domain, "domain.valuation.started", "valuation-start:"+pred+":"+domain, map[string]any{"provider": b.AppSlug, "connection_id": b.ConnectionID, "prediction_id": pred, "status": "starting"}); err != nil {
 			return nil, err
 		}
@@ -117,7 +151,7 @@ func (a *App) toolDomainEstimateStart(ctx *sdk.AppCtx, args map[string]any) (any
 	if err = storeValuationPrediction(ctx, pid, pred, raw, env); err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": b.AppSlug, "domain": strings.Join(domains, ","), "prediction_id": pred, "status": env["status"], "raw": env}, nil
+	return map[string]any{"provider": b.AppSlug, "domain": strings.Join(domains, ","), "prediction_id": pred, "status": env["status"], "raw": env, "cached": false, "reused": reused, "started_domains": newDomains}, nil
 }
 
 // Persist each returned domain separately; zero is a valid estimate and must not become NULL.

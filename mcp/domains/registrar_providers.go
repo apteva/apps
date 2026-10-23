@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -65,6 +67,65 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64, projectID string) (reg
 }
 
 func (a *App) toolDomainAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, batch := args["domains"]; batch {
+		return a.batchAvailabilityCheck(ctx, args)
+	}
+	return a.singleAvailabilityCheck(ctx, args)
+}
+
+// Preserve the original single-domain response. Batch calls keep input order,
+// deduplicate names and isolate per-domain errors, with at most four in flight.
+func (a *App) batchAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	names, err := domainInputs(args, 50, false)
+	if err != nil {
+		return nil, err
+	}
+	unique := []string{}
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if normalized, e := normaliseDomainName(name); e == nil {
+			name = normalized
+		}
+		if !seen[name] {
+			unique = append(unique, name)
+			seen[name] = true
+		}
+	}
+	results := make([]map[string]any, len(unique))
+	jobs := make(chan int, len(unique))
+	for i := range unique {
+		jobs <- i
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for worker := 0; worker < min(4, len(unique)); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				row := map[string]any{"domain": unique[i]}
+				select {
+				case <-ctx.Done():
+					row["error"] = "availability check cancelled"
+				default:
+					out, e := a.singleAvailabilityCheck(ctx, map[string]any{"domain": unique[i], "connection_id": args["connection_id"], "_project_id": connectionProject(ctx, args)})
+					if e != nil {
+						row["error"] = e.Error()
+					} else {
+						row["availability"] = out.(map[string]any)["availability"]
+					}
+				}
+				row["checked_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+				results[i] = row
+			}
+		}()
+	}
+	wg.Wait()
+	return map[string]any{"results": results, "count": len(results)}, nil
+}
+
+func (a *App) singleAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	domain, err := normaliseDomainName(strArg(args, "domain"))
 	if err != nil {
 		return nil, fmt.Errorf("domain: %w", err)

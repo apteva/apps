@@ -1,3 +1,14 @@
+## 1.3.0
+
+- Extend existing MCP tools for agent-led domain exploration without adding tools or workflows. `domain_availability_check` accepts `domains[]` (max 50), deduplicates names, limits concurrency to four, and returns ordered per-domain results/errors and check times. Legacy single-domain responses remain unchanged. Prices remain unknown when the provider does not return them.
+- `domain_estimate_start` accepts arrays as well as existing single/CSV inputs, and reuses saved completed/pending valuations within the same project and provider connection. Only missing names incur new prediction requests. `force_new:true` explicitly requests fresh paid estimates; concurrent default requests share saved predictions. Responses distinguish reused results and started names. The UI reports reuse and retains an explicit New paid estimate action.
+- `domain_sale_publish(dry_run:true)` validates and previews the exact Spaceship/Dynadot payload without executing a provider tool, changing saved listings, or emitting events. Previews do not verify ownership or provider acceptance. Actual publication continues through the same payload validation.
+- Preserve all v1.2.0 providers, registration, DNS, valuation history, SDK workers, confirmed-sale monitoring, and durable bus events. No database migrations or data resets. Pin app-sdk v0.104.0, verified to descend from v0.103.0 and v0.102.0.
+
+Example agent flow: generate names → `domain_availability_check({domains:["example.com","example.net"]})` → explicitly request estimates for selected names → read `domain_estimate_list` → `domain_sale_publish({domain:"example.com",price:"145",dry_run:true})`. Purchasing and public listing remain separate explicit actions.
+
+Validation: Go race suite, vet and build; TypeScript checking, panel build and all 10 browser tests. Targeted regression coverage includes batch errors/order/prices, account/project cache isolation, concurrent estimate starts, exact preview/publication parity and no preview side effects. No live purchase, listing publication or paid appraisal was made for this release.
+
 ## 1.2.0
 
 - SDK workers refresh saved purchase operations and pending valuations every 30 seconds, and tracked listings plus confirmed-sale reports every five minutes. Workers never submit purchases, create listings, remove listings, change DNS, or start paid estimates.

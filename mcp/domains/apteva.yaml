@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 1.2.0
+version: 1.3.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -108,10 +108,10 @@ provides:
     - { name: domain_refresh, description: "Read-only refresh of tracked lifecycle state." }
     - { name: domain_sale_history, description: "Read saved listing history and confirmed sales." }
     - { name: domain_events_list, description: "Read saved lifecycle events and bus delivery status." }
-    - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship." }
+    - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship; dry_run validates a preview without publishing." }
     - { name: domain_sale_remove, description: "Remove a domain marketplace listing through Dynadot or Spaceship." }
     - { name: domain_sale_get, description: "Read marketplace listing status through Dynadot or Spaceship." }
-    - { name: domain_estimate_start, description: "Start and store a paid domain valuation through Replicate/HumbleWorth." }
+    - { name: domain_estimate_start, description: "Request stored domain valuations in batches; reuse saved predictions unless force_new explicitly requests new paid estimates." }
     - { name: domain_estimate_list, description: "List stored domain valuation history." }
     - { name: domain_update, description: "Update metadata or explicitly change/unbind a DNS connection." }
     - { name: domain_sync, description: "Refresh domain registration expiry from Porkbun." }
@@ -123,7 +123,7 @@ provides:
     - { name: domain_list,           description: "List domains registered with this app for the current project." }
     - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }
     # registrar operations
-    - { name: domain_availability_check, description: "Check if a domain is available for registration through the registrar provider. Safe/read-only. Args: domain, connection_id?." }
+    - { name: domain_availability_check, description: "Check domain or domains[] (max 50) for registration availability, optional provider prices and per-domain errors. Safe/read-only. Args: domain?, domains?, connection_id?." }
     - { name: domain_registration_prepare, description: "Prepare an expiring registration intent after a provider availability check. Present the returned quote or account-rate billing terms to the user and obtain explicit confirmation before calling domain_register. Args: domain, years?, auto_renew?, whois_privacy?, connection_id?, notes?, contacts?, accept_account_rate?." }
     - { name: domain_pricing_get,    description: "Fetch registrar pricing, optionally for one TLD. Args: tld?, connection_id?." }
     - { name: domain_register,       description: "Register a domain from a prepared intent. This spends real money. Requires confirmation_token from domain_registration_prepare after explicit user confirmation; completed-token retries are idempotent." }
