@@ -707,7 +707,7 @@ func (d firewallDriver) setIndividualRules(id string, want []FirewallRule) error
 			if nativeJSON(v.Rule) == nativeJSON(r) {
 				found = true
 				if !v.Enabled {
-					if _, e = d.call("firewall_rule_enable", map[string]any{"rule_id": v.ID}); e != nil {
+					if e = d.ensureCloudingRuleEnabled(id, v.ID, r); e != nil {
 						return e
 					}
 				}
@@ -754,7 +754,7 @@ func (d firewallDriver) setIndividualRules(id string, want []FirewallRule) error
 			if ruleID == "" {
 				return errors.New("new firewall rule identity missing")
 			}
-			if _, e = d.call("firewall_rule_enable", map[string]any{"rule_id": ruleID}); e != nil {
+			if e = d.ensureCloudingRuleEnabled(id, ruleID, r); e != nil {
 				return e
 			}
 		}
@@ -794,6 +794,45 @@ func (d firewallDriver) setIndividualRules(id string, want []FirewallRule) error
 		}
 	}
 	return nil
+}
+
+// Clouding can create rules already enabled. Treat state, not the enable
+// response, as authoritative, including concurrent enable and lost responses.
+func (d firewallDriver) ensureCloudingRuleEnabled(profileID, ruleID string, want FirewallRule) error {
+	state := func() (bool, error) {
+		rules, e := d.remoteRules(profileID)
+		if e != nil {
+			return false, e
+		}
+		for _, r := range rules {
+			if r.ID == ruleID {
+				if nativeJSON(r.Rule) != nativeJSON(want) {
+					return false, errors.New("firewall rule identity differs from desired owned rule")
+				}
+				return r.Enabled, nil
+			}
+		}
+		return false, errFirewallPending
+	}
+	enabled, e := state()
+	if e != nil {
+		return e
+	}
+	if enabled {
+		return nil
+	}
+	_, enableErr := d.call("firewall_rule_enable", map[string]any{"rule_id": ruleID})
+	enabled, verifyErr := state()
+	if verifyErr == nil && enabled {
+		return nil
+	}
+	if enableErr != nil {
+		return enableErr
+	}
+	if verifyErr != nil {
+		return verifyErr
+	}
+	return errFirewallPending
 }
 func (d firewallDriver) remove(s firewallState) error {
 	// A provider 404 is the only successful absent-resource result.
