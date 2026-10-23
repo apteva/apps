@@ -1,7 +1,7 @@
 # Full duplex browser voice validation — 2026-10-23
 
-Implementation is local and unreleased. Existing installations and production
-processes were not changed. Source, packaged panels, and app frontend assets are
+Implementation is published as Conversations v0.24.52. Existing installations
+and production processes were not changed by validation or publication. Source, packaged panels, and app frontend assets are
 rebuilt together.
 
 ## Verified behavior
@@ -75,4 +75,4 @@ unchanged.
 A synthesized MediaStream exercises actual browser scheduling and resampling,
 not physical microphone/speaker acoustics. These runs do not establish echo
 cancellation quality for every device or long-session reliability. No change to
-Core's fixes was needed. No public release was created by this task.
+Core's fixes was needed. Publication and installation are separate; these tests did not deploy Core fixes.

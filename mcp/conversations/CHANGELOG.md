@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — full duplex browser voice
+## 0.24.52 — 2026-10-23
 
 - Advertise playback receipts at connection startup; report partial consumption
   using the audio clock and acknowledge scoped clearing.
