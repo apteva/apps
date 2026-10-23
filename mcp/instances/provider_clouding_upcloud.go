@@ -241,8 +241,10 @@ func validateCloudingUpcloudCreate(ctx *sdk.AppCtx, provider string, in *CreateI
 			}
 			size = best
 		}
-		if _, err = cloudingFirewall(ctx); err != nil {
-			return err
+		if in.Firewall == nil {
+			if _, err = cloudingFirewall(ctx); err != nil {
+				return err
+			}
 		}
 	} else if size > 4096 {
 		return errors.New("UpCloud boot disk exceeds the supported 4096 GB limit")
@@ -315,7 +317,13 @@ func cloudingUpcloudCreateRequest(ctx *sdk.AppCtx, inst *Instance, in CreateInst
 		return "", nil, errors.New("missing validated boot storage")
 	}
 	if in.Provider == "clouding" {
-		firewall, err := cloudingFirewall(ctx)
+		var firewall string
+		var err error
+		if s, e := firewallLoad(ctx.AppDB(), inst.ID); e == nil && s.ResourceID != "" {
+			firewall = s.ResourceID
+		} else {
+			firewall, err = cloudingFirewall(ctx)
+		}
 		if err != nil {
 			return "", nil, err
 		}

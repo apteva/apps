@@ -392,7 +392,7 @@ func retryInstanceSetup(ctx *sdk.AppCtx, id int64, options *SetupOptions) error 
 	if inst.Status != "ready" && inst.Status != "error" && inst.Status != "provisioning" {
 		return ErrOperationSuperseded
 	}
-	if inst.Status == "error" && (inst.Setup == nil || inst.Setup.Status != "error") {
+	if inst.Status == "error" && inst.LifecycleStage != "Firewall" && (inst.Setup == nil || inst.Setup.Status != "error") {
 		return errors.New("resolve the provider provisioning error before retrying host setup")
 	}
 	if options == nil {

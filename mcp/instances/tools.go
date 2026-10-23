@@ -11,6 +11,10 @@ import (
 
 func (a *App) MCPTools() []sdk.Tool {
 	return append(monitoringTools(), []sdk.Tool{
+		{Name: "instance_firewall_capabilities", Description: "Discover opt-in provider/product firewall support, IPv6 and limits. Does not modify hosts.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolFirewallCapabilities},
+		{Name: "instance_firewall_get", Description: "Read owned policies and effective rules. refresh=true verifies provider rules/attachments without changing them. Host OS firewall is externally managed.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "refresh": map[string]any{"type": "boolean"}}, []string{"id"}), Handler: a.toolFirewallGet},
+		{Name: "instance_firewall_apply", Description: "Set an owner's inbound allow rules and reconcile the union of all owners. Always retain SSH. Requires explicit replace_existing for initial takeover of existing firewall attachments. Does not modify shared rules or the guest firewall.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "owner": map[string]any{"type": "string"}, "firewall": firewallPolicySchema()}, []string{"id", "owner", "firewall"}), Handler: a.toolFirewallApply},
+		{Name: "instance_firewall_release", Description: "Remove only one owner's rules and reconcile the remaining owners plus SSH. Keeps a dedicated baseline firewall even when no workloads remain.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "owner": map[string]any{"type": "string"}}, []string{"id", "owner"}), Handler: a.toolFirewallRelease},
 		{Name: "instance_quote", Description: "Prepare and review a priced OVH VPS/dedicated/Eco order without purchasing. Use a unique ovh.request_key; pass the returned quote_id to instance_create only after reviewing prices and contracts.", InputSchema: ovhQuoteSchema(), Handler: a.toolInstanceQuote},
 		{Name: "instance_order_status", Description: "Inspect or resume an owned OVH order. confirm_termination consumes the provider email token without storing it. Never repeats checkout or an unknown installation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "action": map[string]any{"type": "string", "enum": []string{"inspect", "resume", "confirm_termination"}}, "token": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolOrderStatus},
 		{
@@ -33,6 +37,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"image":                  map[string]any{"type": "string"},
 				"tags_json":              map[string]any{"type": "string"},
 				"retain_for_diagnosis":   map[string]any{"type": "boolean", "description": "Keep a failed provider resource for diagnostics instead of automatic rollback; defaults to true"},
+				"firewall":               firewallPolicySchema(),
 				"setup":                  setupSchema(),
 				"ovh":                    ovhOrderOptionsSchema(),
 				"elastic_metal": map[string]any{"type": "object", "description": "Optional Scaleway Elastic Metal install settings", "properties": map[string]any{
@@ -311,13 +316,17 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("name required")
 	}
 	provider := strArg(args, "provider")
+	firewall, err := firewallPolicyArg(args)
+	if err != nil {
+		return nil, err
+	}
 	setup, err := parseSetup(args)
 	if err != nil {
 		return nil, err
 	}
 	in := CreateInstanceInput{
-		Setup: setup,
-		Name:  name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
+		Firewall: firewall, Setup: setup,
+		Name: name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
 		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
 		Storage:      storageRequestArg(args),
 		ElasticMetal: elasticMetalConfigArg(args), OVH: ovhOrderArg(args),

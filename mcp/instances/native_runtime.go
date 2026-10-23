@@ -32,6 +32,7 @@ type nativeTransport interface {
 	Logs(context.Context, *Instance, nativeRecord, string, int) ([]string, string, error)
 }
 type nativeBackend struct {
+	appCtx          *sdk.AppCtx
 	db              *sql.DB
 	root            string
 	installID       int64
@@ -76,7 +77,7 @@ func nativeFor(ctx *sdk.AppCtx) (*nativeBackend, error) {
 		return nil, e
 	}
 	life, cancel := context.WithCancel(context.Background())
-	b := &nativeBackend{db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{inspections: newNativeInspectionPool(life)}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
+	b := &nativeBackend{appCtx: ctx, db: ctx.AppDB(), root: root, installID: id, projectID: os.Getenv("APTEVA_PROJECT_ID"), transport: nativeSSH{inspections: newNativeInspectionPool(life)}, tunnels: newTunnelRegistry(dialInstanceLoopback), ctx: life, cancel: cancel, locks: map[string]*sync.Mutex{}, jobs: map[string]context.CancelFunc{}}
 	b.stateLimits, b.stateTimeout = limits, timeout
 	b.stateEpoch = nativeHash(strconv.FormatInt(time.Now().UnixNano(), 10))
 	nativeManagers[ctx.AppDB()] = b
@@ -253,6 +254,9 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e != nil {
 		return nil, o, a, p, e
 	}
+	if e := nativeFirewallValidation(inst, o); e != nil {
+		return nil, o, a, p, e
+	}
 	a, e = b.artifact(o.ArtifactID, true)
 	if e != nil {
 		return nil, o, a, p, e
@@ -348,6 +352,12 @@ func (b *nativeBackend) create(r nativeRequest, o nativeOptions, a nativeArtifac
 		}
 		seen[k] = true
 		d.Execution.Ports = append(d.Execution.Ports, nativePort{Protocol: proto, Start: v.HostPort, End: v.HostPort, Exclusive: true})
+	}
+	if e := b.validateEffectiveFirewall(inst, d.ControlPort); e != nil {
+		return d, e
+	}
+	if _, e := nativeFirewallPolicy(inst, o, d.Execution.Ports, d.ControlPort); e != nil {
+		return d, e
 	}
 	if o.Ingress != nil {
 		var n int
@@ -889,6 +899,14 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			writeNative(w, d.Execution)
 			return
 		}
+		if d.Started && d.EnvDigest != digest {
+			http.Error(w, "start retry changed process environment", 409)
+			return
+		}
+		if e = b.applyFirewall(inst, d, false); e != nil {
+			http.Error(w, "firewall not confirmed; inspect/retry", 503)
+			return
+		}
 		if d.Started {
 			if d.EnvDigest != digest {
 				http.Error(w, "start retry changed process environment", 409)
@@ -971,6 +989,10 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		d.Execution.Ready = false
 		if e = b.save(d); e != nil {
 			http.Error(w, "cannot journal confirmed stop", 503)
+			return
+		}
+		if e = b.applyFirewall(inst, d, true); e != nil {
+			http.Error(w, "service stopped; firewall cleanup pending; retry", 503)
 			return
 		}
 		b.tunnels.close(d.InstanceID, d.ControlPort)
