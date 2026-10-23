@@ -357,7 +357,11 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 		if !regexp.MustCompile(v.URLPattern).MatchString(e.currentURL) {
 			return nil, fmt.Errorf("unverified view URL %s", e.currentURL)
 		}
-		if readHas(root, v.ReadySelector) && !readHas(root, v.LoadingSelector) {
+		// Empty collections often omit the populated table/list shell entirely.
+		// Accept only an explicit verified empty state with no item rows, and
+		// retain the same URL, identity, error, loading and filter guards.
+		verifiedEmpty := readVerifiedEmpty(root, v) && !readHas(root, v.Items)
+		if (readHas(root, v.ReadySelector) || verifiedEmpty) && !readHas(root, v.LoadingSelector) {
 			token, err := verifyReadIdentity(c, root, e.currentURL)
 			if err != nil {
 				return nil, err
@@ -479,6 +483,12 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		// Navigation links must be observed in the assigned context, never guessed.
 		entry := v
 		entry.URLPattern = "^" + regexp.QuoteMeta(c.EntryURL) + "/?$"
+		// The entry page only needs to expose the observed navigation link.
+		// Target-view rows, empty markers and filters cannot establish whether
+		// that different view is ready before we have navigated to it.
+		entry.ReadySelector = v.LinkSelector
+		entry.EmptySelector = ""
+		entry.Verification = nil
 		root, err = e.readViewDOM(c, entry)
 		if err != nil {
 			return err
@@ -1009,7 +1019,7 @@ func (e *actorExecution) observePage(step actorStep) error {
 func completeReadView(v actorReadView, result *actorViewCoverage, root *html.Node, count int, base, evidence string) error {
 	if v.Total != nil {
 		expected := 0
-		if !(count == 0 && readHas(root, v.EmptySelector)) {
+		if !(count == 0 && readVerifiedEmpty(root, v)) {
 			item, err := extractNodeItem(root, map[string]actorField{"total": *v.Total}, base)
 			if err != nil {
 				return fmt.Errorf("end-of-list total unavailable: %w", err)
