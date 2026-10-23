@@ -126,17 +126,17 @@ export class VoiceAudioClient {
     this.playbackCursor = entry.end; this.playback.set(source, entry);
     source.onended = () => {
       if (this.playback.get(source) !== entry || epoch !== this.epoch || socket !== this.socket) return;
-      this.reportEntry(entry); this.playback.delete(source); source.disconnect(); this.updateState();
+      this.reportEntry(entry, true); this.playback.delete(source); source.disconnect(); this.updateState();
       if (!this.playback.size) this.stopProgress();
     };
     source.start(start);
     if (!this.progressTimer) this.progressTimer = setInterval(() => { this.reportProgress(); this.updateState(); }, 50);
     this.updateState();
   }
-  private reportEntry(entry: Playback) {
+  private reportEntry(entry: Playback, completed = false) {
     const frame = entry.frame;
     if (!frame || entry.epoch !== this.epoch || entry.socket !== this.socket || this.cancelled.has(frame.item_id) || !this.context) return;
-    const elapsed = Math.max(0, Math.min(entry.end - entry.start, this.context.currentTime - entry.start));
+    const elapsed = completed ? entry.end - entry.start : Math.max(0, Math.min(entry.end - entry.start, this.context.currentTime - entry.start));
     if (!elapsed) return;
     const end = Math.max(0, Math.min(frame.audio_end_ms, Math.floor(frame.audio_end_ms - (entry.end - entry.start - elapsed) * 1000 + 0.001)));
     if (end <= (this.reported.get(frame.item_id) ?? 0)) return;

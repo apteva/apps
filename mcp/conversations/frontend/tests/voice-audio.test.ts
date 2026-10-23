@@ -49,7 +49,7 @@ test("ready immediately; partial playback receipts follow clock, not scheduling"
   s.frame("A",1000);expect(s.sent).toHaveLength(1);
   ctx.currentTime=0.335;await Bun.sleep(60);
   const receipt=s.sent.find(x=>x.type==="playback.progress");expect(receipt.audio_end_ms).toBe(320);
-  ctx.currentTime=1.015;ctx.sources[0].onended?.();expect(s.sent.at(-1).audio_end_ms).toBe(1000);
+  ctx.currentTime=1.0149;ctx.sources[0].onended?.();expect(s.sent.at(-1).audio_end_ms).toBe(1000);
 });
 test("scoped clear preserves B and scheduling; rejects late A and canceled callbacks",async()=>{
   const {s,ctx,states}=await fixture();s.frame("A",500);s.frame("B",300);

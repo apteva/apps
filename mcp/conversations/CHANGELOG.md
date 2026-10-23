@@ -9,6 +9,7 @@
 - Preserve silent PCM without displaying it as speech. Keep microphone audio
   streaming during replies, with debounced speech-onset/end interruption signals.
 - Limit bridge renewal and ignore renewals returned after leaving the chat.
+- Pin App SDK v0.105.0, verified as the latest release by commit ancestry.
 - Add deterministic audio/browser regressions and an opt-in native Tier 3 real
   GPT Live workflow through Conversations, Server, Core and Chromium Web Audio.
 
