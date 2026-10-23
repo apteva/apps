@@ -97,16 +97,19 @@ export function VoiceControls({ client, chatId, disabled = false, onActiveChange
       setMode("dictation"); setBusy(false); onActiveChange?.(false); startDictation(); return;
     }
     setMode("live");
+    let renewals = 0;
     const connection = new VoiceAudioClient(
       next => { if (mounted.current) setState(next); },
       () => {
         // The bridge token is one-use. One renewal is enough to recover a
         // transient network drop; a second failure closes the session.
-        if (!active.current || !mounted.current) return;
+        if (!active.current || !mounted.current || audio.current !== connection) return;
+        if (renewals++ >= 1) { setError(t("voice.failed")); void end(); return; }
         void client.renewVoice(chatId).then(async session => {
-          if (!session.audio_bridge_url || !audio.current) throw new Error("Audio bridge unavailable.");
-          await audio.current.connect(session.audio_bridge_url);
-        }).catch(reason => { if (mounted.current) setError(String(reason)); void end(); });
+          if (!active.current || !mounted.current || audio.current !== connection) return;
+          if (!session.audio_bridge_url) throw new Error("Audio bridge unavailable.");
+          await connection.connect(session.audio_bridge_url);
+        }).catch(reason => { if (!mounted.current || audio.current !== connection) return; setError(String(reason)); void end(); });
       },
     );
     audio.current = connection;

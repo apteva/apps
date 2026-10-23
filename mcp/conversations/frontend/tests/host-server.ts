@@ -2,6 +2,8 @@ import { join } from "node:path";
 const root=join(import.meta.dir,"..");
 const result=await Bun.build({entrypoints:[join(root,"example/main.tsx"),join(root,"example/dashboard.tsx"),join(root,"example/package.tsx")],outdir:join(root,".example"),target:"browser",format:"esm",define:{"process.env.NODE_ENV":'"development"'},plugins:process.env.APTEVA_SDK_ENTRY?[{name:"sdk-candidate",setup(build){build.onResolve({filter:/^@apteva\/web-sdk$/},()=>({path:process.env.APTEVA_SDK_ENTRY!}));}}]:[]});
 if(!result.success)throw new AggregateError(result.logs,"example build");
+const voice=await Bun.build({entrypoints:[join(root,"src/voiceAudio.ts")],outdir:join(root,".example"),target:"browser",format:"esm"});
+if(!voice.success)throw new AggregateError(voice.logs,"voice build");
 const uploaded=new Map<string,any>();
 const rows=new Map<string,any[]>();const calls:any[]=[];
 let panelRows:any[]=[],panelOlderRows:any[]=[];
@@ -56,6 +58,8 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
   for(const c of streams) {try {c.enqueue(new TextEncoder().encode(`event: stream\ndata: ${JSON.stringify(frame)}\n\n`));}catch{streams.delete(c);}}
   return Response.json({ok:true});
  }
+ if(url.pathname==="/voiceAudio.js")return new Response(Bun.file(join(root,".example/voiceAudio.js")),{headers:{"Content-Type":"text/javascript"}});
+ if(url.pathname==="/realtime-capture-worklet.js")return new Response(Bun.file(join(root,"../ui/realtime-capture-worklet.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/health")return new Response("ok");
  if(url.pathname==="/dashboard.js")return new Response(Bun.file(join(root,".example/dashboard.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/package.js")return new Response(Bun.file(join(root,".example/package.js")),{headers:{"Content-Type":"text/javascript"}});

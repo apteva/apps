@@ -20,7 +20,7 @@ class FakeContext {
   close() { return Promise.resolve(); }
 }
 class FakeWorklet {
-  port = { onmessage: null as ((event: MessageEvent<ArrayBuffer>) => void) | null };
+  port = { onmessage: null as ((event: MessageEvent<ArrayBuffer>) => void) | null, postMessage() {} };
   connect() {}
   disconnect() {}
 }
@@ -160,4 +160,35 @@ test("dropped audio bridge renews its one-use capability", async () => {
   await act(async () => { FakeSocket.instances[0].close(); await new Promise(resolve => setTimeout(resolve, 10)); });
   expect(calls).toContain("renew");
   expect(calls).toContain("socket:wss://example.test/audio?token=two");
+});
+
+test("a second bridge failure ends voice instead of renewing indefinitely", async () => {
+  const client = { voiceWorkletURL: () => "https://example.test/worklet.js",
+    voiceStatus: async () => ({ status: "closed" }),
+    startVoice: async () => ({ status: "active", audio_bridge_url: "wss://example.test/one" }),
+    renewVoice: async () => { calls.push("renew"); return { status: "active", audio_bridge_url: "wss://example.test/two" }; },
+    endVoice: async () => { calls.push("end"); return { status: "closed" }; },
+  } as unknown as ConversationsClient;
+  await act(async () => root.render(<VoiceControls client={client} chatId="conv-one" />));
+  await act(async () => { element.querySelector("button")!.click(); await new Promise(resolve=>setTimeout(resolve,10)); });
+  await act(async () => { FakeSocket.instances[0].close(); await new Promise(resolve=>setTimeout(resolve,10)); });
+  await act(async () => { FakeSocket.instances[1].close(); await new Promise(resolve=>setTimeout(resolve,10)); });
+  expect(calls.filter(c=>c==="renew")).toHaveLength(1);
+  expect(calls).toContain("end");
+});
+
+test("a late bridge renewal after leaving the pane cannot reconnect", async () => {
+  let resolve!: (value: unknown) => void;
+  const client = { voiceWorkletURL: () => "https://example.test/worklet.js",
+    voiceStatus: async () => ({ status: "closed" }),
+    startVoice: async () => ({ status: "active", audio_bridge_url: "wss://example.test/one" }),
+    renewVoice: () => new Promise(r=>resolve=r),
+    endVoice: async () => ({ status: "closed" }),
+  } as unknown as ConversationsClient;
+  await act(async () => root.render(<VoiceControls client={client} chatId="conv-one" />));
+  await act(async () => { element.querySelector("button")!.click(); await new Promise(resolve=>setTimeout(resolve,10)); });
+  await act(async () => { FakeSocket.instances[0].close(); await new Promise(resolve=>setTimeout(resolve,10)); });
+  await act(async () => root.render(<div>Another pane</div>));
+  await act(async () => { resolve({status:"active",audio_bridge_url:"wss://example.test/stale"});await new Promise(resolve=>setTimeout(resolve,10)); });
+  expect(FakeSocket.instances).toHaveLength(1);
 });

@@ -1,0 +1,30 @@
+name: conversations-voice-duplex-browser
+description: Opt-in real GPT Live audio through Conversations, Server, Core, and the production browser player/worklet, including interruption and resumed speech.
+timeout: 7m
+max_iterations: 80
+setup:
+  app:
+    path: .
+  agents: 1
+  required_env:
+    - APTEVA_RUN_CONVERSATIONS_VOICE_TIER3
+    - OPENAI_API_KEY
+  agent_config:
+    realtime_enabled: true
+    realtime_provider: openai
+    realtime_model: gpt-live-1
+    realtime_voice: brise
+    providers:
+      - name: openai
+        realtime_models:
+          large: gpt-live-1
+          medium: gpt-live-1
+          small: gpt-live-1
+        realtime_voice: brise
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_VoiceDuplexBrowser$", "-v", "-count=1", "-timeout=6m", "."]
+directive: |
+  You are an assistant in an isolated voice test. Wait quietly when there is no
+  request. During voice speak French, yield to interruptions, and answer the
+  caller's latest request briefly. Do not invent bookings or end the call.
+budget:
+  total_tokens: 300000

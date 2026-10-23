@@ -296,3 +296,32 @@ Release validation on 2026-10-23 passed: 113 Bun UI/client tests, all 117
 Playwright tests (plus the three voice cases rerun with blocked-history reload),
 frontend builds and consumer type checks, the complete Go race/integration suite
 (96.1 seconds), and a production application build with the pinned released SDK.
+
+## Full duplex voice in the real browser (paid Tier 3)
+
+```sh
+APTEVA_RUN_CONVERSATIONS_VOICE_TIER3=1 GOWORK=off apteva test --tier 3 \
+  --provider openai --model gpt-6.1-sol --json scenarios/22-voice-duplex-browser.yaml
+```
+
+Supply `OPENAI_API_KEY` through the runtime environment. This requires the CLI
+runner that provisions the project-scoped `openai-api` connection; older runners
+incorrectly rely on Server environment bootstrap. Select current local binaries
+with `APTEVA_SERVER_BIN` and `APTEVA_CORE_BIN`. No existing user agent is reused.
+
+The native runner owns the disposable Server, project, agent and Conversations
+sidecar. The driver synthesizes French microphone audio using OpenAI TTS and
+feeds it through a real Chromium MediaStream and the production capture worklet.
+The production VoiceAudioClient connects through Server's audio relay to Core
+and real `gpt-live-1`. It interrupts a spoken explanation with a new appointment
+request, verifies scoped clearing/receipts, continuous microphone capture,
+subsequent consumed audio, the correct French answer in durable history, actual
+model telemetry, and absence of missing-caption stops, errors and disconnects.
+The 65-second startup wait accommodates Server's known agent telemetry ownership
+refresh interval. API credentials are never included in browser code or output.
+
+This is real Web Audio scheduling with a synthesized microphone, not a simulated
+playback clock. It does not establish acoustic echo cancellation quality on every
+physical device. Deterministic unit/browser regressions additionally cover A/B
+cancellation, late PCM/callbacks, partial progress, legacy controls, silence,
+noise/onset debouncing, mute, and stale connection callbacks.

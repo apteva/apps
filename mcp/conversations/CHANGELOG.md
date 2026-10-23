@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — full duplex browser voice
+
+- Advertise playback receipts at connection startup; report partial consumption
+  using the audio clock and acknowledge scoped clearing.
+- Cancel only the requested playback, reject its late PCM and callbacks, preserve
+  unrelated scheduled audio, and isolate callbacks across reconnects.
+- Preserve silent PCM without displaying it as speech. Keep microphone audio
+  streaming during replies, with debounced speech-onset/end interruption signals.
+- Limit bridge renewal and ignore renewals returned after leaving the chat.
+- Add deterministic audio/browser regressions and an opt-in native Tier 3 real
+  GPT Live workflow through Conversations, Server, Core and Chromium Web Audio.
+
 ## 0.24.51 — 2026-10-23
 
 - Persist live voice transcript checkpoints as revisions of one message per Core transcript identity. Preserve metadata, timestamps and stable message IDs; ignore stale updates and duplicate deliveries, and retain legacy Core compatibility.
