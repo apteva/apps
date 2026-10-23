@@ -11,17 +11,32 @@ import (
 // These are Core transcript identities, not telemetry delivery identities.
 // Continuous speech emits cumulative checkpoints and revises them on shutdown.
 type voiceTranscript struct {
-	ID                 string `json:"id"`
-	Generation         int    `json:"generation"`
-	ResponseID         string `json:"response_id,omitempty"`
-	ItemID             string `json:"item_id,omitempty"`
-	Status             string `json:"status"`
-	FinalizationReason string `json:"finalization_reason"`
-	StartMS            int    `json:"start_ms,omitempty"`
-	EndMS              int    `json:"end_ms,omitempty"`
+	ID                 string                    `json:"id"`
+	Generation         int                       `json:"generation"`
+	ResponseID         string                    `json:"response_id,omitempty"`
+	ItemID             string                    `json:"item_id,omitempty"`
+	Status             string                    `json:"status"`
+	FinalizationReason string                    `json:"finalization_reason"`
+	StartMS            int                       `json:"start_ms,omitempty"`
+	EndMS              int                       `json:"end_ms,omitempty"`
+	Fragments          []voiceTranscriptFragment `json:"fragments,omitempty"`
+}
+
+type voiceTranscriptFragment struct {
+	Text    string `json:"text"`
+	StartMS int    `json:"start_ms"`
+	EndMS   int    `json:"end_ms"`
 }
 
 func (v *voiceTranscript) validate() error {
+	if len(v.Fragments) > 4096 {
+		return fmt.Errorf("too many voice transcript fragments")
+	}
+	for _, f := range v.Fragments {
+		if f.StartMS < 0 || f.EndMS < f.StartMS {
+			return fmt.Errorf("invalid voice fragment timeline")
+		}
+	}
 	if v.ID == "" || len(v.ID) > 2048 || v.Generation < 0 || v.StartMS < 0 || v.EndMS < 0 || (v.EndMS > 0 && v.EndMS < v.StartMS) || len(v.ItemID) > 1024 || len(v.ResponseID) > 1024 || len(v.FinalizationReason) > 256 {
 		return fmt.Errorf("invalid voice transcript metadata")
 	}

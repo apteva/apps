@@ -19,6 +19,9 @@ func TestUIModuleEntriesAreSelfContained(t *testing.T) {
 	if err != nil || !strings.Contains(string(worklet), `registerProcessor("conversations-pcm-capture"`) {
 		t.Fatalf("packaged voice capture worklet missing or invalid: %v", err)
 	}
+	if !strings.Contains(string(worklet), `registerProcessor("conversations-pcm-playback"`) {
+		t.Fatal("packaged continuous voice playback worklet missing")
+	}
 	relativeImport := regexp.MustCompile(`(?m)\b(?:from|import)\s*["']\./`)
 	for _, name := range []string{
 		"ConversationsPanel.mjs",

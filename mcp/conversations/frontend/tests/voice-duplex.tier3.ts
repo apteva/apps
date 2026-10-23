@@ -1,6 +1,7 @@
 // Paid Tier 3 driver. Run only via apteva test scenarios/22-voice-duplex-browser.yaml.
 import { chromium } from "@playwright/test";
 import { join } from "node:path";
+import { voiceTranscriptMessages } from "../src/voiceTranscript";
 const env=process.env;
 for(const name of ["APTEVA_RUN_CONVERSATIONS_VOICE_TIER3","OPENAI_API_KEY","APTEVA_TEST_SERVER_URL","APTEVA_TEST_SERVER_API_KEY","APTEVA_TEST_PROJECT_ID","APTEVA_TEST_INSTALLS","APTEVA_TEST_AGENT_IDS"]) if(!env[name])throw Error(`Missing runner environment ${name}`);
 const base=env.APTEVA_TEST_SERVER_URL!,agent=JSON.parse(env.APTEVA_TEST_AGENT_IDS!)[0],install=JSON.parse(env.APTEVA_TEST_INSTALLS!).conversations;
@@ -68,6 +69,15 @@ try{
  await wait(()=>[...cancelled].every(id=>sent.some(x=>x.type==="playback.cleared"&&x.item_id===id&&x.at>=interruptionAt)),"browser clear receipts");
  await wait(()=>received.some(f=>f.type==="audio.frame"&&!f.silence&&!cancelled.has(f.item_id)&&f.at>interruptionAt+500&&sent.some(p=>p.type==="playback.progress"&&p.item_id===f.item_id&&p.audio_end_ms>=f.audio_end_ms)),"resumed consumed voiced browser playback");
  await wait(async()=>{const messages=await api(`/api/apps/conversations/messages?chat_id=${chat}`);return messages.some((m:any)=>m.role==="agent"&&/mardi/i.test(m.content));},"correct French response persisted in Conversations");
+ // Wait for the caller's delayed caption, then exercise exactly the same
+ // chronological presentation used by panels and embedded clients.
+ await wait(async()=>{const messages=await api(`/api/apps/conversations/messages?chat_id=${chat}`);return messages.some((m:any)=>m.role==="user"&&/mardi/i.test(m.content));},"interruption transcript persisted");
+ const saved=await api(`/api/apps/conversations/messages?chat_id=${chat}`);
+ const displayed=voiceTranscriptMessages(saved);
+ const callerIndex=displayed.findIndex((m:any)=>m.role==="user"&&/mardi/i.test(m.content));
+ const replyIndex=displayed.findIndex((m:any)=>m.role==="agent"&&/mardi/i.test(m.content));
+ if(callerIndex<0 || replyIndex<=callerIndex)throw Error("Assistant's acknowledgment appeared before the caller interruption");
+ if(!saved.some((m:any)=>m.role==="agent"&&m.metadata?.transcript?.fragments?.length))throw Error("Core did not persist timed caption fragments");
  if(micFrames-micBefore<30)throw Error("Microphone stream stopped during interruption");
  for(const id of cancelled){const cleared=sent.find(x=>x.type==="playback.cleared"&&x.item_id===id);if(sent.some(x=>x.type==="playback.progress"&&x.item_id===id&&x.at>cleared.at))throw Error("Canceled audio acknowledged after clearing");}
  const events=await api(`/api/telemetry?agent_id=${agent}&thread_id=${voice.thread_id}&limit=1000`);
@@ -78,7 +88,7 @@ try{
  const summary=await page.evaluate(()=>({disconnected:(window as any).liveVoice.disconnected,states:(window as any).liveVoice.states}));
  if(summary.disconnected)throw Error("Browser voice disconnected");
  const clearMS=Math.max(...clears.map(c=>sent.find(x=>x.type==="playback.cleared"&&x.item_id===c.item_id).at-c.at));
- console.log(JSON.stringify({model:"gpt-live-1",player:"Conversations VoiceAudioClient + AudioWorklet + Chromium Web Audio",scopedClears:cancelled.size,maxBrowserClearAckMS:clearMS,microphoneFramesDuringRecovery:micFrames-micBefore,realProgressReceipts:sent.filter(x=>x.type==="playback.progress").length,result:"French caller interrupted real assistant speech; correct next reply consumed by browser renderer and persisted; no missing-caption stops or disconnects"}));
+ console.log(JSON.stringify({model:"gpt-live-1",player:"Conversations VoiceAudioClient + AudioWorklet + Chromium Web Audio",transcriptOrder:"caller interruption before next assistant reply",scopedClears:cancelled.size,maxBrowserClearAckMS:clearMS,microphoneFramesDuringRecovery:micFrames-micBefore,realProgressReceipts:sent.filter(x=>x.type==="playback.progress").length,result:"French caller interrupted real assistant speech; correct next reply consumed by browser renderer and persisted; no missing-caption stops or disconnects"}));
  await page.evaluate(()=>{(window as any).liveVoice.client.close();void (window as any).liveVoice.micContext.close();});
 }finally{
  if(chat){await api(`/api/apps/conversations/voice?chat_id=${chat}`,"DELETE").catch(()=>{});await api(`/api/apps/conversations/chats?id=${chat}`,"DELETE").catch(()=>{});}

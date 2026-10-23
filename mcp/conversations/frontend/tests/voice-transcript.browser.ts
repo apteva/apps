@@ -27,3 +27,21 @@ for(const host of ["dashboard","external","package"] as const) {
   await expect(page.getByText("Do not display blocked speech",{exact:true})).toHaveCount(0);
  });
 }
+
+for(const host of ["dashboard","external","package"] as const) {
+ test(`${host}: delayed French caller captions split the acknowledgment below the interruption`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);await expect(page.locator("textarea")).toBeVisible();
+  const conversation_id=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const segment=(id:number,role:string,content:string,start_ms:number,end_ms:number,fragments?:unknown[])=>({id,conversation_id,role,agent_id:41,content,components:[],created_at:new Date(Date.UTC(2026,9,23,11,55)+start_ms).toISOString(),metadata:{source:"voice",voice_session_id:"crepes",transcript:{id:`segment-${id}`,generation:1,start_ms,end_ms,status:"interrupted",...(fragments?{fragments}:{})}}});
+  const recipe="Tu mélanges de la farine, des œufs, du lait,",ack="Oui, je t'écoute.",stop="Non attends, attends, arrête";
+  // Output checkpoint arrived before the caller's delayed captions.
+  await request.post("/append-message",{data:segment(1674,"agent",`${recipe} ${ack}`,30600,35000,[{text:recipe,start_ms:30600,end_ms:33200},{text:` ${ack}`,start_ms:34400,end_ms:35000}])});
+  await request.post("/append-message",{data:segment(1682,"user",stop,33800,34600)});
+  const assertOrder=async()=>{
+   await expect(page.getByText(recipe,{exact:true})).toHaveCount(1);await expect(page.getByText(stop,{exact:true})).toHaveCount(1);await expect(page.getByText(ack,{exact:true})).toHaveCount(1);
+   const y=await Promise.all([recipe,stop,ack].map(text=>page.getByText(text,{exact:true}).evaluate(el=>el.getBoundingClientRect().top)));
+   expect(y[0]).toBeLessThan(y[1]);expect(y[1]).toBeLessThan(y[2]);
+  };
+  await assertOrder();await page.reload();await expect(page.locator("textarea")).toBeVisible();await assertOrder();
+ });
+}

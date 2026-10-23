@@ -214,3 +214,37 @@ func TestVoiceTranscriptConcurrentCheckpoints(t *testing.T) {
 		t.Fatalf("concurrent updates lost the latest checkpoint: %+v", page.Messages)
 	}
 }
+
+func TestVoiceTranscriptTimedFragmentsSurvivePersistence(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	chat := mkConversation(t, a, 41)
+	session := transcriptSession(t, a, chat.ID)
+	event := transcriptEvent(session, 1, "assistant", "Farine, lait, Oui.", "recipe", "application_grouped", 30600, 35000)
+	var payload map[string]any
+	if err := json.Unmarshal(event.Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["transcript"].(map[string]any)["fragments"] = []voiceTranscriptFragment{
+		{Text: "Farine, lait,", StartMS: 30600, EndMS: 33200},
+		{Text: " Oui.", StartMS: 34400, EndMS: 35000},
+	}
+	event.Data, _ = json.Marshal(payload)
+	if err := a.ingestVoiceEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	page, err := newStore(a.store.db).MessagePage(chat.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 1 {
+		t.Fatalf("messages=%d", len(page.Messages))
+	}
+	raw, _ := json.Marshal(page.Messages[0].Metadata["transcript"])
+	var transcript voiceTranscript
+	if err := json.Unmarshal(raw, &transcript); err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript.Fragments) != 2 || transcript.Fragments[1].StartMS != 34400 || transcript.Fragments[1].Text != " Oui." {
+		t.Fatalf("lost fragment evidence: %+v", transcript)
+	}
+}

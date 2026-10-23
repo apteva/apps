@@ -60,6 +60,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(url.pathname==="/voiceAudio.js")return new Response(Bun.file(join(root,".example/voiceAudio.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/realtime-capture-worklet.js")return new Response(Bun.file(join(root,"../ui/realtime-capture-worklet.js")),{headers:{"Content-Type":"text/javascript"}});
+ if(url.pathname==="/voice-probe-worklet.js")return new Response(Bun.file(join(root,"tests/voice-probe-worklet.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/health")return new Response("ok");
  if(url.pathname==="/dashboard.js")return new Response(Bun.file(join(root,".example/dashboard.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/package.js")return new Response(Bun.file(join(root,".example/package.js")),{headers:{"Content-Type":"text/javascript"}});

@@ -28,6 +28,9 @@ export interface CardComponent {
 }
 
 export interface Message {
+  /** Voice presentation only; durable identity and timestamps remain unchanged. */
+  presentation_key?: string;
+  presentation_at?: number;
  phase?: string;
  revision?: number;
   id: number;

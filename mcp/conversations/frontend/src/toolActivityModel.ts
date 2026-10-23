@@ -66,7 +66,7 @@ export function buildChatTimeline(
     ...streams.map(stream => ({kind: "stream" as const, ts: stream.startedAt, stream})),
     ...messages.map((message) => ({
       kind: "message" as const,
-      ts: Date.parse(message.created_at) || 0,
+      ts: message.presentation_at ?? (Date.parse(message.created_at) || 0),
       message,
     })),
     ...[...tools].map((tool) => ({ kind: "tool" as const, ts: tool.startedAt, tool })),
@@ -112,7 +112,7 @@ export function buildChatTimeline(
         !item.message.components?.length;
       content.push({
         kind: "message",
-        key: `message:${item.message.id}`,
+        key: item.message.presentation_key ?? `message:${item.message.id}`,
         ts: item.ts,
         endTs: item.ts,
         message: item.message,
