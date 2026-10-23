@@ -243,8 +243,8 @@ func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, boun
 			return []modelEntry{}, nil
 		}
 		return []modelEntry{{
-			ID:                 "gpt-5.5",
-			Label:              "GPT-5.5 (Codex image generation)",
+			ID:                 defaultCodexImageModel,
+			Label:              "GPT-6.1 Sol (Codex image generation)",
 			SizeModes:          []string{"pixel"},
 			PixelSizes:         []string{"1024x1024", "1024x1536", "1536x1024"},
 			DefaultAspectRatio: "1:1",
