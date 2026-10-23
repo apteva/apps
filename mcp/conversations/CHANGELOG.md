@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.50 — 2026-10-23
+
+- Use the optional scoped host UI API to hide the floating chat-assistant launcher on compact screens only while a conversation pane is open. Returning to the mobile list, leaving the pane or changing hosts releases the request.
+- Support the shared panel, agent widget and exported React chat surfaces without changing manifests or user preferences; older hosts retain their existing behavior.
+- Add launcher lifecycle, mobile navigation, desktop resizing, draft preservation and compatibility tests. Pin the latest released App SDK v0.104.0.
+
 ## 0.24.49 — 2026-10-22
 
 - Allow one optional suggested next user message attached to a final reply through the existing send tool. Persist it with the reply and offer the same ghost text in the desktop/mobile web composer: Tab or tap prepares an editable draft; sending remains explicit.

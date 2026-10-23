@@ -244,3 +244,30 @@ browser tests (including actual touch/mobile viewport checks), consumer type
 checks, packaged UI builds, and `GOWORK=off go test -race -tags=integration ./...`.
 The dedicated real-model Tier 3 run above passed separately. This validation
 covers the v0.24.49 release; publishing does not update installed apps automatically.
+
+## Scoped host launcher visibility (v0.24.50)
+
+The new `host-ui.browser.ts` contract tests exercise the built dashboard panel,
+agent widget, app-served exports and package exports. They verify mobile list →
+conversation → Back cleanup, preserved drafts on reopening, restored launcher
+on inbox navigation, desktop visibility, responsive resizing without remounting
+the chat, and capability-disabled compatibility. Existing tests omit `host`,
+covering older hosts. React lifecycle checks also replace/remove the host while
+retaining the conversation and draft, and verify cleanup on unmount.
+
+These fixtures exercise Conversations' request timing and prop forwarding. The
+platform's separate `hostUI` and `ChatAssistantDock` tests cover foreground,
+navigation/project/installation isolation and preservation of open Helper chats,
+drafts and voice sessions. No real-model test is needed for this presentation
+change: it adds no agent input, tools, events or message behavior.
+
+The host API is currently local/unreleased in the platform. Conversations
+feature-detects it and uses only a structural type; the manifest has no new
+metadata requiring the unreleased SDK. Older platform releases keep showing
+their launcher until the corresponding Dashboard support is installed.
+
+Release validation on 2026-10-23 passed: 110 Conversations Bun tests, all 114
+Playwright browser tests, consumer type checks, panel/frontend builds, the full
+`GOWORK=off go test -race -tags=integration ./...` suite, and the application
+build with the released App SDK v0.104.0. The platform host/dock checks passed
+30 tests separately; no platform source or installed agents were changed.

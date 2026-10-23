@@ -25,7 +25,7 @@ function Example(){
  const Component=name==="inbox-overview"?Inbox:ConversationChat;
  return <main style={{height:"100vh",boxSizing:"border-box",padding:16,display:"flex",flexDirection:"column",gap:8}}>
   <label style={{color:"white"}}>Language <select style={{color:"#111",background:"#fff"}} aria-label="Example language" value={locale} onChange={event=>setLocale(event.target.value)}><option value="en">English</option><option value="fr-FR">Français</option><option value="es-ES">Español</option></select></label>
-  <div style={{flex:1,minHeight:0}}><Component composer={(window as any).COMPOSER_OPTIONS} conversations={loaded.client} agentId={config.agentId} locale={locale} timeZone="Europe/Paris" messages={messages}/></div>
+  <div style={{flex:1,minHeight:0}}><Component host={(window as any).CONVERSATIONS_HOST} composer={(window as any).COMPOSER_OPTIONS} conversations={loaded.client} agentId={config.agentId} locale={locale} timeZone="Europe/Paris" messages={messages}/></div>
  </main>;
 }
 createRoot(document.getElementById("root")!).render(<Example/>);

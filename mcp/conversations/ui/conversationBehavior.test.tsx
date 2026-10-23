@@ -175,6 +175,36 @@ test("switching conversations keeps drafts and late replies out of the next chat
  await act(async()=>FakeEvents.instances.at(-1)!.emit(message(900,"a","private late reply")));
  expect(element.textContent).not.toContain("private late reply");
 });
+
+test("public thread scopes host suppression to the mounted pane and preserves drafts when the host changes", async () => {
+ const events: string[] = [];
+ const host = (id: string) => ({capabilities:{ui:{chatAssistantLauncher:true}},ui:{request:(settings:unknown)=>{
+  expect(settings).toEqual({chatAssistant:{launcher:"hidden_on_compact"}});
+  events.push(`request:${id}`);return () => {events.push(`release:${id}`);};
+ }}});
+ const first = host("first"), second = host("second");
+ const thread = (value?: typeof first) => <ConversationThread host={value} conversations={conversations} conversation={conv("a")}/>;
+ await act(async()=>root.render(thread(first)));await settle();
+ await type("keep this draft");
+ await act(async()=>root.render(thread(second)));await settle();
+ expect(events).toEqual(["request:first","release:first","request:second"]);
+ expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this draft");
+ await act(async()=>root.render(thread()));await settle();
+ expect(events).toEqual(["request:first","release:first","request:second","release:second"]);
+ expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this draft");
+ await act(async()=>root.render(thread(first)));await settle();
+ await act(async()=>root.render(<span>Conversation list</span>));
+ expect(events.slice(-2)).toEqual(["request:first","release:first"]);
+});
+
+test("unsupported hosts keep the conversation usable without requesting launcher changes", async () => {
+ let called = false;
+ const host = {capabilities:{ui:{chatAssistantLauncher:false}},ui:{request:()=>{called=true;return()=>{};}}};
+ await act(async()=>root.render(<ConversationThread host={host} conversations={conversations} conversation={conv("a")}/>));await settle();
+ await type("ordinary draft");
+ expect(called).toBe(false);
+ expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("ordinary draft");
+});
 test("ordinary retry preserves the original submission id",async()=>{
  const bodies:any[]=[];
  fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return bodies.length===1?Promise.reject(new Error("lost response")):json(message(1,"a",bodies[0].content));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});};

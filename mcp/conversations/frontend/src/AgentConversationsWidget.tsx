@@ -3,6 +3,7 @@ import { DetailsDialog } from "./ConversationsPanel";
 import { agentAvatarMode, showsAgentAvatar, ConversationIdentity } from "./agentAppearance";
 import type { AgentInfo } from "./types";
 import type { ComposerOptions } from "./composer";
+import type { ConversationHost } from "./hostUI";
 import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
@@ -30,6 +31,7 @@ import {
 } from "./agentConversations";
 
 export interface AgentConversationsWidgetProps extends ConversationLocalization {
+  host?: ConversationHost;
   pageContext?: import("./pageContext").PageContext;
  composer?:ComposerOptions;
   appName: string;
@@ -86,6 +88,7 @@ function useWideWidgetLayout(allowWide: boolean): boolean {
 }
 
 function ConversationBrowser({
+  host,
   projectId,
   instanceId,
   eventRevision,
@@ -281,6 +284,7 @@ function ConversationBrowser({
 
       {selected ? (
         <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
+          host={host}
           conversation={selected}
           agentAvatars={avatarMode}
           archived={archived}
@@ -310,6 +314,7 @@ function ConversationBrowser({
 
 
 function SingleConversation({
+  host,
   projectId,
   instanceId,
   eventRevision,
@@ -492,6 +497,7 @@ function SingleConversation({
         </section>
       ) : selected ? (
         <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
+          host={host}
           conversation={selected}
           agentAvatars={avatarMode}
           archived={false}

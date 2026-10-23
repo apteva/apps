@@ -405,3 +405,26 @@ should provide a stable non-secret user `storageKey`, as for existing drafts.
 It is not a shared decision or cross-device acknowledgement. All React chat and
 panel exports accept `replySuggestions={false}` to disable agent hints. Existing
 host-provided empty-conversation welcome suggestions remain independent.
+
+## Floating host assistant on mobile
+
+The panel, agent widget and exported `ConversationChat`, `AgentConversations`,
+`ConversationThread` and `ConversationsPanel` accept an optional `host` matching
+the shared host UI contract (`ConversationHost` is exported from `/react`).
+Dashboard injects this prop for its panels and contributions; other hosts can
+pass their compatible `AppHost` directly.
+
+A mounted conversation pane requests
+`host.ui.request({chatAssistant:{launcher:"hidden_on_compact"}})` only when
+`host.capabilities.ui.chatAssistantLauncher` is enabled. It releases the request
+when the pane closes, unmounts, or receives a replacement host. In the full
+panel, mobile Back unmounts the pane even though its conversation remains
+selected, so the launcher reappears on the list. Inbox lists, Telegram settings,
+empty selections and new-conversation forms make no request.
+
+The host decides its compact breakpoint and foreground eligibility. Desktop
+keeps the floating launcher. Requests change neither user preferences nor the
+assistant's open conversation, drafts or voice session. No manifest `host_ui`
+default is declared. Older hosts without the capability retain their existing
+behavior; installing this app alone does not add the capability to an older
+Dashboard. No runtime import of the unreleased host SDK is required.

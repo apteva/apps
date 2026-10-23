@@ -13,3 +13,13 @@ void menuProps;
 
 const ghostOptions:Pick<ChatProps,"replySuggestions">={replySuggestions:false};
 void ghostOptions;
+
+import type { ConversationHost } from "../dist/react";
+const host: ConversationHost = {
+  capabilities: { ui: { chatAssistantLauncher: true } },
+  ui: { request: settings => { void settings.chatAssistant.launcher; return () => {}; } },
+};
+const hostProps: Pick<ChatProps, "host"> = {host};
+// @ts-expect-error Host presentation policies cannot force a disabled launcher on.
+host.ui.request({chatAssistant:{launcher:"show"}});
+void hostProps;

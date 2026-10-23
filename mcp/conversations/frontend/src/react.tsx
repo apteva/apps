@@ -1,4 +1,6 @@
 import type { ThreadActionOptions } from "./threadActions";
+import type { ConversationHost } from "./hostUI";
+export type { ConversationHost } from "./hostUI";
 export type { ThreadAction, ThreadActionOptions } from "./threadActions";
 import type { ComposerOptions } from "./composer";
 export type { ComposerOptions } from "./composer";
@@ -20,6 +22,7 @@ import type { ConversationsClient } from "./client";
 export { ConversationsProvider } from "./context";
 
 export interface ChatProps extends ChatConfiguration {
+  host?: ConversationHost;
   conversations: ConversationsClient;
   agentId: number;
   agentAvatars?: AgentAvatarMode;
@@ -37,25 +40,25 @@ function Surface({ conversations, children, className, pageContext, ...localizat
     <ConversationLocaleRegion className={className}>{children}</ConversationLocaleRegion>
   </ConversationsProvider></PageContextProvider.Provider>;
 }
-export const ConversationChat = forwardRef<ConversationComposerHandle, ChatProps>(function ConversationChat({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
-  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget composerRef={ref} onContextCleared={onContextCleared}
+export const ConversationChat = forwardRef<ConversationComposerHandle, ChatProps>(function ConversationChat({ host, conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
+  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
     instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"single",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
   /></Surface>;
 });
-export const AgentConversations = forwardRef<ConversationComposerHandle, ChatProps>(function AgentConversations({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
-  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget composerRef={ref} onContextCleared={onContextCleared}
+export const AgentConversations = forwardRef<ConversationComposerHandle, ChatProps>(function AgentConversations({ host, conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
+  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
     instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"browser",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
   /></Surface>;
 });
 export const ConversationThread = forwardRef<ConversationComposerHandle, ChatConfiguration & {
-  conversations: ConversationsClient; conversation: Conversation; onChanged?: () => void;
+  host?: ConversationHost; conversations: ConversationsClient; conversation: Conversation; onChanged?: () => void;
   showToolCompletion?: boolean; showToolDuration?: boolean; showPageContext?: boolean; agentAvatars?: AgentAvatarMode;
   welcomeText?: string; suggestions?: ComposerSuggestion[]; contextLabel?: string;
-}>(function ConversationThread({ conversations, conversation, onChanged = () => {}, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, onContextCleared, ...localization }, ref) {
+}>(function ConversationThread({ host, conversations, conversation, onChanged = () => {}, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, onContextCleared, ...localization }, ref) {
   if (conversation.project_id !== conversations.projectId) throw new Error("Conversation project does not match the host scope");
-  return <Surface conversations={conversations} {...localization}><Thread ref={ref} key={conversation.id} conversation={conversation}
+  return <Surface conversations={conversations} {...localization}><Thread host={host} ref={ref} key={conversation.id} conversation={conversation}
     archived={Boolean(conversation.archived_at)} onActed={onChanged} onRemoved={onChanged}
     agentAvatars={agentAvatars} showPageContext={showPageContext} welcomeText={welcomeText} suggestions={suggestions} contextLabel={contextLabel} onContextCleared={onContextCleared}
     showToolCompletion={showToolCompletion} showToolDuration={showToolDuration}/></Surface>;
@@ -71,8 +74,8 @@ export function Inbox({ conversations, agentId, conversationsHref, eventRevision
   return <Surface conversations={conversations} {...localization}><InboxWidget key={agentId} agentId={agentId} projectId={conversations.projectId} installId={conversations.installId}
     conversationsHref={conversationsHref} eventRevision={eventRevision} widgetSize={size}/></Surface>;
 }
-export function ConversationsPanel({ conversations, agentId, agentAvatars, ...localization }: ChatConfiguration & { conversations: ConversationsClient; agentId?: number; agentAvatars?: AgentAvatarMode }) {
-  return <Surface conversations={conversations} {...localization}><Panel appName="conversations" projectId={conversations.projectId}
+export function ConversationsPanel({ host, conversations, agentId, agentAvatars, ...localization }: ChatConfiguration & { host?: ConversationHost; conversations: ConversationsClient; agentId?: number; agentAvatars?: AgentAvatarMode }) {
+  return <Surface conversations={conversations} {...localization}><Panel host={host} appName="conversations" projectId={conversations.projectId}
     installId={conversations.installId ?? 0} instanceId={agentId} agentAvatars={agentAvatars}/></Surface>;
 }
 export function ApprovalCard({ conversations, message, onChanged, ...localization }: ChatConfiguration & { conversations: ConversationsClient; message: Message; onChanged?: (message: Message) => void }) {

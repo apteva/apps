@@ -1,4 +1,5 @@
 import {useReplySuggestion} from "./replySuggestion";
+import { useConversationHost, type ConversationHost } from "./hostUI";
 import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
@@ -84,6 +85,7 @@ function closeOpenMarkdown(s: string): string {
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
 export interface NativePanelProps extends ConversationLocalization {
+  host?: ConversationHost;
   agentAvatars?: AgentAvatarMode;
  composer?:ComposerOptions;
   appName: string;
@@ -1295,6 +1297,7 @@ export function MoreConversations({path,projectId,rows,cursor,onRows,onCursor}: 
 }
 
 export const ConversationChat = forwardRef<ConversationComposerHandle, {
+  host?: ConversationHost;
   conversation: Conversation;
   archived: boolean;
   agentOnline?: boolean;
@@ -1313,6 +1316,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onActed: () => void;
   onRemoved: () => void;
 }>(({
+  host,
   conversation,
   archived,
   agentOnline,
@@ -1331,6 +1335,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   onActed,
   onRemoved,
 }, ref) => {
+  useConversationHost(host);
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, replySuggestions, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -2082,7 +2087,7 @@ function readToolDisplayPreferences(): ToolDisplayPreferences {
   } catch { return defaults; }
 }
 
-export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail, agentAvatars: requestedAvatars }: NativePanelProps) {
+export default function ConversationsPanel({ host, projectId, instanceId, workspaceRail: WorkspaceRail, agentAvatars: requestedAvatars }: NativePanelProps) {
   const agentAvatars = agentAvatarMode(requestedAvatars, "both");
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -2441,6 +2446,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
           </aside>
           {selected && (!isMobile || mobileDetail) ? (
             <ConversationChat key={`${selected.project_id}:${selected.id}`}
+              host={host}
               conversation={selected}
               agentAvatars={agentAvatars}
               archived={showArchived}
