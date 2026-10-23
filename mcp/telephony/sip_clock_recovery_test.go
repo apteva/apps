@@ -228,7 +228,7 @@ func TestSIPIngressAndConsumerTimingAreDistinct(t *testing.T) {
 	}
 }
 
-func TestSIPFreshPacketAfterConcealmentRebuffersWithoutClockReset(t *testing.T) {
+func TestSIPFreshPacketAfterConcealmentDoesNotReprimeOrResetClock(t *testing.T) {
 	b := newRTPJitterBuffer()
 	start := time.Unix(100, 0)
 	for i := 0; i < 3; i++ {
@@ -242,12 +242,15 @@ func TestSIPFreshPacketAfterConcealmentRebuffersWithoutClockReset(t *testing.T) 
 	}
 	anchor := b.sourceAnchorAt
 	b.pushRTP(3, make([]byte, 160), 480, start.Add(120*time.Millisecond))
-	if b.freshResumes != 1 || b.lateDroppedSamples != 0 || len(b.packets) != 1 || b.clockResets != 0 || b.sourceAnchorAt != anchor {
+	if b.freshResumes != 0 || !b.primed || b.generation.Load() != 0 || b.lateDroppedSamples != 0 || len(b.packets) != 1 || b.clockResets != 0 || b.sourceAnchorAt != anchor {
 		t.Fatal("fresh speech was dropped or clock reset", b.freshResumes, b.lateDroppedSamples, b.clockResets)
 	}
 	b.pushRTP(3, make([]byte, 160), 480, start.Add(121*time.Millisecond))
 	if len(b.packets) != 1 {
 		t.Fatal("duplicate packet bypassed protection")
+	}
+	if pcm, ready := b.popAt(start.Add(120 * time.Millisecond)); !ready || len(pcm) == 0 {
+		t.Fatal("fresh speech waited for another prime reserve")
 	}
 }
 

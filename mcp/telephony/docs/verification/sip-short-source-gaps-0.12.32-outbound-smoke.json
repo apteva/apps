@@ -1,0 +1,227 @@
+{
+  "app_version": "0.12.32",
+  "completed_seconds": 20,
+  "concurrent_calls": 8,
+  "process_cpu_one_core_pct": 53.966633290978585,
+  "requested_seconds": 20,
+  "scope": "real Chromium production WebRTC/capture DSP, actual outbound INVITE/180/ACK/BYE and local TLS/SRTP carrier; synthetic microphone with natural speech/markers; local platform identity; excludes Telnyx network and Apteva remote proxy",
+  "wall_seconds": 20.000211875,
+  "results": [
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "delay_by_minute": [
+        {
+          "max_ms": 96.109375,
+          "minute": 0,
+          "p50_ms": 95.909912109375,
+          "p95_ms": 96.08203125
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 95.909912109375,
+      "healthy_delay_p95_ms": 96.08203125,
+      "id": "outbound-soak-0",
+      "longest_healthy_speech_delivery_interruption_ms": 20.504875,
+      "longest_speech_delivery_interruption_ms": 20.504875,
+      "median_delay_growth_ms": -0.06982421875,
+      "profile": "healthy",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": null
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "delay_by_minute": [
+        {
+          "max_ms": 96.033203125,
+          "minute": 0,
+          "p50_ms": 95.597412109375,
+          "p95_ms": 95.89697265625
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 95.597412109375,
+      "healthy_delay_p95_ms": 95.89697265625,
+      "id": "outbound-soak-1",
+      "longest_healthy_speech_delivery_interruption_ms": 24.238791999999997,
+      "longest_speech_delivery_interruption_ms": 24.238791999999997,
+      "median_delay_growth_ms": -0.021484375,
+      "profile": "healthy",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": null
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "delay_by_minute": [
+        {
+          "max_ms": 93.040771484375,
+          "minute": 0,
+          "p50_ms": 92.63232421875,
+          "p95_ms": 92.757568359375
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 92.63232421875,
+      "healthy_delay_p95_ms": 92.757568359375,
+      "id": "outbound-soak-2",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 20,
+      "median_delay_growth_ms": -0.004150390625,
+      "profile": "jitter",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": null
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "delay_by_minute": [
+        {
+          "max_ms": 104.666748046875,
+          "minute": 0,
+          "p50_ms": 102.930419921875,
+          "p95_ms": 103.131591796875
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 102.930419921875,
+      "healthy_delay_p95_ms": 103.131591796875,
+      "id": "outbound-soak-3",
+      "longest_healthy_speech_delivery_interruption_ms": 15.038209000000002,
+      "longest_speech_delivery_interruption_ms": 15.038209000000002,
+      "median_delay_growth_ms": -0.111328125,
+      "profile": "jitter",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": null
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "delay_by_minute": [
+        {
+          "max_ms": 110.717529296875,
+          "minute": 0,
+          "p50_ms": 80.65576171875,
+          "p95_ms": 100.7314453125
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 80.65576171875,
+      "healthy_delay_p95_ms": 100.7314453125,
+      "id": "outbound-soak-4",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 99.992042,
+      "median_delay_growth_ms": -20.083984375,
+      "profile": "shift180",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": [
+        {
+          "start_ms": 14509.766,
+          "end_ms": 22509.766,
+          "fresh_marker_recovery_ms": 225.60302734375
+        }
+      ]
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "delay_by_minute": [
+        {
+          "max_ms": 105.60400390625,
+          "minute": 0,
+          "p50_ms": 85.09228515625,
+          "p95_ms": 105.15625
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 85.09228515625,
+      "healthy_delay_p95_ms": 105.15625,
+      "id": "outbound-soak-5",
+      "longest_healthy_speech_delivery_interruption_ms": 17.428624999999997,
+      "longest_speech_delivery_interruption_ms": 99.989791,
+      "median_delay_growth_ms": -20.0986328125,
+      "profile": "shift180",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": [
+        {
+          "start_ms": 14509.766,
+          "end_ms": 22509.766,
+          "fresh_marker_recovery_ms": 524.7666015625
+        }
+      ]
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "delay_by_minute": [
+        {
+          "max_ms": 77.398681640625,
+          "minute": 0,
+          "p50_ms": 75.19140625,
+          "p95_ms": 75.355224609375
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 75.19140625,
+      "healthy_delay_p95_ms": 75.355224609375,
+      "id": "outbound-soak-6",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 499.79033300000003,
+      "median_delay_growth_ms": 0.071533203125,
+      "profile": "pause570",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": [
+        {
+          "start_ms": 14509.766,
+          "end_ms": 15079.766,
+          "fresh_marker_recovery_ms": 255.548095703125
+        }
+      ]
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "delay_by_minute": [
+        {
+          "max_ms": 91.97021484375,
+          "minute": 0,
+          "p50_ms": 90.011962890625,
+          "p95_ms": 91.35205078125
+        }
+      ],
+      "failures": [],
+      "healthy_delay_p50_ms": 90.011962890625,
+      "healthy_delay_p95_ms": 91.35205078125,
+      "id": "outbound-soak-7",
+      "longest_healthy_speech_delivery_interruption_ms": 13.308833999999997,
+      "longest_speech_delivery_interruption_ms": 499.949083,
+      "median_delay_growth_ms": -0.0322265625,
+      "profile": "pause570",
+      "transport_errors": null,
+      "sip_refreshes": 1,
+      "recording_dropped_ms": 0,
+      "incidents": [
+        {
+          "start_ms": 14509.766,
+          "end_ms": 15079.766,
+          "fresh_marker_recovery_ms": 575.668701171875
+        }
+      ]
+    }
+  ]
+}
