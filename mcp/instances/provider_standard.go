@@ -297,7 +297,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if provider == "scaleway" && isScalewayElasticMetalSize(in.Size) {
 		return scalewayElasticMetalProvision(ctx, in)
 	}
-	privKey, pubKey, err := generateSSHKeypair()
+	privKey, pubKey, err := generateProviderSSHKeypair(provider)
 	if err != nil {
 		return nil, fmt.Errorf("generate ssh keypair: %w", err)
 	}
@@ -372,6 +372,9 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		tool, args, err = apiProviderCreateRequest(ctx, provider, in, pubKey)
 	}
 	if err != nil {
+		// Request construction failed before the compute create call. Preserve any
+		// ancillary-resource identities, but do not mislabel a server as in flight.
+		finishInstanceCreation(ctx, inst.ID)
 		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
 	}

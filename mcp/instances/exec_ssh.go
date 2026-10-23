@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -58,6 +59,27 @@ func generateSSHKeypair() (privPEM, pubAuth string, err error) {
 	pubAuth = string(ssh.MarshalAuthorizedKey(sshPub))
 	pubAuth = strings.TrimSpace(pubAuth) // strip trailing \n
 	return privPEM, pubAuth, nil
+}
+
+// Clouding's keypair API accepts RSA public keys only. Other providers retain
+// Ed25519. RSA signatures still negotiate modern SHA-2 algorithms over SSH.
+func generateProviderSSHKeypair(provider string) (privPEM, pubAuth string, err error) {
+	if normalizeProvider(provider) != "clouding" {
+		return generateSSHKeypair()
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		return "", "", fmt.Errorf("generate RSA: %w", err)
+	}
+	block, err := ssh.MarshalPrivateKey(key, "apteva-instances")
+	if err != nil {
+		return "", "", err
+	}
+	pub, err := ssh.NewPublicKey(&key.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+	return string(pem.EncodeToMemory(block)), strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), nil
 }
 
 // dialSSH opens an SSH session to an instance. Used by both the
