@@ -56,7 +56,9 @@ func (r *dynadotRegistrar) CheckAvailability(ctx *sdk.AppCtx, domain string) (*D
 	}
 	s := strings.ToLower(fmt.Sprint(v["Available"]))
 	out.Available = s == "yes" || s == "true" || s == "1"
-	out.Price = fmt.Sprint(v["Price"])
+	if price, exists := v["Price"]; exists && price != nil {
+		out.Price = fmt.Sprint(price)
+	}
 	return &out, nil
 }
 func (r *dynadotRegistrar) Pricing(ctx *sdk.AppCtx, tld string) (any, error) {

@@ -38,7 +38,70 @@ func saleConnection(ctx *sdk.AppCtx, args map[string]any) (*sdk.BoundIntegration
 	}
 	return &sdk.BoundIntegration{Role: "registrar_provider", Kind: "integration", ConnectionID: id, AppSlug: c.AppSlug}, nil
 }
+
+// listingPayload is shared by previews and publication so a preview validates
+// exactly the payload that would be sent, without verifying account ownership.
+func listingPayload(provider, domain string, args map[string]any) (map[string]any, string, error) {
+	mode := strArg(args, "listing_type")
+	if mode == "" {
+		mode = "buy_now"
+	}
+	if !includes([]string{"buy_now", "make_offer", "buy_now_and_make_offer"}, mode) {
+		return nil, "", errors.New("invalid listing_type")
+	}
+	money := func(value string) (map[string]any, error) {
+		cents, err := decimalCents(strings.TrimSpace(value))
+		if err != nil || cents <= 0 {
+			return nil, errors.New("listing prices must be positive amounts with at most two decimal places")
+		}
+		return map[string]any{"amount": fmt.Sprintf("%d.%02d", cents/100, cents%100), "currency": "USD"}, nil
+	}
+	p := map[string]any{"name": domain, "binPriceEnabled": mode != "make_offer", "minPriceEnabled": false}
+	var price, minimum map[string]any
+	if mode != "make_offer" {
+		var err error
+		price, err = money(strArg(args, "price"))
+		if err != nil {
+			return nil, "", err
+		}
+		p["binPrice"] = price
+	}
+	if offer := strArg(args, "minimum_offer"); offer != "" {
+		var err error
+		minimum, err = money(offer)
+		if err != nil {
+			return nil, "", err
+		}
+		p["minPriceEnabled"] = true
+		p["minPrice"] = minimum
+		if mode != "make_offer" {
+			lo, _ := decimalCents(strings.TrimSpace(offer))
+			hi, _ := decimalCents(strings.TrimSpace(strArg(args, "price")))
+			if lo > hi {
+				return nil, "", errors.New("minimum offer cannot exceed buy-now price")
+			}
+		}
+	}
+	if provider == "dynadot" {
+		p = map[string]any{"domain": domain, "listing_type": mode}
+		if price != nil {
+			p["price"] = price["amount"]
+		}
+		if minimum != nil {
+			p["minimum_offer"] = minimum["amount"]
+		}
+	}
+	if desc := strArg(args, "description"); desc != "" {
+		p["description"] = desc
+	}
+	return p, mode, nil
+}
+
 func (a *App) toolDomainSalePublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	dryRun, e := optionalBool(args, "dry_run")
+	if e != nil {
+		return nil, e
+	}
 	b, e := saleConnection(ctx, args)
 	if e != nil {
 		return nil, e
@@ -47,65 +110,32 @@ func (a *App) toolDomainSalePublish(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if e != nil {
 		return nil, e
 	}
-	p := map[string]any{"domain": d}
+	p, mode, e := listingPayload(b.AppSlug, d, args)
+	if e != nil {
+		return nil, e
+	}
+	tool := "create_sellerhub_domain"
+	currency := "USD"
 	if b.AppSlug == "dynadot" {
-		p["listing_type"] = strArg(args, "listing_type")
-		p["price"] = strArg(args, "price")
-		p["minimum_offer"] = strArg(args, "minimum_offer")
-		p["description"] = strArg(args, "description")
-		_, e := providerCall(ctx, b, "set_for_sale", p)
-		if e != nil {
+		tool = "set_for_sale"
+		currency = "provider_account_currency"
+	}
+	if dryRun {
+		return map[string]any{"dry_run": true, "published": false, "domain": d, "provider": b.AppSlug, "connection_id": b.ConnectionID, "listing_type": mode, "currency": currency, "provider_tool": tool, "payload": p, "ownership_verified": false, "warning": "Preview only: ownership and provider acceptance have not been checked. Publication requires an explicit call without dry_run."}, nil
+	}
+	if b.AppSlug == "dynadot" {
+		if _, e = providerCall(ctx, b, tool, p); e != nil {
 			return nil, e
 		}
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {
 			return nil, err
 		}
-		snapshot, err := saveListing(ctx, pid, d, b, "on_sale", "listed", map[string]any{"name": d, "isForSale": true, "listing_type": p["listing_type"], "price": p["price"], "minimum_offer": p["minimum_offer"]}, "publish")
+		snapshot, err := saveListing(ctx, pid, d, b, "on_sale", "listed", map[string]any{"name": d, "isForSale": true, "listing_type": mode, "price": p["price"], "minimum_offer": p["minimum_offer"]}, "publish")
 		if err != nil {
 			return nil, err
 		}
 		return snapshotResult(snapshot), nil
-	}
-	mode := strArg(args, "listing_type")
-	if mode == "" {
-		mode = "buy_now"
-	}
-	if !includes([]string{"buy_now", "make_offer", "buy_now_and_make_offer"}, mode) {
-		return nil, errors.New("invalid listing_type")
-	}
-	p = map[string]any{"name": d, "binPriceEnabled": mode != "make_offer", "minPriceEnabled": false}
-	money := func(value string) (map[string]any, error) {
-		cents, err := decimalCents(strings.TrimSpace(value))
-		if err != nil || cents <= 0 {
-			return nil, errors.New("listing prices must be positive USD amounts with at most two decimal places")
-		}
-		return map[string]any{"amount": fmt.Sprintf("%d.%02d", cents/100, cents%100), "currency": "USD"}, nil
-	}
-	if mode != "make_offer" {
-		price, err := money(strArg(args, "price"))
-		if err != nil {
-			return nil, err
-		}
-		p["binPrice"] = price
-	}
-	if offer := strArg(args, "minimum_offer"); offer != "" {
-		minimum, err := money(offer)
-		if err != nil {
-			return nil, err
-		}
-		p["minPriceEnabled"] = true
-		p["minPrice"] = minimum
-		if mode != "make_offer" {
-			lo, _ := decimalCents(offer)
-			hi, _ := decimalCents(strArg(args, "price"))
-			if lo > hi {
-				return nil, errors.New("minimum offer cannot exceed buy-now price")
-			}
-		}
-	}
-	if desc := strArg(args, "description"); desc != "" {
-		p["description"] = desc
 	}
 	raw, e := providerCall(ctx, b, "create_sellerhub_domain", p)
 	if e != nil {
