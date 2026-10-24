@@ -160,6 +160,14 @@ func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID strin
 	if isSuppressedHandlingReason(row.HandlingReason) {
 		return nil
 	}
+	if !a.callUsesDirectSIP(row) && (row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo") {
+		// XML pull transports start media from their authenticated inbound/wait
+		// response. A background REST redirect would start it a second time,
+		// replacing the first stream while its bridge claim is still active.
+		// Recovery may prepare Core, but only that callback activates media.
+		_, err = a.prepareInboundRealtime(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting)
+		return err
+	}
 	_, err = a.answerCall(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, true)
 	return err
 }

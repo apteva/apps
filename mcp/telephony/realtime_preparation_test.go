@@ -127,6 +127,83 @@ func waitPreparationResult(t *testing.T, ch <-chan *httptest.ResponseRecorder) *
 	}
 }
 
+// The periodic recovery worker can win the pending-call claim before the
+// authenticated Twilio webhook. It must prepare Core without sending REST
+// TwiML as well as the webhook's Connect/Stream response (which starts twice).
+func TestRealtimePreparationAutoAnswerWorkerDoesNotRedirectTwilio(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "immediate", true: "routing-flow"}[routed], func(t *testing.T) {
+			a, ctx, p, route, row, unblock := preparationFixture(t, routed)
+			worker := make(chan error, 1)
+			go func() { worker <- a.runAutoAnswerTick(context.Background(), ctx) }()
+			winner := waitPreparationEntered(t, p)
+			response := make(chan *httptest.ResponseRecorder, 1)
+			go func() { response <- preparationWebhook(t, a, route) }()
+			unblock()
+			if err := <-worker; err != nil {
+				t.Fatal(err)
+			}
+			rec := waitPreparationResult(t, response)
+			if rec.Code != 200 || strings.Count(rec.Body.String(), "<Connect><Stream") != 1 || strings.Contains(rec.Body.String(), "<Hangup") {
+				t.Fatalf("webhook response=%d %s", rec.Code, rec.Body.String())
+			}
+			if spawned, killed, answered := p.counts(); spawned != 1 || killed != 0 || answered != 0 {
+				t.Fatalf("double activation: spawned=%d killed=%d carrier REST commands=%d", spawned, killed, answered)
+			}
+			stored, err := a.db().findCall(row.ID)
+			if err != nil || stored.Status != "answered" || stored.ThreadID != winner.ThreadID {
+				t.Fatal(stored, err)
+			}
+		})
+	}
+}
+
+func TestRealtimePreparationAutoAnswerWorkerOnlyPreparesXMLCarriers(t *testing.T) {
+	for _, carrier := range []string{"twilio", "plivo"} {
+		t.Run(carrier, func(t *testing.T) {
+			a, ctx, p, route, row, unblock := preparationFixture(t, false)
+			if _, err := a.db().db.Exec(`UPDATE calls SET carrier_slug=? WHERE id=?`, carrier, row.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.db().db.Exec(`UPDATE inbound_routes SET carrier_slug=? WHERE id=?`, carrier, route.ID); err != nil {
+				t.Fatal(err)
+			}
+			route.CarrierSlug = carrier
+			worker := make(chan error, 1)
+			go func() { worker <- a.runAutoAnswerTick(context.Background(), ctx) }()
+			winner := waitPreparationEntered(t, p)
+			unblock()
+			if err := <-worker; err != nil {
+				t.Fatal(err)
+			}
+			stored, err := a.db().findCall(row.ID)
+			if err != nil || stored.Status != "answering" || !realtimePreparationReady(stored) || stored.ThreadID != winner.ThreadID {
+				t.Fatalf("worker incorrectly activated XML call: %+v %v", stored, err)
+			}
+			var rec *httptest.ResponseRecorder
+			if carrier == "twilio" {
+				rec = preparationWebhook(t, a, route)
+			} else {
+				form := url.Values{"CallUUID": {row.CarrierSID}}
+				req := httptest.NewRequest("POST", a.plivoWaitURL(*route, row.ID), strings.NewReader(form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				rec = httptest.NewRecorder()
+				a.handlePlivoInboundWait(rec, req, route)
+			}
+			if rec.Code != 200 || strings.Count(rec.Body.String(), "<Stream") != 1 || strings.Contains(rec.Body.String(), "<Hangup") {
+				t.Fatalf("callback did not activate media: %d %s", rec.Code, rec.Body.String())
+			}
+			if spawned, killed, answered := p.counts(); spawned != 1 || killed != 0 || answered != 0 {
+				t.Fatalf("spawned=%d killed=%d REST commands=%d", spawned, killed, answered)
+			}
+			stored, err = a.db().findCall(row.ID)
+			if err != nil || stored.Status != "answered" {
+				t.Fatal(stored, err)
+			}
+		})
+	}
+}
+
 func TestRealtimePreparationConcurrentWebhooksReuseWinner(t *testing.T) {
 	for _, routed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "immediate", true: "routing-flow"}[routed], func(t *testing.T) {
