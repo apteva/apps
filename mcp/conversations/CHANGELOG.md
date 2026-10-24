@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.56 — 2026-10-24
+
+- Include `message_id` alongside the conversation ID in message, approval, alert, and report notification links so native clients can target the exact message.
+- Preserve notification identities, recipients, grouping, opt-in defaults, and existing publication behavior. Previously saved notifications retain their original conversation-only links.
+- Verify all four links through the embedded runtime manifest and assert that published payloads contain both target IDs.
+
 ## 0.24.55 — 2026-10-24
 
 - Pin App SDK v0.106.0, verified as the latest release by commit ancestry.

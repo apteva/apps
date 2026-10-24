@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.55
+version: 0.24.56
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -17,9 +17,9 @@ description: |
   agent owns every route, the bot can use that agent's display name;
   shared routing automatically restores the original bot identity.
   Telegram response feedback supports native live drafts in private
-  chats, typing-only feedback, or an operator-controlled off mode. v0.24.55
-  aligns thread status dots at the right edge, sharing the hover/focus action
-  slot on desktop and keeping separate non-overlapping actions on touch screens.
+  chats, typing-only feedback, or an operator-controlled off mode. v0.24.56
+  includes exact message IDs in notification links so native clients can open
+  the conversation at the message that triggered the notification.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -80,7 +80,7 @@ provides:
         recipients_field: recipient_user_ids
         title: "New message in {conversation_title}"
         body: "{preview}"
-        link: "?chat={conversation_id}"
+        link: "?chat={conversation_id}&message_id={message_id}"
         group_by: conversation_id
         defaults: { in_app: true, tab: true, desktop: false, mobile: false }
         filters:
@@ -96,7 +96,7 @@ provides:
         recipients_field: recipient_user_ids
         title: "Approval needed in {conversation_title}"
         body: "{preview}"
-        link: "?chat={conversation_id}"
+        link: "?chat={conversation_id}&message_id={message_id}"
         group_by: conversation_id
         defaults: { in_app: true, tab: true, desktop: false, mobile: false }
         filters:
@@ -112,7 +112,7 @@ provides:
         recipients_field: recipient_user_ids
         title: "Alert in {conversation_title}"
         body: "{preview}"
-        link: "?chat={conversation_id}"
+        link: "?chat={conversation_id}&message_id={message_id}"
         group_by: conversation_id
         defaults: { in_app: true, tab: true, desktop: false, mobile: false }
         filters:
@@ -128,7 +128,7 @@ provides:
         recipients_field: recipient_user_ids
         title: "Report in {conversation_title}"
         body: "{preview}"
-        link: "?chat={conversation_id}"
+        link: "?chat={conversation_id}&message_id={message_id}"
         group_by: conversation_id
         defaults: { in_app: true, tab: true, desktop: false, mobile: false }
         filters:
@@ -261,7 +261,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.55, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.56, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

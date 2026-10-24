@@ -58,7 +58,7 @@ func TestConversationManifestDeclaresRecipientNotifications(t *testing.T) {
 		if !n.Defaults.InApp || !n.Defaults.Tab || n.Defaults.Desktop || n.Defaults.Mobile {
 			t.Fatalf("%s defaults = %+v", event.Name, n.Defaults)
 		}
-		if n.GroupBy != "conversation_id" || n.Link != "?chat={conversation_id}" {
+		if n.GroupBy != "conversation_id" || n.Link != "?chat={conversation_id}&message_id={message_id}" {
 			t.Fatalf("%s routing = group %q link %q", event.Name, n.GroupBy, n.Link)
 		}
 	}
@@ -109,6 +109,9 @@ func TestAppendPublishesPrivateRecipientScopedNotification(t *testing.T) {
 	}
 	if got := notificationRecipientIDs(t, event); len(got) != 2 || got[0] != 1 || got[1] != 2 {
 		t.Fatalf("recipients = %v, want [1 2]", got)
+	}
+	if event.Data["conversation_id"] != conv.ID || event.Data["message_id"] != float64(msg.ID) {
+		t.Fatalf("event must identify the notification target: %#v", event.Data)
 	}
 	if event.Data["preview"] != "A private update" {
 		t.Fatalf("preview = %#v", event.Data["preview"])

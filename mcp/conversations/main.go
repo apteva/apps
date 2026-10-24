@@ -29,7 +29,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Embed the source installer manifest so runtime metadata cannot drift.
+// Embed the source installer manifest, including notification deep links,
+// so installed and runtime metadata cannot drift.
 //
 //go:embed apteva.yaml
 var manifestYAML string
