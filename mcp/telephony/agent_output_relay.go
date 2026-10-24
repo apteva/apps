@@ -11,7 +11,7 @@ import (
 // This is a bounded read-ahead allowance, not a second playback reserve. It lets
 // the reader observe cancellation while the renderer admits a pressured batch.
 // The queue never changes media cadence; the carrier pacer remains authoritative.
-const agentOutputReadAheadBytes = 24000 // 500 ms of PCM16/24 kHz, including in-flight delivery
+const agentOutputReadAheadBytes = 24000 // 500 ms plus one batch bounded by the negotiated backlog
 
 type agentRelayOutput struct {
 	metadata []byte
@@ -45,7 +45,7 @@ func (l *agentCoreLink) enqueueOutput(m agentRelayOutput) error {
 		return nil
 	}
 	pending := l.outputBytes.Add(int64(n))
-	if pending > agentOutputReadAheadBytes {
+	if pending > l.maxOutputBytes || int64(n) > l.maxBatchBytes {
 		l.outputBytes.Add(-int64(n))
 		l.outputDiscarded(n)
 		if m.control.ItemID == "" || l.interrupt == nil {

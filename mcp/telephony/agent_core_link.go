@@ -59,7 +59,13 @@ type agentLinkMessage struct {
 	data []byte
 	at   time.Time
 }
+type agentCoreLinkOptions struct {
+	rejects       func(realtimeBridgeControl) bool
+	maxBatchBytes int64
+}
 type agentCoreLink struct {
+	maxOutputBytes int64
+	maxBatchBytes  int64
 	net.Conn
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -177,23 +183,28 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 		}
 		return next, nil
 	}
-	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) })
+	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) }, maxBatchBytes: int64(session.profile.BacklogMS) * 48})
 	session.mu.Lock()
 	session.link = l
 	session.mu.Unlock()
 	return l
 }
 
-func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl), reject ...func(realtimeBridgeControl) bool) *agentCoreLink {
+func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl), options ...agentCoreLinkOptions) *agentCoreLink {
 	client, peer := net.Pipe()
 	ctx, cancel := context.WithCancel(parent)
 	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), control: make(chan agentLinkMessage, 16), interrupt: interrupt}
 	l.output = make(chan agentRelayOutput, 64)
 	l.outputControl = make(chan agentRelayOutput, 16)
 	l.outputProgress = make(chan struct{}, 1)
-	if len(reject) > 0 {
-		l.rejects = reject[0]
+	l.maxBatchBytes = 48000
+	if len(options) > 0 {
+		l.rejects = options[0].rejects
+		if options[0].maxBatchBytes > 0 {
+			l.maxBatchBytes = options[0].maxBatchBytes
+		}
 	}
+	l.maxOutputBytes = agentOutputReadAheadBytes + l.maxBatchBytes
 	l.epoch.Store(1)
 	l.connected.Store(true)
 	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide}

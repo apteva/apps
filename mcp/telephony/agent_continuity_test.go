@@ -648,7 +648,7 @@ func TestAgentCoreLinkInterruptBypassesBlockedPCMDelivery(t *testing.T) {
 	defer p.Close()
 	s := continuousAgentFixture()
 	frame := realtimeBridgeControl{ItemID: "reply", Generation: 1}
-	link := newAgentCoreLink(ctx, c, func(context.Context) (net.Conn, error) { return nil, io.EOF }, func(c realtimeBridgeControl) { s.cancel(c.ItemID, c.Generation) }, func(c realtimeBridgeControl) bool { return s.rejects(c.ItemID, c.Generation) })
+	link := newAgentCoreLink(ctx, c, func(context.Context) (net.Conn, error) { return nil, io.EOF }, func(c realtimeBridgeControl) { s.cancel(c.ItemID, c.Generation) }, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return s.rejects(c.ItemID, c.Generation) }})
 	defer link.Close()
 	done := make(chan error, 1)
 	started := time.Now()
@@ -671,5 +671,45 @@ func TestAgentCoreLinkInterruptBypassesBlockedPCMDelivery(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("interrupt waited for PCM delivery")
+	}
+}
+
+func TestAgentCoreLinkPreservesVariableProviderBatches(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, p := net.Pipe()
+	defer p.Close()
+	batches := [][]byte{make([]byte, 960), make([]byte, 4800), make([]byte, 38400)}
+	for batch := range batches {
+		for i := range batches[batch] {
+			batches[batch][i] = byte(batch + i)
+		}
+	}
+	go func() {
+		for i, pcm := range batches {
+			metadata, _ := json.Marshal(realtimeBridgeControl{Type: "audio.frame", ItemID: strconv.Itoa(i), Generation: 1, AudioEndMS: len(pcm) * 1000 / 48000})
+			if wsutil.WriteServerMessage(p, ws.OpText, metadata) != nil {
+				return
+			}
+			if wsutil.WriteServerMessage(p, ws.OpBinary, pcm) != nil {
+				return
+			}
+		}
+		<-ctx.Done()
+	}()
+	link := newAgentCoreLink(ctx, c, func(context.Context) (net.Conn, error) { return nil, io.EOF }, nil)
+	defer link.Close()
+	for i, want := range batches {
+		meta, op, err := wsutil.ReadServerData(link)
+		if err != nil || op != ws.OpText || !bytes.Contains(meta, []byte(`"item_id":"`+strconv.Itoa(i)+`"`)) {
+			t.Fatal("metadata order", string(meta), err)
+		}
+		got, op, err := wsutil.ReadServerData(link)
+		if err != nil || op != ws.OpBinary || !bytes.Equal(got, want) {
+			t.Fatal("provider batch changed", i, len(got), err)
+		}
+	}
+	if link.snapshot().OutputOmittedMS != 0 {
+		t.Fatal(link.snapshot())
 	}
 }

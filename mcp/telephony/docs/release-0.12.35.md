@@ -15,8 +15,10 @@ connection with received media restores the retry budget for a later incident. T
 protocol/policy rejection and cancellation are fenced. Exhaustion does not issue
 carrier streaming restart commands. No carrier resources or settings change.
 
-A separate bounded output reader/delivery path stages at most 500 ms of PCM
-(including in-flight delivery), without adding a mandatory playback wait.
+A separate bounded output reader/delivery path permits 500 ms of PCM read-ahead plus one in-flight batch capped by the
+configured playback backlog, without adding a mandatory playback wait. This
+preserves valid 600/800 ms provider chunks; the carrier queue and 200 ms pressure
+grace remain independently bounded.
 Interrupts fence their IDs before local delivery, even behind queued PCM.
 Staging exhaustion is explicit scoped overflow; it cannot grow an unbounded
 queue or silently remove words.
