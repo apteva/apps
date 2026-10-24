@@ -111,8 +111,8 @@ func decodeResponse[T any](t *testing.T, response *httptest.ResponseRecorder) T 
 
 func TestManifestExposesDashboardPanel(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.3.0" {
-		t.Fatalf("manifest version=%q, want 0.3.0", manifest.Version)
+	if manifest.Version != "0.3.1" {
+		t.Fatalf("manifest version=%q, want 0.3.1", manifest.Version)
 	}
 	if len(manifest.Provides.UIPanels) != 1 {
 		t.Fatalf("ui panels=%d, want 1", len(manifest.Provides.UIPanels))

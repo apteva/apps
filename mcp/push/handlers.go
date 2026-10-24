@@ -253,6 +253,10 @@ func (a *App) handleAdminTestDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) dispatch(w http.ResponseWriter, d *delivery) {
+	if err := a.store.db.QueryRow(`SELECT instance_ref FROM grants WHERE id = ?`, d.GrantID).Scan(&d.InstanceRef); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not resolve delivery origin")
+		return
+	}
 	device, err := a.store.deviceByID(d.DeviceID)
 	if err != nil || device.Status != "active" {
 		finished, _ := a.store.finishDelivery(d.ID, "failed", "", "device is not active")
@@ -351,7 +355,7 @@ func (a *App) requireGrant(w http.ResponseWriter, r *http.Request) (*grant, bool
 }
 
 func validDeliveryType(value string) bool {
-	return value == "approval" || value == "alert" || value == "report" || value == "test"
+	return value == "notification" || value == "approval" || value == "alert" || value == "report" || value == "test"
 }
 
 func validEnvironment(value string) bool {

@@ -38,8 +38,9 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *deliv
 		tool = "send_notification"
 	}
 	data := map[string]any{
-		"type":    d.Type,
-		"item_id": d.ItemID,
+		"type":         d.Type,
+		"item_id":      d.ItemID,
+		"instance_ref": d.InstanceRef,
 	}
 	if d.ProjectID != "" {
 		data["project_id"] = d.ProjectID
@@ -81,6 +82,8 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *deliv
 
 func notificationCopy(typ string) (string, string) {
 	switch typ {
+	case "notification":
+		return "New app notification", "Open Apteva to view it."
 	case "approval":
 		return "Approval required", "Open Apteva to review."
 	case "alert":
