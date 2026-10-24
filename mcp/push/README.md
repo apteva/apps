@@ -1,5 +1,10 @@
 # Push
 
+Version 0.3.1 accepts generic app `notification` deliveries alongside legacy
+approvals, alerts and reports. Its database migration preserves registered
+devices, encrypted tokens, grants and delivery history. Notification text stays
+generic; clients resolve `instance_ref`, `project_id` and `item_id` after opening.
+
 Push is a small, self-hostable relay between Apteva instances and Apple Push
 Notification service (APNs). It intentionally sends generic notification copy;
 private inbox content remains on the user's Apteva instance.

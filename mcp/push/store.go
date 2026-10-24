@@ -32,6 +32,7 @@ type grant struct {
 }
 
 type delivery struct {
+	InstanceRef    string `json:"instance_ref,omitempty"`
 	ID             string `json:"id"`
 	GrantID        string `json:"-"`
 	DeviceID       string `json:"device_id"`
