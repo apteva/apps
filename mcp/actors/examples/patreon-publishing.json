@@ -412,7 +412,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -421,12 +421,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -436,7 +437,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -446,7 +448,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -456,7 +459,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -475,24 +479,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -569,7 +571,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -823,7 +825,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1265,7 +1267,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1372,7 +1374,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1685,7 +1687,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -1694,12 +1696,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -1709,7 +1712,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1719,7 +1723,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1729,7 +1734,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1748,24 +1754,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -1839,7 +1843,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2267,7 +2271,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2627,7 +2631,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -2636,12 +2640,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -2651,7 +2656,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2661,7 +2667,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2671,7 +2678,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2690,24 +2698,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -2781,7 +2787,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -3209,7 +3215,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -3540,7 +3546,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -3549,12 +3555,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -3563,7 +3570,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3573,7 +3581,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3583,7 +3592,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3602,24 +3612,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -3698,7 +3706,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -4016,7 +4024,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -4025,12 +4033,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -4039,7 +4048,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4049,7 +4059,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4059,7 +4070,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4078,24 +4090,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -4174,7 +4184,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -4455,7 +4465,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -4464,12 +4474,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -4478,7 +4489,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4488,7 +4500,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4498,7 +4511,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4517,24 +4531,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -4660,7 +4672,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -4984,7 +4996,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -4993,12 +5005,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -5007,7 +5020,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5017,7 +5031,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5027,7 +5042,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5046,24 +5062,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -5142,7 +5156,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -5375,7 +5389,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -5384,12 +5398,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -5399,7 +5414,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5409,7 +5425,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5419,7 +5436,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5438,24 +5456,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -5529,7 +5545,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -5957,7 +5973,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6212,7 +6228,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -6221,12 +6237,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -6236,7 +6253,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -6246,7 +6264,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -6256,7 +6275,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -6275,24 +6295,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -6366,7 +6384,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6794,7 +6812,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7044,7 +7062,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -7053,12 +7071,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -7067,7 +7086,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7077,7 +7097,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7087,7 +7108,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7106,24 +7128,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -7249,7 +7269,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -7559,7 +7579,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -7568,12 +7588,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -7582,7 +7603,8 @@
             "text": "Select tiers",
             "exact": true,
             "som_only": true
-          }
+          },
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7592,7 +7614,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7602,7 +7625,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -7621,24 +7645,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -7717,7 +7739,7 @@
               "attribute": "value"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "required": true,
               "attribute": "aria-checked",
@@ -7987,7 +8009,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -7996,12 +8018,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -8011,7 +8034,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -8021,7 +8045,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -8031,7 +8056,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -8050,24 +8076,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -8144,7 +8168,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8398,7 +8422,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8840,7 +8864,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8947,7 +8971,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9236,7 +9260,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9440,7 +9464,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9666,7 +9690,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9870,7 +9894,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10031,7 +10055,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10221,7 +10245,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10425,7 +10449,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10586,7 +10610,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10726,7 +10750,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10930,7 +10954,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11154,7 +11178,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11358,7 +11382,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11517,7 +11541,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11707,7 +11731,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11911,7 +11935,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -12070,7 +12094,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,

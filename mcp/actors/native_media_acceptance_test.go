@@ -19,7 +19,10 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 	json.Unmarshal(raw, &template)
 	for _, audience := range []string{"public", "paid"} {
 		for _, kind := range []string{"image", "gallery", "image_copy", "prepared_image"} {
-			for _, mode := range []string{"nested_blurred", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save", "duplicate_dom_editor"} {
+			for _, mode := range []string{"nested_blurred", "modern_membership", "modern_sale_on", "modern_missing_toggle", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save", "duplicate_dom_editor"} {
+				if mode == "modern_missing_toggle" && audience == "public" {
+					continue
+				}
 				if (kind != "gallery" && mode == "reordered") || (kind != "image_copy" && (mode == "lost_save" || mode == "duplicate_dom_editor")) {
 					continue
 				}
@@ -76,6 +79,15 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					editor := `<body><nav aria-label="Creator navigation"><button aria-label="Create post"></button></nav><a aria-label="Your page" href="https://www.patreon.com/c/creator">Creator</a><span>Saved</span><textarea aria-label="Title">Exact Title</textarea><div aria-label="Text input field for post content" role="textbox" contenteditable="true"><p>Exact first paragraph.</p><p>Exact second paragraph.</p></div>` + radio + `<input id="sell-post-toggle" aria-checked="false"><button data-tag="make-a-post-action-publish">Publish</button>` + menu + `<section><div><img data-tag="gallery-image" class="new-generated-class blurred-layer" src="https://different.example/rendered"></div><div data-tag="preview-thumbnail-container"><span><img alt="Preview" src="https://another.example/thumb"></span></div></section></body>`
 
 					switch mode {
+					case "modern_membership", "modern_sale_on", "modern_missing_toggle":
+						replacement := `<input id="paid-members-toggle" aria-checked="true">`
+						if mode == "modern_missing_toggle" {
+							replacement = ""
+						}
+						if mode == "modern_sale_on" {
+							replacement += `<input id="sell-post-toggle" aria-checked="true">`
+						}
+						editor = strings.Replace(editor, `<input id="sell-post-toggle" aria-checked="false">`, replacement, 1)
 					case "duplicate_dom_editor":
 						editor = strings.Replace(editor, "</body>", `<div aria-label="Text input field for post content" role="textbox" contenteditable="true"><p>Exact first paragraph.</p><p>Exact second paragraph.</p></div></body>`, 1)
 					case "wrong_creator":
@@ -162,7 +174,7 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					queued, _ := claimActorRun(ctx)
 					a.executeActorRun(context.Background(), ctx, queued)
 					result, _ := getActorRun(ctx, q.(map[string]any)["run_id"].(int64))
-					if mode == "nested_blurred" {
+					if mode == "nested_blurred" || mode == "modern_membership" {
 						if result["status"] != "completed" {
 							t.Fatal(result["error"])
 						}

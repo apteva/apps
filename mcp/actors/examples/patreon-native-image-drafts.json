@@ -394,7 +394,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -403,12 +403,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -418,7 +419,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -428,7 +430,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -438,7 +441,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -457,24 +461,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -551,7 +553,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -805,7 +807,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1247,7 +1249,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1354,7 +1356,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -1604,7 +1606,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -1613,12 +1615,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -1628,7 +1631,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1638,7 +1642,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1648,7 +1653,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -1667,24 +1673,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -1761,7 +1765,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2015,7 +2019,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2457,7 +2461,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2564,7 +2568,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -2843,7 +2847,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -2852,12 +2856,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -2867,7 +2872,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2877,7 +2883,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2887,7 +2894,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -2906,24 +2914,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -2997,7 +3003,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -3425,7 +3431,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -3722,7 +3728,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -3731,12 +3737,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -3746,7 +3753,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3756,7 +3764,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3766,7 +3775,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -3785,24 +3795,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -3876,7 +3884,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -4304,7 +4312,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -4630,7 +4638,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -4639,12 +4647,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -4654,7 +4663,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4664,7 +4674,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4674,7 +4685,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -4693,24 +4705,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -4784,7 +4794,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -5212,7 +5222,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -5509,7 +5519,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -5518,12 +5528,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -5533,7 +5544,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5543,7 +5555,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5553,7 +5566,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -5572,24 +5586,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -5663,7 +5675,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6091,7 +6103,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6278,7 +6290,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6482,7 +6494,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6706,7 +6718,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -6910,7 +6922,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7069,7 +7081,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7259,7 +7271,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7463,7 +7475,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7622,7 +7634,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7762,7 +7774,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -7966,7 +7978,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8192,7 +8204,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8396,7 +8408,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8557,7 +8569,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8747,7 +8759,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -8951,7 +8963,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9112,7 +9124,7 @@
               "required": true
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9258,7 +9270,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9467,7 +9479,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9742,7 +9754,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -9951,7 +9963,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10150,7 +10162,8 @@
         },
         {
           "action": "goto",
-          "url": "{{post_edit_url}}"
+          "url": "{{post_edit_url}}",
+          "locator": {}
         },
         {
           "action": "wait_for",
@@ -10183,14 +10196,14 @@
           },
           "readability": false,
           "min_items": 1,
-          "max_items": 1
+          "max_items": 1,
+          "locator": {}
         },
         {
           "action": "assert_values",
           "assertions": {
             "current_url": {
-              "equals_exact": "{{post_edit_url}}",
-              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?[0-9]+/edit(?:\\?.*)?$"
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
             },
             "composer_title": {
               "equals_exact": ""
@@ -10198,11 +10211,13 @@
             "composer_body": {
               "equals_exact": ""
             }
-          }
+          },
+          "locator": {}
         },
         {
           "action": "goto",
-          "url": "https://www.patreon.com/api/posts/{{post_id}}?include=images&fields[post]=title,published_at,scheduled_for,patreon_url,post_type"
+          "url": "https://www.patreon.com/api/posts/{{post_id}}?include=images&fields[post]=title,published_at,scheduled_for,patreon_url,post_type",
+          "locator": {}
         },
         {
           "action": "wait_for",
@@ -10212,7 +10227,8 @@
               "selector": "pre"
             }
           ],
-          "timeout_ms": 30000
+          "timeout_ms": 30000,
+          "locator": {}
         },
         {
           "action": "observe_json",
@@ -10239,7 +10255,8 @@
                 "required": true
               }
             }
-          }
+          },
+          "locator": {}
         },
         {
           "action": "assert_values",
@@ -10256,11 +10273,13 @@
             "empty_attachment_ids": {
               "equals_exact": []
             }
-          }
+          },
+          "locator": {}
         },
         {
           "action": "goto",
-          "url": "{{post_edit_url}}"
+          "url": "{{post_edit_url}}",
+          "locator": {}
         },
         {
           "action": "wait_for",
@@ -10293,14 +10312,14 @@
           },
           "readability": false,
           "min_items": 1,
-          "max_items": 1
+          "max_items": 1,
+          "locator": {}
         },
         {
           "action": "assert_values",
           "assertions": {
             "current_url": {
-              "equals_exact": "{{post_edit_url}}",
-              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?[0-9]+/edit(?:\\?.*)?$"
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
             },
             "composer_title": {
               "equals_exact": ""
@@ -10308,7 +10327,8 @@
             "composer_body": {
               "equals_exact": ""
             }
-          }
+          },
+          "locator": {}
         },
         {
           "text": "{{post_title}}",
@@ -10334,7 +10354,7 @@
         {
           "action": "set_checked",
           "locator": {
-            "selector": "input[type=\"radio\"][value=\"paid\"]"
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
           },
           "checked": true
         },
@@ -10343,12 +10363,13 @@
           "locator": {
             "selector": "#sell-post-toggle"
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "assert_element",
           "locator": {
-            "selector": "#sell-post-toggle[aria-checked=\"false\"]"
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
           }
         },
         {
@@ -10358,7 +10379,8 @@
             "exact": true,
             "som_only": true
           },
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -10368,7 +10390,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": true
+          "checked": true,
+          "optional": true
         },
         {
           "action": "set_checked",
@@ -10378,7 +10401,8 @@
             "exact": true,
             "som_only": true
           },
-          "checked": false
+          "checked": false,
+          "optional": true
         },
         {
           "action": "observe_page",
@@ -10409,24 +10433,22 @@
           "items": "body",
           "fields": {
             "sale_off_before_audience": {
-              "selector": "#sell-post-toggle",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
-              "pattern": "^false$"
+              "pattern": "^(false|true)$"
             },
             "sell_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             },
             "sell_this_post": {
               "selector": "#sell-post-toggle",
               "type": "boolean",
               "attribute": "aria-checked",
-              "required": true,
               "pattern": "^false$"
             }
           },
@@ -10506,7 +10528,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -10946,7 +10968,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11045,7 +11067,8 @@
             "current_url": {
               "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
             }
-          }
+          },
+          "locator": {}
         }
       ],
       "output_schema": {},
@@ -11156,7 +11179,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11365,7 +11388,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11527,7 +11550,7 @@
               "pattern": "^Publish$"
             },
             "sale_off_evidence": {
-              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
               "type": "text",
               "attribute": "aria-checked",
               "required": true,
@@ -11635,6 +11658,972 @@
         "audience",
         "tier_labels",
         "request_id"
+      ]
+    },
+    "attach_image_to_draft": {
+      "limits": {
+        "max_pages": 100,
+        "max_items": 500,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{creator_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "nav[aria-label=\"Creator navigation\"] button[aria-label=\"Create post\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "creator_identity": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?([^/?]+)(?:[/?]|$)"
+            },
+            "creator_url": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "creator_identity": {
+              "equals_exact": "{{expected_creator_identity}}"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{post_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "selector_present",
+              "selector": "[aria-label=\"Text input field for post content\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text"
+            },
+            "composer_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "all": true,
+              "separator": "\n\n",
+              "preserve_line_breaks": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "locator": {}
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
+            },
+            "composer_title": {
+              "equals_exact": "{{post_title}}"
+            },
+            "composer_body": {
+              "equals_exact": "{{post_body}}"
+            }
+          },
+          "locator": {}
+        },
+        {
+          "action": "goto",
+          "url": "https://www.patreon.com/api/posts/{{post_id}}?include=images&fields[post]=title,published_at,scheduled_for,patreon_url,post_type",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "pre"
+            }
+          ],
+          "timeout_ms": 30000,
+          "locator": {}
+        },
+        {
+          "action": "observe_json",
+          "json_document": {
+            "selector": "pre",
+            "fields": {
+              "empty_post_id": {
+                "path": "/data/id",
+                "required": true
+              },
+              "empty_is_draft": {
+                "path": "/data/attributes/published_at",
+                "required": true,
+                "is_null": true
+              },
+              "empty_is_unscheduled": {
+                "path": "/data/attributes/scheduled_for",
+                "required": true,
+                "is_null": true
+              },
+              "empty_attachment_ids": {
+                "path": "/data/relationships/images/data",
+                "select": "/id",
+                "required": true
+              }
+            }
+          },
+          "locator": {}
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "empty_post_id": {
+              "equals_exact": "{{post_id}}"
+            },
+            "empty_is_draft": {
+              "equals_exact": true
+            },
+            "empty_is_unscheduled": {
+              "equals_exact": true
+            },
+            "empty_attachment_ids": {
+              "equals_exact": []
+            }
+          },
+          "locator": {}
+        },
+        {
+          "action": "goto",
+          "url": "{{post_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "selector_present",
+              "selector": "[aria-label=\"Text input field for post content\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text"
+            },
+            "composer_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "all": true,
+              "separator": "\n\n",
+              "preserve_line_breaks": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "locator": {}
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
+            },
+            "composer_title": {
+              "equals_exact": "{{post_title}}"
+            },
+            "composer_body": {
+              "equals_exact": "{{post_body}}"
+            }
+          },
+          "locator": {}
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
+          },
+          "checked": true
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "#sell-post-toggle"
+          },
+          "checked": false,
+          "optional": true
+        },
+        {
+          "action": "assert_element",
+          "locator": {
+            "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Select tiers",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "text": "Select all tiers",
+            "role": "menuitemcheckbox",
+            "exact": true,
+            "som_only": true
+          },
+          "checked": true,
+          "optional": true
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "text": "Select all tiers",
+            "role": "menuitemcheckbox",
+            "exact": true,
+            "som_only": true
+          },
+          "checked": false,
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "tier_picker_text": {
+              "selector": "[role=\"menu\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "role": "menuitemcheckbox",
+            "exact": true,
+            "som_only": true,
+            "text_suffix_pattern": "(?:[\\s\\p{Zs}]+(?:US\\$|\\$|€|£|USD|EUR|GBP)[\\s\\p{Zs}]*[0-9]+(?:[.,][0-9]+)*[\\s\\p{Zs}]*/[\\s\\p{Zs}]*(?:month|year))?(?:[\\s\\p{Zs}]+(?:[·•⸱][\\s\\p{Zs}]*)?[0-9]+(?:,[0-9]{3})*[\\s\\p{Zs}]+members?)?(?:[\\s\\p{Zs}]+[·•⸱][\\s\\p{Zs}]+Unpublished)?"
+          },
+          "checked": true,
+          "labels": "{{tier_labels}}"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "sale_off_before_audience": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"],input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "sell_post": {
+              "selector": "#sell-post-toggle",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "pattern": "^false$"
+            },
+            "sell_this_post": {
+              "selector": "#sell-post-toggle",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "pattern": "^false$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "key": "ESC",
+          "action": "key",
+          "locator": {}
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "input[type=\"radio\"][value=\"{{audience}}\"]"
+          },
+          "checked": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Image",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Image",
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 700
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "browse",
+            "exact": true,
+            "som_only": true
+          },
+          "source_url": "{{image_url}}",
+          "filename": "{{image_filename}}",
+          "mime_type": "{{image_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Saved"
+            },
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "url_from_field": "current_url",
+          "url_match_pattern": "^https://www\\.patreon\\.com/[^/?]+/posts/(?:[^/?]*-)?([0-9]+)/edit(?:\\?[^#]*)?$",
+          "action": "goto",
+          "url": "https://www.patreon.com/api/posts/$1?include=images,access_rules.tier&fields[media]=file_name,state,media_type,size_bytes&fields[post]=title,published_at,scheduled_for,patreon_url,post_type&fields[access-rule]=access_rule_type&fields[reward]=title",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "pre"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "json_document": {
+            "selector": "pre",
+            "fields": {
+              "uploaded_access_types": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/access_rule_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_attachment_filenames": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/file_name",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_attachment_ids": {
+                "unique": true,
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/id"
+              },
+              "uploaded_attachment_sizes": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/size_bytes",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_attachment_states": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/state",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_attachment_types": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/media_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_first_attachment_id": {
+                "path": "/data/relationships/images/data/0/id",
+                "required": true
+              },
+              "uploaded_is_draft": {
+                "is_null": true,
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "uploaded_is_unscheduled": {
+                "is_null": true,
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              },
+              "uploaded_post_id": {
+                "path": "/data/id",
+                "required": true
+              },
+              "uploaded_post_path": {
+                "path": "/data/attributes/patreon_url",
+                "required": true
+              },
+              "uploaded_post_title": {
+                "path": "/data/attributes/title",
+                "required": true
+              },
+              "uploaded_post_type": {
+                "path": "/data/attributes/post_type",
+                "required": true
+              },
+              "uploaded_published_at": {
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "uploaded_saved_tier_labels": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/title",
+                "resolve": {
+                  "through": [
+                    "/relationships/tier/data"
+                  ],
+                  "drop_null": true,
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "uploaded_scheduled_for": {
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              }
+            }
+          },
+          "action": "observe_json",
+          "locator": {}
+        },
+        {
+          "url_from_field": "current_url",
+          "action": "goto",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "uploaded_attachment_filenames": {
+              "equals_exact": [
+                "{{image_filename}}"
+              ]
+            },
+            "uploaded_attachment_states": {
+              "equals_exact": [
+                "ready"
+              ]
+            },
+            "uploaded_attachment_types": {
+              "equals_exact": [
+                "image"
+              ]
+            },
+            "uploaded_is_draft": {
+              "equals_exact": true
+            },
+            "uploaded_is_unscheduled": {
+              "equals_exact": true
+            },
+            "uploaded_post_type": {
+              "equals_exact": "image_file"
+            }
+          }
+        },
+        {
+          "url_from_field": "current_url",
+          "url_match_pattern": "^https://www\\.patreon\\.com/[^/?]+/posts/(?:[^/?]*-)?([0-9]+)/edit(?:\\?[^#]*)?$",
+          "action": "goto",
+          "url": "https://www.patreon.com/api/posts/$1?include=images,access_rules.tier&fields[media]=file_name,state,media_type,size_bytes&fields[post]=title,published_at,scheduled_for,patreon_url,post_type&fields[access-rule]=access_rule_type&fields[reward]=title",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "pre"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "json_document": {
+            "selector": "pre",
+            "fields": {
+              "access_types": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/access_rule_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_filenames": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/file_name",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_ids": {
+                "unique": true,
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/id"
+              },
+              "attachment_sizes": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/size_bytes",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_states": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/state",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_types": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/media_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "first_attachment_id": {
+                "path": "/data/relationships/images/data/0/id",
+                "required": true
+              },
+              "is_draft": {
+                "is_null": true,
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "is_unscheduled": {
+                "is_null": true,
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              },
+              "post_id": {
+                "path": "/data/id",
+                "required": true
+              },
+              "post_path": {
+                "path": "/data/attributes/patreon_url",
+                "required": true
+              },
+              "post_title": {
+                "path": "/data/attributes/title",
+                "required": true
+              },
+              "post_type": {
+                "path": "/data/attributes/post_type",
+                "required": true
+              },
+              "published_at": {
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "saved_tier_labels": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/title",
+                "resolve": {
+                  "through": [
+                    "/relationships/tier/data"
+                  ],
+                  "drop_null": true,
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "scheduled_for": {
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              }
+            }
+          },
+          "action": "observe_json",
+          "locator": {}
+        },
+        {
+          "url_from_field": "current_url",
+          "action": "goto",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "attachment_filenames": {
+              "equals_exact": [
+                "{{image_filename}}"
+              ]
+            },
+            "attachment_ids": {
+              "equals_field": "uploaded_attachment_ids"
+            },
+            "attachment_states": {
+              "equals_exact": [
+                "ready"
+              ]
+            },
+            "attachment_types": {
+              "equals_exact": [
+                "image"
+              ]
+            },
+            "is_draft": {
+              "equals_exact": true
+            },
+            "is_unscheduled": {
+              "equals_exact": true
+            },
+            "post_type": {
+              "equals_exact": "image_file"
+            }
+          }
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"],body:has(#paid-members-toggle[aria-checked=\"true\"]):not(:has(#sell-post-toggle)) input[value=\"paid\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "audience": {
+              "equals_exact": "{{audience}}",
+              "matches": "^(public|paid)$"
+            },
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?[0-9]+/edit(?:\\?.*)?$"
+            },
+            "saved_body": {
+              "equals_exact": "{{post_body}}"
+            },
+            "saved_title": {
+              "equals_exact": "{{post_title}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Select tiers",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience_with_valid_tiers": {
+              "selector": "input[value=\"public\"][aria-checked=\"true\"],body:has([role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\"))) input[value=\"paid\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{audience}}\\E$"
+            },
+            "saved_tiers": {
+              "selector": "[role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\")),input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "all": true,
+              "separator": "\n"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_tiers": {
+              "equals_set": "{{tier_labels}}"
+            }
+          }
+        },
+        {
+          "key": "ESC",
+          "action": "key",
+          "locator": {}
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "post_id": {
+              "equals_exact": "{{post_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?\\Q{{post_id}}\\E/edit(?:\\?.*)?$"
+            }
+          },
+          "locator": {}
+        }
+      ],
+      "output_schema": {},
+      "required_explicit_inputs": [
+        "post_id",
+        "post_edit_url",
+        "post_title",
+        "post_body",
+        "image_url",
+        "image_filename",
+        "image_mime_type",
+        "audience",
+        "tier_labels"
       ]
     }
   },
