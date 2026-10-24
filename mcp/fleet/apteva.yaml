@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.11
+version: 0.10.12
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -57,6 +57,9 @@ description: |
 
   v0.10.11 fixes hosted direct-ingress preparation by keeping the outer tenant
   operation lock for the full cutover attempt without acquiring it twice.
+  v0.10.12 adds stable-host deployment and recovery, durable startup/deployment
+  progress, serving-version and active-slot verification, and compatibility-gated
+  rollback while preserving legacy tenant startup. Uses app-sdk v0.107.0.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -186,7 +189,7 @@ provides:
     - name: tenant_migrate_finalize
       description: "Inspect or permanently remove a stopped source retained by tenant_migrate. Omit confirm for a read-only preview; confirm=true deletes only the recorded old host/path after verifying it is not current. Args: tenant_id, confirm?."
     - name: tenant_update
-      description: "Per-tenant apteva version update. Installs and validates the requested CLI/server/core binaries in Fleet's version cache and records target_version. Active tenants restart and must report the exact requested health version; stopped tenants remain stopped until tenant_start. Other tenants are unaffected. Args: tenant_id, version? (empty → npm latest)."
+      description: "Per-tenant Apteva update. Stable-host tenants deploy through the private host protocol with durable progress and serving-version/active-slot verification; retry the same version after interruption. Legacy tenants restart exact binaries with compatibility-gated rollback. Stopped tenants only prepare the target until tenant_start. Args: tenant_id, version? (empty → npm latest)."
     - name: tenant_check_updates
       description: "Read-only: return npm's apteva@latest plus every local tenant whose current_version is behind. Args: (none)."
     - name: tenant_set_target_version
@@ -216,7 +219,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.11
+    ref: fleet/v0.10.12
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

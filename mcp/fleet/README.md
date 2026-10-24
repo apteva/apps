@@ -4,7 +4,46 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 ## Current behavior
 
-**Fleet v0.10.11** retains the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.76.0**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
+**Fleet v0.10.12** supports the stable host lifecycle and pins **app-sdk v0.107.0**, verified as a descendant of the previous SDK release. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the earlier changes, validation and rollout requirements.
+
+### Stable host lifecycle
+
+Fleet detects the tenant's private `host/control.sock` and `host/state.json`.
+Updates verify the installation identity, copy an immutable release into
+`<tenant-home>/versions/<version>/`, then submit `/deploy` and poll `/status`.
+Success and host-managed rollback require both `/api/health` (`ok=true`, exact
+CLI release version) and an attested active slot matching the host's committed
+version. Cached Fleet metadata alone never proves a running version.
+
+Deployment identity and phase changes survive Fleet restart and appear in the
+tenant's operation and event timeline. Deployment polling is bounded to 15
+minutes. A lost submission response, timeout, unavailable socket, changed job
+identity or `recovery_required` preserves the operation fence and leaves the
+host running. Retry `tenant_update` with the same version to reconcile the saved
+job without submitting it again. The panel's **Reconcile host operation** action
+only clears the fence after verifying a terminal host state and serving version;
+it does not stop processes or restore database snapshots.
+
+Host-managed startup launches the recorded host directly in a tenant-owned
+wrapper, avoiding the CLI's independent 15-second child timer. Fleet tracks
+startup for up to four minutes, allowing the host's default three-minute
+activation window. A prepared target is deployed only after the host recovers
+its committed version. Unresolved startup preserves the host and recovery fence.
+This does not repair server-side activation or callback deadlocks.
+
+Legacy installations continue using explicit server startup; upgrading the npm
+package does not silently convert them to host management. They retain their
+30-second local / 60-second hosted startup budgets. Updates preflight the
+candidate before stopping the tenant. Automatic rollback requires a matching
+report with unchanged schema and rollback-safe data, followed by another safe
+preflight of the previous release against the current database. Missing reports
+allow forward updates but disable automatic rollback; unverified downgrades are
+refused. No fallback uses an arbitrary CLI from PATH or restores a backup over
+live writes. Stopped tenants still only prepare a target version.
+
+Legacy-to-host conversion remains an explicit maintenance operation. Fleet
+conservatively retains its shared version cache while a local host journal or
+socket exists, because running host and recovery binaries can still refer to it.
 
 Version 0.10.11 fixes hosted direct-ingress preparation. The tool now keeps its
 outer tenant operation lease through Instances preflight and the cutover, while

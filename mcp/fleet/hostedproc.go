@@ -362,9 +362,29 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1"
 	}
 	runtimeEnv := fmt.Sprintf("APTEVA_HOME=%s APTEVA_SERVER_BIN=%s APTEVA_CORE_BIN=%s", sh(dataDir), sh(runtime.Server), sh(runtime.Core))
+	startupTenant := &Tenant{Slug: spec.Slug, Kind: KindLocal, InstanceID: spec.InstanceID, ConfigDir: dataDir, BaseURL: fmt.Sprintf("http://%s:%d", spec.InstanceIP, spec.Port), Status: StatusStarting}
+	if tenant, _, lookupErr := a.store.getBySlug(spec.Slug); lookupErr == nil {
+		startupTenant.ID = tenant.ID
+		startupTenant.TargetVersion = tenant.TargetVersion
+	}
+	journal, hosted, err := a.hostRequest(context.Background(), ctx, startupTenant, "JOURNAL", "", nil)
+	if err != nil {
+		return "", "", fmt.Errorf("read stable host journal: %w", err)
+	}
+	launchBin := runtime.CLI
+	legacyArgs := " --server-bin " + sh(runtime.Server)
+	launch := fmt.Sprintf("%s --data-dir %s --port %d --no-browser%s", sh(launchBin), sh(dataDir), spec.Port, legacyArgs)
+	if hosted {
+		runtimeEnv = ""
+		hostEnv := append(stableHostLaunchEnv([]string{"APTEVA_HOME=" + dataDir}, journal), "APTEVA_CORE_BIN=")
+		for _, kv := range hostEnv {
+			runtimeEnv += " " + sh(kv)
+		}
+		launch = "sh -c " + sh(stableHostLaunchScript) + " fleet-host " + sh(dataDir) + " " + sh(journal.HostBinary)
+	}
 	inner := fmt.Sprintf(
-		`exec env %s %s %s %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
-		envArgs, quarantineEnv, runtimeEnv, sh(runtime.CLI), sh(dataDir), spec.Port, sh(logPath),
+		`exec env %s %s %s %s >>%s 2>&1`,
+		envArgs, quarantineEnv, runtimeEnv, launch, sh(logPath),
 	)
 	spawnCmd := fmt.Sprintf(`
 set -eu
@@ -399,8 +419,10 @@ echo "$SID" > "$DATA_DIR/fleet.sid"
 	baseURL = fmt.Sprintf("http://%s:%d", spec.InstanceIP, spec.Port)
 
 	// 4) Wait for /api/health to respond.
-	if err := a.waitForHostedReadyVersion(ctx, spec.InstanceID, spec.Port, expectedVersion, 60*time.Second); err != nil {
-		_ = stopHostedTenant(ctx, spec.InstanceID, spec.Slug, spec.Port, 10*time.Second)
+	if err := a.waitTenantStartup(context.Background(), ctx, startupTenant, expectedVersion, 60*time.Second, nil); err != nil {
+		if !errors.Is(err, errStableHostPending) {
+			_ = stopHostedTenant(ctx, spec.InstanceID, spec.Slug, spec.Port, 10*time.Second)
+		}
 		// Capture log tail to make the failure useful.
 		tail, _, _ := instanceRunCommand(ctx, spec.InstanceID,
 			fmt.Sprintf(`tail -50 %s 2>/dev/null || true`, sh(logPath)), 5)

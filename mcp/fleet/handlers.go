@@ -610,7 +610,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// has a users table, so registration isn't in setup mode and we
 	// don't need to scrape a token. The stored api_key remains valid.
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
-	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	spawnCtx, cancel := context.WithTimeout(context.Background(), tenantLifecycleTimeout)
 	defer cancel()
 	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false /* freshSetup */)
 	if err != nil {

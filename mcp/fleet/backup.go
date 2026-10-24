@@ -424,7 +424,7 @@ func (a *App) restartTenantAfterBackup(ctx *sdk.AppCtx, t *Tenant) error {
 	if port == 0 {
 		return nil
 	}
-	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	spawnCtx, cancel := context.WithTimeout(context.Background(), tenantLifecycleTimeout)
 	defer cancel()
 	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.CurrentVersion), port, false)
 	if err != nil {
