@@ -1,0 +1,59 @@
+MATCHED CONVERSATIONS / PHONE LATENCY REPLAY
+
+Run from mcp/telephony. No Docker, deployed agents, provider number settings,
+webhooks or PSTN calls are used. Helper binaries execute the actual local
+Core audio lane and Server realtime proxy; Telephony's actual carrier handlers
+are driven by a loopback carrier. The PCM baseline uses Conversations' audio
+wire format. This does not execute a browser, the Conversations HTTP UI, SIP
+signaling, or the live Twilio network, and does not measure handset acoustics.
+
+Healthy deterministic transport gate:
+  bun run benchmark:agent-audio --core /path/core --server /path/server \
+    --output /new/results/path --latency true
+
+The fixed provider responds only after the same input sample position reaches
+it (500ms after the saved clip). Check direct PCM, Twilio inbound/outbound,
+PCMA SIP inbound/outbound and G.722 SIP inbound/outbound. Gate added Core input
+wait at 150ms and total synthetic reply delay at 400..1200ms. The 500ms response
+offset is a test stimulus, not a production wait introduced by Telephony.
+
+Real model gate (paid, opt-in; supply OPENAI_API_KEY securely at runtime):
+  TELEPHONY_LATENCY_SAMPLES=2 bun run benchmark:agent-audio \
+    --core /path/core --server /path/server --output /new/live/results \
+    --latency true --live true
+
+Use the same saved French recording, prompt and model for raw PCM, Twilio in
+both directions, and PCM round-tripped through the phone codec without the
+Telephony bridge. Default is gpt-live-1 / brise. TELEPHONY_LATENCY_MODEL can
+select another OpenAI realtime model for a separate controlled experiment.
+
+Verify the expected spoken word (mardi), not merely the first backchannel.
+First output before the question ends is reported separately. The expected
+answer transcript timestamp is not a measurement of handset playback.
+Both post-question output and the expected-answer transcript must arrive
+within 2s; otherwise the live test fails. Repeat samples are bounded to 1..5.
+
+Known failing recovery scenario (must remain visibly failing until fixed):
+  TELEPHONY_LATENCY_PAUSE_MS=400 bun run benchmark:agent-audio \
+    --core /path/core --server /path/server --output /new/paused/results \
+    --latency true
+
+This pauses the fixture provider's first input admission, while real Core
+intake continues. It models an input-sender interruption, not a claim that a
+real OpenAI socket can block for 400ms despite its write deadline. On the
+24 October sources it leaves roughly 390..413ms of input delay after the pause
+and fails all seven input-latency gates. This demonstrates queue recovery
+behavior; it does not prove what initiated the production call's input delay.
+
+Reports retain source hashes, fixture logs, Core telemetry and Telephony audio
+diagnostics. Baseline observations on 24 October:
+  deterministic direct PCM:          502ms
+  deterministic Twilio:              524..556ms
+  deterministic SIP:                 586..610ms
+  real-model PCM (two samples):      1176..1475ms
+  real-model Twilio inbound:         1195..1778ms
+  real-model Twilio outbound:        1120..1257ms
+
+These short local tests establish a normal reference and a reproducible bad
+queue path. They do not certify all model turns, load levels, real carrier
+delivery or the production call's full 2..5s response delays as resolved.

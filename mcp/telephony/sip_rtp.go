@@ -722,6 +722,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	core = a.resilientAgentBridge(session.ctx, row, core, agentBridgeResponse(core), agentSession)
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
+	coreWriter.audioRate.Store(int64(agentSession.byteRate()))
 	coreWriter.sipResidenceBudget.Store(int64(time.Duration(session.playbackPolicy.resolved().MaxAgeMS) * time.Millisecond))
 	media.coreForwardTelemetry.Store(coreWriter)
 	defer media.coreForwardTelemetry.CompareAndSwap(coreWriter, nil)
@@ -748,7 +749,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
 	inputResampler := newPCMResampler(media.sampleRate(), 24000)
-	outputResampler := newPCMResampler(24000, media.sampleRate())
+	agentInput := newAgentMediaConverter(agentSession, media.sampleRate(), true)
+	agentOutput := newAgentMediaConverter(agentSession, media.sampleRate(), false)
 	playback := &sipPlaybackState{}
 	pacerPolicy := agentSession.policy()
 	pacerMode := "buffered"
@@ -911,7 +913,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				if humanHub != nil {
 					queueSIPHumanAudio(coreWriter, pcm24, framer.frameArrival, uint32(jitter.generation.Load()))
 				} else {
-					coreWriter.queueAudioAt(pcm16ToBytes(pcm24), 0, framer.frameArrival)
+					coreWriter.queueAudioAt(agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""), 0, framer.frameArrival)
 				}
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
@@ -944,7 +946,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
-			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/48000), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
+			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/int64(coreWriter.mediaRate())), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
 		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()
@@ -964,6 +966,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
@@ -1005,7 +1011,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
-		pcm8 := outputResampler.Process(bytesToPCM16(data))
+		pcm8 := agentOutput.output(data)
 		if len(pcm8) == 0 {
 			continue
 		}

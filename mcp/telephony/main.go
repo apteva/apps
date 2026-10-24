@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.37
+version: 0.12.38
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -393,7 +393,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.37
+    ref: telephony/v0.12.38
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -761,7 +761,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
-		{Name: "telephony_agent_audio_profile", Description: "Read, save or reset an agent audio policy for new calls. Project-local scopes: project, inbound/outbound, agent/id, route/id, account/id or number/E.164. Config: mode auto/traditional/continuous, interruption auto/local/provider/off, preprocessing analysis_only/noise_suppression, speech_start_ms, send_ahead_ms, backlog_ms. ttl_seconds optionally expires a test without restarting or changing active calls.", InputSchema: schemaObject(map[string]any{"scope": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "reset": map[string]any{"type": "boolean"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}}, nil), HandlerCtx: a.toolAgentAudioProfile},
+		{Name: "telephony_agent_audio_profile", Description: "Read, save or reset an agent audio policy for new calls. Project-local scopes: project, inbound/outbound, agent/id, route/id, account/id or number/E.164. Config: mode auto/traditional/continuous, interruption auto/local/provider/off, preprocessing analysis_only/noise_suppression, transport websocket/webrtc (Core to provider), format pcm16/g711_ulaw/g711_alaw (bridge audio), speech_start_ms, send_ahead_ms, backlog_ms. ttl_seconds optionally expires a test without restarting or changing active calls.", InputSchema: schemaObject(map[string]any{"scope": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "reset": map[string]any{"type": "boolean"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}}, nil), HandlerCtx: a.toolAgentAudioProfile},
 		{Name: "telephony_sip_audio_profile", Description: "Read, save or reset a bounded SIP audio profile for new calls. Scope by optional direction, route_id or outbound carrier_connection_id/phone_number. config includes preset (balanced/resilient/reference/custom), codecs and rtp_playback. expires_at optionally reverts a test within 24h. No carrier changes, restart or active-call mutation.", InputSchema: schemaObject(map[string]any{"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}}, "route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "expires_at": map[string]any{"type": "string"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}, "reset": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolSIPAudioProfile},
 		{
 			Name: "telephony_place_call",
@@ -1403,6 +1403,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	callbackSecret := newSecret()
 	now := time.Now().UTC()
 	spawnCall := callRow{
+		ProjectID: projectID, AgentID: agentID, CarrierConnectionID: bound.ConnectionID,
 		ID:          callID,
 		Direction:   "outbound",
 		CarrierSlug: carrierSlug,
@@ -1412,8 +1413,13 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	}
 	aiPolicy := projectAICallPolicy(ctx)
 	effectiveDirective := aiPolicyDirective(directive, aiPolicy)
+	mediaProfile, err := a.resolveAgentAudioForCall(&spawnCall)
+	if err != nil {
+		return mcpError("agent audio profile unavailable: " + err.Error()), nil
+	}
 
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
+		RealtimeMedia:              mediaProfile.mediaRequest(),
 		AgentID:                    agentID,
 		ThreadID:                   threadID,
 		Directive:                  effectiveDirective,
@@ -1444,6 +1450,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	// the call, so the bridge route must already be able to resolve
 	// callID -> audio_bridge_url.
 	row := callRow{
+		preparedAgentAudio:  &mediaProfile,
 		ID:                  callID,
 		ThreadID:            threadID,
 		Direction:           "outbound",
@@ -4374,8 +4381,9 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
-	AIPolicy        *aiCallPolicy   // transient, frozen before carrier placement
-	ApplicationUser *phonePrincipal // transient placement context, persisted separately before dialing
+	preparedAgentAudio *agentAudioProfile
+	AIPolicy           *aiCallPolicy   // transient, frozen before carrier placement
+	ApplicationUser    *phonePrincipal // transient placement context, persisted separately before dialing
 
 	RingOffers               []ringOffer
 	ID                       string

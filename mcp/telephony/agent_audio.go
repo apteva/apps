@@ -18,13 +18,17 @@ import (
 const agentAudioHeader = "X-Apteva-Audio-Session"
 
 type agentAudioCapabilities struct {
-	Version             int  `json:"version"`
-	Continuous          bool `json:"continuous_conversation"`
-	InputSpeechEvents   bool `json:"input_speech_events"`
-	LocalInterruption   bool `json:"local_interruption_required"`
-	ScopedCancellation  bool `json:"scoped_cancellation"`
-	ReceiptEvidence     bool `json:"receipt_evidence"`
-	PlaybackFlowControl bool `json:"playback_flow_control"`
+	Format               string `json:"audio_format,omitempty"`
+	SampleRate           int    `json:"sample_rate,omitempty"`
+	Channels             int    `json:"channels,omitempty"`
+	Version              int    `json:"version"`
+	Continuous           bool   `json:"continuous_conversation"`
+	InputSpeechEvents    bool   `json:"input_speech_events"`
+	ProviderInterruption bool   `json:"provider_interruption"`
+	LocalInterruption    bool   `json:"local_interruption_required"`
+	ScopedCancellation   bool   `json:"scoped_cancellation"`
+	ReceiptEvidence      bool   `json:"receipt_evidence"`
+	PlaybackFlowControl  bool   `json:"playback_flow_control"`
 }
 
 type agentPlaybackKey struct {
@@ -107,6 +111,9 @@ func (a *App) newAgentAudioSession(row *callRow, response *http.Response) (*agen
 			return nil, errors.New("unsupported agent audio capability contract")
 		}
 	}
+	if err := s.validateMedia(); err != nil {
+		return nil, err
+	}
 	if (p.Mode == "continuous" || s.capabilities.Continuous) && (!s.capabilities.ScopedCancellation || !s.capabilities.ReceiptEvidence) {
 		return nil, errors.New("continuous agent audio requires a compatible Core and Server")
 	}
@@ -131,7 +138,7 @@ func (s *agentAudioSession) configureFrontend(f *carrierAudioFrontend) {
 	f.analysisOnly = s.profile.Preprocessing == "analysis_only"
 	f.speechStartMS = s.profile.SpeechStartMS
 	mode := s.profile.Interruption
-	if mode == "local" || mode == "auto" && s.capabilities.LocalInterruption {
+	if mode == "local" || mode == "auto" && s.capabilities.LocalInterruption && !s.capabilities.ProviderInterruption {
 		f.mode = localBargeInFallback
 	} else {
 		f.mode = localBargeInOff

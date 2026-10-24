@@ -234,9 +234,14 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 		if err = a.registerAIPolicy(ctx, row, threadID, aiPolicy, time.Now().UTC()); err != nil {
 			return fail(fmt.Errorf("persist AI call policy: %w", err))
 		}
+		mediaProfile, err := a.pinAgentAudioProfile(row)
+		if err != nil {
+			return fail(err)
+		}
 		effectiveDirective := aiPolicyDirective(directive, aiPolicy)
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
-			AgentID: row.AgentID, ThreadID: threadID, Directive: effectiveDirective, Voice: voice,
+			RealtimeMedia: mediaProfile.mediaRequest(),
+			AgentID:       row.AgentID, ThreadID: threadID, Directive: effectiveDirective, Voice: voice,
 			CapabilityMode: sdk.RealtimeCapabilitiesInheritAgent, CallContext: realtimeCallContext(*row),
 			TurnDetection: turnDetection, Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
 		})

@@ -212,6 +212,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
+	coreWriter.audioRate.Store(int64(agentSession.byteRate()))
 	agentSession.configureWriter(carrierWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -241,7 +242,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 
 	streamSidCh := make(chan string, 1)
 	inputResampler := carrierInputResampler(cfg.InputCodec)
-	outputResampler := carrierOutputResampler(cfg.OutputCodec)
+	agentInput := newAgentMediaConverter(agentSession, carrierCodecSampleRate(cfg.InputCodec), true)
+	agentOutput := newAgentMediaConverter(agentSession, carrierCodecSampleRate(cfg.OutputCodec), false)
 	playback := newTwilioPlaybackTracker()
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
@@ -397,7 +399,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, fmt.Sprint(f.Media.Timestamp), fmt.Sprint(f.Media.Chunk), bridge.generation)
 					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
 				} else {
-					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+					err = coreWriter.Write(ws.OpBinary, agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""))
 				}
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
@@ -543,6 +545,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
@@ -577,7 +583,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			}
 			continue
 		}
-		if op != ws.OpBinary || len(data) == 0 || len(data)%2 != 0 {
+		if op != ws.OpBinary || len(data) == 0 || agentSession.mediaFormat() == "pcm16" && len(data)%2 != 0 {
 			continue
 		}
 		if !agentSession.accept(nextFrame) {
@@ -585,15 +591,11 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
-		pcm24 := bytesToPCM16(data)
-		pcmCarrier := pcm24
-		if outputResampler != nil {
-			pcmCarrier = outputResampler.Process(pcm24)
-		}
+		pcmCarrier := agentOutput.output(data)
 		if len(pcmCarrier) == 0 {
 			continue
 		}
-		packets := packetizer.addAt(pcmCarrier, len(pcm24), nextFrame, sourceAt)
+		packets := packetizer.addAt(pcmCarrier, agentSession.pcm24Samples(len(data)), nextFrame, sourceAt)
 		if agentSession.continuous() {
 			packets = append(packets, packetizer.flushPartial()...)
 		}
@@ -801,6 +803,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
+	coreWriter.audioRate.Store(int64(agentSession.byteRate()))
 	agentSession.configureWriter(vonageWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -889,6 +892,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	go func() {
 		defer cancel()
 		inputResampler := newPCMResampler(16000, 24000)
+		agentInput := newAgentMediaConverter(agentSession, 16000, true)
 		for {
 			data, op, err := readWebSocketData(vonageReadConn, ws.StateServerSide, vonageWriter, bridge.received)
 			if err != nil {
@@ -925,7 +929,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 				continue
 			}
 			tap.publishPCM(0, pcm24)
-			err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+			err = coreWriter.Write(ws.OpBinary, agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""))
 			if err != nil {
 				bridge.socketError(mediaCloseLegCore, "write", err)
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
@@ -939,7 +943,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	a.bindAIPlayback(row, bridge.generation, func() bool { return false })
-	outputResampler := newPCMResampler(24000, 16000)
+	agentOutput := newAgentMediaConverter(agentSession, 16000, false)
 	listenResampler := newPCMResampler(16000, 24000)
 	for {
 		select {
@@ -949,6 +953,10 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
@@ -968,14 +976,14 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			}
 			continue
 		}
-		if op != ws.OpBinary || len(data) == 0 || len(data)%2 != 0 {
+		if op != ws.OpBinary || len(data) == 0 || agentSession.mediaFormat() == "pcm16" && len(data)%2 != 0 {
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
 		if !sourceAt.IsZero() && time.Since(sourceAt) >= liveAudioMaxAge {
 			continue
 		}
-		pcm16 := outputResampler.Process(bytesToPCM16(data))
+		pcm16 := agentOutput.output(data)
 		err = writeVonageFramesObserved(vonageWriter, pcm16ToBytes(pcm16), func(frame []byte) {
 			a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
 			if tap.hasListeners() {

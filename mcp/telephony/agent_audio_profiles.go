@@ -14,6 +14,8 @@ import (
 )
 
 type agentAudioProfile struct {
+	Transport     string `json:"transport,omitempty"`
+	Format        string `json:"format,omitempty"`
 	Mode          string `json:"mode"`
 	Interruption  string `json:"interruption"`
 	Preprocessing string `json:"preprocessing"`
@@ -23,6 +25,12 @@ type agentAudioProfile struct {
 }
 
 func resolveAgentAudioProfile(p agentAudioProfile) (agentAudioProfile, error) {
+	if p.Transport != "" && p.Transport != "websocket" && p.Transport != "webrtc" {
+		return p, errors.New("transport must be websocket or webrtc")
+	}
+	if p.Format != "" && p.Format != "pcm16" && p.Format != "g711_ulaw" && p.Format != "g711_alaw" {
+		return p, errors.New("invalid agent audio format")
+	}
 	if p.Mode == "" {
 		p.Mode = "auto"
 	}
@@ -132,6 +140,9 @@ func (a *App) pinAgentAudioProfile(row *callRow) (agentAudioProfile, error) {
 	err := a.db().db.QueryRow(`SELECT config_json FROM agent_audio_call_profiles WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		p, e := a.resolveAgentAudioForCall(row)
+		if row.preparedAgentAudio != nil {
+			p, e = *row.preparedAgentAudio, nil
+		}
 		if e != nil {
 			return p, e
 		}

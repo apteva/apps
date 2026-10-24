@@ -107,7 +107,7 @@ func (p *websocketWriterPump) disconnectInfo(err error) audioDisconnectInfo {
 		LastPingSentAt: audioActivityTime(p.activity.pingSent.Load()), LastPongSentAt: audioActivityTime(p.activity.pongSent.Load()),
 		LastAudioReadAt: audioActivityTime(p.activity.audioRead.Load()), LastAudioWriteAt: audioActivityTime(p.activity.audioWrite.Load())}
 	p.audioMu.Lock()
-	d.ServerQueuedMS = p.audioBytes * 1000 / 48000
+	d.ServerQueuedMS = p.audioBytes * 1000 / p.mediaRate()
 	d.MaxWriteMS = p.transportStats.MaxWriteMS
 	p.audioMu.Unlock()
 	if c, ok := p.conn.(*rtcHubConn); ok && c.disconnect != nil {
