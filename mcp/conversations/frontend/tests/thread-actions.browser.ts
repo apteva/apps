@@ -78,3 +78,42 @@ for(const [surface,width] of [["panel",1280],["panel",390],["widget-browser",128
   if(surface==="panel")await page.screenshot({path:`/private/tmp/conversations-thread-layout-${width}.png`});
  });
 }
+
+for(const surface of ["panel","widget-browser","history"] as const)for(const status of ["active","unread"] as const){
+ if(surface==="history" && status==="unread")continue; // History currently exposes activity, not unread dots.
+ test(`${surface}: ${status} dot sits at the right edge and shares the desktop hover/focus menu slot`,async({page,request})=>{
+  await request.post("/reset");await request.post("/seed-panel",{data:chats});
+  await request.post(status==="active"?"/seed-activity":"/seed-unread",{data:status==="active"?["thread-two"]:{chat_id:"thread-two",count:1}});
+  await page.emulateMedia({reducedMotion:"reduce"});
+  await page.goto(`/?host=dashboard${surface==="history"?"":`&surface=${surface}`}&theme=terminal`);
+  if(surface==="history")await page.getByRole("button",{name:"History",exact:true}).click();
+  await page.mouse.move(1200,700);
+  const row=page.locator('[data-thread-actions="thread-two"]'),dot=row.locator('.chat-thread-working-dot,.chat-thread-unread-dot'),trigger=row.locator('.thread-actions-trigger');
+  await expect(dot).toHaveCount(1);await expect(dot).toBeVisible();
+  expect(await dot.evaluate(el=>{const b=el.closest("button")!.getBoundingClientRect();return b.right-el.getBoundingClientRect().right;})).toBeLessThanOrEqual(17);
+  expect(await trigger.evaluate(el=>getComputedStyle(el).opacity)).toBe("0");
+  if(surface==="panel")await row.screenshot({path:`/private/tmp/conversations-thread-dot-desktop-${status}.png`});
+  await row.hover();await expect(dot).toBeHidden();expect(await trigger.evaluate(el=>getComputedStyle(el).opacity)).toBe("1");
+  await row.locator("button").first().focus();await page.mouse.move(1200,700);await expect(dot).toBeHidden();
+  expect(await trigger.evaluate(el=>getComputedStyle(el).opacity)).toBe("1");
+  await trigger.click();await expect(page.getByRole("menu")).toBeVisible();
+ });
+}
+
+test.describe("touch thread status",()=>{
+ test.use({hasTouch:true,viewport:{width:390,height:720}});
+ for(const status of ["active","unread"] as const)test(`${status} dot and menu stay visible without overlap`,async({page,request})=>{
+  await request.post("/reset");await request.post("/seed-panel",{data:chats.map(c=>({...c,title:c.title+" with a longer subject",lead_agent_name:"Voice Agent",updated_at:new Date().toISOString()}))});
+  await request.post(status==="active"?"/seed-activity":"/seed-unread",{data:status==="active"?["thread-two"]:{chat_id:"thread-two",count:1}});
+  await page.emulateMedia({reducedMotion:"reduce"});await page.goto("/?host=dashboard&surface=panel&theme=terminal");
+  const row=page.locator('[data-thread-actions="thread-two"]'),dot=row.locator('.chat-thread-working-dot,.chat-thread-unread-dot'),trigger=row.locator('.thread-actions-trigger');
+  await expect(dot).toBeVisible();expect(await trigger.evaluate(el=>getComputedStyle(el).opacity)).toBe("1");
+  const geometry=await row.evaluate(el=>{
+   const button=el.querySelector("button")!,dot=el.querySelector('.chat-thread-working-dot,.chat-thread-unread-dot')!.getBoundingClientRect(),menu=el.querySelector('.thread-actions-trigger')!.getBoundingClientRect(),title=button.querySelector('.truncate')!.getBoundingClientRect();
+   return {rightInset:button.getBoundingClientRect().right-dot.right,dotLeft:dot.left,menuRight:menu.right,menuLeft:menu.left,titleRight:title.right};
+  });
+  expect(geometry.rightInset).toBeLessThanOrEqual(17);expect(geometry.dotLeft).toBeGreaterThan(geometry.menuRight);expect(geometry.titleRight).toBeLessThanOrEqual(geometry.menuLeft);
+  await row.screenshot({path:`/private/tmp/conversations-thread-dot-touch-${status}.png`});
+  await trigger.tap();await expect(page.getByRole("menu")).toBeVisible();
+ });
+});

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.55 — 2026-10-24
+
+- Pin App SDK v0.106.0, verified as the latest release by commit ancestry.
+
+- Align working and unread dots with the right edge of thread rows. Desktop hover or keyboard focus temporarily replaces the dot with the three-dot menu without shifting the title.
+- Keep the dot and menu separately visible on narrow and touch screens, preserving title truncation, full-width metadata, existing pulse behavior, and context-menu access.
+- Add browser regressions for active/unread positions, desktop hover/focus, touch separation, and supported panel/widget/history indicators.
+
 ## 0.24.54 — 2026-10-24
 
 - Restore the full available width for thread metadata and timestamps. Reserve context-menu space only on the title line in the panel, agent conversation browser, and history.

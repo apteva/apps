@@ -350,12 +350,24 @@
 .apteva-conversations .chat-image-caption small {display:block;color:var(--color-text-muted,#aaa);font-size:11px}
 
 /* Reserve the options target on the heading only; metadata uses the full row. */
-.thread-action-row > button:first-child > .thread-row-heading { padding-inline-end: 2rem; }
+.thread-action-row > button:first-child > .thread-row-heading { position: relative; padding-inline-end: 2rem; }
+/* The status occupies the row's far-right slot. On desktop the hover/focus
+   menu temporarily uses that same slot, without moving or covering the dot. */
+.thread-action-row > button:first-child > .thread-row-heading > :is(.chat-thread-working-dot, .chat-thread-unread-dot) {
+ position: absolute; inset-inline-end: 0; inset-block: 0; margin-block: auto;
+}
+.thread-action-row:is(:hover, :focus-within) > button:first-child > .thread-row-heading > :is(.chat-thread-working-dot, .chat-thread-unread-dot) { visibility: hidden; }
 .thread-actions-trigger { opacity: 0; }
 .thread-action-row:hover > .thread-actions-trigger,
 .thread-action-row:focus-within > .thread-actions-trigger { opacity: 1; }
 .thread-action-dialog::backdrop { background: rgb(0 0 0 / .55); }
-@media (max-width: 767px), (pointer: coarse) { .thread-actions-trigger { opacity: 1; } }
+@media (max-width: 767px), (pointer: coarse) {
+ .thread-actions-trigger { opacity: 1; }
+ /* Touch has no hover: keep status at the edge and actions beside it. */
+ .thread-action-row:has(> button > .thread-row-heading > :is(.chat-thread-working-dot, .chat-thread-unread-dot)) > .thread-actions-trigger { right: 2rem; }
+ .thread-action-row > button:first-child > .thread-row-heading:has(> :is(.chat-thread-working-dot, .chat-thread-unread-dot)) { padding-inline-end: 3.5rem; }
+ .thread-action-row:is(:hover, :focus-within) > button:first-child > .thread-row-heading > :is(.chat-thread-working-dot, .chat-thread-unread-dot) { visibility: visible; }
+}
 
 /* The same suggestion appears as ghost text on desktop and touch screens.
    Its native button semantics expose acceptance to assistive technology. */
