@@ -17,11 +17,73 @@ import (
 	"time"
 
 	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 )
 
 func continuousAgentFixture() *agentAudioSession {
 	p, _ := resolveAgentAudioProfile(agentAudioProfile{})
 	return &agentAudioSession{profile: p, capabilities: agentAudioCapabilities{Version: 1, Continuous: true, LocalInterruption: true, ScopedCancellation: true, ReceiptEvidence: true}, cancelled: map[agentPlaybackKey]bool{}}
+}
+
+func TestAgentAudioPlaybackCapacityNegotiation(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		flow, receipts bool
+		mode           string
+		backlog, want  int
+	}{
+		{"new_core", true, true, "auto", 1000, 1000},
+		{"small_pinned_profile", true, true, "continuous", 200, 200},
+		{"large_pinned_profile", true, true, "auto", 2000, 2000},
+		{"older_core", false, true, "auto", 1000, 0},
+		{"traditional", true, true, "traditional", 1000, 0},
+		{"no_receipts", true, false, "auto", 1000, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := continuousAgentFixture()
+			s.capabilities.PlaybackFlowControl, s.capabilities.ReceiptEvidence = tc.flow, tc.receipts
+			s.profile.Mode, s.profile.BacklogMS = tc.mode, tc.backlog
+			if s.playbackCapacityMS() != tc.want || s.snapshot().PlaybackCapacityMS != tc.want {
+				t.Fatal("wrong pinned playback capacity", s.snapshot())
+			}
+			if !tc.receipts {
+				if err := s.ready(nil, "estimated"); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			client, server := net.Pipe()
+			defer server.Close()
+			defer client.Close()
+			w := newWebSocketWriterPump(client, ws.StateClientSide)
+			defer w.Stop()
+			done := make(chan error, 1)
+			go func() { done <- s.ready(w, "estimated") }()
+			_ = server.SetReadDeadline(time.Now().Add(time.Second))
+			raw, op, err := wsutil.ReadClientData(server)
+			if err != nil || op != ws.OpText {
+				t.Fatal(op, err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			var ready map[string]any
+			if json.Unmarshal(raw, &ready) != nil || ready["type"] != "playback.ready" {
+				t.Fatal(string(raw))
+			}
+			capacity, present := ready["capacity_ms"]
+			if tc.want == 0 && present || tc.want > 0 && capacity != float64(tc.want) {
+				t.Fatal(string(raw))
+			}
+		})
+	}
+	var human *agentAudioSession
+	if human.playbackCapacityMS() != 0 {
+		t.Fatal("human transport opted in")
+	}
+	if err := human.ready(nil, "estimated"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestAgentAudioProfilesPinnedAndIsolated(t *testing.T) {

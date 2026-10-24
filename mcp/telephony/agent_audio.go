@@ -18,12 +18,13 @@ import (
 const agentAudioHeader = "X-Apteva-Audio-Session"
 
 type agentAudioCapabilities struct {
-	Version            int  `json:"version"`
-	Continuous         bool `json:"continuous_conversation"`
-	InputSpeechEvents  bool `json:"input_speech_events"`
-	LocalInterruption  bool `json:"local_interruption_required"`
-	ScopedCancellation bool `json:"scoped_cancellation"`
-	ReceiptEvidence    bool `json:"receipt_evidence"`
+	Version             int  `json:"version"`
+	Continuous          bool `json:"continuous_conversation"`
+	InputSpeechEvents   bool `json:"input_speech_events"`
+	LocalInterruption   bool `json:"local_interruption_required"`
+	ScopedCancellation  bool `json:"scoped_cancellation"`
+	ReceiptEvidence     bool `json:"receipt_evidence"`
+	PlaybackFlowControl bool `json:"playback_flow_control"`
 }
 
 type agentPlaybackKey struct {
@@ -47,15 +48,16 @@ type agentClearReceipt struct {
 }
 
 type agentAudioSnapshot struct {
-	CoreLink         *agentCoreLinkSnapshot        `json:"core_link,omitempty"`
-	PlaybackPressure agentPlaybackPressureSnapshot `json:"playback_pressure"`
-	Capabilities     agentAudioCapabilities        `json:"capabilities"`
-	Profile          agentAudioProfile             `json:"profile"`
-	Evidence         string                        `json:"progress_evidence"`
-	LateFrames       int64                         `json:"late_cancelled_frames"`
-	SilentFrames     int64                         `json:"silent_frames"`
-	Clears           []agentClearReceipt           `json:"clears,omitempty"`
-	ReplyTiming      agentReplyTimingSnapshot      `json:"reply_timing"`
+	CoreLink           *agentCoreLinkSnapshot        `json:"core_link,omitempty"`
+	PlaybackPressure   agentPlaybackPressureSnapshot `json:"playback_pressure"`
+	Capabilities       agentAudioCapabilities        `json:"capabilities"`
+	PlaybackCapacityMS int                           `json:"playback_capacity_ms,omitempty"`
+	Profile            agentAudioProfile             `json:"profile"`
+	Evidence           string                        `json:"progress_evidence"`
+	LateFrames         int64                         `json:"late_cancelled_frames"`
+	SilentFrames       int64                         `json:"silent_frames"`
+	Clears             []agentClearReceipt           `json:"clears,omitempty"`
+	ReplyTiming        agentReplyTimingSnapshot      `json:"reply_timing"`
 }
 
 type agentAudioSession struct {
@@ -188,8 +190,22 @@ func (s *agentAudioSession) ready(w *websocketWriterPump, evidence string) error
 	s.mu.Lock()
 	s.evidence = evidence
 	s.mu.Unlock()
-	raw, _ := json.Marshal(map[string]any{"type": "playback.ready", "version": 1, "evidence": evidence})
+	ready := map[string]any{"type": "playback.ready", "version": 1, "evidence": evidence}
+	if capacity := s.playbackCapacityMS(); capacity > 0 {
+		ready["capacity_ms"] = capacity
+	}
+	raw, _ := json.Marshal(ready)
 	return w.Write(ws.OpText, raw)
+}
+
+// Credits bound Core's outstanding audio before it reaches our relay and pacer.
+// They use the call's pinned backlog, not a new buffer or a playback delay.
+// Older Core versions and traditional/human transports keep their prior path.
+func (s *agentAudioSession) playbackCapacityMS() int {
+	if !s.continuous() || !s.capabilities.PlaybackFlowControl || !s.capabilities.ReceiptEvidence {
+		return 0
+	}
+	return s.profile.BacklogMS
 }
 func (s *agentAudioSession) progress(w *websocketWriterPump, p twilioPlaybackProgress, fallback string) error {
 	evidence := fallback
@@ -250,7 +266,7 @@ func (s *agentAudioSession) snapshot() *agentAudioSnapshot {
 		v := s.link.snapshot()
 		link = &v
 	}
-	return &agentAudioSnapshot{CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
+	return &agentAudioSnapshot{CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, PlaybackCapacityMS: s.playbackCapacityMS(), Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
 }
 
 type agentBridgeConn struct {

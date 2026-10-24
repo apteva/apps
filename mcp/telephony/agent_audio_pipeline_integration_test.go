@@ -340,6 +340,25 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				if !s.Capabilities.Continuous || !s.Capabilities.ScopedCancellation {
 					t.Fatal("capability handshake lost", s)
 				}
+				if !s.Capabilities.PlaybackFlowControl || s.PlaybackCapacityMS != s.Profile.BacklogMS {
+					t.Fatal("renderer capacity not negotiated", s)
+				}
+				// A provider burst larger than our one-second backlog must be
+				// paced by the actual Core using receipts, without deleting words.
+				beforeBurst := probe.frames.Load()
+				agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": "large-burst", "ms": 2500}, nil)
+				waitAgentPipeline(t, 6*time.Second, func() bool {
+					var stats agentPipelineStats
+					agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
+					return probe.frames.Load() >= beforeBurst+125 && stats.Pending == 0 && stats.Awaiting == 0
+				})
+				if got := probe.frames.Load() - beforeBurst; got != 125 {
+					t.Fatal("large provider burst lost or duplicated carrier frames", got)
+				}
+				burst := a.liveAgentAudio(row.ID)
+				if len(burst.Clears) != 0 || burst.PlaybackPressure.Exhausted != 0 || burst.CoreLink.OutputOmittedMS != 0 || burst.CoreLink.Reconnects != 0 {
+					t.Fatal("large provider burst overflowed or reset the bridge", burst)
+				}
 				// Reproduce the reviewed call's risk: an actual caller speaks
 				// while the renderer has only continuous silence outstanding.
 				// Silence must still flow and produce receipts, without clear.
@@ -361,7 +380,7 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				for cycle := 0; cycle < 3; cycle++ {
 					before := probe.frames.Load()
 					id := fmt.Sprintf("old-%d", cycle)
-					agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": id, "ms": 600}, nil)
+					agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": id, "ms": 1600}, nil)
 					waitAgentPipeline(t, 2*time.Second, func() bool { return probe.frames.Load() > before+2 })
 					agentFixtureJSON(t, "POST", core.url+"/interrupt", map[string]any{}, nil)
 					waitAgentPipeline(t, 2*time.Second, func() bool { return len(a.liveAgentAudio(row.ID).Clears) > cycle })
