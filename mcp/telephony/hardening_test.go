@@ -439,7 +439,7 @@ func TestPendingCallCanOnlyBeClaimedOnce(t *testing.T) {
 	}
 }
 
-func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
+func TestPushImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -448,12 +448,13 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	a := &App{installID: 42}
 
 	route := routeRow{
-		ID: "route-immediate", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		ID: "route-immediate", ProjectID: "project-a", CarrierSlug: "bandwidth", CarrierConnectionID: 9,
 		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
 		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoVoice: "marin",
 		AutoGreeting: "Hello. How can I help?",
 	}
 	call := testCall("immediate", "pending")
+	call.CarrierSlug = "bandwidth"
 	call.Direction = "inbound"
 	call.RouteID = route.ID
 	call.ThreadID = "pending-" + call.ID
@@ -761,7 +762,7 @@ func TestTwilioRouteConfigurationPreservesAndRestoresCallbacks(t *testing.T) {
 	}
 }
 
-func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
+func TestPushImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
 	platform := &answerPlatform{failCarrier: true}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -770,11 +771,12 @@ func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
 	a := &App{installID: 42}
 
 	route := routeRow{
-		ID: "route-failure", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		ID: "route-failure", ProjectID: "project-a", CarrierSlug: "bandwidth", CarrierConnectionID: 9,
 		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
 		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoGreeting: defaultInboundGreeting,
 	}
 	call := testCall("immediate-failure", "pending")
+	call.CarrierSlug = "bandwidth"
 	call.Direction = "inbound"
 	call.RouteID = route.ID
 	call.ThreadID = "pending-" + call.ID
