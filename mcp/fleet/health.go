@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,10 +168,14 @@ func (a *App) bumpFailures(app *sdk.AppCtx, t *Tenant) {
 
 func healthVersion(body []byte) string {
 	var parsed struct {
+		CLI     string `json:"cli"`
 		Version string `json:"version"`
 		Apteva  string `json:"apteva"`
 	}
 	_ = json.Unmarshal(body, &parsed)
+	if parsed.CLI != "" {
+		return strings.TrimPrefix(strings.TrimSpace(parsed.CLI), "v")
+	}
 	if parsed.Apteva != "" {
 		return strings.TrimPrefix(strings.TrimSpace(parsed.Apteva), "v")
 	}
@@ -193,6 +198,12 @@ func requireRuntimeHealthVersion(ctx context.Context, baseURL, requested string)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return body, fmt.Errorf("runtime health returned HTTP %d", resp.StatusCode)
+	}
+	var ready struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(body, &ready); err != nil || !ready.OK {
+		return body, errors.New("runtime health does not report ok=true")
 	}
 	actual := healthVersion(body)
 	requested = strings.TrimPrefix(strings.TrimSpace(requested), "v")

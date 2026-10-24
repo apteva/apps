@@ -29,6 +29,16 @@ func (a *App) retentionPlan() ([]retentionCandidate, error) {
 	for _, t := range tenants {
 		pinned[t.CurrentVersion] = true
 		pinned[t.TargetVersion] = true
+		if t.Kind == KindLocal && !t.IsHosted() {
+			// The running host or a saved recovery binary can still live in
+			// Fleet's shared cache after current/target move to a staged release.
+			// Until retention accounts for every host reference, keep that cache.
+			_, journalErr := os.Lstat(filepath.Join(t.ConfigDir, "host", "state.json"))
+			_, socketErr := os.Lstat(filepath.Join(t.ConfigDir, "host", "control.sock"))
+			if !os.IsNotExist(journalErr) || !os.IsNotExist(socketErr) {
+				canPruneVersions = false
+			}
+		}
 		if hostedTenantExpectedRunning(t.Status) && t.CurrentVersion == "" {
 			canPruneVersions = false
 		}

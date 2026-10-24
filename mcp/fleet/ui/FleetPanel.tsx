@@ -306,7 +306,15 @@ interface CredentialsReveal {
 }
 
 interface GetResp {
-  operation?: { id: string; operation: string; phase: string };
+  operation?: {
+    id: string;
+    operation: string;
+    phase: string;
+    snapshot?: {
+      host?: { job_id?: string; requested: string };
+      host_startup?: boolean;
+    };
+  };
   setup_complete?: boolean;
   tenant: Tenant;
   events: FleetEvent[] | null;
@@ -1171,6 +1179,7 @@ function TenantDetail({
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const hostOperation = !!(operation?.snapshot?.host || operation?.snapshot?.host_startup);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [supportURL, setSupportURL] = useState<{
@@ -1281,18 +1290,21 @@ function TenantDetail({
         {operation && (
           <div className="px-4 py-2 text-sm border-b border-border">
             <p>
-              {operation.operation}: {operation.phase}
+              {operation.operation}: {operation.phase.replaceAll("_", " ")}
             </p>
             <p className="text-xs text-text-dim">
               Operation {operation.id}. Progress survives closing this panel.
+              {operation.snapshot?.host?.job_id && ` Host deployment ${operation.snapshot.host.job_id}.`}
             </p>
             <ActionButton
-              label="Recover interrupted operation"
+              label={hostOperation ? "Reconcile host operation" : "Recover interrupted operation"}
               busy={!!busy}
               onClick={() => {
                 if (
                   window.confirm(
-                    "Stop all runtimes recorded by this operation and preserve their data? Recovery is rejected while an operation is still executing.",
+                    hostOperation
+                      ? "Verify the stable host and serving version, then clear the recovery fence? Reconciliation waits for a terminal host state and keeps the host running."
+                      : "Stop all runtimes recorded by this operation and preserve their data? Recovery is rejected while an operation is still executing.",
                   )
                 )
                   run("recovery", "fleet_recover_operation", {
