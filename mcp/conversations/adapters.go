@@ -435,6 +435,19 @@ func (a *App) notificationRecipients(conv *Conversation) ([]int64, error) {
 	return ids, nil
 }
 
+func conversationAlertLabel(severity string) string {
+	switch severity {
+	case "info":
+		return "Info"
+	case "warn":
+		return "Warning"
+	case "error":
+		return "Error"
+	default:
+		return "Alert"
+	}
+}
+
 func (a *App) publishConversationEvent(app *sdk.AppCtx, conv *Conversation, msg *Message) {
 	if app == nil || conv == nil || msg == nil {
 		return
@@ -453,6 +466,7 @@ func (a *App) publishConversationEvent(app *sdk.AppCtx, conv *Conversation, msg 
 		return
 	}
 	data := map[string]any{
+		"alert_label":        conversationAlertLabel(msg.Severity),
 		"conversation_id":    conv.ID,
 		"conversation_title": conv.Title,
 		"message_id":         msg.ID,

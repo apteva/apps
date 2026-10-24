@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.57 — 2026-10-24
+
+- Use Info, Warning or Error in alert notification titles through the existing
+  generic event template. Preserve recipients, body text, grouping and exact
+  message links. Existing notification history is unchanged.
+
 ## 0.24.56 — 2026-10-24
 
 - Include `message_id` alongside the conversation ID in message, approval, alert, and report notification links so native clients can target the exact message.
