@@ -144,14 +144,17 @@
         },
         {
           "action": "wait_for",
-          "locator": {},
           "conditions": [
             {
               "type": "selector_present",
               "selector": "[role=\"menu\"] [role=\"menuitem\"]"
+            },
+            {
+              "type": "selector_present",
+              "selector": "body:has(textarea[aria-label=\"Title\"]):has([aria-label=\"Text input field for post content\"])"
             }
           ],
-          "match": "all",
+          "match": "any",
           "timeout_ms": 30000
         },
         {
@@ -163,7 +166,8 @@
             "som_only": true
           },
           "expected_text": "Post",
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "wait_for",
@@ -180,6 +184,37 @@
           ],
           "match": "all",
           "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text"
+            },
+            "composer_body": {
+              "selector": "[aria-label=\"Text input field for post content\"]",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?[0-9]+/edit(?:\\?.*)?$"
+            },
+            "composer_title": {
+              "equals_exact": ""
+            },
+            "composer_body": {
+              "equals_exact": ""
+            }
+          }
         },
         {
           "text": "{{post_title}}",
@@ -1325,24 +1360,24 @@
             "tier_name": {
               "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
               "type": "text",
-              "pattern": "^(.*?)\\s*(?:Unpublished\\s+)?(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
+              "pattern": "^(.*?)\\s*(?:Unpublished\\s+)?(?:US\\$|\\$|€|£|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
             },
             "price_display": {
               "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
               "type": "text",
               "required": true,
-              "pattern": "(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
+              "pattern": "(?:US\\$|\\$|€|£|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
             },
             "monthly_price": {
               "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
               "type": "number",
-              "pattern": "(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/\\s*month"
+              "pattern": "(?:US\\$|\\$|€|£|USD|EUR|GBP)\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/\\s*month"
             },
             "currency_symbol": {
               "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
               "type": "text",
               "required": true,
-              "pattern": "(US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]"
+              "pattern": "(US\\$|\\$|€|£|USD|EUR|GBP)\\s*[0-9]"
             },
             "member_count": {
               "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
@@ -1468,14 +1503,17 @@
         },
         {
           "action": "wait_for",
-          "locator": {},
           "conditions": [
             {
               "type": "selector_present",
               "selector": "[role=\"menu\"] [role=\"menuitem\"]"
+            },
+            {
+              "type": "selector_present",
+              "selector": "body:has(textarea[aria-label=\"Title\"]):has([aria-label=\"Text input field for post content\"])"
             }
           ],
-          "match": "all",
+          "match": "any",
           "timeout_ms": 30000
         },
         {
@@ -1487,7 +1525,8 @@
             "som_only": true
           },
           "expected_text": "Post",
-          "expected_effect": "open_configuration"
+          "expected_effect": "open_configuration",
+          "optional": true
         },
         {
           "action": "wait_for",
@@ -1504,6 +1543,37 @@
           ],
           "match": "all",
           "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text"
+            },
+            "composer_body": {
+              "selector": "[aria-label=\"Text input field for post content\"]",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "current_url": {
+              "matches": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?\\Q{{expected_creator_identity}}\\E/posts/(?:[^/?]*-)?[0-9]+/edit(?:\\?.*)?$"
+            },
+            "composer_title": {
+              "equals_exact": ""
+            },
+            "composer_body": {
+              "equals_exact": ""
+            }
+          }
         },
         {
           "text": "{{post_title}}",

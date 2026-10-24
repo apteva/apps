@@ -1,0 +1,9 @@
+# Patreon composer navigation and empty image draft recovery
+
+Patreon can open a post-type menu after Create post or navigate straight to a new editor. The publishing recipes accept either observed state. Only an exact semantic Post menu item is optional; the subsequent title/body readiness, creator-specific edit URL and empty title/body assertions are mandatory. No second Create post click is used. Missing editors, wrong identities and pre-existing copy fail before filling or uploading.
+
+`prepare_empty_image_draft` fills one explicitly supplied existing post ID/edit URL. It verifies the correct creator, an empty editor, native unpublished/unscheduled state and no image attachments before changing anything. It then saves the approved copy, original image and access, reloads and verifies the native image identity and state. It cannot Publish. Patreon may add a title slug to the edit URL; the final guard binds the creator and exact native ID rather than requiring the original URL spelling.
+
+A prepared draft is independently checked with `inspect_image_draft`. Supply the verified native image IDs, original filenames and byte sizes to `publish_prepared_image_draft`, along with the exact approved copy/access and original logical request. That operation cannot create a composer, fill copy or upload media. It verifies the bound unpublished/unscheduled draft again and uses the `image_url_post` once scope with the original request ID, then requires live confirmation for that exact resource. Persist and reuse one reviewed transport key for each separately authorized preparation/publication operation. A timeout or partial preparation requires inspection of the same accepted run/resource, never a replacement or blind retry.
+
+These are Actor-definition updates supported by Actors 0.2.45. They do not require an app binary change, alter any existing creator context, or relax live predecessor, approval, due-time, audience or duplicate guards.

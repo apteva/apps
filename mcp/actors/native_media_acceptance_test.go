@@ -18,7 +18,7 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 	var template map[string]any
 	json.Unmarshal(raw, &template)
 	for _, audience := range []string{"public", "paid"} {
-		for _, kind := range []string{"image", "gallery", "image_copy"} {
+		for _, kind := range []string{"image", "gallery", "image_copy", "prepared_image"} {
 			for _, mode := range []string{"nested_blurred", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save", "duplicate_dom_editor"} {
 				if (kind != "gallery" && mode == "reordered") || (kind != "image_copy" && (mode == "lost_save" || mode == "duplicate_dom_editor")) {
 					continue
@@ -132,9 +132,24 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					var fixture map[string]any
 					json.Unmarshal(raw, &fixture)
 					fixture["browser"] = map[string]any{"context_id": "fixture-context"}
+					if kind == "prepared_image" {
+						// Exercise every real same-draft guard, stopping immediately
+						// before the consequential click in this preflight fixture.
+						op := mapFromAny(mapFromAny(fixture["operations"])["publish_prepared_image_draft"])
+						steps := op["steps"].([]any)
+						for i, step := range steps {
+							if mapFromAny(step)["once_key"] != nil {
+								op["steps"] = steps[:i]
+								break
+							}
+						}
+					}
 					rec := saveFixtureActor(t, ctx, a, fixture)
 					input := map[string]any{"creator_url": "https://www.patreon.com/c/creator", "expected_creator_identity": "creator", "post_id": "42", "post_edit_url": "https://www.patreon.com/creator/posts/exact-42/edit", "post_title": "Exact Title", "post_body": "Exact first paragraph.\n\nExact second paragraph.", "audience": audience, "tier_labels": tiers, "request_id": "same-request", "expected_attachment_ids": expectedIDs, "expected_attachment_filenames": expectedNames, "expected_attachment_sizes": expectedSizes}
 					operation := "publish_" + kind + "_draft_preflight"
+					if kind == "prepared_image" {
+						operation = "publish_prepared_image_draft"
+					}
 					if kind == "image_copy" {
 						operation = "prepare_image_draft_copy"
 						input["expected_current_body"] = input["post_body"]
