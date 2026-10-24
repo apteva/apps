@@ -2,9 +2,10 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.12.9
+version: 0.13.0
 description: |
-  File storage for Apteva agents and human teams. Upload bytes,
+  File storage for Apteva agents and human teams. Read images, PDF pages,
+  DOCX body text and UTF-8 text into agent context with files_read. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
   local disk by default, S3-compatible (AWS / R2 / B2 / Hetzner /
   Scaleway / Vultr) through integration bindings. On S3, presigned upload + download URLs
@@ -107,6 +108,8 @@ provides:
       description: Queue or inspect verified whole-file SHA-256 repair for one file. Returns checksum_status, sha256, and file revision; never moves or replaces the object.
     - name: files_get_url
       description: Mint a signed time-limited URL. Supports disposition=inline|attachment and delivery=apteva|direct|proxy. Proxy serves bytes through Storage without redirecting or exposing the backend. Omitting delivery uses revocable Storage delivery. Explicit direct links remain usable until their expiry.
+    - name: files_read
+      description: Read images as visual content, PDF pages as images, and UTF-8 text or DOCX body text. Supports PDF page selection and text pagination. Checks files.read on the file folder. Use files_get_content for lossless app-to-app bytes.
     - name: files_get_content
       description: |
         Fetch the file's bytes inline as base64 (≤25 MB). For
@@ -197,7 +200,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: storage/v0.12.9
+    ref: storage/v0.13.0
     entry: mcp/storage
   port: 8080
   health_check: /health

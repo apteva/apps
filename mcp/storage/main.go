@@ -218,6 +218,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolGetURLCtx,
 		},
 		{
+			Name:        "files_read",
+			Description: "Read a stored file into model context. Returns actual image content for PNG/JPEG/GIF/WebP; rendered PDF pages (including scanned documents); or readable UTF-8 text and DOCX body text. Args: id, pages? (PDF only, 1-based '1-3,5', at most 4, default '1'), offset? (text character offset), max_chars? (text, default 12000, max 60000). Files up to 25 MiB. Check total_pages/truncated/next_offset and read more when needed. Use files_get_content only for lossless bytes consumed by another app.",
+			InputSchema: schemaObject(map[string]any{
+				"id":        map[string]any{"type": "integer"},
+				"pages":     map[string]any{"type": "string"},
+				"offset":    map[string]any{"type": "integer", "minimum": 0},
+				"max_chars": map[string]any{"type": "integer", "minimum": 1, "maximum": readMaxChars},
+			}, []string{"id"}),
+			HandlerCtx: a.toolReadCtx,
+		},
+		{
 			Name:        "files_get_content",
 			Description: "Fetch the file's bytes inline as base64 (≤25 MB). Use this for cross-sidecar reads where the platform's HTTP-routed signed URL doesn't resolve to the right storage instance — this call goes through the binding (CallAppResult) so it always hits the storage install bound to the caller. For files >25 MB or for handing URLs to third parties (Deepgram, browsers, humans) use files_get_url instead. Args: id. Returns {id, name, content_type, size_bytes, content_base64}.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
