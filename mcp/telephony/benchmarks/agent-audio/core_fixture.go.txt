@@ -54,7 +54,7 @@ func TestTelephonyInternalAudioCoreFixture(t *testing.T){
  })
  mux.HandleFunc("/caller",func(w http.ResponseWriter,r *http.Request){mu.Lock();defer mu.Unlock();w.Header().Set("Content-Type","application/octet-stream");w.Write(caller)})
  mux.HandleFunc("/emit",func(w http.ResponseWriter,r *http.Request){
-  var cfg struct{Item string `json:"item"`;MS int `json:"ms"`;Silent bool `json:"silent"`};if json.NewDecoder(r.Body).Decode(&cfg)!=nil||cfg.MS<=0||cfg.MS>800{http.Error(w,"invalid",400);return}
+  var cfg struct{Item string `json:"item"`;MS int `json:"ms"`;Silent bool `json:"silent"`};if json.NewDecoder(r.Body).Decode(&cfg)!=nil||cfg.MS<=0||cfg.MS>5000{http.Error(w,"invalid",400);return}
   audio:=make([]byte,cfg.MS*48);for i:=0;i<len(audio)/2;i++{sample:=int16(10000*math.Sin(2*math.Pi*500*float64(i)/24000));if cfg.Silent{sample=0};audio[2*i]=byte(sample);audio[2*i+1]=byte(uint16(sample)>>8)}
   fake.events<-RealtimeEvent{Type:RealtimeEventAudioOut,ItemID:cfg.Item,ResponseID:cfg.Item,Audio:audio,AudioSilence:cfg.Silent};w.WriteHeader(204)
  })

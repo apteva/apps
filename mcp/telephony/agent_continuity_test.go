@@ -25,6 +25,7 @@ func TestAgentCoreLinkThreeFailuresKeepRendererAlive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var connections atomic.Int64
+	readyMessage := []byte(`{"type":"playback.ready","capacity_ms":1000,"evidence":"carrier_mark"}`)
 	payload := pcm16ToBytes([]int16{23, -1500, 3200, -22})
 	newRemote := func() (net.Conn, error) {
 		c, p := net.Pipe()
@@ -35,7 +36,7 @@ func TestAgentCoreLinkThreeFailuresKeepRendererAlive(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if !bytes.Contains(ready, []byte("playback.ready")) {
+			if !bytes.Equal(ready, readyMessage) {
 				return
 			}
 			if n <= 3 {
@@ -54,7 +55,7 @@ func TestAgentCoreLinkThreeFailuresKeepRendererAlive(t *testing.T) {
 	first, _ := newRemote()
 	link := newAgentCoreLink(ctx, first, func(context.Context) (net.Conn, error) { return newRemote() }, nil)
 	defer link.Close()
-	if err := wsutil.WriteClientMessage(link, ws.OpText, []byte(`{"type":"playback.ready"}`)); err != nil {
+	if err := wsutil.WriteClientMessage(link, ws.OpText, readyMessage); err != nil {
 		t.Fatal(err)
 	}
 	data, op, err := wsutil.ReadServerData(link)
