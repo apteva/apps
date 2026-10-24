@@ -25,7 +25,7 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *deliv
 	if bound == nil || bound.ConnectionID == 0 {
 		return nil, errors.New("Apple Push Notifications integration is not connected")
 	}
-	title, body := notificationCopy(d.Type)
+	title, body := deliveryCopy(d)
 	aps := map[string]any{
 		"alert": map[string]string{"title": title, "body": body},
 		"sound": "default",

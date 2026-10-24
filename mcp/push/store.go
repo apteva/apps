@@ -32,20 +32,21 @@ type grant struct {
 }
 
 type delivery struct {
-	InstanceRef    string `json:"instance_ref,omitempty"`
-	ID             string `json:"id"`
-	GrantID        string `json:"-"`
-	DeviceID       string `json:"device_id"`
-	IdempotencyKey string `json:"idempotency_key"`
-	Type           string `json:"type"`
-	ItemID         string `json:"item_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
-	Badge          *int   `json:"badge,omitempty"`
-	Status         string `json:"status"`
-	ProviderID     string `json:"provider_id,omitempty"`
-	Error          string `json:"error,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	SentAt         string `json:"sent_at,omitempty"`
+	Preview        *pushPreview `json:"-"` // Request-scoped only; never stored or returned in history.
+	InstanceRef    string       `json:"instance_ref,omitempty"`
+	ID             string       `json:"id"`
+	GrantID        string       `json:"-"`
+	DeviceID       string       `json:"device_id"`
+	IdempotencyKey string       `json:"idempotency_key"`
+	Type           string       `json:"type"`
+	ItemID         string       `json:"item_id,omitempty"`
+	ProjectID      string       `json:"project_id,omitempty"`
+	Badge          *int         `json:"badge,omitempty"`
+	Status         string       `json:"status"`
+	ProviderID     string       `json:"provider_id,omitempty"`
+	Error          string       `json:"error,omitempty"`
+	CreatedAt      string       `json:"created_at"`
+	SentAt         string       `json:"sent_at,omitempty"`
 }
 
 type pushStats struct {
