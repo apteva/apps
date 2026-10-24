@@ -21,7 +21,7 @@ import (
 	"github.com/gobwas/ws/wsutil"
 )
 
-func withTelephonyTestContext(t *testing.T, platform *answerPlatform) (*App, *sdk.AppCtx) {
+func withTelephonyTestContext(t *testing.T, platform sdk.PlatformClient) (*App, *sdk.AppCtx) {
 	t.Helper()
 	t.Setenv("APTEVA_PUBLIC_URL", "https://example.test")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))

@@ -229,7 +229,16 @@ func TestAgentAudioScopedTwilioClearPreservesNextReply(t *testing.T) {
 		}
 		if v.Event == "media" && clearAt >= 0 {
 			got, e := base64.StdEncoding.DecodeString(v.Media.Payload)
-			if e != nil || !bytes.Equal(got, want) {
+			expected := want
+			if after == 0 {
+				// Only the first 3 ms after an explicit clear has a start ramp.
+				pcm := append([]int16(nil), b[0].PCM...)
+				for j := 0; j < 24; j++ {
+					pcm[j] = int16(int64(pcm[j]) * int64(j+1) / 24)
+				}
+				expected, _ = base64.StdEncoding.DecodeString(encodeCarrierPacket(pcm, carrierCodecPCMU8))
+			}
+			if e != nil || !bytes.Equal(got, expected) {
 				t.Fatal("cancelled speech escaped after clear")
 			}
 			after++

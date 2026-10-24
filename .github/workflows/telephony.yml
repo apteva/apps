@@ -54,7 +54,7 @@ jobs:
           TELEPHONY_SPEECH_ACCEPTANCE_RESULTS: /tmp/telephony-speech-acceptance.json
           TELEPHONY_SPEECH_ACCEPTANCE_AUDIO_DIR: /tmp/telephony-speech-audio
       - name: Bounded audio timing and telemetry overhead
-        run: go test -run '^$' -bench '^Benchmark(AgentAudioCancellationFence|AgentAudioReplyTimingSteadyFrame|AgentAudioFrontend|SIPReceiveEvidence|SIPRecoveryEligibility|SIPRTCPReport|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
+        run: go test -run '^$' -bench '^Benchmark(AgentAudioCancellationFence|AgentAudioReplyTimingSteadyFrame|AgentPlaybackPressureNoPressure|AgentCoreLinkDuplex|AgentAudioFrontend|SIPReceiveEvidence|SIPRecoveryEligibility|SIPRTCPReport|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
         working-directory: mcp/telephony
       - name: Runtime optimization benchmarks
         run: |
@@ -248,7 +248,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(AgentAudio|AudioFrontend|SIPShortSourceGap|SIPSourceGap|SIPJitterResumesShortDTX|SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
+            pattern: 'Test(AgentAudio|AgentCoreLink|AgentContinuity|AgentPlaybackPressure|AudioFrontend|SIPShortSourceGap|SIPSourceGap|SIPJitterResumesShortDTX|SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
           - group: lifecycle
             pattern: 'Test(SIPCrossedBYE|CarrierInventoryOutage|CarrierVerification|TemporaryCarrier|InventoryReads|AccountFailure|GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

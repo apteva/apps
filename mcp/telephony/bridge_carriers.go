@@ -203,6 +203,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		_ = core.Close()
 		return
 	}
+	core = a.resilientAgentBridge(bridge.ctx, row, core, response, agentSession)
+	if _, ok := core.(*agentCoreLink); ok {
+		bridge.coreManaged.Store(true)
+	}
+	if !bridge.bind(core) {
+		return
+	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
 	agentSession.configureWriter(carrierWriter)
@@ -592,7 +599,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		}
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queuedMS, droppedMS, err := pacer.enqueue(ctx, packets)
+		var queuedMS, droppedMS int
+		err = agentSession.withPlaybackPressure(ctx, frame, func() error { var e error; queuedMS, droppedMS, e = pacer.enqueue(ctx, packets); return e })
 		if errors.Is(err, errCarrierPacerOverflow) {
 			err = agentSession.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow")
 			if err != nil {
@@ -780,6 +788,13 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	defer a.trackAgentAudio(row.ID, agentSession)()
 	if buffered != nil {
 		core = hijackedConn{Conn: core, reader: buffered}
+	}
+	if !bridge.bind(core) {
+		return
+	}
+	core = a.resilientAgentBridge(bridge.ctx, row, core, response, agentSession)
+	if _, ok := core.(*agentCoreLink); ok {
+		bridge.coreManaged.Store(true)
 	}
 	if !bridge.bind(core) {
 		return

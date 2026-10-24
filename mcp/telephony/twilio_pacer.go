@@ -219,6 +219,7 @@ func (p *twilioAudioPacer) run() {
 		adaptiveUntil          time.Time
 		lastSentTail           []int16
 		needsCrossfade         bool
+		fadeAfterClear         bool
 	)
 	bufferWindow := time.Duration(p.targetBufferedSamples) * time.Second / twilioMediaSampleRate
 	stopTimer := func() {
@@ -276,6 +277,11 @@ func (p *twilioAudioPacer) run() {
 			return 0, nil
 		}
 		pcm := packet.PCM
+		if fadeAfterClear {
+			pcm = append([]int16(nil), pcm...)
+			applyAgentStartFade(pcm, twilioMediaSampleRate)
+			fadeAfterClear = false
+		}
 		if needsCrossfade && len(lastSentTail) > 0 {
 			pcm = append([]int16(nil), pcm...)
 			applyPCMOverlapCrossfade(lastSentTail, pcm, twilioMediaSampleRate/200)
@@ -335,6 +341,7 @@ func (p *twilioAudioPacer) run() {
 	handleCommand := func(command twilioPacerCommand) error {
 		if command.cancel != nil {
 			c := command.cancel
+			fadeAfterClear = p.agentSession.continuous()
 			receipt := agentClearReceipt{Scope: "local"}
 			kept := queue[:0]
 			for _, packet := range queue {

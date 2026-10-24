@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"github.com/gobwas/ws"
 	"net"
 	"time"
@@ -97,7 +98,12 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 		if count < len(pcm) {
 			packets = append(packets, carrierPacedPacket{PCM: append([]int16(nil), pcm[count:]...), ItemID: frame.ItemID, Generation: frame.Generation, Silence: frame.Silence, AudioEndMS: frame.AudioEndMS})
 		}
-		if _, _, err = pacer.enqueue(ctx, packets); err != nil {
+		err = session.withPlaybackPressure(ctx, frame, func() error { _, _, e := pacer.enqueue(ctx, packets); return e })
+		if err != nil {
+			if !errors.Is(err, errCarrierPacerOverflow) {
+				bridge.socketError(mediaCloseLegCarrier, "write", err)
+				return
+			}
 			if session.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow") != nil {
 				return
 			}
