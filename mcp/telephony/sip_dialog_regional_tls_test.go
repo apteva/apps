@@ -13,15 +13,23 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 )
 
-func TestSIPDialogTelnyxRegionalTLS(t *testing.T) {
+func TestSIPDialogCarrierTLS(t *testing.T) {
 	for _, tc := range []struct {
-		name, certificate, identity, provider string
-		outbound, untrusted, blocked, ok      bool
+		name, certificate, identity, provider      string
+		outbound, untrusted, blocked, ok, defaults bool
 	}{
+		{name: "Twilio inbound default DNS identity for IP Contact", certificate: "sip.twilio.com", identity: "sip.twilio.com", provider: "twilio", defaults: true, ok: true},
+		{name: "Twilio untrusted certificate rejected", certificate: "sip.twilio.com", identity: "sip.twilio.com", provider: "twilio", defaults: true, untrusted: true},
+		{name: "Twilio lookalike certificate rejected", certificate: "sip.twilio.com.attacker.example", identity: "sip.twilio.com", provider: "twilio", defaults: true},
+		{name: "Twilio destination allowlist preserved", certificate: "sip.twilio.com", identity: "sip.twilio.com", provider: "twilio", defaults: true, blocked: true},
+		{name: "Twilio custom identity stays exact", certificate: "sip.twilio.com", identity: "custom.example", provider: "twilio"},
+		{name: "Twilio outbound retains trunk identity", certificate: "*.pstn.twilio.com", identity: "test.pstn.twilio.com", provider: "twilio", outbound: true, ok: true},
+		{name: "Twilio outbound wrong trunk rejected", certificate: "other.pstn.twilio.com", identity: "test.pstn.twilio.com", provider: "twilio", outbound: true},
 		{name: "inbound EU fallback", certificate: "sip.telnyx.eu", identity: "sip.telnyx.com", provider: "telnyx", ok: true},
 		{name: "outbound EU fallback", certificate: "sip.telnyx.eu", identity: "sip.telnyx.com", provider: "telnyx", outbound: true, ok: true},
 		{name: "inbound global unchanged", certificate: "sip.telnyx.com", identity: "sip.telnyx.com", provider: "telnyx", ok: true},
@@ -95,6 +103,18 @@ func TestSIPDialogTelnyxRegionalTLS(t *testing.T) {
 			cfg.PublicHost = tc.certificate
 			cfg.clientRoots = roots
 			cfg.TLSPeerNames = map[string]string{tc.provider: tc.identity}
+			if tc.defaults {
+				loaded, err := loadSIPGatewayConfig(sdk.Config{
+					"sip_enabled": "true", "sip_transport": "tls",
+					"sip_public_host": "sip.example.test", "sip_public_ip": "198.51.100.10",
+					"sip_tls_cert_file": cfg.TLSCertFile, "sip_tls_key_file": cfg.TLSKeyFile,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.TLSPeerNames = loaded.TLSPeerNames
+			}
+
 			if !tc.blocked {
 				cfg.AllowedCIDRs = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
 			}
@@ -144,7 +164,7 @@ func TestSIPDialogTelnyxRegionalTLS(t *testing.T) {
 					t.Fatal("dialog routing changed")
 				}
 				expected := int32(1)
-				if tc.identity != tc.certificate {
+				if tc.provider == "telnyx" && tc.identity != tc.certificate {
 					expected = 2
 				}
 				if handshakes.Load() != expected {

@@ -201,7 +201,11 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 	if strings.TrimSpace(allowedCIDRs) == "" {
 		allowedCIDRs = strings.Join(defaultSIPCarrierCIDRs, ",")
 	}
-	cfg.TLSPeerNames = map[string]string{"telnyx": "sip.telnyx.com"}
+	// Twilio may advertise an IP Contact while presenting a DNS-only SIP
+	// certificate. Keep dialog routing intact and verify against its carrier
+	// identity when reconnecting, just as for Telnyx. Operator overrides below
+	// remain authoritative; never derive a trusted identity from the Contact.
+	cfg.TLSPeerNames = map[string]string{"telnyx": "sip.telnyx.com", "twilio": "sip.twilio.com"}
 	if raw := strings.TrimSpace(config["sip_tls_peer_names"]); raw != "" {
 		if len(raw) > 4096 || json.Unmarshal([]byte(raw), &cfg.TLSPeerNames) != nil {
 			return cfg, errors.New("invalid SIP TLS peer names")

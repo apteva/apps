@@ -309,3 +309,14 @@ TLS negotiation, authenticated re-INVITE refreshes, encrypted two-way audio,
 recording pause/resume, codec negotiation, cancellation and BYE are covered by
 local mock-carrier tests for both adapters. Real carrier/account interoperability
 and actual pricing require controlled verification before switching a live number.
+
+### TLS identity for dialog reconnection
+
+If the original TLS socket is unavailable and an established dialog targets an
+IP address, Telephony preserves that destination and verifies the carrier's DNS
+certificate identity. Inbound defaults are `sip.twilio.com` for Twilio and
+`sip.telnyx.com` for Telnyx (including the existing validated Telnyx regional
+alternative). Outbound calls retain their configured termination hostname.
+The `sip_tls_peer_names` map can override inbound identities. Destination network
+restrictions, certificate trust/name verification and TLS 1.2 minimum remain
+enabled. This also applies to in-dialog refresh requests, not only hangup.
