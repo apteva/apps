@@ -60,10 +60,12 @@ type agentLinkMessage struct {
 	at   time.Time
 }
 type agentCoreLinkOptions struct {
+	byteRate      int
 	rejects       func(realtimeBridgeControl) bool
 	maxBatchBytes int64
 }
 type agentCoreLink struct {
+	byteRate       int
 	maxOutputBytes int64
 	maxBatchBytes  int64
 	net.Conn
@@ -101,7 +103,7 @@ func (l *agentCoreLink) Close() error { l.cancel(); _ = l.peer.Close(); return l
 func (l *agentCoreLink) discard(m agentLinkMessage) {
 	if m.op == ws.OpBinary {
 		l.mu.Lock()
-		l.stats.InputDiscardedMS += int64(len(m.data)) * 1000 / 48000
+		l.stats.InputDiscardedMS += int64(len(m.data)) * 1000 / int64(l.mediaRate())
 		l.mu.Unlock()
 	}
 }
@@ -183,7 +185,7 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 		}
 		return next, nil
 	}
-	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) }, maxBatchBytes: int64(session.profile.BacklogMS) * 48})
+	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) }, byteRate: session.byteRate(), maxBatchBytes: int64(session.profile.BacklogMS) * int64(session.byteRate()) / 1000})
 	session.mu.Lock()
 	session.link = l
 	session.mu.Unlock()
@@ -199,12 +201,13 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 	l.outputProgress = make(chan struct{}, 1)
 	l.maxBatchBytes = 48000
 	if len(options) > 0 {
+		l.byteRate = options[0].byteRate
 		l.rejects = options[0].rejects
 		if options[0].maxBatchBytes > 0 {
 			l.maxBatchBytes = options[0].maxBatchBytes
 		}
 	}
-	l.maxOutputBytes = agentOutputReadAheadBytes + l.maxBatchBytes
+	l.maxOutputBytes = int64(l.mediaRate()/2) + l.maxBatchBytes
 	l.epoch.Store(1)
 	l.connected.Store(true)
 	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide}
@@ -245,13 +248,13 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				}
 			} else if op == ws.OpBinary {
 				// Never allow a catch-up backlog or unbounded memory during recovery.
-				if len(raw) > 5760 || len(raw)%2 != 0 {
+				if len(raw) > l.mediaRate()*120/1000 || l.mediaRate() == 48000 && len(raw)%2 != 0 {
 					cancel()
 					return
 				}
-				for offset := 0; offset < len(raw); offset += 960 {
+				for offset := 0; offset < len(raw); offset += l.mediaRate() / 50 {
 					part := m
-					part.data = raw[offset:min(offset+960, len(raw))]
+					part.data = raw[offset:min(offset+l.mediaRate()/50, len(raw))]
 					select {
 					case l.audio <- part:
 					default:
@@ -456,7 +459,7 @@ func (l *agentCoreLink) relay(remote net.Conn, local *agentRelayWriter) error {
 		if err := writer.Write(m.op, m.data); err != nil {
 			if m.op == ws.OpBinary {
 				l.mu.Lock()
-				l.stats.AmbiguousInputMS += int64(len(m.data)) * 1000 / 48000
+				l.stats.AmbiguousInputMS += int64(len(m.data)) * 1000 / int64(l.mediaRate())
 				l.mu.Unlock()
 			}
 

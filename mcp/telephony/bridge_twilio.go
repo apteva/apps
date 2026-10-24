@@ -94,6 +94,7 @@ type twilioPlaybackProgress struct {
 const twilioMediaPacketSamples = 160 // 20ms at Twilio's 8kHz media rate.
 
 type twilioAudioPacket struct {
+	Encoded    []byte
 	SourceAt   time.Time
 	PCM        []int16
 	AudioEndMS int
@@ -324,6 +325,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
+	coreWriter.audioRate.Store(int64(agentSession.byteRate()))
 	agentSession.configureWriter(twWriter)
 	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -357,7 +359,8 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	// wait for it without racing.
 	streamSidCh := make(chan string, 1)
 	inputResampler := newPCMResampler(8000, 24000)
-	outputResampler := newPCMResampler(24000, 8000)
+	agentInput := newAgentMediaConverter(agentSession, 8000, true)
+	agentOutput := newAgentMediaConverter(agentSession, 8000, false)
 	playback := newTwilioPlaybackTracker()
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
@@ -493,7 +496,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, f.Media.Timestamp, f.Media.Chunk, bridge.generation)
 					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
 				} else {
-					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+					err = coreWriter.Write(ws.OpBinary, agentInput.inputWithPCM24(processed.PCM, pcm24, mu, "g711_ulaw"))
 				}
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
@@ -615,6 +618,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
@@ -656,12 +663,17 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
-		pcm24 := bytesToPCM16(data)
-		pcm8 := outputResampler.Process(pcm24)
+		pcm8 := agentOutput.output(data)
 		if len(pcm8) == 0 {
 			continue
 		}
-		packets := twilioAudioPackets(pcm8, len(pcm24), nextFrame)
+		packets := twilioAudioPackets(pcm8, agentSession.pcm24Samples(len(data)), nextFrame)
+		if agentSession.mediaFormat() == "g711_ulaw" {
+			for i := range packets {
+				start := i * twilioMediaPacketSamples
+				packets[i].Encoded = append([]byte(nil), data[start:min(len(data), start+twilioMediaPacketSamples)]...)
+			}
+		}
 		for i := range packets {
 			if !sourceAt.IsZero() {
 				packets[i].SourceAt = sourceAt.Add(time.Duration(i) * 20 * time.Millisecond)

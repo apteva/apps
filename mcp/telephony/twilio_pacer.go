@@ -28,6 +28,7 @@ var (
 )
 
 type twilioPacedPacket struct {
+	Encoded    []byte
 	Generation int64
 	Silence    bool
 	EnqueuedAt time.Time
@@ -152,7 +153,7 @@ func (p *twilioAudioPacer) enqueueWithDiagnostics(ctx context.Context, packets [
 		if at.IsZero() {
 			at = time.Now()
 		}
-		paced[i] = twilioPacedPacket{Generation: frame.Generation, Silence: frame.Silence, EnqueuedAt: at, PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
+		paced[i] = twilioPacedPacket{Generation: frame.Generation, Silence: frame.Silence, EnqueuedAt: at, PCM: packet.PCM, Encoded: packet.Encoded, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
 	}
 	result := p.command(ctx, twilioPacerCommand{packets: paced})
 	return result.queuedMS, result.droppedMS, result.err
@@ -277,18 +278,24 @@ func (p *twilioAudioPacer) run() {
 			return 0, nil
 		}
 		pcm := packet.PCM
+		encoded := packet.Encoded
 		if fadeAfterClear {
+			encoded = nil
 			pcm = append([]int16(nil), pcm...)
 			applyAgentStartFade(pcm, twilioMediaSampleRate)
 			fadeAfterClear = false
 		}
 		if needsCrossfade && len(lastSentTail) > 0 {
+			encoded = nil
 			pcm = append([]int16(nil), pcm...)
 			applyPCMOverlapCrossfade(lastSentTail, pcm, twilioMediaSampleRate/200)
 			needsCrossfade = false
 		}
 		out := twilioOutbound{Event: "media", StreamSID: p.streamSID}
-		out.Media.Payload = base64.StdEncoding.EncodeToString(pcm16ToUlaw(pcm))
+		if encoded == nil {
+			encoded = pcm16ToUlaw(pcm)
+		}
+		out.Media.Payload = base64.StdEncoding.EncodeToString(encoded)
 		payload, _ := json.Marshal(out)
 		writeStarted := time.Now()
 		if err := p.write(payload); err != nil {

@@ -91,6 +91,7 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
+	audioRate          atomic.Int64
 	maxWriteBudget     atomic.Int64
 	sipResidenceBudget atomic.Int64
 	activity           audioSocketActivity
@@ -389,7 +390,7 @@ func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
 	s.Transport.Events = append([]websocketWriteEvent(nil), p.transportStats.Events...)
 	s.WhisperSentFrames = p.whisperSent.Load()
 	s.WhisperDroppedFrames = p.whisperDropped.Load()
-	s.QueuedMS = p.audioBytes * 1000 / 48000
+	s.QueuedMS = p.audioBytes * 1000 / p.mediaRate()
 	return s
 }
 
@@ -403,7 +404,11 @@ func (p *websocketWriterPump) queueAudio(data []byte, headerBytes int) {
 
 // Preserve the original receipt time through a short attachment handoff.
 func (p *websocketWriterPump) queueAudioAt(data []byte, headerBytes int, received time.Time) {
-	pcmBytes := (len(data) - headerBytes) &^ 1
+	pcmBytes := len(data) - headerBytes
+	if p.mediaRate() == 48000 {
+		pcmBytes &^= 1
+	}
+	limit := p.mediaRate() * 120 / 1000
 	if pcmBytes <= 0 {
 		return
 	}
@@ -423,26 +428,26 @@ func (p *websocketWriterPump) queueAudioAt(data []byte, headerBytes int, receive
 		return
 	}
 	p.audioStats.EnqueuedBytes += int64(pcmBytes)
-	if pcmBytes > liveAudioMaxBytes {
-		p.audioStats.OverflowBytes += int64(pcmBytes - liveAudioMaxBytes)
-		trimmed := make([]byte, headerBytes+liveAudioMaxBytes)
+	if pcmBytes > limit {
+		p.audioStats.OverflowBytes += int64(pcmBytes - limit)
+		trimmed := make([]byte, headerBytes+limit)
 		copy(trimmed, data[:headerBytes])
-		copy(trimmed[headerBytes:], data[headerBytes+pcmBytes-liveAudioMaxBytes:headerBytes+pcmBytes])
+		copy(trimmed[headerBytes:], data[headerBytes+pcmBytes-limit:headerBytes+pcmBytes])
 		if headerBytes == microphoneSourceHeader && binary.LittleEndian.Uint64(trimmed) == microphoneSourceMagic {
-			advance := time.Duration(pcmBytes-liveAudioMaxBytes) * time.Second / 48000
+			advance := time.Duration(pcmBytes-limit) * time.Second / time.Duration(p.mediaRate())
 			received = received.Add(advance)
 			binary.LittleEndian.PutUint64(trimmed[8:], uint64(received.UnixNano()))
 		}
 		if headerBytes == sourceAudioHeaderBytes {
-			advance := float64(pcmBytes-liveAudioMaxBytes) * 1000 / 48000
+			advance := float64(pcmBytes-limit) * 1000 / float64(p.mediaRate())
 			for _, offset := range []int{32, 48} {
 				value := math.Float64frombits(binary.LittleEndian.Uint64(trimmed[offset:]))
 				binary.LittleEndian.PutUint64(trimmed[offset:], math.Float64bits(value+advance))
 			}
 		}
-		data, pcmBytes = trimmed, liveAudioMaxBytes
+		data, pcmBytes = trimmed, limit
 	}
-	for p.audioBytes+pcmBytes > liveAudioMaxBytes || len(p.audio) == cap(p.audio) {
+	for p.audioBytes+pcmBytes > limit || len(p.audio) == cap(p.audio) {
 		select {
 		case old := <-p.audio:
 			p.audioBytes -= old.pcmBytes
@@ -457,7 +462,7 @@ func (p *websocketWriterPump) queueAudioAt(data []byte, headerBytes int, receive
 	}
 	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioWriteTimeout, enqueued: received, pcmBytes: pcmBytes}
 	p.audioBytes += pcmBytes
-	p.audioStats.MaxQueuedMS = max(p.audioStats.MaxQueuedMS, p.audioBytes*1000/48000)
+	p.audioStats.MaxQueuedMS = max(p.audioStats.MaxQueuedMS, p.audioBytes*1000/p.mediaRate())
 }
 
 func (p *websocketWriterPump) FlushAudio() {

@@ -564,7 +564,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		s.Forward.DropEvents = nil // Transport events have their own bounded journal.
 		s.Forward.Transport = w.transportStats
 		s.Forward.Transport.Events = nil
-		s.Forward.QueuedMS = w.audioBytes * 1000 / 48000
+		s.Forward.QueuedMS = w.audioBytes * 1000 / w.mediaRate()
 		w.audioMu.Unlock()
 	}
 	// Retain cumulative counters when a best-effort snapshot is unavailable.

@@ -22,7 +22,7 @@ type agentRelayOutput struct {
 
 func (l *agentCoreLink) outputDiscarded(n int) {
 	l.mu.Lock()
-	l.stats.OutputOmittedMS += int64(n) * 1000 / 48000
+	l.stats.OutputOmittedMS += int64(n) * 1000 / int64(l.mediaRate())
 	l.mu.Unlock()
 }
 func (l *agentCoreLink) enqueueOutput(m agentRelayOutput) error {
@@ -64,7 +64,7 @@ func (l *agentCoreLink) enqueueOutput(m agentRelayOutput) error {
 		}
 	}
 	l.mu.Lock()
-	l.stats.MaxOutputStagingMS = max(l.stats.MaxOutputStagingMS, float64(pending)*1000/48000)
+	l.stats.MaxOutputStagingMS = max(l.stats.MaxOutputStagingMS, float64(pending)*1000/float64(l.mediaRate()))
 	l.mu.Unlock()
 	select {
 	case l.output <- m:

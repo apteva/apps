@@ -50,11 +50,15 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 	if err := session.ready(coreWriter, "estimated"); err != nil {
 		return
 	}
-	resampler := newPCMResampler(24000, 16000)
+	agentOutput := newAgentMediaConverter(session, 16000, false)
 	var frame realtimeBridgeControl
 	for {
 		raw, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				bridge.closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			return
 		}
@@ -81,15 +85,15 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 			}
 			continue
 		}
-		if op != ws.OpBinary || len(raw) == 0 || len(raw)%2 != 0 {
+		if op != ws.OpBinary || len(raw) == 0 || session.mediaFormat() == "pcm16" && len(raw)%2 != 0 {
 			continue
 		}
 		if !session.accept(frame) {
 			frame = realtimeBridgeControl{}
 			continue
 		}
-		pcm := resampler.Process(bytesToPCM16(raw))
-		packets := newCarrierAudioPacketizer(16000).add(pcm, len(raw)/2, frame)
+		pcm := agentOutput.output(raw)
+		packets := newCarrierAudioPacketizer(16000).add(pcm, session.pcm24Samples(len(raw)), frame)
 		// Binary providers accept subframe PCM; preserve the trailing real samples.
 		count := 0
 		for _, packet := range packets {

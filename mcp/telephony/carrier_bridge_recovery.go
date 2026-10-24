@@ -165,6 +165,7 @@ type carrierBridgeLease struct {
 	flowing            atomic.Bool
 	continuousInput    atomic.Bool
 	coreManaged        atomic.Bool
+	completionExpected atomic.Bool
 	reception          atomic.Pointer[carrierReception]
 	replacementPending atomic.Bool
 	replaced           atomic.Bool
@@ -507,7 +508,10 @@ func (b *carrierBridgeLease) socketError(leg mediaCloseLeg, operation string, er
 			b.closeState.SetLeg(leg, closed.Code, closed.Reason)
 		}
 	}
-	if e.AfterLocalCancel {
+	if e.AfterLocalCancel || b.completionExpected.Load() {
+		if b.completionExpected.Load() {
+			e.Kind = "completion_transport_closed"
+		}
 		b.mu.Lock()
 		b.appendLocked(e)
 		b.mu.Unlock()
@@ -595,6 +599,9 @@ func (b *carrierBridgeLease) receivedLeg(leg mediaCloseLeg, op ws.OpCode, data [
 			if ws.CheckCloseFrameData(code, reason) != nil {
 				return
 			}
+		}
+		if leg == mediaCloseLegCore && agentCoreCompletion(&b.row, wsutil.ClosedError{Code: code, Reason: reason}) {
+			b.completionExpected.Store(true)
 		}
 		b.mu.Lock()
 		b.appendLocked(carrierBridgeEvidence{Kind: "peer_close_received", PeerCloseReceived: true, Leg: string(leg), ActualCloseCode: int(code), ActualCloseReason: carrierEvidenceDetail(&b.row, reason)})

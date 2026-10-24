@@ -747,3 +747,37 @@ func TestAgentAudioOverflowKeepsUnrelatedQueuedSpeech(t *testing.T) {
 		})
 	}
 }
+
+// The same frontend policy is used by SIP, Twilio and the other carrier bridges.
+// Automatic duplex overlap must preserve all microphone samples and must not
+// create an application cancellation for a greeting/backchannel collision.
+func TestAgentDuplexOverlapPreservesSpeech(t *testing.T) {
+	for _, rate := range []int{8000, 16000, 24000} {
+		for _, mode := range []string{"auto", "local"} {
+			t.Run(fmt.Sprintf("%d/%s", rate, mode), func(t *testing.T) {
+				s := continuousAgentFixture()
+				s.capabilities.ProviderInterruption = true
+				s.profile.Interruption = mode
+				f := newCarrierAudioFrontend(rate)
+				s.configureFrontend(f)
+				if mode == "auto" && f.mode != localBargeInOff {
+					t.Fatal("duplex provider forced local cancellation")
+				}
+				if mode == "local" && f.mode != localBargeInFallback {
+					t.Fatal("explicit local override lost")
+				}
+				speech := telephoneSpeech(rate, 580, 1500)
+				result := f.process(speech)
+				if !bytes.Equal(pcm16ToBytes(speech), pcm16ToBytes(result.PCM)) {
+					t.Fatal("overlap changed caller samples")
+				}
+				if mode == "local" && !result.SpeechStarted {
+					t.Fatal("explicit interruption did not detect sustained speech")
+				}
+				if mode == "auto" && result.SpeechStarted {
+					t.Fatal("automatic overlap emitted hard cancel")
+				}
+			})
+		}
+	}
+}

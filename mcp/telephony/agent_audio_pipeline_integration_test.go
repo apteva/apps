@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,19 @@ type agentCarrierProbe struct {
 	stop       func()
 	send       func([]int16) error
 	sampleRate int
+	audible    chan time.Time
+}
+
+func (p *agentCarrierProbe) observePCM(pcm []int16) {
+	for _, v := range pcm {
+		if v > 1000 || v < -1000 {
+			select {
+			case p.audible <- time.Now():
+			default:
+			}
+			return
+		}
+	}
 }
 
 func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App, *callRow, *internalAudioHelper, *agentCarrierProbe, string) {
@@ -83,7 +97,9 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 		Thread string `json:"thread"`
 		Token  string `json:"token"`
 	}
-	agentFixtureJSON(t, "POST", core.url+"/new", map[string]any{"live": live}, &auth)
+	replyAfterMS, _ := strconv.Atoi(os.Getenv("TELEPHONY_LATENCY_REPLY_AFTER_MS"))
+	pauseMS, _ := strconv.Atoi(os.Getenv("TELEPHONY_LATENCY_PAUSE_MS"))
+	agentFixtureJSON(t, "POST", core.url+"/new", map[string]any{"live": live, "latency": os.Getenv("TELEPHONY_AGENT_AUDIO_LATENCY") == "1", "reply_after_input_ms": replyAfterMS, "input_pause_ms": pauseMS}, &auth)
 	platform := &answerPlatform{}
 	if provider == "sinch" {
 		platform.credentials = &sdk.ConnectionCredentials{Fields: map[string]string{"service_id": "fixture-sinch"}}
@@ -102,8 +118,51 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 	if err := a.db().insertCall(row); err != nil {
 		t.Fatal(err)
 	}
-	probe := &agentCarrierProbe{}
-	if strings.HasPrefix(provider, "sip-") {
+	probe := &agentCarrierProbe{audible: make(chan time.Time, 1024)}
+	if strings.HasPrefix(provider, "conversations-pcm") {
+		conn, _, _, err := ws.DefaultDialer.Dial(context.Background(), row.AudioBridgeURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := newWebSocketWriterPump(conn, ws.StateClientSide)
+		probe.sampleRate = 24000
+		down, up := newPCMResampler(24000, 8000), newPCMResampler(8000, 24000)
+		probe.send = func(pcm []int16) error {
+			if provider == "conversations-pcm-pcmu" {
+				pcm = up.Process(ulawToPCM16(pcm16ToUlaw(down.Process(pcm))))
+			}
+			return writer.Write(ws.OpBinary, pcm16ToBytes(pcm))
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			var meta struct {
+				Type   string `json:"type"`
+				ItemID string `json:"item_id"`
+				EndMS  int    `json:"audio_end_ms"`
+			}
+			for {
+				raw, op, err := readWebSocketData(conn, ws.StateClientSide, writer)
+				if err != nil {
+					return
+				}
+				if op == ws.OpText {
+					_ = json.Unmarshal(raw, &meta)
+					continue
+				}
+				if op != ws.OpBinary {
+					continue
+				}
+				probe.frames.Add(1)
+				probe.observePCM(bytesToPCM16(raw))
+				if meta.Type == "audio.frame" {
+					progress, _ := json.Marshal(map[string]any{"type": "playback.progress", "item_id": meta.ItemID, "audio_end_ms": meta.EndMS})
+					_ = writer.Write(ws.OpText, progress)
+				}
+			}
+		}()
+		probe.stop = func() { conn.Close(); <-done }
+	} else if strings.HasPrefix(provider, "sip-") {
 		sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
 			t.Fatal(err)
@@ -139,9 +198,15 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 		}()
 		go func() {
 			buf := make([]byte, 2048)
+			decoder := &sipRTPMedia{offer: media.offer}
 			for {
-				if _, _, err := peer.ReadFromUDP(buf); err != nil {
+				n, _, err := peer.ReadFromUDP(buf)
+				if err != nil {
 					return
+				}
+				var packet rtp.Packet
+				if packet.Unmarshal(buf[:n]) == nil {
+					probe.observePCM(decoder.decodeAudio(packet.Payload))
 				}
 				probe.frames.Add(1)
 			}
@@ -238,6 +303,11 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 				switch frame.Event {
 				case "media":
 					payload, _ := base64.StdEncoding.DecodeString(frame.Media.Payload)
+					observedPCM := bytesToPCM16(payload)
+					if provider == "twilio" {
+						observedPCM = ulawToPCM16(payload)
+					}
+					probe.observePCM(observedPCM)
 					count := len(payload) / 2
 					if provider == "twilio" {
 						count = len(payload)
