@@ -315,6 +315,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		_ = core.Close()
 		return
 	}
+	core = a.resilientAgentBridge(bridge.ctx, row, core, response, agentSession)
+	if _, ok := core.(*agentCoreLink); ok {
+		bridge.coreManaged.Store(true)
+	}
+	if !bridge.bind(core) {
+		return
+	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
 	agentSession.configureWriter(twWriter)
@@ -662,7 +669,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		}
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queuedMS, droppedMS, err := pacer.enqueueWithDiagnostics(ctx, packets, frame)
+		var queuedMS, droppedMS int
+		err = agentSession.withPlaybackPressure(ctx, frame, func() error {
+			var e error
+			queuedMS, droppedMS, e = pacer.enqueueWithDiagnostics(ctx, packets, frame)
+			return e
+		})
 		if errors.Is(err, errTwilioPacerOverflow) {
 			globalCtx.Logger().Warn("twilio playback queue overflow", "call", callID, "item", frame.ItemID, "max_queued_ms", maxQueuedMS)
 			err = agentSession.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow")

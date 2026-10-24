@@ -47,16 +47,20 @@ type agentClearReceipt struct {
 }
 
 type agentAudioSnapshot struct {
-	Capabilities agentAudioCapabilities   `json:"capabilities"`
-	Profile      agentAudioProfile        `json:"profile"`
-	Evidence     string                   `json:"progress_evidence"`
-	LateFrames   int64                    `json:"late_cancelled_frames"`
-	SilentFrames int64                    `json:"silent_frames"`
-	Clears       []agentClearReceipt      `json:"clears,omitempty"`
-	ReplyTiming  agentReplyTimingSnapshot `json:"reply_timing"`
+	CoreLink         *agentCoreLinkSnapshot        `json:"core_link,omitempty"`
+	PlaybackPressure agentPlaybackPressureSnapshot `json:"playback_pressure"`
+	Capabilities     agentAudioCapabilities        `json:"capabilities"`
+	Profile          agentAudioProfile             `json:"profile"`
+	Evidence         string                        `json:"progress_evidence"`
+	LateFrames       int64                         `json:"late_cancelled_frames"`
+	SilentFrames     int64                         `json:"silent_frames"`
+	Clears           []agentClearReceipt           `json:"clears,omitempty"`
+	ReplyTiming      agentReplyTimingSnapshot      `json:"reply_timing"`
 }
 
 type agentAudioSession struct {
+	link                     *agentCoreLink
+	pressure                 agentPlaybackPressureSnapshot
 	mu                       sync.Mutex
 	capabilities             agentAudioCapabilities
 	profile                  agentAudioProfile
@@ -241,7 +245,12 @@ func (s *agentAudioSession) snapshot() *agentAudioSnapshot {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return &agentAudioSnapshot{Capabilities: s.capabilities, Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
+	var link *agentCoreLinkSnapshot
+	if s.link != nil {
+		v := s.link.snapshot()
+		link = &v
+	}
+	return &agentAudioSnapshot{CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
 }
 
 type agentBridgeConn struct {

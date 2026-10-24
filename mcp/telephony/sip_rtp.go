@@ -269,6 +269,7 @@ type sipRTPPacer struct {
 	trimToPackets   int
 	droppedPackets  atomic.Int64
 	needsCrossfade  atomic.Bool
+	fadeAfterClear  atomic.Bool
 	lastSentPCM     []int16
 	dropMu          sync.Mutex
 	drops           []audioDropEvent
@@ -331,6 +332,7 @@ func (p *sipRTPPacer) run() {
 		case <-p.ctx.Done():
 			return
 		case command := <-p.cancelCh:
+			p.fadeAfterClear.Store(p.agentSession.continuous())
 			p.queueMu.Lock()
 			partialCleared := 0
 			if p.packetizer != nil {
@@ -401,6 +403,9 @@ func (p *sipRTPPacer) run() {
 						}
 						if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
 							applyPCMOverlapCrossfade(p.lastSentPCM, packet.pcm, p.media.sampleRate()/200)
+						}
+						if p.fadeAfterClear.Swap(false) {
+							applyAgentStartFade(packet.pcm, p.media.sampleRate())
 						}
 						packet.payload = p.media.encodeAudio(packet.pcm)
 						p.lastSentPCM = append(p.lastSentPCM[:0], packet.pcm...)
@@ -714,6 +719,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		session.finish("core", err)
 		return
 	}
+	core = a.resilientAgentBridge(session.ctx, row, core, agentBridgeResponse(core), agentSession)
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	agentSession.configureWriter(coreWriter)
 	coreWriter.sipResidenceBudget.Store(int64(time.Duration(session.playbackPolicy.resolved().MaxAgeMS) * time.Millisecond))
@@ -1025,7 +1031,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		}
 		frameMeta := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queued, err := pacer.enqueue(packets)
+		var queued int
+		err = agentSession.withPlaybackPressure(ctx, frameMeta, func() error { var e error; queued, e = pacer.enqueue(packets); return e })
 		if err != nil {
 			if writeErr := agentSession.overflow(coreWriter, frameMeta.ItemID, frameMeta.Generation, "carrier_queue_overflow"); writeErr != nil {
 				return

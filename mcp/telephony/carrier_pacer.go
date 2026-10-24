@@ -341,6 +341,7 @@ func (p *jsonCarrierAudioPacer) run() {
 	var adaptiveUntil time.Time
 	var lastSentTail []int16
 	needsCrossfade := false
+	fadeAfterClear := false
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -418,6 +419,11 @@ func (p *jsonCarrierAudioPacer) run() {
 			return nil
 		}
 		pcm := packet.PCM
+		if fadeAfterClear {
+			pcm = append([]int16(nil), pcm...)
+			applyAgentStartFade(pcm, p.sampleRate)
+			fadeAfterClear = false
+		}
 		if needsCrossfade && len(lastSentTail) > 0 {
 			pcm = append([]int16(nil), pcm...)
 			applyPCMOverlapCrossfade(lastSentTail, pcm, p.sampleRate/200)
@@ -509,6 +515,7 @@ func (p *jsonCarrierAudioPacer) run() {
 	handleCommand := func(command carrierPacerCommand) error {
 		if command.cancel != nil {
 			c := command.cancel
+			fadeAfterClear = p.policy.agentSession.continuous()
 			receipt := agentClearReceipt{Scope: "local"}
 			kept := queue[:0]
 			for _, packet := range queue {

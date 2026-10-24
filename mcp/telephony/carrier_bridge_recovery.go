@@ -164,6 +164,7 @@ type carrierBridgeLease struct {
 	lastRead           atomic.Int64
 	flowing            atomic.Bool
 	continuousInput    atomic.Bool
+	coreManaged        atomic.Bool
 	reception          atomic.Pointer[carrierReception]
 	replacementPending atomic.Bool
 	replaced           atomic.Bool
@@ -479,6 +480,10 @@ func (b *carrierBridgeLease) fail(e carrierBridgeEvidence) {
 	// replacement arriving before deferred cleanup can claim immediately.
 	_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "error", first.Detail, 0, "", first.Leg, b.generation)
 	_, _ = b.app.db().db.Exec(`UPDATE calls SET media_active=0 WHERE id=? AND media_generation=?`, b.row.ID, b.generation)
+	if e.Leg == string(mediaCloseLegCore) && b.coreManaged.Load() {
+		_ = b.app.failCarrierRecovery(b.row.ID, b.generation, b, "Core connection recovery exhausted or rejected")
+		return
+	}
 	b.scheduleRecovery()
 }
 func (b *carrierBridgeLease) socketError(leg mediaCloseLeg, operation string, err error) {
