@@ -640,3 +640,36 @@ func TestAgentContinuityOwnershipChangeDuringRenewal(t *testing.T) {
 		t.Fatal("stale renewal changed the new owner", current, err, p.renewals.Load())
 	}
 }
+
+func TestAgentCoreLinkInterruptBypassesBlockedPCMDelivery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, p := net.Pipe()
+	defer p.Close()
+	s := continuousAgentFixture()
+	frame := realtimeBridgeControl{ItemID: "reply", Generation: 1}
+	link := newAgentCoreLink(ctx, c, func(context.Context) (net.Conn, error) { return nil, io.EOF }, func(c realtimeBridgeControl) { s.cancel(c.ItemID, c.Generation) }, func(c realtimeBridgeControl) bool { return s.rejects(c.ItemID, c.Generation) })
+	defer link.Close()
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- s.withPlaybackPressure(ctx, frame, func() error { return errCarrierPacerOverflow }) }()
+	// The local renderer deliberately never reads the staged PCM. The interrupt
+	// must still be parsed and fence the ID instead of waiting for its writer.
+	for i := 0; i < 2; i++ {
+		_ = wsutil.WriteServerMessage(p, ws.OpText, []byte(`{"type":"audio.frame","item_id":"reply","session_generation":1,"audio_end_ms":200}`))
+		if err := wsutil.WriteServerMessage(p, ws.OpBinary, make([]byte, 9600)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := wsutil.WriteServerMessage(p, ws.OpText, []byte(`{"type":"interrupt","item_id":"reply","session_generation":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil || time.Since(started) > 150*time.Millisecond {
+			t.Fatal(err, time.Since(started))
+		}
+	case <-ctx.Done():
+		t.Fatal("interrupt waited for PCM delivery")
+	}
+}

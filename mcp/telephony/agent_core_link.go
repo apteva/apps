@@ -24,13 +24,15 @@ const agentCoreStableWindow = 30 * time.Second
 const agentCoreInputMaxAge = 250 * time.Millisecond
 
 type agentCoreLinkSnapshot struct {
-	Reconnects       int                  `json:"reconnects"`
-	AmbiguousInputMS int64                `json:"ambiguous_input_ms"`
-	InputDiscardedMS int64                `json:"input_discarded_ms"`
-	LastCause        string               `json:"last_cause,omitempty"`
-	MaxRecoveryMS    float64              `json:"max_recovery_ms"`
-	Recovering       bool                 `json:"recovering"`
-	Events           []agentCoreLinkEvent `json:"events,omitempty"`
+	Reconnects         int                  `json:"reconnects"`
+	AmbiguousInputMS   int64                `json:"ambiguous_input_ms"`
+	InputDiscardedMS   int64                `json:"input_discarded_ms"`
+	LastCause          string               `json:"last_cause,omitempty"`
+	OutputOmittedMS    int64                `json:"output_omitted_ms"`
+	MaxOutputStagingMS float64              `json:"max_output_staging_ms"`
+	MaxRecoveryMS      float64              `json:"max_recovery_ms"`
+	Recovering         bool                 `json:"recovering"`
+	Events             []agentCoreLinkEvent `json:"events,omitempty"`
 }
 type agentCoreLinkEvent struct {
 	At     string `json:"at"`
@@ -59,20 +61,26 @@ type agentLinkMessage struct {
 }
 type agentCoreLink struct {
 	net.Conn
-	ctx          context.Context
-	cancel       context.CancelFunc
-	peer         net.Conn
-	mu           sync.Mutex
-	stats        agentCoreLinkSnapshot
-	ready        []byte
-	speechKnown  bool
-	speech       bool
-	audio        chan agentLinkMessage
-	control      chan agentLinkMessage
-	interrupt    func(realtimeBridgeControl)
-	recovering   atomic.Bool
-	connected    atomic.Bool
-	outputFrames atomic.Uint64
+	ctx            context.Context
+	cancel         context.CancelFunc
+	peer           net.Conn
+	mu             sync.Mutex
+	stats          agentCoreLinkSnapshot
+	ready          []byte
+	speechKnown    bool
+	speech         bool
+	audio          chan agentLinkMessage
+	control        chan agentLinkMessage
+	interrupt      func(realtimeBridgeControl)
+	recovering     atomic.Bool
+	connected      atomic.Bool
+	outputFrames   atomic.Uint64
+	epoch          atomic.Uint64
+	outputBytes    atomic.Int64
+	output         chan agentRelayOutput
+	outputControl  chan agentRelayOutput
+	outputProgress chan struct{}
+	rejects        func(realtimeBridgeControl) bool
 }
 
 func (l *agentCoreLink) snapshot() agentCoreLinkSnapshot {
@@ -169,19 +177,27 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 		}
 		return next, nil
 	}
-	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) })
+	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) })
 	session.mu.Lock()
 	session.link = l
 	session.mu.Unlock()
 	return l
 }
 
-func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl)) *agentCoreLink {
+func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl), reject ...func(realtimeBridgeControl) bool) *agentCoreLink {
 	client, peer := net.Pipe()
 	ctx, cancel := context.WithCancel(parent)
 	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), control: make(chan agentLinkMessage, 16), interrupt: interrupt}
+	l.output = make(chan agentRelayOutput, 64)
+	l.outputControl = make(chan agentRelayOutput, 16)
+	l.outputProgress = make(chan struct{}, 1)
+	if len(reject) > 0 {
+		l.rejects = reject[0]
+	}
+	l.epoch.Store(1)
 	l.connected.Store(true)
 	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide}
+	go l.deliverOutput(local)
 	go func() { <-ctx.Done(); _ = peer.Close(); _ = initial.Close() }()
 	go func() {
 		defer cancel()
@@ -266,6 +282,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				if retryAgentCore(err) && attempt >= agentCoreRecoveryLimit {
 					code, reason = 1011, agentCoreRecoveryExhausted
 				}
+				l.drainOutput()
 				_ = local.Write(ws.OpClose, ws.NewCloseFrameBody(code, reason))
 				return
 			}
@@ -297,6 +314,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				}
 			}
 			if err != nil || next == nil {
+				l.drainOutput()
 				_ = local.Write(ws.OpClose, ws.NewCloseFrameBody(1011, agentCoreRecoveryExhausted))
 				return
 			}
@@ -355,6 +373,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				}
 			}
 			l.event("core_connection_renewed", 0)
+			l.epoch.Add(1)
 			l.connected.Store(true)
 			remote = next
 		}
@@ -385,23 +404,18 @@ func (l *agentCoreLink) relay(remote net.Conn, local *agentRelayWriter) error {
 					continue
 				}
 			}
-			// Forward an audio metadata/payload pair only once both were received.
+			frame := realtimeBridgeControl{}
 			if op == ws.OpBinary && len(metadata) > 0 {
-				if err = local.Write(ws.OpText, metadata); err != nil {
-					ended <- agentLocalRelayError{err}
-					return
-				}
+				frame, _ = parseRealtimeBridgeControl(metadata)
+			}
+			output := agentRelayOutput{control: frame, message: agentLinkMessage{op: op, data: raw}, epoch: l.epoch.Load()}
+			if op == ws.OpBinary {
+				output.metadata = metadata
 				metadata = nil
 			}
-			if err = local.Write(op, raw); err != nil {
+			if err = l.enqueueOutput(output); err != nil {
 				ended <- agentLocalRelayError{err}
 				return
-			}
-			if op == ws.OpBinary {
-				l.outputFrames.Add(1)
-			}
-			if op == ws.OpBinary && l.recovering.CompareAndSwap(true, false) {
-				l.event("core_media_resumed", 0)
 			}
 		}
 	}()

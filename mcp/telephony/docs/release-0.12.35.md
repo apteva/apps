@@ -15,6 +15,12 @@ connection with received media restores the retry budget for a later incident. T
 protocol/policy rejection and cancellation are fenced. Exhaustion does not issue
 carrier streaming restart commands. No carrier resources or settings change.
 
+A separate bounded output reader/delivery path stages at most 500 ms of PCM
+(including in-flight delivery), without adding a mandatory playback wait.
+Interrupts fence their IDs before local delivery, even behind queued PCM.
+Staging exhaustion is explicit scoped overflow; it cannot grow an unbounded
+queue or silently remove words.
+
 The relay forwards complete audio metadata/payload pairs and does not replay
 partially written messages. Caller PCM is normalized to 20 ms admission units;
 a 12-frame queue and 250 ms age bound prevent recovery catch-up backlogs. Audio
@@ -41,7 +47,8 @@ Audio health retains bounded Core connection events, connection/media recovery
 state, omitted/ambiguous input durations and playback pressure wait/outcome
 counters. Steady-state bookkeeping adds no periodic worker or database writes.
 The message relay uses serialized direct writers rather than extra per-frame
-writer requests.
+writer requests. Audio health also exposes maximum output staging and omitted
+output duration; these are not handset playback measurements.
 
 ## Verification and limits
 
