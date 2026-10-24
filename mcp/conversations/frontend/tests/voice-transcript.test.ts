@@ -47,3 +47,43 @@ test("fragment text is preserved exactly across syllables and malformed evidence
  (m.metadata!.transcript as any).fragments[1]={text:"different",start_ms:200,end_ms:400};
  expect(voiceTranscriptMessages([m]).map(m=>m.content)).toEqual(["Bonjour."]);
 });
+
+
+test("captured Live overlap keeps syllables and punctuation with their speaker and puts the acknowledgement after the caller",async()=>{
+ const {default:captured}=await import("./fixtures/voice-french-overlap.json");
+ const messages=captured as Message[];
+ const original=JSON.stringify(messages);
+ const rows=voiceTranscriptMessages(messages);
+ expect(rows.map(m=>[m.role,m.content.trim()])).toEqual([
+  ["user","Bonjour"], ["agent","Oui bonjour."],
+  ["user","Ça va bien"], ["agent","Oui, ça va."],
+  ["user","Tu peux faire quoi"],
+  ["agent","Je peux vous renseigner sur des questions du quotidien, vous donner des idées, vous aider à préparer des messages,"],
+  ["user","Non, non, non"], ["agent","Oui ? Dites-moi."],
+ ]);
+ expect(new Set(rows.map(m=>m.presentation_key??m.id)).size).toBe(rows.length);
+ expect(JSON.stringify(messages)).toBe(original);
+ // The caller caption can arrive after both parts of the acknowledgment.
+ const withoutCaller=messages.filter(m=>m.id!==108);
+ expect(voiceTranscriptMessages(withoutCaller).some(m=>m.content.includes("Oui ?"))).toBe(true);
+ expect(voiceTranscriptMessages([...withoutCaller,messages.find(m=>m.id===108)!]).map(m=>m.content)).toEqual(rows.map(m=>m.content));
+});
+
+test("onset tolerance does not move an ongoing answer or its last word after an interruption",()=>{
+ const answer=voice(1,"Here is the answer.",100,1200);
+ (answer.metadata!.transcript as any).fragments=[{text:"Here is the",start_ms:100,end_ms:900},{text:" answer.",start_ms:900,end_ms:1200}];
+ const interruption=voice(2,"Wait",1100,1400,"user");
+ expect(voiceTranscriptMessages([answer,interruption]).map(m=>m.content.trim())).toEqual([answer.content,"Wait"]);
+ // Legacy rows and provider-final turns without exact deltas retain their order.
+ expect(voiceTranscriptMessages([voice(1,"Okay",100,300),voice(2,"Next",300,500,"user")]).map(m=>m.content)).toEqual(["Okay","Next"]);
+});
+
+test("continuation grouping preserves raw whitespace, repeated words and session boundaries",()=>{
+ const a=voice(1,"Oui oui bon",100,300),b=voice(3,"jour !",300,500);
+ (a.metadata!.transcript as any).fragments=[{text:" Oui oui bon",start_ms:100,end_ms:300}];
+ (b.metadata!.transcript as any).fragments=[{text:"jour",start_ms:300,end_ms:400},{text:" !",start_ms:400,end_ms:500}];
+ const caller=voice(2,"Salut",300,500,"user");
+ expect(voiceTranscriptMessages([a,caller,b]).map(m=>m.content.trim())).toEqual(["Salut","Oui oui bonjour !"]);
+ const isolated={...b,metadata:{...b.metadata,voice_session_id:"different"}};
+ expect(voiceTranscriptMessages([a,caller,isolated]).map(m=>m.content.trim())).toEqual(["Salut","Oui oui bon","jour !"]);
+});

@@ -1,0 +1,412 @@
+[
+  {
+    "id": 101,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "Oui bon",
+    "components": [],
+    "created_at": "2026-10-24T11:37:32.935248Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-101",
+        "generation": 1,
+        "item_id": "fragment-101",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 2200,
+        "end_ms": 2400,
+        "fragments": [
+          {
+            "text": "Oui bon",
+            "start_ms": 2200,
+            "end_ms": 2400
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 102,
+    "conversation_id": "chat",
+    "role": "user",
+    "agent_id": 41,
+    "content": "Bonjour",
+    "components": [],
+    "created_at": "2026-10-24T11:37:33.026986Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-102",
+        "generation": 1,
+        "item_id": "fragment-102",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 2400,
+        "end_ms": 2600,
+        "fragments": [
+          {
+            "text": " Bonjour",
+            "start_ms": 2400,
+            "end_ms": 2600
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 103,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "jour.",
+    "components": [],
+    "created_at": "2026-10-24T11:37:33.057605Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-103",
+        "generation": 1,
+        "item_id": "fragment-103",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 2400,
+        "end_ms": 2600,
+        "fragments": [
+          {
+            "text": "jour.",
+            "start_ms": 2400,
+            "end_ms": 2600
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 104,
+    "conversation_id": "chat",
+    "role": "user",
+    "agent_id": 41,
+    "content": "Ça va bien",
+    "components": [],
+    "created_at": "2026-10-24T11:37:36.836851Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-104",
+        "generation": 1,
+        "item_id": "fragment-104",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 6200,
+        "end_ms": 6800,
+        "fragments": [
+          {
+            "text": " Ça",
+            "start_ms": 6200,
+            "end_ms": 6400
+          },
+          {
+            "text": " va",
+            "start_ms": 6400,
+            "end_ms": 6600
+          },
+          {
+            "text": " bien ",
+            "start_ms": 6600,
+            "end_ms": 6800
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 105,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "Oui, ça va.",
+    "components": [],
+    "created_at": "2026-10-24T11:37:37.033273Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-105",
+        "generation": 1,
+        "item_id": "fragment-105",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 6400,
+        "end_ms": 7000,
+        "fragments": [
+          {
+            "text": " Oui,",
+            "start_ms": 6400,
+            "end_ms": 6600
+          },
+          {
+            "text": " ça va",
+            "start_ms": 6600,
+            "end_ms": 6800
+          },
+          {
+            "text": ".",
+            "start_ms": 6800,
+            "end_ms": 7000
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 106,
+    "conversation_id": "chat",
+    "role": "user",
+    "agent_id": 41,
+    "content": "Tu peux faire quoi",
+    "components": [],
+    "created_at": "2026-10-24T11:37:40.945509Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-106",
+        "generation": 1,
+        "item_id": "fragment-106",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 10400,
+        "end_ms": 11000,
+        "fragments": [
+          {
+            "text": " Tu",
+            "start_ms": 10400,
+            "end_ms": 10600
+          },
+          {
+            "text": " peux",
+            "start_ms": 10600,
+            "end_ms": 10800
+          },
+          {
+            "text": " faire quoi",
+            "start_ms": 10800,
+            "end_ms": 11000
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 107,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "Je peux vous renseigner sur des questions du quotidien, vous donner des idées, vous aider à préparer des messages, Oui",
+    "components": [],
+    "created_at": "2026-10-24T11:37:41.681002Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-107",
+        "generation": 1,
+        "item_id": "fragment-107",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 11000,
+        "end_ms": 17400,
+        "fragments": [
+          {
+            "text": " Je",
+            "start_ms": 11000,
+            "end_ms": 11200
+          },
+          {
+            "text": " peux vous",
+            "start_ms": 11200,
+            "end_ms": 11400
+          },
+          {
+            "text": " renseigner",
+            "start_ms": 11400,
+            "end_ms": 11600
+          },
+          {
+            "text": " sur",
+            "start_ms": 11800,
+            "end_ms": 12000
+          },
+          {
+            "text": " des questions",
+            "start_ms": 12200,
+            "end_ms": 12400
+          },
+          {
+            "text": " du quotidien",
+            "start_ms": 12600,
+            "end_ms": 12800
+          },
+          {
+            "text": ",",
+            "start_ms": 12800,
+            "end_ms": 13000
+          },
+          {
+            "text": " vous",
+            "start_ms": 13600,
+            "end_ms": 13800
+          },
+          {
+            "text": " donner",
+            "start_ms": 13800,
+            "end_ms": 14000
+          },
+          {
+            "text": " des",
+            "start_ms": 14000,
+            "end_ms": 14200
+          },
+          {
+            "text": " idées,",
+            "start_ms": 14200,
+            "end_ms": 14400
+          },
+          {
+            "text": " vous",
+            "start_ms": 15000,
+            "end_ms": 15200
+          },
+          {
+            "text": " aider",
+            "start_ms": 15200,
+            "end_ms": 15400
+          },
+          {
+            "text": " à préparer",
+            "start_ms": 15400,
+            "end_ms": 15600
+          },
+          {
+            "text": " des messages",
+            "start_ms": 15800,
+            "end_ms": 16000
+          },
+          {
+            "text": ",",
+            "start_ms": 16000,
+            "end_ms": 16200
+          },
+          {
+            "text": " Oui",
+            "start_ms": 17200,
+            "end_ms": 17400
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 108,
+    "conversation_id": "chat",
+    "role": "user",
+    "agent_id": 41,
+    "content": "Non, non, non",
+    "components": [],
+    "created_at": "2026-10-24T11:37:47.953227Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-108",
+        "generation": 1,
+        "item_id": "fragment-108",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 17400,
+        "end_ms": 17800,
+        "fragments": [
+          {
+            "text": " Non, non",
+            "start_ms": 17400,
+            "end_ms": 17600
+          },
+          {
+            "text": ", non",
+            "start_ms": 17600,
+            "end_ms": 17800
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 109,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "?",
+    "components": [],
+    "created_at": "2026-10-24T11:37:48.202567Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-109",
+        "generation": 1,
+        "item_id": "fragment-109",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 17600,
+        "end_ms": 17800,
+        "fragments": [
+          {
+            "text": " ?",
+            "start_ms": 17600,
+            "end_ms": 17800
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 110,
+    "conversation_id": "chat",
+    "role": "agent",
+    "agent_id": 41,
+    "content": "Dites-moi.",
+    "components": [],
+    "created_at": "2026-10-24T11:37:49.134327Z",
+    "metadata": {
+      "source": "voice",
+      "voice_session_id": "captured-french-overlap",
+      "transcript": {
+        "id": "captured-110",
+        "generation": 1,
+        "item_id": "fragment-110",
+        "status": "interrupted",
+        "finalization_reason": "stopped",
+        "start_ms": 18600,
+        "end_ms": 19000,
+        "fragments": [
+          {
+            "text": " Dites",
+            "start_ms": 18600,
+            "end_ms": 18800
+          },
+          {
+            "text": "-moi.",
+            "start_ms": 18800,
+            "end_ms": 19000
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Keep Live transcript syllables and trailing punctuation together across interleaved caller captions. Use a bounded caller-first rule for near-simultaneous reply onsets, preserving ongoing answers and the original saved transcript.
+- Add the captured French overlap regression, including delayed captions, repeated words, session isolation, and desktop/mobile live updates and reloads across Dashboard, embedded, and package chat surfaces.
+
 ## 0.24.57 — 2026-10-24
 
 - Use Info, Warning or Error in alert notification titles through the existing

@@ -1,4 +1,5 @@
 import { expect,test } from "@playwright/test";
+import capturedOverlap from "./fixtures/voice-french-overlap.json" with {type:"json"};
 
 for(const host of ["dashboard","external","package"] as const) {
  test(`${host}: live voice revisions replace prefixes, group adjacent fragments and survive reload without shutdown duplicates`,async({page,request})=>{
@@ -25,6 +26,27 @@ for(const host of ["dashboard","external","package"] as const) {
   await publish(segment(104,"Do not display blocked speech",3000,3500,"agent","blocked",5));
   await page.reload();await expect(page.locator("textarea")).toBeVisible();
   await expect(page.getByText("Do not display blocked speech",{exact:true})).toHaveCount(0);
+ });
+}
+
+for(const host of ["dashboard","external","package"] as const)for(const width of [1280,390]) {
+ test(`${host} ${width}: captured overlapping French captions stay readable live and after reload`,async({page,request})=>{
+  await page.setViewportSize({width,height:900});
+  await request.post("/reset");await page.goto(`/?host=${host}`);await expect(page.locator("textarea")).toBeVisible();
+  const conversation_id=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  for(const message of capturedOverlap) {
+   await request.post("/append-message",{data:{...message,conversation_id}});
+  }
+  const expected=["Bonjour","Oui bonjour.","Ça va bien","Oui, ça va.","Tu peux faire quoi",
+    "Je peux vous renseigner sur des questions du quotidien, vous donner des idées, vous aider à préparer des messages,",
+    "Non, non, non","Oui ? Dites-moi."];
+  const assertTranscript=async()=>{
+   for(const content of expected)await expect(page.getByText(content,{exact:true})).toHaveCount(1);
+   for(const broken of ["Oui bon","jour.","? Dites-moi."])await expect(page.getByText(broken,{exact:true})).toHaveCount(0);
+   const positions=await Promise.all(expected.map(content=>page.getByText(content,{exact:true}).evaluate(el=>el.getBoundingClientRect().top)));
+   for(let index=1;index<positions.length;index++)expect(positions[index]).toBeGreaterThan(positions[index-1]);
+  };
+  await assertTranscript();await page.reload();await expect(page.locator("textarea")).toBeVisible();await assertTranscript();
  });
 }
 
