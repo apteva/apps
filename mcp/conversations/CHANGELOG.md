@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.54 — 2026-10-24
+
+- Restore the full available width for thread metadata and timestamps. Reserve context-menu space only on the title line in the panel, agent conversation browser, and history.
+- Let the three-dot action inherit its row background instead of painting a separate tile. Preserve hover, touch, keyboard access, selection, unread/activity indicators, and context-menu behavior.
+- Add desktop/mobile layout regressions covering long titles, metadata width, and action overlap.
+
 ## 0.24.53 — 2026-10-23
 
 - Render interrupted assistant captions after the caller using preserved provider-timed fragments, including delayed captions. Preserve durable message identities, legacy history, and separate voice sessions. Full ordering support requires the accompanying Core transcript changes.

@@ -55,3 +55,26 @@ test("host can disable menus or add a keyboard-accessible action; details do not
  await expect(page.getByRole("dialog")).toBeVisible();await expect(page.getByRole("heading",{name:"Thread one",exact:true})).toBeVisible();
  expect((await (await request.get("/requests")).json()).some((c:any)=>c.path.endsWith("/participants")&&c.query.id==="thread-two")).toBe(true);
 });
+
+for(const [surface,width] of [["panel",1280],["panel",390],["widget-browser",1280],["history",1280]] as const){
+ test(`${surface} ${width}px: thread metadata uses the full row while options only reserve heading space`,async({page,request})=>{
+  await request.post("/reset");await request.post("/seed-panel",{data:chats.map(c=>({...c,title:`${c.title} with a longer subject to fit the sidebar`,lead_agent_name:"A helpful agent with a long name",updated_at:new Date().toISOString()}))});
+  await page.setViewportSize({width,height:720});
+  await page.goto(`/?host=dashboard${surface==="history"?"":`&surface=${surface}`}&theme=terminal`);
+  if(surface==="history")await page.getByRole("button",{name:"History",exact:true}).click();
+  const row=page.locator('[data-thread-actions="thread-one"]');await expect(row).toBeVisible();await row.hover();
+  const geometry=await row.evaluate(element=>{
+   const button=element.querySelector("button")!,heading=button.firstElementChild!,metadata=button.lastElementChild!,trigger=element.querySelector(".thread-actions-trigger")!;
+   const b=button.getBoundingClientRect(),m=metadata.getBoundingClientRect(),target=trigger.getBoundingClientRect();
+   const title=heading.querySelector(".truncate")!.getBoundingClientRect();
+   return {metadataRightInset:b.right-m.right,titleRight:title.right,targetLeft:target.left,triggerBackground:getComputedStyle(trigger).backgroundColor,scrollWidth:button.scrollWidth,width:button.clientWidth};
+  });
+  expect(geometry.metadataRightInset).toBeLessThanOrEqual(17);
+  expect(geometry.metadataRightInset).toBeGreaterThanOrEqual(12);
+  expect(geometry.titleRight).toBeLessThanOrEqual(geometry.targetLeft);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
+  // Hovering the row does not paint a separate rectangular background tile.
+  expect(geometry.triggerBackground).toBe("rgba(0, 0, 0, 0)");
+  if(surface==="panel")await page.screenshot({path:`/private/tmp/conversations-thread-layout-${width}.png`});
+ });
+}

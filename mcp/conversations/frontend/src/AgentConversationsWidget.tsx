@@ -262,7 +262,7 @@ function ConversationBrowser({
                       onClick={() => setSelectedId(conversation.id)}
                       className={`w-full border-l-2 px-3 py-2.5 text-left ${conversation.id === selectedId ? "border-accent bg-bg-hover" : "border-transparent hover:bg-bg-hover"}`}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="thread-row-heading flex items-center gap-2">
                         {showsAgentAvatar(avatarMode, "threads") && <ConversationIdentity conversation={conversation} agents={appearanceAgents}/>}
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
                         <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
@@ -607,7 +607,7 @@ function SingleConversation({
                         }}
                         className={`w-full px-4 py-3 text-left hover:bg-bg-hover ${conversation.id === selected?.id ? "bg-bg-hover" : ""}`}
                       >
-                        <span className="flex items-center gap-2 text-sm font-medium text-text">
+                        <span className="thread-row-heading flex items-center gap-2 text-sm font-medium text-text">
                           {showsAgentAvatar(avatarMode, "threads") && <ConversationIdentity conversation={conversation} agents={appearanceAgents}/>}
                           <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
                           <ConversationActivityIndicator active={activeHistory.has(conversation.id)} />

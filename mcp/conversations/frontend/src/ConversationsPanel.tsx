@@ -2404,7 +2404,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                             : "border-transparent hover:bg-bg-hover"
                         }`}
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="thread-row-heading flex items-center gap-2">
                           {attentionRank > 0 && (
                             <span
                               className={`inline-flex shrink-0 ${attentionIconClass(attentionRank)}`}

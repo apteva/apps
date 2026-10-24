@@ -349,7 +349,8 @@
 .apteva-conversations .chat-image-caption {font-size:13px;overflow-wrap:anywhere;margin:10px 0 0}
 .apteva-conversations .chat-image-caption small {display:block;color:var(--color-text-muted,#aaa);font-size:11px}
 
-.thread-action-row > button:first-child { padding-right: 3rem; }
+/* Reserve the options target on the heading only; metadata uses the full row. */
+.thread-action-row > button:first-child > .thread-row-heading { padding-inline-end: 2rem; }
 .thread-actions-trigger { opacity: 0; }
 .thread-action-row:hover > .thread-actions-trigger,
 .thread-action-row:focus-within > .thread-actions-trigger { opacity: 1; }
