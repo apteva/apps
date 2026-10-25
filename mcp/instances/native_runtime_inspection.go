@@ -203,8 +203,9 @@ func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestor
  unitfile=/etc/systemd/system/"$unit"
  restore_pending=false
  if test -e "$(dirname "$data")/.restore-intent"; then restore_pending=true; fi
- inspect_execution() {
  ` + nativeUnitProperties() + `
+ inspect_execution() {
+
  if test -e "$root/.stopped"; then ` + nativeInactiveProperties() + nativeReleasedListeners(d) + `printf stopped; return; fi
  if test "$state" = active; then
   test "$restore_pending" = false
@@ -220,7 +221,8 @@ func nativeInspectionCommand(d nativeRecord, peers []nativeRecord, recoverRestor
  observed=$(inspect_execution)
  `
 	cmd += nativeInspectionMetadataScript(len(measure) > 0 && measure[0])
-	cmd += `printf '{"state":"%s","snapshot_sha256":"%s","restore_pending":%s,"state_bytes":%s,"state_entries":%s,"state_available_bytes":%s}\n' "$observed" "$snapshot_sha" "$restore_pending" "$metadata_bytes" "$metadata_entries" "$metadata_available"
+	cmd += nativeResourceInspectionScript()
+	cmd += `printf '{"process_resources":%s,"state":"%s","snapshot_sha256":"%s","restore_pending":%s,"state_bytes":%s,"state_entries":%s,"state_available_bytes":%s}\n' "$resource_json" "$observed" "$snapshot_sha" "$restore_pending" "$metadata_bytes" "$metadata_entries" "$metadata_available"
  `
 	return cmd
 }

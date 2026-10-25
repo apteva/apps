@@ -229,6 +229,15 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e := json.Unmarshal([]byte(nativeJSON(r.Options)), &o); e != nil {
 		return nil, o, a, p, errors.New("invalid native backend options")
 	}
+	if o.Resources != nil {
+		return nil, o, a, p, errors.New("resource_policy must use the typed request field")
+	}
+	o.Resources = r.Resources
+	if r.Resources != nil {
+		if _, e := sdk.ResolveResources(r.Manifest.Runtime.ResourcePolicy, r.Resources); e != nil {
+			return nil, o, a, p, e
+		}
+	}
 	if o.GatewayURL == "" {
 		o.GatewayURL = r.GatewayURL
 	}
@@ -456,6 +465,7 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 	c, measure := b.metadataContext(c, inst, d, force)
 	obs, e := b.inspectRemote(c, inst, &d)
 	b.mergeStateMetadata(inst, d, &obs, measure)
+	out.ProcessResources = obs.ProcessResources
 	out.StateBytes, out.StateEntries, out.StateAvailableBytes = obs.StateBytes, obs.StateEntries, obs.StateAvailableBytes
 	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
 	if e != nil || d.Restore != nil && (!d.Restore.Completed || d.Execution.SnapshotSHA256 != d.Restore.SHA256) {
@@ -556,6 +566,9 @@ func (b *nativeBackend) environment(d nativeRecord, r nativeRequest) (map[string
 	}
 	if env["APTEVA_INSTALL_ID"] != strconv.FormatInt(d.InstallID, 10) || env["APTEVA_DEPLOYMENT_ID"] != d.ID || env["APTEVA_DEPLOYMENT_GENERATION"] != strconv.FormatInt(d.Generation, 10) || env["APTEVA_GATEWAY_URL"] != d.Options.GatewayURL || env["APTEVA_APP_TOKEN"] == "" || env["APTEVA_PROJECT_ID"] != r.ProjectID || d.Artifact.AppCapabilities.PassiveStart && env["APTEVA_RUNTIME_MODE"] != "standby" {
 		return nil, errors.New("Server environment identity/gateway handoff mismatch")
+	}
+	if err := validateNativeResourceEnvironment(d, env); err != nil {
+		return nil, err
 	}
 	env["APTEVA_APP_PORT"] = strconv.Itoa(d.ControlPort)
 	env["APTEVA_BIND_HOST"] = "127.0.0.1"
