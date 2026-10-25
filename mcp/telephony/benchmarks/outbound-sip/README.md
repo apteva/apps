@@ -116,3 +116,23 @@ and a stalled stream. These are failed acceptance results, not a smoothness or
 production-capacity certification. Healthy controls also recorded common timing
 interruptions; their cause remains unresolved. The runtime recovery fix was local at measurement time, was not included in
 0.12.26, and is packaged in 0.12.27.
+
+## Resource policy and diagnostics contention
+
+Enable the optional SDK governor/socket policy and eight diagnostic readers
+while the existing recording and media acceptance gates remain unchanged:
+
+```sh
+TELEPHONY_RESOURCE_SOAK=1 TELEPHONY_RESOURCE_SOAK_RX=262144 \
+  bun run benchmark:outbound-sip --seconds 60 --calls 8 --recording true
+```
+
+`TELEPHONY_RESOURCE_SOAK_RX` accepts 0 (unchanged OS buffer) through 4 MiB;
+256 KiB, 512 KiB and 1 MiB are comparison candidates, not runtime defaults.
+`resources.json` records successful/failed diagnostic work, governor counts,
+and requested/effective socket settings. A test fails if no diagnostic work
+happens or a diagnostic request fails. Only local testkit contexts are changed.
+
+When developing the SDK simultaneously, set `TELEPHONY_TEST_GOWORK` to an
+explicit temporary Go workspace that selects the modified SDK and this app.
+Default runs keep `GOWORK=off` and use the pinned released SDK.

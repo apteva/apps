@@ -81,7 +81,7 @@ func (s *rtcICESession) initial(listener bool) []byte {
 			state = "unavailable"
 		}
 	}
-	raw, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": s.credentials.ICEServers, "ice_transport_policy": policy, "ice_revision": s.revision.Load(), "ice_restart_supported": true, "turn_source": state, "expires_at": s.credentials.ExpiresAt, "relay_configured": hasTURN(s.credentials.ICEServers), "bitrate": s.config.Bitrate, "fec_requested": s.config.fecEnabled(), "listener": listener})
+	raw, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": s.credentials.ICEServers, "ice_transport_policy": policy, "ice_revision": s.revision.Load(), "ice_restart_supported": true, "turn_source": state, "expires_at": s.credentials.ExpiresAt, "relay_configured": hasTURN(s.credentials.ICEServers), "bitrate": s.config.Bitrate, "fec_requested": s.config.fecEnabled(), "listener": listener, "network_policy": s.config.NetworkPolicy})
 	return raw
 }
 func (s *rtcICESession) requestRefresh() {

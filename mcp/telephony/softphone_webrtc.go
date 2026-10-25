@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/interceptor"
@@ -28,6 +29,8 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	socketPolicy     func(*net.UDPConn) sdk.SocketPolicyResult
+	NetworkPolicy    *phoneNetworkPolicy
 	ClientICEServers []webrtc.ICEServer
 	ICEPolicy        string
 	TURN             *rtcTURNProvider
@@ -108,11 +111,15 @@ func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, erro
 
 func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngine)) (*webrtc.API, error) {
 	m := &webrtc.MediaEngine{}
+	codecMax := 32000
+	if c.NetworkPolicy != nil {
+		codecMax = c.NetworkPolicy.MaxBitrate
+	}
 	fec := "1"
 	if !c.fecEnabled() {
 		fec = "0"
 	}
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=" + fec + ";stereo=0;sprop-stereo=0;maxaveragebitrate=32000"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=" + fec + ";stereo=0;sprop-stereo=0;maxaveragebitrate=" + strconv.Itoa(codecMax)}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
 	i := &interceptor.Registry{}
@@ -120,11 +127,12 @@ func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngin
 		return nil, err
 	}
 	s := webrtc.SettingEngine{}
-	if c.socketTelemetry != nil {
+	if c.socketTelemetry != nil || c.socketPolicy != nil {
 		network, err := newRTCObservedNet(c.socketTelemetry)
 		if err != nil {
 			return nil, err
 		}
+		network.socketPolicy = c.socketPolicy
 		s.SetNet(network)
 	}
 	s.SetIncludeLoopbackCandidate(true)
@@ -344,11 +352,11 @@ func (j *rtcJitter) pop(now time.Time) *rtp.Packet {
 // connectSoftphoneRTC owns the real signaling socket until Close. PCM never
 // crosses that socket. Private coaching is mixed only at this browser boundary,
 // after carrier/recording/listener taps, retaining the pinned-adviser validator.
-func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net.Conn, func(), error) {
+func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, settings ...func(*webrtc.SettingEngine)) (net.Conn, func(), error) {
 	stats := &rtcMediaStats{}
 	stats.ingress.socket = &rtcSocketTelemetry{}
 	c.socketTelemetry = stats.ingress.socket
-	api, err := softphoneRTCAPI(c)
+	api, err := softphoneRTCAPI(c, settings...)
 	if err != nil {
 		signal.Close()
 		return nil, nil, err
@@ -460,6 +468,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	if err != nil {
 		return fail(err)
 	}
+	stats.voice.policy.Store(c.NetworkPolicy)
 	stats.ice.Store(iceSession)
 	if err := signalWriter.Write(ws.OpText, iceSession.initial(false)); err != nil {
 		return fail(err)
@@ -646,30 +655,7 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 		}
 		now := time.Now()
 		for p := j.pop(now); p != nil; p = j.pop(now) {
-			if timeline.ssrc != p.SSRC {
-				timeline.valid = false
-			}
-			repaired := 0
-			for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
-				if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
-					release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond-time.Duration(gap)*20*time.Millisecond), stats, direction)
-					stats.mu.Lock()
-					stats.value.IngressConcealedMS += 20
-					repaired += 20
-					stats.mu.Unlock()
-				}
-			}
-			if repaired > 0 {
-				stats.ingress.observe(p, now, now, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
-			}
-			n, err := decoder.decode(p.Payload, pcm)
-			if err != nil {
-				timeline.valid = false
-				stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
-				continue
-			}
-			timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
-			release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond), stats, direction)
+			decodeRTCPacket(p, &j, &timeline, &release, decoder, pcm, stats, direction, fec, now, len(packets))
 		}
 		if f, ok := release.pop(now, stats, direction); ok {
 			forward(f.pcm, f.source)
@@ -693,6 +679,35 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			due = timer.C
 		}
 	}
+}
+
+// decodeRTCPacket is shared by live reception and deterministic speech replays.
+// It preserves RTP source time and repair order; it never owns a network clock.
+func decodeRTCPacket(p *rtp.Packet, j *rtcJitter, timeline *rtcDecodeTimeline, release *rtcAudioRelease, decoder rtcOpusDecoder, pcm []int16, stats *rtcMediaStats, direction string, fec bool, now time.Time, queueDepth int) {
+	if timeline.ssrc != p.SSRC {
+		timeline.valid = false
+	}
+	repaired := 0
+	for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
+		if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
+			release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond-time.Duration(gap)*20*time.Millisecond), stats, direction)
+			stats.mu.Lock()
+			stats.value.IngressConcealedMS += 20
+			repaired += 20
+			stats.mu.Unlock()
+		}
+	}
+	if repaired > 0 {
+		stats.ingress.observe(p, now, now, queueDepth, stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
+	}
+	n, err := decoder.decode(p.Payload, pcm)
+	if err != nil {
+		timeline.valid = false
+		stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
+		return
+	}
+	*timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+	release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond), stats, direction)
 }
 
 // Browser bandwidth probes may carry RTP padding without an Opus payload.
@@ -727,6 +742,10 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 	}
 	defer encoder.Close()
 	policy := newRTCVoicePolicy(bitrate)
+	if p := stats.voice.policy.Load(); p != nil {
+		policy.minimum = p.MinBitrate
+		policy.maximum = p.MaxBitrate
+	}
 	stats.voice.codec.Store(rtcOpusEncoderState(encoder, fec, bitrate, 10, time.Now()))
 	// Keep 20ms frame boundaries and a bounded 120ms outgoing queue. Encoding
 	// and RTP writes are paced outside the hub's carrier receive loop.

@@ -12,6 +12,7 @@ type rtcReceiverFeedback struct {
 }
 type rtcVoiceControl struct {
 	feedback            atomic.Pointer[rtcReceiverFeedback]
+	policy              atomic.Pointer[phoneNetworkPolicy]
 	codec               atomic.Pointer[rtcEncoderState]
 	configurationErrors atomic.Uint64
 }
@@ -40,12 +41,12 @@ func (c *rtcVoiceControl) observe(highest uint32, fraction uint8, now time.Time)
 // RTCP observations never perform encoder work. The sender alone applies
 // bounded changes, no more than once per two seconds, with slow recovery.
 type rtcVoicePolicy struct {
-	bitrate, maximum, loss int
-	last, stable, observed time.Time
+	bitrate, minimum, maximum, loss int
+	last, stable, observed          time.Time
 }
 
 func newRTCVoicePolicy(maximum int) rtcVoicePolicy {
-	return rtcVoicePolicy{bitrate: maximum, maximum: maximum, loss: 10}
+	return rtcVoicePolicy{bitrate: maximum, minimum: 16000, maximum: maximum, loss: 10}
 }
 func (p *rtcVoicePolicy) next(now time.Time, feedback *rtcReceiverFeedback) (int, int, bool) {
 	if feedback == nil || now.Sub(feedback.at) > 5*time.Second || !feedback.at.After(p.observed) || !p.last.IsZero() && now.Sub(p.last) < 2*time.Second {
@@ -57,7 +58,7 @@ func (p *rtcVoicePolicy) next(now time.Time, feedback *rtcReceiverFeedback) (int
 	p.loss = max(10, min(30, feedback.loss))
 	if feedback.loss >= 3 {
 		p.stable = time.Time{}
-		p.bitrate = max(16000, p.bitrate-4000)
+		p.bitrate = max(p.minimum, p.bitrate-4000)
 	} else {
 		if p.stable.IsZero() {
 			p.stable = now

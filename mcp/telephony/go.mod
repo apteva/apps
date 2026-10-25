@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/telephony
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.107.0
+	github.com/apteva/app-sdk v0.108.0
 	github.com/ebitengine/purego v0.11.1
 	github.com/emiago/sipgo v1.4.3
 	github.com/gobwas/ws v1.4.0

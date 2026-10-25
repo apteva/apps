@@ -972,7 +972,7 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 	defer cancel()
 	r = r.WithContext(context.WithValue(playbackCtx, playbackDownloadContextKey{}, settings.MaxFileBytes))
 	key := fmt.Sprintf("%s:%s:%d:%s:%s:%d", recording.ProjectID, recording.ID, recording.StorageFileID, recording.CompletedAt, variant, settings.MaxFileBytes)
-	file, err := cachedRecording(r.Context(), key, func() (string, error) {
+	file, err := cachedRecording(r.Context(), key, resourceRecordingBuild(r.Context(), ctx, func() (string, error) {
 		var path string
 		var err error
 		if recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
@@ -1007,7 +1007,7 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 			_ = os.Remove(path)
 		}
 		return playbackPath, err
-	})
+	}))
 	if err != nil {
 		ctx.Logger().Warn("recording playback", "recording", recording.ID, "err", err)
 		if variant == recordingVariantMix && r.Context().Err() == nil {

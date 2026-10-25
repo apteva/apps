@@ -172,7 +172,7 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 	}
 	git := exec.Command("git", "rev-parse", "HEAD")
 	revision, _ := git.Output()
-	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP, optional carrier TCP and forced-relay UDP profiles; synthetic acoustic markers; no live provider", "results": results}
+	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "network_profile": firstNonEmpty(os.Getenv("TELEPHONY_BENCHMARK_NETWORK_PROFILE"), "balanced"), "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP, optional carrier TCP and forced-relay UDP profiles; synthetic acoustic markers; no live provider", "results": results}
 	raw, _ := json.MarshalIndent(report, "", "  ")
 	if err = os.WriteFile(filepath.Join(output, "results.json"), append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
@@ -199,6 +199,23 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	result := benchmarkResult{Profile: profile, Outcome: "error"}
 	platform := newTier2PlatformGateway(t)
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true"}))
+	// Exercise the real persisted project policy rather than overriding fake
+	// browser statistics or bypassing the production encoder configuration.
+	if preset := os.Getenv("TELEPHONY_BENCHMARK_NETWORK_PROFILE"); preset != "" {
+		policy := defaultPhoneNetworkPolicy()
+		switch preset {
+		case "balanced":
+		case "guarded":
+			policy.UploadBitrateControl = "guarded"
+		case "unstable":
+			policy.InitialBitrate, policy.MaxBitrate, policy.PlaybackTarget = 20000, 20000, 80
+		default:
+			t.Fatalf("unknown browser network benchmark preset %q", preset)
+		}
+		if status, body := tier2Request(t, sc, "POST", "/numbers/network-policy?project_id="+tier2Project, map[string]any{"policy": policy}, nil, tier2Headers()); status != 200 {
+			t.Fatalf("network preset: %d %s", status, body)
+		}
+	}
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser", "recording_mode": "off"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})

@@ -1222,6 +1222,8 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	var result map[string]any
 	switch path {
+	case "/numbers/network-policy":
+		result, err = a.networkPolicies(ctx, body, nil)
 	case "/numbers/turn-policy":
 		result, err = a.turnPolicies(ctx, body, nil)
 	case "/numbers/outbound-transport":

@@ -1,3 +1,4 @@
+import {runNetworkCheck} from "./network-check";
 import { boundedMediaRequest } from "./media-lease";
 import {RuntimeTelephonyTransport, type TelephonyRuntimeMode, type DirectTelephonyConnection} from "./runtime-transport";
 import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
@@ -163,6 +164,8 @@ export interface TelephonyClientOptions {
 /** Human-call API. Does not invoke the AI-call MCP tools or open a microphone. */
 export class TelephonyClient {
  private transport: RuntimeTelephonyTransport;
+ private networkCheckControllers = new Set<AbortController>();
+ private incomingPending=false;
   listMicrophones = listMicrophones;
   createMicrophonePreview = (onLevel?: (level: number) => void) => createMicrophonePreview(onLevel, this.app);
   constructor(readonly app: AppHandle, private readonly options: TelephonyClientOptions = {}) {
@@ -186,6 +189,8 @@ export class TelephonyClient {
     if (!Array.isArray(result?.calls) || result.calls.some(c => !c || typeof c.id !== "string" || typeof c.status !== "string")) {
       throw new Error("Invalid Telephony calls response");
     }
+    this.incomingPending=result.calls.some(isIncomingBrowserCall);
+ if(this.incomingPending)this.cancelNetworkChecks();
     return result.calls;
   }
 
@@ -297,6 +302,7 @@ export class TelephonyClient {
   }
 
   async place(request: DialRequest): Promise<CallSession> {
+    this.cancelNetworkChecks();
     if (!/^\+[1-9]\d{7,14}$/.test(request.to) || !request.idempotency_key?.trim()) {
       throw new Error("Dial requires an E.164 number and an idempotency key");
     }
@@ -305,6 +311,7 @@ export class TelephonyClient {
   }
 
   async answer(id: string, request: AnswerRequest = {}): Promise<CallSession> {
+    this.cancelNetworkChecks();
     const started = leaseClock();
     try {
       return this.session(await this.post(this.path(`/softphone/answer/${callID(id)}`), request), id, "media", started);
@@ -351,6 +358,18 @@ export class TelephonyClient {
   /** Operator-only optional carrier buffer. Off by default; shared resource scope.
    * apply defers while calls are active. Does not change local SIP recovery. */
   /** The backend resolves project and adviser identity from authentication. */
+  networkPolicy(request:{policy?:Partial<import("./network-policy").NetworkPolicy>;inherit?:boolean}={},signal?:AbortSignal):Promise<import("./network-policy").NetworkPolicyView>{return this.post(this.path("/softphone/network-policy"),request,{signal});}
+  configureNetworkPolicy(request:{identity?:import("./turn-policy").TURNIdentity;policy?:Partial<import("./network-policy").NetworkPolicy>;inherit?:boolean}={}):Promise<import("./network-policy").NetworkPolicyView>{return this.post(this.path("/numbers/network-policy"),request);}
+  registerNetworkCheck(controller:AbortController):()=>void {this.networkCheckControllers.add(controller);return()=>this.networkCheckControllers.delete(controller);}
+  cancelNetworkChecks(preserve?:AbortSignal):void {for(const controller of this.networkCheckControllers)if(controller.signal!==preserve){controller.abort();this.networkCheckControllers.delete(controller);}}
+  get networkChecksAllowed():boolean{return !this.incomingPending;}
+  async checkNetwork(options:import("./network-check").NetworkCheckOptions={}):Promise<import("./network-check").NetworkCheckResult>{
+    if(this.incomingPending)return {state:"cancelled",checkedAt:new Date().toISOString(),paths:[]};
+    this.cancelNetworkChecks(options.signal);const controller=new AbortController();this.networkCheckControllers.add(controller);
+    const cancel=()=>controller.abort();options.signal?.addEventListener("abort",cancel,{once:true});if(options.signal?.aborted)cancel();
+    try{return await runNetworkCheck((body,signal)=>this.post(this.path("/softphone/network-check"),body,{signal}),{...options,signal:controller.signal});}
+    finally{options.signal?.removeEventListener("abort",cancel);this.networkCheckControllers.delete(controller);}
+  }
   turnPolicy(request:{policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/softphone/turn-policy"),request);}
   /** Operator-only project/adviser relay configuration. */
   configureTURNPolicy(request:{identity?:import("./turn-policy").TURNIdentity;policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/numbers/turn-policy"),request);}

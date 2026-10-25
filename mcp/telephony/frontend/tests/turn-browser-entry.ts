@@ -42,5 +42,5 @@ import {DEFAULT_SOFTPHONE_AUDIO_OPTIONS} from "../../ui/softphone-audio";
   if(loss>0||remoteLoss>0||maxGap>180)throw new Error(`Renewal interrupted media: lost=${loss} remote_lost=${remoteLoss} observed_gap_ms=${maxGap}`);
   if(events.some(e=>e.action==="reconnect"))throw new Error("Renewal recreated attachment");
   return {before,after,path,packet_loss_delta:loss,remote_packet_loss_delta:remoteLoss,max_receive_observation_gap_ms:maxGap,delayed_answers:delayedAnswers,events:events.filter(e=>e.action==="ice_restart"),peer_preserved:true,mute_preserved:true};
- } finally {if(monitor)clearInterval(monitor);connection.stop();}
+ } catch(error){const pc=(connection as any).pc;const stats=pc?rtcStatistics(await pc.getStats()):undefined;throw Error(JSON.stringify({error:String(error),events,path:stats?.webrtc,state:pc?.connectionState}));} finally {if(monitor)clearInterval(monitor);connection.stop();}
 };

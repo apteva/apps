@@ -1,3 +1,5 @@
+import {validateNetworkPolicy,type NetworkPolicy} from "./network-policy";
+import {withNetworkAbort,type NetworkCheckResult,type NetworkCheckOptions} from "./network-check";
 import { AudioRecoveryLoop } from "./audio-recovery";
 import { mediaFailure, mediaDiagnosticID, boundedMediaRequest } from "./media-lease";
 import type { CallListenerOptions } from "./listener";
@@ -21,6 +23,8 @@ export function phaseForStatus(status?: string): SoftphonePhase {
 
 export interface SoftphoneSnapshot {
   readonly callId?: string;
+ readonly networkCheck?: NetworkCheckResult;
+ readonly networkChecking?:boolean;
   readonly carrierStatus?: string;
   readonly audioState: SoftphoneState | "idle";
   readonly busy: boolean;
@@ -37,6 +41,9 @@ export interface SoftphoneSnapshot {
   readonly capabilities?: Call["capabilities"];
 }
 export interface SoftphoneOptions {
+ /** Idle-only network readiness checks. Enabled by the bundled panel, opt-in for existing hosts. */
+ networkCheck?: boolean;
+ onNetworkCheck?: (result:NetworkCheckResult)=>void;
   onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
 	/** Applied to the shared browser runtime; defaults to websocket. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
@@ -80,14 +87,59 @@ export class HeadlessSoftphone {
   private ringing = false;
   private readonly runtime: AudioRuntime;
   private audioOptions: SoftphoneAudioOptions;
+  private preferredPlayback:Pick<SoftphoneAudioOptions,"playbackTargetMs"|"playbackMinMs"|"playbackMaxMs">={};
+  private preferredMediaTransport: SoftphoneAudioOptions["mediaTransport"];
+ private networkTimer?:ReturnType<typeof setTimeout>;
+ private networkRequest?:AbortController;
+ private readonly networkChanged=()=>{if(this.disposed)return;if(this.snapshot.networkCheck)this.update({networkCheck:{...this.snapshot.networkCheck,state:"inconclusive"}});this.scheduleNetworkCheck(1000);};
   private readonly interval: number;
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
     this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio, ...(options.mediaTransport ? { mediaTransport: options.mediaTransport } : {}) };
+    this.preferredMediaTransport=this.audioOptions.mediaTransport;
+    this.preferredPlayback={playbackTargetMs:this.audioOptions.playbackTargetMs,playbackMinMs:this.audioOptions.playbackMinMs,playbackMaxMs:this.audioOptions.playbackMaxMs};
     playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");
+    if(options.networkCheck){globalThis.addEventListener?.("online",this.networkChanged);this.scheduleNetworkCheck(500+Math.random()*15000);}
+  }
+
+  private scheduleNetworkCheck(delay=300000+Math.random()*60000){
+    if(!this.options.networkCheck||this.disposed)return;
+    clearTimeout(this.networkTimer);
+    this.networkTimer=setTimeout(()=>{if(!this.session&&!this.snapshot.busy&&(typeof document==="undefined"||document.visibilityState!=="hidden"))void this.checkNetwork().catch(()=>{});else this.scheduleNetworkCheck();},delay);
+  }
+  private cancelNetworkCheck(){if(this.snapshot.networkChecking)this.update({networkChecking:false});clearTimeout(this.networkTimer);this.networkRequest?.abort();this.networkRequest=undefined;this.client.cancelNetworkChecks();}
+  /** Does not alter busy/call state; dial and answer synchronously cancel it. */
+  async checkNetwork(options:NetworkCheckOptions={}):Promise<NetworkCheckResult>{
+    this.assertOpen();if(this.session||this.snapshot.busy||!this.client.networkChecksAllowed)throw Error("Network checks pause during calls or incoming offers");
+    this.cancelNetworkCheck();const controller=new AbortController();this.networkRequest=controller;const unregister=this.client.registerNetworkCheck(controller);this.update({networkChecking:true});
+    const cancel=()=>controller.abort();options.signal?.addEventListener("abort",cancel,{once:true});if(options.signal?.aborted)cancel();
+    let profileDeadline:ReturnType<typeof setTimeout>|undefined;
+    try{
+      // Policy discovery is never on the call-admission path. A slow or old
+      // server cannot stall answering, microphone preparation or cancellation.
+      const profileController=new AbortController(),cancelProfile=()=>profileController.abort();controller.signal.addEventListener("abort",cancelProfile,{once:true});
+      profileDeadline=setTimeout(cancelProfile,3000);
+      let enabled=true;
+      try {const view=await withNetworkAbort(this.client.networkPolicy({},profileController.signal),profileController.signal);const profile=validateNetworkPolicy(view.effective);enabled=profile.background_check;
+        if(!controller.signal.aborted&&!this.session&&!this.snapshot.busy)this.applyNetworkPolicy(view.configured===false?undefined:profile);
+      }catch { /* optional policy discovery never breaks existing calls */ }
+      finally {clearTimeout(profileDeadline);controller.signal.removeEventListener("abort",cancelProfile);}
+      if(!enabled && !options.paths)return {state:"unavailable",checkedAt:new Date().toISOString(),paths:[]};
+      const result=await this.client.checkNetwork({...options,signal:controller.signal});
+      if(this.networkRequest===controller&&!controller.signal.aborted){this.update({networkCheck:result});try{this.options.onNetworkCheck?.(result);}catch{/* observer isolation */}}
+      return result;
+    }finally{unregister();clearTimeout(profileDeadline);options.signal?.removeEventListener("abort",cancel);if(this.networkRequest===controller){this.networkRequest=undefined;this.update({networkChecking:false});this.scheduleNetworkCheck();}}
+  }
+
+  /** Applies to the next attachment, without restarting an existing call. */
+  applyNetworkPolicy(value?:NetworkPolicy):void {
+    this.assertOpen();
+    if(value===undefined){if(this.audioOptions.networkProfile)this.audioOptions={...this.audioOptions,...this.preferredPlayback,networkProfile:undefined,mediaTransport:this.preferredMediaTransport};return;}
+    const profile=validateNetworkPolicy(value);
+    this.audioOptions={...this.audioOptions,networkProfile:profile,playbackTargetMs:profile.playback_target_ms,playbackMinMs:Math.min(this.preferredPlayback.playbackMinMs??60,profile.playback_target_ms),playbackMaxMs:profile.playback_max_ms,mediaTransport:profile.media_transport==="inherit"?this.preferredMediaTransport:profile.media_transport};
   }
 
   /** New listener/coach sessions inherit this softphone's current audio profile. */
@@ -133,6 +185,7 @@ export class HeadlessSoftphone {
     });
   }
   private begin(requireIdle: boolean): number {
+ this.cancelNetworkCheck();
     this.assertOpen();
     if (this.snapshot.busy || this.hangingUp || (requireIdle && this.session)) throw new Error("Softphone already has an active operation or call");
     const generation = this.invalidate();
@@ -251,7 +304,7 @@ export class HeadlessSoftphone {
     const nextOptions = { ...this.audioOptions, ...audio };
     playbackBufferOptions(nextOptions);
     const generation = this.begin(false);
-    this.audioOptions = nextOptions;
+    this.configureAudio(audio??{});
     const id = this.session.call_id;
     const recovery=mediaRecoveryContext(action),previous_session_id=this.session.session_generation;
     const report=(outcome:string,extra:Partial<MediaSessionEvent>={})=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome,...recovery,previous_session_id,...extra});
@@ -351,7 +404,10 @@ export class HeadlessSoftphone {
     this.assertOpen();
     const nextOptions = { ...this.audioOptions, ...options };
     playbackBufferOptions(nextOptions);
+    if(options.mediaTransport!==undefined)this.preferredMediaTransport=options.mediaTransport;
+    for(const key of ["playbackTargetMs","playbackMinMs","playbackMaxMs"] as const)if(key in options)this.preferredPlayback[key]=options[key];
     this.audioOptions = nextOptions;
+    if(nextOptions.networkProfile)this.applyNetworkPolicy(nextOptions.networkProfile);
   }
 
   setMuted(muted: boolean): void {
@@ -627,7 +683,7 @@ export class HeadlessSoftphone {
     this.hasStatusPush=false;
     this.stopAudio();
     this.stopPolling();
-    this.session = undefined;this.hasLiveAudio=false;
+    this.session = undefined;this.hasLiveAudio=false;this.scheduleNetworkCheck();
     this.outbound = false;
     this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined, phase: carrierStatus ? "ended" : "idle",
       holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
@@ -635,6 +691,7 @@ export class HeadlessSoftphone {
 
   /** Releases local devices and monitoring. An established carrier call stays up. */
   dispose(): void {
+ this.cancelNetworkCheck();globalThis.removeEventListener?.("online",this.networkChanged);
     if (this.disposed) return;
     this.disposed = true;
     this.invalidate();

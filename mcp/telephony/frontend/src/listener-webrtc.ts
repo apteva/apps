@@ -1,10 +1,11 @@
+import {validateNetworkPolicy} from "./network-policy";
 import {safeMediaSessionEvent,type MediaSessionEvent} from "./media-lease";
 import {RTCICEController,rtcICEConfiguration} from "./rtc-ice";
 import type { AppHandle } from "@apteva/web-sdk";
 import type { ListenerAudioConnection, ListenerAudioRuntime, ListenerPlaybackOptions } from "./listener-audio";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions } from "../../ui/softphone-audio";
 import { loadAudioModules, type AudioModules } from "./audio-assets";
-import { RTCQualityPolicy } from "./webrtc-quality";
+import { rtcQualityPolicy, RTCQualityPolicy, RTCPathHealth } from "./webrtc-quality";
 import { rtcMediaURL, rtcStatistics } from "./webrtc-audio";
 
 /** Passive listening has no microphone/transmitter. Each explicit PTT obtains
@@ -13,7 +14,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
  return {create(callbacks) {
   const audioOptions={...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...options};
   const buffer=playbackBufferOptions(audioOptions);
-  const quality=new RTCQualityPolicy(audioOptions);
+  let quality=rtcQualityPolicy(audioOptions);let pathHealth=new RTCPathHealth(audioOptions.networkProfile);
   const receivers:RTCRtpReceiver[]=[];
   let socket:WebSocket|undefined, pc:RTCPeerConnection|undefined, context:AudioContext|undefined, speaker:GainNode|undefined;
   let closed=false, ready=false, connected=false, coaching=false, talkWanted=false, talking=false, generation=0;
@@ -84,6 +85,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
        if(ice?.handle(event))return;
        if(event.type==="webrtc.config"){
  relayRequired=event.ice_transport_policy==="relay";
+        if(event.network_policy){try{const networkProfile=validateNetworkPolicy(event.network_policy);quality=rtcQualityPolicy({...audioOptions,networkProfile});pathHealth=new RTCPathHealth(networkProfile);}catch{finish(new Error("Invalid network policy"));return;}}
         if(pc || event.listener!==true){finish(new Error("Invalid WebRTC listener configuration"));return;}
         try{config=rtcICEConfiguration(event);}catch(error){finish(error as Error);return;}bitrate=event.bitrate??32000;
         pc=new RTCPeerConnection(config);const peer=pc;
@@ -121,6 +123,7 @@ export function createListenerRTC(app:AppHandle, options:ListenerPlaybackOptions
       if(closed||!pc||sampling)return;sampling=true;
       void pc.getStats().then(report=>{if(closed)return;const value=rtcStatistics(report,previous);previous=value.previous;
        quality.observe({...value.metrics,receiver_jitter:value.webrtc.jitterMs/1000});
+ if(pathHealth.observe(value.metrics,performance.now(),pc?.connectionState==="connected"&&context?.state==="running")){iceEvents.push({timestamp:new Date().toISOString(),action:"network_quality",outcome:"sustained_degradation"});if(iceEvents.length>50)iceEvents.shift();}
        for(const receiver of receivers)if("jitterBufferTarget" in receiver)try{(receiver as RTCRtpReceiver&{jitterBufferTarget:number}).jitterBufferTarget=quality.target;}catch{/* optional browser hint */}
        callbacks.onDiagnostics?.({session_events:iceEvents.slice(),media_transport:"webrtc",dropped_ms:[],played_ms:[],max_queue_ms:value.queueMs,max_late_ms:0,sequence_gaps:[],network_excess_ms:0,network_dropped_ms:[],webrtc:value.webrtc});
       }).catch(()=>{}).finally(()=>{sampling=false;});

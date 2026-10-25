@@ -1,0 +1,56 @@
+{
+  "after": {
+    "actual_discarded_datagrams": 0,
+    "browser": "153.0.8010.12",
+    "concealed_ms": 170.375,
+    "enabled": true,
+    "events": [],
+    "lost_packets": 0,
+    "microphone_preserved": true,
+    "observation_ms": 15006.300000190735,
+    "path": {
+      "candidateType": "relay",
+      "concealedMs": 170.375,
+      "jitterBufferMs": 69.95283018867924,
+      "jitterMs": 0,
+      "packetsDiscarded": 0,
+      "packetsLost": 0,
+      "protocol": "udp",
+      "receiveBitrateBps": 0,
+      "relayProtocol": "udp",
+      "sendBitrateBps": 0
+    },
+    "peer_preserved": true,
+    "tail_lost_packets": 0
+  },
+  "before": {
+    "actual_discarded_datagrams": 400,
+    "browser": "153.0.8010.12",
+    "concealed_ms": 7585.1875,
+    "enabled": false,
+    "events": [
+      {
+        "action": "network_quality",
+        "outcome": "sustained_degradation",
+        "timestamp": "2026-10-25T09:33:53.810Z"
+      }
+    ],
+    "lost_packets": 399,
+    "microphone_preserved": true,
+    "observation_ms": 15007.299999952316,
+    "path": {
+      "candidateType": "host",
+      "concealedMs": 5989.875,
+      "jitterBufferMs": 65.7910447761194,
+      "jitterMs": 1,
+      "packetsDiscarded": 0,
+      "packetsLost": 319,
+      "protocol": "udp",
+      "receiveBitrateBps": 0,
+      "sendBitrateBps": 0
+    },
+    "peer_preserved": true,
+    "tail_lost_packets": 80
+  },
+  "scope": "real Chromium, production WebRTC bridge, actual direct SRTP packet drops; impaired direct vs healthy relay selected before calling; no mid-call route switch"
+}

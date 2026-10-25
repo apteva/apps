@@ -120,6 +120,8 @@ func TestOutboundSIPBrowserSoak(t *testing.T) {
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = previous })
 	app := &App{installID: 42}
+	stopResourceSoak := startResourceSoak(t, app, ctx, output)
+	t.Cleanup(stopResourceSoak)
 	mediaServer := softphoneTestServer(t, app)
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(mediaServer.URL, "http://"))
 	t.Setenv("APTEVA_APP_PORT", port)
@@ -483,6 +485,7 @@ func startOutboundSoakCarrier(t *testing.T, app *App, ctx *sdk.AppCtx, calls []*
 		t.Fatal(err)
 	}
 	cfg := directSIPTestConfig()
+	cfg.socketPolicy = func(conn *net.UDPConn) sdk.SocketPolicyResult { return ctx.ApplyUDPSocketPolicy(conn, "sip_media") }
 	cfg.PublicHost = "127.0.0.1"
 	cfg.PublicIP = mustSoakAddr("127.0.0.1")
 	cfg.RTPBindIP = cfg.PublicIP

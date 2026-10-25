@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	"github.com/pion/transport/v5"
 	"github.com/pion/transport/v5/stdnet"
 )
@@ -66,13 +67,14 @@ func (d *rtcSocketTelemetry) takePacket(ssrc uint32, sequence uint16, now time.T
 }
 
 type rtcObservedNet struct {
+	socketPolicy func(*net.UDPConn) sdk.SocketPolicyResult
 	transport.Net
 	telemetry *rtcSocketTelemetry
 }
 
 func newRTCObservedNet(d *rtcSocketTelemetry) (*rtcObservedNet, error) {
 	base, err := stdnet.NewNet()
-	return &rtcObservedNet{base, d}, err
+	return &rtcObservedNet{Net: base, telemetry: d}, err
 }
 func (n *rtcObservedNet) wrap(c transport.UDPConn, err error) (transport.UDPConn, error) {
 	if err != nil {
@@ -80,6 +82,12 @@ func (n *rtcObservedNet) wrap(c transport.UDPConn, err error) (transport.UDPConn
 	}
 	native, ok := c.(*net.UDPConn)
 	if !ok {
+		return c, nil
+	}
+	if n.socketPolicy != nil {
+		n.socketPolicy(native)
+	}
+	if n.telemetry == nil {
 		return c, nil
 	}
 	if enableSIPSocketTimestamps(native) {

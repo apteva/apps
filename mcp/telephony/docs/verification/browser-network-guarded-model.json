@@ -1,0 +1,44 @@
+{
+  "scope": "wire queue model; not native BWE or audible speech",
+  "results": [
+    {
+      "capacity": 96000,
+      "standard": {
+        "dropped": 60,
+        "p95_queue_ms": 12,
+        "final_bitrate": 32000
+      },
+      "guarded": {
+        "dropped": 60,
+        "p95_queue_ms": 12,
+        "final_bitrate": 32000
+      }
+    },
+    {
+      "capacity": 48000,
+      "standard": {
+        "dropped": 85,
+        "p95_queue_ms": 1558.3333333333333,
+        "final_bitrate": 20000
+      },
+      "guarded": {
+        "dropped": 60,
+        "p95_queue_ms": 1081.3333333333333,
+        "final_bitrate": 16000
+      }
+    },
+    {
+      "capacity": 44000,
+      "standard": {
+        "dropped": 98,
+        "p95_queue_ms": 1578.1818181818182,
+        "final_bitrate": 16000
+      },
+      "guarded": {
+        "dropped": 79,
+        "p95_queue_ms": 1532.1818181818182,
+        "final_bitrate": 16000
+      }
+    }
+  ]
+}

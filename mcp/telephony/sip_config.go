@@ -41,6 +41,7 @@ type sipRuntimeHolder struct {
 }
 
 type sipGatewayConfig struct {
+	socketPolicy  func(*net.UDPConn) sdk.SocketPolicyResult
 	clientRoots   *x509.CertPool // nil uses system roots; tests inject a private CA.
 	TLSPeerNames  map[string]string
 	Enabled       bool

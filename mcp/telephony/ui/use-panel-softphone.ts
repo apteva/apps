@@ -12,6 +12,8 @@ export function usePanelSoftphone(projectId: string, installId: number, options:
   const [state, setState] = useState<SoftphoneSnapshot>({ audioState: "idle", busy: false, muted: false, phase: "idle" });
   useEffect(() => {
     const controller = client.createSoftphone({
+ networkCheck:true,
+ onNetworkCheck:value=>callbacks.current.onNetworkCheck?.(value),
       audio: callbacks.current.audio,
       mediaTransport: callbacks.current.mediaTransport,
       pollIntervalMs: 0, // CallsView already watches the call list.

@@ -1,3 +1,4 @@
+import {validateNetworkPolicy} from "./network-policy";
 import { RTCICEController, rtcICEConfiguration, applyRTCICEOptions, type RTCICEOptions } from "./rtc-ice";
 import { SOFTPHONE_CLIENT_VERSION } from "../../ui/client-version";
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
@@ -7,7 +8,7 @@ import { measureAudioSetup } from "../../ui/audio-setup";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, mediaDiagnosticID, mediaRecoveryContext, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import type { AudioConnection } from "./audio";
-import { RTCQualityPolicy, RTCControlBudget } from "./webrtc-quality";
+import { rtcQualityPolicy, RTCQualityPolicy, RTCControlBudget, RTCPathHealth } from "./webrtc-quality";
 
 export type MediaTransport = "websocket" | "webrtc" | "auto";
 export function mediaTransport(value?: MediaTransport): MediaTransport {
@@ -71,6 +72,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
       if(silent!==undefined&&silent>=old.silentConcealedSamples)metrics.receiver_silent_concealed_delta_ms=(metrics.receiver_silent_concealed_delta_ms??0)+(silent-old.silentConcealedSamples)*1000/rate;
     }
   };
+  let feedbackTime:number|undefined, feedbackFresh=false;
   let concealmentSupported=false, identities=0;
   report.forEach((s:any,id:string)=>{
     at=Math.max(at,finite(s.timestamp,1e15));
@@ -78,6 +80,9 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
       if(s.type==="outbound-rtp"){
         sent+=finite(s.bytesSent);copy(s,"sender_",["bytesSent","packetsSent","headerBytesSent","retransmittedPacketsSent","retransmittedBytesSent","nackCount","targetBitrate"]);
         interval(s,id,"totalPacketSendDelay","packetsSent","sender_send_delay_interval_ms");
+        const count=numeric(s,"packetsSent"), old=previous?.counters?.[id];
+        counters[id]??={};if(count!==undefined)counters[id].packetsSent=count;
+        if(old && count!==undefined && count>=old.packetsSent && s.timestamp>old.at){metrics.sender_packets_delta=count-old.packetsSent;metrics.sender_window_ms=s.timestamp-old.at;}
       }
       if(s.type==="inbound-rtp"){
         loss(s,id,"receiver_");
@@ -96,7 +101,13 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
         if(numeric(s,"lastPacketReceivedTimestamp")!==undefined)metrics.receiver_last_packet_age_ms=Math.max(0,s.timestamp-s.lastPacketReceivedTimestamp);
         if(codec){states.codec=codec.mimeType;metrics.codec_clock_rate=rate;if(numeric(codec,"channels")!==undefined)metrics.codec_channels=codec.channels;}
       }
-      if(s.type==="remote-inbound-rtp"){copy(s,"remote_receiver_",["packetsLost","fractionLost","jitter","roundTripTime","totalRoundTripTime","roundTripTimeMeasurements"]);loss(s,id,"remote_receiver_");}
+      if(s.type==="remote-inbound-rtp"){
+        const stamp=numeric(s,"timestamp"), old=previous?.counters?.[id];
+        feedbackTime=stamp;
+        feedbackFresh=stamp!==undefined && (!old || old.ssrc!==numeric(s,"ssrc") || stamp>old.feedbackAt);
+        counters[id]??={};
+        if(stamp!==undefined)counters[id].feedbackAt=stamp;
+        copy(s,"remote_receiver_",["packetsLost","fractionLost","jitter","roundTripTime","totalRoundTripTime","roundTripTimeMeasurements"]);loss(s,id,"remote_receiver_");}
       if(s.type==="remote-outbound-rtp")copy(s,"remote_sender_",["packetsSent","bytesSent"]);
       const bytesKey=s.type==="outbound-rtp"?"bytesSent":s.type==="inbound-rtp"?"bytesReceived":undefined;
       if(bytesKey && numeric(s,bytesKey)!==undefined){counters[id]??={};counters[id][bytesKey]=s[bytesKey];counters[id].at=s.timestamp;}
@@ -116,6 +127,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
     if(previous?.counters){let total=0;for(const [id,c] of Object.entries(counters)){const old=previous.counters[id];if(old && c[key]>=old[key] && c.at>old.at)total+=(c[key]-old[key])*8000/(c.at-old.at);}return total;}
     const seconds=previous && at>previous.at?(at-previous.at)/1000:0;return seconds?Math.max(0,fallback-(key==="bytesSent"?previous!.sent:previous!.received))*8/seconds:0;
   };
+  if(feedbackTime!==undefined){metrics.remote_receiver_report_age_ms=Math.max(0,at-feedbackTime);metrics.remote_receiver_report_updated=feedbackFresh?1:0;}
   const pathRevision=(previous?.pathRevision??0)+(pairID && pairID!==previous?.pairID?1:0);
   metrics.path_revision=pathRevision;
   const sendBitrateBps=bitrate("bytesSent",sent),receiveBitrateBps=bitrate("bytesReceived",received);
@@ -187,6 +199,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   });
   private controlBudget=new RTCControlBudget();
   private quality?:RTCQualityPolicy;
+ private pathHealth=new RTCPathHealth();
   private playbackReceiver?:RTCRtpReceiver;
   private uploadSender?:RTCRtpSender;
   private applyingBitrate=false;
@@ -217,7 +230,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
     for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
-    this.ready=this.peer=this.answered=this.reportedLive=false;this.mediaPathReady=undefined;this.mediaRevision=0;this.previous=undefined;this.quality=new RTCQualityPolicy(options);this.appliedBitrate=undefined;
+    this.ready=this.peer=this.answered=this.reportedLive=false;this.mediaPathReady=undefined;this.mediaRevision=0;this.previous=undefined;this.quality=rtcQualityPolicy(options);this.pathHealth=new RTCPathHealth(options.networkProfile);this.appliedBitrate=undefined;
     const stream=await measureAudioSetup("microphone_device", event=>this.recordSessionEvent(event), ()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)}));
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
@@ -271,6 +284,7 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(this.ice?.handle(value))return;
         if(value.type==="webrtc.config"){
  relayRequired=value.ice_transport_policy==="relay";
+          if(value.network_policy){try{const networkProfile=validateNetworkPolicy(value.network_policy);this.quality=rtcQualityPolicy({...options,networkProfile});this.pathHealth=new RTCPathHealth(networkProfile);}catch{finish(new Error("Invalid network policy"));return;}}
           this.relayConfigured=typeof value.relay_configured==="boolean"?value.relay_configured:undefined;
           this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_configuration",outcome:rtcRelayEvidence(value.relay_configured)});
           if(this.pc){finish(new Error("Repeated WebRTC configuration"));return;}
@@ -279,7 +293,7 @@ export class WebRTCAudioConnection implements AudioConnection {
             this.ice?.stop();this.ice=new RTCICEController(v=>this.send(v),()=>this.current(generation),(outcome,evidence)=>this.recordSessionEvent({...evidence,timestamp:new Date().toISOString(),action:"ice_restart",outcome}),config=>{this.relayConfigured=config.iceServers?.some(s=>(typeof s.urls==="string"?[s.urls]:s.urls).some(u=>/^turns?:/.test(u)))??false;});this.ice.register("main",pc);
             this.destination!.stream.getAudioTracks().forEach(track=>{
               const sender=pc.addTrack(track,this.destination!.stream);
-              this.uploadSender=sender;void this.applyUploadBitrate(sender,32000,generation);
+              this.uploadSender=sender;void this.applyUploadBitrate(sender,this.quality?.bitrate??32000,generation);
             });
             pc.ontrack=e=>{if(!this.current(generation))return;
               this.playbackReceiver=e.receiver;this.applyPlaybackTarget();
@@ -373,7 +387,11 @@ export class WebRTCAudioConnection implements AudioConnection {
       result.webrtc.packetsDiscarded+=this.completedCounts.packetsDiscarded;
       if(result.webrtc.concealedMs!==undefined)result.webrtc.concealedMs+=this.completedCounts.concealedMs;
       this.quality?.observe(result.metrics);this.applyPlaybackTarget();
+      const eligible=this.pc.connectionState==="connected"&&this.context?.state==="running"&&this.peer&&this.answered;
+      if(this.pathHealth.observe(result.metrics,performance.now(),eligible)){this.recordSessionEvent({timestamp:new Date().toISOString(),action:"network_quality",outcome:"sustained_degradation"},false);safe(()=>this.callbacks.onNotice?.("The audio connection is unstable. After this call, compare direct and relay paths in Network settings."));}
       if(this.uploadSender&&this.quality)void this.applyUploadBitrate(this.uploadSender,this.quality.bitrate,generation);
+      result.states.upload_bitrate_control=this.quality?.uploadControl??"standard";
+      result.states.upload_bitrate_reason=this.quality?.uploadReason??"standard";
       result.metrics.requested_playback_target_ms=this.quality?.target??60;
       if(this.appliedBitrate!==undefined)result.metrics.requested_upload_bitrate_bps=this.appliedBitrate;
       this.controlBudget.observeAvailableBitrate(result.metrics.pair_availableOutgoingBitrate);
@@ -469,7 +487,7 @@ export class WebRTCAudioConnection implements AudioConnection {
       }
     };void attempt();
   }
-  recordSessionEvent(event:MediaSessionEvent){try{event={...this.callbacks.sessionDiagnostics?.(),...event};}catch{/* observer isolation */}event=safeMediaSessionEvent(event);this.events=[...this.events,event].slice(-100);this.enqueueRTCEvents({session_events:[event]});safe(()=>this.callbacks.onSessionEvent?.(event));}
+  recordSessionEvent(event:MediaSessionEvent,report=true){try{event={...this.callbacks.sessionDiagnostics?.(),...event};}catch{/* observer isolation */}event=safeMediaSessionEvent(event);this.events=[...this.events,event].slice(-100);if(report)this.enqueueRTCEvents({session_events:[event]});safe(()=>this.callbacks.onSessionEvent?.(event));}
   setMuted(value:boolean){if(this.muted!==value)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:value?"muted":"unmuted"});this.muted=value;this.gate();if(value)this.send({type:"interrupt"});}
   sendDTMF(digits:string){if(!/^[0-9*#]+$/.test(digits))throw new Error("Invalid DTMF digits");this.send({type:"dtmf",digits});}
   setOutputVolume(value:number){if(!Number.isFinite(value)||value<0||value>1)throw new RangeError("Volume must be between 0 and 1");if(this.speaker)this.speaker.gain.value=value;if(this.options)this.options.outputVolume=value;}

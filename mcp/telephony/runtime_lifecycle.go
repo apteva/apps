@@ -377,6 +377,7 @@ func (a *App) handleRuntimeLifecycle(w http.ResponseWriter, r *http.Request) {
 			rt.state = "draining"
 		}
 		rt.mu.Unlock()
+		a.networkChecks.stopAll()
 		counts, err := a.runtimeDrainStatus()
 		if err != nil {
 			http.Error(w, "drain state unavailable", 503)

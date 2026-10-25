@@ -1,3 +1,5 @@
+import type {NetworkPolicyView} from "../frontend/src/network-policy";
+import NetworkSettings,{NetworkCheckControl} from "./NetworkSettings";
 import TurnSettings,{type TURNPolicyView} from "./TurnSettings";
 import RecordingPlayer from "./RecordingPlayer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1071,6 +1073,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   }, [projectId]);
 
  const selfTURNRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(withProject("/softphone/turn-policy"),body),[withProject]);
+ const selfNetworkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(withProject("/softphone/network-policy"),body).then(view=>{phone?.applyNetworkPolicy(view.configured===false?undefined:view.effective);return view}),[withProject,phone]);
 
   const chooseFromNumber = useCallback((value: string) => {
     setFromNumber(value);
@@ -1436,6 +1439,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
             <option value="wav">Store WAV · lossless</option>
           </select>
         ) : null}
+        <NetworkCheckControl phone={phone} state={phoneState}/>
         <button
           type="button"
           onClick={loadCalls}
@@ -1568,7 +1572,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
               />
               <div className="border-t border-border p-4 space-y-4">
-                <TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+                <NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                   value={audioOptions}
                   disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -1697,7 +1701,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
               ) : null}
 
-              <TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+              <NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                 value={audioOptions}
                 disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -2069,6 +2073,7 @@ function NumbersView({ projectId }: NativePanelProps) {
  const carrierMediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/carrier-media"),body),[endpoint]);
  const sipAudioProfileRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/sip-audio-profile"),body),[endpoint]);
  const turnRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(endpoint("/numbers/turn-policy"),body),[endpoint]);
+ const networkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(endpoint("/numbers/network-policy"),body),[endpoint]);
  const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
   const loadConnected = useCallback(async (fresh = false) => {
@@ -2348,7 +2353,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </button>
           </header>
 
-          <div className="px-4 py-2"><TurnSettings request={turnRequest} admin/></div>
+          <div className="px-4 py-2 space-y-2"><NetworkSettings request={networkRequest} admin/><TurnSettings request={turnRequest} admin/></div>
           <div className="px-4 py-2 flex flex-wrap gap-2">
             <button type="button" onClick={() => setSipSettings({route:"",label:"Project defaults"})} className="rounded border border-border px-2 py-1 text-xs">SIP media defaults</button>
             {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"

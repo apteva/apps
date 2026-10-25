@@ -49,6 +49,7 @@ export class HeadlessCallListener {
   async listen(callId: string): Promise<void> { return this.begin(callId,false); }
   async coach(callId: string): Promise<void> { return this.begin(callId,true); }
   private async begin(callId: string, coaching: boolean): Promise<void> {
+ this.client.cancelNetworkChecks();
     if (this.disposed) throw new Error("Listener disposed");
     await this.stop();
     this.coaching=coaching;

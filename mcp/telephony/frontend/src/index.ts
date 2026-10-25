@@ -21,3 +21,7 @@ export type { OutboundSIPConfig, OutboundTransport, OutboundTransportRequest, Ou
 export type { TelephonyRuntimeMode } from "./runtime-transport";
 
 export type {DirectTelephonyConnection, BrowserCredential} from "./runtime-transport";
+
+export type {NetworkPolicy,NetworkPolicyView} from "./network-policy";
+export {DEFAULT_NETWORK_POLICY} from "./network-policy";
+export type {NetworkCheckOptions,NetworkCheckResult,NetworkPathResult,NetworkCheckPath} from "./network-check";

@@ -1,0 +1,2022 @@
+{
+  "schema": "telephony-browser-network-verification/v1",
+  "date": "2026-10-25",
+  "base_version": "0.12.40",
+  "base_commit": "fb2ca449784eeaf7399b74d14ab031c485bbd080",
+  "scope": "local Telephony and shared softphone only; no instance changes or live provider calls",
+  "release_ready": false,
+  "functional_checks": {
+    "full_go": {
+      "pass": 2011,
+      "skip": 12
+    },
+    "full_frontend_pass": 349,
+    "focused_compatibility_pass": 81,
+    "race": "pass",
+    "typecheck": "pass",
+    "vet": "pass",
+    "build_and_panels": "pass",
+    "browser_tests": "direct/relay paths and TURN renewal passed; probe tests corrected to accept safe insufficient-sample inconclusive result and passed 3 repeats"
+  },
+  "remaining_gate": "Final same-source 60-second browser comparison: guarded passed (3.39% upstream markers missing), standard failed (11.02%). Guarded is opt-in/experimental; this isolated comparison does not establish universal superiority or certify Ringover parity. Prior baseline/candidate failures remain retained. Seamless automatic direct-to-relay handover remains excluded.",
+  "browser_checks": [
+    {
+      "browser": "153.0.8010.12",
+      "result": {
+        "state": "ready",
+        "checkedAt": "2026-10-25T10:07:10.231Z",
+        "paths": [
+          {
+            "path": "configured",
+            "state": "ready",
+            "setupMs": 201.60000014305115,
+            "durationMs": 6002.299999952316,
+            "sent": 300,
+            "received": 299,
+            "uploadLossPct": 0,
+            "downloadLossPct": 0,
+            "rttMs": 21.800000000000182,
+            "jitterMs": 0.322,
+            "browserPauseMs": 9.200000047683716,
+            "candidateType": "host"
+          }
+        ],
+        "recommendedPath": "configured"
+      },
+      "requests": [
+        {
+          "action": "prepare"
+        },
+        {
+          "action": "offer"
+        },
+        {
+          "action": "cancel"
+        }
+      ],
+      "microphone": "prompt"
+    },
+    {
+      "browser": "153.0.8010.12",
+      "result": {
+        "state": "degraded",
+        "checkedAt": "2026-10-25T10:07:17.080Z",
+        "paths": [
+          {
+            "path": "configured",
+            "state": "degraded",
+            "setupMs": 143.20000004768372,
+            "durationMs": 6002.700000047684,
+            "sent": 300,
+            "received": 252,
+            "uploadLossPct": 17.56756756756757,
+            "downloadLossPct": 15.436241610738255,
+            "rttMs": 64.39999995231665,
+            "jitterMs": 0.511,
+            "browserPauseMs": 10.100000143051147,
+            "candidateType": "relay",
+            "relayProtocol": "udp"
+          }
+        ],
+        "recommendedPath": "configured"
+      },
+      "requests": [
+        {
+          "action": "prepare"
+        },
+        {
+          "action": "offer"
+        },
+        {
+          "action": "cancel"
+        }
+      ],
+      "microphone": "prompt"
+    },
+    {
+      "actual_discarded_datagrams": 400,
+      "browser": "153.0.8010.12",
+      "concealed_ms": 7625.6875,
+      "enabled": false,
+      "events": [],
+      "lost_packets": 399,
+      "microphone_preserved": true,
+      "observation_ms": 15004.600000143051,
+      "path": {
+        "candidateType": "host",
+        "concealedMs": 6042.895833333333,
+        "jitterBufferMs": 77.46268656716418,
+        "jitterMs": 0,
+        "packetsDiscarded": 0,
+        "packetsLost": 319,
+        "protocol": "udp",
+        "receiveBitrateBps": 0,
+        "sendBitrateBps": 0
+      },
+      "peer_preserved": true,
+      "tail_lost_packets": 80
+    },
+    {
+      "actual_discarded_datagrams": 0,
+      "browser": "153.0.8010.12",
+      "concealed_ms": 0,
+      "enabled": true,
+      "events": [],
+      "lost_packets": 0,
+      "microphone_preserved": true,
+      "observation_ms": 15013.399999856949,
+      "path": {
+        "candidateType": "relay",
+        "concealedMs": 0,
+        "jitterBufferMs": 69.0895061728395,
+        "jitterMs": 1,
+        "packetsDiscarded": 0,
+        "packetsLost": 0,
+        "protocol": "udp",
+        "receiveBitrateBps": 0,
+        "relayProtocol": "udp",
+        "sendBitrateBps": 0
+      },
+      "peer_preserved": true,
+      "tail_lost_packets": 0
+    },
+    {
+      "browser": "153.0.8010.12",
+      "before": {
+        "sent": 13,
+        "received": 12,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 0
+      },
+      "after": {
+        "sent": 820,
+        "received": 810,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 1
+      },
+      "path": {
+        "protocol": "udp",
+        "candidateType": "host",
+        "sendBitrateBps": 0,
+        "receiveBitrateBps": 0,
+        "packetsLost": 0,
+        "jitterMs": 1,
+        "concealedMs": 0,
+        "packetsDiscarded": 0,
+        "jitterBufferMs": 70.18587360594796
+      },
+      "packet_loss_delta": 0,
+      "remote_packet_loss_delta": 0,
+      "max_receive_observation_gap_ms": 110.5,
+      "delayed_answers": 0,
+      "events": [
+        {
+          "timestamp": "2026-10-25T10:07:58.571Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_2",
+          "remaining_ms": 3599429
+        },
+        {
+          "timestamp": "2026-10-25T10:07:58.572Z",
+          "action": "ice_restart",
+          "outcome": "credentials_applied_direct",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-746b6bef-a09e-4044-af07-feed62959626",
+          "duration_ms": 1
+        },
+        {
+          "timestamp": "2026-10-25T10:08:09.705Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_3",
+          "remaining_ms": 3599295
+        },
+        {
+          "timestamp": "2026-10-25T10:08:09.706Z",
+          "action": "ice_restart",
+          "outcome": "credentials_applied_direct",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-59fb3fe0-a4e8-4216-8f56-3533e4ac9101",
+          "duration_ms": 1
+        }
+      ],
+      "peer_preserved": true,
+      "mute_preserved": true
+    },
+    {
+      "browser": "153.0.8010.12",
+      "before": {
+        "sent": 13,
+        "received": 12,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 0
+      },
+      "after": {
+        "sent": 821,
+        "received": 812,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 1
+      },
+      "path": {
+        "relayProtocol": "udp",
+        "protocol": "udp",
+        "candidateType": "relay",
+        "sendBitrateBps": 0,
+        "receiveBitrateBps": 0,
+        "packetsLost": 0,
+        "jitterMs": 2,
+        "concealedMs": 0,
+        "packetsDiscarded": 0,
+        "jitterBufferMs": 70.59332509270705
+      },
+      "packet_loss_delta": 0,
+      "remote_packet_loss_delta": 0,
+      "max_receive_observation_gap_ms": 108.30000019073486,
+      "delayed_answers": 2,
+      "events": [
+        {
+          "timestamp": "2026-10-25T10:08:16.150Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_2",
+          "remaining_ms": 3599850
+        },
+        {
+          "timestamp": "2026-10-25T10:08:16.154Z",
+          "action": "ice_restart",
+          "outcome": "restart_started",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea32bee9-aac5-401b-a219-b3dc4252b8d0",
+          "duration_ms": 3
+        },
+        {
+          "timestamp": "2026-10-25T10:08:16.562Z",
+          "action": "ice_restart",
+          "outcome": "restart_signaled",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea32bee9-aac5-401b-a219-b3dc4252b8d0",
+          "duration_ms": 412
+        },
+        {
+          "timestamp": "2026-10-25T10:08:16.870Z",
+          "action": "ice_restart",
+          "outcome": "restart_completed",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea32bee9-aac5-401b-a219-b3dc4252b8d0",
+          "duration_ms": 719
+        },
+        {
+          "timestamp": "2026-10-25T10:08:28.037Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_3",
+          "remaining_ms": 3599963
+        },
+        {
+          "timestamp": "2026-10-25T10:08:28.038Z",
+          "action": "ice_restart",
+          "outcome": "restart_started",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-df82d6aa-b8f4-4415-9a30-c0906362321c",
+          "duration_ms": 1
+        },
+        {
+          "timestamp": "2026-10-25T10:08:28.441Z",
+          "action": "ice_restart",
+          "outcome": "restart_signaled",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-df82d6aa-b8f4-4415-9a30-c0906362321c",
+          "duration_ms": 404
+        },
+        {
+          "timestamp": "2026-10-25T10:08:28.650Z",
+          "action": "ice_restart",
+          "outcome": "restart_completed",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-df82d6aa-b8f4-4415-9a30-c0906362321c",
+          "duration_ms": 614
+        }
+      ],
+      "peer_preserved": true,
+      "mute_preserved": true
+    },
+    {
+      "browser": "153.0.8010.12",
+      "before": {
+        "sent": 13,
+        "received": 12,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 0
+      },
+      "after": {
+        "sent": 821,
+        "received": 812,
+        "lost": 0,
+        "remoteLost": 0,
+        "remoteReports": 1
+      },
+      "path": {
+        "relayProtocol": "tcp",
+        "protocol": "udp",
+        "candidateType": "relay",
+        "sendBitrateBps": 0,
+        "receiveBitrateBps": 0,
+        "packetsLost": 0,
+        "jitterMs": 2,
+        "concealedMs": 0,
+        "packetsDiscarded": 0,
+        "jitterBufferMs": 70.70457354758962
+      },
+      "packet_loss_delta": 0,
+      "remote_packet_loss_delta": 0,
+      "max_receive_observation_gap_ms": 107.79999995231628,
+      "delayed_answers": 2,
+      "events": [
+        {
+          "timestamp": "2026-10-25T10:08:33.674Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_2",
+          "remaining_ms": 3599326
+        },
+        {
+          "timestamp": "2026-10-25T10:08:33.676Z",
+          "action": "ice_restart",
+          "outcome": "restart_started",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea8c88e0-1371-4961-b60e-764652edda5b",
+          "duration_ms": 2
+        },
+        {
+          "timestamp": "2026-10-25T10:08:34.079Z",
+          "action": "ice_restart",
+          "outcome": "restart_signaled",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea8c88e0-1371-4961-b60e-764652edda5b",
+          "duration_ms": 405
+        },
+        {
+          "timestamp": "2026-10-25T10:08:34.389Z",
+          "action": "ice_restart",
+          "outcome": "restart_completed",
+          "code": "ice_rev_2",
+          "attempt_id": "attempt-ea8c88e0-1371-4961-b60e-764652edda5b",
+          "duration_ms": 715
+        },
+        {
+          "timestamp": "2026-10-25T10:08:45.473Z",
+          "action": "ice_restart",
+          "outcome": "credentials_refreshed",
+          "code": "ice_rev_3",
+          "remaining_ms": 3599527
+        },
+        {
+          "timestamp": "2026-10-25T10:08:45.475Z",
+          "action": "ice_restart",
+          "outcome": "restart_started",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-d9c851f6-4c7b-4d0d-a1b3-3c7dc96ae3d1",
+          "duration_ms": 2
+        },
+        {
+          "timestamp": "2026-10-25T10:08:45.882Z",
+          "action": "ice_restart",
+          "outcome": "restart_signaled",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-d9c851f6-4c7b-4d0d-a1b3-3c7dc96ae3d1",
+          "duration_ms": 409
+        },
+        {
+          "timestamp": "2026-10-25T10:08:46.190Z",
+          "action": "ice_restart",
+          "outcome": "restart_completed",
+          "code": "ice_rev_3",
+          "attempt_id": "attempt-d9c851f6-4c7b-4d0d-a1b3-3c7dc96ae3d1",
+          "duration_ms": 717
+        }
+      ],
+      "peer_preserved": true,
+      "mute_preserved": true
+    }
+  ],
+  "model": {
+    "scope": "deterministic packet/queue simulation, actual browser policy vs frozen 0.12.40 policy",
+    "results": [
+      {
+        "name": "healthy",
+        "before": {
+          "lostPackets": 0,
+          "deliveredPackets": 6000,
+          "addedDelayP95Ms": 12,
+          "maxQueueMs": 12,
+          "finalBitrate": 32000
+        },
+        "after": {
+          "lostPackets": 0,
+          "deliveredPackets": 6000,
+          "addedDelayP95Ms": 12,
+          "maxQueueMs": 12,
+          "finalBitrate": 32000
+        },
+        "afterResilientPreset": {
+          "lostPackets": 0,
+          "deliveredPackets": 6000,
+          "addedDelayP95Ms": 9.5,
+          "maxQueueMs": 9.5,
+          "finalBitrate": 20000
+        }
+      },
+      {
+        "name": "busy-upload",
+        "before": {
+          "lostPackets": 60,
+          "deliveredPackets": 5940,
+          "addedDelayP95Ms": 1593.8333333333335,
+          "maxQueueMs": 1604,
+          "finalBitrate": 32000
+        },
+        "after": {
+          "lostPackets": 60,
+          "deliveredPackets": 5940,
+          "addedDelayP95Ms": 1593.8333333333335,
+          "maxQueueMs": 1604,
+          "finalBitrate": 32000
+        },
+        "afterResilientPreset": {
+          "lostPackets": 0,
+          "deliveredPackets": 6000,
+          "addedDelayP95Ms": 19,
+          "maxQueueMs": 19,
+          "finalBitrate": 20000
+        }
+      },
+      {
+        "name": "severe-contention",
+        "before": {
+          "lostPackets": 76,
+          "deliveredPackets": 5924,
+          "addedDelayP95Ms": 1593.2727272727273,
+          "maxQueueMs": 1606.1818181818182,
+          "finalBitrate": 32000
+        },
+        "after": {
+          "lostPackets": 76,
+          "deliveredPackets": 5924,
+          "addedDelayP95Ms": 1593.2727272727273,
+          "maxQueueMs": 1606.1818181818182,
+          "finalBitrate": 32000
+        },
+        "afterResilientPreset": {
+          "lostPackets": 9,
+          "deliveredPackets": 5991,
+          "addedDelayP95Ms": 1581.090909090909,
+          "maxQueueMs": 1600.7272727272727,
+          "finalBitrate": 20000
+        }
+      }
+    ]
+  },
+  "benchmarks": {
+    "released_20s": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "media_transport": "webrtc",
+            "name": "webrtc-baseline",
+            "expectation": "usable",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 120.091064453125,
+            "p95_ms": 121.195068359375,
+            "p99_ms": 122.097900390625,
+            "max_ms": 122.097900390625,
+            "median_level_dbfs": -15.110110603955963,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 142.153564453125,
+            "p95_ms": 152.158447265625,
+            "p99_ms": 152.166748046875,
+            "max_ms": 152.166748046875,
+            "median_level_dbfs": -16.431135392528027,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-64k",
+            "expectation": "usable",
+            "down": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 214.050048828125,
+            "p95_ms": 214.85498046875,
+            "p99_ms": 216.488037109375,
+            "max_ms": 216.488037109375,
+            "median_level_dbfs": -15.833714613506935,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 212.33740234375,
+            "p95_ms": 212.42138671875,
+            "p99_ms": 212.426513671875,
+            "max_ms": 212.426513671875,
+            "median_level_dbfs": -15.180308649304173,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 149.613037109375,
+            "p95_ms": 163.56591796875,
+            "p99_ms": 163.6630859375,
+            "max_ms": 163.6630859375,
+            "median_level_dbfs": -15.165835347635381,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 204.796142578125,
+            "p95_ms": 204.879638671875,
+            "p99_ms": 204.88671875,
+            "max_ms": 204.88671875,
+            "median_level_dbfs": -16.051356451582873,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-120ms-burst",
+            "expectation": "recovery",
+            "down": {
+              "udp_burst_at_ms": 4000,
+              "udp_burst_ms": 120,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_burst_at_ms": 4000,
+              "udp_burst_ms": 120,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 166.89404296875,
+            "p95_ms": 168.85107421875,
+            "p99_ms": 168.85791015625,
+            "max_ms": 168.85791015625,
+            "median_level_dbfs": -15.164705588399068,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 173.205322265625,
+            "p95_ms": 173.276123046875,
+            "p99_ms": 173.304931640625,
+            "max_ms": 173.304931640625,
+            "median_level_dbfs": -16.626282173371933,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "released_60s": {
+      "duration_ms": 60000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 113,
+            "missing_markers_pct": 4.237288135593221,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 166.306884765625,
+            "p95_ms": 189.344970703125,
+            "p99_ms": 189.867919921875,
+            "max_ms": 189.89208984375,
+            "median_level_dbfs": -15.164705588399068,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 192.71240234375,
+            "p95_ms": 222.724853515625,
+            "p99_ms": 242.717529296875,
+            "max_ms": 242.804931640625,
+            "median_level_dbfs": -15.149768962204455,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "released_60s_recheck": {
+      "duration_ms": 60000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 114,
+            "missing_markers_pct": 3.389830508474576,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 168.0009765625,
+            "p95_ms": 199.930908203125,
+            "p99_ms": 200.968017578125,
+            "max_ms": 205.569091796875,
+            "median_level_dbfs": -16.690010902960392,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 232.0986328125,
+            "p95_ms": 267.7138671875,
+            "p99_ms": 287.62646484375,
+            "max_ms": 287.656494140625,
+            "median_level_dbfs": -15.208873254026432,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "rejected_rtt_candidate_20s": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "4b2e4e59d46b291f30ca2bd0a161e8874646d02e5bed4695a90f18654c479a1c",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "media_transport": "webrtc",
+            "name": "webrtc-baseline",
+            "expectation": "usable",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 120.908935546875,
+            "p95_ms": 121.31005859375,
+            "p99_ms": 121.43505859375,
+            "max_ms": 121.43505859375,
+            "median_level_dbfs": -15.110110603955963,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 152.757568359375,
+            "p95_ms": 152.8271484375,
+            "p99_ms": 152.855224609375,
+            "max_ms": 152.855224609375,
+            "median_level_dbfs": -16.350788004521647,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-64k",
+            "expectation": "usable",
+            "down": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 203.339111328125,
+            "p95_ms": 230.0849609375,
+            "p99_ms": 230.89306640625,
+            "max_ms": 230.89306640625,
+            "median_level_dbfs": -15.816573605436403,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 254.1123046875,
+            "p95_ms": 334.1123046875,
+            "p99_ms": 334.181640625,
+            "max_ms": 334.181640625,
+            "median_level_dbfs": -15.208873254026432,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 181.47705078125,
+            "p95_ms": 192.2451171875,
+            "p99_ms": 196.071044921875,
+            "max_ms": 196.071044921875,
+            "median_level_dbfs": -15.077805158596238,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 232.0869140625,
+            "p95_ms": 272.066162109375,
+            "p99_ms": 272.087646484375,
+            "max_ms": 272.087646484375,
+            "median_level_dbfs": -15.14297579605621,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-120ms-burst",
+            "expectation": "recovery",
+            "down": {
+              "udp_burst_at_ms": 4000,
+              "udp_burst_ms": 120,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_burst_at_ms": 4000,
+              "udp_burst_ms": 120,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 153.152099609375,
+            "p95_ms": 179.198974609375,
+            "p99_ms": 179.26611328125,
+            "max_ms": 179.26611328125,
+            "median_level_dbfs": -15.094398145094875,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 184.232177734375,
+            "p95_ms": 184.30126953125,
+            "p99_ms": 184.3212890625,
+            "max_ms": 184.3212890625,
+            "median_level_dbfs": -15.130538839674921,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "rejected_rtt_candidate_60s": {
+      "duration_ms": 60000,
+      "seed": 20261025,
+      "source_fingerprint": "b767690c024ea71802a826fdb27d6574dddcbe5b8130a51c8ac140735b62d787",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 112,
+            "missing_markers_pct": 5.084745762711864,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 161.5869140625,
+            "p95_ms": 181.695068359375,
+            "p99_ms": 190.10009765625,
+            "max_ms": 190.39794921875,
+            "median_level_dbfs": -15.81940788559874,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 222.02685546875,
+            "p95_ms": 242.13330078125,
+            "p99_ms": 252.095947265625,
+            "max_ms": 252.109375,
+            "median_level_dbfs": -15.204473400736372,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "conservative_candidate_60s": {
+      "duration_ms": 60000,
+      "seed": 20261025,
+      "source_fingerprint": "2b48228fb4db3d2487b8bf0d659f9046db45e0868a260ca736d3d5926aeee839",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 106,
+            "missing_markers_pct": 10.169491525423728,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 167.56396484375,
+            "p95_ms": 205.490966796875,
+            "p99_ms": 245.43701171875,
+            "max_ms": 245.77392578125,
+            "median_level_dbfs": -13.56790019292908,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 117,
+            "missing_markers_pct": 0.847457627118644,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 341.219970703125,
+            "p95_ms": 371.276123046875,
+            "p99_ms": 371.310302734375,
+            "max_ms": 371.33251953125,
+            "median_level_dbfs": -15.225499733841595,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "preserved_default_candidate_20s": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "61cc14a03999c8416fb27e5ed16276ed8e9d8480eb212cf40392f1f4d867f4a9",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 171.550048828125,
+            "p95_ms": 177.65087890625,
+            "p99_ms": 180.2060546875,
+            "max_ms": 180.2060546875,
+            "median_level_dbfs": -15.08119520368097,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 215.586181640625,
+            "p95_ms": 225.616455078125,
+            "p99_ms": 265.569580078125,
+            "max_ms": 265.569580078125,
+            "median_level_dbfs": -15.188307926202434,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "new_client_released_server_60s": {
+      "duration_ms": 60000,
+      "seed": 20261025,
+      "source_fingerprint": "327f914c6383bc9e1f5be0052a8fc1398d68ad33ce361e39ee2065eb034ca43f",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 110,
+            "missing_markers_pct": 6.779661016949152,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 164.445068359375,
+            "p95_ms": 197.35205078125,
+            "p99_ms": 201.678955078125,
+            "max_ms": 202.48193359375,
+            "median_level_dbfs": -15.462919509795999,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 234.180908203125,
+            "p95_ms": 304.2626953125,
+            "p99_ms": 314.29638671875,
+            "max_ms": 314.336669921875,
+            "median_level_dbfs": -15.155928716519703,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "unstable_20kbps_preset": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "ecdf52c2fda78c2c928ed082600e4b9e21c2eaaf03197a16110add57d4deeb79",
+      "network_profile": "unstable",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-64k",
+            "expectation": "usable",
+            "down": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 64,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 200.01904296875,
+            "p95_ms": 225.76806640625,
+            "p99_ms": 225.77392578125,
+            "max_ms": 225.77392578125,
+            "median_level_dbfs": -15.420581366028262,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 314.4931640625,
+            "p95_ms": 314.58203125,
+            "p99_ms": 334.50927734375,
+            "max_ms": 334.50927734375,
+            "median_level_dbfs": -14.895284315321843,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-48k",
+            "expectation": "degradation",
+            "down": {
+              "kbps": 48,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 48,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "degraded",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 197.172119140625,
+            "p95_ms": 231.7958984375,
+            "p99_ms": 231.797119140625,
+            "max_ms": 231.797119140625,
+            "median_level_dbfs": -15.123487595614877,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 333.79541015625,
+            "p95_ms": 363.8447265625,
+            "p99_ms": 363.8642578125,
+            "max_ms": 363.8642578125,
+            "median_level_dbfs": -14.901960701493149,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "short_quiet_candidate_20s": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "2e92931c5a799ceee4ad30013290b3cf746afd7e7b9d7c9eb666b3a689580da4",
+      "network_profile": "balanced",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 165.922119140625,
+            "p95_ms": 169.14208984375,
+            "p99_ms": 173.294921875,
+            "max_ms": 173.294921875,
+            "median_level_dbfs": -15.174933920806115,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 220.11767578125,
+            "p95_ms": 220.21533203125,
+            "p99_ms": 220.233154296875,
+            "max_ms": 220.233154296875,
+            "median_level_dbfs": -15.212632666653178,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "clean_released_repeat_1": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 157.998046875,
+            "p95_ms": 159.784912109375,
+            "p99_ms": 165.236083984375,
+            "max_ms": 165.236083984375,
+            "median_level_dbfs": -17.072628724072153,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 212.03759765625,
+            "p95_ms": 212.13720703125,
+            "p99_ms": 212.140625,
+            "max_ms": 212.140625,
+            "median_level_dbfs": -16.497493452900216,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "clean_released_repeat_2": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 192.201904296875,
+            "p95_ms": 192.509033203125,
+            "p99_ms": 192.58203125,
+            "max_ms": 192.58203125,
+            "median_level_dbfs": -15.658246790260952,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 222.741455078125,
+            "p95_ms": 222.814453125,
+            "p99_ms": 222.814453125,
+            "max_ms": 222.814453125,
+            "median_level_dbfs": -16.358308830422168,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    },
+    "clean_released_repeat_3": {
+      "duration_ms": 20000,
+      "seed": 20261025,
+      "source_fingerprint": "f3d03297b6c06df70bce0d7667afa3697581933295b8143310027fe98d54ad7a",
+      "results": [
+        {
+          "profile": {
+            "rtc_udp": true,
+            "media_transport": "webrtc",
+            "name": "webrtc-udp-96k-jitter-loss",
+            "expectation": "usable",
+            "down": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "udp_loss_probability": 0.01,
+              "kbps": 96,
+              "latency_ms": 20,
+              "jitter_ms": 20,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 5
+          },
+          "outcome": "failed",
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 173.702880859375,
+            "p95_ms": 179.763916015625,
+            "p99_ms": 202.2451171875,
+            "max_ms": 202.2451171875,
+            "median_level_dbfs": -15.174933920806115,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 195.18017578125,
+            "p95_ms": 195.283447265625,
+            "p99_ms": 195.2919921875,
+            "max_ms": 195.2919921875,
+            "median_level_dbfs": -16.129439365833193,
+            "final_two_seconds_markers": 4
+          },
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ]
+        }
+      ]
+    }
+  },
+  "rejected_changes": [
+    "automatic direct-to-relay ICE handover",
+    "new ICE gathering wait",
+    "custom RTT-driven bitrate reduction"
+  ],
+  "defaults": "Existing controller and host playback preferences retained unless a network profile is saved; idle probes and new notices off by default; notices do not transmit extra event traffic.",
+  "notes": [
+    "Synthetic acoustic markers are not speech-loss or MOS measurements.",
+    "The 48 kbps preset benchmark is deliberately classified degraded; completing its scenario does not mean usable audio.",
+    "Individual stochastic benchmark runs do not establish a causal regression; failed gates are retained.",
+    "Final full Go suite passed with current Go runtime changes; subsequently strengthened constrained-speech assertions were covered by the passing focused race run. Final frontend suite passed 349 tests. No audio marker acceptance threshold changed."
+  ],
+  "baseline_integrity": "Separate verification checkout restored to a clean Git tree after mixed client/server experiment; webrtc-audio.ts, webrtc-quality.ts and softphone-audio.ts verified byte-identical to its released baseline commit.",
+  "followup": {
+    "scope": "local Telephony and shared softphone only; no release, deployment, installation or production/staging action",
+    "guarded_default": "off; standard remains default",
+    "natural_speech_scenarios": 36,
+    "natural_speech_artifact": "browser-network-speech.json",
+    "wire_model_artifact": "browser-network-guarded-model.json",
+    "browser_comparison": {
+      "guarded": {
+        "duration_ms": 60000,
+        "seed": 20261025,
+        "results": [
+          {
+            "profile": {
+              "rtc_udp": true,
+              "media_transport": "webrtc",
+              "name": "webrtc-udp-96k-jitter-loss",
+              "expectation": "usable",
+              "down": {
+                "udp_loss_probability": 0.01,
+                "kbps": 96,
+                "latency_ms": 20,
+                "jitter_ms": 20,
+                "recovery_probability": 0,
+                "recovery_ms": 0,
+                "outage_at_ms": 0,
+                "outage_ms": 0
+              },
+              "up": {
+                "udp_loss_probability": 0.01,
+                "kbps": 96,
+                "latency_ms": 20,
+                "jitter_ms": 20,
+                "recovery_probability": 0,
+                "recovery_ms": 0,
+                "outage_at_ms": 0,
+                "outage_ms": 0
+              },
+              "max_p95_ms": 500,
+              "max_missing_pct": 5
+            },
+            "outcome": "pass",
+            "adviser_to_carrier": {
+              "expected_markers": 118,
+              "received_markers": 114,
+              "missing_markers_pct": 3.389830508474576,
+              "duplicate_markers": 0,
+              "out_of_order_markers": 0,
+              "p50_ms": 170.9130859375,
+              "p95_ms": 185.800048828125,
+              "p99_ms": 187.31103515625,
+              "max_ms": 187.43408203125,
+              "median_level_dbfs": -15.211046021498994,
+              "final_two_seconds_markers": 4
+            },
+            "carrier_to_adviser": {
+              "expected_markers": 118,
+              "received_markers": 118,
+              "missing_markers_pct": 0,
+              "duplicate_markers": 0,
+              "out_of_order_markers": 0,
+              "p50_ms": 202.256103515625,
+              "p95_ms": 232.346435546875,
+              "p99_ms": 242.364013671875,
+              "max_ms": 242.394287109375,
+              "median_level_dbfs": -15.130538839674921,
+              "final_two_seconds_markers": 4
+            },
+            "udp_network": {
+              "down": {
+                "packets": 3946,
+                "wire_bytes": 379576,
+                "delivered_packets": 3914,
+                "delivered_wire_bytes": 376576,
+                "dropped_packets": 32,
+                "dropped_wire_bytes": 3000,
+                "max_delay_ms": 71.696902,
+                "first_at_ms": 1792926750680,
+                "last_at_ms": 1792926813370
+              },
+              "up": {
+                "packets": 3661,
+                "wire_bytes": 339536,
+                "delivered_packets": 3614,
+                "delivered_wire_bytes": 335251,
+                "dropped_packets": 47,
+                "dropped_wire_bytes": 4285,
+                "max_delay_ms": 123.6134,
+                "first_at_ms": 1792926750693,
+                "last_at_ms": 1792926813260
+              }
+            }
+          }
+        ]
+      },
+      "balanced": {
+        "duration_ms": 60000,
+        "seed": 20261025,
+        "results": [
+          {
+            "profile": {
+              "rtc_udp": true,
+              "media_transport": "webrtc",
+              "name": "webrtc-udp-96k-jitter-loss",
+              "expectation": "usable",
+              "down": {
+                "udp_loss_probability": 0.01,
+                "kbps": 96,
+                "latency_ms": 20,
+                "jitter_ms": 20,
+                "recovery_probability": 0,
+                "recovery_ms": 0,
+                "outage_at_ms": 0,
+                "outage_ms": 0
+              },
+              "up": {
+                "udp_loss_probability": 0.01,
+                "kbps": 96,
+                "latency_ms": 20,
+                "jitter_ms": 20,
+                "recovery_probability": 0,
+                "recovery_ms": 0,
+                "outage_at_ms": 0,
+                "outage_ms": 0
+              },
+              "max_p95_ms": 500,
+              "max_missing_pct": 5
+            },
+            "outcome": "failed",
+            "errors": [
+              "usable-profile audio thresholds exceeded"
+            ],
+            "adviser_to_carrier": {
+              "expected_markers": 118,
+              "received_markers": 105,
+              "missing_markers_pct": 11.016949152542374,
+              "duplicate_markers": 0,
+              "out_of_order_markers": 0,
+              "p50_ms": 154.804931640625,
+              "p95_ms": 181.64111328125,
+              "p99_ms": 184.47412109375,
+              "max_ms": 186.44091796875,
+              "median_level_dbfs": -14.858872309200136,
+              "final_two_seconds_markers": 3
+            },
+            "carrier_to_adviser": {
+              "expected_markers": 118,
+              "received_markers": 118,
+              "missing_markers_pct": 0,
+              "duplicate_markers": 0,
+              "out_of_order_markers": 0,
+              "p50_ms": 234.246337890625,
+              "p95_ms": 244.403076171875,
+              "p99_ms": 244.45166015625,
+              "max_ms": 244.4677734375,
+              "median_level_dbfs": -15.208873254026432,
+              "final_two_seconds_markers": 4
+            },
+            "udp_network": {
+              "down": {
+                "packets": 3938,
+                "wire_bytes": 379192,
+                "delivered_packets": 3906,
+                "delivered_wire_bytes": 376000,
+                "dropped_packets": 32,
+                "dropped_wire_bytes": 3192,
+                "max_delay_ms": 73.632514,
+                "first_at_ms": 1792926820937,
+                "last_at_ms": 1792926883528
+              },
+              "up": {
+                "packets": 3744,
+                "wire_bytes": 350232,
+                "delivered_packets": 3697,
+                "delivered_wire_bytes": 345722,
+                "dropped_packets": 47,
+                "dropped_wire_bytes": 4510,
+                "max_delay_ms": 119.690972,
+                "first_at_ms": 1792926820937,
+                "last_at_ms": 1792926883455
+              }
+            }
+          }
+        ]
+      },
+      "identical_source_files": true
+    },
+    "diagnostic_test_correction": "Initial impaired probe returned inconclusive/insufficient_samples with 78 received samples and 14\u201315% measured loss. That is correct app behavior, not false readiness. The test now accepts this safe outcome with actual impairment evidence; healthy readiness still requires full samples. Production classifier unchanged. Three subsequent repetitions passed.",
+    "outbound_validation": {
+      "completed_seconds": 60,
+      "concurrent_calls": 8,
+      "source_unchanged": true,
+      "results": [
+        {
+          "accepted": true,
+          "codec": "PCMA",
+          "failures": [],
+          "healthy_delay_p95_ms": 85.27783203125,
+          "longest_healthy_speech_delivery_interruption_ms": 40,
+          "median_delay_growth_ms": -0.28662109375,
+          "profile": "healthy"
+        },
+        {
+          "accepted": true,
+          "codec": "G722",
+          "failures": [],
+          "healthy_delay_p95_ms": 95.943115234375,
+          "longest_healthy_speech_delivery_interruption_ms": 10.229709,
+          "median_delay_growth_ms": -0.093994140625,
+          "profile": "healthy"
+        },
+        {
+          "accepted": true,
+          "codec": "PCMA",
+          "failures": [],
+          "healthy_delay_p95_ms": 92.717041015625,
+          "longest_healthy_speech_delivery_interruption_ms": 20,
+          "median_delay_growth_ms": -0.04833984375,
+          "profile": "jitter"
+        },
+        {
+          "accepted": true,
+          "codec": "G722",
+          "failures": [],
+          "healthy_delay_p95_ms": 92.5439453125,
+          "longest_healthy_speech_delivery_interruption_ms": 8.960208000000002,
+          "median_delay_growth_ms": -0.117919921875,
+          "profile": "jitter"
+        },
+        {
+          "accepted": true,
+          "codec": "PCMA",
+          "failures": [],
+          "healthy_delay_p95_ms": 110.515380859375,
+          "longest_healthy_speech_delivery_interruption_ms": 20,
+          "median_delay_growth_ms": -20.06103515625,
+          "profile": "shift180"
+        },
+        {
+          "accepted": true,
+          "codec": "G722",
+          "failures": [],
+          "healthy_delay_p95_ms": 100.070068359375,
+          "longest_healthy_speech_delivery_interruption_ms": 20.10975,
+          "median_delay_growth_ms": -0.083740234375,
+          "profile": "shift180"
+        },
+        {
+          "accepted": true,
+          "codec": "PCMA",
+          "failures": [],
+          "healthy_delay_p95_ms": 93.271728515625,
+          "longest_healthy_speech_delivery_interruption_ms": 40,
+          "median_delay_growth_ms": -0.0703125,
+          "profile": "pause420"
+        },
+        {
+          "accepted": true,
+          "codec": "G722",
+          "failures": [],
+          "healthy_delay_p95_ms": 87.982421875,
+          "longest_healthy_speech_delivery_interruption_ms": 8.598125,
+          "median_delay_growth_ms": -0.129638671875,
+          "profile": "pause420"
+        }
+      ]
+    }
+  }
+}

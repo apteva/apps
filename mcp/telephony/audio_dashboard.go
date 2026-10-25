@@ -499,6 +499,17 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operator access required", 403)
 		return
 	}
+	if globalCtx == nil {
+		a.serveAudioDashboard(w, r, project)
+		return
+	}
+	err = globalCtx.WithProject(project).WithWorkload(r.Context(), "diagnostics", func(ctx context.Context) error { a.serveAudioDashboard(w, r.WithContext(ctx), project); return nil })
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "diagnostics busy; retry shortly", 503)
+	}
+}
+func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, project string) {
 	if id := r.URL.Query().Get("call_id"); id != "" {
 		row, e := a.db().findCall(id)
 		if e != nil {

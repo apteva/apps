@@ -114,6 +114,7 @@ export interface SoftphoneCallbacks {
 }
 
 export interface SoftphoneAudioOptions {
+ networkProfile?: import("../frontend/src/network-policy").NetworkPolicy;
   turnTransport?: "all"|"udp"|"tcp"|"tls";
   iceTransportPolicy?: "all"|"relay";
   turnTLSPort?:number;

@@ -657,6 +657,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			config = globalCtx.WithProject(row.ProjectID).Config()
 		}
 		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		attachRTCResourcePolicy(&rtcConfig, globalCtx)
 		if err != nil || !rtcConfig.Enabled {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "webrtc_unavailable"})
 			return
@@ -1067,7 +1068,11 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.URL.Path == "/softphone/turn-policy" {
+	if r.URL.Path == "/softphone/network-check" {
+		a.handleNetworkCheck(w, r)
+		return
+	}
+	if r.URL.Path == "/softphone/turn-policy" || r.URL.Path == "/softphone/network-policy" {
 		if globalCtx == nil {
 			http.Error(w, "app context unavailable", 503)
 			return
@@ -1081,7 +1086,11 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", 405)
 			return
 		}
-		a.handleSelfTURNPolicy(w, r, project)
+		if r.URL.Path == "/softphone/network-policy" {
+			a.handleSelfNetworkPolicy(w, r, project)
+		} else {
+			a.handleSelfTURNPolicy(w, r, project)
+		}
 		return
 	}
 	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
@@ -1097,6 +1106,9 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
+	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/softphone/place" || strings.HasPrefix(r.URL.Path, "/softphone/answer/") || strings.HasPrefix(r.URL.Path, "/softphone/attach/") || strings.HasPrefix(r.URL.Path, "/softphone/listen/") || strings.HasPrefix(r.URL.Path, "/softphone/coach/")) {
+		a.networkChecks.stopOwner(project, networkCheckOwner(r))
 	}
 	if r.URL.Path == "/softphone/numbers" {
 		a.handleSoftphoneNumbers(w, r, project)

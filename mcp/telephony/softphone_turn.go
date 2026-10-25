@@ -252,6 +252,10 @@ func (p *rtcTURNProvider) issue(ctx context.Context) (rtcTURNCredentials, error)
 	if err != nil {
 		return rtcTURNCredentials{}, errors.New("TURN credential service unavailable")
 	}
+	return p.validated(v)
+}
+
+func (p *rtcTURNProvider) validated(v rtcTURNCredentials) (rtcTURNCredentials, error) {
 	if v.ExpiresAt <= time.Now().Unix()+15 || v.ExpiresAt > time.Now().Unix()+86405 || v.TTLSeconds < 60 || v.TTLSeconds > 86400 || v.ExpiresAt > time.Now().Unix()+int64(v.TTLSeconds)+5 || len(v.ICEServers) == 0 || len(v.ICEServers) > 8 {
 		return rtcTURNCredentials{}, errors.New("invalid temporary TURN credentials")
 	}
@@ -285,6 +289,9 @@ func (p *rtcTURNProvider) issue(ctx context.Context) (rtcTURNCredentials, error)
 // Caller has validated this exact media token. Revalidate it on every renewal;
 // supervisor policies come from their listener session, never the adviser's row.
 func (a *App) configureManagedTURN(c *softphoneRTCConfig, row *callRow, token string, identity phoneIdentity, listener bool, q url.Values) error {
+	if err := a.configureNetworkPolicy(c, row.ProjectID, identity); err != nil {
+		return err
+	}
 	policy, err := a.resolvedTURNPolicy(row.ProjectID, identity, q)
 	if err != nil {
 		return err

@@ -104,6 +104,10 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 			_ = conn.Close()
 			continue
 		}
+		if cfg.socketPolicy != nil {
+			cfg.socketPolicy(conn)
+			cfg.socketPolicy(rtcpConn)
+		}
 		media := &sipRTPMedia{
 			rtcpConn: rtcpConn,
 			conn:     conn, offer: offer, security: security, remote: remote, localPort: port,

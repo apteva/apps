@@ -562,6 +562,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			config = globalCtx.WithProject(row.ProjectID).Config()
 		}
 		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		attachRTCResourcePolicy(&rtcConfig, globalCtx)
 		if err != nil || !rtcConfig.Enabled {
 			writeJSONStatus(w, 503, map[string]any{"code": "webrtc_unavailable"})
 			return

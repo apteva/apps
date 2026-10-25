@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.40
+version: 0.12.41
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -361,6 +361,18 @@ provides:
             maximum: 12
 
 runtime:
+  resource_policy:
+    workloads: [recording_import, recording_playback, maintenance, diagnostics]
+    traffic_classes: [sip_media, webrtc_media]
+    defaults:
+      workloads:
+        recording_import: {concurrency: 1, queue: 8, weight: 2}
+        recording_playback: {concurrency: 1, queue: 8, weight: 2}
+        maintenance: {concurrency: 1, queue: 8, weight: 1}
+        diagnostics: {concurrency: 4, queue: 16, weight: 4}
+      network:
+        sip_media: {}
+        webrtc_media: {}
   ingress:
     browser_path: /runtime-browser
     endpoints: {browser: "", media: "", signaling: "", callbacks: "", carrier_media: ""}
@@ -393,7 +405,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.40
+    ref: telephony/v0.12.41
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -410,6 +422,8 @@ config_schema:
   - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
   - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
+  - { name: softphone_network_check_udp_port_min, type: text, label: "Network check UDP range start", description: "Optional dedicated range for background diagnostics. Configure both bounds and forward separately; must not overlap live WebRTC ports. Empty uses OS ephemeral ports outside the call range." }
+  - { name: softphone_network_check_udp_port_max, type: text, label: "Network check UDP range end", description: "Inclusive diagnostic UDP upper bound, 1024–65535. Diagnostic failure never blocks a call." }
   - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
   - { name: softphone_webrtc_udp_port_max, type: text, label: "WebRTC UDP range end", description: "Inclusive UDP range end; must be greater than or equal to the start." }
   - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Legacy setting; client IP now uses Server-signed SDK metadata, with socket-peer fallback. Configure trusted proxies in Server. This setting no longer accepts unsigned forwarded addresses." }
@@ -452,6 +466,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	networkChecks      networkCheckRegistry
 	legacyAdmission    atomic.Uint32
 	legacyWork         atomic.Int64
 	recordingWriters   atomic.Int64
@@ -644,7 +659,7 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	workers := []sdk.Worker{
-		{Name: "sip-resource-retirement", Schedule: "@every 30s", Run: a.runRetiredSIPResources},
+		{Workload: "maintenance", Name: "sip-resource-retirement", Schedule: "@every 30s", Run: a.runRetiredSIPResources},
 		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
 		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
@@ -652,7 +667,7 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
 		{Name: "routing-reconciliation", Schedule: "@every 30s", Run: a.runRoutingReconciliation},
-		{Name: "historical-housekeeping", Schedule: "@every 1m", Run: a.runHousekeeping},
+		{Workload: "maintenance", Name: "historical-housekeeping", Schedule: "@every 1m", Run: a.runHousekeeping},
 		{
 			Name:     "call-auto-answer",
 			Schedule: "@every 30s",
@@ -665,6 +680,7 @@ func (a *App) Workers() []sdk.Worker {
 		},
 		{
 			Name:     "recording-import",
+			Workload: "recording_import",
 			Schedule: "@every 5s",
 			Run:      a.runRecordingTick,
 		},

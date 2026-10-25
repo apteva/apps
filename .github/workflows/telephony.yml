@@ -71,15 +71,25 @@ jobs:
           TELEPHONY_EFFICIENCY_RESULTS: /tmp/telephony-efficiency.json
       - run: bun test --timeout 15000 frontend/tests/*.test.ts ui/*.test.ts
         working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_RESULTS: /tmp/telephony-network-model.json
+          TELEPHONY_GUARDED_MODEL_RESULTS: /tmp/telephony-guarded-model.json
+      - name: Natural speech under identical packet faults and bandwidth limits
+        run: go test -run '^TestNetworkSpeechReplay$' -count=1 -v . > /tmp/telephony-network-speech.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_SPEECH_RESULTS: /tmp/telephony-network-speech.json
       - run: bunx --no-install playwright install --with-deps chromium
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/outbound-setup.playwright.config.ts
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
         working-directory: mcp/telephony
-      - name: Compiled sidecar Chromium, TURN recovery and managed renewal
-        run: go test -tags integration -run '^Test(Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
+      - name: Compiled sidecar Chromium, network checks, TURN recovery and managed renewal
+        run: go test -tags integration -run '^Test(Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal|NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_BROWSER_RESULTS: /tmp/telephony-network-paths.json
       - name: Outbound Chromium to SIP recovery smoke
         run: go test -tags integration -run '^TestOutboundSIPBrowserSoak($|Metrics|SourceClock|PauseWindow)' -count=1 -timeout 4m -v . > /tmp/telephony-outbound-soak.log 2>&1
         working-directory: mcp/telephony
@@ -120,6 +130,11 @@ jobs:
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
             /tmp/telephony-chromium.log
+            /tmp/telephony-network-speech.json
+            /tmp/telephony-network-speech.log
+            /tmp/telephony-guarded-model.json
+            /tmp/telephony-network-model.json
+            /tmp/telephony-network-paths.json
             /tmp/telephony-outbound-soak.log
             /tmp/telephony-outbound-soak/
   browser-outages:

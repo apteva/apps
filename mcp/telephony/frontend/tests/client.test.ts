@@ -655,3 +655,59 @@ test("unknown attachment outcome retries the same mutation; hangup stops the loo
 test("permanent media and microphone failures do not restart audio",async()=>{
  const f=fixture();await f.phone.dial({to:"+12025550100"});f.callbacks.onState?.("error","denied");expect((f.phone as any).automaticRecovery).toBeUndefined();f.phone.dispose();
 });
+
+test("background network check never holds inbound answer or outbound placement",async()=>{
+ for(const direction of ["inbound","outbound"]){
+  const f=fixture(),policyGate=deferred();
+  f.setResponse(async(url)=>{if(url.pathname.endsWith("/network-policy")){await policyGate.promise;return {effective:{media_transport:"webrtc"}};}return f.session;});
+  const checking=f.phone.checkNetwork();await Bun.sleep(1);
+  if(direction==="inbound")await f.phone.answer("call-1");else await f.phone.dial({to:"+33123456789"});
+  expect(f.phone.getSnapshot().audioState).toBe("live");expect((await checking).state).toBe("cancelled");expect(f.started).toBe(1);
+  expect(f.requests.some(r=>r.url.pathname.endsWith("/network-check"))).toBe(false);
+  expect(f.startedOptions[0].mediaTransport).toBeUndefined();
+  policyGate.resolve();await Bun.sleep(1);expect(f.started).toBe(1);expect(f.phone.getSnapshot().audioState).toBe("live");f.phone.dispose();
+ }
+});
+
+test("network checks do not mark a phone busy, change live controls or survive disposal",async()=>{
+ const f=fixture(),gate=deferred();f.setResponse(async()=>{await gate.promise;return {};});
+ const pending=f.phone.checkNetwork();await Bun.sleep(1);expect(f.phone.getSnapshot().busy).toBe(false);expect(f.phone.getSnapshot().phase).toBe("idle");
+ f.phone.dispose();expect((await pending).state).toBe("cancelled");gate.resolve();await Bun.sleep(1);expect(f.started).toBe(0);expect(f.phone.getSnapshot().busy).toBe(false);
+});
+
+test("incoming offers stop even policy discovery and prevent a later probe from starting",async()=>{
+ const f=fixture(),gate=deferred();f.setResponse(async url=>{
+  if(url.pathname.endsWith("/network-policy")){await gate.promise;return {effective:{}};}
+  if(url.pathname.endsWith("/calls"))return {calls:[{id:"incoming-2",status:"pending",direction:"inbound",peer_kind:"human",answerable:true}]};return f.session;
+ });
+ const checking=f.phone.checkNetwork();await Bun.sleep(1);await f.client.listCalls();expect((await checking).state).toBe("cancelled");
+ await expect(f.phone.checkNetwork()).rejects.toThrow("incoming offers");gate.resolve();await Bun.sleep(1);
+ expect(f.requests.some(r=>r.url.pathname.endsWith("/network-check"))).toBe(false);expect(f.phone.getSnapshot().busy).toBe(false);f.phone.dispose();
+});
+
+test("network profiles affect the next attachment and restore inherited transport",async()=>{
+ const {validateNetworkPolicy}=await import("../src/network-policy");
+ const f=fixture();f.phone.configureAudio({mediaTransport:"websocket"});
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"webrtc",initial_bitrate_bps:24000,max_bitrate_bps:24000,playback_target_ms:80}));
+ await f.phone.answer("call-1");expect(f.startedOptions[0].mediaTransport).toBe("webrtc");expect(f.startedOptions[0].playbackTargetMs).toBe(80);
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"inherit"}));
+ expect(f.started).toBe(1);expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.startedOptions[0].mediaTransport).toBe("webrtc");
+ await f.phone.reconnect();expect(f.startedOptions[1].mediaTransport).toBe("websocket");expect(f.startedOptions[1].networkProfile?.initial_bitrate_bps).toBe(32000);f.phone.dispose();
+});
+
+test("unsaved network defaults never overwrite existing host playback preferences",async()=>{
+ const {DEFAULT_NETWORK_POLICY}=await import("../src/network-policy");const f=fixture();
+ f.phone.configureAudio({mediaTransport:"webrtc",playbackTargetMs:100,playbackMaxMs:280});
+ f.setResponse(async url=>url.pathname.endsWith("/network-policy")?{configured:false,effective:DEFAULT_NETWORK_POLICY}:f.session);
+ expect((await f.phone.checkNetwork()).state).toBe("unavailable");await f.phone.answer("call-1");
+ expect(f.startedOptions[0].playbackTargetMs).toBe(100);expect(f.startedOptions[0].playbackMaxMs).toBe(280);expect(f.startedOptions[0].mediaTransport).toBe("webrtc");f.phone.dispose();
+});
+
+test("removing a network override restores host playback and does not restart live audio",async()=>{
+ const {validateNetworkPolicy}=await import("../src/network-policy");const f=fixture();
+ f.phone.configureAudio({mediaTransport:"websocket",playbackTargetMs:100,playbackMinMs:80,playbackMaxMs:280});
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"webrtc",playback_target_ms:60}));
+ await f.phone.answer("call-1");expect(f.startedOptions[0].playbackTargetMs).toBe(60);expect(f.startedOptions[0].playbackMinMs).toBe(60);
+ f.phone.applyNetworkPolicy();expect(f.started).toBe(1);await f.phone.reconnect();
+ expect(f.startedOptions[1]).toMatchObject({mediaTransport:"websocket",playbackTargetMs:100,playbackMinMs:80,playbackMaxMs:280});expect(f.startedOptions[1].networkProfile).toBeUndefined();f.phone.dispose();
+});

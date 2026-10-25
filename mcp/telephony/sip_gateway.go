@@ -148,10 +148,12 @@ func (a *App) resolveSIPGatewayConfig(ctx *sdk.AppCtx, forceEnabled bool) (sipGa
 			publicURL = info.PublicURL
 		}
 	}
-	return loadSIPGatewayConfigWithOptions(ctx.Config(), sipConfigOptions{
+	cfg, err := loadSIPGatewayConfigWithOptions(ctx.Config(), sipConfigOptions{
 		ForceEnabled: forceEnabled,
 		PublicURL:    publicURL,
 	})
+	cfg.socketPolicy = func(conn *net.UDPConn) sdk.SocketPolicyResult { return ctx.ApplyUDPSocketPolicy(conn, "sip_media") }
+	return cfg, err
 }
 
 func (a *App) stopSIPGateway() {

@@ -145,6 +145,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 		}
 		tracks[d] = track
 		result.stats[d] = &rtcMediaStats{direction: []string{"caller_to_listener", "adviser_to_listener"}[d]}
+		result.stats[d].voice.policy.Store(c.NetworkPolicy)
 		parameters := sender.GetParameters()
 		if len(parameters.Encodings) > 0 {
 			result.stats[d].rtp.ssrc = uint32(parameters.Encodings[0].SSRC)
@@ -265,7 +266,6 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 			if json.Unmarshal(data, &event) != nil {
 				return
 			}
-
 			if event.Type == "webrtc.ice_refresh" {
 				iceSession.requestRefresh()
 				continue

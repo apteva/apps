@@ -16,11 +16,14 @@ export const TRANSPORT_METRICS = [
   "receiver_totalSamplesReceived", "receiver_audioLevel", "receiver_totalAudioEnergy", "receiver_totalSamplesDuration", "receiver_nackCount", "receiver_fecPacketsReceived", "receiver_fecPacketsDiscarded",
   "receiver_jitter_buffer_interval_ms", "receiver_jitter_target_interval_ms", "receiver_jitter_minimum_interval_ms", "receiver_processing_interval_ms", "receiver_totalProcessingDelay", "receiver_totalSamplesDecoded", "telemetry_skipped_samples", "telemetry_skipped_auxiliary", "telemetry_queue_age_ms", "receiver_last_packet_age_ms",
   "sender_bytesSent", "sender_packetsSent", "sender_headerBytesSent", "sender_retransmittedPacketsSent", "sender_retransmittedBytesSent", "sender_nackCount", "sender_targetBitrate", "sender_send_delay_interval_ms",
+  "remote_receiver_report_age_ms", "remote_receiver_report_updated", "sender_packets_delta", "sender_window_ms",
   "remote_receiver_packetsLost", "remote_receiver_fractionLost", "remote_receiver_jitter", "remote_receiver_roundTripTime", "remote_receiver_totalRoundTripTime", "remote_receiver_roundTripTimeMeasurements",
   "remote_sender_packetsSent", "remote_sender_bytesSent", "pair_availableOutgoingBitrate", "pair_availableIncomingBitrate", "pair_currentRoundTripTime", "pair_totalRoundTripTime",
   "pair_bytesSent", "pair_bytesReceived", "pair_requestsSent", "pair_requestsReceived", "pair_responsesSent", "pair_responsesReceived", "pair_consentRequestsSent", "path_revision", "codec_clock_rate", "codec_channels"
 ] as const;
 export const TRANSPORT_STATES: Record<string, readonly string[]> = {
+  upload_bitrate_control: ["standard", "guarded"],
+  upload_bitrate_reason: ["standard", "initial", "observation_reset", "loss", "bandwidth", "sustained_upload_delay", "stable_recovery"],
   receiver_processing: ["unavailable", "per_decoded_sample"],
   connection: ["connected", "reconnecting", "closed"], context: ["running", "suspended", "interrupted", "closed"],
   muted: ["true", "false"], device_muted: ["true", "false"], track: ["live", "ended"],
