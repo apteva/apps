@@ -271,3 +271,28 @@ test("access revocation clears raw evidence, shows error and does not loop", asy
   await page.waitForTimeout(3500);
   expect(denied).toBe(1);
 });
+
+test("managed direct HTTPS blocked by dashboard CSP keeps history through gateway",async({page})=>{
+ await fixture(page);
+ let external=0;
+ await page.route("http://localhost:5301/**",route=>{external++;return route.abort();});
+ await page.route("**/runtime-endpoints?**",route=>route.fulfill({json:{managed:true,browser_api_base:"http://localhost:5301/runtime-browser"}}));
+ await page.route("**/runtime-browser-bootstrap?**",route=>route.fulfill({json:{token:"fixture-only",expires_at:Math.floor(Date.now()/1000)+300,endpoint:"http://localhost:5301/runtime-browser"}}));
+ await page.goto("/?restrict_connect=1");
+ await expect(page.getByText(/active \/ .* recent/)).toBeVisible();
+ await expect(page.getByText("No calls yet.",{exact:true})).toHaveCount(0);
+ expect(external).toBe(0); // browser blocked it before the request reached a server
+});
+test("failed initial call load is unavailable, never zero calls; recovery clears error",async({page})=>{
+ await fixture(page);
+ let fail=true;
+ await page.route("**/calls?**",route=>fail?route.abort("failed"):route.fulfill({json:{calls:[]}}));
+ await page.goto("/");
+ await expect(page.getByText("Call list unavailable",{exact:true})).toBeVisible();
+ await expect(page.getByText("0 active / 0 recent",{exact:true})).toHaveCount(0);
+ await expect(page.getByText("No calls yet.",{exact:true})).toHaveCount(0);
+ fail=false;
+ await page.getByRole("button",{name:"Refresh",exact:true}).click();
+ await expect(page.getByText("0 active / 0 recent",{exact:true})).toBeVisible();
+ await expect(page.getByText(/Call refresh failed/)).toHaveCount(0);
+});

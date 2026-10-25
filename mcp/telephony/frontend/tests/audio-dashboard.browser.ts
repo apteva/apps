@@ -69,6 +69,11 @@ async function fixture(page: Page, dropped = () => 450) {
         calls: empty
           ? []
           : [{ ...base, metrics: {...base.metrics, playback_dropped_ms: dropped()}, call_id: second ? "next-call" : "audio-call" }],
+        charts: url.searchParams.get("include_charts")==="true" ? [{
+          from:url.searchParams.get("from"),until:url.searchParams.get("until"),
+          calls:empty?0:120,observed:empty?0:118,affected:empty?0:110,
+          problem_percent:empty?null:110/118*100,sip_discard_ms:200,browser_discard_ms:dropped(),sip_calls:100,browser_calls:118,
+        }] : undefined,
         totals: {
           calls: empty ? 0 : 120,
           active: empty ? 0 : 2,
@@ -218,4 +223,29 @@ test("widget link opens monitor with filters and selected diagnostics expanded",
   await expect(
     page.getByText("Call audio-call", { exact: false }),
   ).toBeVisible();
+});
+
+
+test("Audio Health charts follow time picker and filters and remain independent of call pages",async({page})=>{
+ const requests=await fixture(page);
+ await page.goto("/?view=monitor");
+ await expect(page.getByRole("region",{name:"Audio health charts"})).toBeVisible();
+ await expect(page.getByRole("heading",{name:"Call observations over time"})).toBeVisible();
+ await page.getByText("Chart data and intervals",{exact:true}).click();
+ await expect(page.getByRole("cell",{name:"120",exact:true})).toBeVisible();
+ await page.getByLabel("Time window").selectOption("1h");
+ await expect.poll(()=>{
+  const u=new URL(requests.at(-1)!);
+  return Date.parse(u.searchParams.get("until")!)-Date.parse(u.searchParams.get("from")!);
+ }).toBe(3600000);
+ expect(new URL(requests.at(-1)!).searchParams.get("include_charts")).toBe("true");
+ await page.getByRole("button",{name:"Next",exact:true}).click();
+ await expect.poll(()=>new URL(requests.at(-1)!).searchParams.has("cursor")).toBe(true);
+ await page.getByText("Chart data and intervals",{exact:true}).click();
+ await expect(page.getByRole("cell",{name:"120",exact:true})).toBeVisible();
+ await page.getByLabel("Provider",{exact:true}).selectOption("telnyx");
+ await expect.poll(()=>new URL(requests.at(-1)!).searchParams.get("provider")).toBe("telnyx");
+ await page.getByText("Chart data and intervals",{exact:true}).click();
+ await expect(page.getByRole("cell",{name:"Unknown",exact:true})).toBeVisible();
+ await expect(page.getByRole("cell",{name:"120",exact:true})).toHaveCount(0);
 });

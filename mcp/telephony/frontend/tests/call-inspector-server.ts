@@ -22,7 +22,7 @@ Bun.serve({
       });
     return new Response(
       `<!doctype html><html lang="en" data-theme="clean" data-mode="dark"><head><title>Call inspector fixture</title><link rel="stylesheet" href="/theme.css"><style>html,body,#root{height:100%;margin:0;background:var(--bg,#111);color:var(--text,#eee);font-family:var(--font-sans,system-ui)}*{box-sizing:border-box}</style></head><body><div id="root"></div><script type="module" src="/app.js"></script></body></html>`,
-      { headers: { "content-type": "text/html" } },
+      { headers: { "content-type": "text/html", ...(new URL(req.url).searchParams.has("restrict_connect") ? {"Content-Security-Policy":"connect-src 'self'"} : {}) } },
     );
   },
 });

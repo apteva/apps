@@ -80,3 +80,31 @@ test('native fetch is invoked with its global receiver',async()=>{
  const transport=new RuntimeTelephonyTransport(f.app,'direct',branded,{baseURL:'https://voice.example/runtime-browser',credentialProvider:async()=>({token:'scoped',expires_at:Math.floor(Date.now()/1000)+300,endpoint:'https://voice.example/runtime-browser'})});
  await transport.request('GET','/calls');
 });
+
+test('auto reads fall back through authenticated gateway with a bounded cooldown, never writes',async()=>{
+ const previous=Object.getOwnPropertyDescriptor(globalThis,'location');
+ Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/apps/telephony'}});
+ try {
+  const f=fixture();const get=f.app.get;const reads:string[]=[];
+  f.app.get=async(path:string,init?:RequestInit)=>{if(path==='/runtime-endpoints')return get(path,init);reads.push(path);return {calls:[{id:'retained'}]} as any};
+  let direct=0;const transport=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{direct++;throw new TypeError('Failed to fetch')}) as unknown as typeof fetch);
+  expect(await transport.request<{calls:{id:string}[]}>('GET','/calls')).toEqual({calls:[{id:'retained'}]});
+  await transport.request('GET','/calls');
+  expect(direct).toBe(1);expect(reads).toEqual(['/calls','/calls']);
+  await expect(transport.request('POST','/softphone/place',{})).rejects.toThrow('Failed to fetch');
+  expect(f.calls.filter(c=>c.path==='/softphone/place')).toHaveLength(0);
+  expect(transport.directBase).toBe('https://voice.example/runtime-browser');
+ } finally {if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
+});
+test('auto does not mask direct authorization errors or retry aborted reads',async()=>{
+ const previous=Object.getOwnPropertyDescriptor(globalThis,'location');
+ Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/'}});
+ try {
+  const f=fixture(),t=new RuntimeTelephonyTransport(f.app,'auto',(async()=>new Response('',{status:403})) as unknown as typeof fetch);
+  await expect(t.request('GET','/calls')).rejects.toMatchObject({status:403});
+  const ctrl=new AbortController();ctrl.abort();
+  const canceled=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{throw new TypeError('aborted')}) as unknown as typeof fetch);
+  await expect(canceled.request('GET','/calls',undefined,{signal:ctrl.signal})).rejects.toThrow();
+  expect(f.calls.filter(c=>c.path==='/calls')).toHaveLength(0);
+ } finally {if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
+});

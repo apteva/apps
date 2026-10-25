@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.45
+version: 0.12.46
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -71,6 +71,7 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.dashboard.connect          # exact managed browser/media origins
     - platform.connections.execute        # invoke carrier API
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.instances.read             # resolve assigned agent names in the routing panel
@@ -407,7 +408,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.45
+    ref: telephony/v0.12.46
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -589,6 +590,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) initializeActiveRuntime(ctx *sdk.AppCtx) error {
 	if !a.runtimeInitializationAllowed() {
 		return errRuntimeAdmission
+	}
+	if err := a.registerRuntimeDashboard(ctx.DashboardConnectAPI()); err != nil {
+		ctx.Logger().Warn("managed dashboard connection registration unavailable; reload or use proxy access", "err", err)
 	}
 	if err := initializeRecordingTemporaryFiles(ctx.DataDir()); err != nil {
 		ctx.Logger().Warn("recording temporary directory unavailable", "err", err)

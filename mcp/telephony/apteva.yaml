@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.45
+version: 0.12.46
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -24,6 +24,7 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.dashboard.connect          # exact managed browser/media origins
     - platform.connections.execute        # invoke carrier API
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.instances.read             # resolve assigned agent names in the routing panel
@@ -360,7 +361,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.45
+    ref: telephony/v0.12.46
     entry: mcp/telephony
   port: 8080
   health_check: /health

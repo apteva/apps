@@ -49,6 +49,7 @@ export class RuntimeTelephonyTransport {
   private credential?: BrowserCredential;
   private issuing?: Promise<BrowserCredential>;
   private proxyOnly = false;
+  private readFallbackUntil = 0;
 
   constructor(private proxy: AppHandle, private mode: TelephonyRuntimeMode = 'auto',
               private fetchImpl: typeof fetch = globalThis.fetch, private direct?: DirectTelephonyConnection) { this.fetchImpl = fetchImpl.bind(globalThis); }
@@ -106,15 +107,27 @@ export class RuntimeTelephonyTransport {
       return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
     }
     await this.prepare();
-    if (!this.directBase) return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
+    if (!this.directBase || method === 'GET' && this.mode === 'auto' && !this.direct && Date.now() < this.readFallbackUntil) return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
     requestPath(path);
     const grant = await this.grant(), url = new URL(this.directBase + path);
     if (this.proxy.projectId) url.searchParams.set('project_id', this.proxy.projectId);
     const headers = new Headers(init?.headers);
     headers.set('Authorization', 'Bearer ' + grant.token);
     headers.set('Content-Type', 'application/json');
-    const response = await this.fetchImpl(url, { ...init, method, headers,
-      body: body === undefined ? undefined : JSON.stringify(body), credentials: 'omit', redirect: 'error' });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, { ...init, method, headers,
+        body: body === undefined ? undefined : JSON.stringify(body), credentials: 'omit', redirect: 'error' });
+    } catch (error) {
+      // Safe reads can use the authenticated gateway when an older dashboard
+      // CSP or the client network blocks direct HTTPS. Never replay a mutation:
+      // a failed fetch does not prove that a write was not executed remotely.
+      if (method === 'GET' && this.mode === 'auto' && !this.direct && !init?.signal?.aborted && error instanceof TypeError) {
+        this.readFallbackUntil = Date.now() + 30000;
+        return this.proxy.get<R>(path, init);
+      }
+      throw error;
+    }
     if (!response.ok) {
       if (response.status === 403) this.credential = undefined;
       const body = (await response.text()).slice(0, 65536);

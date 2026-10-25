@@ -1,3 +1,4 @@
+import AudioHealthCharts from "./AudioHealthCharts";
 import CallDiagnostics from "./CallDiagnostics";
 import { subscribeAudioDashboardEvents, type AudioUpdatesMode } from "./audio-dashboard-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,6 +21,7 @@ export function useAudioDashboard(
   cursor = "",
   limit = 50,
   interval = 15000,
+  includeCharts = false,
 ) {
   const [data, setData] = useState<AudioDashboardResponse | null>(null),
     [error, setError] = useState(""),
@@ -36,7 +38,7 @@ export function useAudioDashboard(
     setLoading(true);
     const timeout = window.setTimeout(() => ctrl.abort("timeout"), 12000);
     try {
-      const url = audioDashboardURL(host, filters, cursor, limit);
+      const url = audioDashboardURL(host, filters, cursor, limit, Date.now(), includeCharts);
       const response = await fetch(url, {
         credentials: "same-origin",
         signal: ctrl.signal,
@@ -61,7 +63,7 @@ export function useAudioDashboard(
       window.clearTimeout(timeout);
       if (generation === latest.current) setLoading(false);
     }
-  }, [host.appName, host.installId, host.projectId, filters, cursor, limit]);
+  }, [host.appName, host.installId, host.projectId, filters, cursor, limit, includeCharts]);
   useEffect(() => {
     setData(null);
     setError("");
@@ -193,6 +195,9 @@ export default function AudioHealthView(props: AudioDashboardHost) {
     props,
     filters,
     cursor,
+    50,
+    15000,
+    true,
   );
   const update = (key: keyof AudioFilters, value: string) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -338,6 +343,7 @@ export default function AudioHealthView(props: AudioDashboardHost) {
       {data ? (
         <>
           <AudioHealthCards data={data} />
+          <AudioHealthCharts buckets={data.charts} />
           {data.pending_reports > 0 ? (
             <p className="text-xs text-warn">
               {data.pending_reports} reports awaiting background indexing.

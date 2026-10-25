@@ -86,7 +86,13 @@ export interface AudioAlert {
   call_ids: string[];
   occurred_at: string;
 }
+export interface AudioHealthBucket {
+ from:string; until:string; calls:number; observed:number; affected:number;
+ sip_discard_ms:number; browser_discard_ms:number; sip_calls:number; browser_calls:number; problem_percent:number|null;
+}
 export interface AudioDashboardResponse {
+ charts?: AudioHealthBucket[];
+ chart_basis?: string;
   calls: AudioReport[];
   totals: {
     calls: number;
@@ -109,6 +115,7 @@ export function audioDashboardURL(
   cursor = "",
   limit = 50,
   now = Date.now(),
+  includeCharts = false,
 ): string {
   const q = new URLSearchParams();
   if (host.projectId) q.set("project_id", host.projectId);
@@ -130,6 +137,7 @@ export function audioDashboardURL(
   q.set("until", new Date(until).toISOString());
   q.set("limit", String(Math.min(100, Math.max(1, limit))));
   if (cursor) q.set("cursor", cursor);
+  if (includeCharts) q.set("include_charts", "true");
   for (const k of [
     "provider",
     "adviser",

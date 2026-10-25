@@ -371,6 +371,7 @@ func (c *callsDB) saveAudioDashboardAlert(alert audioAlert) error {
 }
 
 type audioDashboardFilter struct {
+	IncludeCharts                                               bool
 	OmitTotals, OmitFacets                                      bool
 	From, Until                                                 int64
 	Provider, Adviser, Destination, Stage, Issue, State, Search string
@@ -381,6 +382,13 @@ type audioDashboardFilter struct {
 func parseAudioDashboardFilter(r *http.Request, now time.Time) (audioDashboardFilter, error) {
 	q := r.URL.Query()
 	f := audioDashboardFilter{From: now.Add(-24 * time.Hour).UnixMilli(), Until: now.UnixMilli(), Provider: q.Get("provider"), Adviser: q.Get("adviser"), Destination: q.Get("destination"), Stage: q.Get("stage"), Issue: q.Get("issue"), State: q.Get("state"), Search: strings.TrimSpace(q.Get("search")), Limit: 50, Cursor: q.Get("cursor")}
+	if q.Has("include_charts") {
+		b, err := strconv.ParseBool(q.Get("include_charts"))
+		if err != nil {
+			return f, errors.New("invalid include_charts")
+		}
+		f.IncludeCharts = b
+	}
 	for key, flag := range map[string]*bool{"include_totals": &f.OmitTotals, "include_facets": &f.OmitFacets} {
 		if v := q.Get(key); v != "" {
 			b, err := strconv.ParseBool(v)
@@ -616,6 +624,15 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 	if err != nil {
 		http.Error(w, "load audio health", 500)
 		return
+	}
+	if f.IncludeCharts {
+		charts, e := a.db().audioDashboardCharts(r.Context(), project, f, now)
+		if e != nil {
+			http.Error(w, "load audio health charts", 503)
+			return
+		}
+		result["charts"] = charts
+		result["chart_basis"] = "latest_audio_observation_cumulative_call_metrics"
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, result)

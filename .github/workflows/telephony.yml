@@ -45,6 +45,9 @@ jobs:
         working-directory: mcp/telephony
       - run: go vet ./...
         working-directory: mcp/telephony
+      - name: Managed dashboard origins and Audio Health race checks
+        run: go test -race -count=1 -run '^Test(RuntimeDashboard|ManagedRuntimeBrowser|AudioDashboard)' .
+        working-directory: mcp/telephony
       - name: Statistics access and snapshot race checks
         run: go test -race -count=1 -run '^TestCallStatistics' -skip '^TestCallStatisticsDSTAndIndexWithLargeHistory$' .
         working-directory: mcp/telephony

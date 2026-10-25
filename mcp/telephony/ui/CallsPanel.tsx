@@ -1003,6 +1003,8 @@ function useInboundRingtone(active: boolean) {
 function CallsView({ projectId, installId, visible = true, showCalls }: NativePanelProps & {visible?:boolean; showCalls?:()=>void}) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
+  const [callsLoaded, setCallsLoaded] = useState(false);
+  const [callsError, setCallsError] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const selectedPane = useRef<HTMLElement | null>(null);
   const [status, setStatus] = useState("");
@@ -1138,6 +1140,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const receiveCalls = useCallback((raw: TelephonyCall[]) => {
     const list = raw.map(call => normalizeCall(call as RawCall));
     setCalls(list);
+    setCallsLoaded(true);
+    setCallsError("");
     setSelectedId(current => current && list.some(c => c.id === current) ? current : list[0]?.id ?? "");
     setLoading(false);
   }, []);
@@ -1150,7 +1154,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       const list = await telephony.listCalls(request.signal);
       if (!request.signal.aborted) receiveCalls(list);
     } catch (e) {
-      if (!request.signal.aborted) setStatus((e as Error).message || "Load failed");
+      if (!request.signal.aborted) setCallsError((e as Error).message || "Load failed");
     } finally {
       if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
@@ -1203,7 +1207,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       onFailure: sample => {
         setLoading(false);
         const response = sample.status === undefined ? "network" : `HTTP ${sample.status}`;
-        setStatus(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
+        setCallsError(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
       },
     });
     return () => watcher.close();
@@ -1394,10 +1398,10 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
         <div className="flex-1" style={{ minWidth: "9rem" }}>
           <h1 className="text-sm font-semibold leading-5">Calls</h1>
           <p className="text-xs text-text-muted">
-            {activeCount} active / {terminalCount} recent
+            {callsLoaded ? `${activeCount} active / ${terminalCount} recent${callsError ? " · stale" : ""}` : callsError ? "Call list unavailable" : "Loading calls…"}
           </p>
         </div>
-        <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
+        <div role={callsError ? "alert" : undefined} className="text-xs text-text-muted" style={{ maxWidth: "28rem" }}>{callsError || status}</div>
         <button
           type="button"
           onClick={() => { if (ringtoneEnabled) disableRingtone(); else void enableRingtone(); }}
@@ -1498,7 +1502,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
         >
           {calls.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>
-              No calls yet.
+              {callsLoaded ? "No calls yet." : callsError ? "Call history could not be loaded. Refresh to retry." : "Loading call history…"}
             </div>
           ) : (
             <div style={{ minWidth: "54rem" }}>

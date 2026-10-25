@@ -33,6 +33,7 @@ func (c *callsDB) dashboardExtra(ctx context.Context, project string, f audioDas
 	f.Limit = 0
 	f.OmitTotals = false
 	f.OmitFacets = false
+	f.IncludeCharts = false
 	raw, _ := json.Marshal(struct {
 		Project, Kind string
 		Filter        audioDashboardFilter
