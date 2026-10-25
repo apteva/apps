@@ -740,6 +740,12 @@ func recordingPublic(recording recordingRow) map[string]any {
 			out["playback_source"] = "local"
 		}
 	}
+	if out["playback_url"] != nil && recordingPlaybackFormat(&recording) == "mp3" && !recordingSupportsVariants(&recording) {
+		original := recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantOriginal)
+		out["playback_url"] = original
+		out["playback_urls"] = map[string]string{recordingVariantOriginal: original}
+		return out
+	}
 	if out["playback_url"] != nil {
 		urls := map[string]string{
 			recordingVariantMix:      providerPlaybackURL(recording.ProjectID, recording.ID),
@@ -942,6 +948,15 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if !recordingSupportsVariants(recording) {
+		if r.URL.Query().Get("variant") == "" {
+			variant = recordingVariantOriginal
+		}
+		if variant != recordingVariantOriginal {
+			http.Error(w, "playback variants are unavailable for this recording format", http.StatusConflict)
+			return
+		}
 	}
 	if variant == recordingVariantOriginal && recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
 		w.Header().Set("Cache-Control", "private, no-store")

@@ -17,7 +17,9 @@ license and rebuild script are included under `native/lame/`.
   choice for exact sample preservation.
 - Source and stored formats/sizes are tracked separately, so remote state
   migration continues to verify the retained WAV against its own size. Private original, balanced,
-  caller-only and agent-only playback remain available; MP3 variants decode
+  caller-only and agent-only playback remain available for converted WAV/SIP
+  recordings. Legacy/provider MP3 keeps original-only playback because its MPEG
+  profile may not support channel decoding. Telephony MP3 variants decode
   incrementally to bounded disk files and preserve seeking and access checks.
 - Source WAV remains until upload size/SHA-256 verification succeeds. Existing
   copy-versus-delete retention policy is unchanged. Conversion failures, size/

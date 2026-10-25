@@ -36,6 +36,13 @@ func recordingPlaybackFormat(r *recordingRow) string {
 	return r.Format
 }
 
+// Only our own converted MP3 is known to use the decoder-compatible MPEG
+// profile. Keep legacy/provider MP3 original-only (it can be MPEG-2.5).
+func recordingSupportsVariants(r *recordingRow) bool {
+	format := recordingPlaybackFormat(r)
+	return format == "wav" || (format == "mp3" && r.Format == "wav" && r.StorageFormat == "mp3" && r.StorageStatus == "stored" && r.StorageFileID > 0)
+}
+
 func prepareRecordingStorage(ctx context.Context, path, sourceFormat, targetFormat string, channels int) (string, string, error) {
 	if targetFormat == "" {
 		targetFormat = "mp3"
