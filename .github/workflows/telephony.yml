@@ -184,7 +184,7 @@ jobs:
       - name: Verify native runtime and bundled codec (no system Opus required)
         run: |
           test "$(go env GOARCH)" = '${{ matrix.arch }}'
-          go test -count=1 -run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -v .
+          go test -count=1 -run 'TestRecordingMP3RoundTrip|TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -v .
       - name: Verify musl library with a musl-loader binary
         if: runner.os == 'Linux'
         run: |
@@ -203,7 +203,7 @@ jobs:
           sudo install -m 0755 /tmp/telephony-opus-musl "$musl_root/test"
           sudo mount -t proc proc "$musl_root/proc"
           sudo chroot --userspec=10001:10001 "$musl_root" /usr/bin/env XDG_CACHE_HOME=/tmp/codec-cache /test \
-            -test.run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
+            -test.run 'TestRecordingMP3RoundTrip|TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
   mixed-media-load:
     name: Mixed SIP media load
     runs-on: ubuntu-latest
@@ -250,7 +250,7 @@ jobs:
           - group: media
             pattern: 'Test(AgentAudio|AgentMedia|AgentCoreCompletion|AgentCompletionClose|AgentCoreLink|AgentContinuity|AgentPlaybackPressure|AudioFrontend|SIPShortSourceGap|SIPSourceGap|SIPJitterResumesShortDTX|SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
           - group: lifecycle
-            pattern: 'Test(RealtimePreparation|PushImmediate|TwilioImmediate|SIPCrossedBYE|CarrierInventoryOutage|CarrierVerification|TemporaryCarrier|InventoryReads|AccountFailure|GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
+            pattern: 'Test(RecordingMP3|RealtimePreparation|PushImmediate|TwilioImmediate|SIPCrossedBYE|CarrierInventoryOutage|CarrierVerification|TemporaryCarrier|InventoryReads|AccountFailure|GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:
       GOWORK: 'off'
     steps:
@@ -267,3 +267,24 @@ jobs:
         with:
           name: telephony-race-${{ matrix.group }}
           path: /tmp/telephony-race.log
+
+  recording-mp3:
+    name: MP3 long recordings (30/60/120 minutes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOWORK: 'off'
+      TELEPHONY_LONG_RECORDING_TEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - run: go test -count=1 -timeout 35m -run '^TestLongSIPMP3RecordingMatrix$' -v . > /tmp/telephony-mp3.log
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-mp3-long-recordings
+          path: /tmp/telephony-mp3.log

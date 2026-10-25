@@ -55,7 +55,7 @@ func (a *App) managedRecordingPathChanges() ([]recordingPathChange, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := a.db().db.Query(`SELECT f.recording_id,f.path,r.size_bytes,r.provider_status FROM local_recording_files f JOIN recordings r ON r.id=f.recording_id WHERE r.deleted_at='' AND r.provider_deleted_at=''`)
+	rows, err := a.db().db.Query(`SELECT f.recording_id,f.path,COALESCE(NULLIF(r.source_size_bytes,0),r.size_bytes),r.provider_status FROM local_recording_files f JOIN recordings r ON r.id=f.recording_id WHERE r.deleted_at='' AND r.provider_deleted_at=''`)
 	if err != nil {
 		return nil, err
 	}

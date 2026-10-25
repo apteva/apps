@@ -199,6 +199,7 @@ interface RecordingSettings {
   default_mode: "off" | "always";
   channels: "mono" | "dual";
   storage_mode: "copy_to_storage" | "copy_then_delete_provider";
+  storage_format: "mp3" | "wav";
   retention_days: number;
   carrier: string;
   recording_supported: boolean;
@@ -1328,6 +1329,21 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     }
   };
 
+  const setRecordingFormat = async (storage_format: "mp3" | "wav") => {
+    setRecordingBusy("settings");
+    try {
+      const res = await fetch(withProject("/recording-settings"), {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storage_format }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setRecordingSettings(await res.json() as RecordingSettings);
+      setStatus("Recording format updated for pending and future Storage uploads");
+    } catch (e) { setStatus((e as Error).message || "Could not update recording format"); }
+    finally { setRecordingBusy(""); }
+  };
+
   const recordingAction = async (recording: Recording, action: "retry" | "delete") => {
     if (action === "delete") {
       const location = recording.storage_file_id > 0 ? "Storage and the carrier" : "the carrier";
@@ -1410,6 +1426,15 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
             />
             Record future calls
           </label>
+        ) : null}
+        {recordingSettings ? (
+          <select aria-label="Recording storage format" title="Format for pending and future Storage uploads. Local capture remains WAV; existing stored recordings are unchanged."
+            className="h-8 px-2 border border-border rounded text-xs bg-bg"
+            value={recordingSettings.storage_format ?? "mp3"} disabled={recordingBusy === "settings"}
+            onChange={e => void setRecordingFormat(e.target.value as "mp3" | "wav")}>
+            <option value="mp3">Store MP3 · 128 kbps</option>
+            <option value="wav">Store WAV · lossless</option>
+          </select>
         ) : null}
         <button
           type="button"

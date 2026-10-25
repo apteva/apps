@@ -305,7 +305,12 @@ func TestManagedRuntimeRecordingReferencesMoveWithState(t *testing.T) {
 	if err != nil || got != file {
 		t.Fatal(got, err)
 	}
-	ctx.AppDB().Exec(`UPDATE recordings SET size_bytes=8 WHERE id=?`, rec.ID)
+	// Compressed Storage size must not replace retained-original verification.
+	ctx.AppDB().Exec(`UPDATE recordings SET size_bytes=2,source_size_bytes=7,storage_format='mp3',storage_status='stored',storage_file_id=1 WHERE id=?`, rec.ID)
+	if err = a.relocateRecordingPaths(); err != nil {
+		t.Fatal("MP3 storage blocked valid retained WAV", err)
+	}
+	ctx.AppDB().Exec(`UPDATE recordings SET source_size_bytes=8 WHERE id=?`, rec.ID)
 	if err = a.relocateRecordingPaths(); err == nil {
 		t.Fatal("unverified transfer passed")
 	}

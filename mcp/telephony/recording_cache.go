@@ -30,7 +30,8 @@ const playbackCacheTTL = 10 * time.Minute
 
 // The two disk-work permits cover imports, downloads and generated playback.
 // Large files hold a permit until the last reader closes. At most two jobs can
-// each retain one bounded source plus one bounded output (4 GiB total), in
+// each retain a source and output: WAV work up to 2 GiB/job, MP3 decoding
+// up to 2 GiB PCM plus 1 GiB mono output (6 GiB total for two jobs), in
 // addition to the 256 MiB reusable cache. Durable originals are never cache files.
 type recordingPlaybackFile struct {
 	*os.File

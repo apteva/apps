@@ -23,6 +23,7 @@ require (
 	github.com/pion/transport/v5 v5.1.1
 	github.com/pion/turn/v5 v5.1.2
 	github.com/pion/webrtc/v4 v4.2.22
+	github.com/tetratelabs/wazero v1.11.0
 	github.com/twilio/twilio-go v1.30.9
 	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0
