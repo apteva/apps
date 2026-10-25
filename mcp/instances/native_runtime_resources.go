@@ -11,6 +11,13 @@ import (
 func nativeResourceCapabilities() *sdk.ResourceCapabilities {
 	return &sdk.ResourceCapabilities{Contract: sdk.ResourcePolicyVersion, ProcessControls: []string{"cpu_weight", "cpu_quota_percent", "memory_high_bytes", "memory_max_bytes", "io_weight", "nice"}, ProcessApply: "next_deployment", WorkloadApply: "cooperative", NetworkApply: "new_sockets", Limitations: []string{"systemd/cgroup support is target-dependent", "ancestor quotas and host contention remain applicable", "DSCP enforcement beyond the host is not guaranteed"}}
 }
+
+func nativeEffectiveResourcePolicy(p *sdk.ResourcePolicy) *sdk.ResourcePolicy {
+	if p == nil || p.Process.Empty() && p.TotalConcurrency == 0 && len(p.Workloads) == 0 && len(p.Network) == 0 {
+		return nil
+	}
+	return p
+}
 func validateNativeResourceEnvironment(d nativeRecord, env map[string]string) error {
 	raw := env["APTEVA_RESOURCE_POLICY"]
 	if raw == "" {

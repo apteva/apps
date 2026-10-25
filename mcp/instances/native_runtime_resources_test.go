@@ -47,3 +47,48 @@ func TestNativeResourceInspectionShellSyntax(t *testing.T) {
 		t.Fatal("default CPU behavior changed")
 	}
 }
+
+func TestNativeResourcePolicyFullLifecycle(t *testing.T) {
+	b, f, req := newNativeTest(t)
+	req.Resources = &sdk.ResourcePolicy{Process: sdk.ProcessResources{CPUWeight: 200}}
+	req.Execution = prepareNativeTest(t, b, req)
+	for _, action := range []string{"prepare", "inspect"} {
+		if _, w := nativeCall(t, b, action, req); w.Code != 200 {
+			t.Fatalf("%s: %d %s", action, w.Code, w.Body.String())
+		}
+	}
+	changed := req
+	changed.Resources = &sdk.ResourcePolicy{Process: sdk.ProcessResources{CPUWeight: 201}}
+	for _, action := range []string{"prepare", "inspect", "start", "stop", "delete"} {
+		if _, w := nativeCall(t, b, action, changed); w.Code != 409 {
+			t.Fatalf("changed policy accepted by %s: %d", action, w.Code)
+		}
+	}
+	start := startNativeRequest(req)
+	start.Environment["APTEVA_RESOURCE_POLICY"] = nativeJSON(sdk.ResourceEnvelope{InstallID: "52", DeploymentID: req.DeploymentID, Generation: "1", Policy: *req.Resources})
+	if _, w := nativeCall(t, b, "start", start); w.Code != 200 {
+		t.Fatalf("start: %d %s", w.Code, w.Body.String())
+	}
+	if out, w := nativeCall(t, b, "inspect", req); w.Code != 200 || !out.Ready {
+		t.Fatalf("running inspect: %d %s", w.Code, w.Body.String())
+	}
+	if _, w := nativeCall(t, b, "start", start); w.Code != 200 || f.starts != 1 {
+		t.Fatal("start retry failed or duplicated process")
+	}
+	for _, action := range []string{"stop", "prepare", "inspect", "delete", "delete", "inspect"} {
+		if _, w := nativeCall(t, b, action, req); w.Code != 200 {
+			t.Fatalf("%s: %d %s", action, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestNativeLegacyDeploymentAcceptsEmptyResourcePolicy(t *testing.T) {
+	b, _, req := newNativeTest(t)
+	req.Execution = prepareNativeTest(t, b, req)
+	req.Resources = &sdk.ResourcePolicy{Workloads: map[string]sdk.WorkloadPolicy{}, Network: map[string]sdk.SocketPolicy{}}
+	for _, action := range []string{"inspect", "prepare", "stop", "delete"} {
+		if _, w := nativeCall(t, b, action, req); w.Code != 200 {
+			t.Fatalf("legacy %s: %d %s", action, w.Code, w.Body.String())
+		}
+	}
+}

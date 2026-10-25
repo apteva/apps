@@ -182,6 +182,9 @@ func (b *nativeBackend) save(d nativeRecord) error {
 	return e
 }
 func nativeEnvelope(r nativeRequest) error {
+	if _, exists := r.Options["resource_policy"]; exists {
+		return errors.New("resource_policy must use the typed request field")
+	}
 	if r.Contract != nativeContract || !nativeID(r.DeploymentID) || r.InstallID <= 0 || r.Generation <= 0 || r.OperationID == "" || len(r.OperationID) > 256 || r.IdempotencyKey == "" || len(r.IdempotencyKey) > 512 {
 		return errors.New("invalid runtime request identity/contract")
 	}
@@ -191,6 +194,10 @@ func nativeEnvelope(r nativeRequest) error {
 	return nil
 }
 func nativeFingerprint(r nativeRequest, o nativeOptions) string {
+	// All lifecycle operations must fingerprint the same typed policy, not just
+	// prepare (which has already populated Options during validation). Empty
+	// policies preserve fingerprints of deployments created before this field.
+	o.Resources = nativeEffectiveResourcePolicy(r.Resources)
 	return nativeHash(nativeJSON(struct {
 		Install, Generation int64
 		Project             string
@@ -232,7 +239,7 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if o.Resources != nil {
 		return nil, o, a, p, errors.New("resource_policy must use the typed request field")
 	}
-	o.Resources = r.Resources
+	o.Resources = nativeEffectiveResourcePolicy(r.Resources)
 	if r.Resources != nil {
 		if _, e := sdk.ResolveResources(r.Manifest.Runtime.ResourcePolicy, r.Resources); e != nil {
 			return nil, o, a, p, e
