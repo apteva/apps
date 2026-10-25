@@ -288,6 +288,14 @@ func nativeEnvironmentText(env map[string]string) string {
 	return out.String()
 }
 func nativeUnitText(d nativeRecord) string {
+	properties := ""
+	if d.Options.Resources != nil {
+		values, _ := d.Options.Resources.Process.SystemdProperties()
+		properties = strings.Join(values, "\n")
+		if properties != "" {
+			properties += "\n"
+		}
+	}
 	return fmt.Sprintf(`# apteva-native-owner:%s
 [Unit]
 Description=Apteva native deployment %s
@@ -301,7 +309,7 @@ KillMode=control-group
 TimeoutStopSec=10
 Restart=no
 UMask=0077
-`, d.Fingerprint, nativeHash(d.ID)[:12], d.ReleaseDir, d.Artifact.Executable, d.ReleaseDir, d.ReleaseDir)
+%s`, d.Fingerprint, nativeHash(d.ID)[:12], d.ReleaseDir, d.Artifact.Executable, d.ReleaseDir, d.ReleaseDir, properties)
 }
 
 // Process credentials travel over encrypted SSH stdin, never in a command line.
@@ -332,6 +340,11 @@ func nativeRunInput(c context.Context, i *Instance, cmd string, input io.Reader)
 	return nil
 }
 func (nativeSSH) Start(c context.Context, i *Instance, d nativeRecord, env map[string]string) error {
+	if d.Options.Resources != nil {
+		if err := d.Options.Resources.Validate(); err != nil {
+			return err
+		}
+	}
 	var input bytes.Buffer
 	tw := tar.NewWriter(&input)
 	for _, f := range []struct{ name, body string }{{".environment", nativeEnvironmentText(env)}, {".unit", nativeUnitText(d)}} {
