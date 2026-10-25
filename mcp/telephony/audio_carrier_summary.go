@@ -81,7 +81,12 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["sip_srtp_decryption_failures"] = float64(v.RTP.DecryptErrors)
 		m["sip_srtp_replay_failures"] = float64(v.RTP.ReplayErrors)
 		m["sip_packets_sent"] = float64(v.RTP.Sent)
+		if v.PacerAvailable {
+			m["sip_pacer_sent_ms"] = float64(v.Pacer.SentMS)
+			m["sip_pacer_dropped_ms"] = float64(v.Pacer.DroppedMS)
+		}
 		m["sip_send_errors"] = float64(v.RTP.SendErrors)
+		m["sip_read_errors"] = float64(v.RTP.ReadErrors)
 		m["sip_max_send_duration_ms"] = v.RTP.MaxSendMS
 		m["sip_max_socket_read_wait_ms"] = v.RTP.MaxSocketWaitMS
 		m["sip_kernel_timestamped_packets"] = float64(v.RTP.KernelTimestampPackets)

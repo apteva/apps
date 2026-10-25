@@ -73,6 +73,12 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		}
 	}
 	m := s.Metrics
+	if b.ReceivedAt != "" {
+		m["browser_observed"] = 1
+	}
+	if c.UpdatedAt != "" {
+		m["carrier_observed"] = 1
+	}
 	m["playback_dropped_ms"] = float64(b.PlaybackDroppedMS)
 	if b.MediaTransport != "webrtc" {
 		m["playback_underruns"] = float64(b.PlaybackUnderruns)
@@ -510,6 +516,10 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, project string) {
+	if r.URL.Query().Get("view") == "statistics" {
+		a.serveCallStatistics(w, r, project)
+		return
+	}
 	if id := r.URL.Query().Get("call_id"); id != "" {
 		row, e := a.db().findCall(id)
 		if e != nil {

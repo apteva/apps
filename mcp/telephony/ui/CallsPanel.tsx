@@ -18,6 +18,7 @@ import {
 
 import AudioHealthView from "./AudioHealthView";
 import CallDiagnostics from "./CallDiagnostics";
+import CallStatistics from "./CallStatistics";
 import SIPMediaDialog from "./SIPMediaDialog";
 import OutboundTransportDialog from "./OutboundTransportDialog";
 import { usePanelSoftphone } from "./use-panel-softphone";
@@ -3752,7 +3753,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
 }
 
 export default function CallsPanel(props: NativePanelProps) {
-  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles" | "audio-health">(() => new URLSearchParams(window.location.search).get("tab")==="audio-health"?"audio-health":"calls");
+  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles" | "audio-health" | "statistics">(() => new URLSearchParams(window.location.search).get("tab")==="statistics"?"statistics":new URLSearchParams(window.location.search).get("tab")==="audio-health"?"audio-health":"calls");
   return (
     <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
       <nav className="shrink-0 min-h-11 max-w-full overflow-x-auto border-b border-border px-2 flex items-center gap-1" aria-label="Telephony views">
@@ -3792,9 +3793,11 @@ export default function CallsPanel(props: NativePanelProps) {
         >
           Compliance
         </button>
+        <button type="button" onClick={()=>setView("statistics")} className={`h-8 px-3 rounded text-sm ${view==="statistics"?"bg-bg-subtle font-medium":"text-text-muted hover:bg-bg-subtle"}`}>Statistics</button>
       </nav>
       <div className="min-h-0 min-w-0 flex-1 flex flex-col">
         <CallsView key={`${props.projectId}:${props.installId}`} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
+        {view === "statistics" ? <CallStatistics key={`${props.projectId}:${props.installId}`} {...props}/> : null}
         {view === "audio-health" ? <AudioHealthView key={`${props.projectId}:${props.installId}`} {...props} /> : null}
         {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
