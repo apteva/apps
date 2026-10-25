@@ -167,12 +167,18 @@ func (d *localDest) pathForKey(key string) (string, error) {
 	return filepath.Join(d.cfg.Path, clean), nil
 }
 
-func (d *localDest) Put(ctx context.Context, key string, body io.Reader, _ int64) error {
+func (d *localDest) Put(ctx context.Context, key string, body io.Reader, size int64) error {
 	dst, err := d.pathForKey(key)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if size < 0 {
+		size = 0
+	}
+	if err := requireDiskSpace(filepath.Dir(dst), size); err != nil {
 		return err
 	}
 	tmp := dst + ".tmp"
@@ -186,7 +192,7 @@ func (d *localDest) Put(ctx context.Context, key string, body io.Reader, _ int64
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err := io.Copy(f, contextReader{ctx: ctx, r: body}); err != nil {
+	if _, err := io.Copy(&archiveDiskWriter{ctx: ctx, out: f, path: filepath.Dir(dst), remaining: 1 << 40}, contextReader{ctx: ctx, r: body}); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -348,12 +354,40 @@ func newCloudDest(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, cfg s3Config) (*
 	return &cloudDest{cfg: cfg, client: client, region: region}, nil
 }
 
+type uploadSizeContextKey struct{}
+
+// Unknown-length encrypted streams still have a known plaintext upper bound.
+// Size parts for S3's 10,000-part ceiling without buffering the full object.
+func cloudUploadParts(size int64) (uint64, uint) {
+	part := int64(16 << 20)
+	if size > 0 {
+		upper := size + size/1024 + (1 << 20)
+		needed := (upper + 9998) / 9999
+		needed = ((needed + (1 << 20) - 1) / (1 << 20)) * (1 << 20)
+		if needed > part {
+			part = needed
+		}
+	}
+	threads := uint(2)
+	if part > 16<<20 {
+		threads = 1
+	}
+	return uint64(part), threads
+}
 func (d *cloudDest) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+	hint := size
+	if n, ok := ctx.Value(uploadSizeContextKey{}).(int64); ok {
+		hint = n
+	}
+	part, threads := cloudUploadParts(hint)
+	if err := requireMemoryHeadroom(int64(part)*int64(threads) + (128 << 20)); err != nil {
+		return err
+	}
 	if size <= 0 {
 		size = -1
 	}
 	_, err := d.client.PutObject(ctx, d.cfg.Bucket, d.prefixedKey(key), body, size, minio.PutObjectOptions{
-		ContentType: "application/octet-stream", PartSize: 16 << 20, NumThreads: 4,
+		ContentType: "application/octet-stream", PartSize: part, NumThreads: threads, ConcurrentStreamParts: true,
 	})
 	if err != nil {
 		return fmt.Errorf("S3 put %s: %w", key, err)

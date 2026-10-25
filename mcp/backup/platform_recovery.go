@@ -1,8 +1,8 @@
 package main
 
-// The published SDK provides streaming but not recovery-passphrase headers.
-// This adapter uses the same permissioned callbacks and outbound install token;
-// it can be removed once that SDK extension is released.
+// Compatibility adapter for streaming clients without recovery-passphrase
+// methods. Current SDK clients use their native implementation; older clients
+// retain the same permissioned callbacks and outbound install token.
 import (
 	"context"
 	"encoding/json"

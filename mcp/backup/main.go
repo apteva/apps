@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.6
+version: 0.3.7
 description: |
   Verified platform snapshots stored on local disk, AWS S3, or Cloudflare R2,
   with durable scheduling, isolated retention, and optional encryption.
@@ -119,7 +119,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.6
+    ref: backup/v0.3.7
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -855,13 +855,21 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	run, err := runBackup(ctx, dest, policy, scope)
+	var run *Run
+	var err error
+	if policy != nil {
+		run, err = enqueueBackup(ctx, dest, policy)
+	} else {
+		run, err = enqueueInteractiveRun(ctx, dest, nil, scope)
+	}
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "run": run})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	httpJSON(w, map[string]any{"run": run})
 }
 

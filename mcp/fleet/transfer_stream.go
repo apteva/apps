@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -281,7 +282,29 @@ func (a *App) httpTransfer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	var streamErr error
 	if tr.Direction == "backup-download" && tr.BackupManifest != nil {
-		streamErr = writeFleetTenantArchive(w, tr.SourceDir, *tr.BackupManifest)
+		done, err := a.beginTenantOperation(tr.BackupManifest.Tenant.ID, "backup snapshot")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		defer done()
+		tenant, _, err := a.store.get(tr.BackupManifest.Tenant.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if err = validateRestorableFleetTenant(tenant); err != nil || tenant.ConfigDir != tr.SourceDir {
+			http.Error(w, "tenant changed after backup preparation", http.StatusConflict)
+			return
+		}
+		manifest, err := a.onlineBackupManifest(tenant)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		requestCtx, cancel := context.WithTimeout(r.Context(), tenantTransferTTL)
+		defer cancel()
+		streamErr = writeFleetTenantArchiveContext(requestCtx, w, tr.SourceDir, manifest)
 	} else {
 		streamErr = streamTenantArchiveLocal(w, tr.SourceDir)
 	}

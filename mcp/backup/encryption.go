@@ -37,6 +37,9 @@ func prepareStoredSnapshot(ctx *sdk.AppCtx, rawPath string, rawSize int64, rawSH
 	if passphrase == "" {
 		return rawPath, rawSize, rawSHA, false, cleanup, nil
 	}
+	if err := requireEncryptionMemory(); err != nil {
+		return "", 0, "", false, cleanup, err
+	}
 	recipient, err := age.NewScryptRecipient(passphrase)
 	if err != nil {
 		return "", 0, "", false, cleanup, err
@@ -84,6 +87,7 @@ func prepareStoredSnapshot(ctx *sdk.AppCtx, rawPath string, rawSize int64, rawSH
 // encrypted copies on the local disk at the same time.
 func putStoredSnapshot(opCtx context.Context, ctx *sdk.AppCtx, destination Destination_writer, key, rawPath string, rawSize int64, rawSHA string) (size int64, sha string, encrypted bool, err error) {
 	passphrase := backupPassphrase(ctx)
+	opCtx = context.WithValue(opCtx, uploadSizeContextKey{}, rawSize)
 	if passphrase == "" {
 		in, openErr := os.Open(rawPath)
 		if openErr != nil {
@@ -94,6 +98,19 @@ func putStoredSnapshot(opCtx context.Context, ctx *sdk.AppCtx, destination Desti
 			return 0, "", false, putErr
 		}
 		return rawSize, rawSHA, false, nil
+	}
+	if local, ok := destination.(*localDest); ok {
+		if err := requireDiskSpace(local.cfg.Path, rawSize+rawSize/1024+(1<<20)); err != nil {
+			return 0, "", false, err
+		}
+	}
+	memory := int64(384 << 20)
+	if _, ok := destination.(*cloudDest); ok {
+		part, threads := cloudUploadParts(rawSize)
+		memory += int64(part) * int64(threads)
+	}
+	if err := requireMemoryHeadroom(memory); err != nil {
+		return 0, "", false, err
 	}
 	recipient, err := age.NewScryptRecipient(passphrase)
 	if err != nil {
@@ -149,10 +166,14 @@ func decryptStoredSnapshot(ctx *sdk.AppCtx, encryptedPath string) (string, func(
 	if passphrase == "" {
 		return "", func() {}, fmt.Errorf("backup is encrypted but encryption_passphrase is not configured")
 	}
+	if err := requireEncryptionMemory(); err != nil {
+		return "", func() {}, err
+	}
 	identity, err := age.NewScryptIdentity(passphrase)
 	if err != nil {
 		return "", func() {}, err
 	}
+	identity.SetMaxWorkFactor(18)
 	in, err := os.Open(encryptedPath)
 	if err != nil {
 		return "", func() {}, err
@@ -194,10 +215,14 @@ func openDecryptedSnapshot(ctx *sdk.AppCtx, encryptedPath string) (io.ReadCloser
 	if passphrase == "" {
 		return nil, fmt.Errorf("backup is encrypted but encryption_passphrase is not configured")
 	}
+	if err := requireEncryptionMemory(); err != nil {
+		return nil, err
+	}
 	identity, err := age.NewScryptIdentity(passphrase)
 	if err != nil {
 		return nil, err
 	}
+	identity.SetMaxWorkFactor(18)
 	in, err := os.Open(encryptedPath)
 	if err != nil {
 		return nil, err

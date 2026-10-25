@@ -224,3 +224,29 @@ APTEVA_GATEWAY_URL=http://localhost:5280 \
   FLEET_APTEVA_BIN=$(which apteva) \
   go run .
 ```
+
+
+## Online tenant backups
+
+`fleet_tenant_snapshot` returns a signed `archive_url` immediately. Snapshot
+bytes are streamed during download; the default provider path does not buffer a base64 archive or copy/stop the
+whole tenant before responding. Explicit supports_streaming=false retains the
+existing 32 MiB bounded legacy response. Local tenant
+processes remain running. Hosted tenant snapshots remain unsupported.
+
+Each SQLite file is detected by its header (including `.sqlite` and extensionless
+files) and copied through the incremental online backup API with WAL contents.
+Only one database copy is retained at a time; ordinary files stream directly.
+Database copies yield in 1 MiB steps, check cancellation and free disk space,
+and use a stable read view in WAL mode. Changing ordinary files fail the capture.
+This gives per-database consistency, not an atomic snapshot across databases. Existing format-v2 management credentials, setup
+state and restore metadata are preserved, along with the v0.10.12 stable-host
+lifecycle and recovery behavior.
+
+Backup object directories marked `.apteva-backup-destination` are excluded to
+avoid recursive archives. One Fleet backup stream runs at a time, transfers have
+a two-hour deadline, and SQLite staging preserves 512 MiB of disk headroom.
+Contained relative symlinks remain supported; runtime IPC sockets are omitted
+as in the previous snapshot copier. A failed/cancelled capture cleans its temporary directory and does not seal a
+valid gzip stream around a partial payload. Restores still require explicit
+confirmation and may stop the target tenant while replacing its data.
