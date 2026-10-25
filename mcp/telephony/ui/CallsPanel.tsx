@@ -1142,7 +1142,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     setCalls(list);
     setCallsLoaded(true);
     setCallsError("");
-    setSelectedId(current => current && list.some(c => c.id === current) ? current : list[0]?.id ?? "");
+    setSelectedId(current => current && list.some(c => c.id === current) ? current : "");
     setLoading(false);
   }, []);
 
@@ -1214,7 +1214,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   }, [telephony, receiveCalls]);
 
   const selected = useMemo(
-    () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
+    () => calls.find((call) => call.id === selectedId) ?? null,
     [calls, selectedId],
   );
 
@@ -1522,8 +1522,13 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     key={call.id}
                     type="button"
                     onClick={() => setSelectedId(call.id)}
-                    className={`w-full grid gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
-                    style={{ gridTemplateColumns: CALL_COLUMNS }}
+                    aria-pressed={picked}
+                    className="w-full grid gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70"
+                    style={{
+                      gridTemplateColumns: CALL_COLUMNS,
+                      backgroundColor: picked ? "color-mix(in srgb, var(--accent, #f97316) 8%, transparent)" : undefined,
+                      boxShadow: picked ? "inset 2px 0 color-mix(in srgb, var(--accent, #f97316) 50%, transparent)" : undefined,
+                    }}
                   >
                     <div>
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>

@@ -170,7 +170,15 @@ test("select live and finished calls, expand, inspect and export without touchin
   page.on("pageerror", (e) => errors.push(e.message));
   const { requests, mutations } = await fixture(page);
   await page.goto("/");
-  await page.getByRole("button", { name: /in-progress.*202 555 0101/ }).click();
+  const liveRow = page.getByRole("button", { name: /in-progress.*202 555 0101/ });
+  const finishedRow = page.getByRole("button", { name: /completed.*202 555 0102/ });
+  await expect(liveRow).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByText("Select a call.", { exact: true })).toBeVisible();
+  expect(requests.some(r => r.includes("audio-health"))).toBe(false);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(liveRow).toHaveAttribute("aria-pressed", "false");
+  await liveRow.click();
+  await expect(liveRow).toHaveAttribute("aria-pressed", "true");
   const inspector = page.getByRole("region", { name: "Call diagnostics" });
   await expect(
     inspector.getByRole("heading", { name: "Call diagnostics" }),
@@ -203,7 +211,9 @@ test("select live and finished calls, expand, inspect and export without touchin
   );
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await page.getByRole("button", { name: /completed.*202 555 0102/ }).click();
+  await finishedRow.click();
+  await expect(finishedRow).toHaveAttribute("aria-pressed", "true");
+  await expect(liveRow).toHaveAttribute("aria-pressed", "false");
   await expect(
     inspector.getByText("Finished call · completed", { exact: true }),
   ).toBeVisible();
