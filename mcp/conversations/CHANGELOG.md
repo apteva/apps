@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Present server-queued follow-ups in a compact tray attached above the composer across the panel, widgets, and exported chat surfaces. Move released/steered messages into the transcript once, preserving FIFO order and server-side storage.
+- Edit queued text inline without replacing the new-message draft or its attachments. Keep removal and immediate steering accessible with compact controls, keyboard support, localized labels, and visible retry errors.
+- Bound long queues independently of transcript scrolling and use Apteva theme tokens on desktop, narrow panes, and mobile.
+
 ## 0.24.58 — 2026-10-24
 
 - Keep Live transcript syllables and trailing punctuation together across interleaved caller captions. Use a bounded caller-first rule for near-simultaneous reply onsets, preserving ongoing answers and the original saved transcript.

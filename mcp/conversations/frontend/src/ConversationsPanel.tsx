@@ -1,4 +1,5 @@
 import {useReplySuggestion} from "./replySuggestion";
+import { QueuedMessages } from "./QueuedMessages";
 import { useConversationHost, type ConversationHost } from "./hostUI";
 import { voiceTranscriptMessages } from "./voiceTranscript";
 import { ThreadActionRow } from "./threadActions";
@@ -949,7 +950,7 @@ function ContextColumn({
 //   user   — right-aligned accent-tinted bubble, plain text
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
-function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>;onQueueEdit?:(message:Message)=>void;onQueueRemove?:(message:Message)=>void;onQueueSteer?:(message:Message)=>void}) {
+function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
  const user=props.message.role==="user";
  const voice=props.message.metadata?.source==="voice";
  const { t } = useConversationLocalization();
@@ -959,12 +960,6 @@ function MessageRow(props: {message:Message;agentName?:string;onAction:(id:numbe
  {voice ? <span className={`inline-flex items-center gap-1 text-[10px] text-text-muted ${user?"self-end":"self-start"}`} title={t("voice.transcriptWarning")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></svg>{t("voice.turn")}</span> : null}
  {user&&attachments}
  {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
- {user && props.message.queue_state === "queued" && <div className="flex justify-end gap-2 text-xs text-text-muted">
-   <span className="rounded-full bg-accent/10 px-2 py-1 text-accent">Queued</span>
-   <button type="button" className="hover:text-text" onClick={() => props.onQueueEdit?.(props.message)}>Edit</button>
-   <button type="button" className="hover:text-error" onClick={() => props.onQueueRemove?.(props.message)}>Remove</button>
-   <button type="button" className="font-medium text-accent hover:text-text" onClick={() => props.onQueueSteer?.(props.message)}>Steer</button>
- </div>}
  {!user&&attachments}{!props.message.component_kind && <MessageCards message={props.message} onAction={props.onAction}/>}
  </div>;
 }
@@ -1378,7 +1373,9 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
     ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
     : []);
-  const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled"));
+  const queuedMessages = archived ? [] : messages.filter(message=>message.conversation_id===conversation.id&&message.role==="user"&&message.queue_state==="queued")
+    .sort((a,b)=>(a.queue_position||a.id)-(b.queue_position||b.id)||a.id-b.id);
+  const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
   const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const progressShowsThinking = (p: LiveResponseProgress) => {
@@ -1615,20 +1612,22 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     mergeMessages([result.message]);
     onActed();
   };
-  const onQueueEdit = async (message: Message) => {
-    const content = window.prompt("Edit queued message", message.content);
-    if (content == null || !content.trim()) return;
-    try { mergeMessages([await conversationsClient.editQueued(conversation.id, message.id, content)]); } catch (err) { setSendError(String(err)); }
+  const onQueueEdit = async (message: Message, content: string) => {
+    const row=await conversationsClient.editQueued(conversation.id, message.id, content);
+    if(mountedRef.current)mergeMessages([row]);
   };
   const onQueueRemove = async (message: Message) => {
-    try { mergeMessages([await conversationsClient.removeQueued(conversation.id, message.id)]); } catch (err) { setSendError(String(err)); }
+    const row=await conversationsClient.removeQueued(conversation.id, message.id);
+    if(mountedRef.current)mergeMessages([row]);
   };
   const onQueueSteer = async (message: Message) => {
-    try { mergeMessages([await conversationsClient.steerQueued(conversation.id, message.id)]); } catch (err) { setSendError(String(err)); }
+    const row=await conversationsClient.steerQueued(conversation.id, message.id);
+    if(mountedRef.current)mergeMessages([row]);
   };
 
   return (
     <ConversationChatView
+      queuedMessages={<QueuedMessages key={conversation.id} messages={queuedMessages} canSteer={resolvedAgentOnline!==false&&connected&&!voiceActive} onEdit={onQueueEdit} onRemove={onQueueRemove} onSteer={onQueueSteer}/>}
       voiceControl={!archived && conversation.audience !== "public" && conversation.kind === "direct" ? <VoiceControls client={conversationsClient} chatId={conversation.id} disabled={Boolean(activeResponse) || sending} onActiveChange={setVoiceActive} onTranscript={text => setDraft(current => [current.trimEnd(), text].filter(Boolean).join(" "))}/> : undefined}
       voiceActive={voiceActive}
       contextChip={showPageContext ? <PageContextChip context={sharedPage.context} prefix={contextLabel || "Using context"} onRemove={sharedPage.dismiss} /> : undefined}
@@ -1649,14 +1648,14 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           waitingForModel={waitingToolGroups.has(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
-        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={item.key}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction} onQueueEdit={onQueueEdit} onQueueRemove={onQueueRemove} onQueueSteer={onQueueSteer}/></fieldset>
+        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={item.key}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
  {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
    <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
    <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
  </div>)}
  </div>;})())}
       </>}
-      hasMessages={timeline.length > 0}
+      hasMessages={timeline.length > 0 || queuedMessages.length > 0}
       streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || waitsInToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
           if (!progressShowsThinking(p)) return null;

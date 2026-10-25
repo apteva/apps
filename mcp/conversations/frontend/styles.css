@@ -238,6 +238,43 @@
 }
 
 /* One type and spacing scale for the input and both composer controls. */
+.apteva-conversations .chat-queue {
+ margin:0 10px -12px; padding:4px 4px 16px; min-width:0;
+ border:1px solid var(--color-border,#373737); border-bottom:0; border-radius:16px 16px 0 0;
+ background:var(--color-bg-card,#141414); color:var(--color-text,#eee);
+}
+.apteva-conversations .chat-queue-list {list-style:none;margin:0;padding:0;max-height:min(220px,32vh);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;}
+.apteva-conversations .chat-queue-item {padding:3px 5px;min-width:0;}
+.apteva-conversations .chat-queue-item + .chat-queue-item {border-top:1px solid color-mix(in srgb,var(--color-border,#373737) 55%,transparent);}
+.apteva-conversations .chat-queue-row {display:flex;align-items:center;gap:6px;min-width:0;}
+.apteva-conversations .chat-queue-icon {display:flex;flex:0 0 18px;justify-content:center;color:var(--color-text-dim,#777);}
+.apteva-conversations .chat-queue-preview {flex:1;min-width:0;padding:7px 3px;text-align:start;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:20px;cursor:pointer;}
+.apteva-conversations .chat-queue-text {display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;white-space:pre-wrap;}
+.apteva-conversations .chat-queue-files {display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-muted,#999);font-size:11px;line-height:18px;}
+.apteva-conversations .chat-queue-actions {display:flex;flex:0 0 auto;align-items:center;gap:2px;}
+.apteva-conversations .chat-queue-control {display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:0 0 auto;min-width:32px;height:34px;padding:5px;border:0;border-radius:7px;background:transparent;color:var(--color-text-muted,#999);font:inherit;font-size:12px;cursor:pointer;}
+.apteva-conversations .chat-queue-steer {padding-inline:7px;}
+.apteva-conversations .chat-queue-control:enabled:hover,.apteva-conversations .chat-queue-preview:enabled:hover {background:color-mix(in srgb,var(--color-text,#eee) 6%,transparent);color:var(--color-text,#eee);}
+.apteva-conversations .chat-queue-steer:enabled:hover {color:var(--color-accent,#f97316);}
+.apteva-conversations .chat-queue-remove:enabled:hover {color:var(--color-error,#ef4444);}
+.apteva-conversations .chat-queue :is(button,textarea):focus-visible {outline:2px solid var(--color-accent,#f97316);outline-offset:1px;}
+.apteva-conversations .chat-queue button:disabled {opacity:.4;cursor:default;}
+.apteva-conversations .chat-queue-editor {flex:1;min-width:0;padding-block:5px;}
+.apteva-conversations .chat-queue-editor textarea {display:block;box-sizing:border-box;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:7px 9px;border:1px solid var(--color-border,#373737);border-radius:8px;background:var(--color-bg-input,#171717);color:var(--color-text,#eee);font:inherit;font-size:14px;line-height:20px;}
+.apteva-conversations .chat-queue-editor-actions {display:flex;justify-content:flex-end;gap:5px;padding-top:5px;}
+.apteva-conversations .chat-queue-editor-actions button {min-height:32px;padding:4px 10px;border:0;border-radius:6px;background:transparent;color:var(--color-text-muted,#999);font:inherit;font-size:12px;cursor:pointer;}
+.apteva-conversations .chat-queue-editor-actions button:last-child {background:color-mix(in srgb,var(--color-accent,#f97316) 12%,transparent);color:var(--color-accent,#f97316);}
+.apteva-conversations .chat-queue-error {margin:3px 4px 5px 24px;color:var(--color-error,#ef4444);font-size:12px;line-height:18px;}
+@container apteva-composer (max-width:380px) {
+ .apteva-conversations .chat-queue {margin-inline:6px;}
+ .apteva-conversations .chat-queue-steer span {display:none;}
+ .apteva-conversations .chat-queue-row {gap:3px;}
+}
+@media (pointer:coarse), (max-width:480px) {
+ .apteva-conversations .chat-queue-control {min-width:40px;height:40px;}
+ .apteva-conversations .chat-queue-preview {min-height:40px;}
+ .apteva-conversations .chat-queue-editor-actions button {min-height:40px;}
+}
 .apteva-conversations .chat-composer-box {
  position:relative; display:flex; flex-direction:column; gap:8px;
  border:1px solid var(--color-border,#373737); border-radius:20px;

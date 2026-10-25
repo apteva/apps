@@ -1,6 +1,14 @@
 import { telegramCatalog } from "./telegramLocales";
 /** App-owned UI copy. Tuple order: English, French, Spanish. Never translate message content. */
 export const catalog = {
+  "queue.title": ["Queued messages", "Messages en attente", "Mensajes en cola"],
+  "queue.edit": ["Edit queued message", "Modifier le message en attente", "Editar mensaje en cola"],
+  "queue.editText": ["Edit queued message: {text}", "Modifier le message en attente : {text}", "Editar mensaje en cola: {text}"],
+  "queue.remove": ["Remove queued message", "Retirer le message en attente", "Quitar mensaje en cola"],
+  "queue.steer": ["Steer with queued message", "Intervenir avec ce message", "Intervenir con este mensaje"],
+  "queue.steerLabel": ["Steer", "Intervenir", "Intervenir"],
+  "queue.steerHint": ["Send now to steer the current response", "Envoyer maintenant pour orienter la réponse en cours", "Enviar ahora para orientar la respuesta actual"],
+  "queue.attachment": ["Attachment", "Pièce jointe", "Archivo adjunto"],
   "replySuggestion.use": ["Use suggested reply", "Utiliser la réponse suggérée", "Usar respuesta sugerida"],
   "replySuggestion.hint": ["Tab or tap to use", "Tab ou toucher pour utiliser", "Tab o toca para usar"],
   "replySuggestion.description": ["Suggested reply: {text}. Press Tab to use it or Escape to dismiss. It will not be sent automatically.", "Réponse suggérée : {text}. Appuyez sur Tab pour l’utiliser ou Échap pour la masquer. Elle ne sera pas envoyée automatiquement.", "Respuesta sugerida: {text}. Pulsa Tab para usarla o Escape para descartarla. No se enviará automáticamente."],

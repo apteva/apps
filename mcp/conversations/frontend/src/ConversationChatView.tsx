@@ -4,6 +4,7 @@ import { useConversationLocalization } from "./i18n";
 import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
 export interface ConversationChatViewProps {
+  queuedMessages?: ReactNode;
   contextChip?: ReactNode;
   voiceControl?: ReactNode;
   voiceActive?: boolean;
@@ -225,6 +226,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         <footer className="chat-composer-safe shrink-0 px-2 pt-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
           {props.contextChip}
+          {props.queuedMessages}
           <form
             onDragOver={event=>{if(props.attachments.options.files!==false)event.preventDefault()}}
             onDrop={event=>{if(props.attachments.options.files!==false){event.preventDefault();void props.attachments.add(Array.from(event.dataTransfer.files));}}}

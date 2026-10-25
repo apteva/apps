@@ -7,8 +7,8 @@
     "sha256": "ca3d38ef6e0234c52daba99d69c1a54e1f8150429d953688b4b1bf438ed979fe"
   },
   "ui": {
-    "path": "/ui/frontend/react-cd15cad152c7ca0d.mjs",
-    "sha256": "cd15cad152c7ca0df0a185e9ecad05c97719f5017caecac23873f395d409b11d",
+    "path": "/ui/frontend/react-6480cd15f21ed0e7.mjs",
+    "sha256": "6480cd15f21ed0e7061198915a0d932cf515e2c94b5522ed06303f90513de75d",
     "reactMajor": 19,
     "components": [
       "agent-conversations",
@@ -22,7 +22,7 @@
     ]
   },
   "styles": {
-    "path": "/ui/frontend/styles-155c476b9e0b672a.css",
-    "sha256": "155c476b9e0b672a2f7c40dafc1774e62f84549838787658355b9f5a3b137acd"
+    "path": "/ui/frontend/styles-7e9a554b41ebb0e8.css",
+    "sha256": "7e9a554b41ebb0e80b9e72fb2494f6a346d1aab6c4ef8bc650a207a148e3ce10"
   }
 }
