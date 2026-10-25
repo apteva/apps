@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { test, expect, type Page } from "@playwright/test";
 async function fixture(page: Page) {
   const requests: string[] = [],
@@ -193,7 +194,7 @@ test("select live and finished calls, expand, inspect and export without touchin
   ).toBeVisible();
   await dialog.getByRole("button", { name: "Overview", exact: true }).click();
   await page.screenshot({
-    path: "/private/tmp/telephony-call-inspector-expanded.png",
+    path: `${tmpdir()}/telephony-call-inspector-expanded.png`,
   });
   const downloaded = page.waitForEvent("download");
   await dialog.getByRole("button", { name: "Export", exact: true }).click();
@@ -237,7 +238,7 @@ test("narrow dark/light views remain readable and expanded dialog fits", async (
       ),
     ).toBe(true);
     await page.screenshot({
-      path: `/private/tmp/telephony-call-inspector-${mode}.png`,
+      path: `${tmpdir()}/telephony-call-inspector-${mode}.png`,
       fullPage: true,
     });
   }

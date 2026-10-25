@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { test, expect, type Page } from "@playwright/test";
 const identity = JSON.stringify({
   issuer_app: "auth",
@@ -133,7 +134,7 @@ test("monitor filters, pages, expands full diagnostics and reports request failu
   ).toBeVisible();
   await expect(page.getByRole("heading", {name:"Call diagnostics"})).toBeVisible();
   await page.screenshot({
-    path: "/private/tmp/telephony-audio-health-view.png",
+    path: `${tmpdir()}/telephony-audio-health-view.png`,
     fullPage: true,
   });
   await page.getByLabel("Provider", { exact: true }).selectOption("telnyx");
@@ -168,7 +169,7 @@ test("widget highlights issues, filters and expands details without links", asyn
   await page.getByLabel("Audio provider").selectOption("twilio");
   await expect(page.getByLabel("Audio issue reports").getByText("Dropped audio", {exact:true})).toBeVisible();
   await page.getByText("More filters", {exact:true}).click();
-  await page.screenshot({path:"/private/tmp/telephony-audio-health-widget.png"});
+  await page.screenshot({path:`${tmpdir()}/telephony-audio-health-widget.png`});
 });
 
 test("widget receives real SSE hints with project/install isolation and recovery", async ({ page, request }) => {

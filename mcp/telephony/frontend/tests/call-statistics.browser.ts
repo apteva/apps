@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { test, expect, type Page } from "@playwright/test";
 const totals = {
   calls: 120,
@@ -227,7 +228,7 @@ test("Statistics tab filters, histogram drilldown, per-call inspector and pagina
   );
   await expect(page.getByText("8.0%", { exact: true }).first()).toBeVisible();
   await page.screenshot({
-    path: "/private/tmp/telephony-statistics-wide.png",
+    path: `${tmpdir()}/telephony-statistics-wide.png`,
     fullPage: true,
   });
   expect(errors).toEqual([]);
@@ -274,7 +275,7 @@ test("narrow layout, theme switching and hidden-tab polling remain bounded", asy
       ),
     ).toBe(true);
     await page.screenshot({
-      path: `/private/tmp/telephony-statistics-${mode}.png`,
+      path: `${tmpdir()}/telephony-statistics-${mode}.png`,
       fullPage: true,
     });
   }
