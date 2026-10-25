@@ -58,14 +58,19 @@ func (s *recordingStorageFixture) ServeHTTP(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		var meta struct {
-			Size       int64  `json:"size"`
-			SHA        string `json:"sha256"`
-			Visibility string `json:"visibility"`
+			Size        int64  `json:"size"`
+			SHA         string `json:"sha256"`
+			Visibility  string `json:"visibility"`
+			Filename    string `json:"filename"`
+			ContentType string `json:"content_type"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&meta); err != nil || meta.Visibility != "private" || meta.Size <= 0 {
 			s.t.Error("incorrect private upload contract", meta, err)
 			http.Error(w, "bad", 400)
 			return
+		}
+		if (strings.HasSuffix(meta.Filename, ".mp3") && meta.ContentType != "audio/mpeg") || (strings.HasSuffix(meta.Filename, ".wav") && meta.ContentType != "audio/wav") {
+			s.t.Error("incorrect upload MIME", meta)
 		}
 		file, err := os.CreateTemp(s.root, "stored-")
 		if err != nil {
@@ -246,6 +251,11 @@ func TestLongSIPRecordingImportAndPlaybackMatrix(t *testing.T) {
 			t.Run(fmt.Sprintf("%s-%d-minute", direction, minutes), func(t *testing.T) {
 				started := time.Now()
 				app, ctx := withTelephonyTestContext(t, &answerPlatform{})
+				settings := defaultRecordingSettings("project-a")
+				settings.StorageFormat = "wav" // retain coverage of the lossless opt-in path
+				if err := app.db().saveRecordingSettings(settings); err != nil {
+					t.Fatal(err)
+				}
 				rec, original := captureAcceleratedRecording(t, app, direction, minutes)
 				if recordingPublic(*rec)["storage_state_label"] != "Recorded locally" {
 					t.Fatal("local capture state missing")

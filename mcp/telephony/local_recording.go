@@ -212,7 +212,7 @@ finish:
 	if dropped := r.dropped.Load(); dropped > 0 {
 		message = fmt.Sprintf("recording incomplete: %d ms omitted by bounded recorder", dropped)
 	}
-	_, _ = r.app.db().db.Exec(`UPDATE recordings SET provider_status=?,storage_status=?,duration_ms=?,size_bytes=?,channels=?,last_error=?,completed_at=?,next_attempt_at=? WHERE id=? AND deleted_at=''`, status, storage, length*1000/int64(24000*2*channels), length+44, channels, message, ringTime(time.Now()), ringTime(time.Now()), r.row.ID)
+	_, _ = r.app.db().db.Exec(`UPDATE recordings SET provider_status=?,storage_status=?,duration_ms=?,size_bytes=?,source_size_bytes=?,channels=?,last_error=?,completed_at=?,next_attempt_at=? WHERE id=? AND deleted_at=''`, status, storage, length*1000/int64(24000*2*channels), length+44, length+44, channels, message, ringTime(time.Now()), ringTime(time.Now()), r.row.ID)
 	_, _ = r.app.db().db.Exec(`UPDATE local_recording_files SET dropped_ms=? WHERE recording_id=?`, r.dropped.Load(), r.row.ID)
 	if r.appCtx != nil {
 		r.app.saveCallNotification(r.row.ProjectID, r.row.CallID, "recording.ready", map[string]any{"id": r.row.ID, "call_id": r.row.CallID, "provider": localRecordingProvider, "provider_status": status, "dropped_ms": r.dropped.Load()})
