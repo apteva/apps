@@ -177,6 +177,7 @@ export class TelephonyClient {
 
   private get<R>(path:string,init?:RequestInit):Promise<R>{return this.transport.request<R>("GET",path,undefined,init);}
   private post<R=any>(path:string,body?:unknown,init?:RequestInit):Promise<R>{return this.transport.request<R>("POST",path,body,init);}
+  private mediaPost<R=any>(path:string,body?:unknown,init?:RequestInit):Promise<R>{return this.transport.requestMedia<R>(path,body,init);}
   private subscribe<E>(path:string,onEvent:(event:E)=>void,opts?:Parameters<AppHandle["subscribe"]>[2]){return this.transport.subscribe(path,onEvent,opts);}
 
   private path(path: string): string {
@@ -307,14 +308,14 @@ export class TelephonyClient {
       throw new Error("Dial requires an E.164 number and an idempotency key");
     }
     const started = leaseClock();
-    return this.session(await this.post(this.path("/softphone/place"), request), undefined, "media", started);
+    return this.session(await this.mediaPost(this.path("/softphone/place"), request), undefined, "media", started);
   }
 
   async answer(id: string, request: AnswerRequest = {}): Promise<CallSession> {
     this.cancelNetworkChecks();
     const started = leaseClock();
     try {
-      return this.session(await this.post(this.path(`/softphone/answer/${callID(id)}`), request), id, "media", started);
+      return this.session(await this.mediaPost(this.path(`/softphone/answer/${callID(id)}`), request), id, "media", started);
     } catch (error) {
       const response = error as { status?: number; body?: string };
       if (response.status === 409 && typeof response.body === "string") {
@@ -337,18 +338,18 @@ export class TelephonyClient {
   /** Attach an assigned human call; never dials or takes another user's call. */
   async attach(id: string, diagnostics?: MediaAttachmentDiagnostics, init?:RequestInit, expectedGeneration?:string): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await boundedMediaRequest(signal=>this.post(this.path(`/softphone/attach/${callID(id)}`), {...(diagnostics ? {media_diagnostics:diagnostics} : {}),...(expectedGeneration!==undefined && diagnostics?.attempt_id ? {attachment_guard:{id:diagnostics.attempt_id,expected_generation:expectedGeneration}} : {})},{...init,signal}),init?.signal??undefined), id, "media", started);
+    return this.session(await boundedMediaRequest(signal=>this.mediaPost(this.path(`/softphone/attach/${callID(id)}`), {...(diagnostics ? {media_diagnostics:diagnostics} : {}),...(expectedGeneration!==undefined && diagnostics?.attempt_id ? {attachment_guard:{id:diagnostics.attempt_id,expected_generation:expectedGeneration}} : {})},{...init,signal}),init?.signal??undefined), id, "media", started);
   }
 
   async takeover(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await this.post(this.path(`/softphone/takeover/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
+    return this.session(await this.mediaPost(this.path(`/softphone/takeover/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
   }
 
   createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, {...options,...listenerAudioOptions({...this.options.audio,...options.audio},options)}); }
 
-  async listenSession(id: string, signal?:AbortSignal): Promise<CallSession> { const started = leaseClock(); return this.session(await boundedMediaRequest(s=>this.post(this.path(`/softphone/listen/${callID(id)}`), {},{signal:s}),signal,5000,value=>{try{void this.stopListening(this.session(value,id,"listen-media",started)).catch(()=>{});}catch{/* invalid late credentials cannot be used */}}), id, "listen-media", started); }
-  async coachSession(id: string): Promise<CallSession> { const started = leaseClock(); const s=this.session(await this.post(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media",started); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
+  async listenSession(id: string, signal?:AbortSignal): Promise<CallSession> { const started = leaseClock(); return this.session(await boundedMediaRequest(s=>this.mediaPost(this.path(`/softphone/listen/${callID(id)}`), {},{signal:s}),signal,5000,value=>{try{void this.stopListening(this.session(value,id,"listen-media",started)).catch(()=>{});}catch{/* invalid late credentials cannot be used */}}), id, "listen-media", started); }
+  async coachSession(id: string): Promise<CallSession> { const started = leaseClock(); const s=this.session(await this.mediaPost(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media",started); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
   async renewListening(session: CallSession): Promise<{lease_seconds?: number}> { return this.post(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async stopListening(session: CallSession): Promise<void> { await this.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }

@@ -81,30 +81,31 @@ test('native fetch is invoked with its global receiver',async()=>{
  await transport.request('GET','/calls');
 });
 
-test('auto reads fall back through authenticated gateway with a bounded cooldown, never writes',async()=>{
- const previous=Object.getOwnPropertyDescriptor(globalThis,'location');
- Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/apps/telephony'}});
- try {
-  const f=fixture();const get=f.app.get;const reads:string[]=[];
-  f.app.get=async(path:string,init?:RequestInit)=>{if(path==='/runtime-endpoints')return get(path,init);reads.push(path);return {calls:[{id:'retained'}]} as any};
-  let direct=0;const transport=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{direct++;throw new TypeError('Failed to fetch')}) as unknown as typeof fetch);
-  expect(await transport.request<{calls:{id:string}[]}>('GET','/calls')).toEqual({calls:[{id:'retained'}]});
-  await transport.request('GET','/calls');
-  expect(direct).toBe(1);expect(reads).toEqual(['/calls','/calls']);
-  await expect(transport.request('POST','/softphone/place',{})).rejects.toThrow('Failed to fetch');
-  expect(f.calls.filter(c=>c.path==='/softphone/place')).toHaveLength(0);
-  expect(transport.directBase).toBe('https://voice.example/runtime-browser');
- } finally {if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
+test('auto reads, writes and notifications use proxy even when direct transport is blocked',async()=>{
+ const f=fixture();let direct=0,closed=false;
+ f.app.subscribe=((path:any)=>{f.calls.push({path});return {close(){closed=true}}}) as any;
+ const transport=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{direct++;throw new TypeError('Failed to fetch')}) as unknown as typeof fetch);
+ await transport.request('GET','/calls');
+ await transport.request('POST','/softphone/place',{to:'+12025550100'});
+ const stream=transport.subscribe('/calls/events',()=>{});stream.close();
+ expect(f.calls.map(c=>c.path)).toEqual(['/calls','/softphone/place','/calls/events']);
+ expect(direct).toBe(0);expect(closed).toBe(true);
 });
-test('auto does not mask direct authorization errors or retry aborted reads',async()=>{
+test('automatic media discovery preserves direct media while its action stays on the gateway',async()=>{
  const previous=Object.getOwnPropertyDescriptor(globalThis,'location');
  Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/'}});
  try {
-  const f=fixture(),t=new RuntimeTelephonyTransport(f.app,'auto',(async()=>new Response('',{status:403})) as unknown as typeof fetch);
-  await expect(t.request('GET','/calls')).rejects.toMatchObject({status:403});
+  const f=fixture();const transport=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{throw Error('must not use direct HTTP')}) as unknown as typeof fetch);
+  await transport.requestMedia('/softphone/answer/call-a',{});
+  expect(f.calls.map(c=>c.path)).toEqual(['/runtime-endpoints','/softphone/answer/call-a']);
+  expect(transport.mediaURL(new URL('https://management.example/api/apps/telephony/_install/42/softphone/media/call-a/token'),'webrtc').origin).toBe('https://voice.example');
   const ctrl=new AbortController();ctrl.abort();
-  const canceled=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{throw new TypeError('aborted')}) as unknown as typeof fetch);
-  await expect(canceled.request('GET','/calls',undefined,{signal:ctrl.signal})).rejects.toThrow();
-  expect(f.calls.filter(c=>c.path==='/calls')).toHaveLength(0);
+  await expect(transport.requestMedia('/softphone/place',{}, {signal:ctrl.signal})).rejects.toThrow();
+  expect(f.calls.some(c=>c.path==='/softphone/place')).toBe(false);
  } finally {if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
+});
+test('unavailable media discovery does not prevent ordinary dashboard reads and subscriptions',async()=>{
+ const f=fixture();f.app.get=async(path:string)=>{if(path==='/runtime-endpoints')throw Error('discovery unavailable');return {calls:[]} as any};
+ const t=new RuntimeTelephonyTransport(f.app,'auto');
+ expect(await t.request<{calls:unknown[]}>('GET','/calls')).toEqual({calls:[]});
 });
