@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -99,107 +100,47 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, fmt.Errorf("tenant data dir: %w", err)
 	}
 
-	if err := preflightSnapshotSpace(t.ConfigDir, transferScratchRoot()); err != nil {
+	manifest, err := a.onlineBackupManifest(t)
+	if err != nil {
 		return nil, err
 	}
-	port, _ := portFromBaseURL(t.BaseURL)
-	wasRunning := port > 0 && portInUse(port)
-	if wasRunning {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		ok, actual, _, probeErr := probeHealth(probeCtx, t.BaseURL, "")
-		if probeErr != nil || !ok || actual == "" {
-			return nil, fmt.Errorf("cannot verify running runtime before snapshot: %v", probeErr)
-		}
-		if _, err := ensureVersionInstalled(probeCtx, actual); err != nil {
-			return nil, fmt.Errorf("prepare restart of runtime %s before stopping: %w", actual, err)
-		}
-		t.CurrentVersion = actual
-		if err := a.store.setCurrentVersion(t.ID, actual); err != nil {
-			return nil, err
-		}
-		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); err != nil {
-			return nil, fmt.Errorf("stop tenant for snapshot: %w", err)
-		}
-	}
-	finish := func(result any, snapshotErr error) (any, error) {
-		if !wasRunning {
-			return result, snapshotErr
-		}
-		restartErr := a.restartTenantAfterBackup(ctx, t)
-		if restartErr != nil {
-			_ = a.store.setStatus(t.ID, StatusFailed, "backup")
-			if snapshotErr != nil {
-				return nil, fmt.Errorf("snapshot failed: %v; restart also failed: %w", snapshotErr, restartErr)
-			}
-			return nil, fmt.Errorf("snapshot created but tenant restart failed: %w", restartErr)
-		}
-		return result, snapshotErr
-	}
-
-	manifest := fleetTenantBackupManifest{
-		FormatVersion: 2,
-		Provider:      "fleet",
-		ScopeKind:     "fleet_tenant",
-		GeneratedAt:   time.Now().UTC(),
-		Tenant:        t,
-	}
-	_, keyEnc, keyErr := a.store.get(t.ID)
-	if keyErr != nil {
-		return finish(nil, keyErr)
-	}
-	manifest.ManagementKey = keyEnc
-	manifest.SetupComplete = a.setupComplete(t.ID)
-	metadata, err := a.store.backupMetadata(t.ID)
-	if err != nil {
-		return finish(nil, err)
-	}
-	manifest.Metadata = &metadata
-	stage, err := os.MkdirTemp(transferScratchRoot(), "backup-*")
-	if err != nil {
-		return finish(nil, err)
-	}
-	keepStage := false
-	defer func() {
-		if !keepStage {
-			_ = os.RemoveAll(stage)
-		}
-	}()
-	payload := filepath.Join(stage, "tenant")
-	if err = copyDirReadOnly(t.ConfigDir, payload); err != nil {
-		return finish(nil, err)
-	}
-	// Compression/download no longer extend the quiescence window.
-	if _, err = finish(nil, nil); err != nil {
-		return nil, err
-	}
-	wasRunning = false
 	streaming := true
 	if explicit, ok := args["supports_streaming"].(bool); ok {
 		streaming = explicit
 	}
 	if streaming {
-		archiveURL, err := a.createBackupDownloadURL(ctx, payload, stage, manifest, tenantTransferTTL)
+		archiveURL, err := a.createBackupDownloadURL(ctx, t.ConfigDir, "", manifest, tenantTransferTTL)
 		if err != nil {
 			return nil, err
 		}
-		keepStage = true
 		mb, _ := json.Marshal(manifest)
-		_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"mode": "stream"})
+		_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"mode": "online-stream"})
 		return map[string]any{"archive_url": archiveURL, "manifest": json.RawMessage(mb), "streaming": true}, nil
 	}
-
+	// Preserve the existing explicitly requested, size-bounded legacy response.
+	opCtx, cancel := context.WithTimeout(context.Background(), tenantTransferTTL)
+	defer cancel()
 	var buf bytes.Buffer
-	if err := writeFleetTenantArchive(&boundedWriter{w: &buf, remaining: maxLegacyBackupBytes}, payload, manifest); err != nil {
-		return finish(nil, err)
+	if err := writeFleetTenantArchiveContext(opCtx, &boundedWriter{w: &buf, remaining: maxLegacyBackupBytes}, t.ConfigDir, manifest); err != nil {
+		return nil, err
 	}
 	mb, _ := json.Marshal(manifest)
-	_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"bytes": buf.Len()})
-	return finish(map[string]any{
-		"archive_b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
-		"manifest":    json.RawMessage(mb),
-		"bytes":       buf.Len(),
-	}, nil)
+	_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"bytes": buf.Len(), "mode": "online-legacy"})
+	return map[string]any{"archive_b64": base64.StdEncoding.EncodeToString(buf.Bytes()), "manifest": json.RawMessage(mb), "bytes": buf.Len()}, nil
+}
+
+// Preserve format-v2 management credentials, setup state, and all control-plane
+// metadata introduced by prior Fleet releases. Call under the tenant lease.
+func (a *App) onlineBackupManifest(t *Tenant) (fleetTenantBackupManifest, error) {
+	_, keyEnc, err := a.store.get(t.ID)
+	if err != nil {
+		return fleetTenantBackupManifest{}, err
+	}
+	metadata, err := a.store.backupMetadata(t.ID)
+	if err != nil {
+		return fleetTenantBackupManifest{}, err
+	}
+	return fleetTenantBackupManifest{FormatVersion: 2, Provider: "fleet", ScopeKind: "fleet_tenant", GeneratedAt: time.Now().UTC(), Tenant: t, ManagementKey: keyEnc, SetupComplete: a.setupComplete(t.ID), Metadata: &metadata}, nil
 }
 
 func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -440,67 +381,158 @@ func (a *App) restartTenantAfterBackup(ctx *sdk.AppCtx, t *Tenant) error {
 	return nil
 }
 
+var fleetSnapshotMu sync.Mutex
+
 func writeFleetTenantArchive(w io.Writer, dataDir string, manifest fleetTenantBackupManifest) error {
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	mb, err := json.MarshalIndent(manifest, "", "  ")
+	return writeFleetTenantArchiveContext(context.Background(), w, dataDir, manifest)
+}
+func writeFleetTenantArchiveContext(ctx context.Context, w io.Writer, dataDir string, manifest fleetTenantBackupManifest) error {
+	if !fleetSnapshotMu.TryLock() {
+		return fmt.Errorf("another Fleet backup is already running")
+	}
+	defer fleetSnapshotMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	scratch, err := os.MkdirTemp(transferScratchRoot(), "backup-sqlite-*")
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	if err := tw.WriteHeader(&tar.Header{Name: "manifest.json", Mode: 0o644, Size: int64(len(mb)), ModTime: now}); err != nil {
+	defer os.RemoveAll(scratch)
+	if err = fleetBackupSpace(scratch, 0); err != nil {
 		return err
 	}
-	if _, err := tw.Write(mb); err != nil {
+	root, err := os.Lstat(dataDir)
+	if err != nil {
 		return err
 	}
-	if err := filepath.Walk(dataDir, func(path string, info os.FileInfo, walkErr error) error {
+	if !root.IsDir() {
+		return fmt.Errorf("backup source must be a directory")
+	}
+	gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+	tw := tar.NewWriter(gz)
+	mb, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if err = tw.WriteHeader(&tar.Header{Name: "manifest.json", Mode: 0600, Size: int64(len(mb))}); err != nil {
+		return err
+	}
+	if _, err = tw.Write(mb); err != nil {
+		return err
+	}
+	if err = tw.WriteHeader(&tar.Header{Name: "tenant/", Typeflag: tar.TypeDir, Mode: 0700}); err != nil {
+		return err
+	}
+	var total int64
+	count := 2
+	err = walkFleetBackupTree(ctx, dataDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, err := filepath.Rel(dataDir, path)
-		if err != nil || rel == "." {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		name := filepath.ToSlash(filepath.Join("tenant", rel))
-		link := ""
+		rel, err := filepath.Rel(dataDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			if _, err := os.Stat(filepath.Join(path, ".apteva-backup-destination")); err == nil {
+				return filepath.SkipDir
+			}
+		}
+		if strings.HasSuffix(path, "-wal") || strings.HasSuffix(path, "-shm") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			link, err = os.Readlink(path)
+			link, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(rel), link))
+			if filepath.IsAbs(link) || !filepath.IsLocal(resolved) {
+				return fmt.Errorf("unsafe backup symlink %s", rel)
+			}
+			h, err := tar.FileInfoHeader(info, link)
+			if err != nil {
+				return err
+			}
+			h.Name = "tenant/" + filepath.ToSlash(rel)
+			count++
+			if count > maxExtractedTenantFiles {
+				return fmt.Errorf("backup exceeds file-count limit")
+			}
+			return tw.WriteHeader(h)
 		}
-		h, err := tar.FileInfoHeader(info, link)
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			// Runtime IPC (including stable-host control.sock) is recreated on boot,
+			// matching the prior copyDirReadOnly snapshot's regular-file policy.
+			return nil
+		}
+		count++
+		if count > maxExtractedTenantFiles {
+			return fmt.Errorf("backup exceeds file-count limit")
+		}
+		h, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
 		}
-		h.Name = name
-		if err := tw.WriteHeader(h); err != nil {
-			return err
+		h.Name = "tenant/" + filepath.ToSlash(rel)
+		if info.IsDir() {
+			return tw.WriteHeader(h)
 		}
-		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return nil
+		captured := path
+		if fleetSQLiteFile(path) {
+			captured = filepath.Join(scratch, "current.db")
+			if err = cloneSQLiteDBContext(ctx, path, captured); err != nil {
+				return err
+			}
+			stat, e := os.Stat(captured)
+			if e != nil {
+				return e
+			}
+			h.Size = stat.Size()
 		}
-		if !info.Mode().IsRegular() {
-			return nil
+		if h.Size < 0 || h.Size > maxExtractedTenantBytes-total {
+			return fmt.Errorf("backup exceeds expanded-size limit")
 		}
-		f, err := os.Open(path)
+		total += h.Size
+		f, err := os.Open(captured)
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(tw, f)
+		if err = tw.WriteHeader(h); err == nil {
+			_, err = io.CopyN(tw, fleetBackupReader{ctx, f}, h.Size)
+		}
+		after, statErr := f.Stat()
 		closeErr := f.Close()
-		if copyErr != nil {
-			return copyErr
+		if err == nil {
+			err = statErr
 		}
-		return closeErr
-	}); err != nil {
-		_ = tw.Close()
-		_ = gz.Close()
+		if err == nil && captured == path && (after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime())) {
+			err = fmt.Errorf("file changed during backup: %s", rel)
+		}
+		if captured != path {
+			os.Remove(captured)
+		}
+		if err == nil {
+			err = closeErr
+		}
+		return err
+	})
+	// Never seal a valid gzip stream around a partial capture.
+	if err != nil {
 		return err
 	}
-	if err := tw.Close(); err != nil {
-		_ = gz.Close()
+	if err = tw.Close(); err != nil {
 		return err
 	}
 	return gz.Close()

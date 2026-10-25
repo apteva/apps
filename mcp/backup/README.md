@@ -12,10 +12,10 @@ Legacy format-v1 snapshots contain the platform database and running app
 sidecar databases only. External storage, unmanaged repositories, and host
 configuration remain outside this archive.
 
-Local backup destinations carry a `.apteva-backup-destination` marker. These markers are for a separate Server snapshot-exclusion update, which is
-not included in Backup v0.3.5. Until that Server update is deployed, use cloud
-storage or a local destination outside the server configuration directory to
-avoid recursively including previous backup archives.
+Local destinations carry a `.apteva-backup-destination` marker. Servers with snapshot-exclusion support
+exclude those directories from platform snapshots; older servers still require
+cloud storage or a destination outside the server configuration directory to
+avoid recursively including previous archives.
 
 A Fleet tenant scope contains the selected local tenant's managed config
 directory. Hosted Fleet tenants are reported as unsupported until remote
@@ -35,6 +35,49 @@ snapshot transport is implemented.
 - Destination health checks and partial-restore reporting
 - App-authorized streaming with separate snapshot and restore permissions
 
+## Performance and resource limits
+
+The HTTP Run now action commits a durable queued run and returns HTTP 202;
+progress and failures appear in run history. Repeated clicks reuse an existing
+queued/running backup for the same destination and scope. Scheduled jobs use the
+same queue.
+Only one operation executes per Backup process. A transfer has a two-hour
+context deadline, including preparation before response headers arrive.
+
+Archive data streams through bounded buffers. Backup keeps one compressed
+archive on disk to validate gzip/tar before upload. The separate server streaming improvements stage one SQLite database at a time
+and compute hashes while streaming, but those changes are not shipped in
+Backup v0.3.7. Until that server update is released and deployed, platform
+snapshots still use the installed server's existing copy/VACUUM implementation.
+There is no stop-the-platform phase; independent databases and changing files
+are not captured as one cross-database transaction.
+
+Temporary and local-destination writes preserve a 512 MiB free-space reserve,
+checked before and during writes. A local destination additionally needs room
+for the new object while the validated temporary archive still exists. Keep
+sufficient headroom for the largest SQLite copy, compressed archive, retained
+objects, and live WAL growth; unrelated disk writers are outside this budget.
+
+Platform creation and restore share ceilings: 64 GiB compressed, 256 GiB
+expanded, 128 GiB per file, 10,000 tar entries including the manifest, and a
+4 MiB manifest. Oversized or incomplete archives fail before upload/success.
+Fleet has its own extraction limits. Cloud multipart sizes account for S3's
+10,000-part limit, including encrypted streams; upload concurrency and buffers
+are bounded and checked against available Linux/container memory.
+
+Passphrase encryption retains age's default scrypt strength and its fixed
+256 MiB derivation allocation. Linux memory preflight accounts for host and
+cgroup limits, ancestor groups, reclaimable inactive file cache, upload buffers,
+and headroom; a small container receives a clear failure before allocation.
+Encryption does not allocate memory proportional to archive size. Old Backup
+archives remain readable; imported age files with work factors above Backup's
+standard factor 18 are rejected to prevent multi-gigabyte derivation allocations.
+
+Fleet v0.10.13 backups prepare a signed download immediately and snapshot local
+tenant databases online during download. They do not stop or restart the tenant.
+Regular files must remain stable while read; cancellation or a capture failure
+leaves an invalid stream rather than a misleading successful partial archive.
+
 ## Scheduling
 
 Backup requires the Jobs app. Each policy creates a Jobs `app_tool` target that
@@ -45,7 +88,10 @@ single dispatcher processes queued policies when the backup/restore lock is
 available; pending requests survive restarts. Repeated ticks for an already
 queued policy share that pending run.
 
-Backup and restore operations are globally serialized. Scheduled backups wait
+Backup and restore operations are serialized within each Backup process. The
+separate server update adds exclusion across callers; this app release alone
+does not change the server's concurrency behavior.
+Scheduled backups wait
 in the durable queue; conflicting interactive operations are rejected so platform snapshots cannot overlap a destructive
 restore or run several full-database VACUUM operations at once.
 
@@ -88,7 +134,7 @@ has been validated, avoiding a second full encrypted temporary file.
 For portable platform recovery, use a passphrase of at least 12 characters
 without line breaks. Backup sends it through authenticated headers on the existing app callback
 routes so format-v2 servers wrap the original server encryption key inside the
-archive. An app-local streaming adapter supports the published SDK v0.77.0.
+archive. The app pins SDK v0.107.0; a compatibility adapter also supports older streaming clients.
 Backup rejects new encrypted platform snapshots if the server did not wrap the
 key. This requires a server with format-v2 recovery support; no SDK release is needed. Unencrypted
 snapshots still require the original server key on a fresh host. Older archives
@@ -218,7 +264,7 @@ and optional `target_instance_id` alongside `run_id` and `confirm: true`.
 `backup_now` with `retry_run_id` retries a failed instance run.
 
 Worker regression tests are included in `go test ./...`. To build all four
-helper release assets, run `go run ./cmd/build-helpers -version 0.3.6 -out /tmp/backup-helper-assets`.
+helper release assets, run `go run ./cmd/build-helpers -version 0.3.7 -out /tmp/backup-helper-assets`.
 Commit the resulting `helper-assets.json` and attach those exact binaries to
 the matching Backup release before publishing its registry entry.
 Go tests exercise the real worker and HTTP streams through a local test adapter
