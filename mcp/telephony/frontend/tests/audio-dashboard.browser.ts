@@ -127,13 +127,11 @@ test("monitor filters, pages, expands full diagnostics and reports request failu
     .toBe("next-page");
   await page.getByRole("button", { name: "Previous", exact: true }).click();
   await page.getByRole("button", { name: /Paris sales/ }).click();
-  await page.getByText("Full recorded diagnostics:", { exact: false }).click();
+  await page.getByText("Advanced · raw diagnostics", { exact: true }).click();
   await expect(
     page.getByText('"peer_address_hash": "hash-only"', { exact: false }),
   ).toBeVisible();
-  await expect(
-    page.getByText("AudioContext suspensions", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", {name:"Call diagnostics"})).toBeVisible();
   await page.screenshot({
     path: "/private/tmp/telephony-audio-health-view.png",
     fullPage: true,

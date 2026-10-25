@@ -14,7 +14,8 @@
     "benchmark:agent-audio": "bun benchmarks/agent-audio/run.ts",
     "test:network": "bun test frontend/tests/network-resilience.test.ts frontend/tests/rtc-send-policy.test.ts frontend/tests/client.test.ts frontend/tests/rtc-ice.test.ts && env GOWORK=off go test -run \"^TestNetwork\" -count=1 .",
     "test:network:browser": "env GOWORK=off go test -tags integration -run \"^Test(NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss|TURNBrowserMediaCredentialRenewal)$\" -count=1 -timeout 5m -v .",
-    "test:network:speech": "env GOWORK=off go test -run \"^TestNetworkSpeechReplay$\" -count=1 -v ."
+    "test:network:speech": "env GOWORK=off go test -run \"^TestNetworkSpeechReplay$\" -count=1 -v .",
+    "test:call-inspector": "bun test ui/call-diagnostics.test.ts && bunx --no-install playwright test -c frontend/call-inspector.playwright.config.ts"
   },
   "devDependencies": {
     "@apteva/web-sdk": "0.7.0",

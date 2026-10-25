@@ -410,3 +410,46 @@ func TestAudioDashboardNotificationsFollowCommitAndStayBounded(t *testing.T) {
 		t.Fatal("failed transaction lost work")
 	}
 }
+
+func TestAudioDashboardInspectorLifecycleMetadata(t *testing.T) {
+	softphoneTestCtx(t)
+	a := &App{installID: 42}
+	phoneTestCall(t, a, "inspector", "in-progress")
+	for _, status := range []string{"in-progress", "completed"} {
+		if _, err := a.db().db.Exec(`UPDATE calls SET status=? WHERE id='inspector'`, status); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{"none", "incremental"} {
+			v := dashboardTestResult(t, a, "?call_id=inspector&history="+mode)
+			c, ok := v["call"].(map[string]any)
+			if !ok {
+				t.Fatal("missing call metadata", v)
+			}
+			if c["call_id"] != "inspector" || c["status"] != status || c["active"] != (status == "in-progress") {
+				t.Fatal(c)
+			}
+			if _, err := time.Parse(time.RFC3339Nano, v["generated_at"].(string)); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"peer_token", "audio_bridge_url", "owner_identity", "recording_url"} {
+				if _, ok := c[key]; ok {
+					t.Fatalf("unexpected sensitive field %s", key)
+				}
+			}
+		}
+	}
+	for _, mode := range []string{"none", "incremental"} {
+		user := phoneTestIdentity("alice")
+		if w := phoneTestRequest(a, &user, "GET", "/audio-health?call_id=inspector&history="+mode, nil); w.Code != 403 {
+			t.Fatal(w.Code)
+		}
+	}
+	if _, err := a.db().db.Exec(`UPDATE calls SET project_id='other' WHERE id='inspector'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"none", "incremental"} {
+		if w := phoneTestRequest(a, nil, "GET", "/audio-health?call_id=inspector&history="+mode, nil); w.Code != 404 {
+			t.Fatal(w.Code)
+		}
+	}
+}

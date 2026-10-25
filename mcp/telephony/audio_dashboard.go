@@ -520,6 +520,10 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 			http.NotFound(w, r)
 			return
 		}
+		// Lightweight call identity/lifecycle travels with every diagnostic read so
+		// an open inspector follows hangup even when the call list has not refreshed.
+		call := map[string]any{"call_id": row.ID, "status": row.Status, "active": !isTerminalStatus(row.Status), "direction": row.Direction, "provider": row.CarrierSlug, "peer_kind": row.PeerKind, "started_at": row.PlacedAt, "answered_at": row.AnsweredAt, "ended_at": row.EndedAt, "media_status": row.MediaStatus}
+		generatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		historyMode := r.URL.Query().Get("history")
 		if historyMode != "" && historyMode != "none" && historyMode != "incremental" {
 			http.Error(w, "invalid history mode", 400)
@@ -531,7 +535,7 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 				http.Error(w, "load live diagnostics", 500)
 				return
 			}
-			writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
+			writeJSON(w, map[string]any{"call": call, "generated_at": generatedAt, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
 			return
 		}
 		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
@@ -582,7 +586,7 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 			http.Error(w, "load carrier commands", 500)
 			return
 		}
-		result := map[string]any{"carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		result := map[string]any{"call": call, "generated_at": generatedAt, "carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
 		if r.URL.Query().Get("include_packet_timing") == "true" {
 			result["sip_packet_timing"] = a.sipPacketTimingForCall(project, id)
 		}

@@ -85,6 +85,11 @@ jobs:
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
         working-directory: mcp/telephony
+      - name: Call inspector and Audio Health navigation
+        run: |
+          bunx --no-install playwright test -c frontend/call-inspector.playwright.config.ts
+          bunx --no-install playwright test -c frontend/audio-dashboard.playwright.config.ts
+        working-directory: mcp/telephony
       - name: Compiled sidecar Chromium, network checks, TURN recovery and managed renewal
         run: go test -tags integration -run '^Test(Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal|NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony

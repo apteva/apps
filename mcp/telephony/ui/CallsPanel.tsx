@@ -17,6 +17,7 @@ import {
 } from "./audio-settings";
 
 import AudioHealthView from "./AudioHealthView";
+import CallDiagnostics from "./CallDiagnostics";
 import SIPMediaDialog from "./SIPMediaDialog";
 import OutboundTransportDialog from "./OutboundTransportDialog";
 import { usePanelSoftphone } from "./use-panel-softphone";
@@ -1002,6 +1003,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  const selectedPane = useRef<HTMLElement | null>(null);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [ending, setEnding] = useState("");
@@ -1210,6 +1212,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
     [calls, selectedId],
   );
+
+  useEffect(() => { selectedPane.current?.scrollTo({ top: 0 }); }, [selected?.id]);
 
   const [detailCall,setDetailCall]=useState<Call|null>(null);
   useEffect(()=>{
@@ -1549,7 +1553,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
           )}
         </section>
 
-        <aside className="min-h-0 overflow-auto">
+        <aside ref={selectedPane} className="min-h-0 overflow-auto">
           {dialerOpen ? (
             <div>
               <Dialer
@@ -1636,6 +1640,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   Hang up
                 </button>
               </div>
+
+              {visible ? <CallDiagnostics host={{appName:"telephony",projectId,installId}} callId={selected.id} /> : null}
 
               {softphoneCallId === selected.id ? (
                 <div className="rounded border border-border bg-bg-muted/50 p-3 space-y-3">
