@@ -241,6 +241,10 @@ func (a *App) runLifecycleTick(workerCtx context.Context, ctx *sdk.AppCtx) error
 		ctx.Logger().Warn("publish pending call lifecycle events", "err", err)
 	}
 
+	if err := a.publishAccountEvents(workerCtx, ctx); err != nil {
+		ctx.Logger().Warn("publish pending carrier account events", "err", err)
+	}
+
 	rows, err := ctx.AppDB().Query(`SELECT call_id, agent_id, message, attempts
         FROM inbound_event_outbox
         WHERE project_id = ? AND delivered_at = '' AND next_attempt_at <= ?

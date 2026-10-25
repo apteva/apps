@@ -231,6 +231,11 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	if allowLateFacts && (transitionAccepted || current.Status == status) {
+		observed := facts
+		observed.OccurredAt = occurredAt
+		c.observeAccountCall(updated, status, errMsg, observed)
+	}
 	c.committed(current.ProjectID)
 	if c.afterTransition != nil && (transitionAccepted || created) {
 		c.afterTransition(id)

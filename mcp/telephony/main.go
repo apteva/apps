@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.41
+version: 0.12.42
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -218,6 +218,8 @@ provides:
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   publishes:
+    - { name: telephony.account.issue, description: "Carrier account operation reported a normalized issue; durable and deduplicated.", payload: { event_id: string, issue_id: string, revision: integer, provider: string, carrier_connection_id: integer, reason: string, severity: string, affected_operations: array, message: string, source: string, call_id: string, occurred_at: string } }
+    - { name: telephony.account.recovered, description: "An affected carrier operation recovered; does not imply all account operations are healthy.", payload: { event_id: string, issue_id: string, revision: integer, provider: string, carrier_connection_id: integer, reason: string, severity: string, affected_operations: array, message: string, source: string, call_id: string, occurred_at: string } }
     - { name: telephony.routing.requested, description: "Durable correlated routing outcome: requested.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.accepted, description: "Durable correlated routing outcome: accepted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.rejected, description: "Durable correlated routing outcome: rejected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
@@ -405,7 +407,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.41
+    ref: telephony/v0.12.42
     entry: mcp/telephony
   port: 8080
   health_check: /health

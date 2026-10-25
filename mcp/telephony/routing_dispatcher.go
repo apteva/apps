@@ -159,6 +159,9 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		if err := a.publishLifecycleEventsContext(workCtx, ctx.WithProject(project), ""); err != nil {
 			ctx.Logger().Warn("routing event delivery", "project", project, "err", err)
 		}
+		if err := a.publishAccountEvents(workCtx, ctx.WithProject(project)); err != nil {
+			ctx.Logger().Warn("carrier account event delivery", "project", project, "err", err)
+		}
 		return time.Time{}
 	})
 	deadlines := routingDeadlineTracker{}

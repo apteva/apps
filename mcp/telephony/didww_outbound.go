@@ -382,6 +382,9 @@ func (s *outboundSIPSession) waitAnswer() {
 				status = "no-answer"
 			}
 		}
+		if response := s.dialog.InviteResponse; response != nil {
+			s.gateway.app.db().observeAccountSIP(s.callID, response.StatusCode, response.Reason)
+		}
 		s.finishWithStatus("carrier", status, err)
 		return
 	}

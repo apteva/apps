@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -210,6 +211,7 @@ func (c *bandwidthCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, requests ...context.Context) (json.RawMessage, error) {
+	started := time.Now()
 	var res *sdk.ExecuteResult
 	var err error
 	if len(requests) > 0 && requests[0] != nil {
@@ -224,6 +226,7 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 	} else {
 		res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
 	}
+	observeAccountAPI(ctx, connID, tool, started, res, err)
 	if res != nil && len(requests) > 0 && requests[0] != nil {
 		if obs, ok := requests[0].Value(carrierCommandObservationKey{}).(*carrierCommandObservation); ok {
 			obs.Status = res.Status
