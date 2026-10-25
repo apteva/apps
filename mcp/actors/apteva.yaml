@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.44
+version: 0.2.45
 description: |
+  v0.2.45 accepts verified empty collections without a populated table shell,
+  checks observed entry navigation separately from target-view readiness, and
+  retains creator, URL, loading, error and filter verification on every view.
   v0.2.44 adds operation-specific browser isolation and required explicit
   inputs, checked before allocating a browser. Secret-backed fills resolve encrypted
   install settings by project, context, HTTPS host and expiry without saving raw inputs.
@@ -119,7 +122,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.44
+    ref: actors/v0.2.45
     entry: mcp/actors
   port: 8080
   health_check: /health
