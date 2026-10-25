@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.47
+version: 0.12.48
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -407,7 +407,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.47
+    ref: telephony/v0.12.48
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -708,6 +708,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Method: "GET", Pattern: "/health", Handler: a.handleRuntimeHealth, NoAuth: true},
 		{Pattern: runtimeAppPrefix, Handler: a.handleRuntimeLifecycle},
 		{Pattern: "/runtime-endpoints", Handler: a.handleRuntimeEndpoints},
 		{Pattern: "/runtime-browser-bootstrap", Handler: a.handleRuntimeBrowserBootstrap},
@@ -768,7 +769,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		}
 	}
 	for i := range routes {
-		if routes[i].Pattern != runtimeAppPrefix {
+		if routes[i].Pattern != runtimeAppPrefix && routes[i].Pattern != "/health" {
 			routes[i].Handler = a.runtimeHTTP(routes[i].Handler, runtimeNewHTTP(routes[i].Pattern))
 		}
 	}

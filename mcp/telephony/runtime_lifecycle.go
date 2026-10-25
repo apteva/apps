@@ -21,24 +21,29 @@ const runtimeAppPrefix = "/_apteva/runtime/app/"
 var errRuntimeAdmission = errors.New("Telephony execution is not admitting new work")
 
 type telephonyRuntime struct {
-	mu           sync.Mutex
-	deployment   string
-	generation   int64
-	state        string
-	fenced       bool
-	armed        bool
-	initialized  bool
-	initializing bool
-	initWG       sync.WaitGroup
-	expires      time.Time
-	work         int
-	endpoints    map[string]string
-	cancel       context.CancelFunc
-	done         chan struct{}
-	mediaStopped bool
-	http         *http.Client
-	initialize   func() error
-	lastError    string
+	mu                   sync.Mutex
+	deployment           string
+	generation           int64
+	state                string
+	fenced               bool
+	armed                bool
+	initialized          bool
+	initializing         bool
+	initWG               sync.WaitGroup
+	expires              time.Time
+	work                 int
+	endpoints            map[string]string
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	mediaStopped         bool
+	http                 *http.Client
+	initialize           func() error
+	recoveryVerified     bool
+	fenceReason          string
+	fencedAt             time.Time
+	lastOwnershipError   string
+	lastOwnershipErrorAt time.Time
+	lastError            string
 }
 
 type runtimeOwnership struct {
@@ -148,23 +153,25 @@ func (a *App) refreshRuntimeOwnership(ctx context.Context) {
 	now := time.Now()
 	rt.mu.Lock()
 	if err != nil {
+		rt.recoveryVerified = false
 		rt.lastError = err.Error()
+		rt.lastOwnershipError = err.Error()
+		rt.lastOwnershipErrorAt = now
 		var callbackErr runtimeCallbackError
 		// A first managed installation has no active pointer until Server commits
 		// it. Its ownership callback legitimately returns 409 in passive startup.
 		waitingForFirstOwner := errors.As(err, &callbackErr) && callbackErr.Status == 409 && !rt.initialized && !rt.initializing && rt.expires.IsZero()
 		if permanentRuntimeFailure(err) && !waitingForFirstOwner || !rt.expires.IsZero() && !now.Before(rt.expires) {
-			rt.state = "fenced"
-			rt.fenced = true
+			rt.fenceLocked("ownership_unverified", now)
 		}
 		rt.mu.Unlock()
 		return
 	}
 	matching := own.Active && own.Deployment == rt.deployment && own.Generation == rt.generation && own.Expires > now.Unix() && own.Expires <= now.Add(time.Minute).Unix()
 	if !matching {
+		rt.recoveryVerified = false
 		if rt.initialized || rt.initializing {
-			rt.state = "fenced"
-			rt.fenced = true
+			rt.fenceLocked("ownership_changed", now)
 		}
 		rt.expires = time.Time{}
 		rt.mu.Unlock()
@@ -173,6 +180,7 @@ func (a *App) refreshRuntimeOwnership(ctx context.Context) {
 	rt.expires = time.Unix(own.Expires, 0)
 	rt.lastError = ""
 	if rt.fenced {
+		rt.recoveryVerified = true
 		rt.mu.Unlock()
 		return
 	}
@@ -225,8 +233,7 @@ func (rt *telephonyRuntime) initializeOwned() {
 			rt.state = "draining"
 		}
 	} else {
-		rt.state = "fenced"
-		rt.fenced = true
+		rt.fenceLocked("initialization_lease_expired", time.Now())
 	}
 }
 func (a *App) runtimeBegin(newAdmission bool) (func(), error) {
@@ -327,6 +334,10 @@ func (a *App) handleRuntimeLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.TrimPrefix(r.URL.Path, runtimeAppPrefix)
+	if action == "status" && r.Method == "GET" {
+		writeJSON(w, a.runtimeStatus())
+		return
+	}
 	if action == "describe" && r.Method == "GET" {
 		writeJSON(w, map[string]any{"passive_start": true, "drain": true, "replica_safe": false, "worker_coordination": false, "routing": "key"})
 		return

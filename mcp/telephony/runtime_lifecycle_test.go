@@ -96,6 +96,14 @@ func TestManagedRuntimeActivationAndOwnership(t *testing.T) {
 	if a.runtimeOwned() {
 		t.Fatal("fenced process resurrected itself")
 	}
+	if a.runtimeStatus()["recovery"] == nil {
+		t.Fatal("fresh same-owner verification did not request replacement")
+	}
+	status.Store(403)
+	a.refreshRuntimeOwnership(t.Context())
+	if a.runtimeStatus()["recovery"] != nil {
+		t.Fatal("revoked callback credential requested replacement using stale lease")
+	}
 	if w := runtimeLifecycleRequest(a, "activate", `{"deployment_id":"deployment-a","generation":1}`); w.Code != 409 {
 		t.Fatal("fenced process must restart")
 	}

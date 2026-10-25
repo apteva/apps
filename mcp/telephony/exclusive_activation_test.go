@@ -24,8 +24,8 @@ func TestTelephonyExclusiveActivationManifest(t *testing.T) {
 		if m.Runtime.ActivationStrategy != sdk.ActivationExclusive {
 			t.Fatal("configurable SIP ports need exclusive activation")
 		}
-		if m.MinAptevaVersion != "0.87.4" {
-			t.Fatalf("exclusive activation requires the supporting server: %q", m.MinAptevaVersion)
+		if m.MinAptevaVersion != "0.94.1" {
+			t.Fatalf("activation and managed dashboard routing require the supporting server: %q", m.MinAptevaVersion)
 		}
 		if m.Runtime.StartupTimeoutSeconds != 60 || m.Runtime.DatabaseUpgrade != "backward_compatible" {
 			t.Fatalf("missing bounded readiness/rollback policy: %+v", m.Runtime)
