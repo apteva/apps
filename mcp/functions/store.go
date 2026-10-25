@@ -75,28 +75,29 @@ type FunctionVersion struct {
 }
 
 type Invocation struct {
-	Identity     StoredResources `json:"identity,omitempty"`
-	Resources    StoredResources `json:"resources,omitempty"`
-	BuildMS      int64           `json:"build_ms"`
-	QueueMS      int64           `json:"queue_ms"`
-	ColdStartMS  int64           `json:"cold_start_ms"`
-	ExecutionMS  int64           `json:"execution_ms"`
-	VersionID    *int64          `json:"version_id,omitempty"`
-	ConfigHash   string          `json:"config_hash,omitempty"`
-	Truncated    bool            `json:"truncated,omitempty"`
-	ID           int64           `json:"id"`
-	FunctionID   int64           `json:"function_id"`
-	FunctionName string          `json:"function_name,omitempty"`
-	StartedAt    string          `json:"started_at"`
-	FinishedAt   string          `json:"finished_at,omitempty"`
-	DurationMS   int64           `json:"duration_ms"`
-	Status       string          `json:"status"`
-	ExitCode     int             `json:"exit_code"`
-	TriggerKind  string          `json:"trigger_kind"`
-	EventJSON    string          `json:"event_json,omitempty"`
-	ResponseBody string          `json:"response_body,omitempty"`
-	Stderr       string          `json:"stderr,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	DetailsExpired bool            `json:"details_expired,omitempty"`
+	Identity       StoredResources `json:"identity,omitempty"`
+	Resources      StoredResources `json:"resources,omitempty"`
+	BuildMS        int64           `json:"build_ms"`
+	QueueMS        int64           `json:"queue_ms"`
+	ColdStartMS    int64           `json:"cold_start_ms"`
+	ExecutionMS    int64           `json:"execution_ms"`
+	VersionID      *int64          `json:"version_id,omitempty"`
+	ConfigHash     string          `json:"config_hash,omitempty"`
+	Truncated      bool            `json:"truncated,omitempty"`
+	ID             int64           `json:"id"`
+	FunctionID     int64           `json:"function_id"`
+	FunctionName   string          `json:"function_name,omitempty"`
+	StartedAt      string          `json:"started_at"`
+	FinishedAt     string          `json:"finished_at,omitempty"`
+	DurationMS     int64           `json:"duration_ms"`
+	Status         string          `json:"status"`
+	ExitCode       int             `json:"exit_code"`
+	TriggerKind    string          `json:"trigger_kind"`
+	EventJSON      string          `json:"event_json,omitempty"`
+	ResponseBody   string          `json:"response_body,omitempty"`
+	Stderr         string          `json:"stderr,omitempty"`
+	Error          string          `json:"error,omitempty"`
 }
 
 type FunctionFilter struct {
@@ -665,7 +666,7 @@ func scanInvocation(row scanRow, inv *Invocation) error {
 		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
 		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated,
 		&inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS,
-		&inv.Resources, &inv.Identity)
+		&inv.Resources, &inv.Identity, &inv.DetailsExpired)
 }
 
 func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...int64) ([]*Invocation, error) {
@@ -676,7 +677,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.function_id = ? AND (?=0 OR i.id<?)
 		 ORDER BY i.id DESC LIMIT ?`,
@@ -702,7 +703,7 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.id = ?`,
 		pid, id)
@@ -777,7 +778,7 @@ func invocationHistoryDetailsQuery(pid string, ids []int64) (string, []any) {
 			i.trigger_kind, '', '', '', COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,
 			i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,
 			COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),
-			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`, args
 }

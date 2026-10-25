@@ -2,8 +2,15 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.17.1
+version: 1.18.0
 description: |
+  v1.18.0 Adds bounded incremental space reclamation, independent summary
+  and success/failure detail retention, and storage health metrics/alerts.
+  Defaults keep summaries and failure details for 30 days and successful
+  details for 7 days. Existing databases need a planned offline conversion
+  for incremental reclamation; migration 010 builds retention indexes with
+  all runtimes/producers stopped. See STORAGE_MANAGEMENT.md before upgrading.
+
   v1.17.1 Fixes project-wide history reads with indexed cursor pagination,
   page-bounded resource/identity lookups, and a separate read pool.
   First index creation requires a maintenance window with all runtimes
@@ -116,6 +123,8 @@ provides:
     - prefix: /url/
       no_auth: true
   mcp_tools:
+    - name: functions_storage
+      description: "Inspect database/WAL size, reusable space, reclamation mode, project retention backlog and storage alerts."
     - name: functions_performance
       description: "Rank hot, busy, slow or failing functions over window (1h|6h|24h|7d|30d) or since/until. Optional id/name, sort, limit. Returns calls, rate, errors, average/p95 latency, queue wait and total execution wall time."
     - name: functions_slow_invocations
@@ -185,7 +194,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.17.1
+    ref: functions/v1.18.0
     entry: mcp/functions
   port: 8080
   health_check: /health

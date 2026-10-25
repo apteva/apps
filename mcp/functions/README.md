@@ -437,3 +437,11 @@ Go builds receive independent copies of a trusted standard-library cache compile
 Function lists omit source, environment values and URL tokens. Function detail masks secrets unless `include_secrets=true` (MCP) or `include_secrets=1` (HTTP) is explicitly requested. Function/version/invocation lists return `next_cursor`; pass it as `cursor` for the next page. Invocation lists are summaries; `/invocations/<id>` and `functions_logs` return stored previews. The panel fetches independent details concurrently and rejects stale selection responses.
 
 Run the opt-in workload with `GOWORK=off GOMAXPROCS=4 FUNCTIONS_PERFORMANCE=1 go test -run '^TestPerformance$' -count=1 -v`. It measures real local HTTP invocation and app callbacks with fixed 2 ms downstream latency, first-use/deploy time, p50/p95, allocation bytes and failed requests. `BenchmarkEventRead` isolates HTTP event parsing. Compare identical workloads with release `functions/v1.7.0`; retain error counts and interleave runs on a shared host. Faster first invocation partly reflects boot validation performed during deployment, not elimination of boot cost.
+
+## Database storage and retention
+
+See [STORAGE_MANAGEMENT.md](STORAGE_MANAGEMENT.md) for bounded reclamation, separate
+summary/detail retention, storage health metrics, and the required offline first
+upgrade/conversion procedure. Defaults keep successful payloads for 7 days and
+summaries/failure details for 30 days. Migration 010 builds history indexes and
+must first run with every runtime and invocation producer stopped.

@@ -1,4 +1,4 @@
-// Functions v1.17.1 — Lambda-style serverless functions.
+// Functions v1.18.0 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -98,6 +98,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/runtime/drain", Handler: a.handleRuntimeDrain},
 		{Pattern: "/runtime/status", Handler: a.handleRuntimeStatus},
+		{Pattern: "/storage", Handler: a.handleHTTPStorage},
 		{Pattern: "/capacity", Handler: a.handleHTTPCapacity},
 		{Pattern: "/capacity/settings", Handler: a.handleHTTPCapacitySettings},
 		{Pattern: "/performance", Handler: a.handleHTTPPerformance},
@@ -123,6 +124,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		storageTool(),
 		performanceTool(a, false),
 		performanceTool(a, true),
 		authenticatedInvocationTool(a),
@@ -280,6 +282,14 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() {
 	if maybeRunSandboxHelper() {
 		return
+	}
+	path := os.Getenv("DB_PATH")
+	if path == "" {
+		path = (&App{}).Manifest().DB.Path
+	}
+	if err := initializeStorageDatabase(path); err != nil {
+		fmt.Fprintln(os.Stderr, "initialize Functions storage:", err)
+		os.Exit(1)
 	}
 	sdk.Run(&App{})
 }
