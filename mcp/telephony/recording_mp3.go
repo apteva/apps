@@ -51,7 +51,7 @@ func prepareRecordingStorage(ctx context.Context, path, sourceFormat, targetForm
 		return path, sourceFormat, nil
 	}
 	if sourceFormat == "wav" && targetFormat == "mp3" {
-		out, err := encodeRecordingMP3(ctx, path)
+		out, err := encodeRecordingMP3(ctx, path, channels)
 		return out, "mp3", err
 	}
 	if sourceFormat == "mp3" && targetFormat == "wav" {
@@ -81,7 +81,7 @@ func initRecordingMP3() {
 	r.compiled, r.err = r.runtime.CompileModule(context.Background(), code)
 }
 
-func encodeRecordingMP3(ctx context.Context, path string) (string, error) {
+func encodeRecordingMP3(ctx context.Context, path string, expectedChannels ...int) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -93,6 +93,9 @@ func encodeRecordingMP3(ctx context.Context, path string) (string, error) {
 	info, err := inspectPCM16WAV(source)
 	if err != nil {
 		return "", err
+	}
+	if len(expectedChannels) > 0 && info.Channels != expectedChannels[0] {
+		return "", errors.New("recording channel metadata does not match source WAV; original retained")
 	}
 	stat, err := source.Stat()
 	if err != nil {

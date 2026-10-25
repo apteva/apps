@@ -212,6 +212,10 @@ func TestRecordingMP3DefaultsAndImport(t *testing.T) {
 
 func TestRecordingMP3FailureAndCancellation(t *testing.T) {
 	source := writeMP3TestWAV(t, 2, 24000, 2)
+	if path, _, err := prepareRecordingStorage(t.Context(), source, "wav", "mp3", 1); err == nil {
+		os.Remove(path)
+		t.Fatal("mismatched channel metadata accepted")
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if p, err := encodeRecordingMP3(ctx, source); err == nil {
