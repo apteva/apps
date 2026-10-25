@@ -248,8 +248,9 @@
 .apteva-conversations .chat-queue-item + .chat-queue-item {border-top:1px solid color-mix(in srgb,var(--color-border,#373737) 55%,transparent);}
 .apteva-conversations .chat-queue-row {display:flex;align-items:center;gap:6px;min-width:0;}
 .apteva-conversations .chat-queue-icon {display:flex;flex:0 0 18px;justify-content:center;color:var(--color-text-dim,#777);}
-.apteva-conversations .chat-queue-preview {flex:1;min-width:0;padding:7px 3px;text-align:start;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:20px;cursor:pointer;}
-.apteva-conversations .chat-queue-text {display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;white-space:pre-wrap;}
+.apteva-conversations .chat-queue-preview {display:flex;align-items:center;gap:6px;flex:1;min-width:0;padding:6px 3px;text-align:start;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:20px;cursor:pointer;}
+.apteva-conversations .chat-queue-text {display:block;flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.apteva-conversations .chat-queue-attachment {display:flex;flex:0 0 auto;color:var(--color-text-muted,#999);}
 .apteva-conversations .chat-queue-files {display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-muted,#999);font-size:11px;line-height:18px;}
 .apteva-conversations .chat-queue-actions {display:flex;flex:0 0 auto;align-items:center;gap:2px;}
 .apteva-conversations .chat-queue-control {display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:0 0 auto;min-width:32px;height:34px;padding:5px;border:0;border-radius:7px;background:transparent;color:var(--color-text-muted,#999);font:inherit;font-size:12px;cursor:pointer;}

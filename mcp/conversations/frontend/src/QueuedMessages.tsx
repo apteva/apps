@@ -16,6 +16,7 @@ const queueIcon="M5 4v9a4 4 0 0 0 4 4h10 M15 13l4 4-4 4 M10 5h9 M10 9h6";
 const steerIcon="M4 5v6a3 3 0 0 0 3 3h13 M16 10l4 4-4 4";
 const editIcon="m16 3 5 5-12 12-6 1 1-6L16 3Z M13 6l5 5";
 const removeIcon="M3 6h18 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7";
+const attachmentIcon="m21 11-8 8a6 6 0 0 1-8-8l9-9a4 4 0 0 1 6 6l-9 9a2 2 0 0 1-3-3l8-8";
 
 function QueuedMessage({message,canSteer,onEdit,onRemove,onSteer}:QueueActions & {message:Message}) {
   const { t }=useConversationLocalization();
@@ -53,9 +54,9 @@ function QueuedMessage({message,canSteer,onEdit,onRemove,onSteer}:QueueActions &
           <button type="button" disabled={busy||!content.trim()} onClick={save}>{t("common.save")}</button>
         </div>
       </div> : <>
-        <button ref={preview} type="button" className="chat-queue-preview" onClick={edit} disabled={busy} title={message.content||filenames} aria-label={t("queue.editText",{text:message.content||filenames||t("queue.attachment")})}>
+        <button ref={preview} type="button" className="chat-queue-preview" onClick={edit} disabled={busy} title={[message.content,filenames].filter(Boolean).join("\n")} aria-label={t("queue.editText",{text:message.content||filenames||t("queue.attachment")})}>
           <span className="chat-queue-text">{message.content||filenames||t("queue.attachment")}</span>
-          {message.content&&filenames&&<span className="chat-queue-files">{filenames}</span>}
+          {filenames&&<span className="chat-queue-attachment" role="img" aria-label={t("queue.attachments",{names:filenames})} title={filenames}><Icon path={attachmentIcon}/></span>}
         </button>
         <div className="chat-queue-actions">
           <button type="button" className="chat-queue-control chat-queue-steer" disabled={busy||!canSteer} onClick={()=>void run(()=>onSteer(message))} aria-label={t("queue.steer")} title={t("queue.steerHint")}>

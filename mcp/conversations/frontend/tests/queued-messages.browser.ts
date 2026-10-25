@@ -16,6 +16,8 @@ for(const host of ["dashboard","external","package"] as const)for(const width of
   const tray=page.getByRole("region",{name:"Queued messages"}),input=page.locator(".chat-composer-input");
   await expect(tray).toBeVisible();await expect(tray.getByRole("listitem")).toHaveCount(2);
   await expect(tray.getByRole("listitem").first()).toContainText("Then confirm");
+  expect(await tray.locator(".chat-queue-text").first().evaluate(el=>el.getBoundingClientRect().height)).toBe(20);
+  expect((await tray.getByRole("listitem").first().boundingBox())!.height).toBeLessThanOrEqual(48);
   await expect(page.locator(".chat-transcript").getByText("Then confirm",{exact:true})).toHaveCount(0);
   await expect(page.locator(".chat-transcript").getByText("Run regression checks",{exact:true})).toHaveCount(0);
   const bounds=await tray.boundingBox(),composer=await page.locator(".chat-composer-box").boundingBox();
@@ -34,7 +36,7 @@ for(const host of ["dashboard","external","package"] as const)for(const width of
   await expect(input).toHaveValue("A separate draft");
   await first.getByRole("button",{name:"Save",exact:true}).click();
   await expect(tray.getByText("Then confirm the result",{exact:true})).toBeVisible();
-  await expect(tray.getByRole("listitem").first().getByText("queued-notes.txt",{exact:true})).toBeVisible();
+  await expect(tray.getByRole("listitem").first().getByRole("img",{name:"Attachments: queued-notes.txt",exact:true})).toBeVisible();
   // Dashboard has stable per-user draft storage; unconfigured visitor clients
   // deliberately isolate new client instances on reload. Queue rows persist
   // server-side in either case (checked before typing and after steering).
@@ -83,7 +85,7 @@ test("inline edit cancellation and failed saves keep both drafts; an offline age
 
 test("a long queue stays bounded and uses the host's light theme in a narrow panel",async({page,request})=>{
  await request.post("/reset");await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Queued follow-ups",kind:"direct",origin:"web",audience:"operator",created_at:"",updated_at:""}]});
- for(let id=31;id<43;id++)await request.post("/append-message",{data:queued("chat-operator",id,`Follow-up ${id}: ${"Check the next part of the result. ".repeat(8)}`)});
+ for(let id=31;id<43;id++)await request.post("/append-message",{data:queued("chat-operator",id,`Follow-up ${id}: ${"Check the next part of the result.\n".repeat(8)}`)});
  await page.setViewportSize({width:390,height:740});await page.goto("/?host=dashboard&surface=panel&theme=clean");
  await page.locator('button[data-conversation-id="chat-operator"]').click();
  const tray=page.getByRole("region",{name:"Queued messages"});await expect(tray.getByRole("listitem")).toHaveCount(12);
@@ -91,6 +93,9 @@ test("a long queue stays bounded and uses the host's light theme in a narrow pan
  expect(await list.evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);expect((await list.boundingBox())!.height).toBeLessThanOrEqual(220);
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  const color=await tray.evaluate(el=>getComputedStyle(el).backgroundColor);expect(color).toBe("rgb(245, 245, 245)");
+ const preview=tray.locator(".chat-queue-text").first();
+ expect(await preview.evaluate(el=>({height:el.getBoundingClientRect().height,lineHeight:parseFloat(getComputedStyle(el).lineHeight),nowrap:getComputedStyle(el).whiteSpace,overflow:el.scrollWidth>el.clientWidth}))).toEqual({height:20,lineHeight:20,nowrap:"nowrap",overflow:true});
+ expect((await tray.getByRole("listitem").first().boundingBox())!.height).toBeLessThanOrEqual(48);
  await page.screenshot({path:"/private/tmp/conversations-queue-light-mobile.png"});
  await input.fill("The composer is still usable");await expect(input).toHaveValue("The composer is still usable");
 });

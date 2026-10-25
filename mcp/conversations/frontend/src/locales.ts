@@ -9,6 +9,7 @@ export const catalog = {
   "queue.steerLabel": ["Steer", "Intervenir", "Intervenir"],
   "queue.steerHint": ["Send now to steer the current response", "Envoyer maintenant pour orienter la réponse en cours", "Enviar ahora para orientar la respuesta actual"],
   "queue.attachment": ["Attachment", "Pièce jointe", "Archivo adjunto"],
+  "queue.attachments": ["Attachments: {names}", "Pièces jointes : {names}", "Archivos adjuntos: {names}"],
   "replySuggestion.use": ["Use suggested reply", "Utiliser la réponse suggérée", "Usar respuesta sugerida"],
   "replySuggestion.hint": ["Tab or tap to use", "Tab ou toucher pour utiliser", "Tab o toca para usar"],
   "replySuggestion.description": ["Suggested reply: {text}. Press Tab to use it or Escape to dismiss. It will not be sent automatically.", "Réponse suggérée : {text}. Appuyez sur Tab pour l’utiliser ou Échap pour la masquer. Elle ne sera pas envoyée automatiquement.", "Respuesta sugerida: {text}. Pulsa Tab para usarla o Escape para descartarla. No se enviará automáticamente."],

@@ -1,14 +1,14 @@
 {
   "schema": "apteva-app-frontend/v1",
   "app": "conversations",
-  "version": "0.24.58",
+  "version": "0.24.59",
   "client": {
     "path": "/ui/frontend/client-ca3d38ef6e0234c5.mjs",
     "sha256": "ca3d38ef6e0234c52daba99d69c1a54e1f8150429d953688b4b1bf438ed979fe"
   },
   "ui": {
-    "path": "/ui/frontend/react-6480cd15f21ed0e7.mjs",
-    "sha256": "6480cd15f21ed0e7061198915a0d932cf515e2c94b5522ed06303f90513de75d",
+    "path": "/ui/frontend/react-a804cb069ca6b361.mjs",
+    "sha256": "a804cb069ca6b361a9497846e594ce49c0488535b0e384a21f8f1f869e24cf83",
     "reactMajor": 19,
     "components": [
       "agent-conversations",
@@ -22,7 +22,7 @@
     ]
   },
   "styles": {
-    "path": "/ui/frontend/styles-7e9a554b41ebb0e8.css",
-    "sha256": "7e9a554b41ebb0e80b9e72fb2494f6a346d1aab6c4ef8bc650a207a148e3ce10"
+    "path": "/ui/frontend/styles-26127ad9aa056463.css",
+    "sha256": "26127ad9aa056463ca0a1454e755763d55b2f8b2eb28cb01618275733156f347"
   }
 }

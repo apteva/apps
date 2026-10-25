@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.24.59 — 2026-10-25
 
+- Keep each queued preview to one line with ellipsis and a compact attachment indicator; show the full text and filenames when editing.
+- Pin App SDK v0.108.0, verified as the latest release by commit ancestry.
 - Present server-queued follow-ups in a compact tray attached above the composer across the panel, widgets, and exported chat surfaces. Move released/steered messages into the transcript once, preserving FIFO order and server-side storage.
 - Edit queued text inline without replacing the new-message draft or its attachments. Keep removal and immediate steering accessible with compact controls, keyboard support, localized labels, and visible retry errors.
 - Bound long queues independently of transcript scrolling and use Apteva theme tokens on desktop, narrow panes, and mobile.
