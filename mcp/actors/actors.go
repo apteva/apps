@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ const (
 	maxActorItems           = 100000
 	maxActorSeconds         = 3600
 	maxActorSteps           = 100
+	maxActorOperations      = 500
 	maxActorTraceEvents     = 500
 	maxActorPreviewItems    = 20
 	maxActorFields          = 100
@@ -37,16 +39,20 @@ const (
 )
 
 type actorDefinition struct {
-	Operations    map[string]actorOperation `json:"operations,omitempty"`
-	SchemaVersion int                       `json:"schema_version"`
-	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
-	Defaults      map[string]any            `json:"defaults,omitempty"`
-	Presets       map[string]map[string]any `json:"presets,omitempty"`
-	Browser       actorBrowser              `json:"browser"`
-	AllowedHosts  []string                  `json:"allowed_hosts"`
-	Limits        actorLimits               `json:"limits"`
-	Steps         []actorStep               `json:"steps"`
-	OutputSchema  map[string]string         `json:"output_schema"`
+	RequiredExplicitInputs []string                  `json:"required_explicit_inputs,omitempty"`
+	RecoveryOnly           bool                      `json:"recovery_only,omitempty"`
+	ReadOnly               bool                      `json:"read_only,omitempty"`
+	Recovery               *actorRecoveryPolicy      `json:"recovery,omitempty"`
+	Operations             map[string]actorOperation `json:"operations,omitempty"`
+	SchemaVersion          int                       `json:"schema_version"`
+	Crawl                  *crawlDefinition          `json:"crawl,omitempty"`
+	Defaults               map[string]any            `json:"defaults,omitempty"`
+	Presets                map[string]map[string]any `json:"presets,omitempty"`
+	Browser                actorBrowser              `json:"browser"`
+	AllowedHosts           []string                  `json:"allowed_hosts"`
+	Limits                 actorLimits               `json:"limits"`
+	Steps                  []actorStep               `json:"steps"`
+	OutputSchema           map[string]string         `json:"output_schema"`
 }
 
 type actorBrowser struct {
@@ -69,14 +75,27 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	SecretRef          string                `json:"secret_ref,omitempty"`
+	Reveal             *actorReveal          `json:"reveal,omitempty"`
+	URLFromField       string                `json:"url_from_field,omitempty"`
+	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
+	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
+	ReadOnly           bool                  `json:"read_only,omitempty"`
+	ReadRetries        *int                  `json:"read_retries,omitempty"`
+	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
 	Text               string                `json:"text,omitempty"`
 	Key                string                `json:"key,omitempty"`
 	Direction          string                `json:"direction,omitempty"`
 	Amount             int                   `json:"amount,omitempty"`
+	TargetID           string                `json:"target_id,omitempty"`
+	ExpectedName       string                `json:"expected_name,omitempty"`
+	ExpectedRole       string                `json:"expected_role,omitempty"`
 	Action             string                `json:"action"`
+	URLQuery           map[string]string     `json:"url_query,omitempty"`
 	URL                string                `json:"url,omitempty"`
 	Locator            actorLocator          `json:"locator,omitempty"`
 	ExpectedText       string                `json:"expected_text,omitempty"`
+	EffectPhase        string                `json:"effect_phase,omitempty"`
 	ExpectedEffect     string                `json:"expected_effect,omitempty"`
 	ConfirmConsequence string                `json:"confirm_consequence,omitempty"`
 	Optional           bool                  `json:"optional,omitempty"`
@@ -100,10 +119,41 @@ type actorStep struct {
 	Match       string               `json:"match,omitempty"`
 	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
 	Checked     any                  `json:"checked,omitempty"`
+	Labels      any                  `json:"labels,omitempty"`
 	Value       string               `json:"value,omitempty"`
 	Values      []string             `json:"values,omitempty"`
+	Texts       []string             `json:"texts,omitempty"`
 	Readability *bool                `json:"readability,omitempty"`
 	OnceKey     string               `json:"once_key,omitempty"`
+	OnceScope   string               `json:"once_scope,omitempty"`
+	// MinItems/MaxItems turn an extraction into a cardinality gate. They are
+	// especially useful before a consequential click: a missing or ambiguous
+	// target must fail closed instead of producing an empty successful extract.
+	MinItems      int                       `json:"min_items,omitempty"`
+	MaxItems      int                       `json:"max_items,omitempty"`
+	Assertions    map[string]actorAssertion `json:"assertions,omitempty"`
+	VerifiedField string                    `json:"verified_field,omitempty"`
+}
+
+// actorAssertion is evaluated against the most recent extraction. It keeps
+// validation declarative and site-neutral: values may be compared directly,
+// checked for containment, or reconciled arithmetically before a click.
+type actorAssertion struct {
+	CanonicalMap       map[string]string  `json:"canonical_map,omitempty"`
+	EqualsExact        any                `json:"equals_exact,omitempty"`
+	GreaterThan        any                `json:"greater_than,omitempty"`
+	GreaterThanOrEqual any                `json:"greater_than_or_equal,omitempty"`
+	LessThanOrEqual    any                `json:"less_than_or_equal,omitempty"`
+	GreaterThanField   string             `json:"greater_than_field,omitempty"`
+	EqualsURL          *actorURLAssertion `json:"equals_url,omitempty"`
+	Matches            string             `json:"matches,omitempty"`
+	Equals             any                `json:"equals,omitempty"`
+	EqualsField        string             `json:"equals_field,omitempty"`
+	EqualsSet          any                `json:"equals_set,omitempty"`
+	Contains           string             `json:"contains,omitempty"`
+	SumOf              []string           `json:"sum_of,omitempty"`
+	DifferenceOf       []string           `json:"difference_of,omitempty"`
+	Tolerance          float64            `json:"tolerance,omitempty"`
 }
 
 type actorWaitCondition struct {
@@ -116,19 +166,26 @@ type actorWaitCondition struct {
 }
 
 type actorLocator struct {
-	Text     string `json:"text,omitempty"`
-	Role     string `json:"role,omitempty"`
-	Selector string `json:"selector,omitempty"`
-	Exact    bool   `json:"exact,omitempty"`
-	SOMOnly  bool   `json:"som_only,omitempty"`
+	Text              string `json:"text,omitempty"`
+	Role              string `json:"role,omitempty"`
+	Selector          string `json:"selector,omitempty"`
+	Exact             bool   `json:"exact,omitempty"`
+	SOMOnly           bool   `json:"som_only,omitempty"`
+	TextSuffixPattern string `json:"text_suffix_pattern,omitempty"`
 }
 
 type actorField struct {
-	Selector  string `json:"selector,omitempty"`
-	Type      string `json:"type,omitempty"`
-	Attribute string `json:"attribute,omitempty"`
-	Required  bool   `json:"required,omitempty"`
-	Pattern   string `json:"pattern,omitempty"`
+	Many               bool   `json:"many,omitempty"`
+	Selector           string `json:"selector,omitempty"`
+	Type               string `json:"type,omitempty"`
+	Attribute          string `json:"attribute,omitempty"`
+	Required           bool   `json:"required,omitempty"`
+	Pattern            string `json:"pattern,omitempty"`
+	PreserveLineBreaks bool   `json:"preserve_line_breaks,omitempty"`
+	TrimLineEdges      bool   `json:"trim_line_edges,omitempty"`
+	OwnText            bool   `json:"own_text,omitempty"`
+	All                bool   `json:"all,omitempty"`
+	Separator          string `json:"separator,omitempty"`
 }
 
 type actorRecord struct {
@@ -155,6 +212,7 @@ type actorQueuedRun struct {
 func (a *App) actorTools() []sdk.Tool {
 	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
 	return append([]sdk.Tool{
+		{Name: "actors_read_close", Description: "Close an unused read-only continuation and release its browser session. A consumed reference must be replaced by its successor.", InputSchema: schemaObject(map[string]any{"ref": map[string]any{"type": "string"}}, []string{"ref"}), Handler: a.toolReadContinuationClose},
 		{
 			Name: "actors_save", Description: "Create or update a reusable browser actor. Updating increments its revision; expected_revision prevents lost updates.",
 			InputSchema: schemaObject(map[string]any{
@@ -164,8 +222,8 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Get one actor by id or name.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}}, nil), Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Get an actor by id or name, optionally at an exact immutable revision. Supply operation to retrieve one complete operation with execution settings and input requirements.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
 			Name: "actors_list", Description: "List actor definitions for the current project.",
@@ -197,6 +255,10 @@ func (a *App) actorTools() []sdk.Tool {
 		{
 			Name: "actors_run_retry", Description: "Queue a retry using the original run's immutable definition snapshot and input.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorRunRetry,
+		},
+		{
+			Name: "actors_run_recover", Description: "Recover a provably uncommitted failed run with an explicitly reviewed replacement revision. Preserves original identity, media, access and once keys; only declared explicitly reviewed copy fields may differ after exact saved-resource inspection. Requires fresh complete read-only duplicate inspection and repeats it before execution. Unknown/successful outcomes block.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "reviewed": map[string]any{"type": "boolean"}, "duplicate_check_run_id": map[string]any{"type": "integer"}, "resource_check_run_id": map[string]any{"type": "integer", "description": "Required for same-draft recovery: reviewed read-only draft inspection run."}, "reviewed_copy": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Explicitly approved copy amendments, limited to fields declared by the reviewed same-resource policy and verified by its fresh exact read-only inspection."}}, []string{"id", "revision", "reviewed", "duplicate_check_run_id"}), Handler: a.toolActorRunRecover,
 		},
 		{
 			Name: "actors_schedule", Description: "Create a Jobs-owned schedule that queues this actor. Supports once, every, cron, deterministic random daily schedules, and deterministic rotation across a preset_pool.",
@@ -240,6 +302,18 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	seenInputs := map[string]bool{}
+	for _, name := range def.RequiredExplicitInputs {
+		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) || seenInputs[name] {
+			return fmt.Errorf("invalid or duplicate required explicit input %q", name)
+		}
+		seenInputs[name] = true
+	}
+	if def.Recovery != nil {
+		if err := recoveryPolicyValid(def.Recovery); err != nil {
+			return err
+		}
+	}
 	if def.SchemaVersion == 2 {
 		if len(def.Operations) > 0 || len(def.Steps) > 0 {
 			return errors.New("schema version 2 uses crawl and does not support steps or operations")
@@ -267,8 +341,11 @@ func validateActorDefinition(def actorDefinition) error {
 		return nil
 	}
 	if len(def.Operations) > 0 {
-		if len(def.Steps) > 0 || len(def.Operations) > 50 {
-			return errors.New("use either steps or up to 50 named operations")
+		if len(def.Steps) > 0 {
+			return errors.New("use either steps or named operations")
+		}
+		if len(def.Operations) > maxActorOperations {
+			return fmt.Errorf("definition.operations exceeds the %d named operation limit", maxActorOperations)
 		}
 		for name, operation := range def.Operations {
 			if !operationNamePattern.MatchString(name) {
@@ -276,6 +353,16 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 			selected := def
 			selected.Operations = nil
+			selected.ReadOnly = selected.ReadOnly || operation.ReadOnly
+			selected.RecoveryOnly = operation.RecoveryOnly
+			if operation.Limits != nil {
+				selected.Limits = *operation.Limits
+			}
+			if operation.Browser != nil {
+				selected.Browser = *operation.Browser
+			}
+			selected.RequiredExplicitInputs = append(append([]string{}, def.RequiredExplicitInputs...), operation.RequiredExplicitInputs...)
+			selected.Recovery = operation.Recovery
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
 			if err := validateActorDefinition(selected); err != nil {
@@ -351,7 +438,77 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if err := validateReadRetries(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
+		if step.Action != "scroll" && (step.TargetID != "" || step.ExpectedName != "" || step.ExpectedRole != "") {
+			return fmt.Errorf("steps[%d] target_id, expected_name and expected_role are scroll-only fields", i)
+		}
+		if err := validateEffectPhase(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
+		if step.OnceScope != "" && (step.OnceKey == "" || (step.Action != "click" && step.Action != "click_verified") || strings.TrimSpace(step.OnceScope) != step.OnceScope || len(step.OnceScope) > 100) {
+			return fmt.Errorf("steps[%d].once_scope requires a guarded click and a nonempty scope of at most 100 bytes", i)
+		}
+		if (def.ReadOnly || step.ReadOnly) && !readOnlyActorAction(step.Action) {
+			return fmt.Errorf("steps[%d]: %s is not allowed in a read_only operation", i, step.Action)
+		}
+		if suffix := step.Locator.TextSuffixPattern; suffix != "" {
+			if !step.Locator.Exact || !step.Locator.SOMOnly {
+				return fmt.Errorf("steps[%d].locator.text_suffix_pattern requires exact som_only", i)
+			}
+			if _, err := regexp.Compile("^(?:" + suffix + ")$"); err != nil {
+				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
+			}
+		}
+		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" {
+			return fmt.Errorf("steps[%d].secret_ref requires fill_secret or goto_secret", i)
+		}
 		switch step.Action {
+		case "goto_secret":
+			if strings.TrimSpace(step.SecretRef) == "" || step.URL != "" || step.Text != "" || step.Optional {
+				return fmt.Errorf("steps[%d]: goto_secret requires secret_ref without literal URL, text or optional", i)
+			}
+		case "fill_secret":
+			if !locatorHasTarget(step.Locator) || strings.TrimSpace(step.SecretRef) == "" || step.Text != "" || step.Value != "" || step.Optional || step.Mode != "" || step.NewlineMode != "" {
+				return fmt.Errorf("steps[%d]: fill_secret requires a locator and secret_ref, without literal text, value, optional or mode", i)
+			}
+		case "reveal_control":
+			if err := validateActorReveal(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
+		case "inspect_control":
+			if !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" {
+				return errors.New("inspect_control requires an exact som_only name and no write effect")
+			}
+		case "dismiss_inspection":
+			if step.Key != "" || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" {
+				return errors.New("dismiss_inspection sends only fixed Escape")
+			}
+		case "observe_json":
+			if err := validateJSONDocument(step.JSONDocument); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
+		case "inspect_views":
+			if step.ReadViews != nil && step.ReadViews.ContinuationEnabled && (!def.ReadOnly || len(def.Steps) != 1) {
+				return errors.New("continuation reads require an entirely read-only operation with one inspect_views step")
+			}
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional {
+				return errors.New("inspect_views requires a read_only operation or step and cannot be optional")
+			}
+			if err := validateReadViews(step.ReadViews); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
+			if step.ReadViews.AllowPartial && !def.ReadOnly && !step.ReadOnly {
+				return fmt.Errorf("steps[%d]: allow_partial requires a read_only operation or explicit read_only inspection step", i)
+			}
+			if step.ReadViews.AllowPartial && !def.ReadOnly {
+				for _, later := range def.Steps[i+1:] {
+					if !readOnlyActorAction(later.Action) {
+						return fmt.Errorf("steps[%d]: partial inspection cannot precede write or input actions", i)
+					}
+				}
+			}
 		case "fill":
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for fill", i)
@@ -360,15 +517,41 @@ func validateActorDefinition(def actorDefinition) error {
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for set_text", i)
 			}
+			if step.NewlineMode != "" && !actorTemplateValue(step.NewlineMode) && step.NewlineMode != "preserve" && step.NewlineMode != "compact" {
+				return fmt.Errorf("steps[%d].newline_mode must be preserve or compact", i)
+			}
 		case "set_checked", "select_option", "set_temporal":
-			if !locatorHasTarget(step.Locator) {
+			if !locatorHasTarget(step.Locator) && !(step.Action == "set_checked" && step.Labels != nil) {
 				return fmt.Errorf("steps[%d].locator is required for %s", i, step.Action)
 			}
 			if step.Action == "set_checked" {
+				if step.Labels != nil {
+					if step.Locator.Selector != "" || !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text != "" {
+						return fmt.Errorf("steps[%d].labels requires an exact som_only locator without text or selector", i)
+					}
+					if !actorListTemplate(step.Labels) {
+						if _, err := actorLabelList(step.Labels); err != nil {
+							return fmt.Errorf("steps[%d].labels: %w", i, err)
+						}
+					}
+				}
 				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
 					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
 				}
-			} else if step.Value == "" && (step.Action != "select_option" || len(step.Values) == 0) {
+			} else if step.Action == "select_option" {
+				choices := 0
+				for _, present := range []bool{step.Value != "", len(step.Values) > 0, step.Text != "", len(step.Texts) > 0} {
+					if present {
+						choices++
+					}
+				}
+				if choices != 1 {
+					return fmt.Errorf("steps[%d].select_option requires exactly one of value, values, text or texts", i)
+				}
+				if step.Mode != "" && !actorTemplateValue(step.Mode) && step.Mode != "replace" && step.Mode != "add" && step.Mode != "remove" && step.Mode != "toggle" {
+					return fmt.Errorf("steps[%d].select_option mode must be replace, add, remove or toggle", i)
+				}
+			} else if step.Value == "" {
 				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
 			}
 		case "upload_file":
@@ -390,6 +573,10 @@ func validateActorDefinition(def actorDefinition) error {
 					return fmt.Errorf("steps[%d].source_url must be http or https", i)
 				}
 			}
+		case "type":
+			if step.Text == "" || (len(step.Text) > 256 && !actorTemplateValue(step.Text)) {
+				return fmt.Errorf("steps[%d].text must contain 1-256 bytes for literal typing; use set_text for longer fields", i)
+			}
 		case "key":
 			if step.Key == "" {
 				return fmt.Errorf("steps[%d].key is required", i)
@@ -398,27 +585,87 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Direction != "up" && step.Direction != "down" && step.Direction != "left" && step.Direction != "right" {
 				return fmt.Errorf("steps[%d].direction is invalid", i)
 			}
+			if (step.ExpectedName != "" || step.ExpectedRole != "") && strings.TrimSpace(step.TargetID) == "" {
+				return fmt.Errorf("steps[%d] scroll identity guards require target_id", i)
+			}
 		case "assert_element":
 			if step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator.selector is required", i)
 			}
 		case "goto":
-			if strings.TrimSpace(step.URL) == "" {
+			if strings.TrimSpace(step.URL) == "" && step.URLFromField == "" {
 				return fmt.Errorf("steps[%d].url is required", i)
+			}
+			if step.URLMatchPattern != "" {
+				if step.URLFromField == "" {
+					return errors.New("url_match_pattern requires url_from_field")
+				}
+				if _, err := regexp.Compile(step.URLMatchPattern); err != nil {
+					return err
+				}
 			}
 		case "click", "paginate":
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
-			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
-		case "extract":
+		case "observe_page", "extract":
 			if strings.TrimSpace(step.Items) == "" || len(step.Fields) == 0 {
 				return fmt.Errorf("steps[%d] requires items and fields", i)
 			}
 			if len(step.Fields) > maxActorFields {
 				return fmt.Errorf("steps[%d].fields exceeds the %d field limit", i, maxActorFields)
+			}
+			if step.MinItems < 0 || step.MaxItems < 0 || (step.MaxItems > 0 && step.MinItems > step.MaxItems) {
+				return fmt.Errorf("steps[%d] has invalid min_items/max_items", i)
+			}
+			for name, field := range step.Fields {
+				if err := validateTrimLineEdges(field); err != nil {
+					return fmt.Errorf("steps[%d].fields[%q]: %w", i, name, err)
+				}
+			}
+		case "select_record":
+			if step.VerifiedField == "" || step.Value == "" {
+				return errors.New("select_record requires verified_field and value")
+			}
+		case "assert_values":
+			if len(step.Assertions) == 0 {
+				return fmt.Errorf("steps[%d].assertions is required", i)
+			}
+			for field, assertion := range step.Assertions {
+				if err := validateCanonicalAssertion(assertion); err != nil {
+					return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+				}
+				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
+				}
+				if assertion.EqualsURL != nil {
+					if err := assertion.EqualsURL.validate(); err != nil {
+						return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+					}
+				}
+				if assertion.Matches != "" {
+					if _, err := regexp.Compile(assertion.Matches); err != nil {
+						return fmt.Errorf("invalid assertion pattern: %w", err)
+					}
+				}
+				if assertion.EqualsSet != nil && !actorListTemplate(assertion.EqualsSet) {
+					if _, err := actorLabelList(assertion.EqualsSet); err != nil {
+						return fmt.Errorf("steps[%d].assertions[%q].equals_set: %w", i, field, err)
+					}
+				}
+				if len(assertion.SumOf) > 0 && len(assertion.DifferenceOf) > 0 {
+					return fmt.Errorf("steps[%d].assertions[%q] cannot combine sum_of and difference_of", i, field)
+				}
+			}
+		case "click_verified":
+			if strings.TrimSpace(step.VerifiedField) == "" {
+				return fmt.Errorf("steps[%d].verified_field is required for click_verified", i)
+			}
+			if step.OnceKey != "" && (step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
+				return fmt.Errorf("steps[%d].once_key requires an acknowledged expected_effect", i)
 			}
 		case "assert_url":
 			if normalizeAllowedHost(step.Host) == "" {
@@ -607,11 +854,52 @@ func (a *App) toolActorSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, supplied := args["operation"]; supplied {
+		return a.getActorOperation(ctx, args)
+	}
 	rec, err := getActor(ctx, int64ArgLocal(args, "id"), stringArg(args, "name"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"actor": rec, "found": rec != nil}, nil
+	if rec == nil {
+		return map[string]any{"actor": nil, "found": false}, nil
+	}
+	latest := rec.Revision
+	if _, supplied := args["revision"]; supplied && intArg(args, "revision") <= 0 {
+		return nil, errors.New("revision must be positive")
+	}
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
+	}
+	operations := make([]string, 0, len(rec.Definition.Operations))
+	for name := range rec.Definition.Operations {
+		operations = append(operations, name)
+	}
+	if len(operations) == 0 {
+		operations = append(operations, "run")
+	}
+	sort.Strings(operations)
+	return map[string]any{"actor": rec, "found": true, "retrieved_revision": rec.Revision, "latest_revision": latest, "operations": operations}, nil
+}
+
+func loadActorRevision(ctx *sdk.AppCtx, rec *actorRecord, revision int) error {
+	if revision <= 0 || revision == rec.Revision {
+		return nil
+	}
+	var raw string
+	if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("actor revision not found")
+		}
+		return err
+	}
+	var historical actorDefinition
+	if err := json.Unmarshal([]byte(raw), &historical); err != nil {
+		return err
+	}
+	rec.Definition = historical
+	rec.Revision = revision
+	return nil
 }
 
 func (a *App) toolActorList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -843,7 +1131,7 @@ func actorHTTPID(r *http.Request) int64 {
 	if raw == "" {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		for i := len(parts) - 1; i >= 0; i-- {
-			if parts[i] == "cancel" || parts[i] == "retry" {
+			if parts[i] == "cancel" || parts[i] == "retry" || parts[i] == "recover" {
 				continue
 			}
 			if id, err := strconv.ParseInt(parts[i], 10, 64); err == nil {
@@ -1010,15 +1298,8 @@ func (a *App) toolActorSchedule(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !rec.Enabled {
 		return nil, errors.New("actor is disabled")
 	}
-	if revision := intArg(args, "revision"); revision > 0 && revision != rec.Revision {
-		var raw string
-		if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&raw); err != nil {
-			return nil, errors.New("actor revision not found")
-		}
-		if err := json.Unmarshal([]byte(raw), &rec.Definition); err != nil {
-			return nil, err
-		}
-		rec.Revision = revision
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
 	}
 	if _, err := selectOperation(rec.Definition, firstNonEmpty(stringArg(args, "operation"), "run")); err != nil {
 		return nil, err
@@ -1214,4 +1495,38 @@ func claimActorRun(ctx *sdk.AppCtx) (*actorQueuedRun, error) {
 	}
 	ctx.EmitWithProject("actor.run.started", run.ProjectID, map[string]any{"run_id": run.ID, "actor_id": run.ActorID})
 	return &run, nil
+}
+
+func (a *App) handleActorGet(w http.ResponseWriter, r *http.Request) {
+	ctx, err := actorHTTPContext(r)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	args := map[string]any{"id": actorHTTPID(r)}
+	if raw := r.URL.Query().Get("revision"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			httpErr(w, http.StatusBadRequest, "revision must be positive")
+			return
+		}
+		args["revision"] = n
+	}
+	out, err := a.toolActorGet(ctx, args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) handleRunRecover(w http.ResponseWriter, r *http.Request) {
+	ctx, err := actorHTTPContext(r)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	args, ok := decodeActorHTTPArgs(w, r)
+	if !ok {
+		return
+	}
+	args["id"] = actorHTTPID(r)
+	out, err := a.toolActorRunRecover(ctx, args)
+	writeJSON(w, out, err)
 }

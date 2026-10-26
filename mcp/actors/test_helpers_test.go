@@ -24,10 +24,14 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	readViewsResponse        func(string, map[string]any) map[string]any
 	crawlHTMLMinimumLimit    int
 	crawlHTMLAlwaysTruncated bool
 	tk.BasePlatformClient
 	failAction            string
+	failNavigateRemaining int
+	failNavigationURL     string
+	navigateError         string
 	blockExtract          chan struct{}
 	mu                    sync.Mutex
 	calls                 []fakeCall
@@ -89,6 +93,16 @@ var _ sdk.AppContextClient = (*fakePlatform)(nil)
 func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out any) error {
 	p.mu.Lock()
 	p.calls = append(p.calls, fakeCall{app: app, tool: tool, args: copyArgs(in)})
+	if app == "computer" && tool == "browser_open" && p.failNavigationURL != "" && in["url"] == p.failNavigationURL && p.failNavigateRemaining > 0 {
+		p.failNavigateRemaining--
+		p.mu.Unlock()
+		return fmt.Errorf("%s", firstNonEmpty(p.navigateError, "action_timeout: navigate: context deadline exceeded"))
+	}
+	if app == "computer" && tool == "computer_use" && in["action"] == "navigate" && p.failNavigateRemaining > 0 {
+		p.failNavigateRemaining--
+		p.mu.Unlock()
+		return fmt.Errorf("%s", firstNonEmpty(p.navigateError, "action_timeout: navigate: context deadline exceeded"))
+	}
 	if tool == "computer_use" && p.failAction != "" && in["action"] == p.failAction {
 		p.mu.Unlock()
 		return fmt.Errorf("simulated uncertain action failure")
@@ -103,6 +117,11 @@ func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out an
 }
 
 func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]any {
+	if p.readViewsResponse != nil {
+		if r := p.readViewsResponse(app+"."+tool, in); r != nil {
+			return r
+		}
+	}
 	switch app + "." + tool {
 	case "computer.browser_open":
 		if u, ok := in["url"].(string); ok {

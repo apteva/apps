@@ -41,6 +41,9 @@ func executeNext(t *testing.T, ctx *sdk.AppCtx, app *App) map[string]any {
 func TestStandaloneManifestAndAssets(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
+	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "actors/v"+manifest.Version {
+		t.Fatal("release version and immutable source ref must agree")
+	}
 	if manifest.Name != "actors" {
 		t.Fatal(manifest.Name)
 	}

@@ -1,0 +1,1873 @@
+{
+  "operations": {
+    "fill_iberia_passenger_draft": {
+      "browser": {
+        "context_id": "{{booking_context_id}}",
+        "backend": "browserbase",
+        "persist": true,
+        "viewport": {
+          "height": 1000,
+          "width": 1440
+        }
+      },
+      "required_explicit_inputs": [
+        "booking_context_id",
+        "search_url",
+        "departure_date",
+        "outbound_reference",
+        "quote_label",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "contact_phone",
+        "contact_country_code"
+      ],
+      "limits": {
+        "max_pages": 35,
+        "max_items": 200,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{search_url}}",
+          "locator": {}
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.google.com",
+          "path_prefix": "/travel/flights"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "button[aria-label^=\"Continue to book with \"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "adults": {
+              "type": "number",
+              "required": true,
+              "pattern": "Prices include required taxes \\+ fees for ([0-9]+) adults?\\."
+            },
+            "currency": {
+              "selector": "button[aria-label^=\"Currency \"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Currency ([A-Z]{3})$"
+            },
+            "departure_date": {
+              "selector": "[data-outbound-date]",
+              "type": "text",
+              "attribute": "data-outbound-date",
+              "required": true
+            },
+            "outbound_cabin_value": {
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-seatingclass",
+              "required": true
+            },
+            "outbound_reference": {
+              "many": true,
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-travelimpactmodelwebsiteurl",
+              "required": true
+            },
+            "summary": {
+              "selector": "[role=\"main\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "adults": {
+              "equals": "{{adults}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "outbound_cabin_value": {
+              "canonical_map": {
+                "1": "Economy",
+                "2": "Premium economy",
+                "3": "Business",
+                "4": "First",
+                "Business": "Business",
+                "Economy": "Economy",
+                "First": "First",
+                "Premium economy": "Premium economy"
+              },
+              "equals": "{{cabin}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "quote_label": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true
+            },
+            "quote_provider": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Continue to book with (Iberia)(?:,| airline)"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "quote_label": {
+              "equals_exact": "{{quote_label}}"
+            },
+            "quote_provider": {
+              "equals_exact": "Iberia"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quote_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{quote_label}}",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.iberia.com",
+          "path_prefix": "/flights/"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cookies Settings",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Cookies Settings",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Reject All",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Reject All",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+          },
+          "expected_text": "Enter passenger details",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#name_0"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "passenger_count": {
+              "equals": 1
+            },
+            "phone_code": {
+              "equals_exact": "{{contact_country_code}}"
+            },
+            "stage": {
+              "equals_exact": "Passenger information"
+            }
+          }
+        },
+        {
+          "text": "{{passenger_first_name}}",
+          "action": "set_text",
+          "locator": {
+            "selector": "#name_0"
+          }
+        },
+        {
+          "text": "{{passenger_last_name}}",
+          "action": "set_text",
+          "locator": {
+            "selector": "#first_surname_0"
+          }
+        },
+        {
+          "text": "{{contact_email}}",
+          "action": "set_text",
+          "locator": {
+            "selector": "#contact_email"
+          }
+        },
+        {
+          "text": "{{contact_phone}}",
+          "action": "set_text",
+          "locator": {
+            "selector": "#contact_phone_number"
+          }
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "#contact_check"
+          },
+          "checked": true
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "#save_passengers_data"
+          },
+          "checked": false
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "contact_phone": {
+              "equals_exact": "{{contact_phone}}"
+            },
+            "first_names": {
+              "equals_exact": [
+                "{{passenger_first_name}}"
+              ]
+            },
+            "last_names": {
+              "equals_exact": [
+                "{{passenger_last_name}}"
+              ]
+            },
+            "phone_code": {
+              "equals_exact": "{{contact_country_code}}"
+            },
+            "stage": {
+              "equals_exact": "Passenger information"
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "inspect_iberia_checkout": {
+      "browser": {
+        "context_id": "{{booking_context_id}}",
+        "backend": "browserbase",
+        "persist": true,
+        "viewport": {
+          "height": 1000,
+          "width": 1440
+        }
+      },
+      "required_explicit_inputs": [
+        "booking_context_id",
+        "search_url",
+        "departure_date",
+        "outbound_reference",
+        "quote_label"
+      ],
+      "limits": {
+        "max_pages": 35,
+        "max_items": 200,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{search_url}}",
+          "locator": {}
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.google.com",
+          "path_prefix": "/travel/flights"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "button[aria-label^=\"Continue to book with \"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "adults": {
+              "type": "number",
+              "required": true,
+              "pattern": "Prices include required taxes \\+ fees for ([0-9]+) adults?\\."
+            },
+            "currency": {
+              "selector": "button[aria-label^=\"Currency \"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Currency ([A-Z]{3})$"
+            },
+            "departure_date": {
+              "selector": "[data-outbound-date]",
+              "type": "text",
+              "attribute": "data-outbound-date",
+              "required": true
+            },
+            "outbound_cabin_value": {
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-seatingclass",
+              "required": true
+            },
+            "outbound_reference": {
+              "many": true,
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-travelimpactmodelwebsiteurl",
+              "required": true
+            },
+            "summary": {
+              "selector": "[role=\"main\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "adults": {
+              "equals": "{{adults}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "outbound_cabin_value": {
+              "canonical_map": {
+                "1": "Economy",
+                "2": "Premium economy",
+                "3": "Business",
+                "4": "First",
+                "Business": "Business",
+                "Economy": "Economy",
+                "First": "First",
+                "Premium economy": "Premium economy"
+              },
+              "equals": "{{cabin}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "quote_label": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true
+            },
+            "quote_provider": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Continue to book with (Iberia)(?:,| airline)"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "quote_label": {
+              "equals_exact": "{{quote_label}}"
+            },
+            "quote_provider": {
+              "equals_exact": "Iberia"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quote_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{quote_label}}",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.iberia.com",
+          "path_prefix": "/flights/"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cookies Settings",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Cookies Settings",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Reject All",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Reject All",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+          },
+          "expected_text": "Enter passenger details",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#name_0"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": null
+    },
+    "open_iberia_checkout": {
+      "browser": {
+        "context_id": "{{booking_context_id}}",
+        "backend": "browserbase",
+        "persist": true,
+        "viewport": {
+          "height": 1000,
+          "width": 1440
+        }
+      },
+      "required_explicit_inputs": [
+        "booking_context_id",
+        "search_url",
+        "departure_date",
+        "outbound_reference",
+        "quote_label"
+      ],
+      "limits": {
+        "max_pages": 35,
+        "max_items": 200,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{search_url}}",
+          "locator": {}
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.google.com",
+          "path_prefix": "/travel/flights"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "button[aria-label^=\"Continue to book with \"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "adults": {
+              "type": "number",
+              "required": true,
+              "pattern": "Prices include required taxes \\+ fees for ([0-9]+) adults?\\."
+            },
+            "currency": {
+              "selector": "button[aria-label^=\"Currency \"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Currency ([A-Z]{3})$"
+            },
+            "departure_date": {
+              "selector": "[data-outbound-date]",
+              "type": "text",
+              "attribute": "data-outbound-date",
+              "required": true
+            },
+            "outbound_cabin_value": {
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-seatingclass",
+              "required": true
+            },
+            "outbound_reference": {
+              "many": true,
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-travelimpactmodelwebsiteurl",
+              "required": true
+            },
+            "summary": {
+              "selector": "[role=\"main\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "adults": {
+              "equals": "{{adults}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "outbound_cabin_value": {
+              "canonical_map": {
+                "1": "Economy",
+                "2": "Premium economy",
+                "3": "Business",
+                "4": "First",
+                "Business": "Business",
+                "Economy": "Economy",
+                "First": "First",
+                "Premium economy": "Premium economy"
+              },
+              "equals": "{{cabin}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "quote_label": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true
+            },
+            "quote_provider": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Continue to book with (Iberia)(?:,| airline)"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "quote_label": {
+              "equals_exact": "{{quote_label}}"
+            },
+            "quote_provider": {
+              "equals_exact": "Iberia"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quote_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{quote_label}}",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.iberia.com",
+          "path_prefix": "/flights/"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cookies Settings",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Cookies Settings",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Reject All",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Reject All",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": null
+    },
+    "open_iberia_passenger_form": {
+      "browser": {
+        "context_id": "{{booking_context_id}}",
+        "backend": "browserbase",
+        "persist": true,
+        "viewport": {
+          "height": 1000,
+          "width": 1440
+        }
+      },
+      "required_explicit_inputs": [
+        "booking_context_id",
+        "search_url",
+        "departure_date",
+        "outbound_reference",
+        "quote_label"
+      ],
+      "limits": {
+        "max_pages": 35,
+        "max_items": 200,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{search_url}}",
+          "locator": {}
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.google.com",
+          "path_prefix": "/travel/flights"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "button[aria-label^=\"Continue to book with \"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "adults": {
+              "type": "number",
+              "required": true,
+              "pattern": "Prices include required taxes \\+ fees for ([0-9]+) adults?\\."
+            },
+            "currency": {
+              "selector": "button[aria-label^=\"Currency \"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Currency ([A-Z]{3})$"
+            },
+            "departure_date": {
+              "selector": "[data-outbound-date]",
+              "type": "text",
+              "attribute": "data-outbound-date",
+              "required": true
+            },
+            "outbound_cabin_value": {
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-seatingclass",
+              "required": true
+            },
+            "outbound_reference": {
+              "many": true,
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-travelimpactmodelwebsiteurl",
+              "required": true
+            },
+            "summary": {
+              "selector": "[role=\"main\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "adults": {
+              "equals": "{{adults}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "outbound_cabin_value": {
+              "canonical_map": {
+                "1": "Economy",
+                "2": "Premium economy",
+                "3": "Business",
+                "4": "First",
+                "Business": "Business",
+                "Economy": "Economy",
+                "First": "First",
+                "Premium economy": "Premium economy"
+              },
+              "equals": "{{cabin}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "quote_label": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true
+            },
+            "quote_provider": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Continue to book with (Iberia)(?:,| airline)"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "quote_label": {
+              "equals_exact": "{{quote_label}}"
+            },
+            "quote_provider": {
+              "equals_exact": "Iberia"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quote_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{quote_label}}",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.iberia.com",
+          "path_prefix": "/flights/"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cookies Settings",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Cookies Settings",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Reject All",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Reject All",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+          },
+          "expected_text": "Enter passenger details",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#name_0"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": null
+    },
+    "preflight_iberia_passenger_form": {
+      "browser": {
+        "context_id": "{{booking_context_id}}",
+        "backend": "browserbase",
+        "persist": true,
+        "viewport": {
+          "height": 1000,
+          "width": 1440
+        }
+      },
+      "required_explicit_inputs": [
+        "booking_context_id",
+        "search_url",
+        "departure_date",
+        "outbound_reference",
+        "quote_label",
+        "origin",
+        "destination",
+        "checkout_date_label",
+        "checkout_currency",
+        "reviewed_total",
+        "max_total"
+      ],
+      "limits": {
+        "max_pages": 35,
+        "max_items": 200,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{search_url}}",
+          "locator": {}
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.google.com",
+          "path_prefix": "/travel/flights"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "button[aria-label^=\"Continue to book with \"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "adults": {
+              "type": "number",
+              "required": true,
+              "pattern": "Prices include required taxes \\+ fees for ([0-9]+) adults?\\."
+            },
+            "currency": {
+              "selector": "button[aria-label^=\"Currency \"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Currency ([A-Z]{3})$"
+            },
+            "departure_date": {
+              "selector": "[data-outbound-date]",
+              "type": "text",
+              "attribute": "data-outbound-date",
+              "required": true
+            },
+            "outbound_cabin_value": {
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-seatingclass",
+              "required": true
+            },
+            "outbound_reference": {
+              "many": true,
+              "selector": ".rarCGf:contains(\"Departing flight\") [data-travelimpactmodelwebsiteurl=\"{{outbound_reference}}\"]",
+              "type": "text",
+              "attribute": "data-travelimpactmodelwebsiteurl",
+              "required": true
+            },
+            "summary": {
+              "selector": "[role=\"main\"]",
+              "type": "text"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "adults": {
+              "equals": "{{adults}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "outbound_cabin_value": {
+              "canonical_map": {
+                "1": "Economy",
+                "2": "Premium economy",
+                "3": "Business",
+                "4": "First",
+                "Business": "Business",
+                "Economy": "Economy",
+                "First": "First",
+                "Premium economy": "Premium economy"
+              },
+              "equals": "{{cabin}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "quote_label": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true
+            },
+            "quote_provider": {
+              "selector": "button[aria-label=\"{{quote_label}}\"]",
+              "type": "text",
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Continue to book with (Iberia)(?:,| airline)"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "quote_label": {
+              "equals_exact": "{{quote_label}}"
+            },
+            "quote_provider": {
+              "equals_exact": "Iberia"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quote_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{quote_label}}",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "assert_url",
+          "locator": {},
+          "host": "www.iberia.com",
+          "path_prefix": "/flights/"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cookies Settings",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Cookies Settings",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Reject All",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Reject All",
+          "expected_effect": "navigation_only",
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "#AVAILABILITY_CONTINUE_BUTTON"
+          },
+          "expected_text": "Enter passenger details",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#name_0"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Show booking breakdown",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Show booking breakdown",
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".ib-summary-breakdown__item-content"
+            }
+          ],
+          "timeout_ms": 10000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "airports": {
+              "many": true,
+              "selector": ".ib-header-common__container-top .ib-header-common__city.hidden-xl",
+              "type": "text",
+              "required": true
+            },
+            "amount": {
+              "selector": ".ib-text--price-big",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\\s*\u20ac$"
+            },
+            "contact_email": {
+              "selector": "#contact_email",
+              "type": "text",
+              "attribute": "value"
+            },
+            "contact_phone": {
+              "selector": "#contact_phone_number",
+              "type": "text",
+              "attribute": "value"
+            },
+            "currency_symbol": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true,
+              "pattern": "(\u20ac)$"
+            },
+            "departure_display": {
+              "selector": ".ib-header-common__fly-day",
+              "type": "text",
+              "required": true,
+              "pattern": "^OUTBOUND:\\s*([0-9]{2}/[0-9]{2}/[0-9]{4})$"
+            },
+            "fare_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Fare\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "first_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"name_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hold_booking_control": {
+              "selector": "#bbki-on-hold-now-book-btn",
+              "type": "text"
+            },
+            "last_names": {
+              "many": true,
+              "selector": "form[name=\"passengerForm\"] input[id^=\"first_surname_\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "locked_steps": {
+              "many": true,
+              "selector": ".steps-nav-btn[disabled]",
+              "type": "text",
+              "attribute": "aria-label"
+            },
+            "passenger_count": {
+              "selector": ".ib-header-common__fly-passenger",
+              "type": "number",
+              "required": true,
+              "pattern": "\\bx ([0-9]+)\\b"
+            },
+            "payment_controls": {
+              "many": true,
+              "selector": "button[id*=\"PAY\"],button[id*=\"pay\"]",
+              "type": "text"
+            },
+            "phone_code": {
+              "selector": "#contact_prefix input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "stage": {
+              "selector": ".steps-nav-btn-current .steps-nav-btn-text",
+              "type": "text",
+              "required": true
+            },
+            "tax_amount": {
+              "selector": ".ib-summary-breakdown__item-content:contains(\"Taxes, fees and carrier charges\") .ib-summary-breakdown__item-text--text-right",
+              "type": "number",
+              "required": true,
+              "pattern": "^([0-9,]+\\.[0-9]{2})\u20ac$"
+            },
+            "total_display": {
+              "selector": ".ib-text--price-big",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "airports": {
+              "equals_exact": [
+                "{{origin}}",
+                "{{destination}}"
+              ]
+            },
+            "amount": {
+              "less_than_or_equal": "{{max_total}}",
+              "equals": "{{reviewed_total}}",
+              "sum_of": [
+                "fare_amount",
+                "tax_amount"
+              ],
+              "tolerance": 0.001
+            },
+            "currency_symbol": {
+              "canonical_map": {
+                "EUR": "EUR",
+                "\u20ac": "EUR"
+              },
+              "equals": "{{checkout_currency}}"
+            },
+            "departure_display": {
+              "equals_exact": "{{checkout_date_label}}"
+            },
+            "passenger_count": {
+              "equals": 1
+            },
+            "stage": {
+              "equals_exact": "Passenger information"
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    }
+  },
+  "schema_version": 1,
+  "defaults": {
+    "adults": 1,
+    "cabin": "Economy",
+    "currency": "EUR",
+    "max_pages": 10
+  },
+  "browser": {
+    "backend": "browserbase",
+    "viewport": {
+      "height": 1000,
+      "width": 1440
+    }
+  },
+  "allowed_hosts": [
+    "www.google.com",
+    "consent.google.com",
+    "www.iberia.com"
+  ],
+  "limits": {
+    "max_pages": 20,
+    "max_items": 150,
+    "max_duration_seconds": 240,
+    "step_retries": 0
+  },
+  "steps": null,
+  "output_schema": null
+}
