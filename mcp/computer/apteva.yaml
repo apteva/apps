@@ -2,9 +2,13 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.95
+version: 0.7.97
 description: |
-  v0.7.95 adds an opt-in extraction lifecycle that skips automatic final
+  v0.7.97 supports bounded rendered DOM extraction up to a 5 MB serialized
+  response while retaining live form state, navigation and response limits.
+  v0.7.96 serializes live form values, selections and checked state in DOM
+  snapshots, including controls outside the viewport. It also preserves the
+  opt-in extraction lifecycle that skips automatic final
   screenshots while preserving provider release, history and usage accounting.
   Watch, steer, and replay hosted browser sessions. v0.7.94 preserves headers,
   footers and sidebars when readability is disabled, and retains mailto and tel
@@ -524,7 +528,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.7.95
+    ref: computer/v0.7.97
     entry: mcp/computer
   port: 8080
   health_check: /health

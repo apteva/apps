@@ -198,6 +198,10 @@ type DisplaySize struct {
 	Height int `json:"height"`
 }
 
+// MaxExtractChars is the shared ceiling for DOM extraction and the complete
+// serialized response budget enforced by the Computer app.
+const MaxExtractChars = 5_000_000
+
 // ExtractOptions controls browser-DOM extraction from the currently active
 // page. This is intentionally narrower than arbitrary JavaScript evaluation:
 // callers can request structured page data without gaining script execution.

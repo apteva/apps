@@ -20,6 +20,9 @@ type ExtractLink = api.ExtractLink
 type ExtractRect = api.ExtractRect
 type ExtractRegion = api.ExtractRegion
 type DOMExtractor = api.DOMExtractor
+
+const MaxExtractChars = api.MaxExtractChars
+
 type ActionOnlyExecutor = api.ActionOnlyExecutor
 type WaitCondition = api.WaitCondition
 type WaitConditionResult = api.WaitConditionResult

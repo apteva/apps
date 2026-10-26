@@ -58,16 +58,18 @@ var manifestYAML []byte
 var globalCtx *sdk.AppCtx
 
 type browserSession struct {
-	SessionID        string            `json:"session_id"`
-	Backend          string            `json:"backend"`
-	RequestedBackend *string           `json:"requested_backend"`
-	EffectiveBackend string            `json:"effective_backend"`
-	CurrentURL       string            `json:"current_url"`
-	DebugURL         string            `json:"debug_url,omitempty"`
-	StreamURL        string            `json:"stream_url,omitempty"`
-	Width            int               `json:"width"`
-	Height           int               `json:"height"`
-	Proxy            browserProxyState `json:"proxy"`
+	AppContextID      string            `json:"app_context_id,omitempty"`
+	ProviderExpiresAt string            `json:"provider_expires_at,omitempty"`
+	SessionID         string            `json:"session_id"`
+	Backend           string            `json:"backend"`
+	RequestedBackend  *string           `json:"requested_backend"`
+	EffectiveBackend  string            `json:"effective_backend"`
+	CurrentURL        string            `json:"current_url"`
+	DebugURL          string            `json:"debug_url,omitempty"`
+	StreamURL         string            `json:"stream_url,omitempty"`
+	Width             int               `json:"width"`
+	Height            int               `json:"height"`
+	Proxy             browserProxyState `json:"proxy"`
 }
 
 type browserProxyState struct {
@@ -139,6 +141,9 @@ type computerSOMScreenshot struct {
 }
 
 type setOfMarkTarget struct {
+	Effect         string `json:"effect"`
+	Dangerous      bool   `json:"dangerous"`
+	Loading        bool   `json:"loading"`
 	ID             string `json:"id"`
 	AccessibleName string `json:"accessible_name"`
 	Disabled       bool   `json:"disabled"`
@@ -236,7 +241,7 @@ func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessio
 	extractArgs := withProjectID(ctx, map[string]any{
 		"session_id":  sessionID,
 		"formats":     formats,
-		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 1000000),
+		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, maxActorExtractChars),
 		"readability": true,
 	})
 	if value, ok := args["readability"].(bool); ok {
@@ -286,19 +291,16 @@ func recoverInterruptedRuns(ctx *sdk.AppCtx) error {
 	if _, err := tx.Exec(`UPDATE actors_runs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'queued' ELSE 'cancelled' END WHERE status='running' AND json_extract(definition_snapshot_json,'$.schema_version')=2`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled'))`); err != nil {
+	// V1 writes keep their uncertain-outcome failure policy. Finish this in the
+	// same transaction as releasing stale context locks so a restarted worker
+	// cannot mistake an interrupted terminal run for a live context owner.
+	if _, err := tx.Exec(`UPDATE actors_runs SET status='failed', error='interrupted by app restart', completed_at=? WHERE status='running'`, time.Now().UTC()); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled','failed','completed'))`); err != nil {
 		return err
 	}
-	_, err = ctx.AppDB().Exec(
-		`UPDATE actors_runs
-		    SET status='failed', error='interrupted by app restart', completed_at=?
-		  WHERE status='running'`,
-		time.Now().UTC(),
-	)
-	return err
+	return tx.Commit()
 }
 
 func pruneHistory(ctx *sdk.AppCtx) error {
@@ -819,7 +821,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "actor-runner", Schedule: "@every 2s", Run: a.runActorWorker}}
+	return []sdk.Worker{{Name: "actor-runner", Schedule: "@every 2s", Run: a.runActorWorker}, {Name: "read-continuation-cleanup", Schedule: "@every 1m", Run: a.cleanupReadContinuations}}
 }
 func (a *App) MCPTools() []sdk.Tool { return append(a.actorTools(), a.platformTools()...) }
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -828,8 +830,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/runs/{id}", Handler: a.handleRunItem},
 		{Method: "POST", Pattern: "/runs/{id}/cancel", Handler: a.handleRunCancel},
 		{Method: "POST", Pattern: "/runs/{id}/retry", Handler: a.handleRunRetry},
+		{Method: "POST", Pattern: "/runs/{id}/recover", Handler: a.handleRunRecover},
 		{Method: "GET", Pattern: "/actors", Handler: a.handleActors},
 		{Method: "POST", Pattern: "/actors", Handler: a.handleActorSave},
+		{Method: "GET", Pattern: "/actors/{id}", Handler: a.handleActorGet},
 		{Method: "DELETE", Pattern: "/actors/{id}", Handler: a.handleActorDelete},
 		{Method: "POST", Pattern: "/actors/run", Handler: a.handleActorRun},
 		{Method: "GET", Pattern: "/schedules", Handler: a.handleActorSchedules},

@@ -60,9 +60,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.95
+version: 0.7.97
 description: |
-  v0.7.95 adds an opt-in extraction lifecycle that skips automatic final
+  v0.7.97 supports bounded rendered DOM extraction up to a 5 MB serialized
+  response while retaining live form state, navigation and response limits.
+  v0.7.96 serializes live form values, selections and checked state in DOM
+  snapshots, including controls outside the viewport. It also preserves the
+  opt-in extraction lifecycle that skips automatic final
   screenshots while preserving provider release, history and usage accounting.
   Watch, steer, and replay hosted browser sessions. v0.7.94 preserves headers,
   footers and sidebars when readability is disabled, and retains mailto and tel
@@ -283,7 +287,7 @@ const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
 const recordingProcessingWindow = 15 * time.Minute
 const internalAppCallerHeader = sdk.HeaderBoundCallerInstallID
-const maxExtractChars = 1000000
+const maxExtractChars = backends.MaxExtractChars
 const defaultExtractChars = 50000
 const maxExtractWaitMS = 10000
 
@@ -853,7 +857,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"session_id":  map[string]any{"type": "string"},
 				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
-				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 1000000."},
+				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response budget. Default 50000; maximum 5000000."},
 				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true; false retains headers, footers and sidebars."},
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before extraction for client-rendered pages; maximum 10000."},
 			}, []string{"session_id"}),

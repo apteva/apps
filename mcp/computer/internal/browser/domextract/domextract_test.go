@@ -129,3 +129,36 @@ func TestRunFullBodyPreservesContactFooterAndProtocolLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestRunSerializesLiveFormStateOutsideViewport(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Chromium fixture")
+	}
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+	ctx, cancel = context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	fixture := `<body><form style="margin-top:4000px"><select id="country"><option value="GB" selected>UK</option><option value="ES">Spain</option></select><select id="multi" multiple><option selected>A</option><option>B</option></select><input id="town" value="London"><input id="check" type="checkbox" checked><textarea id="notes">old</textarea><input id="secret" type="password" value="secret"></form></body>`
+	if err := chromedp.Run(ctx, chromedp.Navigate("data:text/html,"+url.PathEscape(fixture)), chromedp.WaitReady("#country"), chromedp.Evaluate(`document.querySelector('#country').value='ES';document.querySelector('#multi').options[0].selected=false;document.querySelector('#multi').options[1].selected=true;document.querySelector('#town').value='Madrid';document.querySelector('#check').checked=false;document.querySelector('#notes').value='new';`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Run(ctx, computer.ExtractOptions{Formats: []string{"html"}, Readability: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`value="ES" selected`, `value="Madrid"`, `>new</textarea>`, `<option selected="">B</option>`} {
+		if !strings.Contains(out.HTML, want) {
+			t.Fatalf("missing %q in %s", want, out.HTML)
+		}
+	}
+	if strings.Contains(out.HTML, `value="GB" selected`) || strings.Contains(out.HTML, `checked`) || strings.Contains(out.HTML, `secret" value="secret`) {
+		t.Fatalf("stale or secret state: %s", out.HTML)
+	}
+	var original string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#country').outerHTML`, &original)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(original, `value="GB" selected`) {
+		t.Fatal("snapshot mutated original attributes")
+	}
+}
