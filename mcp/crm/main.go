@@ -3804,7 +3804,7 @@ func normaliseChannel(kind, value string) string {
 	value = strings.TrimSpace(value)
 	switch kind {
 	case "email":
-		return strings.ToLower(value)
+		return canonicalAddress(channelEmail, strings.TrimPrefix(value, "mailto:"))
 	case "phone":
 		// Keep only + and digits; drop spaces, dashes, parens.
 		var b strings.Builder

@@ -16,19 +16,22 @@ func recipientStatuses(db *sql.DB, ids []int64) map[int64]map[string]string {
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := db.Query(`SELECT message_id,recipient,status FROM recipient_delivery_status WHERE message_id IN (`+strings.TrimRight(strings.Repeat("?,", len(ids)), ",")+`)`, args...)
+	rows, err := db.Query(`SELECT s.message_id,s.recipient,s.status,m.channel FROM recipient_delivery_status s JOIN messages m ON m.id=s.message_id WHERE s.message_id IN (`+strings.TrimRight(strings.Repeat("?,", len(ids)), ",")+`)`, args...)
 	if err != nil {
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var recipient, status string
-		if rows.Scan(&id, &recipient, &status) == nil {
+		var recipient, status, channel string
+		if rows.Scan(&id, &recipient, &status, &channel) == nil {
+			recipient = canonicalAddrForChannel(channel, recipient)
 			if out[id] == nil {
 				out[id] = map[string]string{}
 			}
-			out[id][recipient] = status
+			if shouldPromoteMessageStatus(out[id][recipient], status) {
+				out[id][recipient] = status
+			}
 		}
 	}
 	return out

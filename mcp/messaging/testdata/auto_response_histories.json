@@ -1,0 +1,368 @@
+[
+  {
+    "message": {
+      "id": 47972,
+      "provider_message_id": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+      "message_id_header": "<010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000@eu-west-1.amazonses.com>",
+      "from": "sender@example.test",
+      "to": [
+        "recipient1@example.test"
+      ]
+    },
+    "auto_reply": {
+      "id": 47973,
+      "from": "mailer-daemon@eu-west-1.amazonses.com",
+      "message_id_header": "<010201a1645d07f9-1c065437-bf9d-4c29-aa48-b7cebeecd8db-000000@eu-west-1.amazonses.com>",
+      "verdicts": {
+        "dkim": "PASS",
+        "dmarc": "PASS",
+        "spam": "PASS",
+        "spf": "PASS",
+        "virus": "PASS"
+      },
+      "in_reply_to": "<010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000@eu-west-1.amazonses.com>",
+      "receiving_identity": "sender@example.test",
+      "envelope_recipients": [
+        "sender@example.test"
+      ],
+      "headers": {
+        "Auto-Submitted": "auto-replied",
+        "Content-Type": "text/plain"
+      }
+    },
+    "events": [
+      {
+        "provider_event_id": "sns:20bcfcf8-af27-5bb4-be4c-9fac9991d366:0",
+        "raw": {
+          "eventType": "Send",
+          "mail": {
+            "messageId": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+            "destination": [
+              "recipient1@example.test"
+            ]
+          },
+          "send": {
+            "recipients": [
+              "recipient1@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:94066480-620e-5df8-a500-07d454b6247a:0",
+        "raw": {
+          "eventType": "Delivery",
+          "mail": {
+            "messageId": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+            "destination": [
+              "recipient1@example.test"
+            ]
+          },
+          "delivery": {
+            "timestamp": "2026-10-22T16:06:15.973Z",
+            "recipients": [
+              "recipient1@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:23316e04-c00e-5044-b1af-0d50f6b782f2:0",
+        "raw": {
+          "eventType": "Open",
+          "mail": {
+            "messageId": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+            "destination": [
+              "recipient1@example.test"
+            ]
+          },
+          "open": {
+            "timestamp": "2026-10-22T16:06:17.548Z",
+            "recipients": [
+              "recipient1@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:bc55e756-b370-5bae-9af5-840285cddbf7:0",
+        "raw": {
+          "eventType": "Bounce",
+          "mail": {
+            "messageId": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+            "destination": [
+              "recipient1@example.test"
+            ]
+          },
+          "bounce": {
+            "feedbackId": "010201a1645d07f9-1c065437-bf9d-4c29-aa48-b7cebeecd8db-000000",
+            "bounceType": "Transient",
+            "bounceSubType": "General",
+            "timestamp": "2026-10-22T16:06:20.856Z",
+            "bouncedRecipients": [
+              {
+                "emailAddress": "Example Recipient 1 <recipient1@example.test>"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:6e43b865-f88c-5f87-aca0-db31c04bb27f:0",
+        "raw": {
+          "eventType": "Open",
+          "mail": {
+            "messageId": "010201a1645cf00c-cd272fa3-d844-4554-a8ac-f2e4b6a4e1e9-000000",
+            "destination": [
+              "recipient1@example.test"
+            ]
+          },
+          "open": {
+            "timestamp": "2026-10-22T16:15:03.073Z",
+            "recipients": [
+              "recipient1@example.test"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "message": {
+      "id": 47974,
+      "provider_message_id": "010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000",
+      "message_id_header": "<010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000@eu-west-1.amazonses.com>",
+      "from": "sender@example.test",
+      "to": [
+        "recipient2@example.test"
+      ]
+    },
+    "auto_reply": {
+      "id": 47975,
+      "from": "mailer-daemon@eu-west-1.amazonses.com",
+      "message_id_header": "<010201a1645e4588-4a065014-c141-47b4-9298-da757a016b42-000000@eu-west-1.amazonses.com>",
+      "verdicts": {
+        "dkim": "PASS",
+        "dmarc": "PASS",
+        "spam": "PASS",
+        "spf": "PASS",
+        "virus": "PASS"
+      },
+      "in_reply_to": "",
+      "receiving_identity": "sender@example.test",
+      "envelope_recipients": [
+        "sender@example.test"
+      ],
+      "headers": {
+        "Auto-Submitted": "auto-replied",
+        "Content-Type": "text/plain"
+      }
+    },
+    "events": [
+      {
+        "provider_event_id": "sns:24544e1b-235c-5ccd-ba2d-2d4f1455f47f:0",
+        "raw": {
+          "eventType": "Send",
+          "mail": {
+            "messageId": "010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000",
+            "destination": [
+              "recipient2@example.test"
+            ]
+          },
+          "send": {
+            "recipients": [
+              "recipient2@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:41e4b0ac-9e5f-5693-b317-d3f8a955c7a6:0",
+        "raw": {
+          "eventType": "Delivery",
+          "mail": {
+            "messageId": "010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000",
+            "destination": [
+              "recipient2@example.test"
+            ]
+          },
+          "delivery": {
+            "timestamp": "2026-10-22T16:07:37.984Z",
+            "recipients": [
+              "recipient2@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:c1893cd9-ca5c-5098-9460-5f8dfd5732c4:0",
+        "raw": {
+          "eventType": "Open",
+          "mail": {
+            "messageId": "010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000",
+            "destination": [
+              "recipient2@example.test"
+            ]
+          },
+          "open": {
+            "timestamp": "2026-10-22T16:07:39.587Z",
+            "recipients": [
+              "recipient2@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:2f7324e9-8dd6-562b-b28b-47bdbad85cbd:0",
+        "raw": {
+          "eventType": "Bounce",
+          "mail": {
+            "messageId": "010201a1645e3196-9caba8c0-c159-47c9-b569-06c01fc07fb2-000000",
+            "destination": [
+              "recipient2@example.test"
+            ]
+          },
+          "bounce": {
+            "feedbackId": "010201a1645e4588-4a065014-c141-47b4-9298-da757a016b42-000000",
+            "bounceType": "Transient",
+            "bounceSubType": "General",
+            "timestamp": "2026-10-22T16:07:42.143Z",
+            "bouncedRecipients": [
+              {
+                "emailAddress": "Example Recipient 2 <recipient2@example.test>"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "message": {
+      "id": 48001,
+      "provider_message_id": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+      "message_id_header": "<010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000@eu-west-1.amazonses.com>",
+      "from": "sender@example.test",
+      "to": [
+        "recipient3@example.test"
+      ]
+    },
+    "auto_reply": {
+      "id": 48002,
+      "from": "mailer-daemon@eu-west-1.amazonses.com",
+      "message_id_header": "<010201a169856547-ade0361c-77c6-490e-bf44-b566f481b4d0-000000@eu-west-1.amazonses.com>",
+      "verdicts": {
+        "dkim": "PASS",
+        "dmarc": "PASS",
+        "spam": "PASS",
+        "spf": "PASS",
+        "virus": "PASS"
+      },
+      "in_reply_to": "<010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000@eu-west-1.amazonses.com>",
+      "receiving_identity": "sender@example.test",
+      "envelope_recipients": [
+        "sender@example.test"
+      ],
+      "headers": {
+        "Auto-Submitted": "auto-replied",
+        "Content-Type": "text/plain"
+      }
+    },
+    "events": [
+      {
+        "provider_event_id": "sns:01faeaf8-6eee-587a-b4bc-89ade65275e4:0",
+        "raw": {
+          "eventType": "Send",
+          "mail": {
+            "messageId": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+            "destination": [
+              "recipient3@example.test"
+            ]
+          },
+          "send": {
+            "recipients": [
+              "recipient3@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:019a1c7a-efae-5671-89b9-7f2f6712116b:0",
+        "raw": {
+          "eventType": "Delivery",
+          "mail": {
+            "messageId": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+            "destination": [
+              "recipient3@example.test"
+            ]
+          },
+          "delivery": {
+            "timestamp": "2026-10-23T16:08:28.577Z",
+            "recipients": [
+              "recipient3@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:0f2b855c-8f11-5112-a877-e60907ac98e6:0",
+        "raw": {
+          "eventType": "Open",
+          "mail": {
+            "messageId": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+            "destination": [
+              "recipient3@example.test"
+            ]
+          },
+          "open": {
+            "timestamp": "2026-10-23T16:08:29.842Z",
+            "recipients": [
+              "recipient3@example.test"
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:4ee4f923-a453-55d1-a58c-9a762c93b160:0",
+        "raw": {
+          "eventType": "Bounce",
+          "mail": {
+            "messageId": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+            "destination": [
+              "recipient3@example.test"
+            ]
+          },
+          "bounce": {
+            "feedbackId": "010201a169856547-ade0361c-77c6-490e-bf44-b566f481b4d0-000000",
+            "bounceType": "Transient",
+            "bounceSubType": "General",
+            "timestamp": "2026-10-23T16:08:32.248Z",
+            "bouncedRecipients": [
+              {
+                "emailAddress": "Example Recipient 3 <recipient3@example.test>"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "provider_event_id": "sns:eaead79d-b9b9-5745-a957-b4c83498803e:0",
+        "raw": {
+          "eventType": "Open",
+          "mail": {
+            "messageId": "010201a1698553cf-c9cb9422-046d-4bd4-8a89-0c4bad227fea-000000",
+            "destination": [
+              "recipient3@example.test"
+            ]
+          },
+          "open": {
+            "timestamp": "2026-10-23T16:27:13.945Z",
+            "recipients": [
+              "recipient3@example.test"
+            ]
+          }
+        }
+      }
+    ]
+  }
+]

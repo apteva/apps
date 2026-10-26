@@ -247,7 +247,10 @@ func (a *App) retryMessagingWork(ctx *sdk.AppCtx) error {
 			ctx.Logger().Warn("inbound retry", "message_id", j.id, "err", err)
 		}
 	}
-	return replayProviderEvents(ctx)
+	if err := replayProviderEvents(ctx); err != nil {
+		return err
+	}
+	return reconcilePendingAutoResponses(ctx)
 }
 
 func queueProviderEvents(ctx *sdk.AppCtx, pid, topic string, events []providerEvent) error {

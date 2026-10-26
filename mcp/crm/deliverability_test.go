@@ -148,7 +148,7 @@ func TestSuppressionRetryUsesPendingIndex(t *testing.T) {
 		JOIN contact_channels c ON c.project_id=s.project_id AND c.id=s.channel_id
 		WHERE s.project_id=? AND (
 			(s.quarantined=1 AND s.suppressed=0) OR
-			(s.quarantined=0 AND s.consecutive_soft_bounces=0 AND s.suppressed=1
+			(s.quarantined=0 AND s.consecutive_soft_bounces<3 AND s.suppressed=1
 			 AND s.suppression_source='crm' AND s.suppression_reason='soft-bounce-threshold'))`, "test-proj")
 	if err != nil {
 		t.Fatal(err)
