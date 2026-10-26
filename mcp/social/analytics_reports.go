@@ -61,6 +61,7 @@ type analyticsPostRow struct {
 	Insights    insightSeries    `json:"insights,omitempty"`
 }
 type analyticsPeriodComparison struct {
+	Freshness     *analyticsFreshness `json:"freshness,omitempty"`
 	Status        string              `json:"status"`
 	Reason        string              `json:"reason,omitempty"`
 	Window        analyticsWindow     `json:"window"`

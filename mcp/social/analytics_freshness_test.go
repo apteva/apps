@@ -157,3 +157,17 @@ func TestPinterestOldReportCacheIsNotReused(t *testing.T) {
 		t.Fatalf("stale report or freshness lost: %+v", out)
 	}
 }
+
+func TestPinterestComparisonRetainsPreviousPeriodEstimates(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_board_pins"] = analyticsOK(`{"items":[{"id":"a"}]}`)
+	pf.executeQueues["get_multiple_pin_analytics"] = []*sdk.ExecuteResult{
+		analyticsOK(`{"a":{"all":{"summary_metrics":{"IMPRESSION":4,"PIN_CLICK":0,"OUTBOUND_CLICK":0,"SAVE":0},"daily_metrics":[{"date":"2026-10-24","data_status":"READY","metrics":{"IMPRESSION":4,"PIN_CLICK":0,"OUTBOUND_CLICK":0,"SAVE":0}}]}}}`),
+		analyticsOK(`{"a":{"all":{"summary_metrics":{"IMPRESSION":2,"PIN_CLICK":0,"OUTBOUND_CLICK":0,"SAVE":0},"daily_metrics":[{"date":"2026-10-23","data_status":"ESTIMATE","metrics":{"IMPRESSION":2,"PIN_CLICK":0,"OUTBOUND_CLICK":0,"SAVE":0}}]}}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	out := (&App{}).getPinterestBoardMetrics(ctx, accountMetricsResult{}, 42, "board", analyticsQuery{StartDate: "2026-10-24", EndDate: "2026-10-24", Compare: true})
+	if out.Comparison == nil || out.Comparison.Status != "partial" || out.Comparison.Window.Timezone != "UTC" || out.Comparison.Freshness == nil || len(out.Comparison.Freshness.EstimatedDates) != 1 {
+		t.Fatalf("previous estimates hidden: %+v", out.Comparison)
+	}
+}

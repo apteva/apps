@@ -23,6 +23,7 @@ export interface AnalyticsPostRow {
   status: string; error?: string; metrics: Record<string, number>; report?: AnalyticsReport;
 }
 export interface PeriodComparison {
+  freshness?: AnalyticsFreshness;
   status: string; reason?: string; window: { start_date?: string; end_date?: string };
   metrics?: Record<string, number>; change_percent?: Record<string, number | null>;
   coverage?: AnalyticsReport["coverage"];
@@ -60,6 +61,9 @@ export function ReportNotice({ report, comparison }: { report?: AnalyticsReport;
       Compared with {comparison.window.start_date} – {comparison.window.end_date}
       {comparison.status === "partial" && " · partial comparison"}
       {comparison.reason && ` · ${comparison.reason}`}
+      {!!comparison.freshness?.pending_dates.length && ` · Previous period pending: ${metricDateRanges(comparison.freshness.pending_dates)}`}
+      {!!comparison.freshness?.estimated_dates.length && ` · Previous period includes provider estimates: ${metricDateRanges(comparison.freshness.estimated_dates)}`}
+      {!!comparison.freshness?.unavailable_dates.length && " · Previous period has dates with unavailable data or processing status"}
     </>}</div>}
   </div>;
 }

@@ -29,6 +29,9 @@ test("Social metrics forwards scope, date window and ranking while zero cards st
  expect(browser.document.body.textContent).toContain("Post ranking");expect(browser.document.body.textContent).toContain("saves");expect(browser.document.body.textContent).toContain("Unavailable");
  const metrics=requests.filter(url=>url.pathname.includes("/metrics"));expect(metrics.length).toBeGreaterThan(0);expect(metrics.every(url=>url.searchParams.get("scope")==="provider_account"&&url.searchParams.get("project_id")==="test-project"&&url.searchParams.get("range")==="28d")).toBe(true);
  const scope=browser.document.querySelector('select[aria-label="Analytics scope"]') as HTMLSelectElement;expect(scope.textContent).toContain("Board");await act(async()=>{scope.value="destination";scope.dispatchEvent(new browser.Event("change",{bubbles:true}))});expect(requests.at(-1)?.searchParams.get("scope")).toBe("destination");
+ const range=browser.document.querySelector('option[value="30d"]')!.parentElement as HTMLSelectElement;
+ await act(async()=>{range.value="30d";range.dispatchEvent(new browser.Event("change",{bubbles:true}))});
+ expect(requests.filter(url=>url.pathname.includes("/metrics")).at(-1)?.searchParams.get("range")).toBe("30d");
 });
 
 test("generic report freshness exposes timezone, pending dates and provider estimates",async()=>{

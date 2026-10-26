@@ -493,6 +493,11 @@ func (a *App) getPinterestBoardMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 			out.Comparison = comparePostReports(rows, prevRows, prevQ, pc)
 		}
 		out.Comparison.Window.Timezone = "UTC"
+		_, previousSeries := aggregatePostReport(prevRows)
+		out.Comparison.Freshness = seriesFreshness(previousSeries, []string{"impressions", "pin_clicks", "outbound_clicks", "saves"}, prevQ)
+		if f := out.Comparison.Freshness; len(f.PendingDates) > 0 || len(f.EstimatedDates) > 0 || len(f.UnavailableDates) > 0 {
+			out.Comparison.Status = "partial"
+		}
 		out.Report.Warnings = append(out.Report.Warnings, pw...)
 	}
 	return out
