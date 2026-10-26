@@ -270,14 +270,43 @@ func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) err
 	if err != nil {
 		return err
 	}
+	if kind == "auto_replied" {
+		remove, err := correctAutomaticResponse(tx, pid, channelID, transport, event, state)
+		if err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		emitChannelDeliverabilityChanged(ctx, pid, contactID, channelID, transport)
+		if remove {
+			a.removeSoftBounceSuppression(ctx, pid, transport, state.SuppressionKind, state.SuppressionMatch)
+		}
+		return nil
+	}
+	var corrected int
+	if err := tx.QueryRow(`SELECT corrected FROM crm_delivery_event_contributions WHERE project_id=? AND source_install_id=? AND event_id=?`, pid, event.SourceInstallID, messagingEventID(event)).Scan(&corrected); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if corrected != 0 {
+		return tx.Commit()
+	}
 	if eventIsOlder(occurred, state.StatusUpdatedAt) {
 		return tx.Commit()
 	}
 
 	needsThresholdSuppression := false
 	needsThresholdRemoval := false
+	if kind == "bounced" || kind == "delivered" {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO crm_delivery_event_contributions(project_id,source_install_id,event_id,channel_id,transport,occurred_at) VALUES(?,?,?,?,?,?)`, pid, event.SourceInstallID, messagingEventID(event), channelID, transport, occurred); err != nil {
+			return err
+		}
+	}
 	switch kind {
 	case "delivered":
+		if _, err = tx.Exec(`UPDATE crm_delivery_event_contributions SET active_soft=0 WHERE project_id=? AND channel_id=? AND transport=?`, pid, channelID, transport); err != nil {
+			return err
+		}
 		wasSoft := state.Status == "soft_bounced"
 		_, err = tx.Exec(
 			`UPDATE contact_channel_delivery_state
@@ -305,6 +334,9 @@ func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) err
 				occurred, reason, occurred, pid, channelID, transport,
 			)
 		} else if state.Status == "active" || state.Status == "soft_bounced" {
+			if _, err = tx.Exec(`UPDATE crm_delivery_event_contributions SET active_soft=1 WHERE project_id=? AND source_install_id=? AND event_id=?`, pid, event.SourceInstallID, messagingEventID(event)); err != nil {
+				return err
+			}
 			count := state.ConsecutiveSoftBounces + 1
 			quarantine := count >= softBounceQuarantineThreshold
 			if reason == "" {
@@ -774,7 +806,7 @@ func (a *App) retryProjectSuppressions(ctx *sdk.AppCtx, pid string) (int, error)
 		 JOIN contact_channels c ON c.project_id = s.project_id AND c.id = s.channel_id
 		 WHERE s.project_id = ? AND (
 			(s.quarantined = 1 AND s.suppressed = 0) OR
-			(s.quarantined = 0 AND s.consecutive_soft_bounces = 0 AND s.suppressed = 1
+			(s.quarantined = 0 AND s.consecutive_soft_bounces < 3 AND s.suppressed = 1
 			 AND s.suppression_source = 'crm' AND s.suppression_reason = 'soft-bounce-threshold')
 		 )`, pid)
 	if err != nil {

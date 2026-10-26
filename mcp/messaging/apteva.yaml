@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.60
+version: 0.13.61
 description: |
   Template sends retain immutable content and variable snapshots; message_get
   and message_list expose template_snapshot with availability and provenance.
@@ -190,7 +190,7 @@ runtime:
   startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
-    ref: messaging/v0.13.60
+    ref: messaging/v0.13.61
     entry: mcp/messaging
   port: 8080
   health_check: /health

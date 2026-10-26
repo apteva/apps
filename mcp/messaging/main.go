@@ -612,7 +612,7 @@ func normaliseAddress(channel, raw string) (string, error) {
 	}
 	switch channel {
 	case channelEmail:
-		addr := strings.ToLower(raw)
+		addr := canonicalAddrForChannel(channelEmail, raw)
 		if !looksLikeEmail(addr) {
 			return "", fmt.Errorf("invalid email %q", raw)
 		}
@@ -816,6 +816,7 @@ type DeliveryEvent struct {
 	ID              int64           `json:"id"`
 	MessageID       int64           `json:"message_id"`
 	ProviderEventID string          `json:"provider_event_id,omitempty"`
+	ProviderKind    string          `json:"provider_kind,omitempty"`
 	Kind            string          `json:"kind"`
 	Recipient       string          `json:"recipient,omitempty"`
 	Reason          string          `json:"reason,omitempty"`
@@ -1221,7 +1222,7 @@ func sendResponse(m *Message) map[string]any {
 		status := m.Status
 		if len(m.RecipientStatuses) > 0 {
 			status = "sent"
-			if value, ok := m.RecipientStatuses[strings.ToLower(r)]; ok {
+			if value, ok := m.RecipientStatuses[canonicalAddrForChannel(m.Channel, r)]; ok {
 				status = value
 			}
 		}
@@ -4763,7 +4764,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	}
 	status := mapSESKindToStatus(ev.Kind)
 	if status != "" && ev.Recipient != "" {
-		recipient := strings.ToLower(ev.Recipient)
+		recipient := canonicalAddrForChannel(msg.Channel, ev.Recipient)
 		var prior string
 		if err := tx.QueryRow(`SELECT status FROM recipient_delivery_status WHERE message_id=? AND recipient=?`, msg.ID, recipient).Scan(&prior); err != nil && err != sql.ErrNoRows {
 			return false, err
@@ -4787,12 +4788,27 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 			return false, fmt.Errorf("update message event time: %w", err)
 		}
 	}
+	corrected, err := reconcileAutoResponsesTx(tx, msg)
+	if err != nil {
+		return false, err
+	}
+	if corrected {
+		if err = rebuildDeliverySummaryTx(tx, msg); err != nil {
+			return false, err
+		}
+	}
+	var effectiveKind string
+	if err = tx.QueryRow(`SELECT effective_kind FROM effective_delivery_events WHERE provider_event_id=?`, eventID).Scan(&effectiveKind); err != nil {
+		return false, err
+	}
+	var finalStatus string
+	if err = tx.QueryRow(`SELECT status FROM messages WHERE id=?`, msg.ID).Scan(&finalStatus); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit provider event: %w", err)
 	}
-	if promote {
-		msg.Status = status
-	}
+	msg.Status = finalStatus
 	if suppression != nil {
 		if stored, lookupErr := dbSuppressionGetExact(ctx.AppDB(), suppression.ProjectID, suppression.Channel, suppression.Kind, suppression.Address); lookupErr == nil && stored != nil {
 			suppression = stored
@@ -4806,8 +4822,9 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 		"channel":             msg.Channel,
 		"provider":            ev.Provider,
 		"provider_message_id": ev.ProviderMessageID,
-		"kind":                ev.Kind,
-		"recipient":           ev.Recipient,
+		"kind":                effectiveKind,
+		"provider_kind":       ev.Kind,
+		"recipient":           canonicalAddrForChannel(msg.Channel, ev.Recipient),
 		"occurred_at":         occurred,
 		"metadata":            ev.Metadata,
 		"permanent":           ev.Permanent,
@@ -4819,7 +4836,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	} else if ev.Reason != "" {
 		payload["reason"] = ev.Reason
 	}
-	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
+	emitMessagingEvent(ctx, msg.ProjectID, "message."+effectiveKind, payload)
 	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
 	return true, nil
 }
@@ -5457,6 +5474,9 @@ func canonicalAddrForChannel(channel, addr string) string {
 	addr = strings.TrimSpace(stripScheme(addr))
 	switch channel {
 	case channelEmail:
+		if parsed, err := mail.ParseAddress(addr); err == nil {
+			return strings.ToLower(parsed.Address)
+		}
 		return strings.ToLower(addr)
 	}
 	return addr
@@ -6511,7 +6531,7 @@ func dbDeliveryEventCountsBatch(db *sql.DB, messageIDs []int64) map[int64]map[st
 	for i, id := range messageIDs {
 		args[i] = id
 	}
-	rows, err := db.Query(`SELECT message_id, kind, COUNT(*) FROM delivery_events WHERE message_id IN (`+placeholders+`) GROUP BY message_id, kind`, args...)
+	rows, err := db.Query(`SELECT message_id, effective_kind, COUNT(*) FROM effective_delivery_events WHERE message_id IN (`+placeholders+`) GROUP BY message_id, effective_kind`, args...)
 	if err != nil {
 		return out
 	}
@@ -6532,9 +6552,9 @@ func dbDeliveryEventCountsBatch(db *sql.DB, messageIDs []int64) map[int64]map[st
 
 func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	rows, err := db.Query(
-		`SELECT id, message_id, COALESCE(provider_event_id,''), kind, COALESCE(recipient,''), COALESCE(reason,''),
+		`SELECT id, message_id, COALESCE(provider_event_id,''), kind, effective_kind, COALESCE(recipient,''), COALESCE(reason,''),
 		        raw, COALESCE(occurred_at,'')
-		 FROM delivery_events WHERE message_id = ? ORDER BY id`,
+		 FROM effective_delivery_events WHERE message_id = ? ORDER BY id`,
 		msgID,
 	)
 	if err != nil {
@@ -6545,7 +6565,7 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	for rows.Next() {
 		e := &DeliveryEvent{}
 		var raw string
-		if err := rows.Scan(&e.ID, &e.MessageID, &e.ProviderEventID, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
+		if err := rows.Scan(&e.ID, &e.MessageID, &e.ProviderEventID, &e.ProviderKind, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
 			e.Raw = json.RawMessage(raw)
 			out = append(out, e)
 		}
@@ -6555,7 +6575,7 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 
 func dbDeliveryEventCounts(db *sql.DB, msgID int64) map[string]int {
 	rows, err := db.Query(
-		`SELECT kind, COUNT(*) FROM delivery_events WHERE message_id = ? GROUP BY kind`,
+		`SELECT effective_kind, COUNT(*) FROM effective_delivery_events WHERE message_id = ? GROUP BY effective_kind`,
 		msgID,
 	)
 	if err != nil {

@@ -30,6 +30,9 @@ func recoverChannelDelivery(ctx *sdk.AppCtx, pid string, channelID int64, transp
 	if _, err = tx.Exec(`UPDATE contact_channel_delivery_state SET delivery_evidence=NULL,status='active',status_reason=?,status_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),consecutive_soft_bounces=0,quarantined=0,quarantined_at=NULL WHERE project_id=? AND channel_id=? AND transport=?`, reason, pid, channelID, transport); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(`UPDATE crm_delivery_event_contributions SET active_soft=0 WHERE project_id=? AND channel_id=? AND transport=?`, pid, channelID, transport); err != nil {
+		return err
+	}
 	if err = queueCRMEvent(tx, pid, "contact.channel.deliverability.changed", map[string]any{"contact_id": contactID, "channel_id": channelID, "transport": transport, "recovery_reason": reason}); err != nil {
 		return err
 	}
