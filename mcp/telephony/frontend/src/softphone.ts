@@ -166,13 +166,16 @@ export class HeadlessSoftphone {
     if (this.disposed || generation !== this.generation || this.cancellation.signal.aborted) throw new Error("Softphone operation cancelled");
   }
   private invalidate(): number {
+    this.runtime.cancelPreparation?.();
     this.automaticRecovery?.stop();this.automaticRecovery=undefined;this.uncertainAttachment=undefined;
     this.cancellation.abort();
     this.cancellation = new AbortController();
     return ++this.generation;
   }
   private current(generation: number) { return !this.disposed && generation === this.generation; }
-  private finish(generation: number) { if (this.current(generation)) this.update({ busy: false }); }
+  private finish(generation: number) {
+    if (this.current(generation)) { this.runtime.cancelPreparation?.(); this.update({ busy: false }); }
+  }
   // Device permission and audio startup may never settle. Cancellation must
   // free controls immediately; the runtime still owns cleanup of late devices.
   private cancellable<T>(pending: Promise<T>, generation: number): Promise<T> {
@@ -341,6 +344,7 @@ export class HeadlessSoftphone {
       // With a write in flight, retain the busy lock until its outcome is
       // known and the cancelled operation cleans up any accepted call.
       this.cancellation.abort();
+      this.runtime.cancelPreparation?.();
       return;
     }
     const generation = this.invalidate();
@@ -501,7 +505,15 @@ export class HeadlessSoftphone {
           return pending;
         },
         sessionDiagnostics: () => ({session_id:session.session_generation}),
-        onSessionEvent: event => notify(() => this.options.onSessionEvent?.(safeMediaSessionEvent({...event,session_id:event.session_id??session.session_generation}))),
+        onSessionEvent: event => notify(() => {
+          const steps: Record<string,string> = {
+            audio_assets: "Loading audio resources…", microphone_device: "Opening microphone…",
+            audio_context: "Enabling browser playback…", audio_worklet: "Loading audio processor…",
+            audio_transport: "Connecting audio transport…",
+          };
+          if (this.snapshot.busy && event.outcome === "started" && steps[event.action]) this.update({detail:steps[event.action]});
+          this.options.onSessionEvent?.(safeMediaSessionEvent({...event,session_id:event.session_id??session.session_generation}));
+        }),
         onState: (audioState, detail,failure) => {
           if (!current()) return;
           if (audioState === "ended" && detail === "call.ended") {
@@ -536,7 +548,17 @@ export class HeadlessSoftphone {
       this.startPolling();
       this.startLease(session);
       audio.setMuted(this.snapshot.muted);
-      await this.cancellable(audio.start(this.client.mediaURL(session, this.audioOptions.mediaTransport), this.audioOptions), generation);
+      // The transport's socket timeout starts after device/worklet setup.
+      // Bound the complete operation too: those browser promises can stall.
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await this.cancellable(Promise.race([
+          audio.start(this.client.mediaURL(session, this.audioOptions.mediaTransport), this.audioOptions),
+          new Promise<never>((_, reject) => {
+            startupTimer = setTimeout(() => reject(new Error("Audio setup timed out. Check browser permissions and the network, then try again.")), this.audioOptions.mediaTransport === "auto" ? 40000 : 20000);
+          }),
+        ]), generation);
+      } finally { clearTimeout(startupTimer); }
       this.assertCurrent(generation);
       if (!current()) throw new Error(this.snapshot.detail || "Audio connection ended during setup");
       audio.setMuted(this.snapshot.muted);

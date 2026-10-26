@@ -80,12 +80,18 @@ test("installed headless client talks through real Telephony with host-owned UI"
   });
   // Wait for the initial stream reconciliation, then require a later change.
   await expect.poll(() => page.evaluate(() => (window as any).watchSamples.some((s: any) => s.trigger === "push"))).toBe(true);
+  await page.evaluate(() => {
+    const w=window as any, original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    w.answerDeviceOpens=0;w.restoreAnswerDevice=()=>{navigator.mediaDevices.getUserMedia=original;};
+    navigator.mediaDevices.getUserMedia=(constraints)=>{w.answerDeviceOpens++;return original(constraints);};
+  });
   await page.click("#answer");
   await expect.poll(() => page.evaluate(() => (window as any).watchCalls[0]?.status), { timeout: 1500 }).not.toBe("pending");
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(async () => (await page.request.get(gateway + "/fixture/audio-ready")).json()).toEqual({ ready: true });
+  expect(await page.evaluate(() => {const w=window as any;w.restoreAnswerDevice();return w.answerDeviceOpens;})).toBe(1);
   // Legacy trusted-operator Answer has no lease; explicit reconnect upgrades
   // it to a managed, authorized attach session without changing the carrier leg.
   if(await page.evaluate(()=>(window as any).phone.session.lease_seconds===undefined)) {
@@ -230,11 +236,15 @@ test("packaged softphone recovers after a long HTTP interruption",async({page,co
   window.RTCPeerConnection=class extends original{constructor(config?:RTCConfiguration){super({...config,iceTransportPolicy:"relay"});w.recoveryPeers.push(this);}};
  });
  await page.goto("/");await page.evaluate(({gateway,token})=>(window as any).loadPhone(gateway,token),{gateway,token:process.env.TELEPHONY_TEST_USER_TOKEN});
- await page.evaluate(rtc=>{const w=window as any;w.phone.configureAudio({mediaTransport:rtc?"webrtc":"websocket"});},rtc);await page.click("#answer");
+ await page.evaluate(rtc=>{const w=window as any;w.phone.configureAudio({mediaTransport:rtc?"webrtc":"websocket"});
+ const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);w.answerDeviceOpens=0;w.restoreAnswerDevice=()=>{navigator.mediaDevices.getUserMedia=original;};
+ navigator.mediaDevices.getUserMedia=(constraints)=>{w.answerDeviceOpens++;return original(constraints);};
+ },rtc);await page.click("#answer");
  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:20000}).toBe("live");
  await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
  if(rtc){const path=await page.evaluate(async()=>{const pc=(window as any).recoveryPeers.at(-1),stats=await pc.getStats();let candidate:any;stats.forEach((s:any)=>{if(s.type==="transport"){const p=stats.get(s.selectedCandidatePairId);candidate=stats.get(p?.localCandidateId);}});return {type:candidate?.candidateType,relayProtocol:candidate?.relayProtocol};});
  expect(path).toEqual({type:"relay",relayProtocol:"tcp"});}
+ expect(await page.evaluate(()=>{const w=window as any;w.restoreAnswerDevice();return w.answerDeviceOpens;})).toBe(1);
  const original=await page.evaluate(()=>{const w=window as any;w.phone.setMuted(true);return {id:w.phone.getSnapshot().callId,generation:w.phone.session.session_generation};});
  const blocked='**/api/apps/telephony/**';await page.route(blocked,route=>route.abort("internetdisconnected"));
  expect(await (await request.post(gateway+"/fixture/drop-browser")).json()).toEqual({ok:true});

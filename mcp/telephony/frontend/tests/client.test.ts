@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
 import { TelephonyClient, telephonyExtension, callTerminationLabel, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
@@ -710,4 +710,29 @@ test("removing a network override restores host playback and does not restart li
  await f.phone.answer("call-1");expect(f.startedOptions[0].playbackTargetMs).toBe(60);expect(f.startedOptions[0].playbackMinMs).toBe(60);
  f.phone.applyNetworkPolicy();expect(f.started).toBe(1);await f.phone.reconnect();
  expect(f.startedOptions[1]).toMatchObject({mediaTransport:"websocket",playbackTargetMs:100,playbackMinMs:80,playbackMaxMs:280});expect(f.startedOptions[1].networkProfile).toBeUndefined();f.phone.dispose();
+});
+
+
+test("device/worklet stall after answer releases the claim and allows a fresh answer",async()=>{
+ const f=fixture(),pending=deferred();let cancels=0;f.runtime.cancelPreparation=()=>{cancels++;};
+ f.setStart(()=>pending.promise);
+ const original=setTimeout;
+ const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:number,...args:any[])=>original(fn,ms===20000?5:ms,...args)) as typeof setTimeout);
+ try {
+  await expect(f.phone.answer("call-1")).rejects.toThrow("Audio setup timed out");
+  expect(f.requests.filter(r=>r.url.pathname.includes("/release/"))).toHaveLength(1);
+  expect(f.phone.getSnapshot().busy).toBe(false);expect(f.phone.getSnapshot().callId).toBeUndefined();
+  expect(f.stopped).toBe(1);expect(cancels).toBeGreaterThan(0);
+  f.setStart(async()=>{f.callbacks.onState?.("live");});await f.phone.answer("call-1");
+  pending.resolve();await Bun.sleep(0);
+  expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.stopped).toBe(1);
+ }finally{timer.mockRestore();f.phone.dispose();}
+});
+
+test("answer request failure and cancelled preflight release prepared local devices",async()=>{
+ const f=fixture();let cleaned=0;f.runtime.cancelPreparation=()=>{cleaned++;};
+ f.setResponse(async()=>new Response("gone",{status:410}));await expect(f.phone.answer("call-1")).rejects.toThrow();
+ expect(cleaned).toBeGreaterThanOrEqual(2);expect(f.started).toBe(0);
+ const gate=deferred();f.setPreflight(()=>gate.promise);const starting=f.phone.answer("call-1").catch(e=>e);
+ const before=cleaned;await f.phone.hangup();expect(cleaned).toBeGreaterThan(before);await starting;gate.resolve();f.phone.dispose();
 });

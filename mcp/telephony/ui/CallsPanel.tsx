@@ -236,7 +236,7 @@ interface Recording {
   playback_urls?: Partial<Record<"mix" | "caller" | "agent" | "original", string>>;
 }
 
-const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
+const LIVE_STATUSES = new Set(["initiated", "ringing", "answering", "in-progress", "answered"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "no-answer", "busy", "canceled"]);
 const CALL_COLUMNS = "8rem minmax(0,1fr) minmax(0,1fr) 8rem 7rem 6rem 7rem";
 const CONNECTED_NUMBER_COLUMNS = "minmax(12rem,1.3fr) 7rem minmax(8rem,0.8fr) minmax(10rem,1fr) minmax(11rem,1fr) minmax(9rem,0.8fr) minmax(12rem,1fr) minmax(11rem,0.9fr)";
@@ -1663,7 +1663,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-medium truncate">
-                          {softphoneState !== "live" ? (softphoneState === "error" ? "Audio error" : "Audio reconnecting") : selected.status === "answered" || selected.status === "in-progress"
+                          {softphoneState !== "live" ? (softphoneState === "error" ? "Audio error" : softphoneState === "connecting" ? "Connecting audio" : "Audio reconnecting") : selected.status === "answered" || selected.status === "in-progress"
                             ? "Connected"
                             : selected.status === "ringing"
                               ? "Destination ringing"

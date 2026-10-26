@@ -197,3 +197,15 @@ test("recent buffering recovers independently of lifetime mean and resets explic
  const reset=rtcStatistics(report(3000,1,10),next.previous);expect(reset.webrtc.jitterBufferIntervalMs).toBeUndefined();expect(reset.queueMs).toBe(0);
  const replaced=rtcStatistics(report(4000,1012,1200,43),next.previous);expect(replaced.webrtc.jitterBufferIntervalMs).toBeUndefined();
 });
+
+test("stalled RTC setup is bounded before signaling and auto can still fall back to PCM",async()=>{
+ const events:string[]=[];let late!:()=>void;
+ const original=setTimeout;
+ const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:number,...args:any[])=>original(fn,ms===18000?5:ms,...args)) as typeof setTimeout);
+ const audio=selectableAudio({},()=>connection("ws",events),()=>({...connection("rtc",events),start:()=>new Promise<void>(resolve=>{late=resolve;})}));
+ try{
+  await audio.start("ws://fixture",{...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,mediaTransport:"auto"});
+  expect(events).toContain("rtc:stop");expect(events).toContain("ws:start");
+  late();await Bun.sleep(0);expect(events.filter(e=>e==="ws:start")).toHaveLength(1);
+ }finally{audio.stop();timer.mockRestore();}
+});

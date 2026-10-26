@@ -4,6 +4,7 @@ import type { AppHandle } from "@apteva/web-sdk";
 import { embeddedAudioModules, loadAudioModules, type AudioModules } from "./audio-assets";
 import { selectableAudio, WebRTCAudioConnection } from "./webrtc-audio";
 import { measureAudioSetup } from "../../ui/audio-setup";
+import { AudioPreparation, type PreparedAudioDevices } from "../../ui/audio-preparation";
 
 export interface MicrophoneDevice { deviceId: string; label: string }
 export interface MicrophonePreview {
@@ -63,14 +64,15 @@ export interface AudioConnection {
 }
 export interface AudioRuntime {
   preflight(options: SoftphoneAudioOptions, emit?: (event: MediaSessionEvent) => void): Promise<void>;
+  /** Releases preparation not handed to a transport. */
+  cancelPreparation?(): void;
   /** Prepares immutable assets without opening devices or replacing live audio. */
   prepare?(options: SoftphoneAudioOptions, emit?: (event: MediaSessionEvent) => void): Promise<void>;
   create(callbacks: SoftphoneCallbacks): AudioConnection;
 }
 
 /** Source strings are inside the integrity-checked client bundle, not fetched separately. */
-function createWebSocketAudio(app?: AppHandle): AudioRuntime { return {
-  async preflight(options, emit) { await preflightAudio(app, options, emit); },
+function createWebSocketAudio(app: AppHandle | undefined, takePrepared: () => PreparedAudioDevices | undefined): Pick<AudioRuntime,"create"> { return {
   create(callbacks) {
     const session = new SoftphoneSession(callbacks);
     let modules: AudioModules | undefined;
@@ -85,7 +87,7 @@ function createWebSocketAudio(app?: AppHandle): AudioRuntime { return {
         try {
           modules = await measureAudioSetup("audio_assets", event => session.recordSessionEvent(event), () => app ? loadAudioModules(app) : Promise.resolve(embeddedAudioModules()));
           if (stopped) throw new Error("Audio session was cancelled");
-          await session.start(url, modules.urls[0], modules.urls[1], options);
+          await session.start(url, modules.urls[0], modules.urls[1], options, takePrepared());
         } catch (error) { stop(); throw error; }
       },
       stop,
@@ -100,9 +102,24 @@ function createWebSocketAudio(app?: AppHandle): AudioRuntime { return {
 }; }
 
 export function createBrowserAudio(app?: AppHandle): AudioRuntime {
-  const websocket = createWebSocketAudio(app);
+  let preparation: AudioPreparation | undefined;
+  const cancelPreparation = () => { preparation?.cancel(); preparation = undefined; };
+  const takePrepared = () => {
+    if (!preparation) return undefined;
+    const devices = preparation.take(); preparation = undefined; return devices;
+  };
+  const websocket = createWebSocketAudio(app, takePrepared);
   return {
-    preflight: (options, emit) => websocket.preflight(options, emit),
+    async preflight(options, emit) {
+      cancelPreparation();
+      const pending = new AudioPreparation(microphoneConstraints(options),
+        options.mediaTransport === "webrtc" || options.mediaTransport === "auto"
+          ? {latencyHint:"interactive"} : {sampleRate:24000,latencyHint:"interactive"}, emit);
+      preparation = pending;
+      try { await Promise.all([pending.ready, prepareAudioAssets(app, options, emit)]); }
+      catch (error) { pending.cancel(); if (preparation === pending) preparation = undefined; throw error; }
+    },
+    cancelPreparation,
     prepare: (options, emit) => prepareAudioAssets(app, options, emit),
     create(callbacks) {
       return selectableAudio(callbacks, () => websocket.create(callbacks), () => {
@@ -113,7 +130,7 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime {
             try {
               modules = await measureAudioSetup("audio_assets", event => connection.recordSessionEvent(event), () => app ? loadAudioModules(app, true) : Promise.resolve(embeddedAudioModules(true)));
               if (stopped) throw new Error("Audio session cancelled");
-              await connection.start(url, options, modules.urls[0]);
+              await connection.start(url, options, modules.urls[0], takePrepared());
             } catch (error) { connection.stop(); modules?.dispose(); modules=undefined; throw error; }
           },
           stop() { stopped=true; connection.stop(); modules?.dispose(); modules=undefined; },
@@ -134,16 +151,4 @@ async function prepareAudioAssets(app: AppHandle | undefined, options: Softphone
     const modules = await loadAudioModules(app, options.mediaTransport === "webrtc" || options.mediaTransport === "auto");
     modules.dispose();
   });
-}
-
-async function preflightAudio(app: AppHandle | undefined, options: SoftphoneAudioOptions, emit?: (event: MediaSessionEvent) => void): Promise<void> {
-  // Invoke permission during the user's action, and overlap script preparation.
-  // Each branch owns its cleanup even if the other fails or the host cancels.
-  await Promise.all([
-    measureAudioSetup("microphone_preflight", emit, async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
-      stream.getTracks().forEach(track => track.stop());
-    }),
-    prepareAudioAssets(app, options, emit),
-  ]);
 }

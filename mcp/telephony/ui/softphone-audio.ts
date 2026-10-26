@@ -2,6 +2,7 @@ import {validateRTCICEOptions} from "../frontend/src/rtc-ice";
 import { SOFTPHONE_CLIENT_VERSION } from "./client-version";
 import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
+import type { PreparedAudioDevices } from "./audio-preparation";
 import { measureAudioSetup } from "./audio-setup";
 import { mediaFailure, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
@@ -512,6 +513,7 @@ export class SoftphoneSession {
     workletURL: string,
     workerURL: string,
     options: SoftphoneAudioOptions = DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
+    prepared?: PreparedAudioDevices,
   ): Promise<void> {
     const playbackOptions = playbackBufferOptions(options);
     this.diagnostics.targetMs = playbackOptions.initialTargetMs;
@@ -521,7 +523,8 @@ export class SoftphoneSession {
     this.runtimeTelemetry.tick();
     this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
     try {
-      this.stream = await measureAudioSetup("microphone_device", event => this.recordSessionEvent(event), () => navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) }));
+      if (prepared) { this.stream = prepared.stream; this.ctx = prepared.context; }
+      this.stream = prepared?.stream ?? await measureAudioSetup("microphone_device", event => this.recordSessionEvent(event), () => navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) }));
       this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
@@ -536,8 +539,10 @@ export class SoftphoneSession {
         noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl,
         micInputGainDb: options.inputGainDB,
       };
-      try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
-      catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
+      if (!this.ctx) {
+        try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
+        catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
+      }
       this.runtimeTelemetry.context(this.ctx.state);
       if (this.ctx.state === "suspended") await measureAudioSetup("audio_context", event => this.recordSessionEvent(event), () => this.ctx!.resume());
       this.runtimeTelemetry.context(this.ctx.state);

@@ -4,6 +4,7 @@ import { SOFTPHONE_CLIENT_VERSION } from "../../ui/client-version";
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
+import type { PreparedAudioDevices } from "../../ui/audio-preparation";
 import { measureAudioSetup } from "../../ui/audio-setup";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, mediaDiagnosticID, mediaRecoveryContext, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
@@ -215,23 +216,25 @@ export class WebRTCAudioConnection implements AudioConnection {
   private diagnostics: SoftphoneDiagnostics={mediaTransport:"webrtc",codec:"opus",rttMs:null,queueMs:0,targetMs:60,underruns:null,droppedMs:0,maxQueueMs:0,audioContextRate:48000,websocketBufferedBytes:0,microphoneSampleRate:0,microphoneChannelCount:0,echoCancellation:null,noiseSuppression:null,autoGainControl:null,micActiveRmsDbfs:null,micPeakDbfs:null,micPostPeakDbfs:null,micInputGainDb:0,micLimiterReductionDb:0,captureSequenceGaps:0,playbackSequenceGaps:0,dropEvents:[]};
 
   constructor(private callbacks: SoftphoneCallbacks) {}
-  async start(url:string,options:SoftphoneAudioOptions,workletURL?:string):Promise<void> {
+  async start(url:string,options:SoftphoneAudioOptions,workletURL?:string,prepared?:PreparedAudioDevices):Promise<void> {
     this.options=options;this.workletURL=workletURL;
     if (!workletURL) throw new Error("WebRTC requires the shared Telephony audio processor");
     if (typeof RTCPeerConnection!=="function") throw new Error("WebRTC audio is unavailable in this browser");
     playbackBufferOptions(options);
-    await this.connect(url);
+    await this.connect(url,prepared);
   }
   private current(generation:number){return !this.stopped && this.generation===generation;}
   private guard(generation:number){if(!this.current(generation)) throw new Error("Audio session cancelled");}
-  private async connect(url:string):Promise<void> {
+  private async connect(url:string,prepared?:PreparedAudioDevices):Promise<void> {
     this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
     this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
     for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
     this.ready=this.peer=this.answered=this.reportedLive=false;this.mediaPathReady=undefined;this.mediaRevision=0;this.previous=undefined;this.quality=rtcQualityPolicy(options);this.pathHealth=new RTCPathHealth(options.networkProfile);this.appliedBitrate=undefined;
-    const stream=await measureAudioSetup("microphone_device", event=>this.recordSessionEvent(event), ()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)}));
+    // Adopt both resources before any await so cancellation closes both.
+    if(prepared){this.stream=prepared.stream;this.context=prepared.context;}
+    const stream=prepared?.stream ?? await measureAudioSetup("microphone_device", event=>this.recordSessionEvent(event), ()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)}));
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
     const mic=stream.getAudioTracks()[0];if(!mic) throw new Error("No microphone audio track");
@@ -241,9 +244,9 @@ export class WebRTCAudioConnection implements AudioConnection {
     mic.onmute=()=>this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_muted"});
     mic.onunmute=()=>this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_unmuted"});
     mic.onended=()=>{if(this.current(generation))this.disconnected(generation,"microphone_ended");};
-    this.context=new AudioContext({latencyHint:"interactive"});const context=this.context;
+    this.context=prepared?.context ?? new AudioContext({latencyHint:"interactive"});const context=this.context;
     context.onstatechange=()=>{this.runtime.context(context.state);this.updateLiveState();};
-    this.runtime.context(context.state);await measureAudioSetup("audio_context", event=>this.recordSessionEvent(event), ()=>context.resume());this.guard(generation);
+    this.runtime.context(context.state);if(context.state!=="running")await measureAudioSetup("audio_context", event=>this.recordSessionEvent(event), ()=>context.resume());this.guard(generation);
     if(options.outputDeviceId && "setSinkId" in context) await (context as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId);
     await measureAudioSetup("audio_worklet", event=>this.recordSessionEvent(event), ()=>context.audioWorklet.addModule(this.workletURL!));this.guard(generation);
     this.diagnostics.audioContextRate=context.sampleRate;
@@ -515,14 +518,38 @@ export class WebRTCAudioConnection implements AudioConnection {
 export function selectableAudio(callbacks:SoftphoneCallbacks, websocket:()=>AudioConnection, rtc:()=>AudioConnection):AudioConnection {
   let selected:AudioConnection|undefined,stopped=false,muted=false;
   const setupEvents: MediaSessionEvent[] = [];
+  let cancelStart: (()=>void) | undefined;
   return {
     async start(url,options){
       const choice=mediaTransport(options.mediaTransport);
-      const start=async(factory:()=>AudioConnection)=>{if(stopped)throw new Error("Audio session cancelled");const connection=factory();selected=connection;connection.setMuted(muted);try{for(const event of setupEvents.splice(0)){try{connection.recordSessionEvent?.(event);}catch{/* observational only */}}if(stopped)throw new Error("Audio session cancelled");await connection.start(url,options);if(stopped)throw new Error("Audio session cancelled");}catch(error){connection.stop();if(selected===connection)selected=undefined;throw error;}};
+      const start = async (factory:()=>AudioConnection) => {
+        if (stopped) throw new Error("Audio session cancelled");
+        const connection = factory(); selected = connection; connection.setMuted(muted);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          for (const event of setupEvents.splice(0)) {
+            try { connection.recordSessionEvent?.(event); } catch { /* observational only */ }
+          }
+          if (stopped) throw new Error("Audio session cancelled");
+          // Include device and worklet setup, not only the signaling socket.
+          // Each attempt gets its own deadline so auto can still fall back.
+          await Promise.race([
+            connection.start(url,options),
+            new Promise<never>((_,reject) => {
+              cancelStart = () => reject(new Error("Audio session cancelled"));
+              timer = setTimeout(()=>reject(new Error("Audio transport setup timed out")),18000);
+              if (stopped) cancelStart();
+            }),
+          ]);
+          if (stopped) throw new Error("Audio session cancelled");
+        } catch (error) {
+          connection.stop(); if (selected===connection) selected=undefined; throw error;
+        } finally { clearTimeout(timer); cancelStart=undefined; }
+      };
       if(choice==="websocket"){await start(websocket);return;}
       try{await start(rtc);}catch(error){if(choice!=="auto"||stopped||options.iceTransportPolicy==="relay"||permanentRTCFailure(error))throw error;safe(()=>callbacks.onSessionEvent?.({timestamp:new Date().toISOString(),action:"transport",outcome:"websocket_fallback"}));await start(websocket);}
     },
-    stop(){stopped=true;setupEvents.splice(0);selected?.stop();selected=undefined;},setMuted(value){muted=value;selected?.setMuted(value);},
+    stop(){stopped=true;cancelStart?.();setupEvents.splice(0);selected?.stop();selected=undefined;},setMuted(value){muted=value;selected?.setMuted(value);},
     setOutputVolume(value){selected?.setOutputVolume(value);},sendDTMF(digits){selected?.sendDTMF(digits);},
     recordSessionEvent(event){if(selected)selected.recordSessionEvent?.(event);else if(!stopped){setupEvents.push(safeMediaSessionEvent(event));if(setupEvents.length>20)setupEvents.shift();}},startRingback(country){selected?.startRingback?.(country);},stopRingback(){selected?.stopRingback?.();},
   };
