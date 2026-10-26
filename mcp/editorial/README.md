@@ -126,3 +126,7 @@ Stale revisions fail without changing data; re-read and retry the intended
 small merge. Merge never changes publisher links, release state or external
 posts. Legacy `releases_update.patch.results` still replaces the full results
 object and should not be used for worker ledger updates.
+
+## Brand production profiles
+
+Brands can store an optional `persona_id` and a canonical `operating_profile` in project settings. Use it for audience, positioning, voice, visual rules, content pillars, destinations, approval policies and named `production_profiles`. Persona Studio remains the source of identity assets. A persona is optional; storing profile settings grants no publishing or execution authority.

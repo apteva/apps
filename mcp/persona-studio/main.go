@@ -91,7 +91,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_item_create", Description: "Create a reusable item/product/prop/location/brand asset. Args: persona_id, name, kind?, description?, usage_rules?, visual_rules?, storage_file_ids?, metadata?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "kind": sString(), "description": sString(), "usage_rules": sString(), "visual_rules": sString(), "storage_file_ids": sArray("integer"), "metadata": sObject()}, []string{"persona_id", "name"}), Handler: a.toolItemCreate},
 		{Name: "persona_item_update", Description: "Update a reusable item. Args: id, patch object.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolItemUpdate},
 		{Name: "persona_item_list", Description: "List items. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolItemList},
-		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, source_images, source_image_limit, voice, avatar, storage_folder, options}). Image/video/avatar generation automatically ranks linked persona/item visual references. Persona video requires at least one visual reference, selects or validates a reference-to-video Media Studio model, and honors its source-image limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
+		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, source_images, source_image_limit, voice, avatar, storage_folder, options}). Image/video/avatar generation automatically ranks linked persona/item visual references. Persona video requires at least one visual reference, selects or validates a reference-to-video Media Studio model, and honors its source-image limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "brand_id": sString(), "production_profile": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
 		{Name: "persona_generate_pack", Description: "Generate a starter pack. Args: persona_id, campaign_id?, prompts? object, use_cache?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "campaign_id": sInteger(), "prompts": sObject(), "use_cache": sBool()}, []string{"persona_id"}), Handler: a.toolGeneratePack},
 		{Name: "persona_campaign_create", Description: "Create a campaign. Args: persona_id, name, brief?, platforms?, content_pillars?, status?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "brief": sString(), "platforms": sArray("string"), "content_pillars": sArray("string"), "status": sString()}, []string{"persona_id", "name"}), Handler: a.toolCampaignCreate},
 		{Name: "persona_create_clip_plan", Description: "Create a structured clip plan. Args: persona_id, brief, campaign_id?, asset_ids?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "brief": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id", "brief"}), Handler: a.toolCreateClipPlan},
@@ -996,12 +996,29 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			}
 		}
 	}
+	// Brand policy is resolved by Media Studio against Editorial. Include the
+	// routing references in the key and let that policy-aware cache validate
+	// every reuse against the current approved provider and identity.
+	for _, key := range []string{"brand_id", "production_profile"} {
+		if value := strArg(args, key); value != "" {
+			settings[key] = value
+		}
+	}
+	if assetType == "avatar" && settings["avatar"] == nil && persona.DefaultAvatarID != "" {
+		settings["avatar"] = persona.DefaultAvatarID
+	}
+	if assetType == "audio_tts" && settings["voice"] == nil && persona.DefaultVoiceID != "" {
+		settings["voice"] = persona.DefaultVoiceID
+	}
 	resolved := buildResolvedPrompt(persona, style, refs, items, prompt, assetType)
 	cacheKey := generationCacheKey(personaID, assetType, resolved, settings, refIDs(refs), itemIDs)
 
 	useCache := true
 	if _, ok := args["use_cache"]; ok {
 		useCache = boolArg(args, "use_cache")
+	}
+	if strArg(settings, "brand_id") != "" || strArg(settings, "production_profile") != "" {
+		useCache = false
 	}
 	if useCache {
 		if asset, ok := cachedAsset(ctx.AppDB(), pid, cacheKey); ok {

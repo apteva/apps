@@ -44,3 +44,7 @@ bun run test:browser
 ```
 
 Browser tests use deterministic API fixtures and cover desktop/mobile layout, empty states, safe Markdown, profile editing, saved learning results, service failures, and pagination. Backend regression tests cover delegated authorization, enrollment gates, migrations, file permissions, read cursors, content limits, and progress identity.
+
+## Brand production profiles
+
+Instructor profiles support an optional `persona_id` (zero clears it). This private production reference links the instructor to Persona Studio voice/avatar assets while course and learner records remain in Community. Public instructor payloads do not expose the production reference.

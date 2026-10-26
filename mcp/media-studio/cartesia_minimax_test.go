@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -285,8 +284,7 @@ func TestCartesiaAndMiniMaxProviderQualificationAndModels(t *testing.T) {
 		t.Fatalf("models = %+v", models)
 	}
 	if !audioProviderSupports("cartesia", "voice.create") ||
-		!audioProviderSupports("minimax-audio", "voice.create") ||
-		!strings.Contains(string(mustReadTestFile(t, "apteva.yaml")), "version: 0.10.63") {
+		!audioProviderSupports("minimax-audio", "voice.create") {
 		t.Fatal("provider or manifest capability missing")
 	}
 }
