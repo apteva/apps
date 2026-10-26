@@ -16,7 +16,9 @@ complaints and failures on other recipients keep their existing behavior.
 
 ## Rollout
 
-Release and install CRM first, then Messaging. CRM records the exact soft-bounce
+Release versions: CRM **0.9.26** and Messaging **0.13.61**.
+
+Install CRM first, then Messaging. CRM records the exact soft-bounce
 contribution of each delivery event, so a later correction removes only that
 contribution. It preserves other bounces, permanent delivery evidence, manual
 suppressions, complaints and unsubscribe state. A correction received before
