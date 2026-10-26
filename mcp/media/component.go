@@ -226,7 +226,7 @@ func newExecutorGrant(ctx context.Context, app *sdk.AppCtx, base string, timeout
 		folders = append(folders, folder)
 	}
 	raw, _ := json.Marshal(folders)
-	max := int64(parseConfigIntFallback(app.Config().Get("render_max_output_size_mb"), 2048)) * 1024 * 1024 * 2
+	max := int64(parseConfigIntFallback(app.Config().Get("render_max_output_size_mb"), 4096)) * 1024 * 1024 * 2
 	if _, err := app.AppDB().Exec(`INSERT INTO media_executor_grants(token_hash,project_id,expires_at,max_bytes,folders) VALUES(?,?,?,?,?)`, hash, app.CurrentProject(), time.Now().Add(time.Duration(timeout+60)*time.Second).Unix(), max, string(raw)); err != nil {
 		return "", "", err
 	}
