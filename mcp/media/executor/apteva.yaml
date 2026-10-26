@@ -1,0 +1,51 @@
+schema: apteva-app/v1
+name: media-executor
+display_name: Media Executor
+version: 0.15.0
+description: Private, bounded Media processing worker. Placement is managed by Server owned components.
+scopes: [project, global]
+requires:
+  permissions: [net.egress]
+provides:
+  http_routes:
+    - prefix: /_apteva/runtime/app/
+  mcp_tools:
+    - name: capabilities
+      description: Report available processing dependencies and execution limits.
+    - name: submit
+      description: Submit an idempotent, deadline-bounded processing plan from the owning Media installation.
+    - name: get
+      description: Inspect a processing attempt without replaying it.
+    - name: cancel
+      description: Cancel an attempt and confirm process-group termination.
+    - name: acknowledge
+      description: Compact an execution receipt after the parent durably records it, retaining the idempotency tombstone.
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: media-executor/v0.15.0
+    entry: mcp/media/executor
+  port: 8080
+  health_check: /health
+  startup_timeout_seconds: 120
+  package:
+    app_capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
+config_schema:
+  - name: work_capacity
+    type: text
+    default: "2"
+    description: Weighted processing capacity; control requests use a separate bounded lane.
+  - name: ffmpeg_path
+    type: text
+    default: ffmpeg
+    description: FFmpeg executable on the execution target.
+  - name: ffprobe_path
+    type: text
+    default: ffprobe
+    description: FFprobe executable on the execution target.
