@@ -100,3 +100,25 @@ func TestGoogleCreateRetriesOnlyExplicitConcurrentRejection(t *testing.T) {
 		}
 	}
 }
+
+func TestDemandGenUsesItsOwnNativeTargetBiddingStrategies(t *testing.T) {
+	field, payload := googleDemandGenBidding(bidMaximizeConversions, map[string]any{"target_cpa_cents": 125})
+	if field != "targetCpa" || payload["targetCpaMicros"] != "1250000" {
+		t.Fatalf("bad Demand Gen tCPA: %s %#v", field, payload)
+	}
+	field, payload = googleDemandGenBidding(bidMaximizeConvValue, map[string]any{"target_roas": 2.5})
+	if field != "targetRoas" || payload["targetRoas"] != 2.5 {
+		t.Fatalf("bad Demand Gen ROAS: %s %#v", field, payload)
+	}
+	if field, _ := googleDemandGenBidding(bidMaximizeConversions, map[string]any{}); field != bidMaximizeConversions {
+		t.Fatal("untargeted conversion bidding regressed")
+	}
+}
+
+func TestGoogleValueEligibilityFailureIsActionable(t *testing.T) {
+	raw := []byte(`{"error":{"details":[{"@type":"type.googleapis.com/google.ads.googleads.v23.errors.GoogleAdsFailure","errors":[{"errorCode":{"campaignError":"NOT_ENOUGH_CONVERSIONS"}}]}]}}`)
+	out := classifyProviderFailure(&adAccount{Platform: "google"}, "bulk_mutate", &sdk.ExecuteResult{Success: false, Status: 400, Data: raw})
+	if out["code"] != "provider_bidding_ineligible" || out["retryable"] != false || !strings.Contains(mcpErrorMessage(out), "conversion history") {
+		t.Fatalf("unhelpful eligibility error %#v", out)
+	}
+}

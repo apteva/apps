@@ -25,6 +25,8 @@ const fresh = () => ({
   name: "",
   goal: "channel_subscriptions",
   budget: "",
+  targetCpa: "",
+  targetRoas: "",
   budgetType: "daily",
   start: "",
   end: "",
@@ -73,6 +75,11 @@ export function demandCampaignInput(account: number, d: Draft) {
             ? "leads"
             : "engagement",
     optimization_goal: d.goal,
+    ...(d.goal === "conversion_value" && d.targetRoas
+      ? { target_roas: Number(d.targetRoas) }
+      : d.goal !== "link_clicks" && d.targetCpa
+        ? { target_cpa_cents: Math.round(Number(d.targetCpa) * 100) }
+        : {}),
     ...(d.action ? { conversion_action_resource_ids: [Number(d.action)] } : {}),
     [d.budgetType === "lifetime"
       ? "lifetime_budget_cents"
@@ -187,6 +194,8 @@ export default function CampaignBuilder({
           campaign_id: draft.campaign,
           name: draft.name + " audience",
           placements: draft.placements,
+          locations: commaIds(draft.locations),
+          languages: commaIds(draft.languages),
           ...(draft.audience ? { audience_ids: commaIds(draft.audience) } : {}),
           status: "PAUSED",
           idempotency_key: draft.key + ":group",
@@ -338,6 +347,15 @@ export default function CampaignBuilder({
           </select>
         </label>
         {label(`Budget (${account.currency})`, "budget", "number")}
+        {d.goal === "conversion_value"
+          ? label("Target ROAS (optional)", "targetRoas", "number")
+          : d.goal !== "link_clicks"
+            ? label(
+                `Target CPA (${account.currency}, optional)`,
+                "targetCpa",
+                "number",
+              )
+            : null}
         {label("Start date", "start", "date")}
         {label("End date", "end", "date")}
         <label className="grid gap-1 text-xs sm:col-span-2">

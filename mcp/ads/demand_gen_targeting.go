@@ -267,7 +267,7 @@ func (a *App) toolAdSetConfiguration(ctx *sdk.AppCtx, args map[string]any) (any,
 	if out := a.requireManagedEntity(ctx, acct, def, "ad_group", id); out != nil {
 		return out, nil
 	}
-	fields := []string{"ad_group.id", "ad_group.name", "ad_group.status", "campaign.id", "campaign.advertising_channel_type", "ad_group.optimized_targeting_enabled"}
+	fields := []string{"ad_group.id", "ad_group.name", "ad_group.status", "campaign.id", "campaign.advertising_channel_type", "ad_group.optimized_targeting_enabled", "ad_group.demand_gen_ad_group_settings.channel_controls.channel_strategy"}
 	for _, k := range []string{"youtube_in_stream", "youtube_in_feed", "youtube_shorts", "discover", "gmail", "display"} {
 		fields = append(fields, "ad_group.demand_gen_ad_group_settings.channel_controls.selected_channels."+k)
 	}
@@ -293,8 +293,20 @@ func (a *App) toolAdSetConfiguration(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	result := map[string]any{"adset_id": id, "campaign_id": firstString(mapAt(rows[0], "campaign"), "id"), "name": group["name"], "status": group["status"], "placements": placements, "placement_mode": "selected", "optimized_targeting": group["optimizedTargetingEnabled"], "locations": []string{}, "excluded_locations": []string{}, "languages": []string{}, "audience_ids": []string{}, "native": rows[0]}
 	if len(selected) == 0 {
-		result["placement_mode"] = "provider_default"
+		strategy := firstString(mapAt(settings, "channelControls"), "channelStrategy")
+		if strategy == "" {
+			strategy = "ALL_CHANNELS"
+		}
+		result["placement_mode"] = strings.ToLower(strategy)
+		for key := range demandGenPlacements {
+			if strategy == "ALL_OWNED_AND_OPERATED_CHANNELS" && key == "display" {
+				continue
+			}
+			placements = append(placements, key)
+		}
+		result["placements"] = placements
 	}
+
 	for _, row := range criteria {
 		v := mapAt(row, "adGroupCriterion")
 		key, id := "", ""

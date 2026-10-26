@@ -15,12 +15,14 @@ Supported goals:
 | --- | --- | --- |
 | `link_clicks` | `traffic` | Maximize clicks |
 | `conversions` | `leads` | Maximize conversions / target CPA |
-| `conversion_value` | `sales` | Maximize conversion value / target ROAS |
+| `conversion_value` | `sales` | Maximize conversion value / target ROAS, subject to Google conversion-history eligibility |
 | `channel_subscriptions` | `engagement` | Maximize conversions / target CPA |
 | `follow_on_views` | `engagement` | Maximize conversions / target CPA |
 
 Choose exactly one positive `daily_budget_cents` or `lifetime_budget_cents`.
-Total budgets require start and end dates. Budgets are not shared. Campaign
+Total budgets require start and end dates. Demand Gen uses native `targetCpa`
+and `targetRoas` strategies for targets in v23; Search-style embedded targets
+are not sent for this channel. Budgets are not shared. Campaign
 budget and goal configuration are created atomically. Dates use the account's
 calendar day, represented by the v23 `startDateTime` and `endDateTime` fields.
 
@@ -147,8 +149,12 @@ env GOWORK=off ADS_DEMAND_GEN_LIVE=1 \
 Read the API key at runtime from `ADS_LIVE_CONFIG` (default
 `~/.apteva-prod/apteva.json`). Optionally set `ADS_LIVE_AUDIENCE_ID` to reuse an
 existing grouped audience. Never commit credentials or evidence containing them.
-Provider approval, actual serving and paid attribution are separate from this
-paused-resource test.
+The current live account rejects value/ROAS bidding with
+`NOT_ENOUGH_CONVERSIONS`. This is verified as an expected provider eligibility
+restriction with a structured `provider_bidding_ineligible` error. Positive
+value-bidding creation requires an eligible account and remains unverified here.
+Conversion-count, click and target-CPA campaign creation are verified. Provider
+approval, actual serving and paid attribution are separate from this paused-resource test.
 
 Provider references: [campaigns](https://developers.google.com/google-ads/api/docs/demand-gen/create-campaign),
 [channel controls](https://developers.google.com/google-ads/api/docs/demand-gen/channel-controls),

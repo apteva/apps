@@ -26,6 +26,8 @@ function seed() {
     name: "Channel growth",
     goal: "channel_subscriptions",
     budget: "5",
+    targetCpa: "",
+    targetRoas: "",
     budgetType: "daily",
     start: "",
     end: "",

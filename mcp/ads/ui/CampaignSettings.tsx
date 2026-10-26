@@ -44,6 +44,8 @@ export default function CampaignSettings({
     });
     setCfg(c);
     setGoal(c.settings?.optimization_goal || "");
+    setCpa(c.target_cpa_cents ? String(c.target_cpa_cents / 100) : "");
+    setRoas(c.target_roas ? String(c.target_roas) : "");
     setBudget(
       String(
         Number(c.budget?.amountMicros || c.budget?.totalAmountMicros || 0) /
@@ -68,6 +70,8 @@ export default function CampaignSettings({
         if (current) {
           setCfg(c);
           setGoal(c.settings?.optimization_goal || "");
+          setCpa(c.target_cpa_cents ? String(c.target_cpa_cents / 100) : "");
+          setRoas(c.target_roas ? String(c.target_roas) : "");
           setBudget(
             String(
               Number(

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,6 +97,19 @@ func TestDemandGenLive(t *testing.T) {
 	ctx := newAdsCtx(t, pf)
 	a := &App{}
 	account := seedResourceTestAccount(t, ctx, "google", customer)
+	customerData, customerOut := a.execIntegrationTool(ctx, &adAccount{NativeAccountID: customer, Platform: "google"}, "search", map[string]any{"customer_id": customer, "query": "SELECT customer.id, customer.currency_code, customer.time_zone FROM customer"})
+	if customerOut != nil {
+		t.Fatal(customerOut)
+	}
+	customerRows := resultRows(customerData)
+	if len(customerRows) != 1 {
+		t.Fatal("customer context unavailable")
+	}
+	nativeCustomer := mapAt(customerRows[0], "customer")
+	if _, err := ctx.AppDB().Exec(`UPDATE ad_accounts SET currency=?,timezone_name=? WHERE id=?`, firstString(nativeCustomer, "currencyCode"), firstString(nativeCustomer, "timeZone"), account); err != nil {
+		t.Fatal(err)
+	}
+
 	// Assets are supplied explicitly to make this test repeatable for any linked account.
 	video := os.Getenv("ADS_LIVE_VIDEO_ASSET")
 	logo := os.Getenv("ADS_LIVE_LOGO_ASSET")
@@ -244,6 +258,24 @@ func TestDemandGenLive(t *testing.T) {
 	for _, kind := range []string{"placement", "creative"} {
 		r, e := a.toolPerformanceGet(ctx, map[string]any{"ad_account_id": account, "level": "campaign", "entity_ids": []any{cid}, "date_from": today, "date_to": today, "breakdown": kind, "refresh": true})
 		requireOK(t, r, e)
+	}
+	for index, spec := range []map[string]any{{"optimization_goal": "conversions", "objective": "leads"}, {"optimization_goal": "conversions", "objective": "leads", "bid_strategy": "target_cpa", "target_cpa_cents": 100}, {"optimization_goal": "conversion_value", "objective": "sales"}, {"optimization_goal": "conversion_value", "objective": "sales", "bid_strategy": "target_roas", "target_roas": 2.0}} {
+		args := map[string]any{"ad_account_id": account, "name": fmt.Sprintf("Apteva bid validation %s %d", stamp, index), "channel_type": "demand_gen", "daily_budget_cents": 500, "status": "PAUSED", "idempotency_key": fmt.Sprintf("bid-%s-%d", stamp, index)}
+		for k, v := range spec {
+			args[k] = v
+		}
+		created, e := a.toolCampaignCreate(ctx, args)
+		if firstString(spec, "optimization_goal") == "conversion_value" && mcpResultError(created) != nil && strings.Contains(mcpErrorMessage(mcpResultError(created)), "NOT_ENOUGH_CONVERSIONS") {
+			t.Log("Provider eligibility restriction verified: current account lacks conversion history for value/ROAS bidding")
+			continue
+		}
+		requireOK(t, created, e)
+		campaignID := firstString(asMap(created), "campaign_id")
+		removed, e := a.toolCampaignDelete(ctx, map[string]any{"ad_account_id": account, "campaign_id": campaignID})
+		requireOK(t, removed, e)
+		b, e := a.toolBudgetDelete(ctx, map[string]any{"ad_account_id": account, "budget_ids": []any{firstString(asMap(created), "budget_id")}})
+		requireOK(t, b, e)
+		t.Log("Validated bidding", spec)
 	}
 	t.Log("Real create/read/update/report and video/image/carousel formats passed; no paid delivery was enabled")
 

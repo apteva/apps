@@ -360,6 +360,7 @@ func (a *App) googleDemandGenCampaignCreate(ctx *sdk.AppCtx, acct *adAccount, ar
 	if goal == "link_clicks" && field != bidTargetSpend || goal == "conversion_value" && field != bidMaximizeConvValue || (goal == "channel_subscriptions" || goal == "follow_on_views" || goal == "conversions") && field != bidMaximizeConversions {
 		return mcpError("bidding strategy conflicts with optimization_goal"), nil
 	}
+	field, bidding := googleDemandGenBidding(field, args)
 	refs, out := a.googleGoalActions(ctx, acct, args)
 	if out != nil {
 		return out, nil
@@ -367,7 +368,7 @@ func (a *App) googleDemandGenCampaignCreate(ctx *sdk.AppCtx, acct *adAccount, ar
 	if (goal == "channel_subscriptions" || goal == "follow_on_views") && googleCampaignStatus(firstString(args, "status")) == "ENABLED" {
 		return mcpError("create channel engagement campaigns paused; verify channel linking before activation"), nil
 	}
-	campaign := map[string]any{"resourceName": googleCampaignResource(acct.NativeAccountID, "-2"), "name": name, "advertisingChannelType": "DEMAND_GEN", "status": googleCampaignStatus(firstString(args, "status")), "campaignBudget": budget["resourceName"], "containsEuPoliticalAdvertising": googleEUPoliticalDeclaration(args), field: googleBiddingPayload(field, args)}
+	campaign := map[string]any{"resourceName": googleCampaignResource(acct.NativeAccountID, "-2"), "name": name, "advertisingChannelType": "DEMAND_GEN", "status": googleCampaignStatus(firstString(args, "status")), "campaignBudget": budget["resourceName"], "containsEuPoliticalAdvertising": googleEUPoliticalDeclaration(args), field: bidding}
 	for _, k := range []string{"start_time", "end_time"} {
 		if v := firstString(args, k); v != "" {
 			date, err := demandGenDate(v, k == "end_time")
@@ -635,4 +636,16 @@ func validateDemandGenBids(args map[string]any, goal string) error {
 		return fmt.Errorf("target_cpa_cents requires conversion-count optimization")
 	}
 	return nil
+}
+
+// Demand Gen uses dedicated target strategies in v23. Search's embedded targets
+// on MaximizeConversions/MaximizeConversionValue are rejected for this channel.
+func googleDemandGenBidding(field string, args map[string]any) (string, map[string]any) {
+	if field == bidMaximizeConversions && intArg(args, "target_cpa_cents", 0) > 0 {
+		return "targetCpa", map[string]any{"targetCpaMicros": googleMicros(intArg(args, "target_cpa_cents", 0))}
+	}
+	if field == bidMaximizeConvValue && floatArg(args, "target_roas") > 0 {
+		return "targetRoas", map[string]any{"targetRoas": floatArg(args, "target_roas")}
+	}
+	return field, googleBiddingPayload(field, args)
 }

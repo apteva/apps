@@ -162,6 +162,13 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 		}
 	}
 
+	if acct != nil && acct.Platform == "google" && res != nil && res.Status == 400 && googleConversionHistoryRestriction(res.Data) {
+		out = mcpError("Google Ads value/ROAS bidding is unavailable for this account (NOT_ENOUGH_CONVERSIONS). More conversion history is required; select conversion-count/click bidding or an eligible account.")
+		out["code"] = "provider_bidding_ineligible"
+		out["provider_code"] = "NOT_ENOUGH_CONVERSIONS"
+		out["provider_status"] = 400
+		out["retryable"] = false
+	}
 	if acct != nil && acct.Platform == "google" && res != nil && res.Status == 400 && googleConcurrentRejection(res.Data) {
 		out["code"] = "provider_concurrent_modification"
 		out["retryable"] = true
@@ -305,4 +312,23 @@ func googleConcurrentRejection(raw []byte) bool {
 		}
 	}
 	return found
+}
+
+func googleConversionHistoryRestriction(raw []byte) bool {
+	var v map[string]any
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	for _, detail := range asSlice(mapAt(v, "error")["details"]) {
+		d := asMap(detail)
+		if !strings.HasSuffix(firstString(d, "@type"), ".errors.GoogleAdsFailure") {
+			continue
+		}
+		for _, e := range asSlice(d["errors"]) {
+			if firstString(mapAt(asMap(e), "errorCode"), "campaignError") == "NOT_ENOUGH_CONVERSIONS" {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -21,7 +21,7 @@ func (a *App) toolCampaignConfiguration(ctx *sdk.AppCtx, args map[string]any) (a
 	if out := a.requireManagedCampaign(ctx, acct, id); out != nil {
 		return out, nil
 	}
-	rows, out := a.googleResourceRows(ctx, acct, "SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.maximize_conversions.target_cpa_micros, campaign.maximize_conversion_value.target_roas, campaign.campaign_budget, campaign_budget.amount_micros, campaign_budget.total_amount_micros, campaign_budget.period FROM campaign WHERE campaign.id = "+id)
+	rows, out := a.googleResourceRows(ctx, acct, "SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.maximize_conversions.target_cpa_micros, campaign.maximize_conversion_value.target_roas, campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign.campaign_budget, campaign_budget.amount_micros, campaign_budget.total_amount_micros, campaign_budget.period FROM campaign WHERE campaign.id = "+id)
 	if out != nil {
 		return out, nil
 	}
@@ -38,6 +38,22 @@ func (a *App) toolCampaignConfiguration(ctx *sdk.AppCtx, args map[string]any) (a
 		budget = mapAt(rows[0], "campaign_budget")
 	}
 	result := map[string]any{"campaign_id": id, "name": campaign["name"], "status": campaign["status"], "channel_type": strings.ToLower(firstString(campaign, "advertisingChannelType", "advertising_channel_type")), "bidding_strategy": campaign["biddingStrategyType"], "start_time": campaign["startDateTime"], "end_time": campaign["endDateTime"], "budget": budget, "settings": cfg, "native": rows[0]}
+	if value := firstString(mapAt(campaign, "targetCpa"), "targetCpaMicros"); value != "" {
+		result["target_cpa_cents"] = int64ArgAny(value) / 10000
+	} else if value := firstString(mapAt(campaign, "maximizeConversions"), "targetCpaMicros"); value != "" {
+		result["target_cpa_cents"] = int64ArgAny(value) / 10000
+	}
+	if value := floatArg(mapAt(campaign, "targetRoas"), "targetRoas"); value > 0 {
+		result["target_roas"] = value
+	} else if value := floatArg(mapAt(campaign, "maximizeConversionValue"), "targetRoas"); value > 0 {
+		result["target_roas"] = value
+	}
+	if value := firstString(budget, "amountMicros"); value != "" {
+		result["daily_budget_cents"] = int64ArgAny(value) / 10000
+	}
+	if value := firstString(budget, "totalAmountMicros"); value != "" {
+		result["lifetime_budget_cents"] = int64ArgAny(value) / 10000
+	}
 	if firstString(campaign, "advertisingChannelType", "advertising_channel_type") == "DEMAND_GEN" {
 		goals, out := a.googleResourceRows(ctx, acct, "SELECT conversion_goal_campaign_config.campaign, conversion_goal_campaign_config.goal_config_level, conversion_goal_campaign_config.custom_conversion_goal FROM conversion_goal_campaign_config WHERE conversion_goal_campaign_config.campaign = 'customers/"+acct.NativeAccountID+"/campaigns/"+id+"'")
 		if out != nil {
@@ -138,14 +154,19 @@ func (a *App) googleDemandGenCampaignUpdate(ctx *sdk.AppCtx, acct *adAccount, ar
 		if goal == "link_clicks" && field != bidTargetSpend || goal == "conversion_value" && field != bidMaximizeConvValue || (goal == "conversions" || goal == "channel_subscriptions" || goal == "follow_on_views") && field != bidMaximizeConversions {
 			return mcpError("bidding conflicts with optimization_goal"), nil
 		}
-		expected := map[string]string{bidMaximizeConversions: "MAXIMIZE_CONVERSIONS", bidMaximizeConvValue: "MAXIMIZE_CONVERSION_VALUE", bidTargetSpend: "TARGET_SPEND"}[field]
+		field, bidding := googleDemandGenBidding(field, merged)
+		expected := map[string]string{bidMaximizeConversions: "MAXIMIZE_CONVERSIONS", bidMaximizeConvValue: "MAXIMIZE_CONVERSION_VALUE", bidTargetSpend: "TARGET_SPEND", "targetCpa": "TARGET_CPA", "targetRoas": "TARGET_ROAS"}[field]
 		if firstString(campaign, "biddingStrategyType", "bidding_strategy_type") != expected || args["bid_strategy"] != nil || args["target_cpa_cents"] != nil || args["target_roas"] != nil {
-			update[field] = googleBiddingPayload(field, merged)
+			update[field] = bidding
 			switch field {
 			case bidMaximizeConversions:
 				fields = append(fields, "maximize_conversions.target_cpa_micros")
 			case bidMaximizeConvValue:
 				fields = append(fields, "maximize_conversion_value.target_roas")
+			case "targetCpa":
+				fields = append(fields, "target_cpa.target_cpa_micros")
+			case "targetRoas":
+				fields = append(fields, "target_roas.target_roas")
 			case bidTargetSpend:
 				fields = append(fields, "target_spend.cpc_bid_ceiling_micros")
 			}
