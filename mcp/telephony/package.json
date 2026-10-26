@@ -17,6 +17,8 @@
     "test:network:speech": "env GOWORK=off go test -run \"^TestNetworkSpeechReplay$\" -count=1 -v .",
     "test:call-inspector": "bun test ui/call-diagnostics.test.ts && bunx --no-install playwright test -c frontend/call-inspector.playwright.config.ts",
     "test:call-statistics": "bun test ui/call-statistics.test.ts && bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts",
+    "test:auto-answer": "bun test frontend/tests/auto-answer.test.ts && env GOWORK=off go test -run \"^TestAutoAnswer\" -count=1 .",
+    "test:auto-answer:browser": "env GOWORK=off go test -tags integration -run \"^TestAutoAnswerRealBrowserPickup$\" -count=1 -timeout 90s -v .",
     "test:managed-media": "env GOWORK=off go test -tags integration -run \"^TestManagedRuntimeAutomaticBrowserAnswerAndRenewal$\" -count=1 -timeout 2m -v ."
   },
   "devDependencies": {

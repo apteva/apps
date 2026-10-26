@@ -1,3 +1,4 @@
+import AutoAnswerSettings,{AutoAnswerAvailability} from "./AutoAnswerSettings";
 import type {NetworkPolicyView} from "../frontend/src/network-policy";
 import NetworkSettings,{NetworkCheckControl} from "./NetworkSettings";
 import TurnSettings,{type TURNPolicyView} from "./TurnSettings";
@@ -1078,6 +1079,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     return `${API}${path}${sep}project_id=${encodeURIComponent(projectId)}`;
   }, [projectId]);
 
+ const selfAutoAnswerRequest=useCallback((body:import("../frontend/src/auto-answer").AutoAnswerPolicyRequest)=>telephony.autoAnswerPolicy(body),[telephony]);
  const selfTURNRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(withProject("/softphone/turn-policy"),body),[withProject]);
  const selfNetworkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(withProject("/softphone/network-policy"),body).then(view=>{phone?.applyNetworkPolicy(view.configured===false?undefined:view.effective);return view}),[withProject,phone]);
 
@@ -1268,7 +1270,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const terminalCount = calls.length - activeCount;
 
   // The same controller consumes authoritative call state in both hosts.
-  useEffect(() => { for (const call of calls) phone?.observeCall(call); }, [calls, phone]);
+  useEffect(() => { phone?.observeCalls(calls.map(call=>({...call,peer_kind:call.peerKind,from_number:call.fromNumber,to_number:call.toNumber,ring_offers:call.ringOffers,routing_waiting:call.routingWaiting})) as TelephonyCall[]); }, [calls, phone]);
 
   const hangup = async (call: Pick<Call, "id" | "status">) => {
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
@@ -1380,6 +1382,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   return (
     <div ref={layout.ref} className={`${visible ? "h-full flex-1" : "shrink-0"} min-h-0 min-w-0 flex flex-col bg-bg text-text`}>
+      <AutoAnswerAvailability phone={phone} state={phoneState.autoAnswer}/>
+
       {softphoneCallId ? <div aria-label="Active call controls" className="shrink-0 sticky top-0 z-10 border-b border-border bg-bg p-3">
         <div className="flex flex-wrap items-center gap-2">
           <button className="min-h-11 min-w-0 flex-1 text-left" onClick={() => {showCalls?.(); setSelectedId(softphoneCallId); setDialerOpen(false);}}>
@@ -1587,7 +1591,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
               />
               <div className="border-t border-border p-4 space-y-4">
-                <NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+                <AutoAnswerSettings request={selfAutoAnswerRequest}/><NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                   value={audioOptions}
                   disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -1718,7 +1722,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
               ) : null}
 
-              <NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+              <AutoAnswerSettings request={selfAutoAnswerRequest}/><NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                 value={audioOptions}
                 disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -2090,6 +2094,7 @@ function NumbersView({ projectId }: NativePanelProps) {
  const carrierMediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/carrier-media"),body),[endpoint]);
  const sipAudioProfileRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/sip-audio-profile"),body),[endpoint]);
  const turnRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(endpoint("/numbers/turn-policy"),body),[endpoint]);
+ const autoAnswerRequest=useCallback((body:import("../frontend/src/auto-answer").AutoAnswerPolicyRequest)=>postJSON<import("../frontend/src/auto-answer").AutoAnswerPolicyView>(endpoint("/softphone/auto-answer-policy"),{...body}),[endpoint]);
  const networkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(endpoint("/numbers/network-policy"),body),[endpoint]);
  const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
@@ -2370,7 +2375,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </button>
           </header>
 
-          <div className="px-4 py-2 space-y-2"><NetworkSettings request={networkRequest} admin/><TurnSettings request={turnRequest} admin/></div>
+          <div className="px-4 py-2 space-y-2"><AutoAnswerSettings request={autoAnswerRequest} admin/><NetworkSettings request={networkRequest} admin/><TurnSettings request={turnRequest} admin/></div>
           <div className="px-4 py-2 flex flex-wrap gap-2">
             <button type="button" onClick={() => setSipSettings({route:"",label:"Project defaults"})} className="rounded border border-border px-2 py-1 text-xs">SIP media defaults</button>
             {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"

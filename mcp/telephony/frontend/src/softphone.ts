@@ -1,3 +1,4 @@
+import {AutomaticAnswer,type AutoAnswerSnapshot} from "./auto-answer";
 import {validateNetworkPolicy,type NetworkPolicy} from "./network-policy";
 import {withNetworkAbort,type NetworkCheckResult,type NetworkCheckOptions} from "./network-check";
 import { AudioRecoveryLoop } from "./audio-recovery";
@@ -22,6 +23,7 @@ export function phaseForStatus(status?: string): SoftphonePhase {
 }
 
 export interface SoftphoneSnapshot {
+  readonly autoAnswer?:AutoAnswerSnapshot;
   readonly callId?: string;
  readonly networkCheck?: NetworkCheckResult;
  readonly networkChecking?:boolean;
@@ -44,6 +46,7 @@ export interface SoftphoneOptions {
  /** Idle-only network readiness checks. Enabled by the bundled panel, opt-in for existing hosts. */
  networkCheck?: boolean;
  onNetworkCheck?: (result:NetworkCheckResult)=>void;
+  onAutoAnswer?: (value:AutoAnswerSnapshot)=>void;
   onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
 	/** Applied to the shared browser runtime; defaults to websocket. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
@@ -93,6 +96,9 @@ export class HeadlessSoftphone {
  private networkRequest?:AbortController;
  private readonly networkChanged=()=>{if(this.disposed)return;if(this.snapshot.networkCheck)this.update({networkCheck:{...this.snapshot.networkCheck,state:"inconclusive"}});this.scheduleNetworkCheck(1000);};
   private readonly interval: number;
+  private readonly autoAnswer:AutomaticAnswer;
+  private autoPrepared=false;
+  private automaticAnswerStartedAt?:number;
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
@@ -102,6 +108,13 @@ export class HeadlessSoftphone {
     playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");
+    this.autoAnswer=new AutomaticAnswer(client,{
+      busy:()=>this.disposed||this.snapshot.busy||Boolean(this.session)||Boolean(this.hangingUp),
+      prepare:async()=>{this.cancelNetworkCheck();await this.runtime.preflight(this.audioOptions);this.autoPrepared=true;},
+      releasePreparation:()=>{if(this.autoPrepared){this.runtime.cancelPreparation?.();this.autoPrepared=false;}},
+      answer:(id,dest,session)=>this.answer(id,{destination_id:dest,auto_answer_session:session}),
+      changed:value=>{this.update({autoAnswer:value});try{this.options.onAutoAnswer?.(value);}catch{/* observer isolation */}},
+    },this.interval!==0);
     if(options.networkCheck){globalThis.addEventListener?.("online",this.networkChanged);this.scheduleNetworkCheck(500+Math.random()*15000);}
   }
 
@@ -165,8 +178,8 @@ export class HeadlessSoftphone {
   private assertCurrent(generation: number) {
     if (this.disposed || generation !== this.generation || this.cancellation.signal.aborted) throw new Error("Softphone operation cancelled");
   }
-  private invalidate(): number {
-    this.runtime.cancelPreparation?.();
+  private invalidate(keepPreparation=false): number {
+    if(!keepPreparation){this.runtime.cancelPreparation?.();this.autoPrepared=false;}
     this.automaticRecovery?.stop();this.automaticRecovery=undefined;this.uncertainAttachment=undefined;
     this.cancellation.abort();
     this.cancellation = new AbortController();
@@ -187,11 +200,11 @@ export class HeadlessSoftphone {
       if (!this.current(generation) || signal.aborted) cancel();
     });
   }
-  private begin(requireIdle: boolean): number {
+  private begin(requireIdle: boolean,keepPreparation=false): number {
  this.cancelNetworkCheck();
     this.assertOpen();
     if (this.snapshot.busy || this.hangingUp || (requireIdle && this.session)) throw new Error("Softphone already has an active operation or call");
-    const generation = this.invalidate();
+    const generation = this.invalidate(keepPreparation);
     this.update({ busy: true, detail: undefined });
     return generation;
   }
@@ -241,13 +254,28 @@ export class HeadlessSoftphone {
     } finally { this.finish(generation); }
   }
 
+  /** Explicit session opt-in; invoke from a user gesture to prepare browser audio. */
+  setAutoAnswerAvailable(available:boolean,options:{takeover?:boolean}={}):Promise<void>{return this.autoAnswer.setAvailable(available,options.takeover);}
+  answerAutoAnswerNow():void{this.autoAnswer.answerNow();}
+  cancelAutoAnswer(callId?:string):void{this.autoAnswer.cancel(callId);}
+  /** Hosts that disable polling feed the same complete permission-scoped call list. */
+  observeCalls(calls:Call[]):void{for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
-    const generation = this.begin(true);
+    if(!request.auto_answer_session)this.autoAnswer.cancel(id);
+    const prepared=Boolean(request.auto_answer_session&&this.autoPrepared&&this.runtime.isPrepared?.()!==false);
+    const generation = this.begin(true,prepared);
     let claimed: CallSession | undefined;
     let attached = false;
     try {
       this.assertCurrent(generation);
-      const setupEvents = await this.prepareAudio(generation, true);
+      const setupEvents = prepared ? [] : await this.prepareAudio(generation, true);
+      this.autoPrepared=false;
+      this.automaticAnswerStartedAt=request.auto_answer_session?Date.now():undefined;
+      if(this.automaticAnswerStartedAt){
+        const offered=this.snapshot.autoAnswer?.offerReceivedAt;
+        if(offered)setupEvents.push({timestamp:new Date(offered).toISOString(),action:"automatic_answer",outcome:"offer_received"});
+        setupEvents.push({timestamp:new Date(this.automaticAnswerStartedAt).toISOString(),action:"automatic_answer",outcome:"answer_started",code:this.snapshot.autoAnswer?.source,duration_ms:offered?this.automaticAnswerStartedAt-offered:undefined});
+      }
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
@@ -520,7 +548,10 @@ export class HeadlessSoftphone {
             this.observeCall({ id: session.call_id, status: "completed" });
             return;
           }
-          if(audioState==="live")this.hasLiveAudio=true;
+          if(audioState==="live"){
+            this.hasLiveAudio=true;
+            if(this.automaticAnswerStartedAt){this.reportSessionEvent({timestamp:new Date().toISOString(),action:"automatic_answer",outcome:"audio_connected",duration_ms:Date.now()-this.automaticAnswerStartedAt});this.automaticAnswerStartedAt=undefined;}
+          }
           this.update({ audioState, detail });
           this.scheduleStatusPoll?.();
           if (current() && (audioState === "error" || audioState === "ended")) {
@@ -715,6 +746,7 @@ export class HeadlessSoftphone {
   dispose(): void {
  this.cancelNetworkCheck();globalThis.removeEventListener?.("online",this.networkChanged);
     if (this.disposed) return;
+    this.autoAnswer.dispose();
     this.disposed = true;
     this.invalidate();
     this.listeners.clear();

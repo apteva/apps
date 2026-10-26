@@ -48,6 +48,9 @@ jobs:
       - name: Managed dashboard origins and Audio Health race checks
         run: go test -race -count=1 -run '^Test(RuntimeDashboard|ManagedRuntimeBrowser|AudioDashboard)' .
         working-directory: mcp/telephony
+      - name: Automatic pickup policy and ownership races
+        run: go test -race -count=1 -run '^TestAutoAnswer' .
+        working-directory: mcp/telephony
       - name: Statistics access and snapshot race checks
         run: go test -race -count=1 -run '^TestCallStatistics' -skip '^TestCallStatisticsDSTAndIndexWithLargeHistory$' .
         working-directory: mcp/telephony
@@ -98,7 +101,7 @@ jobs:
           bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts
         working-directory: mcp/telephony
       - name: Compiled sidecar Chromium, network checks, TURN recovery and managed renewal
-        run: go test -tags integration -run '^Test(Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal|NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
+        run: go test -tags integration -run '^Test(AutoAnswerRealBrowserPickup|ManagedRuntimeAutomaticBrowserAnswerAndRenewal|Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal|NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony
         env:
           TELEPHONY_NETWORK_BROWSER_RESULTS: /tmp/telephony-network-paths.json

@@ -48,6 +48,8 @@ export class AudioPreparation {
     finally { clearTimeout(timer); this.cancelWait = undefined; }
   }
 
+  isReady():boolean { return this.completed && !this.cancelled && this.context?.state === "running" && Boolean(this.stream?.getAudioTracks().some(track=>track.readyState === "live")); }
+
   take(): PreparedAudioDevices {
     if (!this.completed || this.cancelled || !this.stream || !this.context) throw Error("Audio preparation is unavailable");
     if (!this.stream.getAudioTracks().some(track => track.readyState === "live")) throw Error("Microphone disconnected before audio setup. Select a microphone and try again.");

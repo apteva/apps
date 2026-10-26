@@ -66,6 +66,7 @@ export interface AudioRuntime {
   preflight(options: SoftphoneAudioOptions, emit?: (event: MediaSessionEvent) => void): Promise<void>;
   /** Releases preparation not handed to a transport. */
   cancelPreparation?(): void;
+  isPrepared?():boolean;
   /** Prepares immutable assets without opening devices or replacing live audio. */
   prepare?(options: SoftphoneAudioOptions, emit?: (event: MediaSessionEvent) => void): Promise<void>;
   create(callbacks: SoftphoneCallbacks): AudioConnection;
@@ -120,6 +121,7 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime {
       catch (error) { pending.cancel(); if (preparation === pending) preparation = undefined; throw error; }
     },
     cancelPreparation,
+    isPrepared:()=>preparation?.isReady()??false,
     prepare: (options, emit) => prepareAudioAssets(app, options, emit),
     create(callbacks) {
       return selectableAudio(callbacks, () => websocket.create(callbacks), () => {

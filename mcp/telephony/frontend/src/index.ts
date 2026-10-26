@@ -25,3 +25,5 @@ export type {DirectTelephonyConnection, BrowserCredential} from "./runtime-trans
 export type {NetworkPolicy,NetworkPolicyView} from "./network-policy";
 export {DEFAULT_NETWORK_POLICY} from "./network-policy";
 export type {NetworkCheckOptions,NetworkCheckResult,NetworkPathResult,NetworkCheckPath} from "./network-check";
+
+export type {AutoAnswerPolicy,AutoAnswerPolicyRequest,AutoAnswerPolicyView,AutoAnswerSnapshot,AutoAnswerEffective} from "./auto-answer";

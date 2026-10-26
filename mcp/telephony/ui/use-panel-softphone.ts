@@ -18,6 +18,7 @@ export function usePanelSoftphone(projectId: string, installId: number, options:
       mediaTransport: callbacks.current.mediaTransport,
       pollIntervalMs: 0, // CallsView already watches the call list.
       ringback: callbacks.current.ringback ?? true, // The bundled panel plays ringback; the SDK default stays off.
+      onAutoAnswer:value=>callbacks.current.onAutoAnswer?.(value),
       onLevels: (mic, speaker) => callbacks.current.onLevels?.(mic, speaker),
       onDiagnostics: value => callbacks.current.onDiagnostics?.(value),
       onNotice: value => callbacks.current.onNotice?.(value),

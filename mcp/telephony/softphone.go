@@ -1061,6 +1061,15 @@ func logSoftphone(msg string, args ...any) {
 // ─── /softphone/... — panel actions ────────────────────────────────
 
 func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/softphone/auto-answer-") {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		a.handleAutoAnswer(w, r, project)
+		return
+	}
 	// /softphone/media/ has its own NoAuth route; a request reaching this
 	// authenticated handler with that prefix means the mux matched the shorter
 	// pattern, so reject rather than treating it as an action.
@@ -1253,9 +1262,12 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 }
 
 func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, callID string) {
+	a.autoAnswerMu.Lock()
+	defer a.autoAnswerMu.Unlock()
 	var request struct {
-		DestinationID string `json:"destination_id"`
-		Rejoin        bool   `json:"rejoin"`
+		DestinationID     string `json:"destination_id"`
+		Rejoin            bool   `json:"rejoin"`
+		AutoAnswerSession string `json:"auto_answer_session,omitempty"`
 	}
 	if r.ContentLength != 0 {
 		if err := decodeJSONBody(r, &request); err != nil {
@@ -1303,6 +1315,10 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	}
 	if isTerminalStatus(row.Status) {
 		http.Error(w, "call has ended", http.StatusGone)
+		return
+	}
+	if request.AutoAnswerSession != "" && (request.Rejoin || row.Status != "pending") {
+		http.Error(w, "automatic pickup requires a pending offer", 409)
 		return
 	}
 	offers, err := a.db().activeRingOffers(callID, project)
@@ -1361,6 +1377,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 
+	if request.AutoAnswerSession != "" {
+		if err := a.validateAutoAnswer(r, row, request.AutoAnswerSession, request.DestinationID); err != nil {
+			http.Error(w, err.Error(), 409)
+			return
+		}
+	}
 	claimed, err := a.db().claimPendingCallForHuman(callID, project, request.DestinationID)
 	if err != nil {
 		http.Error(w, "claim pending call: "+err.Error(), http.StatusInternalServerError)

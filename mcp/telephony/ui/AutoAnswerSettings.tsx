@@ -1,0 +1,34 @@
+import {useEffect,useRef,useState} from "react";
+import type {AutoAnswerPolicy,AutoAnswerPolicyRequest,AutoAnswerPolicyView} from "../frontend/src/auto-answer";
+import type {HeadlessSoftphone} from "../frontend/src/softphone";
+import type {AutoAnswerSnapshot} from "../frontend/src/auto-answer";
+type Request=(body:AutoAnswerPolicyRequest)=>Promise<AutoAnswerPolicyView>;
+export default function AutoAnswerSettings({request,admin=false}:{request:Request;admin?:boolean}){
+ const [open,setOpen]=useState(false),[target,setTarget]=useState(admin?"project":"adviser"),[view,setView]=useState<AutoAnswerPolicyView>(),[policy,setPolicy]=useState<AutoAnswerPolicy>({mode:"inherit",delay_ms:0}),[busy,setBusy]=useState(false),[error,setError]=useState("");
+ const [choices,setChoices]=useState<AutoAnswerPolicyView>();const generation=useRef(0);
+ const selection=():AutoAnswerPolicyRequest=>{if(target.startsWith("user:"))return {scope:"adviser",identity:JSON.parse(target.slice(5))};const [scope,...id]=target.split(":");return {scope:scope as AutoAnswerPolicyRequest["scope"],scope_id:id.join(":")||undefined};};
+ useEffect(()=>{if(!open)return;const gen=++generation.current;setBusy(true);setError("");request(selection()).then(v=>{if(gen!==generation.current)return;setView(v);setChoices(v);setPolicy(v.scope==="project"&&!v.configured?{...v.policy,mode:"manual"}:v.policy);}).catch(e=>{if(gen===generation.current)setError(e.message)}).finally(()=>{if(gen===generation.current)setBusy(false)});return()=>{generation.current++}},[open,target,request]);
+ const save=async(inherit=false)=>{const gen=++generation.current;setBusy(true);setError("");try{const v=await request({...selection(),...(inherit?{inherit:true}:{policy})});if(gen===generation.current){setView(v);setPolicy(v.scope==="project"&&!v.configured?{...v.policy,mode:"manual"}:v.policy);}}catch(e){if(gen===generation.current)setError((e as Error).message)}finally{if(gen===generation.current)setBusy(false)}};
+ const editable=admin||view?.admin||view?.effective.allow_adviser_override;
+ return <details open={open} onToggle={e=>setOpen(e.currentTarget.open)} className="rounded border border-border p-3 text-sm"><summary className="cursor-pointer">Automatic pickup</summary><div className="mt-3 space-y-3">
+ <p className="text-xs text-text-muted">Only offered browser calls. Automatic pickup has no intentional delay unless you set one. Enable availability in the softphone to allow microphone use and select the answering browser.</p>
+ {admin&&<label className="block">Applies to<select disabled={busy} value={target} onChange={e=>setTarget(e.target.value)} className="mt-1 w-full rounded border border-border bg-bg p-2"><option value="project">Project defaults</option><option value="adviser">Current operator</option>{choices?.advisers?.map(u=><option key={JSON.stringify(u)} value={`user:${JSON.stringify(u)}`}>{u.subject_id} · {u.issuer_app} #{u.issuer_install_id}</option>)}{choices?.routes?.map(v=><option key={v.id} value={`route:${v.id}`}>Route · {v.name}</option>)}{choices?.destinations?.map(v=><option key={v.id} value={`destination:${v.id}`}>Browser destination · {v.name}</option>)}</select></label>}
+ {view&&<p className="text-xs">Effective: {view.effective.mode==="automatic"?`automatic · ${view.effective.delay_ms/1000} seconds`:`manual`} · {view.effective.source}. {view.scope==="adviser"&&!view.effective.allow_adviser_override?"Controlled by administrator.":""}</p>}
+ <fieldset disabled={busy||!view||!editable} className="space-y-3"><label className="block">Answer mode<select value={policy.mode} onChange={e=>setPolicy({...policy,mode:e.target.value as AutoAnswerPolicy["mode"]})} className="mt-1 w-full rounded border border-border bg-bg p-2">{target!=="project"&&<option value="inherit">Inherit</option>}<option value="manual">Manual</option><option value="automatic">Automatic</option></select></label>
+ {policy.mode==="automatic"&&<label className="block">Delay in seconds · 0 means immediate<input type="number" min={0} max={10} step={0.1} value={policy.delay_ms/1000} onChange={e=>setPolicy({...policy,delay_ms:Math.round(Number(e.target.value)*1000)})} className="mt-1 w-full rounded border border-border bg-bg p-2"/></label>}
+ {view?.scope!=="adviser"&&<label className="flex gap-2"><input type="checkbox" checked={policy.allow_adviser_override??true} onChange={e=>setPolicy({...policy,allow_adviser_override:e.target.checked})}/>Allow adviser overrides</label>}
+ <button type="button" onClick={()=>void save(policy.mode==="inherit")} className="rounded border border-border px-3 py-2">Save pickup settings</button></fieldset>
+ {error&&<p role="alert" className="text-error">{error}</p>}
+ </div></details>
+}
+export function AutoAnswerAvailability({phone,state}:{phone?:HeadlessSoftphone;state?:AutoAnswerSnapshot}){
+ const [busy,setBusy]=useState(false),[error,setError]=useState(""),[now,setNow]=useState(Date.now());
+ useEffect(()=>{if(!state?.answerAt)return;const t=setInterval(()=>setNow(Date.now()),100);return()=>clearInterval(t)},[state?.answerAt]);
+ const change=async(value:boolean,takeover=false)=>{setBusy(true);setError("");try{await phone?.setAutoAnswerAvailable(value,{takeover})}catch(e){setError((e as Error).message)}finally{setBusy(false)}};
+ return <div className="flex flex-wrap items-center gap-2 text-xs" data-testid="auto-answer-availability"><button type="button" disabled={busy||!phone} aria-pressed={state?.available??false} onClick={()=>void change(!state?.available)} className="rounded border border-border px-3 py-1.5">{busy?"Preparing audio…":state?.available?"Available · auto-answer armed":"Enable auto-answer availability"}</button>
+ {state?.state==="blocked"&&<button type="button" disabled={busy} onClick={()=>void change(true,true)} className="rounded border border-border px-2 py-1">Use this browser</button>}
+ {state?.state==="countdown"&&<><span role="status">Answering in {Math.max(0,Math.ceil(((state.answerAt??now)-now)/1000))}s · {state.source}</span><button type="button" onClick={()=>phone?.answerAutoAnswerNow()} className="rounded border border-border px-2 py-1">Answer now</button><button type="button" onClick={()=>phone?.cancelAutoAnswer()} className="rounded border border-border px-2 py-1">Cancel auto-answer</button></>}
+ {state?.state==="answering"&&<span role="status">Connecting automatically…</span>}
+ {(error||state?.detail)&&<span role="status" className="text-text-muted">{error||state?.detail}</span>}
+ </div>
+}

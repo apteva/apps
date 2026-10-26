@@ -133,6 +133,9 @@ func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 	return p, p != (phoneIdentity{}) || r.Header.Get("X-Apteva-Scopes") != ""
 }
 func phoneAction(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/softphone/auto-answer-") && (r.Method == "GET" || r.Method == "POST") {
+		return "call.answer"
+	}
 	path := r.URL.Path
 	if (path == "/softphone/turn-policy" || path == "/softphone/network-policy" || path == "/softphone/network-check") && (r.Method == "GET" || r.Method == "POST") {
 		return "call.read"
