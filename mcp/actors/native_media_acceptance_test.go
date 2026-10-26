@@ -18,8 +18,11 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 	var template map[string]any
 	json.Unmarshal(raw, &template)
 	for _, audience := range []string{"public", "paid"} {
-		for _, kind := range []string{"image", "gallery", "image_copy"} {
-			for _, mode := range []string{"nested_blurred", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save", "duplicate_dom_editor"} {
+		for _, kind := range []string{"image", "gallery", "image_copy", "prepared_image"} {
+			for _, mode := range []string{"nested_blurred", "modern_membership", "modern_sale_on", "modern_missing_toggle", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save", "duplicate_dom_editor"} {
+				if mode == "modern_missing_toggle" && audience == "public" {
+					continue
+				}
 				if (kind != "gallery" && mode == "reordered") || (kind != "image_copy" && (mode == "lost_save" || mode == "duplicate_dom_editor")) {
 					continue
 				}
@@ -76,6 +79,15 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					editor := `<body><nav aria-label="Creator navigation"><button aria-label="Create post"></button></nav><a aria-label="Your page" href="https://www.patreon.com/c/creator">Creator</a><span>Saved</span><textarea aria-label="Title">Exact Title</textarea><div aria-label="Text input field for post content" role="textbox" contenteditable="true"><p>Exact first paragraph.</p><p>Exact second paragraph.</p></div>` + radio + `<input id="sell-post-toggle" aria-checked="false"><button data-tag="make-a-post-action-publish">Publish</button>` + menu + `<section><div><img data-tag="gallery-image" class="new-generated-class blurred-layer" src="https://different.example/rendered"></div><div data-tag="preview-thumbnail-container"><span><img alt="Preview" src="https://another.example/thumb"></span></div></section></body>`
 
 					switch mode {
+					case "modern_membership", "modern_sale_on", "modern_missing_toggle":
+						replacement := `<input id="paid-members-toggle" aria-checked="true">`
+						if mode == "modern_missing_toggle" {
+							replacement = ""
+						}
+						if mode == "modern_sale_on" {
+							replacement += `<input id="sell-post-toggle" aria-checked="true">`
+						}
+						editor = strings.Replace(editor, `<input id="sell-post-toggle" aria-checked="false">`, replacement, 1)
 					case "duplicate_dom_editor":
 						editor = strings.Replace(editor, "</body>", `<div aria-label="Text input field for post content" role="textbox" contenteditable="true"><p>Exact first paragraph.</p><p>Exact second paragraph.</p></div></body>`, 1)
 					case "wrong_creator":
@@ -132,9 +144,24 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					var fixture map[string]any
 					json.Unmarshal(raw, &fixture)
 					fixture["browser"] = map[string]any{"context_id": "fixture-context"}
+					if kind == "prepared_image" {
+						// Exercise every real same-draft guard, stopping immediately
+						// before the consequential click in this preflight fixture.
+						op := mapFromAny(mapFromAny(fixture["operations"])["publish_prepared_image_draft"])
+						steps := op["steps"].([]any)
+						for i, step := range steps {
+							if mapFromAny(step)["once_key"] != nil {
+								op["steps"] = steps[:i]
+								break
+							}
+						}
+					}
 					rec := saveFixtureActor(t, ctx, a, fixture)
 					input := map[string]any{"creator_url": "https://www.patreon.com/c/creator", "expected_creator_identity": "creator", "post_id": "42", "post_edit_url": "https://www.patreon.com/creator/posts/exact-42/edit", "post_title": "Exact Title", "post_body": "Exact first paragraph.\n\nExact second paragraph.", "audience": audience, "tier_labels": tiers, "request_id": "same-request", "expected_attachment_ids": expectedIDs, "expected_attachment_filenames": expectedNames, "expected_attachment_sizes": expectedSizes}
 					operation := "publish_" + kind + "_draft_preflight"
+					if kind == "prepared_image" {
+						operation = "publish_prepared_image_draft"
+					}
 					if kind == "image_copy" {
 						operation = "prepare_image_draft_copy"
 						input["expected_current_body"] = input["post_body"]
@@ -147,7 +174,7 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					queued, _ := claimActorRun(ctx)
 					a.executeActorRun(context.Background(), ctx, queued)
 					result, _ := getActorRun(ctx, q.(map[string]any)["run_id"].(int64))
-					if mode == "nested_blurred" {
+					if mode == "nested_blurred" || mode == "modern_membership" {
 						if result["status"] != "completed" {
 							t.Fatal(result["error"])
 						}

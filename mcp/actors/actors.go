@@ -81,6 +81,7 @@ type actorStep struct {
 	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
 	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
 	ReadOnly           bool                  `json:"read_only,omitempty"`
+	ReadRetries        *int                  `json:"read_retries,omitempty"`
 	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
 	Text               string                `json:"text,omitempty"`
 	Key                string                `json:"key,omitempty"`
@@ -437,6 +438,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if err := validateReadRetries(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
 		if step.Action != "scroll" && (step.TargetID != "" || step.ExpectedName != "" || step.ExpectedRole != "") {
 			return fmt.Errorf("steps[%d] target_id, expected_name and expected_role are scroll-only fields", i)
 		}
