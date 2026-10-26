@@ -141,3 +141,23 @@ func TestTunnelDeadlineDoesNotCloseOtherChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTunnelTimeoutEvictsOnlyIngressClient(t *testing.T) {
+	dir := t.TempDir()
+	ingress := auditSSHClientWithForwardDelay(t, dir, 150*time.Millisecond)
+	admin := auditSSHClient(t, dir)
+	old := globalSSHPool
+	globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{992: ingress}}
+	defer func() { globalSSHPool.closeAll(); globalSSHPool = old }()
+	_, err := dialInstanceLoopbackWithTimeout(&Instance{ID: 992}, "127.0.0.1:7200", 30*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("channel did not time out", err)
+	}
+	if globalSSHPool.clients[992] != nil {
+		t.Fatal("timed out transport remained cached")
+	}
+	out, code, err := runSSHOnce(admin, "printf healthy", time.Second)
+	if err != nil || code != 0 || out != "healthy" {
+		t.Fatal("administrative path affected", out, code, err)
+	}
+}

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.14.1
+version: 0.14.2
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -170,6 +170,8 @@ provides:
       description: Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage.
     - name: instance_metrics_incidents
       description: List spike incidents or retrieve a bounded recording and best-effort process attribution.
+    - name: instance_network_evidence
+      description: "Bounded timestamped TCP probes, host counters and route evidence between registered instances. Args: id, target_id, port?, samples?."
     - name: instance_monitoring
       description: Read collector health/version or enable/disable automatic background monitoring.
     - name: instance_metrics
@@ -264,7 +266,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.14.1
+    ref: instances/v0.14.2
     entry: mcp/instances
   port: 8080
   health_check: /health

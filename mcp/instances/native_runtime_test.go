@@ -511,3 +511,35 @@ func TestNativeLiveReadOnlyHostProbe(t *testing.T) {
 	}
 	t.Logf("readonly validation: platform=%s available_memory_mb=%d available_disk_mb=%d", p.Platform, p.MemoryMB, p.DiskMB)
 }
+
+func TestNativeHealthSeparatesFencedAppAndBrokenControlTunnel(t *testing.T) {
+	b, f, req := newNativeTest(t)
+	original := f.health.Config.Handler
+	f.health.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/_apteva/runtime/app/status" {
+			writeNative(w, map[string]any{"deployment_id": req.DeploymentID, "generation": req.Generation, "admitting": false})
+			return
+		}
+		if r.URL.Path == "/health" {
+			w.WriteHeader(503)
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	req.Execution = prepareNativeTest(t, b, req)
+	start := startNativeRequest(req)
+	if _, w := nativeCall(t, b, "start", start); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	out, w := nativeCall(t, b, "inspect", req)
+	if w.Code != 200 || out.Health == nil || !out.Health.AdministrativeSSH || !out.Health.ProcessRunning || !out.Health.ControlForwarding || out.Health.Admitting == nil || *out.Health.Admitting || out.Ready {
+		t.Fatal("fenced health conflated", w.Body.String())
+	}
+	// Admin/process inspections keep working when the control tunnel fails.
+	b.tunnels.closeAll()
+	b.tunnels = newTunnelRegistry(func(*Instance, string) (net.Conn, error) { return nil, io.EOF })
+	out, w = nativeCall(t, b, "inspect", req)
+	if w.Code != 200 || !out.Health.AdministrativeSSH || !out.Health.ProcessRunning || out.Health.ControlForwarding || out.Health.Admitting != nil {
+		t.Fatal("tunnel failure conflated", w.Body.String())
+	}
+}

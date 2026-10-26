@@ -1011,7 +1011,9 @@ func (c *callsDB) carrierBridgeHistory(project, call string) ([]map[string]any, 
 	}
 	return out, rows.Err()
 }
-func (a *App) stopCarrierBridges() {
+func (a *App) stopCarrierBridges() { a.stopCarrierBridgesWithReason("application_shutdown") }
+
+func (a *App) stopCarrierBridgesWithReason(reason string) {
 	a.mediaBridges.mu.Lock()
 	a.mediaBridges.recoveryCtx = nil
 	a.mediaBridges.stopped = true
@@ -1021,12 +1023,12 @@ func (a *App) stopCarrierBridges() {
 	for _, b := range all {
 		b.mu.Lock()
 		if b.commandCancel != nil {
-			b.commandReason = "application_shutdown"
-			b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", CommandID: b.commandID, AttemptID: b.attemptID, CancellationReason: "application_shutdown", Trigger: "application_shutdown"})
+			b.commandReason = reason
+			b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", CommandID: b.commandID, AttemptID: b.attemptID, CancellationReason: reason, Trigger: reason})
 			b.commandCancel()
 		}
 		b.mu.Unlock()
-		b.cancelWithCause("application_shutdown", mediaCloseLegLocalError, 1001, "application shutting down", "")
+		b.cancelWithCause(reason, mediaCloseLegLocalError, 1001, reason, "")
 		b.closeSockets()
 		b.app.carrierTelemetry.unregisterBridge(b)
 	}

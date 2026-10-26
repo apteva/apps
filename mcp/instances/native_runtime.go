@@ -465,6 +465,7 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 }
 func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativeStatePolicy) nativeExecution {
 	out := d.Execution
+	out.Health = &nativeExecutionHealth{ObservedAt: time.Now().UTC()}
 	out.Ready = false
 	c, cancel := context.WithTimeout(b.ctx, 12*time.Second)
 	defer cancel()
@@ -472,6 +473,9 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 	c, measure := b.metadataContext(c, inst, d, force)
 	obs, e := b.inspectRemote(c, inst, &d)
 	b.mergeStateMetadata(inst, d, &obs, measure)
+	out.Health.HostReachable = e == nil
+	out.Health.AdministrativeSSH = e == nil
+	out.Health.ProcessRunning = e == nil && obs.State == "running"
 	out.ProcessResources = obs.ProcessResources
 	out.StateBytes, out.StateEntries, out.StateAvailableBytes = obs.StateBytes, obs.StateEntries, obs.StateAvailableBytes
 	out.SnapshotSHA256 = d.Execution.SnapshotSHA256
@@ -493,6 +497,7 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 		out.State = "running"
 		out.StoppedConfirmed = false
 		if b.ensureTunnel(&d, inst) == nil {
+			out.Endpoint = d.Execution.Endpoint
 			env, e := b.readEnvironment(d)
 			if e == nil {
 				req, e := http.NewRequestWithContext(c, http.MethodGet, out.Endpoint+d.HealthPath, nil)
@@ -502,6 +507,20 @@ func (b *nativeBackend) inspect(d nativeRecord, inst *Instance, policy ...*nativ
 					resp, e := client.Do(req)
 					if e == nil {
 						resp.Body.Close()
+						out.Health.ControlForwarding = true
+						statusReq, _ := http.NewRequestWithContext(c, http.MethodGet, out.Endpoint+"/_apteva/runtime/app/status", nil)
+						statusReq.Header.Set("Authorization", "Bearer "+env["APTEVA_APP_TOKEN"])
+						if statusResp, statusErr := client.Do(statusReq); statusErr == nil {
+							var status struct {
+								Deployment string `json:"deployment_id"`
+								Generation int64  `json:"generation"`
+								Admitting  *bool  `json:"admitting"`
+							}
+							if statusResp.StatusCode == 200 && json.NewDecoder(io.LimitReader(statusResp.Body, 16<<10)).Decode(&status) == nil && status.Deployment == d.ID && status.Generation == d.Generation {
+								out.Health.Admitting = status.Admitting
+							}
+							statusResp.Body.Close()
+						}
 						out.Ready = resp.StatusCode == 200
 						if out.Ready {
 							manifestReq, _ := http.NewRequestWithContext(c, http.MethodGet, out.Endpoint+"/manifest", nil)

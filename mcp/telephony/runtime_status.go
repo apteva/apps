@@ -1,12 +1,14 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"time"
 )
 
 func (rt *telephonyRuntime) fenceLocked(reason string, now time.Time) {
 	if !rt.fenced {
+		log.Printf("runtime fenced at=%s deployment=%s generation=%d reason=%s lease_expires=%s", now.UTC().Format(time.RFC3339Nano), rt.deployment, rt.generation, reason, rt.expires.UTC().Format(time.RFC3339Nano))
 		rt.fenceReason = reason
 		rt.fencedAt = now
 	}
@@ -39,7 +41,10 @@ func (a *App) runtimeStatus() map[string]any {
 		state = "fenced"
 	}
 	admitting := !rt.fenced && valid && rt.initialized && rt.armed && state == "active"
-	out := map[string]any{"state": state, "admitting": admitting, "deployment_id": rt.deployment, "generation": rt.generation, "load": rt.work, "initialized": rt.initialized}
+	out := map[string]any{"state": state, "admitting": admitting, "deployment_id": rt.deployment, "generation": rt.generation, "load": rt.work, "initialized": rt.initialized, "fenced": rt.fenced, "last_error": rt.lastError}
+	if !rt.lastOwnershipSuccessAt.IsZero() {
+		out["last_ownership_success_at"] = rt.lastOwnershipSuccessAt.UTC().Format(time.RFC3339Nano)
+	}
 	if !rt.expires.IsZero() {
 		out["ownership_expires_at"] = rt.expires.UTC().Format(time.RFC3339Nano)
 	}
@@ -72,4 +77,39 @@ func (a *App) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSONStatus(w, status, map[string]any{"ok": ready, "status": state, "admitting": admitting})
+}
+
+// Fence once, retain the initiating ownership reason in each carrier bridge,
+// and only then close its media transports. Never renew admission in place.
+func (a *App) stopFencedRuntimeMedia() {
+	rt := a.runtime
+	rt.initWG.Wait() // A fenced initializer must finish before its listeners are torn down.
+	rt.mu.Lock()
+	reason, deployment, generation := rt.fenceReason, rt.deployment, rt.generation
+	rt.mu.Unlock()
+	log.Printf("runtime bridge shutdown at=%s deployment=%s generation=%d reason=%s", time.Now().UTC().Format(time.RFC3339Nano), deployment, generation, reason)
+	a.stopCarrierBridgesWithReason("runtime_" + reason)
+	log.Printf("runtime SIP listener shutdown at=%s deployment=%s generation=%d reason=%s", time.Now().UTC().Format(time.RFC3339Nano), deployment, generation, reason)
+	a.stopSIPGatewayWithReason("runtime_" + reason)
+}
+
+func (a *App) fenceAndStopRuntimeMedia() {
+	rt := a.runtime
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	if !rt.fenced && rt.initialized && !time.Now().Before(rt.expires) {
+		rt.fenceLocked("ownership_expired", time.Now())
+	}
+	fenced := rt.fenced
+	rt.mu.Unlock()
+	if fenced {
+		rt.mediaStopOnce.Do(func() {
+			rt.mu.Lock()
+			rt.mediaStopped = true
+			rt.mu.Unlock()
+			a.stopFencedRuntimeMedia()
+		})
+	}
 }

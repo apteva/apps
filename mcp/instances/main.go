@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.14.1
+version: 0.14.2
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -153,6 +153,7 @@ provides:
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
     - { name: instance_metrics_history, description: "Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage. Args: id, from?, to?, resolution?, max_points?." }
     - { name: instance_metrics_incidents, description: "List spike incidents or retrieve a bounded recording and best-effort process attribution. Args: id, incident_id?, limit?." }
+    - { name: instance_network_evidence, description: "Bounded timestamped TCP probes, host counters and route evidence between registered instances. Args: id, target_id, port?, samples?." }
     - { name: instance_monitoring, description: "Read collector health/version or enable/disable automatic background monitoring. Args: id, enabled?." }
     - { name: instance_metrics,      description: "Latest continuous CPU/memory/I/O snapshot and collector freshness for local and remote Linux/macOS hosts. Args: id." }
     - { name: instance_list_server_types, description: "Live list of active, non-deprecated compute types from the bound provider — name, cores, memory_gb, disk_gb, platform, resource_class, price, available_in. Includes virtual and bare-metal types where supported. Args: provider? (default: bound provider)." }
@@ -227,7 +228,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.14.1
+    ref: instances/v0.14.2
     entry: mcp/instances
   port: 8080
   health_check: /health

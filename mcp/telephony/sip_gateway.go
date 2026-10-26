@@ -156,13 +156,14 @@ func (a *App) resolveSIPGatewayConfig(ctx *sdk.AppCtx, forceEnabled bool) (sipGa
 	return cfg, err
 }
 
-func (a *App) stopSIPGateway() {
+func (a *App) stopSIPGateway() { a.stopSIPGatewayWithReason("application_shutdown") }
+func (a *App) stopSIPGatewayWithReason(reason string) {
 	a.sip.mu.Lock()
 	gateway := a.sip.gateway
 	a.sip.gateway = nil
 	a.sip.mu.Unlock()
 	if gateway != nil {
-		gateway.Stop()
+		gateway.stopWithReason(reason)
 	}
 }
 
@@ -262,7 +263,8 @@ func (g *sipGateway) Start() error {
 	}
 }
 
-func (g *sipGateway) Stop() {
+func (g *sipGateway) Stop() { g.stopWithReason("application_shutdown") }
+func (g *sipGateway) stopWithReason(reason string) {
 	if g == nil {
 		return
 	}
@@ -272,10 +274,10 @@ func (g *sipGateway) Stop() {
 	g.mu.Unlock()
 	g.mu.RLock()
 	for _, session := range g.byCall {
-		session.diagnostics.event("sip_shutdown", "local", "application_shutdown", 0)
+		session.diagnostics.event("sip_shutdown", "local", reason, 0)
 	}
 	for _, session := range g.outboundByCall {
-		session.diagnostics.event("sip_shutdown", "local", "application_shutdown", 0)
+		session.diagnostics.event("sip_shutdown", "local", reason, 0)
 	}
 	g.mu.RUnlock()
 	g.mu.RLock()
@@ -295,7 +297,7 @@ func (g *sipGateway) Stop() {
 		go func() {
 			defer finishing.Done()
 			for session := range jobs {
-				session.finish("local_error", errors.New("direct SIP gateway stopped"))
+				session.finish("local_error", fmt.Errorf("direct SIP gateway stopped: %s", reason))
 			}
 		}()
 	}
@@ -307,7 +309,7 @@ func (g *sipGateway) Stop() {
 	}
 	g.mu.RUnlock()
 	for _, session := range outbound {
-		session.finish("local_error", errors.New("SIP gateway stopped"))
+		session.finish("local_error", fmt.Errorf("SIP gateway stopped: %s", reason))
 	}
 	// Mark dialogs ended before canceling their shared parent. Otherwise an
 	// outbound signaling owner can exit before it knows a BYE is required.

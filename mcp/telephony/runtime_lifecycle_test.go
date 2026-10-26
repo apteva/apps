@@ -78,6 +78,9 @@ func TestManagedRuntimeActivationAndOwnership(t *testing.T) {
 	a.refreshRuntimeOwnership(t.Context())
 	a.runtime.initWG.Wait()
 	a.refreshRuntimeOwnership(t.Context())
+	if a.runtimeStatus()["last_ownership_success_at"] == nil {
+		t.Fatal("successful renewal absent from status")
+	}
 	if starts.Load() != 1 || !a.runtimeOwned() {
 		t.Fatal("activation was not idempotent")
 	}
@@ -90,6 +93,9 @@ func TestManagedRuntimeActivationAndOwnership(t *testing.T) {
 	a.refreshRuntimeOwnership(t.Context())
 	if a.runtimeOwned() || !a.runtime.fenced {
 		t.Fatal("expired lease admitted work")
+	}
+	if a.runtimeStatus()["last_ownership_error"] == nil || a.runtimeStatus()["fenced"] != true {
+		t.Fatal("fencing evidence missing")
 	}
 	status.Store(200)
 	a.refreshRuntimeOwnership(t.Context())
@@ -562,5 +568,193 @@ func TestManagedRuntimeSIPStandbyRejectsPromptlyWithoutCreatingCall(t *testing.T
 	var calls int
 	if err = a.db().db.QueryRow(`SELECT COUNT(*) FROM calls`).Scan(&calls); err != nil || calls != 0 {
 		t.Fatal("standby SIP created state", calls, err)
+	}
+}
+
+func TestManagedRuntimeMissingFailedEmptyRecordingRepair(t *testing.T) {
+	a, memory := withTelephonyTestContext(t, &answerPlatform{})
+	fileDB := filepath.Join(t.TempDir(), "app.db")
+	if _, err := memory.AppDB().Exec(`VACUUM INTO ?`, fileDB); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", fileDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	manifest := a.Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, &answerPlatform{}, nil)
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = memory; db.Close() })
+	a.runtime = runtimeTestActive()
+	row := testCall("failed-empty-recording", "failed")
+	row.ProjectID = "project-a"
+	if err := a.db().insertCall(row); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := a.db().upsertProviderRecording(&row, localRecordingProvider, "empty", "failed", "wav", 0, 2, "both")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE recordings SET storage_status='failed',size_bytes=44,source_size_bytes=44,last_error='no recorded audio' WHERE id=?`, rec.ID)
+	exec(`INSERT INTO local_recording_files(recording_id,path) VALUES(?,?)`, rec.ID, "/old/recordings/call-empty.wav")
+	for _, tc := range []struct{ name, set string }{
+		{"completed", "provider_status='completed'"}, {"duration", "duration_ms=1"}, {"source audio", "source_size_bytes=45"}, {"stored audio", "size_bytes=45"}, {"storage copy", "storage_file_id=2"}, {"pending import", "storage_status='pending'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec(`UPDATE recordings SET `+tc.set+` WHERE id=?`, rec.ID)
+			if _, err := a.managedRecordingPathChanges(); err == nil {
+				t.Fatal("unsafe missing recording accepted")
+			}
+			exec(`UPDATE recordings SET provider_status='failed',storage_status='failed',duration_ms=0,size_bytes=44,source_size_bytes=44,storage_file_id=0 WHERE id=?`, rec.ID)
+		})
+	}
+	a.recordingWriters.Store(1)
+	if _, err := a.managedRecordingPathChanges(); err == nil {
+		t.Fatal("active recorder allowed repair")
+	}
+	a.recordingWriters.Store(0)
+	changes, err := a.managedRecordingPathChanges()
+	if err != nil || len(changes) != 1 {
+		t.Fatalf("plan %v %v", changes, err)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM local_recording_files`).Scan(&n)
+	if n != 1 {
+		t.Fatal("standby validation mutated state")
+	}
+	for i := 0; i < 2; i++ {
+		if err := a.relocateRecordingPaths(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM local_recording_files`).Scan(&n)
+	if n != 0 {
+		t.Fatal("stale reference retained")
+	}
+	var status, reason string
+	if err := db.QueryRow(`SELECT provider_status,last_error FROM recordings WHERE id=?`, rec.ID).Scan(&status, &reason); err != nil || status != "failed" || reason != "no recorded audio" {
+		t.Fatal("recording history lost", status, reason, err)
+	}
+}
+
+// Exercise real UDP SIP listener ownership across an outage. The Server suite
+// separately exercises the authenticated monitor/controller replacement loop.
+func TestManagedRuntimeLeaseOutageRestoresSIPOnlyInReplacement(t *testing.T) {
+	a, ctx := withTelephonyTestContext(t, &answerPlatform{})
+	t.Setenv("APTEVA_APP_TOKEN", "runtime-secret")
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "")
+	var unavailable atomic.Bool
+	var generation atomic.Int64
+	generation.Store(1)
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unavailable.Load() {
+			w.WriteHeader(503)
+			return
+		}
+		writeJSON(w, runtimeOwnership{Active: true, Deployment: fmt.Sprintf("deployment-%d", generation.Load()), Generation: generation.Load(), Expires: time.Now().Add(15 * time.Second).Unix()})
+	}))
+	defer control.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", control.URL)
+	cfg := directSIPTestConfig()
+	cfg.Transport = "udp"
+	cfg.ListenAddress = fmt.Sprintf("127.0.0.1:%d", freeUDPPort(t))
+	cfg.PublicHost = "127.0.0.1"
+	cfg.PublicIP = netip.MustParseAddr("127.0.0.1")
+	initialize := func(app *App) func() error {
+		return func() error {
+			g, e := newSIPGateway(app, ctx, cfg)
+			if e != nil {
+				return e
+			}
+			if e = g.Start(); e != nil {
+				g.Stop()
+				return e
+			}
+			app.sip.mu.Lock()
+			app.sip.gateway = g
+			app.sip.mu.Unlock()
+			return nil
+		}
+	}
+	a.runtime = &telephonyRuntime{deployment: "deployment-1", generation: 1, state: "standby", armed: true, http: control.Client(), initialize: initialize(a)}
+	a.refreshRuntimeOwnership(t.Context())
+	a.runtime.initWG.Wait()
+	defer a.stopSIPGateway()
+	if !a.runtimeOwned() || a.directSIPGateway() == nil {
+		t.Fatal("initial admission/listener missing")
+	}
+	unavailable.Store(true)
+	a.refreshRuntimeOwnership(t.Context())
+	if !a.runtimeOwned() {
+		t.Fatal("transient failure prematurely ended valid lease")
+	}
+	a.runtime.mu.Lock()
+	a.runtime.expires = time.Now().Add(-time.Second)
+	a.runtime.mu.Unlock()
+	a.refreshRuntimeOwnership(t.Context())
+	a.stopFencedRuntimeMedia()
+	if a.runtimeOwned() || a.directSIPGateway() != nil {
+		t.Fatal("expired owner retained media/admission")
+	}
+	// A bind succeeds only once the old listener actually released its socket.
+	probe, e := net.ListenPacket("udp", cfg.ListenAddress)
+	if e != nil {
+		t.Fatal("old SIP listener still bound", e)
+	}
+	probe.Close()
+	unavailable.Store(false)
+	a.refreshRuntimeOwnership(t.Context())
+	if a.runtimeStatus()["recovery"] == nil || a.runtimeOwned() {
+		t.Fatal("restored connectivity must request replacement, not revive owner")
+	}
+	next := &App{}
+	generation.Store(2)
+	next.runtime = &telephonyRuntime{deployment: "deployment-2", generation: 2, state: "standby", armed: true, http: control.Client(), initialize: initialize(next)}
+	next.refreshRuntimeOwnership(t.Context())
+	next.runtime.initWG.Wait()
+	defer next.stopSIPGateway()
+	if !next.runtimeOwned() || next.directSIPGateway() == nil || a.runtimeOwned() {
+		t.Fatal("exclusive SIP replacement failed")
+	}
+	a.refreshRuntimeOwnership(t.Context())
+	if a.runtimeStatus()["recovery"] != nil {
+		t.Fatal("displaced owner requested another recovery")
+	}
+}
+
+func TestManagedRuntimeFencingPreservesCallShutdownReason(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	row := recoveryCall(t, a, "ownership-stop", "twilio")
+	bridge, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.runtime = runtimeTestActive()
+	a.runtime.fenceLocked("ownership_expired", time.Now())
+	a.fenceAndStopRuntimeMedia()
+	a.fenceAndStopRuntimeMedia() // competing socket guards must not overwrite cause
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	n := 0
+	for _, event := range bridge.events {
+		if event.Kind == "local_close_requested" {
+			n++
+			if event.Trigger != "runtime_ownership_expired" || event.LocalCloseReason != "runtime_ownership_expired" {
+				t.Fatal(event)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatal("missing or duplicated initiating reason", n)
+	}
+	if bridge.ctx.Err() == nil {
+		t.Fatal("fenced bridge not cancelled")
 	}
 }

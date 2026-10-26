@@ -21,29 +21,31 @@ const runtimeAppPrefix = "/_apteva/runtime/app/"
 var errRuntimeAdmission = errors.New("Telephony execution is not admitting new work")
 
 type telephonyRuntime struct {
-	mu                   sync.Mutex
-	deployment           string
-	generation           int64
-	state                string
-	fenced               bool
-	armed                bool
-	initialized          bool
-	initializing         bool
-	initWG               sync.WaitGroup
-	expires              time.Time
-	work                 int
-	endpoints            map[string]string
-	cancel               context.CancelFunc
-	done                 chan struct{}
-	mediaStopped         bool
-	http                 *http.Client
-	initialize           func() error
-	recoveryVerified     bool
-	fenceReason          string
-	fencedAt             time.Time
-	lastOwnershipError   string
-	lastOwnershipErrorAt time.Time
-	lastError            string
+	mu                     sync.Mutex
+	deployment             string
+	generation             int64
+	state                  string
+	fenced                 bool
+	armed                  bool
+	initialized            bool
+	initializing           bool
+	initWG                 sync.WaitGroup
+	expires                time.Time
+	work                   int
+	endpoints              map[string]string
+	cancel                 context.CancelFunc
+	done                   chan struct{}
+	mediaStopped           bool
+	mediaStopOnce          sync.Once
+	http                   *http.Client
+	initialize             func() error
+	recoveryVerified       bool
+	fenceReason            string
+	fencedAt               time.Time
+	lastOwnershipError     string
+	lastOwnershipErrorAt   time.Time
+	lastOwnershipSuccessAt time.Time
+	lastError              string
 }
 
 type runtimeOwnership struct {
@@ -128,16 +130,7 @@ func (a *App) startRuntimeOwnership(ctx *sdk.AppCtx) {
 			case <-timer.C:
 				a.refreshRuntimeOwnership(lifetime)
 				if !a.runtimeOwned() {
-					rt.mu.Lock()
-					fenced := rt.fenced && !rt.mediaStopped
-					if fenced {
-						rt.mediaStopped = true
-					}
-					rt.mu.Unlock()
-					if fenced {
-						a.stopCarrierBridges()
-						a.stopSIPGateway()
-					}
+					a.fenceAndStopRuntimeMedia()
 				}
 			}
 		}
@@ -178,6 +171,7 @@ func (a *App) refreshRuntimeOwnership(ctx context.Context) {
 		return
 	}
 	rt.expires = time.Unix(own.Expires, 0)
+	rt.lastOwnershipSuccessAt = now
 	rt.lastError = ""
 	if rt.fenced {
 		rt.recoveryVerified = true
@@ -312,6 +306,7 @@ func (a *App) runtimeHTTP(next http.HandlerFunc, newAdmission bool) http.Handler
 						return
 					case <-t.C:
 						if !a.runtimeOwned() {
+							a.fenceAndStopRuntimeMedia()
 							cancel()
 							return
 						}
@@ -335,6 +330,7 @@ func (a *App) handleRuntimeLifecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	action := strings.TrimPrefix(r.URL.Path, runtimeAppPrefix)
 	if action == "status" && r.Method == "GET" {
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, a.runtimeStatus())
 		return
 	}

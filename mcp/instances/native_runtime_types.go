@@ -33,24 +33,25 @@ type nativePort struct {
 	Exclusive bool   `json:"exclusive"`
 }
 type nativeExecution struct {
-	ProcessResources    map[string]string `json:"process_resources,omitempty"`
-	StateBytes          *int64            `json:"state_bytes,omitempty"`
-	StateEntries        *int64            `json:"state_entries,omitempty"`
-	StateAvailableBytes *int64            `json:"state_available_bytes,omitempty"`
-	SnapshotSHA256      string            `json:"snapshot_sha256,omitempty"`
-	BrowserEndpoint     string            `json:"browser_endpoint,omitempty"`
-	Endpoints           map[string]string `json:"endpoints,omitempty"`
-	Handle              string            `json:"handle"`
-	State               string            `json:"state"`
-	HostKey             string            `json:"host_key"`
-	ReleaseDigest       string            `json:"release_digest"`
-	Platform            string            `json:"platform"`
-	Endpoint            string            `json:"control_endpoint,omitempty"`
-	StateRef            string            `json:"state_ref,omitempty"`
-	Ports               []nativePort      `json:"ports,omitempty"`
-	Ready               bool              `json:"ready"`
-	StoppedConfirmed    bool              `json:"stopped_confirmed"`
-	AppCapabilities     nativeAppCaps     `json:"app_capabilities"`
+	Health              *nativeExecutionHealth `json:"health,omitempty"`
+	ProcessResources    map[string]string      `json:"process_resources,omitempty"`
+	StateBytes          *int64                 `json:"state_bytes,omitempty"`
+	StateEntries        *int64                 `json:"state_entries,omitempty"`
+	StateAvailableBytes *int64                 `json:"state_available_bytes,omitempty"`
+	SnapshotSHA256      string                 `json:"snapshot_sha256,omitempty"`
+	BrowserEndpoint     string                 `json:"browser_endpoint,omitempty"`
+	Endpoints           map[string]string      `json:"endpoints,omitempty"`
+	Handle              string                 `json:"handle"`
+	State               string                 `json:"state"`
+	HostKey             string                 `json:"host_key"`
+	ReleaseDigest       string                 `json:"release_digest"`
+	Platform            string                 `json:"platform"`
+	Endpoint            string                 `json:"control_endpoint,omitempty"`
+	StateRef            string                 `json:"state_ref,omitempty"`
+	Ports               []nativePort           `json:"ports,omitempty"`
+	Ready               bool                   `json:"ready"`
+	StoppedConfirmed    bool                   `json:"stopped_confirmed"`
+	AppCapabilities     nativeAppCaps          `json:"app_capabilities"`
 }
 type nativeTarget struct {
 	InstallID int64  `json:"app_install_id"`
@@ -233,4 +234,15 @@ func nativePublicEndpoints(o nativeOptions) error {
 		}
 	}
 	return nil
+}
+
+type nativeExecutionHealth struct {
+	ObservedAt        time.Time `json:"observed_at"`
+	HostReachable     bool      `json:"host_reachable"`
+	AdministrativeSSH bool      `json:"administrative_ssh"`
+	ControlForwarding bool      `json:"control_forwarding"`
+	ProcessRunning    bool      `json:"process_running"`
+	// nil means unknown, never healthy by implication from SSH or process state.
+	Admitting *bool          `json:"admitting"`
+	Tunnel    map[string]any `json:"tunnel,omitempty"`
 }
