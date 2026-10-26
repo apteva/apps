@@ -60,8 +60,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.96
+version: 0.7.97
 description: |
+  v0.7.97 supports bounded rendered DOM extraction up to a 5 MB serialized
+  response while retaining live form state, navigation and response limits.
   v0.7.96 serializes live form values, selections and checked state in DOM
   snapshots, including controls outside the viewport. It also preserves the
   opt-in extraction lifecycle that skips automatic final
