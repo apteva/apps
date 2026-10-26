@@ -23,10 +23,16 @@ test("Social metrics forwards scope, date window and ranking while zero cards st
  if(url.pathname.endsWith("/accounts"))return Response.json({accounts:[{id:42,platform:"pinterest",display_name:"Ideas",status:"active"}]});
  if(url.pathname.endsWith("/platforms"))return Response.json({platforms:[]});
  if(url.pathname.endsWith("/posts"))return Response.json({posts:[]});
- if(url.pathname.includes("/metrics"))return Response.json({social_account_id:42,platform:"pinterest",display_name:"Ideas",status:"ok",updated_at:new Date().toISOString(),impressions:100,saves:0,available:["impressions","saves"],report:{...report,metric_info:{...report.metric_info,saves:{kind:"range",additive:true}}},capabilities:{scope_labels:{destination:"Board",provider_account:"Pinterest account"},metrics:["impressions","saves"]},post_rows:[{id:"a",title:"A Pin",url:"https://pinterest.com/pin/a",status:"ok",metrics:{impressions:100,saves:0},report}]});
+ if(url.pathname.includes("/metrics"))return Response.json({social_account_id:42,platform:"pinterest",display_name:"Ideas",status:"ok",updated_at:new Date().toISOString(),impressions:100,saves:0,available:["impressions","saves"],outbound_clicks:null,report:{...report,requested_metrics:["impressions","saves","outbound_clicks"],metric_info:{...report.metric_info,saves:{kind:"range",additive:true}}},capabilities:{scope_labels:{destination:"Board",provider_account:"Pinterest account"},metrics:["impressions","saves"]},post_rows:[{id:"a",title:"A Pin",url:"https://pinterest.com/pin/a",status:"ok",metrics:{impressions:100,saves:0},report}]});
  return Response.json({items:[],unread:0});}) as typeof fetch;
  await render(<SocialPanel projectId="test-project"/>);
- expect(browser.document.body.textContent).toContain("Post ranking");expect(browser.document.body.textContent).toContain("saves");
+ expect(browser.document.body.textContent).toContain("Post ranking");expect(browser.document.body.textContent).toContain("saves");expect(browser.document.body.textContent).toContain("Unavailable");
  const metrics=requests.filter(url=>url.pathname.includes("/metrics"));expect(metrics.length).toBeGreaterThan(0);expect(metrics.every(url=>url.searchParams.get("scope")==="provider_account"&&url.searchParams.get("project_id")==="test-project"&&url.searchParams.get("range")==="28d")).toBe(true);
  const scope=browser.document.querySelector('select[aria-label="Analytics scope"]') as HTMLSelectElement;expect(scope.textContent).toContain("Board");await act(async()=>{scope.value="destination";scope.dispatchEvent(new browser.Event("change",{bubbles:true}))});expect(requests.at(-1)?.searchParams.get("scope")).toBe("destination");
+});
+
+test("generic report freshness exposes timezone, pending dates and provider estimates",async()=>{
+ await render(<ReportNotice report={{...report,identity:"another-channel:account",window:{...report.window,timezone:"UTC"},freshness:{observed_at:"2026-10-26T13:00:00Z",processed_through:"2026-10-24",pending_dates:["2026-10-25","2026-10-26"],estimated_dates:["2026-10-23"],unavailable_dates:["2026-10-22"]}}}/>);
+ const text=browser.document.body.textContent!;
+ expect(text).toContain("UTC");expect(text).toContain("Processed through");expect(text).toContain("Pending:");expect(text).toContain("provider estimates");expect(text).toContain("not real-time");expect(text).toContain("gaps are not zero activity");
 });

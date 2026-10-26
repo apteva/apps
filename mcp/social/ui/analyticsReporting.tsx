@@ -1,10 +1,20 @@
+import { metricDateLabel, metricDateRanges } from "./metricsPresentation";
+export interface AnalyticsFreshness {
+  observed_at: string;
+  processed_through?: string;
+  pending_dates: string[];
+  estimated_dates: string[];
+  unavailable_dates: string[];
+}
 export interface AnalyticsReport {
+  requested_metrics?: string[];
+  freshness?: AnalyticsFreshness;
   scope: string;
   entity_id: string;
   identity: string;
   source: string;
-  window: { kind: string; start_date?: string; end_date?: string };
-  metric_info: Record<string, { kind: string; additive?: boolean; alias_of?: string }>;
+  window: { kind: string; start_date?: string; end_date?: string; timezone?: string };
+  metric_info: Record<string, { kind: string; additive?: boolean; alias_of?: string; freshness?: AnalyticsFreshness }>;
   coverage?: { inventory: string; discovered: number; included: number; failed: number; complete: boolean; truncated: boolean; metric_posts?: Record<string, number>; note?: string };
   warnings?: string[];
 }
@@ -27,10 +37,19 @@ export function comparableIdentity(report: AnalyticsReport | undefined, fallback
 export function ReportNotice({ report, comparison }: { report?: AnalyticsReport; comparison?: PeriodComparison }) {
   if (!report) return null;
   const c = report.coverage;
+  const f = report.freshness;
   return <div className="text-xs text-text-dim flex flex-col gap-1" role="status">
     <div>{report.scope === "provider_account" ? "Whole account" : report.scope === "post" ? "Individual post" : "Selected destination"}
       {report.window.kind === "range" ? ` · ${report.window.start_date} – ${report.window.end_date}` : ` · ${report.window.kind} totals`}
+      {report.window.timezone && ` · ${report.window.timezone}`}
       {report.source === "post_aggregation" && " · Calculated from individual posts"}</div>
+    {f && <>
+      <div>Provider API report; not real-time. Fetched {f.observed_at}.</div>
+      {f.processed_through && <div>Processed through {metricDateLabel(f.processed_through)}.</div>}
+      {!!f.pending_dates.length && <div>Pending: {metricDateRanges(f.pending_dates)}.</div>}
+      {!!f.estimated_dates.length && <div>Includes provider estimates: {metricDateRanges(f.estimated_dates)}.</div>}
+      {!!f.unavailable_dates.length && <div>Data or processing status unavailable for {f.unavailable_dates.length} date{f.unavailable_dates.length === 1 ? "" : "s"}; gaps are not zero activity.</div>}
+    </>}
     {c && <>
       <div>{c.complete ? "Complete inventory" : "Partial coverage"} · {c.included}/{c.discovered} posts included{c.failed ? ` · ${c.failed} failed` : ""}{c.truncated ? " · inventory limit reached" : ""}</div>
       {c.metric_posts && <div>{Object.entries(c.metric_posts).map(([name, count]) => `${metricLabel(name)}: ${count} posts`).join(" · ")}</div>}

@@ -6102,6 +6102,7 @@ function MetricsView({
               >
                 <option value="7d">Last 7 days</option>
                 <option value="28d">Last 28 days</option>
+                <option value="30d">Last 30 days</option>
                 <option value="90d">Last 90 days</option>
                 <option value="custom">Custom dates</option>
               </select>
@@ -6290,7 +6291,7 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     ["saves", metrics.saves],
     ["sends", metrics.sends],
     ["clicks", metrics.clicks],
-  ].filter(([name, value]) => metrics.report ? visibleMetricNames(metrics.available,metrics.report).includes(String(name)) : value != null && Number(value) > 0).map(([name,value])=>[name,Number(value || 0)]) as [string, number][];
+  ].filter(([name, value]) => metrics.report ? visibleMetricNames(metrics.available,metrics.report).includes(String(name)) || metrics.report.requested_metrics?.includes(String(name)) : value != null && Number(value) > 0).map(([name,value])=>[name, metrics.report && !visibleMetricNames(metrics.available,metrics.report).includes(String(name)) ? null : value == null ? null : Number(value)]) as [string, number | null][];
   if (metrics.engagement_rate != null && metrics.engagement_rate > 0) {
     stats.push(["engagement rate", metrics.engagement_rate]);
   }
@@ -6302,7 +6303,7 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
       {stats.map(([label, value]) => (
         <div key={label} className="border border-border rounded px-3 py-2 bg-bg">
           <div className="text-text font-medium">
-            {label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
+            {value == null ? "Unavailable" : label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
           </div>
           <div className="text-text-dim text-[10px] uppercase tracking-wide">{label.replace(/_/g," ")}</div>
           {metrics.report?.metric_info[label]?.kind && <div className="text-text-dim text-xs">{metrics.report.metric_info[label].kind==="range" ? "Selected period" : metrics.report.metric_info[label].kind==="snapshot" ? "Current total" : "Lifetime"}</div>}
