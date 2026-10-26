@@ -1,0 +1,84 @@
+schema: apteva-app/v1
+name: mobile
+display_name: Mobile
+version: 0.1.0
+description: |
+  Operate physical Android and iOS devices through exclusive sessions.
+  Navigate websites, install and launch apps, inspect screens and UI trees,
+  and run repeatable smoke tests with screenshots and durable results.
+  Runs beside devices or connects to an authenticated Mobile runner.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/mobile
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [mobile, android, ios, automation, testing, devices]
+scopes: [project]
+min_apteva_version: "0.11.0"
+requires:
+  permissions: [db.write.app, net.egress]
+  binaries:
+    - name: adb
+      executables: [adb]
+      required: false
+      hint: "Install Android Platform Tools and authorize USB or wireless debugging. Optional when using Appium or a remote Mobile runner."
+      sources: {}
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: mobile_devices, description: "List discovered/configured devices and host setup diagnostics. Args: platform?, physical?." }
+    - { name: mobile_session, description: "Open, list, get, renew or close an exclusive device session. Recover releases an unknown Appium creation outcome after manual cleanup and confirm=true. Args: action, device_id? or platform?, physical?, session_id?, ttl_seconds?, mode? (screen|structured), confirm?. Close preserves app data." }
+    - { name: mobile_observe, description: "Inspect a session. Returns screenshot image content and optional UI source. Args: session_id, source? (default false)." }
+    - { name: mobile_action, description: "Operate a session. Args: session_id, action (navigate|tap|swipe|text|key|tap_element|context), url?, x?, y?, to_x?, to_y?, text?, key?, using?, value?, context?. Coordinates are normalized 0..1." }
+    - { name: mobile_app, description: "Install, launch, stop or uninstall an app. Args: session_id, action, app_id?, artifact?. Install accepts an APK or device IPA from the configured artifact directory. Uninstall requires confirm=true." }
+    - { name: mobile_stream, description: "Get authenticated screenshot polling details for a live session. This version uses polling, not video. Args: session_id." }
+    - name: mobile_test_run
+      description: "Start a bounded deterministic smoke test on a device. Args: device_id, steps (max 50), name?, build_ref?, mode?. Each step has action and optional label, params; assert_text/wait_for_text use params.text. Returns a durable run_id."
+      async_result:
+        id_field: run_id
+        notify:
+          target: caller
+          mode: once
+          events: [mobile.test.completed]
+          match: { run_id: "$result.run_id" }
+          expires_after: 15m
+    - { name: mobile_test_get, description: "Get a test report or list recent runs. Args: run_id?; report includes failure_kind, per-step evidence and build_ref." }
+    - { name: mobile_test_cancel, description: "Cancel a queued or running test. Args: run_id." }
+  ui_panels:
+    - slot: project.page
+      label: Mobile
+      icon: smartphone
+      entry: /ui/MobilePanel.mjs
+  skills:
+    - name: mobile
+      command: /mobile
+      body_file: skills/how-to-use-mobile.md
+      description: Discover phones, reserve a session, operate mobile browsers/apps and execute smoke tests.
+      metadata: { category: development }
+  publishes:
+    - { name: mobile.test.completed, description: "A test reached a terminal state; includes run_id, status and failure_kind." }
+  workers:
+    - { name: test_notifications, schedule: "@every 5s" }
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: mobile/v0.1.0
+    entry: mcp/mobile
+  port: 8080
+  health_check: /health
+  storage:
+    - { name: artifacts, mount_path: /data }
+db:
+  driver: sqlite
+  path: /data/mobile.db
+  migrations: migrations/
+config_schema:
+  - { name: runner_url, type: text, label: Remote Mobile runner URL, description: "Empty runs locally. Remote runners require HTTPS; loopback HTTP is allowed." }
+  - { name: runner_token, type: secret, label: Remote runner token }
+  - { name: appium_url, type: text, label: Appium server URL, description: "Optional local runner backend, usually http://127.0.0.1:4723. Keep Appium on a trusted private network." }
+  - { name: devices_json, type: text, label: Device inventory JSON, description: 'Optional array: [{"id":"iphone","name":"Test iPhone","platform":"ios","udid":"...","browser":"Safari","physical":true}]. Required for devices attached to a separate Appium host.' }
+  - { name: android_driver, type: text, default: adb, label: Android driver, description: "adb for screen input; appium for structured native/browser automation." }
+  - { name: artifact_dir, type: text, label: Install artifact directory, description: "Runner-local directory containing APK/IPA files. Defaults to the Mobile data directory's uploads subdirectory." }
+  - { name: lock_dir, type: text, label: Shared device lock directory, description: "All local Mobile processes controlling the same devices must share this directory. Defaults to ~/.apteva/mobile-locks." }
+upgrade_policy: auto-patch
