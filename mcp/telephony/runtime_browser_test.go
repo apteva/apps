@@ -61,7 +61,7 @@ func TestManagedRuntimeBrowserScopeAndHeaderSpoofing(t *testing.T) {
 		a.handleRuntimeBrowser(w, r)
 		return w
 	}
-	if w := request("/calls", "https://management.test", "browser-grant"); w.Code != 200 || !strings.Contains(w.Body.String(), row.ID) {
+	if w := request("/calls", "https://management.test", "browser-grant"); w.Code != 200 || !strings.Contains(w.Body.String(), row.ID) || w.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID" || w.Header().Get("X-Request-ID") == "" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	for _, path := range []string{"/calls?project_id=foreign-project", "/mcp", "/_apteva/runtime/app/activate", "/peer/call/secret"} {

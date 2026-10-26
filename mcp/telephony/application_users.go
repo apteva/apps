@@ -137,6 +137,9 @@ func phoneAction(r *http.Request) string {
 		return "call.answer"
 	}
 	path := r.URL.Path
+	if (path == "/softphone/telemetry" && r.Method == "POST") || (strings.HasPrefix(path, "/softphone/offer-telemetry/") && r.Method == "GET") {
+		return "call.read"
+	}
 	if (path == "/softphone/turn-policy" || path == "/softphone/network-policy" || path == "/softphone/network-check") && (r.Method == "GET" || r.Method == "POST") {
 		return "call.read"
 	}

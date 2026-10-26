@@ -333,3 +333,13 @@ describe("call inspector request lifecycle", () => {
     h.c.dispose();
   });
 });
+
+test("pickup timeline separates receipts from explicit display and playback evidence",()=>{
+ const offer={offer_id:"offer-a",offer_created_at:date(),receipt_acknowledged_at:date(10),status:"pending"};
+ const receipt=diagnosticsModel({offer_delivery:{offers:[offer],events:[]}},epoch,epoch);
+ expect(receipt.events.some(e=>e.label==="receipt acknowledged"&&e.detail.includes("Receipt only"))).toBe(true);
+ expect(receipt.events.some(e=>e.label.includes("ringtone")||e.label.includes("displayed"))).toBe(false);
+ const explicit=diagnosticsModel({offer_delivery:{offers:[offer],events:[{id:1,offer_id:"offer-a",stage:"ui_displayed",received_at:date(20),browser_tab_id:"tab-a"},{id:2,offer_id:"offer-a",stage:"ringtone_started",received_at:date(30),browser_tab_id:"tab-a"}]}},epoch,epoch);
+ expect(explicit.events.filter(e=>e.stage==="Pickup")).toHaveLength(3);
+ expect(explicit.events.some(e=>e.label==="ringtone started"&&e.detail.includes("Browser report"))).toBe(true);
+});

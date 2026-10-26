@@ -46,7 +46,7 @@ jobs:
       - run: go vet ./...
         working-directory: mcp/telephony
       - name: Managed dashboard origins and Audio Health race checks
-        run: go test -race -count=1 -run '^Test(RuntimeDashboard|ManagedRuntimeBrowser|AudioDashboard)' .
+        run: go test -race -count=1 -run '^Test(RuntimeDashboard|ManagedRuntimeBrowser|AudioDashboard|BrowserTelemetry|DeliveryRequest)' .
         working-directory: mcp/telephony
       - name: Automatic pickup policy and ownership races
         run: go test -race -count=1 -run '^TestAutoAnswer' .

@@ -1,3 +1,4 @@
+import {correlatedInit,correlatedFailure} from "./telemetry";
 import type { AppHandle } from '@apteva/web-sdk';
 
 export type TelephonyRuntimeMode = 'auto' | 'proxy' | 'direct';
@@ -100,17 +101,20 @@ export class RuntimeTelephonyTransport {
   }
 
   async request<R>(method: string, path: string, body?: unknown, init?: RequestInit): Promise<R> {
+    init=correlatedInit(init);
+    const proxyRequest=()=>{const result=method==='GET'?this.proxy.get<R>(path,init):this.proxy.post<R>(path,body,init);return result.catch(error=>{throw correlatedFailure(error,init)})};
     // Preserve request initiation order on legacy/local paths. An extra await
     // here changes cancellation and recovery ordering for existing clients.
     if (this.mode !== 'direct' && !this.direct || this.proxyOnly) {
-      return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
+      return proxyRequest();
     }
     await this.prepare();
-    if (!this.directBase) return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
-    return this.requestDirect<R>(method, path, body, init);
+    if (!this.directBase) return proxyRequest();
+    return this.requestDirect<R>(method, path, body, init).catch(error=>{throw correlatedFailure(error,init)});
   }
 
   private async requestDirect<R>(method: string, path: string, body?: unknown, init?: RequestInit): Promise<R> {
+    init=correlatedInit(init);
     requestPath(path);
     init?.signal?.throwIfAborted();
     const grant = await this.grant(), url = new URL(this.directBase + path);
@@ -124,18 +128,19 @@ export class RuntimeTelephonyTransport {
     if (!response.ok) {
       if (response.status === 403) this.credential = undefined;
       const body = (await response.text()).slice(0, 65536);
-      throw Object.assign(new Error(`Telephony HTTP ${response.status}`), { status: response.status, body });
+      throw correlatedFailure(Object.assign(new Error(`Telephony HTTP ${response.status}`), { status: response.status, body }),init,response.headers.get("X-Request-ID")??undefined);
     }
-    return await response.json() as R;
+    try{return await response.json() as R;}catch(error){throw correlatedFailure(Object.assign(new Error("Invalid Telephony JSON response"),{category:"invalid_response",status:response.status}),init,response.headers.get("X-Request-ID")??undefined);}
   }
 
   /** Create and renew a media session on the same remote ingress that will
    * authorize its socket. Ordinary dashboard requests stay on the gateway. */
   requestMedia<R>(path: string, body?: unknown, init?: RequestInit): Promise<R> {
+    init=correlatedInit(init);
     const send = () => {
       init?.signal?.throwIfAborted();
       return this.directBase && !this.proxyOnly
-        ? this.requestDirect<R>('POST', path, body, init)
+        ? this.requestDirect<R>('POST', path, body, init).catch(error=>{throw correlatedFailure(error,init)})
         : this.request<R>('POST', path, body, init);
     };
     if (this.mode === 'auto' && typeof location !== 'undefined' && !this.proxyOnly)
@@ -153,7 +158,7 @@ export class RuntimeTelephonyTransport {
   }
 
   subscribe<E>(path: string, onEvent: (event: E) => void,
-               opts?: { signal?: AbortSignal; onError?: (e: unknown) => void }): { close(): void } {
+               opts?: { signal?: AbortSignal; onOpen?:()=>void; onError?: (e: unknown) => void }): { close(): void } {
     if (this.mode !== 'direct' && !this.direct || this.proxyOnly) return this.proxy.subscribe(path, onEvent, opts);
     const controller = new AbortController();
     let fallback: { close(): void } | undefined;
@@ -178,12 +183,13 @@ export class RuntimeTelephonyTransport {
               throw Object.assign(new Error(`Telephony stream HTTP ${response.status}`), { status: response.status });
             }
             backoff = 500;
+            try{opts?.onOpen?.()}catch{/* diagnostics observers cannot break streaming */}
             const reader = response.body.getReader(), decoder = new TextDecoder();
             let buffered = '';
             try {
               while (!controller.signal.aborted) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done) {if(!controller.signal.aborted)opts?.onError?.(Object.assign(new Error("Telephony stream closed"),{category:"stream_closed",code:"stream_ended"}));break;}
                 buffered += decoder.decode(value, { stream: true });
                 buffered = buffered.replace(/\r\n/g, '\n');
                 if (buffered.length > 65536) throw new Error('Telephony notification frame too large');

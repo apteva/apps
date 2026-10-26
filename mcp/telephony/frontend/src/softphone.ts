@@ -1,3 +1,4 @@
+import {requestDiagnostic} from "./telemetry";
 import {AutomaticAnswer,type AutoAnswerSnapshot} from "./auto-answer";
 import {validateNetworkPolicy,type NetworkPolicy} from "./network-policy";
 import {withNetworkAbort,type NetworkCheckResult,type NetworkCheckOptions} from "./network-check";
@@ -99,6 +100,7 @@ export class HeadlessSoftphone {
   private readonly autoAnswer:AutomaticAnswer;
   private autoPrepared=false;
   private automaticAnswerStartedAt?:number;
+  private observedOffers=new Map<string,Call>();
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
@@ -259,11 +261,14 @@ export class HeadlessSoftphone {
   answerAutoAnswerNow():void{this.autoAnswer.answerNow();}
   cancelAutoAnswer(callId?:string):void{this.autoAnswer.cancel(callId);}
   /** Hosts that disable polling feed the same complete permission-scoped call list. */
-  observeCalls(calls:Call[]):void{for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
+  observeCalls(calls:Call[]):void{this.observedOffers=new Map(calls.map(c=>[c.id,c]));for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
     if(!request.auto_answer_session)this.autoAnswer.cancel(id);
     const prepared=Boolean(request.auto_answer_session&&this.autoPrepared&&this.runtime.isPrepared?.()!==false);
     const generation = this.begin(true,prepared);
+    const offer=this.observedOffers.get(id)?.ring_offers?.find(o=>o.kind==="browser"&&(!request.destination_id||o.destination_id===request.destination_id));
+    if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_attempted"}).catch(()=>{});
+    let answerRequested=false;
     let claimed: CallSession | undefined;
     let attached = false;
     try {
@@ -276,12 +281,14 @@ export class HeadlessSoftphone {
         if(offered)setupEvents.push({timestamp:new Date(offered).toISOString(),action:"automatic_answer",outcome:"offer_received"});
         setupEvents.push({timestamp:new Date(this.automaticAnswerStartedAt).toISOString(),action:"automatic_answer",outcome:"answer_started",code:this.snapshot.autoAnswer?.source,duration_ms:offered?this.automaticAnswerStartedAt-offered:undefined});
       }
+      answerRequested=true;
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
       this.outbound = false;
       await this.attachAudio(claimed, generation, setupEvents);
     } catch (error) {
+      if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_failed",code:answerRequested?(requestDiagnostic(error).code??"answer_request_failed"):"audio_preflight_failed",request_id:requestDiagnostic(error).requestId}).catch(()=>{});
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
         await this.recoverStartup(claimed, generation, () => this.client.release(claimed!));
       }

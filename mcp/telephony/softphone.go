@@ -1061,6 +1061,48 @@ func logSoftphone(msg string, args ...any) {
 // ─── /softphone/... — panel actions ────────────────────────────────
 
 func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/softphone/offer-telemetry/") && r.Method == "GET" {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/softphone/offer-telemetry/")
+		row, err := a.db().findCall(id)
+		if err != nil {
+			http.Error(w, "diagnostics unavailable", 503)
+			return
+		}
+		if row == nil || row.ProjectID != project {
+			http.NotFound(w, r)
+			return
+		}
+		principal := ""
+		if p := phoneUserFrom(r); p != nil {
+			if !a.phoneCallAllowed(p, row, true) && !a.phoneCanAccessSettledOffer(p, row, "") {
+				http.Error(w, "call not visible", 403)
+				return
+			}
+			principal = p.Identity.key()
+		}
+		result, err := a.browserOfferTelemetry(project, id, principal)
+		if err != nil {
+			http.Error(w, "diagnostics unavailable", 503)
+			return
+		}
+		writeJSON(w, result)
+		return
+	}
+
+	if r.URL.Path == "/softphone/telemetry" {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		a.handleBrowserTelemetry(w, r, project)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/softphone/auto-answer-") {
 		project, err := a.panelProject(r)
 		if err != nil {

@@ -1,0 +1,66 @@
+{
+  "feature": "Generic softphone delivery telemetry and watchCalls error classification",
+  "date": "2026-10-26",
+  "base_version": "0.12.55",
+  "release_status": "local, unreleased; no production or staging changes",
+  "checks": {
+    "go_full": {
+      "passed": true,
+      "seconds": 396.95,
+      "log": "/private/tmp/telephony-delivery-all-go.log"
+    },
+    "go_targeted_final_cors_and_telemetry": {
+      "passed": true,
+      "log": "/private/tmp/telephony-telemetry-final-go.log"
+    },
+    "go_targeted_race": {
+      "passed": true,
+      "seconds": 88.125,
+      "log": "/private/tmp/telephony-delivery-race.log"
+    },
+    "go_vet": {
+      "passed": true,
+      "log": "/private/tmp/telephony-telemetry-vet.log"
+    },
+    "frontend_full": {
+      "passed": 420,
+      "failed": 0,
+      "log": "/private/tmp/telephony-telemetry-final-frontend.log"
+    },
+    "request_classification_final": {
+      "passed": 32,
+      "failed": 0,
+      "log": "/private/tmp/telephony-telemetry-request-final.log"
+    },
+    "real_chromium_auto_answer_and_managed_media": {
+      "passed": true,
+      "log": "/private/tmp/telephony-telemetry-final-browser.log"
+    },
+    "inspector_real_chromium": {
+      "passed": 6,
+      "failed": 0,
+      "log": "/private/tmp/telephony-telemetry-pickup-browser.log"
+    },
+    "typecheck_and_generated_frontend_panels": {
+      "passed": true
+    }
+  },
+  "coverage": [
+    "Synchronous and asynchronous embedding callback failures, including HTTP-shaped exceptions",
+    "Independent receipt ACK and continued polling after callback/observer errors",
+    "HTTP status and safe code, client/server request correlation",
+    "Malformed JSON and nested shape validation",
+    "Network versus timeout versus deliberate close; suppression of late results",
+    "Stream reconnects and heartbeat versus call-list health",
+    "Coalesced snapshots and exclusion of arbitrary error messages",
+    "Per-tab receipts and explicit UI/ringtone stages, missing evidence remains unknown",
+    "Project/adviser isolation, idempotency, delayed evidence for completed calls, validation versus database failures",
+    "Real-browser zero-delay and delayed automatic pickup, direct managed media renewal, inspector without microphone access"
+  ],
+  "limits": [
+    "Browser playback progress does not prove physical audibility",
+    "Embedding applications must report their own display and ringtone events",
+    "SDK proxy JSON parse failures do not expose successful HTTP status; it is not fabricated",
+    "These are local fixture/browser tests, not a production live-call test"
+  ]
+}

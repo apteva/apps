@@ -256,7 +256,8 @@ func (a *App) handleRuntimeBrowser(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		w.WriteHeader(204)
 		return
 	}
@@ -292,6 +293,7 @@ func (a *App) handleRuntimeBrowser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 	request.Header.Set("X-Apteva-Project-ID", grant.Project)
 	request.Header.Set("X-Apteva-Operator-ID", strconv.FormatInt(grant.UserID, 10))
 	raw, _ := json.Marshal(grant.Principal)
@@ -435,10 +437,10 @@ func (a *App) runtimeBrowserHandler(path string) http.HandlerFunc {
 		}
 	}
 	if path == "/calls/events" {
-		return a.runtimeHTTP(a.handleCallNotifications, false)
+		return a.deliveryRequestHTTP(a.runtimeHTTP(a.handleCallNotifications, false))
 	}
 	if path == "/calls" {
-		return a.runtimeHTTP(a.handleListCalls, false)
+		return a.deliveryRequestHTTP(a.runtimeHTTP(a.handleListCalls, false))
 	}
 	if strings.HasPrefix(path, "/calls/") && strings.Count(strings.Trim(path, "/"), "/") == 2 {
 		return a.runtimeHTTP(a.handleCallAction, false)
@@ -450,7 +452,7 @@ func (a *App) runtimeBrowserHandler(path string) http.HandlerFunc {
 		return a.runtimeHTTP(a.handleListenMedia, false)
 	}
 	if strings.HasPrefix(path, "/softphone/") {
-		return a.runtimeHTTP(a.handleSoftphoneAction, false)
+		return a.deliveryRequestHTTP(a.runtimeHTTP(a.handleSoftphoneAction, false))
 	}
 	return nil
 }

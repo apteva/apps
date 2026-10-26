@@ -525,6 +525,14 @@ export function diagnosticsModel(
     if (r.event) add([object(r.event)], "Carrier");
   }
   add(list(link.events), "Core link");
+  add(list(at(data,"offer_delivery.events")).map(e=>({...e,at:e.received_at,kind:e.stage,detail:`Browser report · tab ${text(e.browser_tab_id)} · ${text(object(e.facts).code)}`})),"Pickup");
+  for(const offer of list(at(data,"offer_delivery.offers"))){
+    add([{id:offer.offer_id,at:offer.offer_created_at,kind:"offer created"}],"Routing");
+    add([{id:offer.offer_id,at:offer.receipt_acknowledged_at,kind:"receipt acknowledged",detail:"Receipt only; display/playback unknown"}],"Pickup");
+    add([{id:offer.offer_id,at:offer.claimed_at,kind:"offer claimed"}],"Routing");
+    if(offer.status==="expired")add([{id:offer.offer_id,at:offer.expires_at,kind:"offer expired",detail:"Configured offer deadline"}],"Routing");
+  }
+
   add(
     list(agent.clears).map((r) => ({
       ...r,

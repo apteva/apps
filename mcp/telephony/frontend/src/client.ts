@@ -1,3 +1,4 @@
+import {browserTabID,diagnosticID,requestDiagnostic,type CallWatchDiagnostics,type RequestDiagnostic,type OfferBrowserEvent} from "./telemetry";
 import {runNetworkCheck} from "./network-check";
 import { boundedMediaRequest } from "./media-lease";
 import {RuntimeTelephonyTransport, type TelephonyRuntimeMode, type DirectTelephonyConnection} from "./runtime-transport";
@@ -131,17 +132,33 @@ export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | 
   return call.direction === "inbound" && call.status === "pending" && call.answerable !== false && !call.routing_waiting &&
     (call.peer_kind === "human" || Boolean(call.ring_offers?.some(offer => offer.kind === "browser")));
 }
+export interface WatchCallFailure extends RequestDiagnostic {
+  trigger:"poll"|"push";fetchMs:number;operation:"call_list"|"callback";callback?:"onCalls";error:unknown;
+}
 export interface WatchCallsOptions {
-  /** Recovery polling interval; 500 ms is supported as an interim tuning option. */
-  intervalMs?: number;
-  /** Live, permission-filtered hints with polling recovery. Default true. */
-  push?: boolean;
-  /** Local request timing, without assumptions about server/client clock skew. */
-  onTiming?: (sample: { trigger: "poll" | "push"; fetchMs: number }) => void;
-  /** Failed list request, including its HTTP status when one was received. */
-  onFailure?: (sample: { trigger: "poll" | "push"; fetchMs: number; status?: number; error: unknown }) => void;
-  signal?: AbortSignal;
-  onError?: (error: unknown) => void;
+  intervalMs?:number;
+  push?:boolean;
+  /** Coalesced, best-effort health snapshots while an incoming browser offer is observed. */
+  persistDiagnostics?:boolean;
+  /** Bounds a list read, independently of the SDK's general request timeout. */
+  requestTimeoutMs?:number;
+  onTiming?:(sample:{trigger:"poll"|"push";fetchMs:number})=>void;
+  /** Callback failures are separate from request/response failures. */
+  onFailure?:(sample:WatchCallFailure)=>void;
+  onCallbackError?:(sample:WatchCallFailure)=>void;
+  onDiagnostics?:(snapshot:Readonly<CallWatchDiagnostics>)=>void;
+  signal?:AbortSignal;
+  onError?:(error:unknown)=>void;
+}
+/** Host rendering failures retain their original exception in cause, never an HTTP status. */
+export class TelephonyCallbackError extends Error {
+  readonly category="callback";readonly code="on_calls_exception";readonly callback="onCalls";
+  constructor(cause:unknown){super("Telephony host onCalls callback failed",{cause});this.name="TelephonyCallbackError";}
+}
+export class TelephonyInvalidResponseError extends Error {
+  readonly category="invalid_response";
+  readonly code="invalid_call_list";
+  constructor(readonly requestId?:string){super("Invalid Telephony calls response");this.name="TelephonyInvalidResponseError";}
 }
 export const isTerminalCall = (status: string) =>
   ["completed", "failed", "no-answer", "no_answer", "busy", "canceled", "cancelled"].includes(status);
@@ -163,6 +180,9 @@ export interface TelephonyClientOptions {
 
 /** Human-call API. Does not invoke the AI-call MCP tools or open a microphone. */
 export class TelephonyClient {
+  readonly browserTabId=browserTabID();
+  readonly browserSessionId=diagnosticID();
+  private latestWatch?:CallWatchDiagnostics;
  private transport: RuntimeTelephonyTransport;
  private networkCheckControllers = new Set<AbortController>();
  private incomingPending=false;
@@ -185,11 +205,12 @@ export class TelephonyClient {
     return `/user${path}${path.includes("?") ? "&" : "?"}auth_provider=${encodeURIComponent(this.options.authProvider)}`;
   }
 
-  async listCalls(signal?: AbortSignal): Promise<Call[]> {
-    const result = await this.get<{ calls: Call[] }>(this.path("/calls"), { signal });
-    if (!Array.isArray(result?.calls) || result.calls.some(c => !c || typeof c.id !== "string" || typeof c.status !== "string")) {
-      throw new Error("Invalid Telephony calls response");
+  async listCalls(signal?: AbortSignal,requestID=`tel-${diagnosticID()}`): Promise<Call[]> {
+    const result = await this.get<{ calls: Call[] }>(this.path("/calls"), { signal,headers:{"X-Request-ID":requestID} });
+    if (!Array.isArray(result?.calls) || result.calls.some(c => !c || typeof c.id !== "string" || typeof c.status !== "string" || (c.ring_offers != null && (!Array.isArray(c.ring_offers) || c.ring_offers.some(o=>!o || typeof o.id!=="string" || typeof o.kind!=="string" || typeof o.destination_id!=="string"))))) {
+      throw new TelephonyInvalidResponseError(requestID);
     }
+    signal?.throwIfAborted();
     this.incomingPending=result.calls.some(isIncomingBrowserCall);
  if(this.incomingPending)this.cancelNetworkChecks();
     return result.calls;
@@ -207,99 +228,88 @@ export class TelephonyClient {
 
   /** Push is a hint to refetch through the same authorized handle. Coalesce
    * bursts, never overlap requests, and retain periodic/reconnect recovery. */
-  watchCalls(onCalls: (calls: Call[]) => void, options: WatchCallsOptions = {}): { close(): void } {
-    const interval = options.intervalMs ?? 2000;
-    if (!Number.isFinite(interval) || interval < 100) throw new Error("Call watch interval must be at least 100 ms");
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stream: { close(): void } | undefined;
-    let running = false;
-    let queued = false;
-    let lastPush = -Infinity;
-    let hintedState: string | undefined, appliedState: string | undefined;
-    let lastRefresh=performance.now();
-    const nextPollDelay = () => {
-      const age=performance.now()-lastPush;
-      return age<15000 ? Math.max(1,Math.min(Math.max(interval,30000)-(performance.now()-lastRefresh),15000-age)) : interval;
+  watchCalls(onCalls:(calls:Call[])=>unknown,options:WatchCallsOptions={}):{close():void;getDiagnostics():Readonly<CallWatchDiagnostics>} {
+    const interval=options.intervalMs??2000,timeout=options.requestTimeoutMs??10000;
+    if(!Number.isFinite(interval)||interval<100)throw Error("Call watch interval must be at least 100 ms");
+    if(!Number.isFinite(timeout)||timeout<100||timeout>60000)throw Error("Call request timeout must be 100–60000 ms");
+    const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined,stream:{close():void}|undefined;
+    let running=false,queued=false,lastPush=-Infinity,hintedState:string|undefined,appliedState:string|undefined,lastRefresh=performance.now();
+    let diagnostic:CallWatchDiagnostics={browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,watch_id:diagnosticID(),state:options.push===false?"disabled":"connecting",connections:0,disconnects:0,reconnects:0,consecutive_list_failures:0};
+    const snapshot=()=>Object.freeze({...diagnostic,last_failure:diagnostic.last_failure?{...diagnostic.last_failure}:undefined});
+    const update=(patch:Partial<CallWatchDiagnostics>)=>{diagnostic={...diagnostic,...patch};this.latestWatch=snapshot();try{options.onDiagnostics?.(snapshot())}catch{/* diagnostics cannot break delivery */}persistHealth(Boolean(patch.last_failure)||patch.state==="reconnecting"||patch.state==="closed");};
+    let evidenceUntil=0,lastHealthReport=-Infinity,healthReporting=false;
+    const persistHealth=(urgent=false)=>{
+      if(options.persistDiagnostics===false||Date.now()>evidenceUntil||healthReporting||performance.now()-lastHealthReport<(urgent?1000:10000))return;
+      healthReporting=true;lastHealthReport=performance.now();
+      void boundedMediaRequest(signal=>this.post(this.path("/softphone/telemetry"),{browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,events:[],watch:snapshot()},{signal})).catch(()=>{}).finally(()=>{healthReporting=false;});
     };
-    const acknowledged = new Set<string>();
-    const close = () => {
-      clearTimeout(timer); controller.abort(); stream?.close();
-      options.signal?.removeEventListener("abort", close);
+    const acknowledged=new Set<string>();
+    const nextPollDelay=()=>{const age=performance.now()-lastPush;return age<15000?Math.max(1,Math.min(Math.max(interval,30000)-(performance.now()-lastRefresh),15000-age)):interval;};
+    const close=()=>{if(controller.signal.aborted)return;clearTimeout(timer);controller.abort();stream?.close();options.signal?.removeEventListener("abort",close);update({state:"closed"});};
+    const report=(error:unknown)=>{try{options.onError?.(error)}catch{/* host error observers cannot stop call delivery */}};
+    const callbackFailure=(cause:unknown,trigger:"poll"|"push",fetchMs:number,requestId:string)=>{
+      if(controller.signal.aborted)return;
+      const error=new TelephonyCallbackError(cause);
+      const failure:WatchCallFailure={trigger,fetchMs,operation:"callback",callback:"onCalls",category:"callback",code:"on_calls_exception",requestId,clientRequestId:requestId,error};
+      update({last_failure:{category:"callback",code:"on_calls_exception",requestId}});
+      try{options.onFailure?.(failure)}catch{}try{options.onCallbackError?.(failure)}catch{}report(error);
     };
-    const report = (error: unknown) => { try { options.onError?.(error); } catch { close(); } };
-    options.signal?.addEventListener("abort", close, { once: true });
-    if (options.signal?.aborted) close();
-    const refresh = async (trigger: "poll" | "push") => {
-      if (controller.signal.aborted) return;
-      if (running) { queued = true; return; }
-      clearTimeout(timer); running = true;
-      const started = performance.now();
-      const stateAtStart = hintedState;
-      try {
-        const calls = await this.listCalls(controller.signal);
-        lastRefresh=performance.now();
-        if (!controller.signal.aborted) {
-          onCalls(calls);
-          appliedState = stateAtStart;
-          for (const call of calls) {
-            if (call.answerable !== true || call.status !== "pending") continue;
-            for (const offer of call.ring_offers ?? []) {
-              if (offer.kind !== "browser" || !offer.id || acknowledged.has(offer.id)) continue;
-              acknowledged.add(offer.id);
-              void this.acknowledgeOffer(call.id, offer.id).catch(error => {
-                if (![404, 405].includes((error as { status?: number })?.status ?? 0)) acknowledged.delete(offer.id);
-              });
-            }
-          }
-          // Diagnostic observers cannot interrupt call detection.
-          try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
-        }
-      } catch (error) {
-        lastPush=-Infinity; appliedState=undefined;
-        if (!controller.signal.aborted) {
-          const status = (error as { status?: unknown })?.status;
-          try { options.onFailure?.({ trigger, fetchMs: performance.now() - started, status: typeof status === "number" ? status : undefined, error }); } catch {}
-          report(error);
-        }
-      } finally {
-        running = false;
-        if (!controller.signal.aborted) {
-          if (queued) { queued = false; void refresh("push"); }
-          else timer = setTimeout(() => void refresh("poll"), nextPollDelay());
-        }
+    options.signal?.addEventListener("abort",close,{once:true});if(options.signal?.aborted)close();
+    const refresh=async(trigger:"poll"|"push")=>{
+      if(controller.signal.aborted)return;if(running){queued=true;return;}clearTimeout(timer);running=true;
+      const started=performance.now(),stateAtStart=hintedState,requestID=`tel-${diagnosticID()}`,read=new AbortController();
+      const cancel=()=>read.abort(controller.signal.reason);controller.signal.addEventListener("abort",cancel,{once:true});
+      const deadline=setTimeout(()=>read.abort(new DOMException("Call-list read timed out","TimeoutError")),timeout);
+      let calls:Call[]|undefined;
+      // Only the HTTP operation and response validation belong to this catch.
+      let rejectRead:(()=>void)|undefined;
+      try{calls=await Promise.race([this.listCalls(read.signal,requestID),new Promise<never>((_,reject)=>{rejectRead=()=>reject(read.signal.reason);read.signal.addEventListener("abort",rejectRead,{once:true});if(read.signal.aborted)rejectRead();})]);}
+      catch(error){
+        lastPush=-Infinity;appliedState=undefined;
+        if(!controller.signal.aborted){const failure=requestDiagnostic(error,read.signal);failure.clientRequestId??=requestID;failure.requestId??=requestID;update({last_failure:failure,consecutive_list_failures:diagnostic.consecutive_list_failures+1,last_request_id:failure.requestId??requestID});
+          try{options.onFailure?.({...failure,trigger,fetchMs:performance.now()-started,operation:"call_list",error})}catch{}report(error);}
+      }finally{clearTimeout(deadline);controller.signal.removeEventListener("abort",cancel);if(rejectRead)read.signal.removeEventListener("abort",rejectRead);}
+      if(calls&&!controller.signal.aborted&&!read.signal.aborted){
+        if(calls.some(c=>isIncomingBrowserCall(c)&&Boolean(c.ring_offers?.length)))evidenceUntil=Date.now()+30000;
+        const fetchMs=performance.now()-started;lastRefresh=performance.now();appliedState=stateAtStart;
+        update({last_successful_call_list_at:new Date().toISOString(),last_request_id:requestID,consecutive_list_failures:0});
+        // Receipt is independent of whether the host callback renders successfully.
+        for(const call of calls){if(call.answerable!==true||call.status!=="pending")continue;for(const offer of call.ring_offers??[]){
+          if(offer.kind!=="browser"||!offer.id||acknowledged.has(offer.id))continue;acknowledged.add(offer.id);
+          void this.acknowledgeOffer(call.id,offer.id).catch(error=>{if(![404,405].includes((error as {status?:number})?.status??0))acknowledged.delete(offer.id);});
+        }}
+        try{const result=onCalls(calls);if(result&&typeof (result as PromiseLike<unknown>).then==="function")void Promise.resolve(result).catch(error=>callbackFailure(error,trigger,fetchMs,requestID));}
+        catch(error){callbackFailure(error,trigger,fetchMs,requestID);}
+        try{options.onTiming?.({trigger,fetchMs})}catch{/* observers are isolated */}
       }
+      running=false;
+      if(!controller.signal.aborted){if(queued){queued=false;void refresh("push")}else timer=setTimeout(()=>void refresh("poll"),nextPollDelay());}
     };
-    void refresh("poll");
-    if (!controller.signal.aborted && options.push !== false && typeof this.app.subscribe === "function") {
-      try {
-        stream = this.subscribe<{ type?: string; state?: string }>(this.path("/calls/events"), event => {
-          if (event.type === "heartbeat" || event.type === "calls.changed") {
-            lastPush=performance.now();
-            if(event.type==="calls.changed") {
-              const state = typeof event.state === "string" && /^[0-9a-f]{64}$/.test(event.state) ? event.state : undefined;
-              hintedState = state;
-              if (!state || state !== appliedState || running) void refresh("push");
-            }
-            else if(!running) {clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),nextPollDelay());}
-          }
-          else if (event.type === "access.revoked") { lastPush=-Infinity; stream?.close(); void refresh("push"); }
-        }, {
-          transport: "fetch", signal: controller.signal, reconnectDelayMs: 250,
-          // Every stream authenticates. Equal visible-state hints reuse the last
-          // successful read; errors and periodic polls retain recovery.
-          onError: error => {
-            lastPush=-Infinity;
-            if(!running&&!controller.signal.aborted) {clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),interval);}
-            const status = (error as { status?: number })?.status;
-            if (status === 404 || status === 405 || status === 501) stream?.close();
-            // Streaming is optional; the normal authenticated poll reports
-            // actionable authentication errors and keeps old servers working.
+    update({});void refresh("poll");
+    if(!controller.signal.aborted&&options.push!==false&&typeof this.app.subscribe==="function"){
+      try{
+        const q=new URLSearchParams({browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,request_id:`tel-${diagnosticID()}`});
+        stream=this.subscribe<{type?:string;state?:string;request_id?:string;reason?:string}>(this.path(`/calls/events?${q}`),event=>{
+          if(controller.signal.aborted)return;
+          if(event.type==="stream.open"){update({last_request_id:event.request_id});return;}
+          if(event.type==="stream.closed"){update({state:"reconnecting",last_disconnect_at:new Date().toISOString()});return;}
+          if(event.type==="heartbeat"||event.type==="calls.changed"){
+            lastPush=performance.now();update({state:"connected",last_stream_event_at:new Date().toISOString(),...(event.type==="heartbeat"?{last_heartbeat_at:new Date().toISOString()}:{})});
+            if(event.type==="calls.changed"){const state=typeof event.state==="string"&&/^[0-9a-f]{64}$/.test(event.state)?event.state:undefined;hintedState=state;if(!state||state!==appliedState||running)void refresh("push");}
+            else if(!running){clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),nextPollDelay());}
+          }else if(event.type==="access.revoked"){lastPush=-Infinity;stream?.close();update({state:"closed"});void refresh("push");}
+        },{transport:"fetch",signal:controller.signal,reconnectDelayMs:250,
+          onOpen:()=>{if(controller.signal.aborted)return;update({state:"connected",connections:diagnostic.connections+1,reconnects:Math.max(0,diagnostic.connections),last_connect_at:new Date().toISOString()});},
+          onError:error=>{
+            if(controller.signal.aborted)return;lastPush=-Infinity;
+            const failure=requestDiagnostic(error);failure.requestId??=q.get("request_id")??undefined;update({state:"reconnecting",disconnects:diagnostic.disconnects+1,last_disconnect_at:new Date().toISOString(),last_reconnect_attempt_at:new Date().toISOString(),last_failure:failure});
+            if(!running){clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),interval);}
+            if([404,405,501].includes((error as {status?:number})?.status??0)){stream?.close();update({state:"disabled"});}
           },
         });
-      } catch { /* Older hosts can continue using polling. */ }
+      }catch(error){update({state:"disabled",last_failure:requestDiagnostic(error)});}
     }
-    return { close };
+    return {close,getDiagnostics:snapshot};
   }
 
   async place(request: DialRequest): Promise<CallSession> {
@@ -328,8 +338,16 @@ export class TelephonyClient {
   }
 
   async acknowledgeOffer(callIDValue: string, offerID: string): Promise<void> {
-    await this.post(this.path(`/softphone/offer/ack/${callID(callIDValue)}`), { offer_id: offerID });
+    await this.post(this.path(`/softphone/offer/ack/${callID(callIDValue)}`), { offer_id: offerID,browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,...(this.latestWatch?{watch:this.latestWatch}:{}) });
   }
+
+  /** Host UI/audio evidence; receipt ACKs never imply these stages. */
+  reportOfferEvent(event:OfferBrowserEvent):Promise<{accepted:boolean}>{
+    const record={...event,event_id:event.event_id??diagnosticID(),occurred_at:event.occurred_at??new Date().toISOString()};
+    return boundedMediaRequest(signal=>this.post(this.path("/softphone/telemetry"),{browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,events:[record],...(this.latestWatch?{watch:this.latestWatch}:{})},{signal}));
+  }
+  offerDiagnostics(id:string):Promise<Record<string,unknown>>{return this.get(this.path(`/softphone/offer-telemetry/${callID(id)}`));}
+  getWatchDiagnostics():Readonly<CallWatchDiagnostics>|undefined{return this.latestWatch?Object.freeze({...this.latestWatch,last_failure:this.latestWatch.last_failure?{...this.latestWatch.last_failure}:undefined}):undefined;}
 
   async declineOffer(callIDValue: string, offerID: string): Promise<void> {
     await this.post(this.path(`/softphone/offer/decline/${callID(callIDValue)}`), { offer_id: offerID });

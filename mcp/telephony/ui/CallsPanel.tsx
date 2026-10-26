@@ -954,52 +954,35 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
   );
 }
 
-function useInboundRingtone(active: boolean) {
-  const [enabled, setEnabled] = useState(false);
-  const contextRef = useRef<AudioContext | null>(null);
-
-  const enable = useCallback(async () => {
-    const AudioContextClass = window.AudioContext
-      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const context = contextRef.current ?? new AudioContextClass();
-    contextRef.current = context;
-    await context.resume();
-    setEnabled(true);
-  }, []);
-
-  const disable = useCallback(() => setEnabled(false), []);
-
-  useEffect(() => {
-    if (!active || !enabled || !contextRef.current) return;
-    const context = contextRef.current;
-    const ring = () => {
-      const start = context.currentTime;
-      for (const offset of [0, 0.32]) {
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        oscillator.type = "sine";
-        oscillator.frequency.value = 440;
-        gain.gain.setValueAtTime(0, start + offset);
-        gain.gain.linearRampToValueAtTime(0.07, start + offset + 0.02);
-        gain.gain.setValueAtTime(0.07, start + offset + 0.18);
-        gain.gain.linearRampToValueAtTime(0, start + offset + 0.25);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(start + offset);
-        oscillator.stop(start + offset + 0.26);
-      }
-    };
-    ring();
-    const timer = window.setInterval(ring, 1800);
-    return () => window.clearInterval(timer);
-  }, [active, enabled]);
-
-  useEffect(() => () => {
-    void contextRef.current?.close();
-    contextRef.current = null;
-  }, []);
-
-  return { ringtoneEnabled: enabled, enableRingtone: enable, disableRingtone: disable };
+type NativeRingtoneStage="ringtone_attempted"|"ringtone_started"|"ringtone_failed"|"ringtone_stopped"|"ringtone_suppressed";
+function useInboundRingtone(active:boolean,reportAttempt:()=>((stage:NativeRingtoneStage,code?:string)=>void)){
+ const [enabled,setEnabled]=useState(false);const contextRef=useRef<AudioContext|null>(null);const reportRef=useRef(reportAttempt);reportRef.current=reportAttempt;
+ const enable=useCallback(async()=>{
+  try{const Context=window.AudioContext??(window as typeof window & {webkitAudioContext?:typeof AudioContext}).webkitAudioContext;if(!Context)throw Error("audio_context_unavailable");const context=contextRef.current??new Context();contextRef.current=context;await context.resume();if(context.state!=="running")throw Error("audio_context_suspended");setEnabled(true);}
+  catch{reportRef.current()("ringtone_failed","audio_context_unavailable");setEnabled(false);}
+ },[]);
+ const disable=useCallback(()=>setEnabled(false),[]);
+ useEffect(()=>{
+  if(!active)return;
+  if(!enabled||!contextRef.current){reportRef.current()("ringtone_suppressed","sounds_disabled");return;}
+  const context=contextRef.current,nodes=new Set<OscillatorNode>();let lastReport:((stage:NativeRingtoneStage,code?:string)=>void)|undefined;
+  const ring=()=>{
+   const report=reportRef.current();lastReport=report;report("ringtone_attempted");
+   try{
+    if(context.state!=="running"){report("ringtone_failed","audio_context_suspended");return;}
+    const start=context.currentTime;
+    for(const offset of [0,0.32]){
+     const oscillator=context.createOscillator(),gain=context.createGain();nodes.add(oscillator);oscillator.type="sine";oscillator.frequency.value=440;
+     gain.gain.setValueAtTime(0,start+offset);gain.gain.linearRampToValueAtTime(0.07,start+offset+0.02);gain.gain.setValueAtTime(0.07,start+offset+0.18);gain.gain.linearRampToValueAtTime(0,start+offset+0.25);oscillator.connect(gain).connect(context.destination);
+     oscillator.onended=()=>{nodes.delete(oscillator);oscillator.disconnect();gain.disconnect();if(offset===0&&context.state==="running"&&context.currentTime>=start+0.25)report("ringtone_started","webaudio_render_progress");};
+     oscillator.start(start+offset);oscillator.stop(start+offset+0.26);
+    }
+   }catch{report("ringtone_failed","audio_schedule_failed");}
+  };
+  ring();const timer=window.setInterval(ring,1800);return()=>{window.clearInterval(timer);for(const node of nodes){try{node.stop()}catch{}}lastReport?.("ringtone_stopped");};
+ },[active,enabled]);
+ useEffect(()=>()=>{void contextRef.current?.close();contextRef.current=null},[]);
+ return {ringtoneEnabled:enabled,enableRingtone:enable,disableRingtone:disable};
 }
 
 function CallsView({ projectId, installId, visible = true, showCalls }: NativePanelProps & {visible?:boolean; showCalls?:()=>void}) {
@@ -1209,7 +1192,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     const watcher = telephony.watchCalls(receiveCalls, {
       onFailure: sample => {
         setLoading(false);
-        const response = sample.status === undefined ? "network" : `HTTP ${sample.status}`;
+        if(sample.operation==="callback"){setStatus("Call UI callback failed; server read succeeded.");return;}
+        const response = sample.category==="http" ? `HTTP ${sample.status}` : sample.category.replaceAll("_"," ");
         setCallsError(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
       },
     });
@@ -1252,7 +1236,25 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     })),
     [calls],
   );
-  const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length > 0);
+  const incomingEvidence=useRef<Array<{call_id:string;offer_id:string}>>([]);
+  incomingEvidence.current=ringing.flatMap(call=>call.ringOffers.filter(o=>o.kind==="browser").map(o=>({call_id:call.id,offer_id:o.id})));
+  const reportedDelivery=useRef(new Set<string>());
+  const reportDelivery=useCallback((offer:{call_id:string;offer_id:string},stage:import("../frontend/src/telemetry").OfferBrowserStage,code?:string)=>{
+    const key=`${offer.offer_id}:${stage}`;if(reportedDelivery.current.has(key))return;reportedDelivery.current.add(key);
+    void telephony.reportOfferEvent({...offer,stage,code,visibility:document.visibilityState==="hidden"?"hidden":"visible",focused:document.hasFocus()}).catch(()=>{});
+  },[telephony]);
+  const ringtoneReport=useCallback(()=>{const offers=[...incomingEvidence.current];return(stage:NativeRingtoneStage,code?:string)=>{for(const offer of offers)reportDelivery(offer,stage,code)}},[reportDelivery]);
+  const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length>0,ringtoneReport);
+  useEffect(()=>{
+    const active=new Set(incomingEvidence.current.map(o=>o.offer_id));for(const key of reportedDelivery.current)if(!active.has(key.slice(0,key.lastIndexOf(":"))))reportedDelivery.current.delete(key);
+    if(!visible)return;
+    const observe=()=>{
+      if(document.visibilityState!=="visible")return;
+      for(const offer of incomingEvidence.current){const element=document.getElementById(`telephony-call-offer-${offer.call_id}`);if(!element)continue;const r=element.getBoundingClientRect();if(r.width>0&&r.height>0&&r.top<window.innerHeight&&r.bottom>0)reportDelivery(offer,"ui_displayed");}
+    };
+    const frame=requestAnimationFrame(observe);document.addEventListener("visibilitychange",observe);window.addEventListener("scroll",observe,true);
+    return()=>{cancelAnimationFrame(frame);document.removeEventListener("visibilitychange",observe);window.removeEventListener("scroll",observe,true)};
+  },[ringing,visible,reportDelivery]);
 
   // Redial shortcuts: the most recent distinct outbound destinations.
   const recentNumbers = useMemo(() => {
@@ -1301,6 +1303,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const answerSoftphoneCall = async (call: Call) => {
     if (!phone) return;
     setStatus("");
+
     try {
       await phone.answer(call.id, {
         destination_id: answerDestinations[call.id] || call.ringOffers.find(o => o.kind === "browser")?.destination_id,
@@ -1467,7 +1470,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       {ringing.length > 0 ? (
         <div className="shrink-0 border-b border-border px-4 py-2 space-y-2">
           {ringing.map((call) => (
-            <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2">
+            <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2" id={`telephony-call-offer-${call.id}`}>
               <span className="text-success flex items-center gap-2 text-sm font-medium">
                 <PhoneIcon size={15} />
                 Incoming call

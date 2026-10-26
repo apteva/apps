@@ -131,6 +131,11 @@ async function fixture(page: Page) {
           ended_at: active ? "" : date(-60000),
         },
         generated_at: date(),
+        offer_delivery: {
+          offers: [{offer_id:"offer-browser",status:"claimed",offer_created_at:date(-10000),receipt_acknowledged_at:date(-9900),claimed_at:date(-9000)}],
+          events: [{offer_id:"offer-browser",stage:"browser_acknowledged",browser_tab_id:"tab-fixture",browser_session_id:"session-fixture",received_at:date(-9900),facts:{}}],
+          watch_health: [{watch_id:"watch-fixture",browser_tab_id:"tab-fixture",browser_session_id:"session-fixture",state:"reconnecting",connections:2,reconnects:1,disconnects:1,last_failure:{category:"callback",code:"on_calls_exception",requestId:"fixture-request"}}],
+        },
         browser,
         carrier: {
           updated_at: date(),
@@ -305,4 +310,14 @@ test("failed initial call load is unavailable, never zero calls; recovery clears
  await page.getByRole("button",{name:"Refresh",exact:true}).click();
  await expect(page.getByText("0 active / 0 recent",{exact:true})).toBeVisible();
  await expect(page.getByText(/Call refresh failed/)).toHaveCount(0);
+});
+
+test("pickup evidence distinguishes receipt from unconfirmed display and ringtone",async({page})=>{
+ await fixture(page);await page.goto("/");await page.getByRole("button",{name:/in-progress.*202 555 0101/}).click();
+ const inspector=page.getByRole("region",{name:"Call diagnostics"});await inspector.getByRole("button",{name:"Pickup",exact:true}).click();
+ await expect(inspector.getByText("Tab tab-fixture · session session-fixture",{exact:true}).first()).toBeVisible();
+ await expect(inspector.getByText("Call stream · reconnecting",{exact:true})).toBeVisible();
+ await expect(inspector.getByText(/Last failure: callback · on_calls_exception/)).toBeVisible();
+ await expect(inspector.getByText("No retained evidence",{exact:true}).first()).toBeVisible();
+ await expect(inspector.getByText(/Receipt ACKs confirm receipt only/)).toBeVisible();
 });

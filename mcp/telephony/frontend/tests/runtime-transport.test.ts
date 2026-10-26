@@ -135,3 +135,14 @@ test('unmanaged auto media stays on gateway, without acquiring remote credential
   expect(t.mediaURL(new URL('https://management.example/api/apps/telephony/_install/42/softphone/media/call-a/token')).origin).toBe('https://management.example');
  }finally{if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
 });
+
+test('direct diagnostics preserve response request ID, HTTP status and safe server code',async()=>{
+ const f=fixture();let sent:Headers|undefined;
+ const t=new RuntimeTelephonyTransport(f.app,'direct',(async(_url,init)=>{sent=new Headers(init?.headers);return Response.json({code:'runtime_not_admitting'},{status:503,headers:{'X-Request-ID':'server-503'}})}) as typeof fetch);
+ await expect(t.request('GET','/calls',undefined,{headers:{'X-Request-ID':'client-503'}})).rejects.toMatchObject({category:'http',status:503,code:'runtime_not_admitting',requestId:'server-503',clientRequestId:'client-503'});
+ expect(sent!.get('X-Request-ID')).toBe('client-503');
+});
+test('direct malformed successful JSON is invalid_response and retains the actual HTTP status',async()=>{
+ const f=fixture();const t=new RuntimeTelephonyTransport(f.app,'direct',(async()=>new Response('{invalid',{status:200,headers:{'X-Request-ID':'server-json'}})) as unknown as typeof fetch);
+ await expect(t.request('GET','/calls')).rejects.toMatchObject({category:'invalid_response',status:200,requestId:'server-json'});
+});

@@ -1,3 +1,4 @@
+import PickupDiagnostics from "./PickupDiagnostics";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AudioDashboardHost } from "./audio-dashboard";
 import {
@@ -196,6 +197,7 @@ const Inspector = memo(
     const tabs = [
       "Overview",
       "Browser",
+      "Pickup",
       "SIP / carrier",
       ...(m.hasAI ? ["AI / Core"] : []),
       "Timeline",
@@ -427,6 +429,7 @@ const Inspector = memo(
                 <Metrics items={m.agentMetrics} />
               </>
             ) : null}
+            {tab === "Pickup" ? <PickupDiagnostics data={state.data}/> : null}
             {tab === "Timeline" ? (
               <>
                 <p className="text-xs text-text-muted">

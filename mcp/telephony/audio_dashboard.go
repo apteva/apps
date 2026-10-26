@@ -547,13 +547,18 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 			http.Error(w, "invalid history mode", 400)
 			return
 		}
+		delivery, deliveryErr := a.browserOfferTelemetry(project, id, "")
+		if deliveryErr != nil {
+			http.Error(w, "pickup diagnostics unavailable", 503)
+			return
+		}
 		if historyMode == "none" {
 			_, live, err := a.db().carrierTransportCurrent(r.Context(), project, id)
 			if err != nil {
 				http.Error(w, "load live diagnostics", 500)
 				return
 			}
-			writeJSON(w, map[string]any{"call": call, "generated_at": generatedAt, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
+			writeJSON(w, map[string]any{"offer_delivery": delivery, "call": call, "generated_at": generatedAt, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
 			return
 		}
 		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
@@ -604,7 +609,7 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 			http.Error(w, "load carrier commands", 500)
 			return
 		}
-		result := map[string]any{"call": call, "generated_at": generatedAt, "carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		result := map[string]any{"offer_delivery": delivery, "call": call, "generated_at": generatedAt, "carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
 		if r.URL.Query().Get("include_packet_timing") == "true" {
 			result["sip_packet_timing"] = a.sipPacketTimingForCall(project, id)
 		}

@@ -482,3 +482,14 @@ An explicitly bundled client needs rebuilding to use the new transport; dynamic
 the advertised origins in its CSP. Raw SIP/RTP and WebRTC UDP networking remain
 backend configuration responsibilities. See
 [the runtime guide](../docs/managed-runtime.md) before opting into placement.
+
+## Delivery telemetry and callback failures
+
+`watchCalls()` separates HTTP/network/timeout failures, invalid responses and
+synchronous/asynchronous host callback failures. Callback failures use
+`TelephonyCallbackError` with the original exception in `cause`; polling and
+receipt ACKs continue. `onFailure`, `onCallbackError`, `onDiagnostics` and
+`watch.getDiagnostics()` expose structured evidence. Hosts can report actual UI
+and ringtone stages through `client.reportOfferEvent()`. See
+[the telemetry contract](../docs/softphone-delivery-telemetry.md) for examples,
+permissions, retention, request correlation and interpretation limits.
