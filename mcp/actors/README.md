@@ -246,10 +246,28 @@ Operation limits replace the actor limits as a whole, as they do during executio
 Unresolved templated limits report their expression and engine bounds, rather
 than pretending to be a fixed budget. `step_count`, `operation_sha256` (SHA-256 of
 the compact stored operation JSON) and `complete:true` support completeness checks.
-The complete MCP text response is capped at 32 KiB: exceeding that bound returns
-an explicit `incomplete-response` error, never a partial operation. Missing
-operations/revisions fail; even a latest-revision request reads its immutable
-version row. Omitting `operation` preserves the full existing response.
+Discovery and complete operation MCP text responses are capped at 32 KiB.
+An oversized operation returns `complete:false`, no executable fragment, and an
+exact `actors_definition_export` reference. Missing operations/revisions fail;
+even a latest-revision request reads its immutable version row.
+
+In v0.3.0, omitting `operation` returns metadata and operation names only, with
+`definition_included:false`. Follow `next_operation_after` as `operation_after`
+while `operations_complete:false`. `actors_list` also omits definitions and
+pages within the response budget; pass `next_cursor` as `after` while `has_more`.
+
+Full definitions require explicit `actors_definition_export(id, revision)` for
+editing/debugging. It returns bounded base64 chunks, byte offsets, total bytes,
+a SHA-256 digest and explicit completeness metadata. Assemble all chunks for
+that exact revision and verify the total/digest before treating the JSON as
+complete. Add `operation` to export an oversized complete operation contract,
+including all execution settings. A chunk alone is never executable.
+
+The editor lists metadata and explicitly downloads
+`GET /actors/{id}/definition/file?revision=N` when Edit is selected. The download
+returns the exact immutable JSON with revision/digest headers. Other editor
+clients must migrate from implicit `actor.definition` discovery to this export;
+they must never populate a starter definition when an existing download fails.
 Retrieval does not execute steps, reserve publish keys or alter actor definitions.
 
 Exact-label comparisons can opt into `canonical_map` with `equals` or

@@ -834,6 +834,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/actors", Handler: a.handleActors},
 		{Method: "POST", Pattern: "/actors", Handler: a.handleActorSave},
 		{Method: "GET", Pattern: "/actors/{id}", Handler: a.handleActorGet},
+		{Method: "GET", Pattern: "/actors/{id}/definition/file", Handler: a.handleActorDefinitionFile},
 		{Method: "DELETE", Pattern: "/actors/{id}", Handler: a.handleActorDelete},
 		{Method: "POST", Pattern: "/actors/run", Handler: a.handleActorRun},
 		{Method: "GET", Pattern: "/schedules", Handler: a.handleActorSchedules},

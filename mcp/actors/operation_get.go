@@ -15,12 +15,12 @@ import (
 )
 
 // This is a bound on the complete MCP text payload, not a truncation policy.
-// Oversized operation/configuration responses fail rather than dropping steps.
+// Oversized contracts return a bounded explicit export reference, never dropped steps.
 const maxActorOperationResponseBytes = 32 * 1024
 
 var actorInputReferencePattern = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
 
-func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) buildActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	name, ok := args["operation"].(string)
 	if !ok || !operationNamePattern.MatchString(name) {
 		return nil, errors.New("operation must be a nonempty operation name")
@@ -136,12 +136,21 @@ func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"input_requirements": actorOperationInputs(selected),
 		"complete":           true, "step_count": len(steps), "operation_sha256": hex.EncodeToString(digest[:]),
 	}
+	return out, nil
+}
+func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.buildActorOperation(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	encoded, err := json.Marshal(out)
 	if err != nil {
 		return nil, err
 	}
 	if len(encoded) > maxActorOperationResponseBytes {
-		return nil, fmt.Errorf("incomplete-response: complete operation %q at revision %d requires %d bytes, exceeding the %d-byte compact response limit; no definition was returned", name, revision, len(encoded), maxActorOperationResponseBytes)
+		m := out.(map[string]any)
+		actor := m["actor"].(map[string]any)
+		return map[string]any{"found": true, "actor": actor, "retrieved_revision": m["retrieved_revision"], "latest_revision": m["latest_revision"], "operation_name": m["operation_name"], "complete": false, "inline_complete": false, "required_bytes": len(encoded), "operation_sha256": m["operation_sha256"], "reason": "operation_contract_exceeds_inline_budget", "definition_export": exportHint(actor["id"].(int64), m["retrieved_revision"].(int), stringArg(args, "operation"))}, nil
 	}
 	return out, nil
 }
