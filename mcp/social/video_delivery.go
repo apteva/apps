@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -37,28 +38,47 @@ type deliveryEvent struct {
 	Result     string `json:"result,omitempty"`
 }
 type deliveryDiagnostics struct {
-	CorrelationID     string          `json:"correlation_id"`
-	StorageInstallID  int64           `json:"storage_install_id"`
-	MediaProjectID    string          `json:"media_project_id"`
-	SourceFileID      int64           `json:"source_file_id"`
-	SourceSHA256      string          `json:"source_sha256,omitempty"`
-	ExpectedBytes     int64           `json:"expected_bytes,omitempty"`
-	SourceHTTPStatus  int             `json:"source_http_status,omitempty"`
-	SourceRoute       string          `json:"source_route,omitempty"`
-	SourceBytes       int64           `json:"source_bytes,omitempty"`
-	SourceContentType string          `json:"source_content_type,omitempty"`
-	Method            string          `json:"method,omitempty"`
-	Stage             string          `json:"stage"`
-	OperationState    string          `json:"operation_state"`
-	OperationID       string          `json:"operation_id,omitempty"`
-	ProviderStatus    string          `json:"provider_status,omitempty"`
-	FailReason        string          `json:"fail_reason,omitempty"`
-	ErrorCode         string          `json:"error_code,omitempty"`
-	ProviderRequestID string          `json:"provider_request_id,omitempty"`
-	TransferredBytes  int64           `json:"transferred_bytes"`
-	Reconciliation    string          `json:"reconciliation,omitempty"`
-	RetryEligibility  string          `json:"retry_eligibility,omitempty"`
-	Events            []deliveryEvent `json:"events"`
+	AttemptPurpose              string                     `json:"purpose,omitempty"`
+	ProviderUploadedHighWater   *int64                     `json:"provider_uploaded_high_water,omitempty"`
+	ProviderDownloadedHighWater *int64                     `json:"provider_downloaded_high_water,omitempty"`
+	ProgressVersion             int                        `json:"progress_version,omitempty"`
+	VerifiedSourceBytes         *int64                     `json:"verified_source_bytes"`
+	AttemptedBytes              *int64                     `json:"attempted_upload_bytes"`
+	AcknowledgedBytes           *int64                     `json:"acknowledged_upload_bytes"`
+	LegacyTransferredBytes      *int64                     `json:"legacy_transferred_bytes,omitempty"`
+	Initialization              *deliveryOutcome           `json:"initialization,omitempty"`
+	LastUpload                  *deliveryOutcome           `json:"last_upload,omitempty"`
+	FirstUploadError            *deliveryOutcome           `json:"first_upload_error,omitempty"`
+	LatestUploadError           *deliveryOutcome           `json:"latest_upload_error,omitempty"`
+	ProviderObservation         *tikTokProgressObservation `json:"provider_observation,omitempty"`
+	LastProgressAt              string                     `json:"last_progress_at,omitempty"`
+	LocalDiagnostic             string                     `json:"local_diagnostic,omitempty"`
+	AutomaticPollAttempts       int                        `json:"automatic_poll_attempts,omitempty"`
+	AutomaticPollingStopped     bool                       `json:"automatic_polling_stopped"`
+	NextPollAt                  string                     `json:"next_poll_at,omitempty"`
+	UploadURLSHA256             string                     `json:"upload_url_sha256,omitempty"`
+	CorrelationID               string                     `json:"correlation_id"`
+	StorageInstallID            int64                      `json:"storage_install_id"`
+	MediaProjectID              string                     `json:"media_project_id"`
+	SourceFileID                int64                      `json:"source_file_id"`
+	SourceSHA256                string                     `json:"source_sha256,omitempty"`
+	ExpectedBytes               int64                      `json:"expected_bytes,omitempty"`
+	SourceHTTPStatus            int                        `json:"source_http_status,omitempty"`
+	SourceRoute                 string                     `json:"source_route,omitempty"`
+	SourceBytes                 int64                      `json:"source_bytes,omitempty"`
+	SourceContentType           string                     `json:"source_content_type,omitempty"`
+	Method                      string                     `json:"method,omitempty"`
+	Stage                       string                     `json:"stage"`
+	OperationState              string                     `json:"operation_state"`
+	OperationID                 string                     `json:"operation_id,omitempty"`
+	ProviderStatus              string                     `json:"provider_status,omitempty"`
+	FailReason                  string                     `json:"fail_reason,omitempty"`
+	ErrorCode                   string                     `json:"error_code,omitempty"`
+	ProviderRequestID           string                     `json:"provider_request_id,omitempty"`
+	TransferredBytes            int64                      `json:"transferred_bytes"`
+	Reconciliation              string                     `json:"reconciliation,omitempty"`
+	RetryEligibility            string                     `json:"retry_eligibility,omitempty"`
+	Events                      []deliveryEvent            `json:"events"`
 }
 
 func randomDeliveryID() string {
@@ -68,7 +88,7 @@ func randomDeliveryID() string {
 }
 
 var deliveryURLRE = regexp.MustCompile(`https?://[^\s"<>]+`)
-var deliverySecretRE = regexp.MustCompile(`(?i)((?:upload_id|upload_token|access_token|refresh_token|sig|signature|authorization|api_key|session_url)["']?\s*[=:]\s*["']?)[^\s,&"}]+`)
+var deliverySecretRE = regexp.MustCompile(`(?i)((?:upload_id|upload_token|access_token|refresh_token|token|client_secret|sig|signature|authorization|api_key|session_url)["']?\s*[=:]\s*["']?)[^\s,&"}]+`)
 
 var deliveryBearerRE = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*`)
 
@@ -105,7 +125,7 @@ func safeRequestID(s string) string {
 	}, s)
 }
 func responseRequestID(h http.Header) string {
-	for _, k := range []string{"X-Request-Id", "X-Correlation-Id", "X-Amz-Request-Id", "Cf-Ray"} {
+	for _, k := range []string{"X-Request-Id", "X-Correlation-Id", "X-Amz-Request-Id", "X-Tt-Logid", "X-Log-Id", "Cf-Ray"} {
 		if v := h.Get(k); v != "" {
 			return safeRequestID(v)
 		}
@@ -113,12 +133,11 @@ func responseRequestID(h http.Header) string {
 	return ""
 }
 func loadDeliveryDiagnostics(ctx *sdk.AppCtx, target int64) deliveryDiagnostics {
-	var raw string
-	_ = ctx.AppDB().QueryRow(`SELECT t.delivery_diagnostics FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE t.id=? AND p.project_id=?`, target, projectScope(ctx)).Scan(&raw)
-	var d deliveryDiagnostics
-	_ = json.Unmarshal([]byte(raw), &d)
-	return d
+	var raw, platform, lastError string
+	_ = ctx.AppDB().QueryRow(`SELECT t.delivery_diagnostics,a.platform,COALESCE(t.last_error,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE t.id=? AND p.project_id=?`, target, projectScope(ctx)).Scan(&raw, &platform, &lastError)
+	return decodeDeliveryDiagnostics(raw, platform, lastError)
 }
+
 func (d *deliveryDiagnostics) save(ctx *sdk.AppCtx, target int64) error {
 	if target <= 0 {
 		return nil
@@ -126,11 +145,28 @@ func (d *deliveryDiagnostics) save(ctx *sdk.AppCtx, target int64) error {
 	if len(d.Events) > 32 {
 		d.Events = d.Events[len(d.Events)-32:]
 	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if d.CorrelationID != "" {
+		var previous string
+		err := tx.QueryRow(`SELECT diagnostics FROM video_delivery_attempts WHERE project_id=? AND target_id=? AND correlation_id=?`, projectScope(ctx), target, d.CorrelationID).Scan(&previous)
+		if err == nil {
+			var old deliveryDiagnostics
+			if json.Unmarshal([]byte(previous), &old) == nil {
+				d.mergeDeliveryEvidence(old)
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	raw, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE post_targets SET delivery_diagnostics=? WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, string(raw), target, projectScope(ctx))
+	res, err := tx.Exec(`UPDATE post_targets SET delivery_diagnostics=? WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, string(raw), target, projectScope(ctx))
 	if err != nil {
 		return err
 	}
@@ -141,7 +177,12 @@ func (d *deliveryDiagnostics) save(ctx *sdk.AppCtx, target int64) error {
 	if n != 1 {
 		return errors.New("delivery target not found in this project")
 	}
-	return nil
+	if d.CorrelationID != "" {
+		if _, err = tx.Exec(`INSERT INTO video_delivery_attempts(project_id,target_id,correlation_id,diagnostics) VALUES(?,?,?,?) ON CONFLICT(project_id,target_id,correlation_id) DO UPDATE SET diagnostics=excluded.diagnostics,updated_at=CURRENT_TIMESTAMP`, projectScope(ctx), target, d.CorrelationID, string(raw)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func (d *deliveryDiagnostics) event(ctx *sdk.AppCtx, target int64, e deliveryEvent) error {
 	e.At = time.Now().UTC().Format(time.RFC3339Nano)
@@ -254,12 +295,29 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 		project = projectScope(ctx)
 	}
 	previous := loadDeliveryDiagnostics(ctx, j.targetID)
+	if previous.CorrelationID != "" {
+		if err := previous.save(ctx, j.targetID); err != nil {
+			return nil, err
+		}
+	}
 	d := deliveryDiagnostics{CorrelationID: randomDeliveryID(), SourceFileID: item.ID, MediaProjectID: project, ExpectedBytes: item.Bytes, Method: method, Stage: "source_fetch", OperationState: "not_started", Events: []deliveryEvent{}}
 	if b := ctx.IntegrationFor("storage"); b != nil {
 		d.StorageInstallID = b.InstallID
 	}
 	if method == "RECOVERY_VALIDATION" {
+		d.AttemptPurpose = "recovery_validation"
 		d.Method = previous.Method
+		d.Initialization = previous.Initialization
+		d.LastUpload = previous.LastUpload
+		d.FirstUploadError = previous.FirstUploadError
+		d.LatestUploadError = previous.LatestUploadError
+		d.ProviderObservation = previous.ProviderObservation
+		d.LastProgressAt = previous.LastProgressAt
+		d.AcknowledgedBytes = previous.AcknowledgedBytes
+		d.AttemptedBytes = previous.AttemptedBytes
+		d.ProgressVersion = previous.ProgressVersion
+		d.TransferredBytes = previous.TransferredBytes
+		d.LegacyTransferredBytes = previous.LegacyTransferredBytes
 	}
 	// Existing operations are never erased by a new source failure.
 	if previous.OperationID != "" {
@@ -390,6 +448,7 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			return nil, err
 		}
 		d.SourceSHA256 = hash
+		d.VerifiedSourceBytes = bytePointer(n)
 		if d.OperationState == "not_started" {
 			d.RetryEligibility = "source_verified"
 		}
@@ -420,7 +479,7 @@ func executeStatus(res *sdk.ExecuteResult) int {
 }
 
 // Capture provider-native state without retaining provider bodies or session URLs.
-func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, conn int64, operation, status, reason, code, logID string, res *sdk.ExecuteResult, callErr error) {
+func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, conn int64, operation, status, reason, code, logID string, res *sdk.ExecuteResult, callErr error, progress ...tikTokProgressObservation) {
 	rows, err := ctx.AppDB().Query(`SELECT t.id FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND a.connection_id=? AND a.platform='tiktok' AND t.publish_operation_id=?`, projectScope(ctx), conn, operation)
 	if err != nil {
 		return
@@ -436,10 +495,18 @@ func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, conn int64, operation, status,
 	for _, id := range targets {
 		d := loadDeliveryDiagnostics(ctx, id)
 		d.OperationID = safeRequestID(operation)
-		d.ProviderStatus = safeRequestID(status)
-		d.FailReason = safeRequestID(reason)
+		if res != nil && res.Success && (code == "" || code == "ok") && status != "" {
+			d.ProviderStatus = safeRequestID(status)
+			d.FailReason = safeRequestID(reason)
+		}
 		d.ErrorCode = safeRequestID(code)
 		d.ProviderRequestID = safeRequestID(logID)
+		if d.CorrelationID == "" {
+			d.CorrelationID = randomDeliveryID()
+		}
+		if len(progress) > 0 {
+			d.observeTikTokProgress(progress[0])
+		}
 		d.Reconciliation = "unknown"
 		d.OperationState = "unknown"
 		d.RetryEligibility = "blocked_unknown_outcome"
@@ -466,6 +533,7 @@ func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, conn int64, operation, status,
 				d.Reconciliation = "pending"
 			}
 		}
+		d.updateTikTokStall(time.Now().UTC())
 		d.event(ctx, id, deliveryEvent{Stage: stage, HTTPStatus: executeStatus(res), RequestID: safeRequestID(logID), Result: d.Reconciliation})
 	}
 }

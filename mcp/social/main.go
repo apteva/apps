@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.19.1
+version: 0.19.2
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -213,7 +213,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.19.1
+    ref: social/v0.19.2
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -2909,7 +2909,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			var warning *publishedWarningError
 			if errors.As(err, &warning) && (platformPostID != "" || warning.operationID != "") {
 				if warning.pending {
-					_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=?,last_error=?,identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, warning.operationID, warning.Error(), j.targetID)
+					_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=?,last_error=?,retryable=0,identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, warning.operationID, warning.Error(), j.targetID)
 					ctx.Emit("target.pending", map[string]any{"target_id": j.targetID, "platform": j.platform, "reason": warning.Error()})
 					continue
 				}
@@ -4343,6 +4343,20 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 		return "", "", &sourceDeliveryError{"video size differs from upload metadata", false}
 	}
 	d := prepared.Diagnostics
+	d.ProgressVersion = 1
+	d.AttemptedBytes = bytePointer(0)
+	d.AcknowledgedBytes = bytePointer(0)
+	d.TransferredBytes = 0
+	d.Initialization = &deliveryOutcome{StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Result: "request_started"}
+	d.FirstUploadError = nil
+	d.LatestUploadError = nil
+	d.LastUpload = nil
+	d.ProviderObservation = nil
+	d.LastProgressAt = ""
+	d.LocalDiagnostic = ""
+	d.AutomaticPollAttempts = 0
+	d.AutomaticPollingStopped = false
+	d.NextPollAt = ""
 	d.OperationState = "unknown"
 	if err := validatePreparedDestination(ctx, j); err != nil {
 		return "", "", err
@@ -4375,87 +4389,49 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	ctx.Logger().Info("publishTikTok: init upload",
 		"video_size", first.Bytes, "chunk_size", chunkSize, "total_chunks", totalChunks)
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
+	d.Initialization.At = time.Now().UTC().Format(time.RFC3339Nano)
+	d.Initialization.HTTPStatus = executeStatus(out)
+	captureProviderDiagnostics(&d, out)
+	d.Initialization.RequestID = d.ProviderRequestID
+	if out != nil {
+		d.Initialization.ResponseExcerpt = deliveryExcerpt(out.Data)
+	}
+
 	if err != nil {
+		d.Initialization.Result = "outcome_unknown"
+		d.Initialization.ResponseExcerpt = deliveryExcerpt([]byte(err.Error()))
+		_ = d.save(ctx, j.targetID)
 		return "", "", fmt.Errorf("TikTok init outcome unknown; verify the remote outcome: %s", redactDeliverySecrets(err.Error()))
 	}
 	if out == nil || !out.Success {
 		if out != nil && out.Status >= 400 && out.Status < 500 {
 			d.OperationState = "not_started"
 		}
+		d.Initialization.Result = "provider_rejected"
 		captureProviderDiagnostics(&d, out)
 		d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", HTTPStatus: executeStatus(out), Result: "provider_rejected"})
 		return "", "", upstreamError(out)
 	}
 	uploadURL, publishID := extractTikTokUploadInit(out.Data)
 	if uploadURL == "" || publishID == "" {
+		d.Initialization.Result = "invalid_response"
+		_ = d.save(ctx, j.targetID)
 		return "", "", errors.New("post_video init: missing upload_url or publish_id; verify the remote outcome before retrying")
 	}
 	if err := persistPublishOperation(ctx, j.targetID, publishID); err != nil {
 		return "", "", &publishedWarningError{warning: err.Error(), operationID: publishID, pending: true}
 	}
 	d.OperationID = publishID
+	d.Initialization.Result = "operation_persisted"
+	d.UploadURLSHA256 = uploadURLHash(uploadURL)
 	d.OperationState = "pending"
 	captureProviderDiagnostics(&d, out)
 	d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "operation_persisted"})
 	ctx.Logger().Info("publishTikTok: init done",
 		"publish_id", publishID, "upload_url_len", len(uploadURL))
 
-	// The complete source is already on a bounded, protected spool.
-	// Step 3: PUT each chunk. Sequential per TikTok's spec; each chunk
-	// returns 206 Partial Content except the last which returns 201
-	// Created. Tight per-chunk timeout so a stuck PUT doesn't pin a
-	// worker forever — 10 minutes per chunk covers 64 MB on slow
-	// uplinks (≈100 KB/s).
-	putClient := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	mime := first.Mime
-	if mime == "" {
-		mime = "video/mp4"
-	}
-	for i := 0; i < totalChunks; i++ {
-		firstByte := int64(i) * chunkSize
-		var chunkBytes int64
-		if i == totalChunks-1 {
-			// Final chunk absorbs trailing bytes — could be larger than
-			// chunkSize for multi-chunk uploads, equal to videoSize for
-			// single-chunk.
-			chunkBytes = first.Bytes - firstByte
-		} else {
-			chunkBytes = chunkSize
-		}
-		lastByte := firstByte + chunkBytes - 1
-
-		body := io.NewSectionReader(prepared.File, firstByte, chunkBytes)
-		putReq, err := http.NewRequest(http.MethodPut, uploadURL, body)
-		if err != nil {
-			return "", "", fmt.Errorf("build chunk %d PUT: %w", i+1, err)
-		}
-		putReq.ContentLength = chunkBytes
-		putReq.Header.Set("Content-Type", mime)
-		putReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", firstByte, lastByte, first.Bytes))
-
-		ctx.Logger().Info("publishTikTok: PUT chunk",
-			"chunk", fmt.Sprintf("%d/%d", i+1, totalChunks), "bytes", chunkBytes,
-			"range", fmt.Sprintf("%d-%d", firstByte, lastByte))
-		putResp, err := putClient.Do(putReq)
-		if err != nil {
-			d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", Bytes: firstByte, Result: "interrupted"})
-			return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: "TikTok upload interrupted; inspect existing operation before recovery"}
-		}
-		respBody, _ := io.ReadAll(io.LimitReader(putResp.Body, 4<<10))
-		putResp.Body.Close()
-		d.TransferredBytes = lastByte + 1
-		d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", HTTPStatus: putResp.StatusCode, Bytes: lastByte + 1, RequestID: responseRequestID(putResp.Header)})
-
-		// Intermediate chunks should return 206; the final chunk
-		// returns 201. Anything else is a fail.
-		expected := http.StatusPartialContent
-		if i == totalChunks-1 {
-			expected = http.StatusCreated
-		}
-		if putResp.StatusCode != expected {
-			_ = respBody
-			return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: fmt.Sprintf("TikTok chunk upload returned HTTP %d; inspect existing operation before recovery", putResp.StatusCode)}
-		}
+	if err := uploadTikTokChunks(ctx, j.targetID, prepared, &d, uploadURL, chunkSize, totalChunks); err != nil {
+		return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: err.Error() + "; inspect existing operation before recovery"}
 	}
 
 	ctx.Logger().Info("publishTikTok: upload complete", "publish_id", publishID)
@@ -4471,6 +4447,7 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 		return "", "", errors.New("TikTok returned no publish_id")
 	}
 	deadline := time.Now().Add(5 * time.Minute)
+	delay := 2 * time.Second
 	for {
 		status, failReason, postIDs, err := a.getTikTokPublishStatus(ctx, connID, publishID)
 		if err != nil {
@@ -4505,7 +4482,19 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 				operationID: publishID,
 			}
 		}
-		time.Sleep(5 * time.Second)
+		pause := time.Until(deadline)
+		if pause > delay {
+			pause = delay
+		}
+		if pause > 0 {
+			time.Sleep(pause)
+		}
+		if delay < 30*time.Second {
+			delay *= 2
+		}
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
 	}
 }
 
@@ -4538,9 +4527,11 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
 	var payload struct {
 		Data struct {
-			Status  string        `json:"status"`
-			Fail    string        `json:"fail_reason"`
-			PostIDs []exactJSONID `json:"publicaly_available_post_id"`
+			Status          string        `json:"status"`
+			Fail            string        `json:"fail_reason"`
+			PostIDs         []exactJSONID `json:"publicaly_available_post_id"`
+			UploadedBytes   *int64        `json:"uploaded_bytes"`
+			DownloadedBytes *int64        `json:"downloaded_bytes"`
 		} `json:"data"`
 		Error struct {
 			Code  string `json:"code"`
@@ -4551,16 +4542,24 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	if res != nil {
 		parseErr = json.Unmarshal(res.Data, &payload)
 	}
+	observation := tikTokProgressObservation{At: time.Now().UTC().Format(time.RFC3339Nano), Status: safeRequestID(payload.Data.Status), HTTPStatus: executeStatus(res), ErrorCode: safeRequestID(payload.Error.Code), RequestID: safeRequestID(payload.Error.LogID), UploadedBytes: payload.Data.UploadedBytes, DownloadedBytes: payload.Data.DownloadedBytes}
+	if (payload.Data.UploadedBytes != nil && *payload.Data.UploadedBytes < 0) || (payload.Data.DownloadedBytes != nil && *payload.Data.DownloadedBytes < 0) {
+		parseErr = errors.New("negative TikTok progress")
+		observation.UploadedBytes = nil
+		observation.DownloadedBytes = nil
+	}
+	observation.QuerySucceeded = parseErr == nil && err == nil && res != nil && res.Success && (payload.Error.Code == "" || payload.Error.Code == "ok") && payload.Data.Status != ""
 	if parseErr != nil {
-		a.recordTikTokStatus(ctx, connID, publishID, "", "", "", "", res, parseErr)
+		a.recordTikTokStatus(ctx, connID, publishID, "", "", "", "", res, parseErr, observation)
 		return "", "", nil, errors.New("TikTok returned malformed operation status; outcome is unknown")
 	}
 	if payload.Data.Status != "PUBLISH_COMPLETE" && len(payload.Data.PostIDs) > 0 {
+		observation.QuerySucceeded = false
 		conflict := errors.New("TikTok returned a public identity with a non-complete status; outcome is unknown")
-		a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, conflict)
+		a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, conflict, observation)
 		return "", "", nil, conflict
 	}
-	a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, err)
+	a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, err, observation)
 	if err != nil {
 		return "", "", nil, errors.New(redactDeliverySecrets(err.Error()))
 	}
@@ -5409,6 +5408,11 @@ func loadTargetsFrom(db interface {
 		_ = json.Unmarshal([]byte(deliveryRaw), &mediaDiagnostics)
 		var videoDiagnostics map[string]any
 		_ = json.Unmarshal([]byte(redactDeliverySecrets(videoRaw)), &videoDiagnostics)
+		if platform == "tiktok" {
+			decoded := decodeDeliveryDiagnostics(videoRaw, platform, lastErr)
+			encoded, _ := json.Marshal(decoded)
+			_ = json.Unmarshal(encoded, &videoDiagnostics)
+		}
 		if operationID == "" {
 			operationID, _ = videoDiagnostics["operation_id"].(string)
 		}
@@ -10593,6 +10597,10 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "GET or DELETE only at this path", http.StatusMethodNotAllowed)
 			return
 		}
+	}
+	if len(parts) == 4 && parts[1] == "delivery" {
+		a.handleTargetDeliveryAction(w, r, id, parts[2], parts[3])
+		return
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
 		var body struct {

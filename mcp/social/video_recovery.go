@@ -54,6 +54,27 @@ func (a *App) toolPostDeliveryInspect(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	evidence["targets"] = a.loadTargets(ctx, post)
+	evidence["delivery_diagnostics"] = loadDeliveryDiagnostics(ctx, target)
+	snapshots, err := ctx.AppDB().Query(`SELECT correlation_id,diagnostics,created_at FROM video_delivery_attempts WHERE project_id=? AND target_id=? ORDER BY created_at DESC,rowid DESC LIMIT 50`, projectScope(ctx), target)
+	if err != nil {
+		return nil, err
+	}
+	durable := []map[string]any{}
+	for snapshots.Next() {
+		var key, raw, at string
+		if err := snapshots.Scan(&key, &raw, &at); err != nil {
+			snapshots.Close()
+			return nil, err
+		}
+		durable = append(durable, map[string]any{"correlation_id": key, "created_at": at, "diagnostics": decodeDeliveryDiagnostics(raw, r.Platform, "")})
+	}
+	err = snapshots.Err()
+	snapshots.Close()
+	if err != nil {
+		return nil, err
+	}
+	evidence["diagnostics_history"] = durable
+	evidence["diagnostics_history_limit"] = 50
 	// Deliberately no publish, retry, or lifecycle status update here.
 	rows, err := ctx.AppDB().Query(`SELECT operation_id,status,reason,created_at FROM target_delivery_attempts WHERE target_id=? ORDER BY id`, target)
 	if err != nil {
@@ -371,6 +392,9 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 		d := loadDeliveryDiagnostics(ctx, target)
 		d.OperationID = ""
 		d.OperationState = "not_started"
+		d.AutomaticPollAttempts = 0
+		d.AutomaticPollingStopped = false
+		d.NextPollAt = ""
 		d.Reconciliation = "authorized_recovery"
 		_ = d.save(ctx, target)
 	}
