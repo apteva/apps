@@ -110,12 +110,16 @@ func cancelOrphanRemoteRender(app *sdk.AppCtx, row *RenderRow) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		var receipt componentReceipt
-		if err := componentCall(ctx, app.WithProject(row.ProjectID), "cancel", map[string]any{"job_id": jobID}, &receipt); err != nil || !receipt.Stopped {
+		if err := componentCall(ctx, app.WithProject(row.ProjectID), "cancel", map[string]any{"job_id": jobID}, &receipt); err != nil || receipt.JobID != jobID || !receipt.Stopped {
 			failure := fmt.Errorf("%w: component job_id=%s stop unconfirmed", errRemoteCancellation, jobID)
 			recordCancellationFailure(app, row, failure)
 			return failure
 		}
-		return persistComponentReceipt(app.WithProject(row.ProjectID), jobID, receipt)
+		if err := persistComponentReceipt(app.WithProject(row.ProjectID), jobID, receipt); err != nil {
+			return err
+		}
+		recordRenderMetric(app, row, "cancellation_confirmed", true)
+		return nil
 	}
 	var metrics struct {
 		Work string `json:"remote_work_dir"`

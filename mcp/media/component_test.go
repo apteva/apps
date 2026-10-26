@@ -30,9 +30,10 @@ import (
 // suite separately tests registration, ownership, scope, activation and rollback.
 type workerPlatform struct {
 	tk.BasePlatformClient
-	worker     *tk.Sidecar
-	submits    atomic.Int64
-	loseSubmit atomic.Bool
+	worker                      *tk.Sidecar
+	submits                     atomic.Int64
+	loseSubmit                  atomic.Bool
+	cancelAfterProcessingSubmit atomic.Pointer[context.CancelFunc]
 }
 
 func (p *workerPlatform) CallAppResultContext(ctx context.Context, name, tool string, input map[string]any, out any) error {
@@ -69,6 +70,11 @@ func (p *workerPlatform) CallAppResultContext(ctx context.Context, name, tool st
 	}
 	if tool == "submit" && p.loseSubmit.CompareAndSwap(true, false) {
 		return errors.New("simulated lost response after acceptance")
+	}
+	if tool == "submit" && strings.Contains(fmt.Sprint(input["command"]), "APTEVA_RESULT:") {
+		if cancel := p.cancelAfterProcessingSubmit.Swap(nil); cancel != nil {
+			(*cancel)()
+		}
 	}
 	raw := rpc.Result.Structured
 	if len(raw) == 0 {
@@ -432,6 +438,31 @@ func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
 	}
 	if p.submits.Load() < 2 {
 		t.Fatal("processing did not go through the component")
+	}
+	// Cancel immediately after the real worker accepts a render. Its workdir
+	// may not exist yet, or its trap may already have removed it; only the
+	// component's verified job receipt is authoritative.
+	previousCancellation := runRemoteCancellation
+	t.Cleanup(func() { runRemoteCancellation = previousCancellation })
+	var legacyStops atomic.Int64
+	runRemoteCancellation = func(context.Context, *sdk.AppCtx, int64, string, int) (string, int, error) {
+		legacyStops.Add(1)
+		return "missing workdir", 1, errors.New("duplicate legacy cleanup")
+	}
+	cancelID, err := insertRender(app.AppDB(), testProj, "resize", []string{"1"}, map[string]any{"width": 80, "height": 46}, "cancel.mp4", "/renders/", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err = claimNextPending(app.AppDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopRender := context.CancelFunc(func() { triggerCancel(cancelID) })
+	p.cancelAfterProcessingSubmit.Store(&stopRender)
+	runOneRender(app, row, remote.fallback, remote, 30)
+	cancelled, err := getRender(app.AppDB(), testProj, cancelID)
+	if err != nil || cancelled.Status != "cancelled" || legacyStops.Load() != 0 || !strings.Contains(string(cancelled.Metrics), `"cancellation_confirmed":true`) {
+		t.Fatalf("component cancellation used duplicate cleanup: row=%+v legacy=%d err=%v", cancelled, legacyStops.Load(), err)
 	}
 	var leaked int
 	if err = app.AppDB().QueryRow(`SELECT count(*) FROM media_executor_calls WHERE request_json LIKE '%parent-storage-secret-abc%'`).Scan(&leaked); err != nil || leaked != 0 {

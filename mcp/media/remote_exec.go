@@ -209,14 +209,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		"id", row.ID, "op", row.Operation, "host_id", e.hostID,
 		"sources", len(row.SourceFileIDs), "output_folder", folder)
 
-	// Per-render verified group termination on ctx-cancel. Registered before the
-	// long-running call so a cancel mid-encode hits the remote PID.
-	finishCancellation := registerRemoteKill(ctx, app, e.hostID, row.ID, row.WorkDir)
-	defer func() {
-		if err := finishCancellation(); err != nil {
-			execErr = err
-		}
-	}()
+	// The component joins verified process-group cancellation by its durable
+	// job ID. A second shell cleanup races its workdir trap and can turn an
+	// already-confirmed stop into a spurious missing-directory failure.
 
 	// Live progress: poll the remote progress.log every few seconds
 	// while ffmpeg runs. Stops when Execute returns.
@@ -235,6 +230,15 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	}
 
 	out, exit, runErr := runRemote(context.WithValue(context.WithValue(ctx, componentCallOwnerKey{}, fmt.Sprintf("render:%d", row.ID)), componentFolderKey{}, folder), app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
+	if ctx.Err() != nil {
+		confirmed := !errors.Is(runErr, errRemoteCancellation)
+		recordRenderMetric(app, row, "cancellation_confirmed", confirmed)
+		if !confirmed {
+			recordRenderMetric(app, row, "cancellation_error", runErr.Error())
+			return 0, runErr
+		}
+		return 0, ctx.Err()
+	}
 	if raw := runtimeResultFromLog(out); raw != nil {
 		if err := persistRuntimeResult(app, row, raw); err != nil {
 			return 0, err

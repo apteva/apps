@@ -148,10 +148,12 @@ func runComponentPlan(ctx context.Context, app *sdk.AppCtx, command string, time
 			timer.Stop()
 			stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err := componentCall(stopCtx, app, "cancel", map[string]any{"job_id": plan.JobID}, &r); err != nil || !r.Stopped {
+			if err := componentCall(stopCtx, app, "cancel", map[string]any{"job_id": plan.JobID}, &r); err != nil || r.JobID != plan.JobID || !r.Stopped {
 				return "", -1, fmt.Errorf("%w: component job_id=%s", errRemoteCancellation, plan.JobID)
 			}
-			persistComponentReceipt(app, plan.JobID, r)
+			if err := persistComponentReceipt(app, plan.JobID, r); err != nil {
+				return "", -1, err
+			}
 			return r.Output, r.Exit, ctx.Err()
 		case <-timer.C:
 		}
