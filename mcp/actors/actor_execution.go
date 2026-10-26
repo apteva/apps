@@ -612,13 +612,31 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		started := time.Now()
 		var err error
-		for attempt := 0; attempt <= e.retries; attempt++ {
+		retries := e.retries
+		if step.ReadRetries != nil {
+			retries = *step.ReadRetries
+		}
+		for attempt := 0; attempt <= retries; attempt++ {
 			err = e.runStep(step)
 			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
-			if attempt < e.retries {
+			if step.ReadRetries != nil && !transientReadNavigationError(err) {
+				break
+			}
+			if attempt < retries {
+				if checkpointErr := e.checkpoint(); checkpointErr != nil {
+					err = checkpointErr
+					break
+				}
 				e.addTrace(step.Action, "retry", err.Error(), map[string]any{"step": index, "attempt": attempt + 1})
+				// An explicitly read-only navigation can reopen its own browser
+				// after a transport timeout. The saved context and run stay fixed;
+				// no earlier upload, fill, click or consequential step is replayed.
+				if step.ReadRetries != nil && e.session != nil {
+					e.app.closeBrowser(e.ctx, e.session.SessionID)
+					e.session = nil
+				}
 			}
 		}
 		if errors.Is(err, errActorEffectReserved) || errors.Is(err, errActorRecoveryBinding) || errors.Is(err, errActorClickNotDispatched) {

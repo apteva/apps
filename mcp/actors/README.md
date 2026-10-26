@@ -378,3 +378,7 @@ Named operations may declare `browser` to fully replace the actor browser config
 `fill_secret` resolves an expiring reference from encrypted install settings (`browser_secrets`, per project), requiring an exact saved context and HTTPS host. Only the reference is stored in actor definitions and inputs. Backend fill diagnostics are suppressed and Actors screenshots disabled after secret input. Provision these settings through the authenticated operator API; keep plaintext credentials and verification codes out of ordinary inputs, extraction selectors and logs. Computer/provider telemetry has its own retention policy.
 
 For an emailed verification link, `goto_secret` uses the same expiring secret reference after opening the bound saved context. It permits only HTTPS on the current bound host, suppresses URL-bearing errors and in-flight progress, and retains only the resulting origin (no path, query or fragment). Secret input and navigation steps are not automatically retried.
+
+## Bounded read-only navigation retry
+
+A reviewed `goto` step can opt into `read_only: true, read_retries: 1` (maximum2). This overrides the legacy operation-wide retry limit only for that navigation. Transport timeouts may reopen the same saved browser context and repeat that read, within the original run deadline. It never replays earlier fills/uploads or subsequent clicks, and non-transient errors still stop. The field is rejected on writes, secret operations and consequential/effect-bearing steps. Existing definitions and global retry defaults are unchanged.
