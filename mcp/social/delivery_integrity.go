@@ -238,12 +238,22 @@ func persistPublishOperation(ctx *sdk.AppCtx, targetID int64, id string) error {
 	if targetID == 0 {
 		return nil
 	}
-	_, err := ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=? WHERE id=? AND status='publishing'`, id, targetID)
-	return err
+	res, err := ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=? WHERE id=? AND status='publishing'`, id, targetID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("delivery target changed before the operation could be bound")
+	}
+	return nil
 }
 
 func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
-	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,t.publish_operation_id FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND t.status='publishing' AND a.platform='tiktok' AND t.publish_operation_id<>'' AND (t.identity_resolve_after IS NULL OR datetime(t.identity_resolve_after)<=CURRENT_TIMESTAMP) LIMIT 20`, projectScope(ctx))
+	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,t.publish_operation_id FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND t.status='publishing' AND a.platform='tiktok' AND t.publish_operation_id<>'' AND COALESCE(json_extract(CASE WHEN json_valid(t.delivery_diagnostics) THEN t.delivery_diagnostics ELSE '{}' END,'$.automatic_polling_stopped'),0)=0 AND (t.identity_resolve_after IS NULL OR datetime(t.identity_resolve_after)<=CURRENT_TIMESTAMP) LIMIT 20`, projectScope(ctx))
 	if err != nil {
 		return
 	}
@@ -264,7 +274,16 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 			unlock := lockSocialPost(ctx, op.post)
 			defer unlock()
 			_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, op.id)
+			d := loadDeliveryDiagnostics(ctx, op.id)
+			d.AutomaticPollAttempts++
+			if err := d.save(ctx, op.id); err != nil {
+				return
+			}
 			status, reason, ids, err := a.getTikTokPublishStatus(ctx, op.conn, op.op)
+			d = loadDeliveryDiagnostics(ctx, op.id)
+			if err != nil || (status != "FAILED" && status != "PUBLISH_COMPLETE") {
+				d.scheduleTikTokPoll(ctx, op.id)
+			}
 			if err != nil {
 				return
 			}

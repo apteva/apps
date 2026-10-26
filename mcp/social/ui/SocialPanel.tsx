@@ -16,6 +16,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { createRequestGate } from "./requestIdentity";
 import {DestinationPicker,type DestinationCapabilities} from "./destinations";
 import {AccountConnectionChooser} from "./AccountConnectionChooser";
+import {TargetDelivery,type DeliveryDiagnostics} from "./TargetDelivery";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
@@ -124,6 +125,8 @@ interface SocialAccount {
 }
 
 interface PostTarget {
+  delivery_diagnostics?: DeliveryDiagnostics;
+  publish_operation_id?:string;
   id: number;
   social_account_id: number;
   platform: string;
@@ -5095,6 +5098,7 @@ function PostDetailPanel({
                     <span className="ml-auto"><StatusPill status={target.status} /></span>
                   </div>
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
+                  {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
                   {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
                   {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
