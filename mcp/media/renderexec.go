@@ -55,7 +55,7 @@ type renderExecutor interface {
 //
 // Precedence when multiple backends are configured:
 //
-//	remote-instance (render_host_id > 0) → cloudinary → local
+//	component (execution_mode=component) → cloudinary → local
 //
 // The remote backend wins because operators who explicitly point
 // renders at a host are doing so to offload CPU; falling through to
@@ -72,7 +72,7 @@ func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, remote *remoteExec
 	if remote != nil {
 		return remote
 	}
-	if remoteIndexerHostID(app) > 0 {
+	if componentExecutionID(app) > 0 {
 		return unavailableExecutor{reason: "configured remote renderer is unavailable"}
 	}
 	bound := app.IntegrationFor("render_executor")

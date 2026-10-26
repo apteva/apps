@@ -25,7 +25,7 @@ func TestSelectExecutor_RemoteWins(t *testing.T) {
 	row := &RenderRow{Operation: "trim"}
 
 	got := selectExecutor(ctx, local, remote, row)
-	if got.Name() != "remote-instance" {
+	if got.Name() != "component" {
 		t.Errorf("expected remote-instance, got %q", got.Name())
 	}
 }
@@ -138,7 +138,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		"SOURCE_CACHE_MAX_BYTES=21474836480",
 		"WORK='/var/tmp/apteva-media-renders/render-55-",
 		"REQUIRED_BYTES=536870912",
-		`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')`,
+		`AVAILABLE_BYTES=$(df -Pk "$WORK_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')`,
 		`REMOTE_SCRATCH_FULL root=$WORK_ROOT`,
 		"echo $$ > pid",
 		`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT`,
@@ -281,30 +281,6 @@ func TestShellQuote(t *testing.T) {
 		if got := shellQuote(c.in); got != c.want {
 			t.Errorf("shellQuote(%q) = %q, want %q", c.in, got, c.want)
 		}
-	}
-}
-
-func TestRemoteFFmpegInstaller_CacheHit(t *testing.T) {
-	// First Ensure populates the cache; second returns the cached
-	// result without consulting the platform. We assert this by
-	// pointing the second call at a nil PlatformAPI ctx — if the
-	// cache works, it never reaches that code path.
-	ctx := newTestCtxWithPlatform(t, noBindings())
-
-	inst := newRemoteFFmpegInstaller()
-	// Seed the cache directly.
-	inst.hosts.Store(int64(1), &hostInstallState{
-		ready: true,
-		paths: installedPaths{FFmpeg: "/x/ffmpeg", FFprobe: "/x/ffprobe"},
-		err:   nil,
-	})
-
-	paths, err := inst.Ensure(t.Context(), ctx, 1)
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if paths.FFmpeg != "/x/ffmpeg" || paths.FFprobe != "/x/ffprobe" {
-		t.Errorf("cache hit returned wrong paths: %+v", paths)
 	}
 }
 

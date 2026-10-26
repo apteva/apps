@@ -257,7 +257,7 @@ func probeSubmissionSource(app *sdk.AppCtx, project, fid string) (*Probe, error)
 	if e != nil {
 		return nil, e
 	}
-	host := int64(parseConfigIntFallback(app.Config().Get("render_host_id"), 0))
+	host := componentExecutionID(app)
 	var probe *Probe
 	if host > 0 {
 		u, e := sc.GetSignedURL(ctx, project, id, 300)

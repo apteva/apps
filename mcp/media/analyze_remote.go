@@ -1,7 +1,7 @@
 package main
 
-// Remote read-only media analysis. When render_host_id is configured,
-// media_analyze follows the same Instances host used by rendering, indexing,
+// Remote read-only media analysis. When component execution is configured,
+// media_analyze follows the same private worker used by rendering, indexing,
 // smart-crop sampling, and transcript audio preparation. It intentionally does
 // not fall back to local execution: selecting a host is an operator decision to
 // keep ffmpeg CPU and memory away from the Media sidecar.
@@ -49,11 +49,12 @@ var ensureRemoteAnalysisFFmpeg = func(ctx context.Context, app *sdk.AppCtx, host
 var runRemoteAnalysisCommand = runRemote
 
 func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions, hostID int64) (qualityAnalysis, error) {
+	app = app.WithProject(row.ProjectID)
 	result := qualityAnalysis{
 		DecodeOK: true,
 		Issues:   make([]analysisIssue, 0),
-		Executor: "remote-instance",
-		HostID:   hostID,
+		Executor: "component",
+		HostID:   0,
 	}
 	cctx, cancel, release, admission, err := beginAnalysis(app, opts)
 	if err != nil {
@@ -131,14 +132,14 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 		if opts.Depth == "quick" {
 			d.ContinuityWidth = 640
 			q := mergeQuickQuality(results, windows, d)
-			q.Executor = "remote-instance"
-			q.HostID = hostID
+			q.Executor = "component"
+			q.HostID = 0
 			return q, nil
 		}
 		q := results[0]
 		q.Diagnostics = d
-		q.Executor = "remote-instance"
-		q.HostID = hostID
+		q.Executor = "component"
+		q.HostID = 0
 		return q, nil
 	}
 	result.Diagnostics = d

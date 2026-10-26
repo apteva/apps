@@ -220,7 +220,7 @@ func TestAnalyzeExistingSourceFollowsRemoteRenderHost(t *testing.T) {
 	})
 
 	ensureRemoteAnalysisFFmpeg = func(_ context.Context, _ *sdk.AppCtx, hostID int64) (installedPaths, error) {
-		if hostID != 7 {
+		if hostID != 1 {
 			t.Fatalf("ensure host_id=%d want 7", hostID)
 		}
 		return installedPaths{FFmpeg: "/remote/bin/ffmpeg", FFprobe: "/remote/bin/ffprobe"}, nil
@@ -236,7 +236,7 @@ True peak:
   Peak: -0.4 dBFS
 `
 	runRemoteAnalysisCommand = func(_ context.Context, _ *sdk.AppCtx, hostID int64, script string, timeoutS int) (string, int, error) {
-		if hostID != 7 || timeoutS != 30 {
+		if hostID != 1 || timeoutS != 30 {
 			t.Fatalf("remote call host=%d timeout=%d", hostID, timeoutS)
 		}
 		for _, want := range []string{"/remote/bin/ffmpeg", "https://signed.example/source.mp4", remoteAnalysisMarker, "signalstats", "Peak level dB:", "-f", "null"} {
@@ -253,14 +253,14 @@ True peak:
 	}
 
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
-		tk.WithConfig(map[string]string{"render_host_id": "7"}))
+		tk.WithConfig(map[string]string{"execution_mode": "component"}))
 	row := &MediaRow{FileID: "1", HasVideo: true, HasAudio: true, DurationMs: 3_000}
 	opts := analysisOptions{Depth: "full", EndMs: 3_000, SilenceThresholdDB: -50, SilenceMinMs: 1_000, Timeout: 30 * time.Second}
 	got, err := analyzeExistingSource(ctx, "https://signed.example/source.mp4", row, opts)
 	if err != nil {
 		t.Fatalf("remote analyze: %v", err)
 	}
-	if got.Executor != "remote-instance" || got.HostID != 7 || !got.DecodeOK {
+	if got.Executor != "component" || got.HostID != 0 || !got.DecodeOK {
 		t.Fatalf("remote result=%+v", got)
 	}
 	if got.Visual == nil || got.Visual.SampledFrames != 1 || !floatClose(got.Visual.MeanLuma, 42) {
@@ -287,11 +287,11 @@ func TestAnalyzeExistingSourceRemoteFailsClosed(t *testing.T) {
 	}
 
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
-		tk.WithConfig(map[string]string{"render_host_id": "9"}))
+		tk.WithConfig(map[string]string{"execution_mode": "component"}))
 	_, err := analyzeExistingSource(ctx, "https://signed.example/source.mp4",
 		&MediaRow{FileID: "1", HasVideo: true},
 		analysisOptions{Depth: "full", EndMs: 1_000, Timeout: 30 * time.Second})
-	if err == nil || !strings.Contains(err.Error(), "ANALYSIS_EXECUTOR_UNAVAILABLE") || !strings.Contains(err.Error(), "host_id=9") {
+	if err == nil || !strings.Contains(err.Error(), "ANALYSIS_EXECUTOR_UNAVAILABLE") || !strings.Contains(err.Error(), "host_id=1") {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -315,7 +315,7 @@ func TestAnalyzeExistingSourceRemoteReportsFFmpegSignal(t *testing.T) {
 		return remoteAnalysisMarker + string(raw), 0, nil
 	}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
-		tk.WithConfig(map[string]string{"render_host_id": "5"}))
+		tk.WithConfig(map[string]string{"execution_mode": "component"}))
 	got, err := analyzeExistingSource(ctx, "https://signed.example/image.png",
 		&MediaRow{FileID: "1", HasVideo: true, IsImage: true},
 		analysisOptions{Depth: "full", Timeout: 30 * time.Second})

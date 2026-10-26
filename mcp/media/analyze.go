@@ -468,7 +468,7 @@ type qualityAnalysis struct {
 }
 
 func analyzeExistingSource(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
-	hostID := int64(parseConfigIntFallback(app.Config().Get("render_host_id"), 0))
+	hostID := componentExecutionID(app)
 	if hostID > 0 {
 		return analyzeExistingSourceRemote(app, sourceURL, row, opts, hostID)
 	}

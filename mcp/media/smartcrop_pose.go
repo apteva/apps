@@ -438,7 +438,7 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 	if err != nil || row == nil || row.Width <= 0 || row.Height <= 0 {
 		return nil, nil, fmt.Errorf("pose_source_geometry_unavailable")
 	}
-	host := remoteIndexerHostID(app)
+	host := componentExecutionID(app)
 	source := ""
 	var sourceFile *StorageFile
 	positions := posePositions(target, row.DurationMs, row.FPS)
@@ -518,7 +518,7 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		a.PoseAttempt.Status = "inference"
 		a.PoseAttempt.Requested = len(positions)
 	}
-	result, err := runPose(ctx, app, host, poseRequest{SourceFile: sourceFile, SourceCacheMaxBytes: parseConfigInt64Fallback(app.Config().Get("render_source_cache_max_bytes"), remoteSourceCacheDefaultMaxBytes), Hybrid: engine == "hybrid", Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
+	result, err := runPose(ctx, app.WithProject(project), host, poseRequest{SourceFile: sourceFile, SourceCacheMaxBytes: parseConfigInt64Fallback(app.Config().Get("render_source_cache_max_bytes"), remoteSourceCacheDefaultMaxBytes), Hybrid: engine == "hybrid", Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
 	if err != nil {
 		if result != nil {
 			recordPoseAttempt(ctx, result, framing)

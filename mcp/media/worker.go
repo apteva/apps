@@ -357,8 +357,8 @@ func processOne(
 		}
 	}
 
-	// Remote indexing — when render_host_id is set, run probe +
-	// derivations on the Hetzner host via HTTP-range-seek against a
+	// Component indexing — when component execution is selected, run probe +
+	// derivations in the executor component via HTTP-range-seek against a
 	// signed source URL. Saves the giant local download for large
 	// videos: the Apteva machine never touches the source bytes.
 	// Auto-falls-back to local on any error so a flaky Hetzner
@@ -368,7 +368,7 @@ func processOne(
 	// point is that big files no longer require local disk space —
 	// they stay on storage and only the ffmpeg/ffprobe-needed bytes
 	// stream to the remote.
-	if hostID := remoteIndexerHostID(app); hostID > 0 {
+	if hostID := componentExecutionID(app); hostID > 0 {
 		ok := tryRemoteIndex(ctx, app, sc, projectID, fid, f, hostID,
 			thumbSeek, thumbWidth, waveW, waveH)
 		if ok {
@@ -559,16 +559,7 @@ func processOne(
 	maybeEmitMediaCompleted(app, projectID, fid)
 }
 
-// remoteIndexerHostID returns the host_id to dispatch indexing to,
-// or 0 to keep everything local. Reads the same render_host_id
-// config the render pool uses — operators don't need to configure
-// indexing separately, they just say "use this host for ffmpeg work"
-// and both renders and derivations honour it.
-func remoteIndexerHostID(app *sdk.AppCtx) int64 {
-	cfg := app.Config()
-	return int64(parseConfigIntFallback(cfg.Get("render_host_id"), 0))
-}
-
+// Component indexing shares the selected execution mode with rendering.
 // tryRemoteIndex runs the whole indexer pipeline on the remote host
 // and writes the resulting media + derivation rows. Returns false on
 // any error so the caller can fall back to the local path. We don't
@@ -643,7 +634,7 @@ func tryRemoteIndex(
 		"has_audio":   probe.HasAudio,
 		"is_image":    probe.IsImage,
 		"duration_ms": probe.DurationMs,
-		"executor":    "remote-instance",
+		"executor":    "component",
 	})
 	// media.derived — same contract as the local path: fires after
 	// the indexer has finished derive work for this file, regardless
@@ -661,7 +652,7 @@ func tryRemoteIndex(
 		"duration_ms":   probe.DurationMs,
 		"has_thumbnail": thumbID > 0,
 		"has_waveform":  waveID > 0,
-		"executor":      "remote-instance",
+		"executor":      "component",
 	})
 
 	if probe.HasAudio {

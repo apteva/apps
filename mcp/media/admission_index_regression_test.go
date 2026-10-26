@@ -78,12 +78,12 @@ func TestRemoteGenerationClearsRetryPreservesAudioAndCooldown(t *testing.T) {
 }
 
 func TestFourUnitFIFOAndIndependentAdmissionDeadline(t *testing.T) {
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"render_host_id": "35001", "media_work_capacity": "4"}))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"execution_mode": "component", "media_work_capacity": "4"}))
 	_, release3, e := acquireMediaWork(context.Background(), app, 3)
 	if e != nil {
 		t.Fatal(e)
 	}
-	budgetValue, _ := mediaBudgets.Load("35001")
+	budgetValue, _ := mediaBudgets.Load("1")
 	budget := budgetValue.(*mediaBudget)
 	awaitQueue := func(n int) {
 		t.Helper()
@@ -199,11 +199,7 @@ func TestAdmissionTerminalNotifications(t *testing.T) {
 	for _, cancelled := range []bool{false, true} {
 		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
 			rec := tk.NewEmitRecorder()
-			host := fmt.Sprint(35002)
-			if cancelled {
-				host = "35003"
-			}
-			app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithEmitter(rec), tk.WithConfig(map[string]string{"render_host_id": host, "media_work_capacity": "2", "render_admission_timeout_seconds": "1"}))
+			app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithEmitter(rec), tk.WithConfig(map[string]string{"execution_mode": "component", "media_work_capacity": "2", "render_admission_timeout_seconds": "1"}))
 			_, release, err := acquireMediaWork(context.Background(), app, 2)
 			if err != nil {
 				t.Fatal(err)
@@ -222,7 +218,7 @@ func TestAdmissionTerminalNotifications(t *testing.T) {
 			if cancelled {
 				deadline := time.Now().Add(time.Second)
 				for time.Now().Before(deadline) {
-					v, _ := mediaBudgets.Load(host)
+					v, _ := mediaBudgets.Load("1")
 					b := v.(*mediaBudget)
 					b.mu.Lock()
 					n := len(b.waiters)

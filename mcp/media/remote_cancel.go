@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +105,18 @@ func cancelOrphanRemoteRender(app *sdk.AppCtx, row *RenderRow) error {
 	if row.Status != "running" {
 		return nil
 	}
+	var jobID string
+	if app.AppDB().QueryRow(`SELECT job_id FROM media_executor_calls WHERE project_id=? AND owner_key=?`, row.ProjectID, fmt.Sprintf("render:%d", row.ID)).Scan(&jobID) == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		var receipt componentReceipt
+		if err := componentCall(ctx, app.WithProject(row.ProjectID), "cancel", map[string]any{"job_id": jobID}, &receipt); err != nil || !receipt.Stopped {
+			failure := fmt.Errorf("%w: component job_id=%s stop unconfirmed", errRemoteCancellation, jobID)
+			recordCancellationFailure(app, row, failure)
+			return failure
+		}
+		return persistComponentReceipt(app.WithProject(row.ProjectID), jobID, receipt)
+	}
 	var metrics struct {
 		Work string `json:"remote_work_dir"`
 		Host int64  `json:"remote_host_id"`
@@ -113,15 +124,7 @@ func cancelOrphanRemoteRender(app *sdk.AppCtx, row *RenderRow) error {
 	if json.Unmarshal(row.Metrics, &metrics) != nil || metrics.Work == "" {
 		return nil
 	}
-	if metrics.Host <= 0 {
-		metrics.Host, _ = strconv.ParseInt(app.Config().Get("render_host_id"), 10, 64)
-	}
-	if metrics.Host <= 0 {
-		return fmt.Errorf("%w: cannot identify executor host for orphan render %d", errRemoteCancellation, row.ID)
-	}
-	if err := performRemoteCancellation(app, metrics.Host, row.ID, metrics.Work); err != nil {
-		recordCancellationFailure(app, row, err)
-		return err
-	}
-	return nil
+	failure := fmt.Errorf("%w: no component job identity for orphan render %d; verify legacy executor cleanup before retrying", errRemoteCancellation, row.ID)
+	recordCancellationFailure(app, row, failure)
+	return failure
 }

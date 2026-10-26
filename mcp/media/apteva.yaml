@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.41
+version: 0.15.0
 description: |
+  v0.15.0 moves offloaded processing to a private SDK v0.109.0 executor component.
+  Server owns deployment and placement; Media has no infrastructure app dependency.
+  Jobs have durable identities, bounded execution, confirmed cancellation and scoped
+  Storage transfer capabilities. Existing processing and delivery safeguards remain.
   v0.14.41 adds transcript-driven audio redaction with source-bound word or
   timestamp selections, room tone, mute, bleep and muffle, and bounded audio
   previews. Encoded audio, copied video packets, final frames, sample rate and
@@ -227,10 +231,6 @@ requires:
       version: ">=0.1.0"
       optional: true
       reason: optional — recurring or delayed renders schedule via jobs against media's HTTP routes
-    - name: instances
-      version: ">=0.2.0"
-      optional: true
-      reason: optional — when render_host_id config > 0, renders, indexing, and read-only analysis are offloaded to that instances host via SSH (ffmpeg auto-installed there on first use)
   integrations:
     - role: transcripts
       kind: integration
@@ -282,6 +282,8 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /executor-io/
+      no_auth: true
     - prefix: /
   mcp_tools:
     # Catalog (existing)
@@ -705,7 +707,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.41
+    ref: media/v0.15.0
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -865,38 +867,11 @@ config_schema:
     default: "/renders/"
     label: Render output folder
     description: Storage folder where finished renders are uploaded.
-  - name: render_host_id
-    type: select_from_app
-    app: instances
-    discovery:
-      route: /api/instances
-      response_path: instances
-      value_field: id
-      label_field: name
-    fallback: text
-    default: "0"
-    label: Remote render host
-    description: |
-      Pick a host from the Instances app's inventory to offload renders,
-      indexing, and read-only media analysis to. The dropdown populates
-      from /api/apps/instances/api/instances
-      at config-render time. Picking the local host (id 0) means
-      "no remote — render here", which is the default.
-
-      On first remote render: ffmpeg auto-installs into
-      ~/.apteva-render/ on the host (no sudo). Source bytes come from
-      a signed storage URL; output uploads back to storage via the
-      presigned-PUT fast path (S3 backends) or multipart fallback.
-
-      Indexing also follows this setting (v0.11.2): probe + thumbnail
-      + waveform run on the host via HTTP-range-seek against the
-      signed source URL, so giant videos are never downloaded to the
-      Apteva machine. Indexing falls back to local on a remote error.
-      media_analyze follows the configured host too, but fails closed instead
-      of silently using local CPU when the selected host is unavailable.
-
-      If the Instances app isn't installed the field collapses to a
-      plain text input where you can type a host id manually.
+  - name: execution_mode
+    type: text
+    default: local
+    label: Processing execution
+    description: "local runs processing in Media. component uses the operator-deployed private executor, with Server-managed placement. Unavailable component calls fail explicitly. Deploy the executor through the parent installation's Components API before choosing component."
 
   - name: render_source_cache_max_bytes
     type: text
@@ -990,3 +965,66 @@ config_schema:
     description: Hard wall-clock cap per LLM call. Reasoning models can be slow on vision; bump this if you see widespread timeouts.
 
 upgrade_policy: auto-patch
+
+components:
+  executor:
+    protocol: apteva.media-executor/v1
+    required: false
+    capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
+    manifest:
+      schema: apteva-app/v1
+      name: media-executor
+      display_name: Media Executor
+      version: 0.15.0
+      description: Private, bounded Media processing worker. Placement is managed by Server owned components.
+      scopes: [project, global]
+      requires:
+        permissions: [net.egress]
+      provides:
+        http_routes:
+          - prefix: /_apteva/runtime/app/
+        mcp_tools:
+          - name: capabilities
+            description: Report available processing dependencies and execution limits.
+          - name: submit
+            description: Submit an idempotent, deadline-bounded processing plan from the owning Media installation.
+          - name: get
+            description: Inspect a processing attempt without replaying it.
+          - name: cancel
+            description: Cancel an attempt and confirm process-group termination.
+          - name: acknowledge
+            description: Compact an execution receipt after the parent durably records it, retaining the idempotency tombstone.
+      runtime:
+        kind: source
+        source:
+          repo: github.com/apteva/apps
+          ref: 3d8510d126f3896c2b8201debcfc468cc65b2f33
+          entry: mcp/media/executor
+        port: 8080
+        health_check: /health
+        startup_timeout_seconds: 120
+        package:
+          app_capabilities:
+            passive_start: true
+            drain: true
+            replica_safe: false
+            worker_coordination: false
+            routing: key
+      config_schema:
+        - name: work_capacity
+          type: text
+          default: "2"
+          description: Weighted processing capacity; control requests use a separate bounded lane.
+        - name: ffmpeg_path
+          type: text
+          default: ffmpeg
+          description: FFmpeg executable on the execution target.
+        - name: ffprobe_path
+          type: text
+          default: ffprobe
+          description: FFprobe executable on the execution target.

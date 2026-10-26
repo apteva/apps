@@ -153,8 +153,12 @@ func TestRenderReceiptToolPaginationAndStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"files":[]}`)) }))
 	defer srv.Close()
 	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	// Every row uses identical immutable evidence; only its ID changes. Building
+	// and JSON-encoding the very large fixture 28 times makes race runs spend
+	// minutes preparing data instead of exercising pagination.
+	fixture := receiptTestRow(t)
 	for i := 0; i < 28; i++ {
-		r := receiptTestRow(t)
+		r := fixture
 		r.ID = int64(100 + i)
 		_, e := app.AppDB().Exec(`INSERT INTO renders(id,project_id,operation,source_file_ids,params,resolved_params,status,created_at) VALUES(?,?,'extract_reel','["95679"]',?,?,'ok','2026-10-10 10:00:00')`, r.ID, testProj, string(r.Params), string(r.ResolvedParams))
 		if e != nil {

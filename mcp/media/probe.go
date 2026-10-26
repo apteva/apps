@@ -115,7 +115,7 @@ func runProbe(ctx context.Context, ffprobePath, file string) (*Probe, error) {
 
 // parseProbeBytes turns raw ffprobe JSON output into a Probe. Shared
 // between the local runProbe and the remote-indexer path which gets
-// the same JSON shape back over SSH.
+// the same JSON shape back through the component protocol.
 func parseProbeBytes(out []byte) (*Probe, error) {
 	var raw ffprobeOut
 	if err := json.Unmarshal(out, &raw); err != nil {

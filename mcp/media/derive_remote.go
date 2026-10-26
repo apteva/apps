@@ -1,7 +1,7 @@
 package main
 
-// Remote indexer — when render_host_id > 0, runs probe + thumbnail +
-// waveform on the bound Instances host instead of downloading the
+// Component indexer — when component execution is selected, runs probe + thumbnail +
+// waveform on the private executor component instead of downloading the
 // source to the Apteva machine and processing locally. The win is
 // bandwidth + disk: a 50 GB video stays on the storage backend
 // (R2/S3/Hetzner OS), the host reads only the kilobytes ffmpeg
@@ -88,6 +88,7 @@ func runRemoteIndexStage(
 	ctx context.Context, app *sdk.AppCtx, projectID string,
 	params remoteIndexParams,
 ) (*Probe, int64, int64, []remoteKeyframe, error) {
+	app = app.WithProject(projectID)
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("remote indexing requires a publicly reachable storage URL: %w", err)
@@ -132,8 +133,8 @@ func runRemoteIndexStage(
 	defer release()
 	out, exit, err := runRemote(ctx, app, params.HostID, script, 600)
 	if err != nil {
-		// runRemote returns err non-nil when the SSH session itself
-		// reports failure (typically a non-zero exit via ssh.ExitError).
+		// runRemote returns err non-nil when the component execution itself
+		// reports failure (typically a non-zero exit via a failed processing receipt).
 		// The captured stdout still carries the script's actual error
 		// output — include it so the operator sees the real cause
 		// instead of "Process exited with status N" with no context.

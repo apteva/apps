@@ -1,44 +1,8 @@
 package main
 
-// Remote render executor — runs ffmpeg on a host managed by the
-// `instances` app. Selected when render_host_id config > 0 and the
-// instances app is installed.
-//
-// Flow (per render):
-//
-//  1. Pre-flight ensures ffmpeg/ffprobe are installed on the remote
-//     (cached after first success — see remote_ffmpeg_install.go).
-//  2. For each source file_id, mint a time-limited signed URL from
-//     storage. The remote pulls the bytes itself; media's process
-//     never sees them.
-//  3. SSH a single bash script via instances.instance_run_command:
-//       - reuse or curl signed URLs into the remote source cache, then
-//         hardlink/copy them into the per-render workdir
-//       - (concat only) write the demuxer list file
-//       - run ffmpeg with the same args local execution uses, but
-//         pointing at the downloaded local files
-//       - stat + sha256 the output
-//       - multipart POST it back to storage's /files endpoint with
-//         media's outbound bearer token
-//       - echo a single APTEVA_RESULT:{...} JSON marker line that
-//         media parses out of stdout
-//  4. Parse the marker, return the file_id storage assigned.
-//
-// Why upload via curl-from-remote instead of streaming bytes back
-// through media's process: a 4 GiB transcode shouldn't double-hop
-// through media's small container. The remote already has internet
-// egress (instances declares net.egress) and storage is reachable
-// at APTEVA_PUBLIC_URL.
-//
-// Why not the presigned-PUT protocol (storage's /files/init): it
-// only works on S3-backed installs (disk backends return 501). The
-// multipart POST path works everywhere. Presigned PUT is a worthwhile
-// follow-up for S3 installs but not v1.
-//
-// Cancellation: the script publishes its session leader before work.
-// A joined stop attempt terminates its process group and confirms no live
-// workers remain. Startup cancellation uses a workdir guard; failures remain
-// visible in render state and diagnostics. The EXIT trap cleans scratch.
+// Component render executor. Media plans processing and owns catalog state;
+// the private worker runs bounded plans, returns progress/validated output and
+// transfers bytes using per-job capabilities. Server owns deployment placement.
 
 import (
 	"context"
@@ -80,7 +44,7 @@ type remoteExecutor struct {
 	encoderThreads int
 }
 
-func (e *remoteExecutor) Name() string { return "remote-instance" }
+func (e *remoteExecutor) Name() string { return "component" }
 
 // newRemoteExecutor constructs the executor from worker-level config.
 // Returns nil + nil when the feature isn't configured (host_id <= 0)
@@ -102,7 +66,7 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 		tok = os.Getenv("APTEVA_APP_TOKEN")
 	}
 	if tok == "" {
-		return nil, errors.New("render_host_id is set but no outbound storage token in env (APTEVA_OUTBOUND_TOKEN / APTEVA_APP_TOKEN)")
+		return nil, errors.New("component execution selected but no outbound Storage credential in env (APTEVA_OUTBOUND_TOKEN / APTEVA_APP_TOKEN)")
 	}
 	return &remoteExecutor{
 		hostID:              hostID,
@@ -115,12 +79,20 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 }
 
 func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (fileID int64, execErr error) {
+	app = app.WithProject(row.ProjectID)
 	log := app.Logger()
 	finish := renderStage(app, row, "remote_execution")
 	defer finish()
 	row.WorkDir = uniqueRemoteWorkDir(row.ID)
+	// Reconciled attempts retain their original progress/cancellation identity.
+	var previous struct {
+		WorkDir string `json:"remote_work_dir"`
+	}
+	if json.Unmarshal(row.Metrics, &previous) == nil && strings.HasPrefix(previous.WorkDir, remoteRenderRoot+"/render-") {
+		row.WorkDir = previous.WorkDir
+	}
 	recordRenderMetric(app, row, "remote_work_dir", row.WorkDir)
-	recordRenderMetric(app, row, "remote_host_id", e.hostID)
+	recordRenderMetric(app, row, "executor_component", "executor")
 
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
@@ -262,7 +234,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		}
 	}
 
-	out, exit, runErr := runRemote(ctx, app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
+	out, exit, runErr := runRemote(context.WithValue(context.WithValue(ctx, componentCallOwnerKey{}, fmt.Sprintf("render:%d", row.ID)), componentFolderKey{}, folder), app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
 	if raw := runtimeResultFromLog(out); raw != nil {
 		if err := persistRuntimeResult(app, row, raw); err != nil {
 			return 0, err
@@ -278,7 +250,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
-		// SSH-reported non-zero exit lands here with runErr set;
+		// Component-reported non-zero exit lands here with runErr set;
 		// preserve the captured script stdout so the operator sees
 		// the actual cause (ffmpeg error, curl HTTP code, etc.)
 		// rather than just "Process exited with status N".
@@ -377,7 +349,7 @@ func (e *remoteExecutor) buildScript(
 	fmt.Fprintf(&b, "WORK=%s\n", shellQuote(workDir))
 	fmt.Fprintf(&b, "REQUIRED_BYTES=%d\n", remoteScratchRequiredBytes(sourceSizes))
 	b.WriteString(`mkdir -p "$WORK_ROOT" "$SOURCE_CACHE_ROOT"` + "\n")
-	b.WriteString(`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')` + "\n")
+	b.WriteString(`AVAILABLE_BYTES=$(df -Pk "$WORK_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')` + "\n")
 	b.WriteString(`if [ "${AVAILABLE_BYTES:-0}" -lt "$REQUIRED_BYTES" ]; then` + "\n")
 	b.WriteString(`  echo "REMOTE_SCRATCH_FULL root=$WORK_ROOT available=${AVAILABLE_BYTES:-0} required=$REQUIRED_BYTES" >&2` + "\n")
 	b.WriteString(`  exit 1` + "\n")
@@ -717,7 +689,7 @@ prune_source_cache() {
   used=${used:-0}
   loops=0
   while [ $((used + incoming_size)) -gt "$SOURCE_CACHE_MAX_BYTES" ]; do
-    victim=$(find "$SOURCE_CACHE_ROOT" -maxdepth 1 -type f ! -name '*.tmp.*' ! -name '*.verified' -printf '%T@ %p\n' 2>/dev/null | sort -n | awk 'NR==1{$1=""; sub(/^ /,""); print; exit}')
+    victim=$(find "$SOURCE_CACHE_ROOT" -maxdepth 1 -type f ! -name '*.tmp.*' ! -name '*.verified' -exec sh -c 'for file do stamp=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file"); printf "%s %s\n" "$stamp" "$file"; done' sh {} + | sort -n | awk 'NR==1{$1=""; sub(/^ /,""); print; exit}')
     if [ -z "$victim" ]; then
       break
     fi
@@ -744,7 +716,7 @@ ensure_download_space() {
   if [ "$incoming_size" -le 0 ]; then
     return 0
   fi
-  available=$(df -PB1 "$SOURCE_CACHE_ROOT" | awk 'NR==2 {print $4}')
+  available=$(df -Pk "$SOURCE_CACHE_ROOT" | awk 'NR==2 {printf "%.0f", $4 * 1024}')
   required=$((incoming_size + 536870912))
   if [ "${available:-0}" -lt "$required" ]; then
     echo "REMOTE_SOURCE_CACHE_FULL root=$SOURCE_CACHE_ROOT available=${available:-0} required=$required" >&2
@@ -835,7 +807,7 @@ materialize_source() {
 // Plus: the per-op planners always emit `-progress pipe:1` to drive
 // local progress forwarding. On the remote there's no pipe back to
 // media, so we redirect ffmpeg's progress stream to a local file
-// (progress.log) that media polls via a separate SSH command.
+// (progress.log) that media polls via a separate control request.
 func materialiseRemoteArgs(template, srcPaths []string) ([]string, error) {
 	out := make([]string, 0, len(template))
 	for _, a := range template {
@@ -937,7 +909,7 @@ func parseAptevaResult(stdout string) (*remoteRenderResult, error) {
 // otherwise it falls back to the legacy 50 % "ffmpeg is alive" bump.
 //
 // Poll interval is intentionally coarse (5s). Faster would burn
-// SSH connections on every render with no user-visible benefit.
+// component control requests on every render with no user-visible benefit.
 func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string, expectedDurationMs int64, workDirs ...string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

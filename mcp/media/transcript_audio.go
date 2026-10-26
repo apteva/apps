@@ -78,7 +78,7 @@ func ensureTranscriptAudioEvidence(ctx context.Context, app *sdk.AppCtx, sc *sto
 		return nil, fmt.Errorf("source signed URL: %w", err)
 	}
 	var evidence *transcriptAudioEvidence
-	hostID := int64(parseConfigIntFallback(app.Config().Get("render_host_id"), 0))
+	hostID := componentExecutionID(app)
 	if hostID > 0 {
 		evidence, err = prepareTranscriptAudioRemote(ctx, app, media.ProjectID, hostID, sourceURL, media.FileID, media.DurationMs)
 	} else {
@@ -184,6 +184,7 @@ func cleanupStaleTranscriptAudioDerivations(ctx context.Context, app *sdk.AppCtx
 }
 
 func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
+	app = app.WithProject(projectID)
 	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
 	if admissionErr != nil {
 		return nil, admissionErr
@@ -388,6 +389,7 @@ type remoteTranscriptAudioResult struct {
 }
 
 func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectID string, hostID int64, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
+	app = app.WithProject(projectID)
 	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
 	if admissionErr != nil {
 		return nil, admissionErr

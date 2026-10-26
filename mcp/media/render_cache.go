@@ -138,7 +138,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	}
 	// Native pose plans depend on source/model identity, not unrelated index
 	// thumbnails. Legacy fallback plans are deliberately not cached for ML.
-	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeIdentity(engine), poseModelSHA256, posePersonModelSHA256, poseRecoveryModelSHA256, poseAlgorithmIdentity(engine), app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, derivationIdentity, sceneIdentity, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeIdentity(engine), poseModelSHA256, posePersonModelSHA256, poseRecoveryModelSHA256, poseAlgorithmIdentity(engine), app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, derivationIdentity, sceneIdentity, target, ratio, mode, parsed["fit_mode"], app.Config().Get("execution_mode")})
 	digest := sha256.Sum256(raw)
 	key := fmt.Sprintf("%x", digest)
 	load := func() []byte {
@@ -227,7 +227,7 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	case *localExecutor:
 		identity = []any{executableIdentity(e.ffmpegPath), app.Config().Get("render_encoder_threads")}
 	case *remoteExecutor:
-		identity = []any{executorCacheSession, e.hostID, ffmpegVersion, e.encoderThreads}
+		identity = []any{executorCacheSession, e.hostID, app.Manifest().Components["executor"].Manifest.Runtime.Source.Ref, e.encoderThreads}
 	case *cloudinaryExecutor:
 		if e.bound == nil {
 			return "", "", ""

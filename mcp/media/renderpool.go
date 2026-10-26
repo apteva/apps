@@ -107,12 +107,8 @@ func renderWorker(app *sdk.AppCtx, id int) {
 		outputFolder: outputFolder,
 	}
 
-	// Remote backend is opt-in via render_host_id. >0 means "send
-	// renders to that instances host_id". 0 (default) keeps everything
-	// local. Construction-time failures (missing PUBLIC_URL, missing
-	// outbound token) are logged once and the feature disables itself
-	// for this worker — local + cloudinary stay available.
-	hostID := int64(parseConfigIntFallback(cfg.Get("render_host_id"), 0))
+	// Component execution is explicit; an unavailable worker never falls back.
+	hostID := componentExecutionID(app)
 	var remote *remoteExecutor
 	if hostID > 0 {
 		var err error

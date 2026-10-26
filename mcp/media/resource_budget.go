@@ -32,7 +32,7 @@ func acquireMediaWorkWithLeaseContext(ctx, parent context.Context, app *sdk.AppC
 	if ctx.Value(mediaLeaseKey{}) != nil {
 		return ctx, func() {}, nil
 	}
-	key := fmt.Sprint(remoteIndexerHostID(app))
+	key := fmt.Sprint(componentExecutionID(app))
 	value, _ := mediaBudgets.LoadOrStore(key, &mediaBudget{changed: make(chan struct{})})
 	budget := value.(*mediaBudget)
 	capacity := parseConfigIntFallback(app.Config().Get("media_work_capacity"), 2)

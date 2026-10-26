@@ -117,6 +117,7 @@ func analyzeSmartCropV2Source(
 	positions []int64,
 	srcW, srcH, targetW, targetH int,
 ) (result []smartCropV2Sample, resultErr error) {
+	app = app.WithProject(projectID)
 	weight := 1
 	if len(positions) > 1 {
 		weight = 2
@@ -150,7 +151,7 @@ func analyzeSmartCropV2Source(
 		return analyzeSmartCropV2Input(ctx, ffmpegPath, paths[sourceFileID], positions, srcW, srcH, targetW, targetH)
 	}
 	var directFailed, remoteFailed bool
-	if hostID := remoteIndexerHostID(app); hostID > 0 {
+	if hostID := componentExecutionID(app); hostID > 0 {
 		signedURL, err := sc.GetSignedURL(ctx, projectID, fileID, 900)
 		if err != nil {
 			return nil, err
@@ -290,7 +291,7 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 		fmt.Fprintf(&b, " %d", position)
 	}
 	b.WriteString("; do\n  extract_one \"$POS_MS\"\ndone\n")
-	// Instances caps command output at roughly 1 MiB. The released 320px/q3
+	// Bounded component responses carry frame samples. The released 320px/q3
 	// analysis frame must never be recompressed because that would change generic
 	// saliency decisions. Only the supplemental detail frame is compressed more
 	// aggressively when base64 expansion could cross the cap.
