@@ -569,9 +569,16 @@ if [ "$NEED_MULTIPART" = "1" ]; then
             (
               PART_FILE="$PART_DIR/$PART"
               dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$((PART - 1))" count=1 2>/dev/null
+              TRANSFER_HEADERS=(-H "Content-Type: application/octet-stream")
+              if [ "${APTEVA_TRANSFER_ENCODING:-}" = "base64" ]; then
+                base64 < "$PART_FILE" > "$PART_FILE.b64"
+                rm -f "$PART_FILE"
+                PART_FILE="$PART_FILE.b64"
+                TRANSFER_HEADERS=(-H "Content-Type: text/plain" -H "X-Apteva-Transfer-Encoding: base64")
+              fi
               curl_retry --fail -o /dev/null -X PUT \
                 -H "Authorization: Bearer $STORAGE_TOKEN" \
-                -H "Content-Type: application/octet-stream" \
+                "${TRANSFER_HEADERS[@]}" \
                 --data-binary "@$PART_FILE" \
                 "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
               rm -f "$PART_FILE"

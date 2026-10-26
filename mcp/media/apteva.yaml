@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.0
+version: 0.15.1
 description: |
+  v0.15.1 base64-encodes scoped component upload chunks so public gateways
+  accept binary media. The parent decodes before forwarding original bytes to
+  Storage; job grants, transfer limits and output integrity checks still apply.
   v0.15.0 moves offloaded processing to a private SDK v0.109.0 executor component.
   Server owns deployment and placement; Media has no infrastructure app dependency.
   Jobs have durable identities, bounded execution, confirmed cancellation and scoped
@@ -707,7 +710,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.0
+    ref: media/v0.15.1
     entry: mcp/media
   port: 8080
   health_check: /health

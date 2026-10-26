@@ -84,8 +84,11 @@ Media's Storage credential internally and revokes grants after terminal receipts
 S3 output bytes use presigned PUTs; disk-backed Storage uses streamed resumable
 uploads through the relay. The relay enforces private output visibility. Existing
 size/checksum/destination validation remains in the parent before completion.
+Resumable component chunks use base64 on the public hop to avoid binary-body
+rejection by gateways; the relay streams original bytes to Storage. Encoded bytes
+still count toward the job's transfer budget. Direct S3 uploads are unchanged.
 
-Worker targets require POSIX Bash, curl, ps, awk and standard file tools. Python 3
+Worker targets require POSIX Bash, curl, ps, awk, base64 and standard file tools. Python 3
 is required for guarded audio processing and Smart Crop pose runtimes. System
 FFmpeg/FFprobe may be selected with worker configuration. On supported Linux
 amd64/arm64 targets lacking them, the worker installs a fixed checksum-verified

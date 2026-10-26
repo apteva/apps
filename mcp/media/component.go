@@ -106,6 +106,10 @@ func runComponentPlan(ctx context.Context, app *sdk.AppCtx, command string, time
 			}
 			command = strings.ReplaceAll(command, base+boundStorageProxyPath, relay+boundStorageProxyPath)
 			command = strings.ReplaceAll(command, token, grant)
+			// Public gateways can reject arbitrary binary request bodies before
+			// they reach the relay. Only the scoped relay decodes this encoding;
+			// direct Storage/S3 requests retain their existing wire format.
+			command = strings.ReplaceAll(command, "export STORAGE_TOKEN=", "export APTEVA_TRANSFER_ENCODING=base64\nexport STORAGE_TOKEN=")
 			sum := sha256.Sum256([]byte(grant))
 			grantHash = hex.EncodeToString(sum[:])
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -187,6 +188,12 @@ func TestExecutorTransferGrantScope(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer parent-private-token" || r.URL.Query().Get("project_id") != testProj {
 			t.Error("Storage authorization or project lost")
 		}
+		if r.Method == "PUT" {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil || string(raw) != "data" || r.Header.Get("X-Apteva-Transfer-Encoding") != "" {
+				t.Errorf("Storage must receive original bytes without relay encoding: %q, %v", raw, err)
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"upload_id":"new-upload"}`))
 	}))
@@ -199,10 +206,13 @@ func TestExecutorTransferGrantScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call := func(method, tail, body string) int {
+	call := func(method, tail, body string, encoding ...string) int {
 		r := httptest.NewRequest(method, "/executor-io"+boundStorageProxyPath+tail+"?project_id=foreign", strings.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+token)
 		r.Header.Set("Content-Type", "application/json")
+		if len(encoding) > 0 {
+			r.Header.Set("X-Apteva-Transfer-Encoding", encoding[0])
+		}
 		w := httptest.NewRecorder()
 		(&App{}).handleExecutorTransfer(w, r)
 		return w.Code
@@ -220,6 +230,14 @@ func TestExecutorTransferGrantScope(t *testing.T) {
 	}
 	if code := call("PUT", "/uploads/new-upload/parts/1", "data"); code != 200 {
 		t.Fatalf("owned part=%d", code)
+	}
+	if code := call("PUT", "/uploads/new-upload/parts/1", base64.StdEncoding.EncodeToString([]byte("data")), "base64"); code != 200 {
+		t.Fatalf("encoded owned part=%d", code)
+	}
+	for _, tc := range []struct{ method, path, encoding string }{{"PUT", "/uploads/new-upload/parts/1", "unknown"}, {"POST", "/uploads", "base64"}, {"PUT", "/uploads/foreign/parts/1", "base64"}} {
+		if code := call(tc.method, tc.path, "ZGF0YQ==", tc.encoding); code < 400 {
+			t.Fatalf("encoding bypass: %+v -> %d", tc, code)
+		}
 	}
 	if _, err := app.AppDB().Exec(`UPDATE media_executor_grants SET expires_at=0`); err != nil {
 		t.Fatal(err)
@@ -252,6 +270,13 @@ func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
 	var gateway *httptest.Server
 	gateway = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/executor-io/") {
+			if r.Method == "PUT" && strings.Contains(r.URL.Path, "/parts/") {
+				if r.Header.Get("X-Apteva-Transfer-Encoding") != "base64" || r.Header.Get("Content-Type") != "text/plain" {
+					t.Error("binary component chunk reached the public gateway")
+					w.WriteHeader(403)
+					return
+				}
+			}
 			clone := r.Clone(r.Context())
 			u := *r.URL
 			clone.URL = &u

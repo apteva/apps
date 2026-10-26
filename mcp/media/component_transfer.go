@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,14 @@ func (*App) handleExecutorTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	var body io.Reader = &transferBudget{reader: r.Body, hash: hash}
 	ct := r.Header.Get("Content-Type")
+	if encoding := r.Header.Get("X-Apteva-Transfer-Encoding"); encoding != "" {
+		if encoding != "base64" || kind != "uploads" || len(pieces) != 4 || pieces[2] != "parts" || r.Method != "PUT" {
+			http.Error(w, "unsupported transfer encoding", 400)
+			return
+		}
+		body = base64.NewDecoder(base64.StdEncoding, body)
+		ct = "application/octet-stream"
+	}
 	var reserved int64
 	if init {
 		raw, err := io.ReadAll(io.LimitReader(body, 64<<10))

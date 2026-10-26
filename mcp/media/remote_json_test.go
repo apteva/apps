@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,8 +50,9 @@ func TestRemoteChunksBoundConcurrencyAndAbort(t *testing.T) {
 	for _, tc := range []struct {
 		parallel int
 		fail     bool
-	}{{1, false}, {2, false}, {2, true}} {
-		t.Run(fmt.Sprintf("parallel%d-fail%v", tc.parallel, tc.fail), func(t *testing.T) {
+		encoded  bool
+	}{{1, false, false}, {2, false, false}, {2, true, false}, {2, false, true}} {
+		t.Run(fmt.Sprintf("parallel%d-fail%v-encoded%v", tc.parallel, tc.fail, tc.encoded), func(t *testing.T) {
 			var active, peak, aborted atomic.Int32
 			var mu sync.Mutex
 			parts := map[string]string{}
@@ -80,7 +82,19 @@ func TestRemoteChunksBoundConcurrencyAndAbort(t *testing.T) {
 						w.WriteHeader(500)
 						return
 					}
-					data, _ := io.ReadAll(r.Body)
+					var body io.Reader = r.Body
+					if tc.encoded {
+						if r.Header.Get("X-Apteva-Transfer-Encoding") != "base64" || r.Header.Get("Content-Type") != "text/plain" {
+							t.Error("missing encoded transfer headers")
+						}
+						body = base64.NewDecoder(base64.StdEncoding, body)
+					} else if r.Header.Get("X-Apteva-Transfer-Encoding") != "" {
+						t.Error("direct Storage transfer was encoded")
+					}
+					data, err := io.ReadAll(body)
+					if err != nil {
+						t.Error(err)
+					}
 					mu.Lock()
 					parts[part] = string(data)
 					mu.Unlock()
@@ -106,6 +120,9 @@ func TestRemoteChunksBoundConcurrencyAndAbort(t *testing.T) {
 				t.Fatal(err)
 			}
 			script := "set -euo pipefail\ncurl_retry() { curl -sS \"$@\"; }\n"
+			if tc.encoded {
+				script += "APTEVA_TRANSFER_ENCODING=base64\n"
+			}
 			for k, v := range map[string]string{"OUT": out, "STORAGE_BASE": srv.URL, "STORAGE_TOKEN": "test", "PROJECT_ID": "test", "NAME_JSON": `"out.mp4"`, "FOLDER_JSON": `"/"`, "CT_JSON": `"video/mp4"`, "SIZE": "10", "SHA": strings.Repeat("a", 64)} {
 				script += k + "=" + shellQuote(v) + "\n"
 			}
