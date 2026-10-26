@@ -129,6 +129,9 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if empty {
 		return analyticsResponse([]analyticsPoint{}, "cache"), nil
 	}
+	if firstString(args, "breakdown") != "" {
+		return a.googleStructuredBreakdown(ctx, acct, request, args)
+	}
 	pid, err := requireProject(ctx, args)
 	if err != nil {
 		return mcpError(err.Error()), nil
@@ -370,7 +373,7 @@ func (a *App) fetchGoogleAnalytics(ctx *sdk.AppCtx, acct *adAccount, request *ge
 	}[request.Level]
 	query := "SELECT segments.date, " + identityFields + ", customer.currency_code, " +
 		"metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, " +
-		"metrics.conversions_value, metrics.video_views FROM " + resource +
+		"metrics.conversions_value, metrics.video_trueview_views FROM " + resource +
 		" WHERE segments.date BETWEEN '" + request.DateFrom + "' AND '" + request.DateTo + "'"
 	if len(request.EntityIDs) > 0 {
 		filterField := map[string]string{
@@ -503,7 +506,7 @@ func normalizeGoogleAnalyticsPoint(acct *adAccount, level string, row map[string
 		LinkClicks:            int64ArgAny(metrics["clicks"]),
 		Conversions:           numericArgAny(metrics["conversions"]),
 		ConversionValueMicros: conversionValueMicros,
-		VideoViews:            int64ArgAny(metrics["videoViews"], metrics["video_views"]),
+		VideoViews:            int64ArgAny(metrics["videoTrueviewViews"], metrics["video_trueview_views"], metrics["videoViews"], metrics["video_views"]),
 		ProviderMetrics:       map[string]any{},
 		FetchedAt:             time.Now().UTC().Format(time.RFC3339),
 	}, nil

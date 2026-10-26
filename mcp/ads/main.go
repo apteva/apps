@@ -3620,6 +3620,12 @@ func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccoun
 }
 
 func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if strings.EqualFold(stringArgAny(args, "channel_type"), "demand_gen") && (len(asMap(args["platform_options"])) == 0 || args["optimization_goal"] != nil || args["conversion_action_resource_ids"] != nil) {
+		return a.googleDemandGenCampaignCreate(ctx, acct, args)
+	}
+	if strings.EqualFold(stringArgAny(args, "channel_type"), "video") {
+		return mcpError("Google Ads API cannot create traditional Video campaigns; use channel_type=demand_gen with structured video ads"), nil
+	}
 	if strings.EqualFold(stringArgAny(args, "channel_type"), "app") {
 		return a.googleAppCampaignCreate(ctx, acct, args)
 	}
@@ -3812,6 +3818,9 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 }
 
 func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if (a.isDemandGen(ctx, acct, firstString(args, "campaign_id")) && len(asMap(args["platform_options"])) == 0) || args["optimization_goal"] != nil || args["conversion_action_resource_ids"] != nil {
+		return a.googleDemandGenCampaignUpdate(ctx, acct, args)
+	}
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
@@ -3970,6 +3979,9 @@ func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 }
 
 func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if (a.isDemandGen(ctx, acct, firstString(args, "campaign_id")) && len(asMap(args["platform_options"])) == 0) || demandGenGroupRequested(args) {
+		return a.googleDemandGenGroupCreate(ctx, acct, args)
+	}
 	name, _ := args["name"].(string)
 	cid, _ := args["campaign_id"].(string)
 	if name == "" || cid == "" {
@@ -4020,6 +4032,9 @@ func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 }
 
 func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if demandGenGroupRequested(args) {
+		return a.googleDemandGenGroupUpdate(ctx, acct, args)
+	}
 	asid, _ := args["adset_id"].(string)
 	if asid == "" {
 		return mcpError("adset_id required"), nil
@@ -4115,6 +4130,22 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 			return out, nil
 		}
 	}
+	if demandGenFormats[firstString(args, "ad_format")] != "" {
+		if len(opts) > 0 {
+			return mcpError("structured ad_format conflicts with native options"), nil
+		}
+		built, err := googleDemandGenAd(args, acct.NativeAccountID)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		if out := a.validateDemandGenAdParent(ctx, acct, asid); out != nil {
+			return out, nil
+		}
+		if out := a.validateDemandGenAssets(ctx, acct, args); out != nil {
+			return out, nil
+		}
+		ad = built
+	}
 	if len(ad) == 0 && responsiveSearchAdRequested(args) {
 		built, rsaErr := googleResponsiveSearchAd(args)
 		if rsaErr != nil {
@@ -4146,6 +4177,9 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 }
 
 func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if demandGenFormats[firstString(args, "ad_format")] != "" {
+		return a.googleDemandGenAdUpdate(ctx, acct, args)
+	}
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
 		if failure := validateGoogleAdOperations(acct, args, ops, "update"); failure != nil {
@@ -4215,6 +4249,15 @@ func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 }
 
 func (googleAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "format") == "carousel" && len(asMap(args["platform_options"])) == 0 {
+		return a.googleDemandGenCardCreate(ctx, acct, args)
+	}
+	if firstString(args, "format") == "image" && firstString(args, "image_url") != "" && len(asMap(args["platform_options"])) == 0 {
+		upload := cloneMap(args)
+		upload["kind"] = "image"
+		upload["source_url"] = args["image_url"]
+		return (googleAdapter{}).CreativeUpload(a, ctx, acct, def, upload)
+	}
 	format := strings.ToLower(stringArgAny(args, "format"))
 	name := stringArgAny(args, "name")
 	opts, _ := args["platform_options"].(map[string]any)
@@ -4341,6 +4384,18 @@ func (googleAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 }
 
 func (googleAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		rows, out := a.googleResourceRows(ctx, acct, "SELECT audience.id, audience.name, audience.status, audience.description FROM audience")
+		if out != nil {
+			return out, nil
+		}
+		items := []any{}
+		for _, r := range rows {
+			v := mapAt(r, "audience")
+			items = append(items, map[string]any{"id": v["id"], "name": v["name"], "status": v["status"], "audience_type": "grouped"})
+		}
+		return map[string]any{"data": items}, nil
+	}
 	query := `SELECT user_list.id, user_list.name, user_list.type, user_list.size_for_display, user_list.size_for_search FROM user_list`
 	if limit := intArg(args, "limit", 0); limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
@@ -4349,6 +4404,9 @@ func (googleAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 }
 
 func (googleAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		return a.googleGroupedAudienceCreate(ctx, acct, args)
+	}
 	opts, _ := args["platform_options"].(map[string]any)
 	userList, _ := opts["user_list"].(map[string]any)
 	name, _ := args["name"].(string)
@@ -4407,6 +4465,11 @@ func (a *App) toolAdSetCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, er
 				promotedObject["custom_event_type"] = strings.ToUpper(conversionEvent)
 			}
 			args["promoted_object"] = promotedObject
+		}
+	}
+	if mobileActivationRequested(args) {
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
 		}
 	}
 	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
@@ -4518,6 +4581,11 @@ func (a *App) toolAdCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return scopeErr, nil
 	}
 	campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+	if mobileActivationRequested(args) {
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
+	}
 	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad"); id != "" {
@@ -4782,10 +4850,32 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── Audience tools ────────────────────────────────────────────────
 
 func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		acct, def, out := a.resolveAdAccount(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		if acct.Platform != "google" {
+			return mcpError("grouped audiences currently support Google"), nil
+		}
+		return (googleAdapter{}).AudienceList(a, ctx, acct, def, args)
+	}
 	return a.audienceList(ctx, args)
 }
 
 func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		acct, _, out := a.resolveAdAccount(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		if acct.Platform != "google" {
+			return mcpError("grouped audiences currently support Google"), nil
+		}
+		return a.withCreateRequest(ctx, args, "audience_group", func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			return a.googleGroupedAudienceCreate(ctx, acct, args)
+		})
+	}
 	copyArgs := cloneMap(args)
 	copyArgs["type"] = "customer_list"
 	return a.audienceCreate(ctx, copyArgs)

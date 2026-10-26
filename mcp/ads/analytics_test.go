@@ -24,7 +24,7 @@ func TestPerformanceGetGoogle_DerivesAndCachesMetrics(t *testing.T) {
 		query := input["query"].(string)
 		for _, field := range []string{
 			"segments.date", "campaign.id", "metrics.cost_micros",
-			"metrics.conversions_value", "metrics.video_views",
+			"metrics.conversions_value", "metrics.video_trueview_views",
 			"segments.date BETWEEN '2026-07-01' AND '2026-07-31'",
 		} {
 			if !strings.Contains(query, field) {

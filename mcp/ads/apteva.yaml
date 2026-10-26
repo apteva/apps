@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.50
+version: 0.1.51
 description: |
+  v0.1.51 adds structured Demand Gen campaigns, YouTube engagement goals,
+  placements, video/image/carousel ads, campaign-scoped goals and reporting.
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
   same account, resource, campaign, creative, delivery, and analytics tools.
@@ -196,6 +198,8 @@ provides:
     - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
     - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
+    - { name: campaign_configuration_get, description: "Read structured campaign configuration and conversion goals." }
+    - { name: adset_configuration_get, description: "Read structured placements, audience and targeting." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account. channel_type selects the Google campaign shape; objective or bid_strategy selects its bidding strategy." }
     - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
     - { name: campaign_import,             description: "Import selected campaigns into this project." }
@@ -269,7 +273,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.50
+    ref: ads/v0.1.51
     entry: mcp/ads
   port: 8080
   health_check: /health

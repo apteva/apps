@@ -137,6 +137,12 @@ func accountResourceCapabilities(platform string) map[string]any {
 	}
 	return map[string]any{
 		"mobile_app": mobileCapabilities(platform),
+		"demand_gen": func() map[string]any {
+			if platform == "google" {
+				return demandGenCapabilities()
+			}
+			return map[string]any{"supported": false}
+		}(),
 		"tracking_source": map[string]any{
 			"supported":                  supported,
 			"create":                     create,
@@ -675,7 +681,7 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	var query string
 	switch kind {
 	case resourceConversionAction:
-		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer, conversion_action.app_id, conversion_action.primary_for_goal FROM conversion_action ORDER BY conversion_action.id"
+		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer, conversion_action.app_id, conversion_action.primary_for_goal, conversion_action.origin FROM conversion_action ORDER BY conversion_action.id"
 	case resourceLeadForm:
 		query = "SELECT asset.id, asset.name, asset.resource_name, asset.type, asset.lead_form_asset.business_name, asset.lead_form_asset.headline, asset.lead_form_asset.description, asset.lead_form_asset.privacy_policy_url, asset.lead_form_asset.fields, asset.lead_form_asset.call_to_action_type, asset.lead_form_asset.call_to_action_description, asset.lead_form_asset.desired_intent, asset.lead_form_asset.post_submit_headline, asset.lead_form_asset.post_submit_description, asset.lead_form_asset.post_submit_call_to_action_type FROM asset WHERE asset.type = LEAD_FORM ORDER BY asset.id"
 	case resourceAudience:
