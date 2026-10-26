@@ -134,3 +134,22 @@ test("relay policy changes still restart a direct path",async()=>{
  const c=new RTCICEController(v=>messages.push(v),()=>true);c.register("main",p as any);
  c.handle(refresh());await tick();expect(messages).toHaveLength(1);expect(p.offers).toHaveLength(1);c.stop();
 });
+
+test("built-in panel defaults start WebRTC and preserve explicit PCM selection", async () => {
+ const starts:string[]=[];
+ const connection=(kind:string)=>({async start(){starts.push(kind);},stop(){},setMuted(){},setOutputVolume(){},sendDTMF(){}});
+ for(const saved of [null,JSON.stringify({inputGainDB:-3}),JSON.stringify({mediaTransport:"websocket"})]) {
+  const audio=selectableAudio({onState(){}},()=>connection("pcm"),()=>connection("opus"));
+  await audio.start("wss://app.example",resolveAudioOptions(saved,null,null));audio.stop();
+ }
+ expect(starts).toEqual(["opus","opus","pcm"]);
+});
+
+test("panel WebRTC-first default retains PCM when WebRTC setup is unavailable", async () => {
+ const events:string[]=[];
+ const pcm={async start(){events.push("pcm");},stop(){},setMuted(){},setOutputVolume(){},sendDTMF(){}};
+ const rtc={...pcm,async start(){events.push("rtc");throw new Error("WebRTC unavailable");},stop(){events.push("rtc_stopped");}};
+ const audio=selectableAudio({onState(){}},()=>pcm,()=>rtc);
+ await audio.start("wss://app.example",resolveAudioOptions(null,null,null));
+ expect(events).toEqual(["rtc","rtc_stopped","pcm"]);audio.stop();
+});

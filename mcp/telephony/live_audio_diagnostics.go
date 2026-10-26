@@ -132,6 +132,9 @@ type serverAudioDiagnostics struct {
 }
 
 func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
+	// Process sampling can wait for another call's sampler or the Go runtime.
+	// Never hold this call's audio-routing lock while collecting those metrics.
+	process := sampleMediaProcess()
 	epoch, stages := h.timeline.snapshot()
 	socket, health := h.telemetry.snapshots()
 	h.mu.Lock()
@@ -146,7 +149,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	startup.PhaseSchema = 1
 	startup.Readiness = append([]mediaReadinessEvent(nil), startup.Readiness...)
 	startup.Events = append([]startupDrop(nil), startup.Events...)
-	return serverAudioDiagnostics{Startup: startup, Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+	return serverAudioDiagnostics{Startup: startup, Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: process, CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		WebRTC:         rtc,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),

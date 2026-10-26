@@ -9,6 +9,7 @@ describe("softphone audio setting migration", () => {
       autoGainControl: false,
       inputGainDB: 0,
       highpassFilter: true,
+      mediaTransport: "auto",
     });
   });
 
@@ -23,6 +24,7 @@ describe("softphone audio setting migration", () => {
       autoGainControl: false,
       inputGainDB: 0,
       highpassFilter: true,
+      mediaTransport: "auto",
     });
   });
 
@@ -37,6 +39,7 @@ describe("softphone audio setting migration", () => {
       autoGainControl: false,
       inputGainDB: 0,
       highpassFilter: true,
+      mediaTransport: "auto",
     });
   });
 
@@ -54,4 +57,18 @@ describe("softphone audio setting migration", () => {
 test("preserves the saved WebRTC FEC opt-out without changing existing defaults",()=>{
  expect(resolveAudioOptions(JSON.stringify({mediaTransport:"webrtc",webrtcFec:false}),null,null).webrtcFec).toBe(false);
  expect(resolveAudioOptions(null,null,null).webrtcFec).toBeUndefined();
+});
+
+for (const transport of ["webrtc", "websocket", "auto"] as const) {
+  test(`preserves explicit ${transport} across all panel storage generations`, () => {
+    for (let generation = 0; generation < 4; generation++) {
+      const raw: (string | null)[] = [null, null, null, null];
+      raw[generation] = JSON.stringify({mediaTransport: transport, inputGainDB: -3});
+      expect(resolveAudioOptions(raw[0], raw[1], raw[2], raw[3])).toMatchObject({mediaTransport: transport, inputGainDB: -3});
+    }
+  });
+}
+test("existing implicit transport and corrupt preferences use the panel WebRTC default", () => {
+  expect(resolveAudioOptions(JSON.stringify({noiseSuppression: true}), null, null)).toMatchObject({mediaTransport: "auto", noiseSuppression: true});
+  expect(resolveAudioOptions("invalid", null, null).mediaTransport).toBe("auto");
 });
