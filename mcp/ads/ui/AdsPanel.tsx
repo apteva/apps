@@ -1,3 +1,5 @@
+import CampaignSettings from "./CampaignSettings";
+import CampaignBuilder from "./CampaignBuilder";
 import ConversionsWorkspace from "./ConversionsWorkspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -986,6 +988,7 @@ function CampaignWorkspace({
           </header>
 
           <KpiStrip summary={performance} currency={account.currency} />
+          {account.platform === "google" && <CampaignSettings currency={account.currency} key={campaign.id} accountId={account.id} campaignId={campaign.id} groupId={selectedAdSetID} callTool={callTool} dateFrom={dateFrom} dateTo={dateTo} />}
 
           <div className="ads-performance-layout border-b border-border">
             <div className="min-w-0 border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
@@ -1308,6 +1311,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignBuilderOpen, setCampaignBuilderOpen] = useState(false);
   const [activeView, setActiveView] = useState<"overview" | "campaigns" | "audiences" | "conversions">("overview");
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
@@ -2322,6 +2326,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     </button>
                   ))}
                 </div>
+                {activeView === "campaigns" && selected.platform === "google" && <button type="button" onClick={() => setCampaignBuilderOpen(true)} className="h-8 rounded border border-border px-3 text-xs hover:bg-bg-input">Create campaign</button>}
                 {activeView !== "audiences" && <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
                   <div className="col-span-3 inline-flex h-8 justify-self-end rounded border border-border p-0.5 sm:col-auto sm:justify-self-auto">
                     {[7, 30, 90].map((days) => (
@@ -2472,6 +2477,8 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
           )}
         </main>
       </div>
+
+      {campaignBuilderOpen && selected && <Modal title="Create campaign" size="large" onClose={() => setCampaignBuilderOpen(false)} labelledBy="ads-create-campaign"><CampaignBuilder key={`${installId}:${scopedProject}:${selected.id}`} account={selected} callTool={callTool} scopeKey={`${installId}:${scopedProject}`} dateFrom={dateFrom} dateTo={dateTo} onChanged={() => { refreshCampaigns(selected); setWorkspaceRefreshKey(current => current + 1); }} /></Modal>}
 
       {addOpen && (
         <Modal

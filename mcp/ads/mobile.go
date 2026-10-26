@@ -84,7 +84,7 @@ func (a *App) extendConversionTools(tools []sdk.Tool) []sdk.Tool {
 		return schemaObject(p, append([]string{"ad_account_id"}, required...))
 	}
 	str := func() map[string]any { return map[string]any{"type": "string"} }
-	return append(tools,
+	return a.extendDemandGenTools(append(tools,
 		sdk.Tool{Name: "conversion_capabilities_get", Description: "Get provider-specific mobile app goals, event kinds, measurement sources and requirements.", InputSchema: common(nil), Handler: a.toolConversionCapabilities},
 		sdk.Tool{Name: "mobile_app_bind", Description: "Bind an existing store app to this ad account; does not create provider apps or install SDKs. Native Meta app_id is the Meta application id, not the store id.", InputSchema: common(map[string]any{"name": str(), "os": map[string]any{"type": "string", "enum": []string{"android", "ios"}}, "store_url": str(), "app_id": str()}, "name", "os", "store_url", "app_id"), Handler: a.toolMobileAppBind},
 		sdk.Tool{Name: "measurement_source_bind", Description: "Record the app's existing measurement source without claiming that events have been received. Credentials stay in provider integrations.", InputSchema: common(map[string]any{"source": str(), "name": str()}, "mobile_app_resource_id", "source"), Handler: a.toolMeasurementSourceBind},
@@ -92,7 +92,7 @@ func (a *App) extendConversionTools(tools []sdk.Tool) []sdk.Tool {
 		sdk.Tool{Name: "conversion_event_enable", Description: "Enable an existing HIDDEN Google mobile conversion action. Never creates a website action or imports synthetic mobile events.", InputSchema: common(map[string]any{"conversion_event_resource_id": map[string]any{"type": "integer"}}, "mobile_app_resource_id", "conversion_event_resource_id"), Handler: a.toolConversionEventEnable},
 		sdk.Tool{Name: "conversion_readiness_get", Description: "Check app access, measurement binding, event observation and optimization eligibility separately. Unknown diagnostics are never reported as ready.", InputSchema: common(map[string]any{"conversion_event_resource_id": map[string]any{"type": "integer"}, "measurement_source_resource_id": map[string]any{"type": "integer"}}, "mobile_app_resource_id"), Handler: a.toolConversionReadiness},
 		sdk.Tool{Name: "conversion_performance_get", Description: "Get event-level conversions, installs, CPI and revenue separately from spend. Sources and attribution windows are not summed together. Extends performance_get for website and app events.", InputSchema: common(map[string]any{"level": str(), "date_from": str(), "date_to": str(), "entity_ids": map[string]any{"type": "array", "items": str()}, "event": str(), "measurement_source": str()}, "date_from", "date_to"), Handler: a.toolConversionPerformance},
-	)
+	))
 }
 
 var androidPackage = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
@@ -344,6 +344,9 @@ func googleMobileEvent(category, name string) string {
 }
 
 func (a *App) toolConversionEventList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if intArg(args, "mobile_app_resource_id", 0) == 0 {
+		return a.toolGeneralConversionEvents(ctx, args)
+	}
 	acct, _, out := a.resolveAdAccount(ctx, args)
 	if out != nil {
 		return out, nil
@@ -440,6 +443,20 @@ func (a *App) measurementSource(ctx *sdk.AppCtx, acct *adAccount, app *adResourc
 	return &matches[0], nil
 }
 func (a *App) toolConversionReadiness(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if id := firstString(args, "campaign_id"); id != "" {
+		acct, _, out := a.resolveAdAccount(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		if out := a.requireManagedCampaign(ctx, acct, id); out != nil {
+			return out, nil
+		}
+		result, out := a.demandGenReadiness(ctx, acct, id)
+		if out != nil {
+			return out, nil
+		}
+		return result, nil
+	}
 	acct, _, out := a.resolveAdAccount(ctx, args)
 	if out != nil {
 		return out, nil
@@ -796,6 +813,9 @@ func (a *App) inheritMobileArgs(ctx *sdk.AppCtx, acct *adAccount, args map[strin
 }
 
 func (a *App) checkMobileActivation(ctx *sdk.AppCtx, acct *adAccount, args map[string]any, campaignID string) map[string]any {
+	if out := a.checkDemandGenActivation(ctx, acct, args, campaignID); out != nil {
+		return out
+	}
 	var appID, sourceID, eventID int64
 	err := ctx.AppDB().QueryRow(`SELECT mobile_app_resource_id,measurement_source_resource_id,conversion_event_resource_id FROM ad_mobile_campaigns WHERE project_id=? AND ad_account_id=? AND campaign_id=?`, acct.ProjectID, acct.ID, campaignID).Scan(&appID, &sourceID, &eventID)
 	if errors.Is(err, sql.ErrNoRows) {

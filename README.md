@@ -77,6 +77,13 @@ contracts; validate real account permissions and SDK/MMP event receipt before
 activating delivery. Google mobile conversion import follows the
 [provider's conversion action contract](https://developers.google.com/google-ads/api/docs/conversions/categories).
 
+## Ads Demand Gen
+
+Ads extends its existing campaign, ad group, creative, activation and reporting
+tools with structured Demand Gen and YouTube engagement support. See
+[mcp/ads/DEMAND_GEN.md](mcp/ads/DEMAND_GEN.md) for the API contract, real-provider
+validation and provider-version limits.
+
 ## Releasing
 
 Per-app version tags in the `name/vX.Y.Z` form (e.g. `crm/v0.2.0`)

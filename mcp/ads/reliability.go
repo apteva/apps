@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -45,10 +46,18 @@ func (a *App) execIntegrationToolWithPolicy(
 			return parsed, nil
 		}
 		errOut["attempts"] = attempt
+		if errOut["code"] == "provider_concurrent_modification" && attempts == 1 {
+			attempts = 3
+		}
+
 		if attempt == attempts || errOut["retryable"] != true {
 			return nil, errOut
 		}
-		if !a.sleepBeforeRetry(ctx, a.delayBeforeRetry(attempt)) {
+		delay := a.delayBeforeRetry(attempt)
+		if errOut["code"] == "provider_concurrent_modification" && a.retryDelay == nil {
+			delay = time.Duration(attempt) * time.Second
+		}
+		if !a.sleepBeforeRetry(ctx, delay) {
 			errOut["code"] = "operation_cancelled"
 			errOut["retryable"] = false
 			return nil, errOut
@@ -153,6 +162,17 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 		}
 	}
 
+	if acct != nil && acct.Platform == "google" && res != nil && res.Status == 400 && googleConversionHistoryRestriction(res.Data) {
+		out = mcpError("Google Ads value/ROAS bidding is unavailable for this account (NOT_ENOUGH_CONVERSIONS). More conversion history is required; select conversion-count/click bidding or an eligible account.")
+		out["code"] = "provider_bidding_ineligible"
+		out["provider_code"] = "NOT_ENOUGH_CONVERSIONS"
+		out["provider_status"] = 400
+		out["retryable"] = false
+	}
+	if acct != nil && acct.Platform == "google" && res != nil && res.Status == 400 && googleConcurrentRejection(res.Data) {
+		out["code"] = "provider_concurrent_modification"
+		out["retryable"] = true
+	}
 	if out["code"] != "provider_auth_error" && providerRateLimited(res, body) {
 		out["code"] = "provider_rate_limited"
 		out["retryable"] = true
@@ -258,4 +278,57 @@ func providerFailureText(errOut map[string]any) string {
 		return fmt.Sprint(content[0]["text"])
 	}
 	return "provider request failed"
+}
+
+// A typed HTTP 400 concurrent-modification rejection means Google rejected the
+// request. This is deliberately narrower than retrying an ambiguous create timeout.
+func googleConcurrentRejection(raw []byte) bool {
+	var envelope struct {
+		Error struct {
+			Details []struct {
+				Type   string `json:"@type"`
+				Errors []struct {
+					Code map[string]string `json:"errorCode"`
+				} `json:"errors"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return false
+	}
+	found := false
+	for _, detail := range envelope.Error.Details {
+		if !strings.HasSuffix(detail.Type, ".errors.GoogleAdsFailure") {
+			continue
+		}
+		if len(detail.Errors) == 0 {
+			return false
+		}
+		for _, e := range detail.Errors {
+			if len(e.Code) != 1 || e.Code["databaseError"] != "CONCURRENT_MODIFICATION" {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
+
+func googleConversionHistoryRestriction(raw []byte) bool {
+	var v map[string]any
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	for _, detail := range asSlice(mapAt(v, "error")["details"]) {
+		d := asMap(detail)
+		if !strings.HasSuffix(firstString(d, "@type"), ".errors.GoogleAdsFailure") {
+			continue
+		}
+		for _, e := range asSlice(d["errors"]) {
+			if firstString(mapAt(asMap(e), "errorCode"), "campaignError") == "NOT_ENOUGH_CONVERSIONS" {
+				return true
+			}
+		}
+	}
+	return false
 }

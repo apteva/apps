@@ -142,7 +142,9 @@ func (a *App) fetchGoogleConversionPoints(ctx *sdk.AppCtx, acct *adAccount, r *g
 				event = googleMobileEvent(firstString(action.Metadata, "category"), action.DisplayName)
 			}
 			typ := firstString(action.Metadata, "type")
-			if strings.Contains(typ, "FIREBASE") {
+			if firstString(action.Metadata, "origin") == "YOUTUBE_HOSTED" {
+				source = "youtube"
+			} else if strings.Contains(typ, "FIREBASE") {
 				source = "firebase"
 			} else if strings.Contains(typ, "THIRD_PARTY_APP") {
 				source = "mmp"

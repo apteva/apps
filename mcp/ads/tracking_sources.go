@@ -430,6 +430,9 @@ func (a *App) googleConversionInstallation(ctx *sdk.AppCtx, acct *adAccount, arg
 	if resourceErr != nil {
 		return resourceErr, nil
 	}
+	if firstString(resource.Metadata, "origin") == "YOUTUBE_HOSTED" {
+		return mcpError("YouTube-hosted conversions require channel linking, not a website tag"), nil
+	}
 	if googleMobileConversionType(firstString(resource.Metadata, "type")) || firstString(resource.Metadata, "app_id") != "" {
 		return mcpError("mobile app conversions use SDK/Firebase/MMP measurement, not website tag installation"), nil
 	}
