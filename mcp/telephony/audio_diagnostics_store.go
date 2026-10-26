@@ -331,27 +331,28 @@ func (event *audioDropEvent) UnmarshalJSON(data []byte) error {
 }
 
 type carrierAudioDiagnostics struct {
-	AgentAudio                   *agentAudioSnapshot    `json:"agent_audio,omitempty"`
-	OperatorInterrupts           int64                  `json:"operator_interrupts"`
-	LocalInterrupts              int64                  `json:"local_interrupts"`
-	ProviderCoreInterrupts       int64                  `json:"provider_or_core_interrupts"`
-	SendAheadMS                  int                    `json:"send_ahead_ms"`
-	InputAudio                   audioTransportSnapshot `json:"input_audio"`
-	InboundDroppedMS             int                    `json:"inbound_dropped_ms,omitempty"`
-	InboundMaxQueueAgeMS         int                    `json:"inbound_max_queue_age_ms,omitempty"`
-	InboundJitterMS              float64                `json:"inbound_jitter_ms,omitempty"`
-	UpdatedAt                    string                 `json:"updated_at"`
-	Provider                     string                 `json:"provider"`
-	Codec                        string                 `json:"codec"`
-	SampleRate                   int                    `json:"sample_rate"`
-	PacerMode                    string                 `json:"pacer_mode"`
-	MaxQueuedMS                  int                    `json:"max_queued_ms"`
-	DroppedStaleMS               int                    `json:"dropped_stale_ms"`
-	PreAnswerMicrophoneDroppedMS int64                  `json:"pre_answer_microphone_dropped_ms"`
-	CarrierSequenceGaps          int                    `json:"carrier_sequence_gaps"`
-	CaptureSequenceGaps          int                    `json:"capture_sequence_gaps"`
-	SequenceGaps                 int                    `json:"sequence_gaps"`
-	DropEvents                   []audioDropEvent       `json:"drop_events,omitempty"`
+	SIPAgentPlayout              *sipAgentPlayoutDiagnostics `json:"sip_agent_playout,omitempty"`
+	AgentAudio                   *agentAudioSnapshot         `json:"agent_audio,omitempty"`
+	OperatorInterrupts           int64                       `json:"operator_interrupts"`
+	LocalInterrupts              int64                       `json:"local_interrupts"`
+	ProviderCoreInterrupts       int64                       `json:"provider_or_core_interrupts"`
+	SendAheadMS                  int                         `json:"send_ahead_ms"`
+	InputAudio                   audioTransportSnapshot      `json:"input_audio"`
+	InboundDroppedMS             int                         `json:"inbound_dropped_ms,omitempty"`
+	InboundMaxQueueAgeMS         int                         `json:"inbound_max_queue_age_ms,omitempty"`
+	InboundJitterMS              float64                     `json:"inbound_jitter_ms,omitempty"`
+	UpdatedAt                    string                      `json:"updated_at"`
+	Provider                     string                      `json:"provider"`
+	Codec                        string                      `json:"codec"`
+	SampleRate                   int                         `json:"sample_rate"`
+	PacerMode                    string                      `json:"pacer_mode"`
+	MaxQueuedMS                  int                         `json:"max_queued_ms"`
+	DroppedStaleMS               int                         `json:"dropped_stale_ms"`
+	PreAnswerMicrophoneDroppedMS int64                       `json:"pre_answer_microphone_dropped_ms"`
+	CarrierSequenceGaps          int                         `json:"carrier_sequence_gaps"`
+	CaptureSequenceGaps          int                         `json:"capture_sequence_gaps"`
+	SequenceGaps                 int                         `json:"sequence_gaps"`
+	DropEvents                   []audioDropEvent            `json:"drop_events,omitempty"`
 }
 
 func clampDiagnosticInt(value, maximum int) int {
