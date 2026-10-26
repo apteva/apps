@@ -222,13 +222,15 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Get an actor by id or name, optionally at an exact immutable revision. Supply operation to retrieve one complete operation with execution settings and input requirements.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Bounded metadata/operation discovery by default. Supply operation for one complete immutable operation contract. Full definitions require actors_definition_export for editing/debugging.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "operation_after": map[string]any{"type": "string"}, "operation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
-			Name: "actors_list", Description: "List actor definitions for the current project.",
-			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolActorList,
+			Name: "actors_list", Description: "Bounded metadata discovery without definitions; follow next_cursor as after while has_more.",
+			InputSchema: schemaObject(map[string]any{"enabled": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "after": map[string]any{"type": "integer", "minimum": 0}}, nil), Handler: a.toolActorList,
 		},
+		{Name: "actors_definition_export", Description: "Explicit editing/debugging export of one immutable definition or operation contract as bounded base64 chunks. Assemble all chunks and verify sha256 before use. Never needed for ordinary discovery or execution.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxActorExportChunkBytes}}, []string{"revision"}), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorDefinitionExport},
+
 		{
 			Name: "actors_delete", Description: "Delete an actor definition. Existing run snapshots remain reproducible.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorDelete,
@@ -857,29 +859,7 @@ func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, supplied := args["operation"]; supplied {
 		return a.getActorOperation(ctx, args)
 	}
-	rec, err := getActor(ctx, int64ArgLocal(args, "id"), stringArg(args, "name"))
-	if err != nil {
-		return nil, err
-	}
-	if rec == nil {
-		return map[string]any{"actor": nil, "found": false}, nil
-	}
-	latest := rec.Revision
-	if _, supplied := args["revision"]; supplied && intArg(args, "revision") <= 0 {
-		return nil, errors.New("revision must be positive")
-	}
-	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
-		return nil, err
-	}
-	operations := make([]string, 0, len(rec.Definition.Operations))
-	for name := range rec.Definition.Operations {
-		operations = append(operations, name)
-	}
-	if len(operations) == 0 {
-		operations = append(operations, "run")
-	}
-	sort.Strings(operations)
-	return map[string]any{"actor": rec, "found": true, "retrieved_revision": rec.Revision, "latest_revision": latest, "operations": operations}, nil
+	return a.discoverActor(ctx, args)
 }
 
 func loadActorRevision(ctx *sdk.AppCtx, rec *actorRecord, revision int) error {
@@ -903,16 +883,7 @@ func loadActorRevision(ctx *sdk.AppCtx, rec *actorRecord, revision int) error {
 }
 
 func (a *App) toolActorList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	var enabled *bool
-	if raw, ok := args["enabled"]; ok {
-		v := boolArgDefault(map[string]any{"enabled": raw}, "enabled", false)
-		enabled = &v
-	}
-	recs, err := listActors(ctx, enabled, boundedInt(intArg(args, "limit"), 100, 1, 500))
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"actors": recs, "count": len(recs)}, nil
+	return a.discoverActors(ctx, args)
 }
 
 func (a *App) toolActorDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1097,12 +1068,19 @@ func (a *App) handleActors(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	recs, err := listActors(ctx, nil, 500)
-	if err != nil {
-		writeJSON(w, nil, err)
-		return
+	args := map[string]any{}
+	for _, key := range []string{"after", "limit"} {
+		if raw := r.URL.Query().Get(key); raw != "" {
+			n, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				httpErr(w, 400, "invalid "+key)
+				return
+			}
+			args[key] = n
+		}
 	}
-	writeJSON(w, map[string]any{"actors": recs, "count": len(recs)}, nil)
+	out, err := a.discoverActors(ctx, args)
+	writeJSON(w, out, err)
 }
 
 func decodeActorHTTPArgs(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
@@ -1511,6 +1489,19 @@ func (a *App) handleActorGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args["revision"] = n
+	}
+	for _, key := range []string{"operation", "operation_after"} {
+		if values, ok := r.URL.Query()[key]; ok {
+			args[key] = values[0]
+		}
+	}
+	if raw := r.URL.Query().Get("operation_limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			httpErr(w, 400, "invalid operation_limit")
+			return
+		}
+		args["operation_limit"] = n
 	}
 	out, err := a.toolActorGet(ctx, args)
 	writeJSON(w, out, err)

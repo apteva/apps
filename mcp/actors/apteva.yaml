@@ -1,8 +1,12 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.48
+version: 0.3.0
 description: |
+  v0.3.0 makes MCP discovery bounded by default: metadata and paginated operation
+  names, complete exact-operation contracts, and explicit hash-verifiable JSON
+  exports for editing/debugging. The editor explicitly downloads its pinned
+  immutable definition. Execution and publishing behavior are unchanged.
   v0.2.48 includes the preserved Patreon Quips workflow examples in the
   release bundle, with the same 5 MB engine and v0.2.47 behavior.
   v0.2.47 retries complete rendered HTML reads up to 5 MB and requires
@@ -71,7 +75,9 @@ provides:
     - name: actors_get
       description: Get an actor by ID or name, optionally at an exact immutable revision.
     - name: actors_list
-      description: List actor definitions in the current project.
+      description: Discover actor metadata with bounded pagination, without definitions.
+    - name: actors_definition_export
+      description: Explicit immutable JSON export in bounded hash-verifiable chunks for editing and debugging.
     - name: actors_delete
       description: Delete an actor after removing its saved tasks and schedules; preserve run history.
     - name: actors_run
@@ -129,7 +135,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.48
+    ref: actors/v0.3.0
     entry: mcp/actors
   port: 8080
   health_check: /health

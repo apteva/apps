@@ -62,7 +62,13 @@ For a pinned named operation, call `actors_get(id=..., revision=..., operation=.
 Read the complete compact operation and its shared execution settings; verify
 `retrieved_revision`, `complete` and `step_count`. Do not infer that an operation
 is absent from a large full-definition preview. A missing operation/revision or
-`incomplete-response` error must stop execution; never substitute the latest pin.
+incomplete response must stop execution; never substitute the latest pin.
+Unqualified `actors_get` and `actors_list` are bounded metadata discovery only.
+Follow their operation/list cursors when present. Full JSON editing/debugging
+requires `actors_definition_export` with an explicit revision. Export chunks
+must be fully assembled and hash/byte-count verified. An oversized exact
+operation returns `complete:false` and its export reference, never partial
+steps; ordinary workers should obtain only the named operation they need.
 
 For approved label aliases, `assert_values` accepts an exact `canonical_map`
 with `equals`/`equals_field`; preserve raw extracted labels, and inspect

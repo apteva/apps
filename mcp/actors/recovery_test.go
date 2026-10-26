@@ -11,6 +11,7 @@ import (
 func TestExactHistoricalActorGet(t *testing.T) {
 	ctx, app := newTestCtx(t, newFakePlatform())
 	rec := saveFixtureActor(t, ctx, app, testActorDefinition())
+	originalExport := readExportFixture(t, app, ctx, map[string]any{"id": rec.ID, "revision": rec.Revision})
 	old, err := app.toolActorGet(ctx, map[string]any{"id": rec.ID, "revision": rec.Revision})
 	if err != nil {
 		t.Fatal(err)
@@ -28,8 +29,9 @@ func TestExactHistoricalActorGet(t *testing.T) {
 	if got.(map[string]any)["retrieved_revision"] != rec.Revision || got.(map[string]any)["latest_revision"] != rec.Revision+1 {
 		t.Fatal(got)
 	}
-	before, _ := json.Marshal(old.(map[string]any)["actor"].(*actorRecord).Definition)
-	after, _ := json.Marshal(got.(map[string]any)["actor"].(*actorRecord).Definition)
+	before := originalExport
+	after := readExportFixture(t, app, ctx, map[string]any{"id": rec.ID, "revision": rec.Revision})
+	_ = old
 	if string(before) != string(after) {
 		t.Fatal("historical definition replaced by latest")
 	}
@@ -285,9 +287,9 @@ func TestHistoricalRevisionDoesNotMergeLatestOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := out.(map[string]any)["actor"].(*actorRecord)
-	if len(got.Definition.Operations) != 1 || got.Definition.Operations["newer"].Steps != nil {
-		t.Fatal("historical definition merged latest operations", got.Definition.Operations)
+	got := out.(map[string]any)["actor"].(map[string]any)
+	if got["operation_count"] != 1 || strings.Contains(stringMustJSON(got["operation_names"]), "newer") {
+		t.Fatal("historical discovery merged latest operations", got)
 	}
 	if _, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "revision": rec.Revision, "operation": "newer"}); err == nil {
 		t.Fatal("run merged an operation absent from historical revision")

@@ -83,8 +83,8 @@ func TestActorGetOperationExactRevisionAndCompleteness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(full.(map[string]any)["actor"].(*actorRecord).Definition.Operations) != 62 {
-		t.Fatal("legacy full retrieval changed")
+	if full.(map[string]any)["actor"].(map[string]any)["operation_count"] != 62 || strings.Contains(stringMustJSON(full), "unrelatedunrelated") {
+		t.Fatal("discovery leaked definitions or lost operation names")
 	}
 	if len(plat.calls) != 0 {
 		t.Fatal("retrieval performed an external action")
@@ -112,7 +112,7 @@ func TestActorGetOperationPreservesRawAndRejectsOversize(t *testing.T) {
 		}
 		out, err := app.toolActorGet(ctx, map[string]any{"id": rec.ID, "revision": 1, "operation": "gallery_post"})
 		if n == 40000 {
-			if err == nil || !strings.Contains(err.Error(), "incomplete-response") {
+			if err != nil || out.(map[string]any)["complete"] != false || out.(map[string]any)["definition_export"] == nil {
 				t.Fatal("oversized operation silently returned a partial definition")
 			}
 			continue
