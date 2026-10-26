@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.47
+version: 0.2.48
 description: |
+  v0.2.48 includes the preserved Patreon Quips workflow examples in the
+  release bundle, with the same 5 MB engine and v0.2.47 behavior.
   v0.2.47 retries complete rendered HTML reads up to 5 MB and requires
   Computer v0.7.97 with the same extraction ceiling. Retains v0.2.46
   read-only navigation retries, verified empty views and all action guards.
@@ -127,7 +129,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.47
+    ref: actors/v0.2.48
     entry: mcp/actors
   port: 8080
   health_check: /health
