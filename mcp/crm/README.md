@@ -1,4 +1,13 @@
-# CRM v0.9.25
+# CRM v0.9.26
+
+Release `crm/v0.9.26`: normalize display-name email recipients and retain each
+Messaging event's soft-bounce contribution. Confirmed automatic-response
+corrections remove only the disproved contribution, preserve genuine delivery
+failures and suppressions, and tolerate reversed notification order. Migration
+024 is additive and updates the pending suppression-removal index. Install this
+version before Messaging v0.13.61. Pins app-sdk v0.108.0 by commit topology.
+All previous subject inheritance, drafts, snapshots and unsubscribe behavior is
+preserved. See `../messaging/DELIVERY_RECONCILIATION.md` for rollout and recovery.
 
 Release `crm/v0.9.25`: shared email subject inheritance for `contacts_send_message` and
 `contacts_reply`. Subject resolution precedes dispatch and automatic idempotency;
