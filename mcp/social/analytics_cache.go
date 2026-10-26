@@ -38,7 +38,7 @@ func (q analyticsQuery) cacheKey() string {
 		Start, End                string
 		Filters                   map[string][]string
 		Dimensions, Groups        []string
-	}{3, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
+	}{4, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
 	return string(raw)
 }
 func (q analyticsQuery) snapshotPeriod(metric string) string {

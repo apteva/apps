@@ -1,5 +1,5 @@
 import { Area,AreaChart,ResponsiveContainer,Tooltip,XAxis,YAxis } from "recharts";
-import {metricTrendEntries,type MetricPoint} from "./metricsPresentation";
+import {metricChartValue,metricDateLabel,metricTrendEntries,type MetricPoint} from "./metricsPresentation";
 export default function InsightCharts({ metrics }: { metrics: { insights?: Record<string, MetricPoint[]> } }) {
   const entries = metricTrendEntries(metrics.insights);
   if (entries.length === 0) {
@@ -13,13 +13,16 @@ export default function InsightCharts({ metrics }: { metrics: { insights?: Recor
           <div key={name} className="border border-border rounded px-3 py-2 bg-bg">
             <div className="flex items-center justify-between gap-3">
               <span className="text-text text-sm">{name.replace(/_/g, " ")}</span>
-              <span className="text-text font-medium">{formatNumber(latest.value)}</span>
+              <span className="text-text font-medium">{latest.data_status === "pending" ? "Pending" : latest.value == null || latest.data_status === "unavailable" ? "Unavailable" : formatNumber(latest.value)}</span>
             </div>
             <Sparkline points={points} gradientId={`socialMetricFill-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`} />
             <div className="text-text-dim text-xs mt-1">
+              {points.some(point => point.data_status === "pending") && "Pending dates appear as gaps · "}
               {points.length} point{points.length !== 1 ? "s" : ""}
-              {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
-              {latest.partial && ` · partial${latest.expected ? ` (${latest.included}/${latest.expected} posts)` : " or estimated"}`}
+              {latest.time ? ` · latest ${metricDateLabel(latest.time)}` : ""}
+              {latest.data_status === "unknown" && " · Processing status unavailable"}
+              {latest.data_status === "estimated" && " · Provider estimate"}
+              {latest.partial && latest.data_status !== "estimated" && ` · partial${latest.expected ? ` (${latest.included}/${latest.expected} posts)` : " or estimated"}`}
             </div>
           </div>
         );
@@ -31,8 +34,9 @@ export default function InsightCharts({ metrics }: { metrics: { insights?: Recor
 function Sparkline({ points, gradientId }: { points: MetricPoint[]; gradientId: string }) {
   const data = points.map((point, index) => ({
     index,
-    label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),
-    value: Number(point.value) || 0,
+    label: point.time ? metricDateLabel(point.time) : String(index + 1),
+    value: metricChartValue(point),
+    status: point.data_status,
   }));
   if (data.length === 0) return null;
   return (
@@ -57,9 +61,11 @@ function Sparkline({ points, gradientId }: { points: MetricPoint[]; gradientId: 
               fontSize: 12,
             }}
             labelFormatter={(_, payload) => payload?.[0]?.payload?.label || ""}
-            formatter={(value) => [formatNumber(Number(value) || 0), "value"]}
+            filterNull={false}
+            formatter={(value, _name, item) => [item?.payload?.status === "pending" ? "Pending" : value == null ? "Unavailable" : formatNumber(Number(value)), item?.payload?.status === "estimated" ? "Provider estimate" : "value"]}
           />
           <Area
+            connectNulls={false}
             type="monotone"
             dataKey="value"
             stroke="#f97316"

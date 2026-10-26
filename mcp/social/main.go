@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.19.2
+version: 0.19.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -213,7 +213,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.19.2
+    ref: social/v0.19.3
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -5751,7 +5751,7 @@ type normalizedMetrics struct {
 	Shares         int64           `json:"shares"`
 	Saves          int64           `json:"saves"`
 	Clicks         int64           `json:"clicks"`
-	Available      []string        `json:"available,omitempty"`
+	Available      []string        `json:"available"`
 	Raw            json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -5853,19 +5853,23 @@ func (a *App) getPinterestPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 // summary_metrics object; when Pinterest returns several splits we sum them.
 func pinterestSummaryMetrics(raw json.RawMessage) map[string]int64 {
 	var payload map[string]struct {
-		Summary map[string]float64 `json:"summary_metrics"`
+		Summary map[string]*float64 `json:"summary_metrics"`
 	}
 	_ = json.Unmarshal(raw, &payload)
 	out := map[string]int64{}
 	if all, ok := payload["all"]; ok {
 		for key, value := range all.Summary {
-			out[key] = int64(value)
+			if value != nil {
+				out[key] = int64(*value)
+			}
 		}
 		return out
 	}
 	for _, group := range payload {
 		for key, value := range group.Summary {
-			out[key] += int64(value)
+			if value != nil {
+				out[key] += int64(*value)
+			}
 		}
 	}
 	return out
@@ -6469,7 +6473,7 @@ type accountMetricsResult struct {
 	VideoViews      int64                      `json:"video_views"`
 	PinClicks       int64                      `json:"pin_clicks"`
 	OutboundClicks  int64                      `json:"outbound_clicks"`
-	Available       []string                   `json:"available,omitempty"`
+	Available       []string                   `json:"available"`
 	SocialAccountID int64                      `json:"social_account_id"`
 	ProfileID       int64                      `json:"profile_id,omitempty"`
 	Platform        string                     `json:"platform"`
@@ -6502,11 +6506,13 @@ type accountMetricsResult struct {
 }
 
 type insightPoint struct {
-	Included int    `json:"included,omitempty"`
-	Expected int    `json:"expected,omitempty"`
-	Partial  bool   `json:"partial,omitempty"`
-	Time     string `json:"time,omitempty"`
-	Value    int64  `json:"value"`
+	Estimated  bool   `json:"estimated,omitempty"`
+	DataStatus string `json:"data_status,omitempty"`
+	Included   int    `json:"included,omitempty"`
+	Expected   int    `json:"expected,omitempty"`
+	Partial    bool   `json:"partial,omitempty"`
+	Time       string `json:"time,omitempty"`
+	Value      int64  `json:"value"`
 }
 
 type insightSeries map[string][]insightPoint
@@ -6730,55 +6736,9 @@ func (a *App) getPinterestAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	out.Report.Window = newAnalyticsReport("provider_account", profile.Username, "provider", query, "range").Window
 	setReportMetricInfo(out.Report, out.Available)
 	out.Saves = summary["SAVE"]
-	out.Insights = pinterestDailyInsights(analyticsRes.Data)
+	out.Insights = pinterestDailyInsights(analyticsRes.Data, "IMPRESSION", "ENGAGEMENT", "PIN_CLICK", "OUTBOUND_CLICK", "SAVE")
+	finalizePinterestReport(out.Report, out.Insights, query, []string{"impressions", "engagements", "pin_clicks", "outbound_clicks", "saves"})
 	out.Raw = sanitizeRawJSON(analyticsRes.Data)
-	return out
-}
-
-func pinterestDailyInsights(raw json.RawMessage) insightSeries {
-	type dailyMetric struct {
-		Date    string             `json:"date"`
-		Status  string             `json:"data_status"`
-		Metrics map[string]float64 `json:"metrics"`
-	}
-	type group struct {
-		Daily []dailyMetric `json:"daily_metrics"`
-	}
-	var payload map[string]group
-	_ = json.Unmarshal(raw, &payload)
-	if all, ok := payload["all"]; ok {
-		payload = map[string]group{"all": all}
-	}
-	days := map[string]map[string]int64{}
-	partial := map[string]bool{}
-	for _, g := range payload {
-		for _, day := range g.Daily {
-			if day.Status != "" && day.Status != "READY" && day.Status != "ESTIMATE" {
-				continue
-			}
-			if _, err := time.Parse("2006-01-02", day.Date); err != nil {
-				continue
-			}
-			for upstream, name := range pinterestMetricMap {
-				if v, ok := day.Metrics[upstream]; ok {
-					if days[name] == nil {
-						days[name] = map[string]int64{}
-					}
-					days[name][day.Date] += int64(v)
-					if day.Status == "ESTIMATE" {
-						partial[day.Date] = true
-					}
-				}
-			}
-		}
-	}
-	out := insightSeries{}
-	for name, values := range days {
-		for day, v := range values {
-			out[name] = append(out[name], insightPoint{Time: day, Value: v, Partial: partial[day]})
-		}
-		sort.Slice(out[name], func(i, j int) bool { return out[name][i].Time < out[name][j].Time })
-	}
 	return out
 }
 
@@ -7661,7 +7621,7 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 			continue
 		}
 		for _, point := range points {
-			if point.Partial {
+			if point.Partial || point.DataStatus == "pending" || point.DataStatus == "unavailable" {
 				continue
 			}
 			pointTime := normaliseMetricPointTime(point.Time, now)

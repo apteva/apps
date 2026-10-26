@@ -304,11 +304,11 @@ func TestAnalyticsSortingReusesFetchedReport(t *testing.T) {
 }
 func TestPinterestDailyStatusAndCoverage(t *testing.T) {
 	series := pinterestDailyInsights(json.RawMessage(`{"all":{"daily_metrics":[{"date":"2026-10-01","data_status":"PROCESSING","metrics":{"IMPRESSION":0}},{"date":"2026-10-02","data_status":"ESTIMATE","metrics":{"IMPRESSION":4}},{"date":"2026-10-03","data_status":"READY","metrics":{"IMPRESSION":0}}]}}`))
-	if len(series["impressions"]) != 2 || !series["impressions"][0].Partial || series["impressions"][1].Value != 0 {
+	if len(series["impressions"]) != 3 || series["impressions"][0].DataStatus != "pending" || series["impressions"][1].DataStatus != "estimated" || series["impressions"][2].Value != 0 {
 		t.Fatalf("invalid daily statuses: %+v", series)
 	}
 	_, daily := aggregatePostReport([]analyticsPostRow{{Status: "ok", Insights: series}, {Status: "ok"}})
-	if !daily["impressions"][0].Partial || daily["impressions"][0].Included != 1 || daily["impressions"][0].Expected != 2 {
+	if !daily["impressions"][1].Partial || daily["impressions"][1].Included != 1 || daily["impressions"][1].Expected != 2 {
 		t.Fatal("missing daily coverage")
 	}
 }

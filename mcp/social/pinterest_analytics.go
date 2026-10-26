@@ -54,6 +54,7 @@ func (a *App) fetchPinterestPostReport(ctx *sdk.AppCtx, out targetMetricsOutcome
 	out.Status = "ok"
 	out.Insights = pinterestDailyInsights(res.Data)
 	setReportMetricInfo(out.Report, out.Metrics.Available)
+	finalizePinterestReport(out.Report, out.Insights, q, []string{"impressions", "pin_clicks", "outbound_clicks", "saves"})
 	return out
 }
 
@@ -150,8 +151,10 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 	warnings := []string{}
 	start, end := q.dates()
 	stopped := false
+	stopReason := ""
 	fallback := false
 	fallbackCalls := 0
+	pinErrors := map[string]string{}
 	for offset := 0; offset < len(pins); offset += 100 {
 		last := offset + 100
 		if last > len(pins) {
@@ -165,7 +168,7 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 		payload := map[string]json.RawMessage{}
 		batchError := ""
 		if stopped {
-			batchError = "Not fetched after provider rate limit or service failure."
+			batchError = "Not fetched after provider failure: " + stopReason
 		} else if !fallback {
 			res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_multiple_pin_analytics", map[string]any{"pin_ids": ids, "start_date": start, "end_date": end, "metric_types": pinterestPinMetrics})
 			if err != nil || res == nil || !res.Success {
@@ -173,13 +176,17 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 					err = upstreamError(res)
 				}
 				batchError = err.Error()
-				if res != nil && (res.Status == 403 || res.Status == 404) {
+				if pinterestBulkRestricted(res) {
 					fallback = true
 					batchError = ""
 					warnings = append(warnings, "Batch analytics unavailable; using individual Pin requests (maximum 50 per report).")
 				}
-				if res != nil && (res.Status == 429 || res.Status >= 500) {
+				if !fallback {
+					warnings = append(warnings, "Bulk analytics request failed: "+batchError)
+				}
+				if res != nil && (res.Status == 401 && !fallback || res.Status == 429 || res.Status >= 500) {
 					stopped = true
+					stopReason = batchError
 				}
 			} else if json.Unmarshal(res.Data, &payload) != nil {
 				batchError = "Invalid batch analytics response"
@@ -194,9 +201,17 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 				res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_pin_analytics", map[string]any{"pin_id": pin.ID, "start_date": start, "end_date": end, "metric_types": pinterestPinMetrics})
 				if err == nil && res != nil && res.Success {
 					payload[pin.ID] = res.Data
-				} else if res != nil && (res.Status == 429 || res.Status >= 500) {
-					stopped = true
-					break
+				} else {
+					if err == nil {
+						err = upstreamError(res)
+					}
+					pinErrors[pin.ID] = err.Error()
+					warnings = append(warnings, "Pin analytics request failed: "+err.Error())
+					if res != nil && (res.Status == 401 || res.Status == 429 || res.Status >= 500) {
+						stopped = true
+						stopReason = err.Error()
+						break
+					}
 				}
 			}
 		}
@@ -209,7 +224,10 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 				row.Status = "failed"
 				row.Error = batchError
 				if row.Error == "" {
-					row.Error = "Pinterest omitted this Pin's analytics"
+					row.Error = pinErrors[pin.ID]
+					if row.Error == "" {
+						row.Error = "Pinterest omitted this Pin's analytics (or the fallback request budget was reached)"
+					}
 				}
 				c.Failed++
 				c.Complete = false
@@ -217,6 +235,7 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 				row.Metrics = normalizedMetricValues(m)
 				row.Insights = pinterestDailyInsights(raw)
 				setReportMetricInfo(row.Report, m.Available)
+				finalizePinterestReport(row.Report, row.Insights, q, []string{"impressions", "pin_clicks", "outbound_clicks", "saves"})
 				c.Included++
 				for name := range row.Metrics {
 					c.MetricPosts[name]++
@@ -274,7 +293,7 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 		warnings = append(warnings, fmt.Sprintf("Analytics missing for %d Pins; totals are partial.", c.Failed))
 	}
 	if stopped {
-		warnings = append(warnings, "Provider rate limit or service failure stopped further requests; refresh after the provider recovers.")
+		warnings = append(warnings, "Provider failure stopped further requests; resolve the reported error before refreshing.")
 	}
 	return rows, c, warnings
 }
@@ -283,6 +302,8 @@ func aggregatePostReport(rows []analyticsPostRow) (map[string]int64, insightSeri
 	daily := map[string]map[string]int64{}
 	counts := map[string]map[string]int{}
 	partial := map[string]map[string]bool{}
+	states := map[string]map[string]string{}
+	estimates := map[string]map[string]bool{}
 	for _, row := range rows {
 		if row.Status != "ok" {
 			continue
@@ -300,10 +321,18 @@ func aggregatePostReport(rows []analyticsPostRow) (map[string]int64, insightSeri
 				daily[name] = map[string]int64{}
 				counts[name] = map[string]int{}
 				partial[name] = map[string]bool{}
+				states[name] = map[string]string{}
+				estimates[name] = map[string]bool{}
 			}
 			for _, p := range points {
-				daily[name][p.Time] += p.Value
-				counts[name][p.Time]++
+				if p.DataStatus != "pending" && p.DataStatus != "unavailable" {
+					daily[name][p.Time] += p.Value
+					counts[name][p.Time]++
+				} else if _, ok := daily[name][p.Time]; !ok {
+					daily[name][p.Time] = 0
+				}
+				states[name][p.Time] = mergeMetricStatus(states[name][p.Time], p.DataStatus)
+				estimates[name][p.Time] = estimates[name][p.Time] || p.Estimated || p.DataStatus == "estimated"
 				partial[name][p.Time] = partial[name][p.Time] || p.Partial
 			}
 		}
@@ -311,7 +340,11 @@ func aggregatePostReport(rows []analyticsPostRow) (map[string]int64, insightSeri
 	series := insightSeries{}
 	for name, days := range daily {
 		for day, v := range days {
-			series[name] = append(series[name], insightPoint{Time: day, Value: v, Included: counts[name][day], Expected: len(rows), Partial: counts[name][day] < len(rows) || partial[name][day]})
+			status := states[name][day]
+			if status != "pending" && counts[name][day] < len(rows) {
+				status = "unavailable"
+			}
+			series[name] = append(series[name], insightPoint{Estimated: estimates[name][day], DataStatus: status, Time: day, Value: v, Included: counts[name][day], Expected: len(rows), Partial: counts[name][day] < len(rows) || partial[name][day]})
 		}
 		sort.Slice(series[name], func(i, j int) bool { return series[name][i].Time < series[name][j].Time })
 	}
@@ -431,6 +464,7 @@ func (a *App) getPinterestBoardMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 	out.Posts = int64(len(selected))
 	out.Available = append(out.Available, "posts")
 	setReportMetricInfo(out.Report, out.Available)
+	finalizePinterestReport(out.Report, out.Insights, q, []string{"impressions", "pin_clicks", "outbound_clicks", "saves"})
 	if containsFold(q.GroupBy, "post") {
 		out.PostRows = append([]analyticsPostRow{}, rows...)
 	}
@@ -458,6 +492,12 @@ func (a *App) getPinterestBoardMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 		} else {
 			out.Comparison = comparePostReports(rows, prevRows, prevQ, pc)
 		}
+		out.Comparison.Window.Timezone = "UTC"
+		_, previousSeries := aggregatePostReport(prevRows)
+		out.Comparison.Freshness = seriesFreshness(previousSeries, []string{"impressions", "pin_clicks", "outbound_clicks", "saves"}, prevQ)
+		if f := out.Comparison.Freshness; len(f.PendingDates) > 0 || len(f.EstimatedDates) > 0 || len(f.UnavailableDates) > 0 {
+			out.Comparison.Status = "partial"
+		}
 		out.Report.Warnings = append(out.Report.Warnings, pw...)
 	}
 	return out
@@ -480,4 +520,128 @@ func pinterestReportDates(q analyticsQuery) error {
 		return fmt.Errorf("Pinterest analytics require a start date within the last 90 days and a range of at most 90 days.")
 	}
 	return nil
+}
+
+func pinterestBulkRestricted(res *sdk.ExecuteResult) bool {
+	if res == nil {
+		return false
+	}
+	if res.Status == 403 || res.Status == 404 {
+		return true
+	}
+	if res.Status != 401 {
+		return false
+	}
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	return json.Unmarshal(res.Data, &body) == nil && body.Code == 3 && strings.EqualFold(strings.TrimSpace(body.Message), "Your application does not have access to this restricted feature.")
+}
+func pinterestDailyInsights(raw json.RawMessage, requested ...string) insightSeries {
+	if len(requested) == 0 {
+		requested = pinterestPinMetrics
+	}
+	type day struct {
+		Date    string              `json:"date"`
+		Status  string              `json:"data_status"`
+		Metrics map[string]*float64 `json:"metrics"`
+	}
+	type group struct {
+		Daily []day `json:"daily_metrics"`
+	}
+	var payload map[string]group
+	_ = json.Unmarshal(raw, &payload)
+	if all, ok := payload["all"]; ok {
+		payload = map[string]group{"all": all}
+	}
+	days := map[string]map[string]insightPoint{}
+	for _, g := range payload {
+		for _, d := range g.Daily {
+			if _, err := time.Parse("2006-01-02", d.Date); err != nil {
+				continue
+			}
+			expected := map[string]bool{}
+			for _, key := range requested {
+				expected[key] = true
+			}
+			for key := range d.Metrics {
+				expected[key] = true
+			}
+			for key := range expected {
+				name, ok := pinterestMetricMap[key]
+				if !ok {
+					continue
+				}
+				status := "unavailable"
+				switch d.Status {
+				case "PROCESSING":
+					status = "pending"
+				case "ESTIMATE":
+					status = "estimated"
+				case "READY":
+					status = "ready"
+				case "":
+					status = "unknown"
+				}
+				value, present := d.Metrics[key]
+				if (status == "ready" || status == "estimated" || status == "unknown") && (!present || value == nil) {
+					status = "unavailable"
+				}
+				if days[name] == nil {
+					days[name] = map[string]insightPoint{}
+				}
+				p, exists := days[name][d.Date]
+				if !exists {
+					p = insightPoint{Time: d.Date, DataStatus: status}
+				} else {
+					p.DataStatus = mergeMetricStatus(p.DataStatus, status)
+				}
+				if status == "ready" || status == "estimated" || status == "unknown" {
+					p.Value += int64(*value)
+				}
+				p.Estimated = p.Estimated || status == "estimated"
+				p.Partial = p.DataStatus != "ready"
+				days[name][d.Date] = p
+			}
+		}
+	}
+	out := insightSeries{}
+	for name, values := range days {
+		for _, p := range values {
+			out[name] = append(out[name], p)
+		}
+		sort.Slice(out[name], func(i, j int) bool { return out[name][i].Time < out[name][j].Time })
+	}
+	return out
+}
+
+func finalizePinterestReport(report *analyticsReport, series insightSeries, q analyticsQuery, names []string) {
+	if report == nil {
+		return
+	}
+	report.Window.Timezone = "UTC"
+	report.RequestedMetrics = append([]string{}, names...)
+	// Preserve missing calendar dates as gaps; do not synthesize zero activity.
+	start, end := q.dates()
+	s, _ := time.Parse("2006-01-02", start)
+	e, _ := time.Parse("2006-01-02", end)
+	for _, name := range names {
+		seen := map[string]bool{}
+		for _, p := range series[name] {
+			seen[p.Time] = true
+		}
+		for day := s; !day.After(e); day = day.AddDate(0, 0, 1) {
+			date := day.Format("2006-01-02")
+			if !seen[date] {
+				series[name] = append(series[name], insightPoint{Time: date, DataStatus: "unavailable", Partial: true})
+			}
+		}
+		sort.Slice(series[name], func(i, j int) bool { return series[name][i].Time < series[name][j].Time })
+		if info, ok := report.MetricInfo[name]; ok {
+			info.Freshness = seriesFreshness(series, []string{name}, q)
+			report.MetricInfo[name] = info
+		}
+	}
+	report.Freshness = seriesFreshness(series, names, q)
 }

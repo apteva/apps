@@ -13,14 +13,16 @@ import (
 )
 
 type analyticsWindow struct {
-	Kind  string `json:"kind"` // range, lifetime, snapshot
-	Start string `json:"start_date,omitempty"`
-	End   string `json:"end_date,omitempty"`
+	Kind     string `json:"kind"` // range, lifetime, snapshot
+	Timezone string `json:"timezone,omitempty"`
+	Start    string `json:"start_date,omitempty"`
+	End      string `json:"end_date,omitempty"`
 }
 type analyticsMetricInfo struct {
-	Kind     string `json:"kind"`
-	Additive bool   `json:"additive"`
-	AliasOf  string `json:"alias_of,omitempty"`
+	Kind      string              `json:"kind"`
+	Additive  bool                `json:"additive"`
+	AliasOf   string              `json:"alias_of,omitempty"`
+	Freshness *analyticsFreshness `json:"freshness,omitempty"`
 }
 type analyticsCoverage struct {
 	ProviderStopped bool           `json:"provider_stopped,omitempty"`
@@ -34,15 +36,17 @@ type analyticsCoverage struct {
 	Note            string         `json:"note,omitempty"`
 }
 type analyticsReport struct {
-	BindingKey string                         `json:"binding_key"`
-	Scope      string                         `json:"scope"`
-	EntityID   string                         `json:"entity_id"`
-	Identity   string                         `json:"identity"`
-	Source     string                         `json:"source"`
-	Window     analyticsWindow                `json:"window"`
-	Coverage   *analyticsCoverage             `json:"coverage,omitempty"`
-	MetricInfo map[string]analyticsMetricInfo `json:"metric_info"`
-	Warnings   []string                       `json:"warnings,omitempty"`
+	RequestedMetrics []string                       `json:"requested_metrics,omitempty"`
+	Freshness        *analyticsFreshness            `json:"freshness,omitempty"`
+	BindingKey       string                         `json:"binding_key"`
+	Scope            string                         `json:"scope"`
+	EntityID         string                         `json:"entity_id"`
+	Identity         string                         `json:"identity"`
+	Source           string                         `json:"source"`
+	Window           analyticsWindow                `json:"window"`
+	Coverage         *analyticsCoverage             `json:"coverage,omitempty"`
+	MetricInfo       map[string]analyticsMetricInfo `json:"metric_info"`
+	Warnings         []string                       `json:"warnings,omitempty"`
 }
 type analyticsPostRow struct {
 	PostID      int64            `json:"post_id,omitempty"`
@@ -57,6 +61,7 @@ type analyticsPostRow struct {
 	Insights    insightSeries    `json:"insights,omitempty"`
 }
 type analyticsPeriodComparison struct {
+	Freshness     *analyticsFreshness `json:"freshness,omitempty"`
 	Status        string              `json:"status"`
 	Reason        string              `json:"reason,omitempty"`
 	Window        analyticsWindow     `json:"window"`
@@ -95,7 +100,7 @@ func setReportMetricInfo(r *analyticsReport, available []string) {
 		if containsFold([]string{"followers", "following", "posts", "total_videos", "total_likes"}, name) {
 			kind = "snapshot"
 		}
-		r.MetricInfo[name] = analyticsMetricInfo{Kind: kind, Additive: additiveReportMetrics[name]}
+		r.MetricInfo[name] = analyticsMetricInfo{Kind: kind, Additive: additiveReportMetrics[name], Freshness: r.MetricInfo[name].Freshness}
 	}
 	// Compatibility fields stay readable, but are never displayed or summed twice.
 	if _, ok := r.MetricInfo["outbound_clicks"]; ok {
