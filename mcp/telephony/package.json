@@ -16,7 +16,8 @@
     "test:network:browser": "env GOWORK=off go test -tags integration -run \"^Test(NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss|TURNBrowserMediaCredentialRenewal)$\" -count=1 -timeout 5m -v .",
     "test:network:speech": "env GOWORK=off go test -run \"^TestNetworkSpeechReplay$\" -count=1 -v .",
     "test:call-inspector": "bun test ui/call-diagnostics.test.ts && bunx --no-install playwright test -c frontend/call-inspector.playwright.config.ts",
-    "test:call-statistics": "bun test ui/call-statistics.test.ts && bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts"
+    "test:call-statistics": "bun test ui/call-statistics.test.ts && bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts",
+    "test:managed-media": "env GOWORK=off go test -tags integration -run \"^TestManagedRuntimeAutomaticBrowserAnswerAndRenewal$\" -count=1 -timeout 2m -v ."
   },
   "devDependencies": {
     "@apteva/web-sdk": "0.7.0",

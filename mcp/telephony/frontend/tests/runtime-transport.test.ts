@@ -91,13 +91,18 @@ test('auto reads, writes and notifications use proxy even when direct transport 
  expect(f.calls.map(c=>c.path)).toEqual(['/calls','/softphone/place','/calls/events']);
  expect(direct).toBe(0);expect(closed).toBe(true);
 });
-test('automatic media discovery preserves direct media while its action stays on the gateway',async()=>{
+test('automatic media creation and renewal authorize the same remote ingress as the socket',async()=>{
  const previous=Object.getOwnPropertyDescriptor(globalThis,'location');
  Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/'}});
  try {
-  const f=fixture();const transport=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{throw Error('must not use direct HTTP')}) as unknown as typeof fetch);
+  const f=fixture(), sent:any[]=[];const transport=new RuntimeTelephonyTransport(f.app,'auto',(async(url:any, init:any)=>{sent.push({url:new URL(url),init});return Response.json({ok:true});}) as unknown as typeof fetch);
   await transport.requestMedia('/softphone/answer/call-a',{});
-  expect(f.calls.map(c=>c.path)).toEqual(['/runtime-endpoints','/softphone/answer/call-a']);
+  await transport.requestMedia('/softphone/renew/call-a',{session_token:'session'});
+  expect(f.calls.map(c=>c.path)).toEqual(['/runtime-endpoints','/runtime-browser-bootstrap']);
+  expect(sent.map(r=>r.url.pathname)).toEqual(['/runtime-browser/softphone/answer/call-a','/runtime-browser/softphone/renew/call-a']);
+  expect(sent.every(r=>new Headers(r.init.headers).get('Authorization')==='Bearer scoped-browser-credential')).toBe(true);
+  await transport.request('GET','/calls');
+  expect(f.calls.at(-1)?.path).toBe('/calls');
   expect(transport.mediaURL(new URL('https://management.example/api/apps/telephony/_install/42/softphone/media/call-a/token'),'webrtc').origin).toBe('https://voice.example');
   const ctrl=new AbortController();ctrl.abort();
   await expect(transport.requestMedia('/softphone/place',{}, {signal:ctrl.signal})).rejects.toThrow();
@@ -108,4 +113,25 @@ test('unavailable media discovery does not prevent ordinary dashboard reads and 
  const f=fixture();f.app.get=async(path:string)=>{if(path==='/runtime-endpoints')throw Error('discovery unavailable');return {calls:[]} as any};
  const t=new RuntimeTelephonyTransport(f.app,'auto');
  expect(await t.request<{calls:unknown[]}>('GET','/calls')).toEqual({calls:[]});
+});
+
+test('auto media fails closed on authorization or network failure, without proxy retry',async()=>{
+ const previous=Object.getOwnPropertyDescriptor(globalThis,'location');Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/'}});
+ try {
+  for(const fail of ['authorization','network']) {
+   const f=fixture();let sent=0;const t=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{sent++;if(fail==='network')throw new TypeError('Failed to fetch');return new Response('denied',{status:403});}) as unknown as typeof fetch);
+   await expect(t.requestMedia('/softphone/answer/call-a',{})).rejects.toThrow();
+   expect(sent).toBe(1);expect(f.calls.map(c=>c.path)).toEqual(['/runtime-endpoints','/runtime-browser-bootstrap']);
+  }
+ }finally{if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
+});
+test('unmanaged auto media stays on gateway, without acquiring remote credentials',async()=>{
+ const previous=Object.getOwnPropertyDescriptor(globalThis,'location');Object.defineProperty(globalThis,'location',{configurable:true,value:{origin:'https://management.example',href:'https://management.example/'}});
+ try {
+  const f=fixture();f.app.get=async()=>({managed:false}) as any;
+  const t=new RuntimeTelephonyTransport(f.app,'auto',(async()=>{throw Error('Unexpected remote call');}) as unknown as typeof fetch);
+  await t.requestMedia('/softphone/answer/call-a',{});await t.requestMedia('/softphone/renew/call-a',{});
+  expect(f.calls.map(c=>c.path)).toEqual(['/softphone/answer/call-a','/softphone/renew/call-a']);
+  expect(t.mediaURL(new URL('https://management.example/api/apps/telephony/_install/42/softphone/media/call-a/token')).origin).toBe('https://management.example');
+ }finally{if(previous)Object.defineProperty(globalThis,'location',previous);else delete (globalThis as any).location;}
 });
