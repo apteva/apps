@@ -350,8 +350,8 @@ export class TelephonyClient {
 
   async listenSession(id: string, signal?:AbortSignal): Promise<CallSession> { const started = leaseClock(); return this.session(await boundedMediaRequest(s=>this.mediaPost(this.path(`/softphone/listen/${callID(id)}`), {},{signal:s}),signal,5000,value=>{try{void this.stopListening(this.session(value,id,"listen-media",started)).catch(()=>{});}catch{/* invalid late credentials cannot be used */}}), id, "listen-media", started); }
   async coachSession(id: string): Promise<CallSession> { const started = leaseClock(); const s=this.session(await this.mediaPost(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media",started); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
-  async renewListening(session: CallSession): Promise<{lease_seconds?: number}> { return this.post(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
-  async stopListening(session: CallSession): Promise<void> { await this.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async renewListening(session: CallSession): Promise<{lease_seconds?: number}> { return this.mediaPost(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async stopListening(session: CallSession): Promise<void> { await this.mediaPost(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
 
   /** Operator-only configuration. Never available through adviser app-user grants.
@@ -384,12 +384,12 @@ export class TelephonyClient {
   outboundNumbers(options: { fresh?: boolean } = {}): Promise<OutboundNumbersResult> { return this.get(this.path(options.fresh ? "/softphone/numbers?fresh=true" : "/softphone/numbers")); }
 
   async renew(session: CallSession): Promise<{lease_seconds?: number}> {
-    return this.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
+    return this.mediaPost(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
   }
 
   async release(session: CallSession): Promise<void> {
     if (!session.session_token) throw new Error("Answer session has no release token");
-    await this.post(this.path(`/softphone/release/${callID(session.call_id)}`), { session_token: session.session_token });
+    await this.mediaPost(this.path(`/softphone/release/${callID(session.call_id)}`), { session_token: session.session_token });
   }
 
   async hangup(id: string): Promise<void> {

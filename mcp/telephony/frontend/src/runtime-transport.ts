@@ -107,8 +107,14 @@ export class RuntimeTelephonyTransport {
     }
     await this.prepare();
     if (!this.directBase) return method === 'GET' ? this.proxy.get<R>(path, init) : this.proxy.post<R>(path, body, init);
+    return this.requestDirect<R>(method, path, body, init);
+  }
+
+  private async requestDirect<R>(method: string, path: string, body?: unknown, init?: RequestInit): Promise<R> {
     requestPath(path);
+    init?.signal?.throwIfAborted();
     const grant = await this.grant(), url = new URL(this.directBase + path);
+    init?.signal?.throwIfAborted();
     if (this.proxy.projectId) url.searchParams.set('project_id', this.proxy.projectId);
     const headers = new Headers(init?.headers);
     headers.set('Authorization', 'Bearer ' + grant.token);
@@ -123,12 +129,14 @@ export class RuntimeTelephonyTransport {
     return await response.json() as R;
   }
 
-  /** Discover direct media only when attaching a media session. Ordinary UI
-   * requests never depend on discovery or send platform credentials remotely. */
+  /** Create and renew a media session on the same remote ingress that will
+   * authorize its socket. Ordinary dashboard requests stay on the gateway. */
   requestMedia<R>(path: string, body?: unknown, init?: RequestInit): Promise<R> {
     const send = () => {
       init?.signal?.throwIfAborted();
-      return this.request<R>('POST', path, body, init);
+      return this.directBase && !this.proxyOnly
+        ? this.requestDirect<R>('POST', path, body, init)
+        : this.request<R>('POST', path, body, init);
     };
     if (this.mode === 'auto' && typeof location !== 'undefined' && !this.proxyOnly)
       return this.prepare().then(send);
