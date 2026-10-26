@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.46
+version: 0.2.47
 description: |
+  v0.2.47 retries complete rendered HTML reads up to 5 MB and requires
+  Computer v0.7.97 with the same extraction ceiling. Retains v0.2.46
+  read-only navigation retries, verified empty views and all action guards.
   v0.2.46 adds bounded opt-in read-only navigation retries, preserving the
   saved browser context, prior uploads and durable consequential once keys.
   v0.2.45 accepts verified empty collections without a populated table shell,
@@ -48,7 +51,7 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.96"
+      version: ">=0.7.97"
       reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
@@ -124,7 +127,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.46
+    ref: actors/v0.2.47
     entry: mcp/actors
   port: 8080
   health_check: /health

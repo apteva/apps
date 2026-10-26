@@ -381,8 +381,10 @@ For an emailed verification link, `goto_secret` uses the same expiring secret re
 
 ## Larger extraction budget
 
-Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,000,000 up to a 5,000,000 response budget, stopping as soon as Computer returns a complete result. The bound applies to raw view inspection and crawl HTML. Computer must support the same larger ceiling; older Computer builds may still clamp the response at 1 MB, which Actors treats as incomplete. Per-record, dataset and exported-file bounds are unchanged.
+Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,000,000 up to a 5,000,000 response budget, stopping as soon as Computer returns a complete result. The bound applies to raw view inspection and crawl HTML. Actors v0.2.47 requires Computer v0.7.97 or newer for the same larger ceiling. Older Computer builds can clamp the response at 1 MB, which Actors treats as incomplete. Per-record, dataset and exported-file bounds are unchanged.
 
 ## Bounded read-only navigation retry
 
 A reviewed `goto` step can opt into `read_only: true, read_retries: 1` (maximum2). This overrides the legacy operation-wide retry limit only for that navigation. Transport timeouts may reopen the same saved browser context and repeat that read, within the original run deadline. It never replays earlier fills/uploads or subsequent clicks, and non-transient errors still stop. The field is rejected on writes, secret operations and consequential/effect-bearing steps. Existing definitions and global retry defaults are unchanged.
+
+The optional `examples/flights/` definitions and transaction fixtures document local checkout preparation and synthetic payment guards. They do not enable live ticket purchasing or install any site-specific actor automatically.
