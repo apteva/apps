@@ -161,6 +161,8 @@ export const api = {
       apteva.get<{ preview: PublicLessonPreview }>(projectScopedPath(`${communityPublicPath(`/portal/previews/${encodeURIComponent(lessonId)}`)}?community=${encodeURIComponent(community)}`)),
     prepareCheckout: (communitySlug: string, body: {
       catalog_price_id: number;
+      promotion_code?: string;
+      attribution?: Record<string,string>;
       email?: string;
       customer_name?: string;
       recovery_token?: string;

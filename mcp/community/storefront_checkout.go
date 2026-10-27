@@ -113,13 +113,15 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var input struct {
-		CatalogPriceID int64  `json:"catalog_price_id"`
-		Email          string `json:"email"`
-		CustomerName   string `json:"customer_name"`
-		RecoveryToken  string `json:"recovery_token"`
-		ReturnURL      string `json:"return_url"`
-		SuccessURL     string `json:"success_url"`
-		CancelURL      string `json:"cancel_url"`
+		CatalogPriceID int64             `json:"catalog_price_id"`
+		Email          string            `json:"email"`
+		CustomerName   string            `json:"customer_name"`
+		RecoveryToken  string            `json:"recovery_token"`
+		ReturnURL      string            `json:"return_url"`
+		SuccessURL     string            `json:"success_url"`
+		CancelURL      string            `json:"cancel_url"`
+		PromotionCode  string            `json:"promotion_code"`
+		Attribution    map[string]string `json:"attribution"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	decoder.DisallowUnknownFields()
@@ -152,7 +154,7 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 			urls[name] = value
 		}
 	}
-	prepared, err := prepareCheckoutWithCheckoutApp(requestAppCtx(r), community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls)
+	prepared, err := prepareCheckoutWithCheckoutApp(requestAppCtx(r), community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls, storefrontAcquisitionInput{PromotionCode: input.PromotionCode, Attribution: input.Attribution})
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "secure checkout could not be prepared")
 		return
@@ -185,7 +187,7 @@ func validateStorefrontReturnURL(r *http.Request, raw string, communities ...*Co
 	return "", errors.New("checkout return URL must use this portal origin")
 }
 
-func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target storefrontOfferTarget, email, name, recoveryToken string, urls map[string]string) (*preparedStorefrontCheckout, error) {
+func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target storefrontOfferTarget, email, name, recoveryToken string, urls map[string]string, acquisition ...storefrontAcquisitionInput) (*preparedStorefrontCheckout, error) {
 	pid := scopeProject(ctx)
 	var session guestCheckoutSession
 	var cart guestCheckoutCart
@@ -200,6 +202,16 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 		session, cart = restored.Session, restored.Cart
 		if err := validatePreparedCheckout(communityID, target, session, cart); err != nil {
 			return nil, err
+		}
+		saved, err := checkoutContext(ctx.AppDB(), session.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err = validateStorefrontContext(saved, communityID, target, session); err != nil {
+			return nil, err
+		}
+		if len(acquisition) > 0 && saved != nil && saved.Code != strings.TrimSpace(acquisition[0].PromotionCode) {
+			return nil, errors.New("checkout promotion changed")
 		}
 	} else {
 		var created struct {
@@ -245,6 +257,13 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 			return nil, fmt.Errorf("label Checkout session: %w", err)
 		}
 		session = updated.Session
+		input := storefrontAcquisitionInput{}
+		if len(acquisition) > 0 {
+			input = acquisition[0]
+		}
+		if err := prepareStorefrontContext(ctx, communityID, target, session, input); err != nil {
+			return nil, err
+		}
 	}
 	var prepared struct {
 		Session guestCheckoutSession `json:"session"`
@@ -321,6 +340,20 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if restored.Session.Email != "" && !strings.EqualFold(restored.Session.Email, email) {
 		return nil, errors.New("prepared checkout belongs to another email address")
 	}
+	memberID := strArg(args, "_viewer_member_id", strArg(args, "member_id", ""))
+	if target.Kind == "one_time" {
+		if err := verifyMember(ctx.AppDB(), communityID, memberID); err != nil {
+			return nil, err
+		}
+		if active, err := hasActiveCourseEnrollment(ctx.AppDB(), target.SpaceID, memberID); err != nil {
+			return nil, err
+		} else if active {
+			return map[string]any{"enrolled": true, "access_active": true}, nil
+		}
+	}
+	if err := reserveStorefrontPromotion(ctx, communityID, target, restored.Session, email); err != nil {
+		return nil, err
+	}
 	pid := scopeProject(ctx)
 	if restored.Session.Status == "started" {
 		var updated struct {
@@ -353,7 +386,6 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if paid.InvoiceID == 0 || paid.Session.InvoiceID == nil {
 		return nil, errors.New("Checkout returned no Billing invoice")
 	}
-	memberID := strArg(args, "_viewer_member_id", strArg(args, "member_id", ""))
 	result := map[string]any{
 		"offer_kind": target.Kind, "presentation": "deferred", "invoice_id": paid.InvoiceID,
 		"invoice_number": paid.InvoiceNumber, "payment_intent_id": strArg(paid.Payment, "payment_intent_id", ""),
@@ -396,6 +428,11 @@ func claimCourseCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memberID
 		if err := validateCourseSaleWindow(ctx.AppDB(), space.ID, memberID); err != nil {
 			return nil, err
 		}
+		if saved, e := checkoutContext(ctx.AppDB(), session.ID); e != nil {
+			return nil, e
+		} else if saved != nil {
+			offer.UnitAmountCents = saved.Subtotal - saved.Discount
+		}
 		purchase, err = createCoursePurchase(ctx.AppDB(), space, memberID, email, session.CustomerName, authSubjectID, offer)
 		if err != nil {
 			return nil, err
@@ -408,12 +445,39 @@ func claimCourseCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memberID
 	if err != nil {
 		return nil, err
 	}
-	if invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
+	if invoice.ID != *session.InvoiceID || invoice.TotalCents != purchase.UnitAmountCents || !strings.EqualFold(invoice.Currency, target.Currency) {
 		return nil, errors.New("Billing invoice does not match this course offer")
 	}
 	_, err = ctx.AppDB().Exec(`UPDATE course_purchases SET billing_customer_id=?,billing_invoice_id=?,billing_session_id=?,checkout_url=NULL,status='awaiting_payment',last_error='',updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		invoice.CustomerID, *session.InvoiceID, nullIfEmpty(session.ProviderSessionID), purchase.ID)
 	if err != nil {
+		return nil, err
+	}
+	var metadata map[string]any
+	if err = json.Unmarshal(invoice.Metadata, &metadata); err != nil && len(invoice.Metadata) > 0 {
+		return nil, err
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["source_app"] = "community"
+	metadata["community_purchase_id"] = purchase.ID
+	metadata["community_id"] = space.CommunityID
+	metadata["checkout_session_id"] = session.ID
+	if saved, e := checkoutContext(ctx.AppDB(), session.ID); e != nil {
+		return nil, e
+	} else if saved != nil {
+		metadata["attribution"] = saved.Attribution
+		metadata["promotion_code"] = saved.Code
+		metadata["catalog_subtotal_cents"] = saved.Subtotal
+		metadata["discount_cents"] = saved.Discount
+		metadata["discount_reservation_id"] = saved.Reservation
+	}
+	var invoiceUpdated any
+	if err = callAppResult(ctx, "billing", "invoices_update", map[string]any{"id": invoice.ID, "patch": map[string]any{"metadata": metadata}}, &invoiceUpdated); err != nil {
+		return nil, err
+	}
+	if err = bindStorefrontPurchase(ctx, session.ID, purchase.ID); err != nil {
 		return nil, err
 	}
 	purchase, err = loadCoursePurchase(ctx.AppDB(), purchase.ID)
@@ -443,7 +507,7 @@ func claimMembershipCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memb
 	if err != nil {
 		return nil, err
 	}
-	if invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
+	if invoice.ID != *session.InvoiceID || invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
 		return nil, errors.New("Billing invoice does not match this membership offer")
 	}
 	msID := newID("msub")

@@ -715,6 +715,8 @@ export default function App() {
     const storedRecoveryToken = window.sessionStorage.getItem(storageKey) || undefined;
     const prepare = (recovery_token?: string) => api.portal.prepareCheckout(portal.community.slug, {
       catalog_price_id: selectedStorefrontOffer.catalog_price_id,
+      promotion_code: new URLSearchParams(window.location.search).get("promotion") || undefined,
+      attribution: Object.fromEntries(["utm_source","utm_medium","utm_campaign","utm_content","utm_term","campaign_id","adset_id","ad_id","fbclid","captured_at"].map(k=>[k,new URLSearchParams(window.location.search).get(k)||""])),
       recovery_token,
       return_url: success.toString(),
       success_url: success.toString(),
@@ -1206,6 +1208,8 @@ export default function App() {
         product={publicProduct}
         portal={portal}
         checkout={wantsCourseCheckout()}
+        checkoutAmount={storefrontCheckout?.amount_cents}
+        checkoutCurrency={storefrontCheckout?.currency}
         signedIn={Boolean(auth)}
         selectedOffer={selectedStorefrontOffer}
         accountPanel={accountPanel}
@@ -1605,10 +1609,12 @@ function storefrontBenefits(product: PublicProduct): Array<{ title: string; desc
   ];
 }
 
-function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, accountPanel, paymentPanel, onSelect, onChoose, onSignIn }: {
+function PublicStorefront({ product, portal, checkout, checkoutAmount, checkoutCurrency, signedIn, selectedOffer, accountPanel, paymentPanel, onSelect, onChoose, onSignIn }: {
   product: PublicProduct;
   portal: PortalBootstrap;
   checkout: boolean;
+  checkoutAmount?: number;
+  checkoutCurrency?: string;
   signedIn: boolean;
   selectedOffer?: PublicOffer;
   accountPanel?: ReactNode;
@@ -1738,7 +1744,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
         <aside className="storefront-checkout" aria-label="Checkout">
           <div className="checkout-heading">
             <p>{checkout ? "Complete your enrollment" : "Choose your access"}</p>
-            {activeOffer && <strong>{formatPublicOffer(activeOffer)}</strong>}
+            {activeOffer && <strong>{checkout && checkoutAmount && checkoutCurrency ? new Intl.NumberFormat("en-US",{style:"currency",currency:checkoutCurrency}).format(checkoutAmount/100)+" one-time" : formatPublicOffer(activeOffer)}</strong>}
           </div>
           <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
             {offers.map((offer) => {
@@ -1747,7 +1753,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
               return <button type="button" role={offers.length > 1 ? "radio" : undefined} aria-checked={offers.length > 1 ? selected : undefined} className={`offer-option ${selected ? "selected" : ""}`} key={offer.catalog_price_id} onClick={() => onSelect(offer)}>
                 {offers.length > 1 && <span className="offer-radio" aria-hidden="true" />}
                 <span className="offer-copy"><strong>{offerLabel(offer)}</strong><small>{offerNote(offer)}</small></span>
-                <span className="offer-price"><strong>{formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
+                <span className="offer-price"><strong>{checkout && selected && checkoutAmount && checkoutCurrency ? new Intl.NumberFormat("en-US",{style:"currency",currency:checkoutCurrency}).format(checkoutAmount/100) : formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
               </button>;
             })}
             {offers.length === 0 && <div className="checkout-unavailable">This product is not currently available for purchase.</div>}
