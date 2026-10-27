@@ -215,22 +215,23 @@ type VoiceAudioDelivery struct {
 }
 
 type VoiceFinalExchangeResult struct {
-	Status                        string             `json:"status"`
-	Stage                         string             `json:"stage"`
-	ClosingReason                 string             `json:"closing_reason,omitempty"`
-	CallerCompletionRequested     bool               `json:"caller_completion_requested"`
-	CallerClosedPrematurely       bool               `json:"caller_closed_prematurely"`
-	CallerTurnDelivered           bool               `json:"caller_turn_delivered"`
-	ReplyStarted                  bool               `json:"reply_started"`
-	ReplyCompleted                bool               `json:"reply_completed"`
-	ReplyPlayed                   bool               `json:"reply_played"`
-	ReplyCapturedAfterCallerClose bool               `json:"reply_captured_after_caller_close"`
-	ExpectationsMatched           bool               `json:"expectations_matched"`
-	TranscriptStatus              string             `json:"transcript_status"`
-	FinalizationStatus            string             `json:"finalization_status"`
-	AudioLossStatus               string             `json:"audio_loss_status"`
-	CallerAudio                   VoiceAudioDelivery `json:"caller_audio"`
-	ReceptionistAudio             VoiceAudioDelivery `json:"receptionist_audio"`
+	Status                        string                             `json:"status"`
+	Stage                         string                             `json:"stage"`
+	ClosingReason                 string                             `json:"closing_reason,omitempty"`
+	CallerCompletionRequested     bool                               `json:"caller_completion_requested"`
+	CallerClosedPrematurely       bool                               `json:"caller_closed_prematurely"`
+	CallerTurnDelivered           bool                               `json:"caller_turn_delivered"`
+	ReplyStarted                  bool                               `json:"reply_started"`
+	ReplyCompleted                bool                               `json:"reply_completed"`
+	ReplyPlayed                   bool                               `json:"reply_played"`
+	ReplyCapturedAfterCallerClose bool                               `json:"reply_captured_after_caller_close"`
+	ExpectationsMatched           bool                               `json:"expectations_matched"`
+	TranscriptStatus              string                             `json:"transcript_status"`
+	ThreadFinalization            map[string]VoiceThreadFinalization `json:"thread_finalization,omitempty"`
+	FinalizationStatus            string                             `json:"finalization_status"`
+	AudioLossStatus               string                             `json:"audio_loss_status"`
+	CallerAudio                   VoiceAudioDelivery                 `json:"caller_audio"`
+	ReceptionistAudio             VoiceAudioDelivery                 `json:"receptionist_audio"`
 }
 
 type VoiceCallMetrics struct {
