@@ -1,3 +1,5 @@
+import {playPreparedWarning} from "./auto-answer-warning";
+import type {SoftphoneAudioOptions} from "./softphone-audio";
 import { measureAudioSetup } from "./audio-setup";
 import type { MediaSessionEvent } from "../frontend/src/media-lease";
 
@@ -49,6 +51,12 @@ export class AudioPreparation {
   }
 
   isReady():boolean { return this.completed && !this.cancelled && this.context?.state === "running" && Boolean(this.stream?.getAudioTracks().some(track=>track.readyState === "live")); }
+
+  async playWarning(options:SoftphoneAudioOptions,windowMs:number,signal:AbortSignal):Promise<void>{
+    if(!this.isReady()||!this.context)throw Error("Audio preparation is unavailable");
+    await playPreparedWarning(this.context,options,windowMs,signal);
+    if(!this.isReady())throw Error("Audio preparation is unavailable");
+  }
 
   take(): PreparedAudioDevices {
     if (!this.completed || this.cancelled || !this.stream || !this.context) throw Error("Audio preparation is unavailable");

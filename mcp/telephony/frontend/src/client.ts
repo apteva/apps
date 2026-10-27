@@ -122,7 +122,7 @@ export interface DialRequest {
   /** Retain the same key and request when retrying an uncertain response. */
   idempotency_key: string;
 }
-export interface AnswerRequest { destination_id?: string; rejoin?: boolean; auto_answer_session?:string }
+export interface AnswerRequest { destination_id?: string; rejoin?: boolean; auto_answer_session?:string;auto_answer_warning_completed?:boolean }
 export class TelephonyOfferExpiredError extends Error {
   readonly code = "offer_expired";
   readonly status = 409;
@@ -390,8 +390,8 @@ export class TelephonyClient {
     finally{options.signal?.removeEventListener("abort",cancel);this.networkCheckControllers.delete(controller);}
   }
   autoAnswerPolicy(request:import("./auto-answer").AutoAnswerPolicyRequest={}):Promise<import("./auto-answer").AutoAnswerPolicyView>{return this.post(this.path("/softphone/auto-answer-policy"),request);}
-  autoAnswerSession(request:{session_id:string;available:boolean;takeover?:boolean}):Promise<{designated:boolean;lease_ms?:number}>{return boundedMediaRequest(signal=>this.post(this.path("/softphone/auto-answer-session"),request,{signal}));}
-  autoAnswerOffer(request:{session_id:string;call_id:string;destination_id?:string;cancel?:boolean}):Promise<{eligible:boolean;destination_id?:string;effective:import("./auto-answer").AutoAnswerEffective}>{return boundedMediaRequest(signal=>this.post(this.path("/softphone/auto-answer-offer"),request,{signal}));}
+  autoAnswerSession(request:{session_id:string;available:boolean;takeover?:boolean;warning_tone_supported?:boolean}):Promise<{designated:boolean;lease_ms?:number}>{return boundedMediaRequest(signal=>this.post(this.path("/softphone/auto-answer-session"),request,{signal}));}
+  autoAnswerOffer(request:{session_id:string;call_id:string;destination_id?:string;cancel?:boolean}):Promise<{eligible:boolean;destination_id?:string;offer_id?:string;offer_ttl_ms?:number;effective:import("./auto-answer").AutoAnswerEffective}>{return boundedMediaRequest(signal=>this.post(this.path("/softphone/auto-answer-offer"),request,{signal}));}
   turnPolicy(request:{policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/softphone/turn-policy"),request);}
   /** Operator-only project/adviser relay configuration. */
   configureTURNPolicy(request:{identity?:import("./turn-policy").TURNIdentity;policy?:import("./turn-policy").TURNPolicy;inherit?:boolean} = {}):Promise<import("./turn-policy").TURNPolicyView>{return this.post(this.path("/numbers/turn-policy"),request);}

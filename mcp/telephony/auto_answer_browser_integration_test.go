@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"github.com/gobwas/ws/wsutil"
 	"net/http"
@@ -17,12 +18,16 @@ import (
 )
 
 func TestAutoAnswerRealBrowserPickup(t *testing.T) {
-	for _, delay := range []int{0, 300} {
-		t.Run(strings.ReplaceAll(time.Duration(delay*int(time.Millisecond)).String(), ".", "_"), func(t *testing.T) {
+	for _, scenario := range []struct {
+		delay   int
+		warning string
+	}{{0, ""}, {300, ""}, {0, "ok"}, {0, "cancel"}, {0, "blocked"}} {
+		delay := scenario.delay
+		t.Run(strings.ReplaceAll(time.Duration(delay*int(time.Millisecond)).String()+"-"+scenario.warning, ".", "_"), func(t *testing.T) {
 			a := autoAnswerTestSetup(t)
 			a.installID = 42
 			phoneTestRingOfferCall(t, a, "auto-browser")
-			autoAnswerTestPolicy(t, a, map[string]any{"scope": "project", "policy": map[string]any{"mode": "automatic", "delay_ms": delay}})
+			autoAnswerTestPolicy(t, a, map[string]any{"scope": "project", "policy": map[string]any{"mode": "automatic", "delay_ms": delay, "warning_tone": map[string]any{"enabled": scenario.warning != "", "window_ms": 1000}}})
 			t.Setenv("APTEVA_APP_TOKEN", "")
 			t.Setenv("APTEVA_OUTBOUND_TOKEN", "")
 			bundle := filepath.Join(t.TempDir(), "client.js")
@@ -39,6 +44,7 @@ func TestAutoAnswerRealBrowserPickup(t *testing.T) {
 				mux.HandleFunc(route.Pattern, route.Handler)
 			}
 			var answers atomic.Int32
+			var microphoneFrames, nonSilentSamples atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/":
@@ -98,6 +104,15 @@ func TestAutoAnswerRealBrowserPickup(t *testing.T) {
 					if err != nil {
 						return
 					}
+					if scenario.warning == "ok" && op == 2 {
+						microphoneFrames.Add(1)
+						for i := 0; i+1 < len(data); i += 2 {
+							sample := int16(binary.LittleEndian.Uint16(data[i:]))
+							if sample > 2 || sample < -2 {
+								nonSilentSamples.Add(1)
+							}
+						}
+					}
 					if wsutil.WriteClientMessage(peer, op, data) != nil {
 						return
 					}
@@ -106,7 +121,25 @@ func TestAutoAnswerRealBrowserPickup(t *testing.T) {
 			defer func() { peer.Close(); <-done }()
 
 			run := exec.CommandContext(t.Context(), "bun", "frontend/tests/auto-answer-browser-run.ts")
-			run.Env = append(os.Environ(), "TELEPHONY_AUTO_ANSWER_ORIGIN="+server.URL)
+			// A silent capture fixture makes any leaked warning tone observable at the caller peer.
+			wav := make([]byte, 44+48000*2*3)
+			copy(wav, "RIFF")
+			binary.LittleEndian.PutUint32(wav[4:], uint32(len(wav)-8))
+			copy(wav[8:], "WAVEfmt ")
+			binary.LittleEndian.PutUint32(wav[16:], 16)
+			binary.LittleEndian.PutUint16(wav[20:], 1)
+			binary.LittleEndian.PutUint16(wav[22:], 1)
+			binary.LittleEndian.PutUint32(wav[24:], 48000)
+			binary.LittleEndian.PutUint32(wav[28:], 96000)
+			binary.LittleEndian.PutUint16(wav[32:], 2)
+			binary.LittleEndian.PutUint16(wav[34:], 16)
+			copy(wav[36:], "data")
+			binary.LittleEndian.PutUint32(wav[40:], uint32(len(wav)-44))
+			capture := filepath.Join(t.TempDir(), "silence.wav")
+			if err := os.WriteFile(capture, wav, 0600); err != nil {
+				t.Fatal(err)
+			}
+			run.Env = append(os.Environ(), "TELEPHONY_WARNING_CAPTURE="+capture, "TELEPHONY_AUTO_ANSWER_ORIGIN="+server.URL, "TELEPHONY_AUTO_WARNING_MODE="+scenario.warning)
 			out, err := run.CombinedOutput()
 			if err != nil {
 				t.Fatalf("browser %v\n%s", err, out)
@@ -122,8 +155,21 @@ func TestAutoAnswerRealBrowserPickup(t *testing.T) {
 			if err = json.Unmarshal(out, &result); err != nil {
 				t.Fatalf("result %v %s", err, out)
 			}
+			if scenario.warning == "cancel" || scenario.warning == "blocked" {
+				if answers.Load() != 0 {
+					t.Fatalf("canceled/failed warning answered %d", answers.Load())
+				}
+				t.Logf("warning=%s answers=0", scenario.warning)
+				return
+			}
 			if answers.Load() != 1 || result.State.AudioState != "live" {
 				t.Fatalf("answers %d result %s", answers.Load(), out)
+			}
+			if scenario.warning == "ok" && (microphoneFrames.Load() == 0 || nonSilentSamples.Load() != 0) {
+				t.Fatalf("warning contaminated caller audio: frames=%d non-silent=%d", microphoneFrames.Load(), nonSilentSamples.Load())
+			}
+			if scenario.warning == "ok" {
+				t.Logf("warning precedes connection; caller PCM frames=%d, non-silent samples=%d", microphoneFrames.Load(), nonSilentSamples.Load())
 			}
 			countdown := false
 			for _, s := range result.States {

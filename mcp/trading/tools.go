@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -164,7 +165,7 @@ func (a *App) executionTools() []sdk.Tool {
 			}, []string{"symbol"}),
 			Handler: a.toolMarketHistory},
 
-		{Name: "market_source", Description: "Report the live data source per asset class — name (binance-public / polymarket-public / mock), last_ok_at, errors_60s, stale. Lets the agent self-report whether it's reasoning on real prices or the offline mock.",
+		{Name: "market_source", Description: "Report the live data source per asset class — name (coinbase-public / polymarket-public / mock), last_ok_at, errors_60s, stale. Lets the agent self-report whether it's reasoning on real prices or the offline mock.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolMarketSource},
 
@@ -1162,7 +1163,13 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errors.New("symbol required")
 	}
 	mark, err := dbGetMark(ctx.AppDB(), symbol)
-	if err != nil {
+	live := false
+	if globalEngine != nil {
+		_, live = globalEngine.provider.(*liveProvider)
+	}
+	legacyCrypto := live && mark != nil && mark.AssetClass == "crypto" &&
+		(mark.Source != coinbasePublicSource || mark.Instrument == nil || mark.Instrument.QuoteCurrency != "USD")
+	if err != nil || legacyCrypto {
 		// Fall back to live provider if engine hasn't ticked yet.
 		if globalEngine != nil {
 			mark, err = globalEngine.provider.Quote(symbol)
@@ -1181,6 +1188,15 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if mark.Instrument != nil {
 		out["instrument"] = mark.Instrument
+	}
+	if mark.BidPrice != nil {
+		out["bid_price"] = *mark.BidPrice
+	}
+	if mark.AskPrice != nil {
+		out["ask_price"] = *mark.AskPrice
+	}
+	if mark.QuoteAt != "" {
+		out["quote_at"] = mark.QuoteAt
 	}
 	if mark.AssetClass == "polymarket" {
 		out["yes_price"] = mark.Price
@@ -1210,6 +1226,17 @@ func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if rng == "" {
 		rng = "1D"
 	}
+	if _, live := globalEngine.provider.(*liveProvider); live && inferAssetClass(symbol) == "crypto" {
+		// Refresh provenance before returning history; old installations can
+		// still have Binance/USDT metadata persisted under a USD symbol.
+		mark, err := globalEngine.provider.Quote(symbol)
+		if err != nil {
+			return nil, err
+		}
+		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+			return nil, err
+		}
+	}
 	bars, err := globalEngine.provider.Bars(symbol, rng)
 	if err != nil {
 		return nil, err
@@ -1229,6 +1256,8 @@ func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	if source == alpacaMarketDataSlug {
 		out["adjustment_mode"] = "total_return"
+	} else if source == coinbasePublicSource {
+		out["adjustment_mode"] = "raw"
 	}
 	if instrument != nil {
 		out["instrument"] = instrument
@@ -1501,6 +1530,10 @@ func (a *App) toolPortfolioObjectiveUpdate(ctx *sdk.AppCtx, args map[string]any)
 const minRationaleLen = 30
 
 func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.placeOrder(ctx, args, nil)
+}
+
+func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *paperOrderAuthorization) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -1509,6 +1542,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
 	if err != nil {
 		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
+	if err := authorizePaperOrder(ctx, pf, args, authorization); err != nil {
+		return rejectStruct("desk_approval_required", err.Error()), nil
 	}
 
 	requestKey := strings.TrimSpace(strArg(args, "idempotency_key"))
@@ -1737,6 +1773,21 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	if err == nil {
 		_, err = tx.Exec(`UPDATE orders SET origin_app=?,origin_install_id=?,decision_ref=?,external_strategy_id=?,external_strategy_version=? WHERE id=?`, strArg(args, "_origin_app"), int64Arg(args, "_origin_install_id", 0), strArg(args, "decision_ref"), int64Arg(args, "external_strategy_id", 0), int64Arg(args, "external_strategy_version", 0), o.ID)
+	}
+	if err == nil && authorization != nil && authorization.decision != nil {
+		// Commit accepted orders and their recovery/exit ownership together.
+		// A crash can never leave a filled desk entry without a durable plan.
+		var result sql.Result
+		if authorization.exit {
+			result, err = tx.Exec(`UPDATE paper_decisions SET exit_order_id=?,status='exiting',exit_reason=?,last_error='',updated_at=? WHERE portfolio_id=? AND decision_id=? AND exit_order_id='' AND status IN ('submitted','active','exiting')`, o.ID, authorization.exitReason, paperNow(), pf.ID, authorization.decision.Packet.DecisionID)
+		} else {
+			result, err = tx.Exec(`UPDATE paper_decisions SET order_id=?,status='submitted',updated_at=? WHERE portfolio_id=? AND decision_id=? AND order_id='' AND status='approved'`, o.ID, paperNow(), pf.ID, authorization.decision.Packet.DecisionID)
+		}
+		if err == nil {
+			if n, _ := result.RowsAffected(); n != 1 {
+				err = errors.New("paper decision changed before order commit")
+			}
+		}
 	}
 	if err == nil && strategyID > 0 {
 		_, err = tx.Exec(`UPDATE orders SET strategy_id=?,strategy_version=(SELECT version FROM strategies WHERE id=?) WHERE id=?`, strategyID, strategyID, o.ID)

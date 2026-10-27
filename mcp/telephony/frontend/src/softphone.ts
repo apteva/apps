@@ -113,9 +113,23 @@ export class HeadlessSoftphone {
     this.autoAnswer=new AutomaticAnswer(client,{
       busy:()=>this.disposed||this.snapshot.busy||Boolean(this.session)||Boolean(this.hangingUp),
       prepare:async()=>{this.cancelNetworkCheck();await this.runtime.preflight(this.audioOptions);this.autoPrepared=true;},
-      releasePreparation:()=>{if(this.autoPrepared){this.runtime.cancelPreparation?.();this.autoPrepared=false;}},
-      answer:(id,dest,session)=>this.answer(id,{destination_id:dest,auto_answer_session:session}),
-      changed:value=>{this.update({autoAnswer:value});try{this.options.onAutoAnswer?.(value);}catch{/* observer isolation */}},
+      releasePreparation:()=>{this.runtime.cancelPreparation?.();this.autoPrepared=false;},
+      ...(this.runtime.playAutoAnswerWarning?{warning:async(windowMs:number,signal:AbortSignal)=>{
+        signal.throwIfAborted();
+        const cancel=()=>{this.runtime.cancelPreparation?.();this.autoPrepared=false;};
+        signal.addEventListener("abort",cancel,{once:true});
+        try{
+          if(!this.autoPrepared||this.runtime.isPrepared?.()===false){await this.runtime.preflight(this.audioOptions);this.autoPrepared=true;}
+          signal.throwIfAborted();
+          await this.runtime.playAutoAnswerWarning!(this.audioOptions,windowMs,signal);
+        }finally{signal.removeEventListener("abort",cancel);if(signal.aborted)cancel();}
+      }}:{}),
+      answer:(id,dest,session,warningCompleted)=>this.answer(id,{destination_id:dest,auto_answer_session:session,auto_answer_warning_completed:warningCompleted}),
+      changed:value=>{
+        const stage=value.code==="warning_started"?"warning_attempted":value.code==="warning_completed"?"warning_completed":value.code?.startsWith("warning_")||value.code==="auto_answer_warning_unsupported"?"warning_failed":["pickup_canceled","offer_withdrawn","offer_expired","adviser_unavailable","another_call_started"].includes(value.code??"")?"auto_answer_canceled":undefined;
+        const offer=value.eventCallId?this.observedOffers.get(value.eventCallId)?.ring_offers?.find(o=>o.id===value.offerId):undefined;
+        if(stage&&offer&&value.eventCallId)void this.client.reportOfferEvent({call_id:value.eventCallId,offer_id:offer.id,stage,code:value.code,event_id:`auto-${offer.id}-${value.code}`}).catch(()=>{});
+        this.update({autoAnswer:value});try{this.options.onAutoAnswer?.(value);}catch{/* observer isolation */}},
     },this.interval!==0);
     if(options.networkCheck){globalThis.addEventListener?.("online",this.networkChanged);this.scheduleNetworkCheck(500+Math.random()*15000);}
   }
@@ -227,6 +241,7 @@ export class HeadlessSoftphone {
   }
 
   async dial(input: Omit<DialRequest, "idempotency_key"> & { idempotency_key?: string }): Promise<string> {
+    this.autoAnswer.cancel(undefined,"another_call_started");
     const generation = this.begin(true);
     let placed: CallSession | undefined;
     let attached = false;

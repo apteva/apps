@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.16.0
+version: 0.17.0
 description: Portfolio management and paper or broker-backed trade execution for humans, agents and connected apps.
   Owns balances, positions, orders, fills, performance, market data, broker connections and enforced portfolio risk
   limits. Automated strategies and research are provided by the separate Strategies app.
@@ -52,7 +52,7 @@ requires:
       order.status: get_order
       account.summary: get_account
       positions.list: list_positions
-    label: "Broker (optional \u2014 enables live trading)"
+    label: Broker (optional — enables live trading)
     hint: Bind Binance, Kraken, Coinbase, OKX, Bybit, or Bitstamp (crypto), Alpaca (equity/etf/crypto), or Polymarket-CLOB
       (prediction markets). Portfolios pick a broker at creation.
   - role: market_data_equity
@@ -69,9 +69,9 @@ requires:
       quotes.equity: stock_snapshots
       bars.equity: stock_bars
       latest_quotes.equity: stock_latest_quotes
-    label: "Market Data \u2014 Equity (optional \u2014 real prices for live equity portfolios)"
-    hint: "Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback\
-      \ \u2014 the trading sidecar already uses Yahoo automatically when nothing's bound here."
+    label: Market Data — Equity (optional — real prices for live equity portfolios)
+    hint: Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback —
+      the trading sidecar already uses Yahoo automatically when nothing's bound here.
   - role: reference_actions
     kind: integration
     required: false
@@ -81,7 +81,7 @@ requires:
     - reference.corporate_actions
     tools:
       reference.corporate_actions: corporate_actions
-    label: "Reference Data \u2014 Corporate Actions"
+    label: Reference Data — Corporate Actions
     hint: Uses Alpaca's revisioned corporate-actions dataset for splits, dividends, mergers, spinoffs, symbol changes,
       removals, rights, and distributions.
   - role: reference_broker
@@ -97,100 +97,204 @@ requires:
       reference.assets: list_assets
       reference.calendar: get_calendar
       reference.account_activities: list_activities
-    label: "Reference Data \u2014 Assets, Sessions, and Account Effects"
+    label: Reference Data — Assets, Sessions, and Account Effects
 provides:
   http_routes:
   - prefix: /
   mcp_tools:
   - name: portfolio_create
-    description: "Create a new paper or live portfolio. Live portfolios pass broker_slug \u2014 use brokers_list\
-      \ to enumerate."
+    description: Create a new paper or live portfolio. Live portfolios pass broker_slug — use brokers_list to enumerate.
+    requires: trading.admin
   - name: portfolio_broker_bind
     description: Explicitly confirm a legacy portfolio broker account binding.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: brokers_list
     description: Enumerate registered broker adapters and their currently-bound connections.
+    requires: trading.admin
   - name: venue_profiles_list
     description: List effective venue fees, spread/slippage, sessions, funding, minimums, precision, and health.
+    requires: trading.read
   - name: venue_profile_update
     description: Create or update a generic venue-wide or symbol-specific execution profile.
+    requires: trading.admin
   - name: portfolio_list
     description: List portfolios visible to this agent.
+    requires: trading.read
   - name: portfolio_get
     description: Snapshot of one portfolio (mandate, equity, cash, status, watchlist).
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: risk_profiles_list
     description: List built-in portfolio risk presets and enforced percentage limits.
+    requires: trading.read
   - name: portfolio_risk_get
     description: Get a portfolio's resolved risk policy and current drawdown state.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_risk_update
     description: Set an enforceable risk preset or custom percentage limits.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_universe_get
     description: Get the portfolio's enforced tradable universe policy.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_universe_update
     description: Configure a hard symbol allowlist, exclusions, or reference universe.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_objective_create
     description: Create a native Trading percentage objective.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_objectives_list
     description: List portfolio objectives with live progress.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_objective_update
     description: Update or archive a Trading objective.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: account_summary
     description: Equity, cash, buying power, day and open P&L for one portfolio.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: positions_list
     description: Open positions for one portfolio.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: orders_list
     description: Working / filled / cancelled orders for one portfolio.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: order_place
     description: Place a paper or broker order, subject to portfolio permissions, risk limits and live arming. Requires
       a trade rationale.
+    requires: trading.order.direct
+    resource_from: portfolio/{arg.portfolio_id}
   - name: order_cancel
     description: Cancel a working order.
+    requires: trading.order.direct
   - name: market_quote
-    description: "Latest mark for a symbol \u2014 equity/crypto USD or polymarket YES/NO probabilities."
+    description: Latest mark for a symbol — equity/crypto USD or polymarket YES/NO probabilities.
+    requires: trading.read
   - name: market_history
     description: OHLCV bars or probability history for a symbol.
+    requires: trading.read
   - name: market_source
-    description: "Report the live data source per asset class \u2014 provider name, errors_60s, staleness."
+    description: Report the live data source per asset class — provider name, errors_60s, staleness.
+    requires: trading.read
   - name: market_calendar
     description: Return normalized exchange-calendar state and instrument metadata for a symbol.
+    requires: trading.read
   - name: reference_data_status
     description: Report canonical reference-data coverage, checkpoints, and quality state.
+    requires: trading.read
   - name: security_resolve
     description: Resolve symbols and names to stable security/listing identities at a point in time.
+    requires: trading.read
   - name: corporate_actions_list
     description: List normalized latest-revision corporate actions.
+    requires: trading.read
   - name: exchange_sessions_list
     description: List authoritative normalized exchange sessions.
+    requires: trading.read
   - name: watchlist_add
     description: Track a symbol on a portfolio.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: watchlist_remove
     description: Stop tracking a symbol.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: alert_create
     description: Create a price/probability/PNL alert that wakes the agent on match.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: journal_write
     description: Append a thesis/rationale/note to a portfolio's journal.
+    requires: trading.journal
+    resource_from: portfolio/{arg.portfolio_id}
   - name: journal_read
     description: Read journal entries for a portfolio (recent or filtered by kind).
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: execution_costs_list
     description: List attributed fee, spread, slippage, funding, and rebate entries for a portfolio.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: funding_payment_record
     description: Idempotently record a signed venue funding payment.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_pause
-    description: "Pause this portfolio (no new orders). Self-only \u2014 resume is human-only via REST."
+    description: Pause this portfolio (no new orders). Self-only — resume is human-only via REST.
+    requires: trading.pause
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_arm_live
     description: Explicitly arm or disarm automated execution for a broker_live portfolio. Arming requires the exact
       LIVE MONEY confirmation.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: portfolio_research_snapshot
     description: Internal Strategies integration tool.
     exposure: app_only
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
   - name: research_legacy_export
     description: Internal Strategies integration tool.
     exposure: app_only
+    requires: trading.admin
   - name: market_bars_capture
     description: Internal Strategies integration tool.
     exposure: app_only
+    requires: trading.admin
   - name: backtest_market_step
     description: Internal isolated replay pricing tool for Strategies.
     exposure: app_only
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_configure
+    description: Enable and configure a paper desk.
+    requires: trading.admin
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_propose
+    description: Persist an immutable bounded paper experiment.
+    requires: trading.propose
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_review
+    description: Approve or reject an exact paper decision as independent reviewer.
+    requires: trading.review
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_submit
+    description: Submit a stored approved decision and activate durable exits.
+    requires: trading.execute
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_decision_get
+    description: Read a proposal and its entry/exit state.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_observe
+    description: Record a setup observation or hold.
+    requires: trading.observe
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_scorecard
+    description: Read actual experiment performance, with rehearsals separated.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_health
+    description: Inspect desk health, per-symbol freshness/session state and durable exit errors.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_market_context
+    description: Compute deterministic completed-bar facts without generating a trade signal.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_cancel
+    description: Executor cancels an unfilled decision entry without disabling approved exits.
+    requires: trading.execute
+    resource_from: portfolio/{arg.portfolio_id}
   ui_panels:
   - slot: project.page
     label: Trading
@@ -258,11 +362,46 @@ provides:
           default: 5
           minimum: 1
           maximum: 12
+  resources:
+  - name: portfolio
+    label: Portfolio
+    matcher: glob
+  permissions:
+  - name: trading.read
+    resource: portfolio
+    description: Read portfolio, market and desk state.
+  - name: trading.journal
+    resource: portfolio
+    description: Write the shared journal.
+  - name: trading.observe
+    resource: portfolio
+    description: Record setup observations and holds.
+  - name: trading.propose
+    resource: portfolio
+    description: Create immutable paper trade proposals.
+  - name: trading.review
+    resource: portfolio
+    description: Independently approve exact paper proposals.
+  - name: trading.execute
+    resource: portfolio
+    description: Submit approved paper decisions and cancel working orders.
+  - name: trading.pause
+    resource: portfolio
+    description: Pause a portfolio.
+  - name: trading.order.direct
+    resource: portfolio
+    description: Place direct orders outside the agent desk workflow.
+  - name: trading.admin
+    resource: portfolio
+    description: Configure portfolios, desk policies and administrative data.
+  workers:
+  - name: paper_desk_exits
+    schedule: '@every 5s'
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: trading/v0.16.0
+    ref: trading/v0.17.0
     entry: mcp/trading
   port: 8080
   health_check: /health
@@ -280,7 +419,7 @@ config_schema:
   type: text
   default: '5'
   label: Daily-loss halt %
-  description: "Portfolio is auto-paused when day P&L drops below \u2212X%."
+  description: Portfolio is auto-paused when day P&L drops below −X%.
 - name: tick_seconds
   type: text
   default: '5'
@@ -306,9 +445,9 @@ config_schema:
   type: text
   default: live
   label: Pricing provider
-  description: "live \u2014 Binance public REST for crypto + Polymarket gamma-api for prediction markets.\n    \
-    \   Equity/ETF use bound Alpaca market data, then Yahoo Finance. Live mode never uses synthetic data.\nmock\
-    \ \u2014 fully offline; deterministic walks for everything. Used by tests + air-gapped demos.\n"
+  description: "live — Coinbase Exchange USD products for crypto + Polymarket gamma-api for prediction markets.\n\
+    \       Equity/ETF use bound Alpaca market data, then Yahoo Finance. Live mode never uses synthetic data.\n\
+    mock — fully offline; deterministic walks for everything. Used by tests + air-gapped demos.\n"
 - name: bootstrap_demo
   type: text
   default: 'true'

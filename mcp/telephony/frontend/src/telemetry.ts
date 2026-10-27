@@ -25,7 +25,7 @@ export interface CallWatchDiagnostics {
  last_connect_at?:string;last_disconnect_at?:string;last_reconnect_attempt_at?:string;last_heartbeat_at?:string;last_stream_event_at?:string;last_successful_call_list_at?:string;
  last_request_id?:string;last_failure?:RequestDiagnostic;consecutive_list_failures:number;
 }
-export type OfferBrowserStage="ui_displayed"|"ui_hidden"|"ui_failed"|"ringtone_attempted"|"ringtone_started"|"ringtone_failed"|"ringtone_stopped"|"ringtone_suppressed"|"answer_attempted"|"answer_failed";
+export type OfferBrowserStage="warning_attempted"|"warning_completed"|"warning_failed"|"auto_answer_canceled"|"ui_displayed"|"ui_hidden"|"ui_failed"|"ringtone_attempted"|"ringtone_started"|"ringtone_failed"|"ringtone_stopped"|"ringtone_suppressed"|"answer_attempted"|"answer_failed";
 export interface OfferBrowserEvent {call_id:string;offer_id:string;stage:OfferBrowserStage;event_id?:string;occurred_at?:string;visibility?:"visible"|"hidden"|"prerender";focused?:boolean;code?:string;request_id?:string}
 const tabKey=Symbol.for("apteva.telephony.browser-tab-id");
 export function browserTabID():string{const root=globalThis as any;return root[tabKey]??=diagnosticID()}

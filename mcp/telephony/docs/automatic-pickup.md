@@ -53,3 +53,5 @@ An opt-in local Chromium test exercises real microphone/playback preparation and
 ```sh
 env GOWORK=off go test -tags integration -run '^TestAutoAnswerRealBrowserPickup$' -count=1 -timeout 90s -v .
 ```
+
+Optional pre-connection warning: see [automatic-pickup-warning.md](automatic-pickup-warning.md) for scoped policy, selected output, cancellation and SDK event semantics.
