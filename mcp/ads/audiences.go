@@ -41,7 +41,7 @@ var audienceCapabilities = map[string]audienceCapability{
 		SyncModes:  []string{"add", "remove"}, Sources: []string{"storage", "crm_segment"},
 	},
 	"google": {
-		Kinds:      []string{"customer_list", "website", "app_activity"},
+		Kinds:      []string{"customer_list", "website", "app_activity", "remarketing", "combined", "unknown", "custom_segment", "grouped", "lookalike"},
 		Operations: []string{"list", "get", "create", "update", "delete", "members_sync", "usage", "refresh"},
 		SyncModes:  []string{"add", "remove"}, Sources: []string{"storage", "crm_segment"},
 	},
@@ -99,11 +99,17 @@ func (a *App) toolAudienceCapabilitiesGet(ctx *sdk.AppCtx, args map[string]any) 
 		return errOut, nil
 	}
 	capability := audienceCapabilities[acct.Platform]
-	return map[string]any{
-		"platform": acct.Platform, "kinds": capability.Kinds, "operations": capability.Operations,
+	return audienceCapabilityResponse(acct.Platform, capability), nil
+}
+
+func audienceCapabilityResponse(platform string, capability audienceCapability) map[string]any {
+	out := map[string]any{
+		"platform": platform, "kinds": capability.Kinds, "operations": capability.Operations,
 		"sync_modes": capability.SyncModes, "sources": capability.Sources,
 		"privacy": map[string]any{"normalizes": true, "hashes_before_provider": true, "persists_identifiers": false},
-	}, nil
+	}
+	extendAudienceCapabilities(platform, out)
+	return out
 }
 
 func (a *App) audienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -125,7 +131,11 @@ func (a *App) audienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	items := make([]map[string]any, 0, len(resources))
 	for _, resource := range resources {
-		items = append(items, normalizedAudience(acct.Platform, resource))
+		normalized := normalizedAudience(acct.Platform, resource)
+		if filter := firstString(args, "type"); filter != "" && normalized["type"] != filter {
+			continue
+		}
+		items = append(items, normalized)
 	}
 	return map[string]any{"data": items, "refresh_errors": errorsByKind}, nil
 }
@@ -136,7 +146,7 @@ func normalizedAudience(platform string, resource adResource) map[string]any {
 	return map[string]any{
 		"id": resource.ID, "ad_account_id": resource.AdAccountID, "platform": platform,
 		"native_id": resource.NativeID, "name": resource.DisplayName, "type": typeName,
-		"status": resource.Status, "capabilities": resource.Capabilities, "metadata": metadata,
+		"status": resource.Status, "capabilities": effectiveAudienceCapabilities(platform, resource), "metadata": metadata,
 		"managed_by_app": resource.ManagedByApp, "refreshed_at": resource.RefreshedAt,
 	}
 }
@@ -144,6 +154,10 @@ func normalizedAudience(platform string, resource adResource) map[string]any {
 func normalizedAudienceType(nativeType string) string {
 	typeName := strings.ToLower(nativeType)
 	switch {
+	case typeName == "custom_segment", typeName == "grouped", typeName == "remarketing", typeName == "combined", typeName == "unknown":
+		return typeName
+	case typeName == "external_remarketing":
+		return "remarketing"
 	case strings.Contains(typeName, "lookalike"), strings.Contains(typeName, "similar"):
 		typeName = "lookalike"
 	case strings.Contains(typeName, "website"), strings.Contains(typeName, "rule"):
@@ -180,6 +194,9 @@ func (a *App) audienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	kind := strings.ToLower(strings.TrimSpace(stringArgAny(args, "type", "kind", "subtype")))
 	if kind == "" {
 		kind = "customer_list"
+	}
+	if acct.Platform == "google" && kind == "engagement" {
+		return mcpError("Google Ads API cannot create YouTube viewer/subscriber lists; create them in Google Ads Audience Manager, then audience_refresh discovers them as remarketing seeds"), nil
 	}
 	if !containsString(audienceCapabilities[acct.Platform].Kinds, kind) {
 		return mcpError("audience type " + kind + " is not supported by " + acct.Platform), nil
@@ -243,6 +260,9 @@ func (a *App) audienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		providerErr = mcpResultError(parsed)
 	case "google":
+		if kind == "custom_segment" || kind == "grouped" || kind == "lookalike" {
+			return a.googleStructuredAudienceCreate(ctx, acct, args, kind)
+		}
 		if kind != "customer_list" {
 			return mcpError("Google rule-based audiences are discovered and targetable but creation is provider-managed"), nil
 		}
@@ -305,6 +325,12 @@ func (a *App) toolAudienceUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
+	if !containsString(resource.Capabilities, "update") {
+		return mcpError("this audience is read-only or does not support updates"), nil
+	}
+	if acct.Platform == "google" && (resource.ProviderType != "google_user_list" || normalizedAudienceType(firstString(resource.Metadata, "type")) != "customer_list") {
+		return a.googleStructuredAudienceUpdate(ctx, acct, resource, args)
+	}
 	input := map[string]any{}
 	name := strings.TrimSpace(stringArgAny(args, "name"))
 	description := stringArgAny(args, "description")
@@ -364,6 +390,9 @@ func (a *App) toolAudienceDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
+	if !containsString(resource.Capabilities, "delete") {
+		return mcpError("this audience does not support deletion through the provider API"), nil
+	}
 	usage, usageErr := a.audienceUsage(ctx, acct, resource)
 	if usageErr != nil {
 		return nil, usageErr
@@ -380,6 +409,9 @@ func (a *App) toolAudienceDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	case "meta":
 		input["audience_id"] = resource.NativeID
 	case "google":
+		if resource.ProviderType != "google_user_list" || normalizedAudienceType(firstString(resource.Metadata, "type")) != "customer_list" {
+			return a.googleStructuredAudienceDelete(ctx, acct, resource)
+		}
 		input = googleDataManagerResourceInput(acct)
 		input["account_type"] = "GOOGLE_ADS"
 		input["account_id"] = acct.NativeAccountID
@@ -432,17 +464,7 @@ func (a *App) audienceUsage(ctx *sdk.AppCtx, acct *adAccount, resource *adResour
 		}
 		return map[string]any{"data": rowsContainingID(rows, resource.NativeID)}, nil
 	case "google":
-		rows := []map[string]any{}
-		for _, level := range []string{"ad_group", "campaign"} {
-			criterion := level + "_criterion"
-			query := fmt.Sprintf("SELECT %s.resource_name, %s.%s, %s.status, %s.user_list.user_list FROM %s WHERE %s.user_list.user_list = 'customers/%s/userLists/%s' AND %s.status != REMOVED", criterion, criterion, level, criterion, criterion, criterion, criterion, acct.NativeAccountID, resource.NativeID, criterion)
-			found, errOut := a.googleResourceRows(ctx, acct, query)
-			if errOut != nil {
-				return errOut, nil
-			}
-			rows = append(rows, found...)
-		}
-		return map[string]any{"data": rows}, nil
+		return a.googleAudienceUsage(ctx, acct, resource)
 	case "reddit":
 		rows, errOut := a.providerResourceRows(ctx, acct, "list_ad_groups", map[string]any{"ad_account_id": acct.NativeAccountID, "page.size": 500}, "reddit")
 		if errOut != nil {
@@ -519,13 +541,18 @@ func (a *App) toolTargetingCatalogSearch(ctx *sdk.AppCtx, args map[string]any) (
 			if escaped != "" {
 				gaql += " WHERE geo_target_constant.name LIKE '%" + escaped + "%'"
 			}
+		case "interest":
+			gaql = "SELECT user_interest.user_interest_id, user_interest.name, user_interest.taxonomy_type FROM user_interest WHERE user_interest.launched_to_all = TRUE"
+			if escaped != "" {
+				gaql += " AND user_interest.name LIKE '%" + escaped + "%'"
+			}
 		case "language":
 			gaql = "SELECT language_constant.id, language_constant.name, language_constant.code, language_constant.targetable FROM language_constant"
 			if escaped != "" {
 				gaql += " WHERE language_constant.name LIKE '%" + escaped + "%'"
 			}
 		default:
-			return mcpError("Google targeting catalog search supports location and language; use keyword planning tools for keyword ideas"), nil
+			return mcpError("Google targeting catalog search supports location, interest and language; use keyword planning tools for keyword ideas"), nil
 		}
 		gaql += fmt.Sprintf(" LIMIT %d", limit)
 		parsed, errOut = a.execIntegrationTool(ctx, acct, "search", map[string]any{"customer_id": acct.NativeAccountID, "query": gaql})
@@ -591,6 +618,10 @@ func (a *App) toolTargetingCatalogSearch(ctx *sdk.AppCtx, args map[string]any) (
 	for _, row := range resultRows(parsed) {
 		item := row
 		if acct.Platform == "google" {
+			if nested := mapAt(row, "userInterest"); len(nested) > 0 {
+				item = cloneMap(nested)
+				item["id"] = firstString(nested, "userInterestId", "user_interest_id")
+			}
 			if nested := mapAt(row, "geoTargetConstant"); len(nested) > 0 {
 				item = nested
 			}
@@ -607,6 +638,9 @@ func (a *App) toolAudienceMembersSync(ctx *sdk.AppCtx, args map[string]any) (any
 	acct, _, resource, errOut := a.resolveAudience(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if !containsString(resource.Capabilities, "members_add") {
+		return mcpError("member sync is only supported for writable customer lists"), nil
 	}
 	operation := strings.ToLower(stringArgAny(args, "operation"))
 	if operation == "" {
@@ -953,6 +987,7 @@ func (a *App) resolveAudience(ctx *sdk.AppCtx, args map[string]any) (*adAccount,
 	if err != nil || resource.Kind != resourceAudience || resource.Status == "stale" {
 		return nil, nil, nil, mcpError("audience not found in this ad account")
 	}
+	resource.Capabilities = effectiveAudienceCapabilities(acct.Platform, *resource)
 	return acct, def, resource, nil
 }
 
@@ -988,7 +1023,27 @@ func metaAudienceSubtype(kind string) string {
 	return map[string]string{"customer_list": "CUSTOM", "website": "WEBSITE", "app_activity": "APP", "engagement": "ENGAGEMENT", "lookalike": "LOOKALIKE"}[kind]
 }
 
+func effectiveAudienceCapabilities(platform string, resource adResource) []string {
+	if platform != "google" {
+		return resource.Capabilities
+	}
+	if resource.Metadata["readOnly"] == true || resource.Metadata["read_only"] == true {
+		return []string{"target", "get", "usage"}
+	}
+	return audienceResourceCapabilities(platform, normalizedAudienceType(firstString(resource.Metadata, "type", "subtype", "list_type")))
+}
+
 func audienceResourceCapabilities(platform, kind string) []string {
+	if platform == "google" && kind != "customer_list" {
+		caps := []string{"target", "get", "usage"}
+		if kind == "custom_segment" {
+			caps = append(caps, "update", "delete")
+		}
+		if kind == "grouped" {
+			caps = append(caps, "update")
+		}
+		return caps
+	}
 	capabilities := []string{"target", "get", "delete"}
 	if kind == "customer_list" {
 		capabilities = append(capabilities, "members_add", "members_remove")

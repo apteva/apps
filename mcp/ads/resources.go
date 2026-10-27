@@ -137,6 +137,7 @@ func accountResourceCapabilities(platform string) map[string]any {
 	}
 	return map[string]any{
 		"mobile_app": mobileCapabilities(platform),
+		"audiences":  audienceCapabilityResponse(platform, audienceCapabilities[platform]),
 		"demand_gen": func() map[string]any {
 			if platform == "google" {
 				return demandGenCapabilities()
@@ -685,7 +686,7 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	case resourceLeadForm:
 		query = "SELECT asset.id, asset.name, asset.resource_name, asset.type, asset.lead_form_asset.business_name, asset.lead_form_asset.headline, asset.lead_form_asset.description, asset.lead_form_asset.privacy_policy_url, asset.lead_form_asset.fields, asset.lead_form_asset.call_to_action_type, asset.lead_form_asset.call_to_action_description, asset.lead_form_asset.desired_intent, asset.lead_form_asset.post_submit_headline, asset.lead_form_asset.post_submit_description, asset.lead_form_asset.post_submit_call_to_action_type FROM asset WHERE asset.type = LEAD_FORM ORDER BY asset.id"
 	case resourceAudience:
-		query = "SELECT user_list.id, user_list.name, user_list.type, user_list.description, user_list.membership_status, user_list.size_for_display, user_list.size_for_search FROM user_list ORDER BY user_list.id"
+		return a.discoverGoogleAudiences(ctx, acct)
 	default:
 		return nil, mcpError("unsupported Google resource kind: " + kind)
 	}

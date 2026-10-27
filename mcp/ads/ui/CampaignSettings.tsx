@@ -22,6 +22,8 @@ export default function CampaignSettings({
   dateTo: string;
   currency: string;
 }) {
+  const [audiences, setAudiences] = useState<any[]>([]), [audience, setAudience] = useState(""), [optimized, setOptimized] = useState(false);
+  useEffect(() => { let active = true; callTool("audience_list", { ad_account_id: accountId, refresh: false }).then(a => { if(active) setAudiences((a.data || []).filter((r: any) => r.type === "grouped" && r.status === "active")); }).catch(() => {}); return () => { active = false; }; }, [accountId]);
   const [cfg, setCfg] = useState<any>(null),
     [group, setGroup] = useState<any>(null),
     [error, setError] = useState(""),
@@ -97,6 +99,8 @@ export default function CampaignSettings({
         .then((g) => {
           if (current) {
             setGroup(g);
+            setAudience((g.audience_ids || [])[0] || "");
+            setOptimized(g.optimized_targeting === true);
             setPlacements(g.placements || []);
             setLocations((g.locations || []).join(", "));
             setLanguages((g.languages || []).join(", "));
@@ -262,6 +266,8 @@ export default function CampaignSettings({
                 />
               </label>
             </div>
+            <label className="grid gap-1 text-xs">Grouped audience<select className={field} value={audience} onChange={e => setAudience(e.target.value)}><option value="">No audience selected</option>{audience && !audiences.some(a => a.native_id === audience) && <option value={audience}>Current audience {audience}</option>}{audiences.map(a => <option key={a.id} value={a.native_id}>{a.name}</option>)}</select></label>
+            <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={optimized} onChange={e => setOptimized(e.target.checked)} />Allow optimized targeting beyond selected audiences</label>
             <button
               className={button}
               type="button"
@@ -272,6 +278,8 @@ export default function CampaignSettings({
                     ad_account_id: accountId,
                     adset_id: groupId,
                     placements,
+                    audience_ids: audience ? [audience] : [],
+                    optimized_targeting: optimized,
                     locations: commaIds(locations),
                     languages: commaIds(languages),
                   });

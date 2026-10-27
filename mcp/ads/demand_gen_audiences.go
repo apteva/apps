@@ -14,6 +14,30 @@ func (a *App) googleGroupedAudienceCreate(ctx *sdk.AppCtx, acct *adAccount, args
 	if len(asMap(args["platform_options"])) > 0 {
 		return mcpError("grouped audiences use structured segment IDs"), nil
 	}
+	native, err := a.googleGroupedSegments(ctx, acct, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	create, err := googleGroupedAudienceDefinition(acct, native)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	parsed, out := a.execIntegrationTool(ctx, acct, "bulk_mutate", map[string]any{"customer_id": acct.NativeAccountID, "mutateOperations": []any{map[string]any{"audienceOperation": map[string]any{"create": create}}}, "partialFailure": false})
+	if out != nil {
+		return out, nil
+	}
+	id := googleMutateID(parsed, "audienceResult")
+	if id == "" {
+		return mcpError("Google did not return an audience ID"), nil
+	}
+	r, err := a.saveGoogleAudience(ctx, acct, "google_grouped_audience", id, name, "grouped", create, true)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": id, "audience_resource_id": r.ID, "audience_type": "grouped", "result": parsed}, nil
+}
+
+func googleGroupedAudienceDefinition(acct *adAccount, args map[string]any) (map[string]any, error) {
 	segments := []any{}
 	for _, spec := range []struct{ arg, kind, field, prefix string }{{"user_list_ids", "userList", "userList", "customers/" + acct.NativeAccountID + "/userLists/"}, {"custom_audience_ids", "customAudience", "customAudience", "customers/" + acct.NativeAccountID + "/customAudiences/"}, {"user_interest_ids", "userInterest", "userInterestCategory", "customers/" + acct.NativeAccountID + "/userInterests/"}} {
 		for _, raw := range asSlice(args[spec.arg]) {
@@ -22,18 +46,14 @@ func (a *App) googleGroupedAudienceCreate(ctx *sdk.AppCtx, acct *adAccount, args
 				id = strings.TrimPrefix(id, spec.prefix)
 			}
 			if !googleNumericID(id) {
-				return mcpError(fmt.Sprintf("%s requires numeric segment IDs belonging to the selected account", spec.arg)), nil
+				return nil, fmt.Errorf("%s requires numeric segment IDs belonging to the selected account", spec.arg)
 			}
 			segments = append(segments, map[string]any{spec.kind: map[string]any{spec.field: spec.prefix + id}})
 		}
 	}
 	if len(segments) == 0 || len(segments) > 100 {
-		return mcpError("grouped audience requires 1–100 typed segments"), nil
+		return nil, fmt.Errorf("grouped audience requires 1–100 typed segments")
 	}
-	create := map[string]any{"name": name, "description": firstString(args, "description"), "scope": "CUSTOMER", "dimensions": []any{map[string]any{"audienceSegments": map[string]any{"segments": segments}}}}
-	parsed, out := a.execIntegrationTool(ctx, acct, "bulk_mutate", map[string]any{"customer_id": acct.NativeAccountID, "mutateOperations": []any{map[string]any{"audienceOperation": map[string]any{"create": create}}}, "partialFailure": false})
-	if out != nil {
-		return out, nil
-	}
-	return map[string]any{"id": googleMutateID(parsed, "audienceResult"), "audience_type": "grouped", "result": parsed}, nil
+	create := map[string]any{"name": firstString(args, "name"), "description": firstString(args, "description"), "scope": "CUSTOMER", "dimensions": []any{map[string]any{"audienceSegments": map[string]any{"segments": segments}}}}
+	return create, nil
 }

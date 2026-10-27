@@ -33,6 +33,8 @@ const fresh = () => ({
   locations: "",
   languages: "",
   audience: "",
+  audienceResource: "",
+  optimizedTargeting: false,
   placements: ["youtube_in_feed", "youtube_shorts"],
   format: "responsive_video",
   business: "",
@@ -127,6 +129,7 @@ export default function CampaignBuilder({
       return fresh();
     }
   });
+  const [audiences, setAudiences] = useState<any[]>([]);
   const [caps, setCaps] = useState<any>(null),
     [events, setEvents] = useState<any[]>([]),
     [busy, setBusy] = useState(false),
@@ -145,11 +148,13 @@ export default function CampaignBuilder({
         refresh: false,
       }),
       callTool("conversion_event_list", { ad_account_id: account.id }),
+      callTool("audience_list", { ad_account_id: account.id, refresh: false }),
     ])
-      .then(([c, e]) => {
+      .then(([c, e, a]) => {
         if (alive) {
           setCaps(c.capabilities?.demand_gen);
           setEvents(e.events || []);
+          setAudiences((a.data || []).filter((v: any) => v.type === "grouped" && v.status === "active"));
         }
       })
       .catch((e) => alive && setError(e.message));
@@ -196,7 +201,8 @@ export default function CampaignBuilder({
           placements: draft.placements,
           locations: commaIds(draft.locations),
           languages: commaIds(draft.languages),
-          ...(draft.audience ? { audience_ids: commaIds(draft.audience) } : {}),
+          optimized_targeting: draft.optimizedTargeting,
+          ...(draft.audienceResource ? { audience_resource_ids: [Number(draft.audienceResource)] } : draft.audience ? { audience_ids: commaIds(draft.audience) } : {}),
           status: "PAUSED",
           idempotency_key: draft.key + ":group",
         });
@@ -392,7 +398,8 @@ export default function CampaignBuilder({
           "2724 (Spain), 2840 (United States)",
         )}
         {label("Language IDs", "languages", "text", "1000 (English)")}
-        {label("Google Audience ID (optional)", "audience")}
+        <label className="grid gap-1 text-xs">Grouped audience (optional)<select className="h-9 min-w-0 rounded border border-border bg-bg-input px-2" value={d.audienceResource} onChange={e => change("audienceResource", e.target.value)}><option value="">{d.audience ? `Saved native audience ${d.audience}` : "No audience selected"}</option>{audiences.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select><span className="text-text-muted">Create reusable groups in Audiences.</span></label>
+        <label className="flex items-start gap-2 text-xs sm:col-span-2"><input type="checkbox" checked={d.optimizedTargeting} onChange={e => change("optimizedTargeting", e.target.checked)} />Allow optimized targeting beyond selected audiences</label>
         <div className="flex flex-wrap gap-3 text-xs sm:col-span-2">
           {channels
             .filter((c) => !channelGoal || c.startsWith("youtube_"))

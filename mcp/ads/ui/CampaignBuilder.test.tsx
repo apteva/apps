@@ -34,6 +34,8 @@ function seed() {
     locations: "2724",
     languages: "1000",
     audience: "",
+    audienceResource: "",
+    optimizedTargeting: false,
     placements: ["youtube_in_feed"],
     format: "responsive_video",
     business: "Example",
@@ -197,4 +199,13 @@ test("Drafts remain isolated by install/project/account", async () => {
   );
   const { node } = await render(fixture().call, "other-install:other-project");
   expect(node.textContent).not.toContain("Campaign 77");
+});
+test("New campaigns carry scoped group IDs and keep audience expansion explicit", async () => {
+  sessionStorage.setItem("ads:campaign:install:project:1", JSON.stringify({ ...seed(), audienceResource: "42", optimizedTargeting: false }));
+  const f = fixture(); const { node } = await render(f.call);
+  await click(node, "Create paused campaign");
+  const adGroup = f.calls.find(c => c.tool === "adset_create")!;
+  expect(adGroup.args.audience_resource_ids).toEqual([42]);
+  expect(adGroup.args.audience_ids).toBeUndefined();
+  expect(adGroup.args.optimized_targeting).toBe(false);
 });
