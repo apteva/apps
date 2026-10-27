@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.51
+version: 0.1.52
 description: |
+  v0.1.52 extends the shared audience lifecycle and UI with Google custom
+  keyword/URL/app segments, first-party seeded lookalikes, grouped composition,
+  interest discovery and named campaign targeting. Capabilities report provider
+  eligibility and lifecycle restrictions. Google custom segments require
+  integrations catalog v0.54.3 or newer. Existing Meta workflows remain compatible.
   v0.1.51 adds structured Demand Gen campaigns, YouTube engagement goals,
   placements, video/image/carousel ads, campaign-scoped goals and reporting.
   Manage paid advertising across networks behind one MCP surface.
@@ -273,7 +278,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.51
+    ref: ads/v0.1.52
     entry: mcp/ads
   port: 8080
   health_check: /health

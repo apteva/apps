@@ -142,12 +142,12 @@ unknown rather than inferring that every remarketing list is a subscriber list.
 
 ## Integration dependency and verification
 
-Deploy the integration catalog containing `google-ads.custom_audience_mutate`
-before releasing this Ads change. CustomAudienceService is not part of Google's
+Ads 0.1.52 requires integrations catalog 0.54.3 or newer, containing
+`google-ads.custom_audience_mutate`, for structured custom segments. CustomAudienceService is not part of Google's
 `bulk_mutate` operations. The companion integrations change adds only the typed
 HTTP endpoint; existing Google Ads OAuth scopes cover it. Other Ads operations
-continue using existing catalog endpoints. This work does not deploy a catalog,
-publish a release, upgrade a running installation or activate delivery.
+continue using existing catalog endpoints. Publishing these releases does not
+upgrade a running installation or activate delivery.
 
 The opt-in `TestGoogleAudiencesLive` exercises the app's public handlers against
 the connected real Google account. Existing tools use the server integration.

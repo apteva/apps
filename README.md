@@ -92,7 +92,7 @@ composition, interest discovery and named Demand Gen targeting. Capabilities
 report creation, editing, deletion and seed eligibility per type. Existing
 YouTube viewer/subscriber lists are discoverable seeds; Google requires creating
 those lists in Audience Manager. See [the API and validation guide](mcp/ads/GOOGLE_AUDIENCES.md).
-Custom segments require the companion integration catalog endpoint.
+Ads 0.1.52 custom segments require integrations catalog 0.54.3 or newer.
 
 ## Releasing
 
