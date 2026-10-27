@@ -26,6 +26,7 @@ export interface DeliveryDiagnostics {
   };
   first_upload_error?: UploadOutcome;
   latest_upload_error?: UploadOutcome;
+  upload_acknowledgement_resolution?: UploadOutcome;
   initialization?: UploadOutcome;
   last_upload?: UploadOutcome;
   local_diagnostic?: string;
@@ -121,13 +122,14 @@ export function TargetDelivery({
   };
   const d = local;
   const observation = d?.provider_observation;
+  const acknowledgementResolved = !!d?.upload_acknowledgement_resolution;
   return (
     <section
       className="mt-2 rounded border border-border p-2 text-xs"
       aria-label="Delivery status"
     >
       <div className="font-medium text-text">Upload and publication</div>
-      {d?.local_diagnostic === "stalled_upload" && (
+      {d?.local_diagnostic === "stalled_upload" && !acknowledgementResolved && (
         <p role="status" className="mt-1 text-error">
           Upload stalled: no confirmed progress after an upload error. TikTok
           status: {d.provider_status || "Unknown"}. A replacement upload is
@@ -164,10 +166,24 @@ export function TargetDelivery({
           acknowledged progress.
         </p>
       )}
+      {acknowledgementResolved && (
+        <p className="mt-1 text-text-dim">
+          Upload acknowledgement reconciled from the saved successful response.
+          Original warning retained; the existing operation is checked without
+          uploading again.
+        </p>
+      )}
       {d?.latest_upload_error && (
-        <details className="mt-2 text-error">
+        <details
+          className={
+            acknowledgementResolved ? "mt-2 text-text-dim" : "mt-2 text-error"
+          }
+        >
           <summary>
-            Upload error · HTTP {d.latest_upload_error.http_status || "unknown"}
+            {acknowledgementResolved
+              ? "Previous acknowledgement warning (resolved)"
+              : "Upload error"}{" "}
+            · HTTP {d.latest_upload_error.http_status || "unknown"}
           </summary>
           <p>
             First recorded error:{" "}

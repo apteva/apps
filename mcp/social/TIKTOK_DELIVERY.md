@@ -5,10 +5,18 @@ Source verification, attempted upload payload and acknowledged upload are separa
 validation. `attempted_upload_bytes` counts payload bytes submitted to HTTP
 requests, not proof of network transfer. `acknowledged_upload_bytes` advances only
 after 206 for intermediate chunks or 201 for the final chunk, with any returned
-Content-Range/Range checked against the submitted bytes and total. The legacy
+Content-Range/Range checked against the submitted bytes and total. Supported
+inclusive endpoints and exclusive end offsets are normalized, including TikTok's
+observed final `bytes 0-N/N` response. Under-acknowledgements, incompatible totals,
+conflicting headers and unexpected HTTP statuses remain errors. The legacy
 `transferred_bytes` alias now means acknowledged bytes for new TikTok attempts.
 Legacy unverified transfer counters are exposed separately; acknowledgement is
-unknown rather than fabricated during upgrade.
+unknown rather than fabricated during upgrade. Saved final HTTP 201 responses
+previously classified as invalid acknowledgements can be reconciled from their
+exact stored ranges, verified source size and attempted/acknowledged prefix.
+`upload_acknowledgement_resolution` explains the interpretation while original
+first/latest error evidence is retained. This does not infer publication or resend
+bytes: the existing operation is inspected/polled through the normal guarded path.
 
 Each attempt has a durable `video_delivery_attempts` snapshot independent of the
 32 most recent events. Initialization and the first/latest upload errors retain

@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.1
+version: 0.20.2
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -216,7 +216,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.1
+    ref: social/v0.20.2
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -4360,6 +4360,7 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	d.FirstUploadError = nil
 	d.LatestUploadError = nil
 	d.LastUpload = nil
+	d.UploadAcknowledgementResolution = nil
 	d.ProviderObservation = nil
 	d.LastProgressAt = ""
 	d.LocalDiagnostic = ""

@@ -102,13 +102,14 @@ func decodeDeliveryDiagnostics(raw, platform, lastError string) deliveryDiagnost
 				d.LatestUploadError = &latest
 			}
 		}
+		d.reconcileTikTokAcknowledgement()
 		d.updateTikTokStall(time.Now().UTC())
 	}
 	return d
 }
 func (d *deliveryDiagnostics) updateTikTokStall(now time.Time) {
 	d.LocalDiagnostic = ""
-	if d.LatestUploadError == nil || d.ProviderStatus != "PROCESSING_UPLOAD" {
+	if d.LatestUploadError == nil || d.UploadAcknowledgementResolution != nil || d.ProviderStatus != "PROCESSING_UPLOAD" {
 		return
 	}
 	baseline := d.LastProgressAt
@@ -124,36 +125,46 @@ func (d *deliveryDiagnostics) updateTikTokStall(now time.Time) {
 	}
 }
 
-var contentRangeACK = regexp.MustCompile(`(?i)^bytes\s+(\d+)-(\d+)/(\d+)$`)
-var rangeACK = regexp.MustCompile(`(?i)^bytes[ =]+(\d+)-(\d+)$`)
+var contentRangeACK = regexp.MustCompile(`(?i)^bytes[ =]+(\d+)\s*-\s*(\d+)\s*/\s*(\d+)$`)
+var rangeACK = regexp.MustCompile(`(?i)^bytes[ =]+(\d+)\s*-\s*(\d+)$`)
 
+// TikTok has returned both inclusive byte endpoints and an exclusive end
+// offset (including bytes 0-N/N on final HTTP 201). Normalize those two forms;
+// under-acknowledgements, different totals and unexpected statuses stay errors.
 func validateTikTokAcknowledgement(headers http.Header, first, last, total int64) error {
+	if first < 0 || last < first || total <= last {
+		return errors.New("invalid attempted upload range")
+	}
 	for _, field := range []string{"Content-Range", "Range"} {
-		raw := strings.TrimSpace(headers.Get(field))
-		if raw == "" {
-			continue
-		}
-		match := rangeACK.FindStringSubmatch(raw)
-		if field == "Content-Range" {
-			match = contentRangeACK.FindStringSubmatch(raw)
-		}
-		if match == nil {
-			return fmt.Errorf("invalid %s acknowledgement", field)
-		}
-		start, e1 := strconv.ParseInt(match[1], 10, 64)
-		end, e2 := strconv.ParseInt(match[2], 10, 64)
-		if e1 != nil || e2 != nil || (start != 0 && start != first) || end != last || end < start {
-			return fmt.Errorf("%s acknowledgement does not match the attempted chunk", field)
-		}
-		if len(match) == 4 {
-			size, err := strconv.ParseInt(match[3], 10, 64)
-			if err != nil || size != total {
-				return errors.New("Content-Range acknowledgement has a different total size")
+		for _, value := range headers.Values(field) {
+			raw := strings.TrimSpace(value)
+			if raw == "" {
+				continue
+			}
+			expression := rangeACK
+			if field == "Content-Range" {
+				expression = contentRangeACK
+			}
+			match := expression.FindStringSubmatch(raw)
+			if match == nil {
+				return fmt.Errorf("invalid %s acknowledgement", field)
+			}
+			start, e1 := strconv.ParseInt(match[1], 10, 64)
+			end, e2 := strconv.ParseInt(match[2], 10, 64)
+			if e1 != nil || e2 != nil || (start != 0 && start != first) || (end != last && end != last+1) || end < start {
+				return fmt.Errorf("%s acknowledgement does not match the attempted chunk", field)
+			}
+			if len(match) == 4 {
+				size, e := strconv.ParseInt(match[3], 10, 64)
+				if e != nil || size != total {
+					return errors.New("Content-Range acknowledgement has a different total size")
+				}
 			}
 		}
 	}
 	return nil
 }
+
 func (d *deliveryDiagnostics) observeTikTokProgress(observation tikTokProgressObservation) {
 	advanced := false
 	if observation.QuerySucceeded {
@@ -233,6 +244,7 @@ func (d *deliveryDiagnostics) mergeDeliveryEvidence(old deliveryDiagnostics) {
 		}
 		d.AutomaticPollingStopped = d.AutomaticPollingStopped || old.AutomaticPollingStopped
 	}
+	d.reconcileTikTokAcknowledgement()
 	d.updateTikTokStall(time.Now().UTC())
 }
 

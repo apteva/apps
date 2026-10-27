@@ -22,8 +22,11 @@ type historyReadError struct {
 func (e *historyReadError) Error() string { return e.err.Error() }
 
 type nativePage struct {
-	Posts []nativePost
-	Next  string
+	Posts       []nativePost
+	Next        string
+	Total       *int64
+	TotalSource string
+	ListedIDs   []string
 }
 
 func historyExecute(ctx *sdk.AppCtx, b historyAccount, tool string, args map[string]any) (map[string]any, error) {
@@ -291,6 +294,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 			return nativePage{}, err
 		}
 		ids := []string{}
+		listedIDs := []string{}
 		seen := map[string]bool{}
 		for _, item := range items {
 			id := historyString(historyMap(item, "contentDetails"), "videoId")
@@ -302,13 +306,14 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 				addHistoryLimitation(run, "A playlist item had no native video ID.")
 				continue
 			}
+			listedIDs = append(listedIDs, id)
 			if !seen[id] {
 				ids = append(ids, id)
 				seen[id] = true
 			}
 		}
 		posts, err := a.youtubeNativePosts(ctx, b, run, ids)
-		return nativePage{Posts: posts, Next: historyString(raw, "nextPageToken")}, err
+		return nativePage{Posts: posts, Next: historyString(raw, "nextPageToken"), Total: nativeBytes(historyMap(raw, "pageInfo")["totalResults"]), TotalSource: "youtube.uploads.pageInfo.totalResults", ListedIDs: listedIDs}, err
 	case "pinterest":
 		tool := "list_pins"
 		args := map[string]any{"page_size": size}
@@ -358,7 +363,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 		if err != nil {
 			return nativePage{}, err
 		}
-		page := nativePage{}
+		page := nativePage{Total: nativeBytes(historyMap(raw, "summary")["total_count"]), TotalSource: b.Platform + ".posts.summary.total_count"}
 		paging := historyMap(raw, "paging")
 		if next := historyString(paging, "next"); next != "" {
 			page.Next = historyString(historyMap(paging, "cursors"), "after")
@@ -486,7 +491,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 		if err != nil {
 			return nativePage{}, err
 		}
-		page := nativePage{}
+		page := nativePage{Total: nativeBytes(historyMap(raw, "paging")["total"]), TotalSource: "linkedin.author_posts.paging.total"}
 		if len(items) == size {
 			page.Next = strconv.Itoa(offset + len(items))
 		}
@@ -545,6 +550,8 @@ func (a *App) fetchZernioHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *his
 	// A short page is not enough when the provider explicitly supplies hasMore.
 	more, explicit := raw["hasMore"].(bool)
 	pagination := historyMap(raw, "pagination")
+	page.Total = nativeBytes(pagination["total"])
+	page.TotalSource = "zernio.account_posts.pagination.total"
 	if value, ok := pagination["hasMore"].(bool); ok {
 		more = value
 		explicit = true
