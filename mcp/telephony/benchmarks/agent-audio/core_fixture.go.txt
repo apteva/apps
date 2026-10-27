@@ -57,6 +57,7 @@ func TestTelephonyInternalAudioCoreFixture(t *testing.T){
    rt.messages[0].Content=rt.Thinker.directive
    rt.provider=NewOpenAIRealtimeProvider(key);rt.opts.Model,rt.opts.Voice="gpt-live-1","brise"
    if model:=os.Getenv("TELEPHONY_LATENCY_MODEL");cfg.Latency&&model!=""{rt.opts.Model=model;if model!="gpt-live-1"{rt.opts.Voice="marin"}}
+   rt.opts.OutputConfig.Media=RealtimeMediaConfig{Transport:os.Getenv("TELEPHONY_AGENT_AUDIO_TRANSPORT"),Format:"pcm16"}
    rt.capabilities=capabilitiesForRealtime(rt.provider,rt.opts.Model);rt.registry=NewToolRegistry("")
    if cfg.Latency{
     rt.Thinker.directive="Parlez uniquement en français. Attendez la parole de l’utilisateur sans salutation initiale. Répondez brièvement à sa question, seulement avec le jour qu’il a demandé. N’utilisez pas d’outils, ne déléguez pas et ne terminez pas la conversation."
@@ -72,7 +73,7 @@ func TestTelephonyInternalAudioCoreFixture(t *testing.T){
  mux.HandleFunc("/emit",func(w http.ResponseWriter,r *http.Request){
   var cfg struct{Item string `json:"item"`;MS int `json:"ms"`;Silent bool `json:"silent"`};if json.NewDecoder(r.Body).Decode(&cfg)!=nil||cfg.MS<=0||cfg.MS>5000{http.Error(w,"invalid",400);return}
   audio:=make([]byte,cfg.MS*48);for i:=0;i<len(audio)/2;i++{sample:=int16(10000*math.Sin(2*math.Pi*500*float64(i)/24000));if cfg.Silent{sample=0};audio[2*i]=byte(sample);audio[2*i+1]=byte(uint16(sample)>>8)}
-  fake.events<-RealtimeEvent{Type:RealtimeEventAudioOut,ItemID:cfg.Item,ResponseID:cfg.Item,Audio:audio,AudioSilence:cfg.Silent};w.WriteHeader(204)
+  fake.events<-RealtimeEvent{Type:RealtimeEventAudioOut,ItemID:cfg.Item,ResponseID:cfg.Item,ObservedAt:time.Now(),Audio:audio,AudioSilence:cfg.Silent};w.WriteHeader(204)
  })
  mux.HandleFunc("/interrupt",func(w http.ResponseWriter,r *http.Request){rt.rendererSpeechStarted();w.WriteHeader(204)})
  mux.HandleFunc("/stats",func(w http.ResponseWriter,r *http.Request){

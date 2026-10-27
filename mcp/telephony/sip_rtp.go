@@ -316,6 +316,7 @@ func newSIPRTPPacerWithPolicy(
 	}
 	if policy.agentSession.continuous() {
 		pacer.packetizer = newCarrierAudioPacketizer(media.sampleRate())
+		pacer.agentPlayout.tuning = newAgentPlayoutTuning(policy.agentSession, policy.bufferMS)
 		pacer.agentPlayout.reserve = time.Duration(min(max(20, policy.bufferMS), min(200, policy.maxQueueMS))) * time.Millisecond
 	}
 	if len(observers) > 0 {
@@ -340,6 +341,7 @@ func (p *sipRTPPacer) run() {
 		case command := <-p.cancelCh:
 			p.fadeAfterClear.Store(p.agentSession.continuous())
 			p.queueMu.Lock()
+			p.agentPlayout.tuning.resetStream()
 			partialCleared := 0
 			if p.packetizer != nil {
 				before := p.packetizer.queuedSamples
@@ -367,6 +369,7 @@ func (p *sipRTPPacer) run() {
 			if len(p.queue) == 0 && p.packetizer != nil && p.packetizer.queuedSamples == 0 {
 				p.agentPlayout.readyAt = time.Time{}
 				p.agentPlayout.exhaustedAt = time.Time{}
+				p.agentPlayout.tuning.resetStream()
 			}
 			p.queueMu.Unlock()
 			command.reply <- agentClearReceipt{Scope: "local", LocalMS: cleared}
@@ -449,6 +452,7 @@ func (p *sipRTPPacer) run() {
 						return true
 					}
 					p.agentSession.observeSent(packet.itemID, packet.generation, packet.silence, time.Time{})
+					p.agentSession.traceSent(packet.itemID, packet.generation, packet.silence, packet.audioEndMS, 20, "rtp_transmitted", time.Now(), time.Since(writeStarted))
 					if p.observeActivity != nil {
 						p.observeActivity(packet.silence)
 					}
@@ -553,6 +557,7 @@ func (p *sipRTPPacer) drain() int {
 		p.packetizer.clear()
 		p.agentPlayout.readyAt = time.Time{}
 		p.agentPlayout.exhaustedAt = time.Time{}
+		p.agentPlayout.tuning.resetStream()
 	}
 	count := 0
 	for {
@@ -574,34 +579,65 @@ func (p *sipRTPPacer) enqueueAt(packets []sipRTPOutboundPacket, receivedAt time.
 	p.queueMu.Lock()
 	defer p.queueMu.Unlock()
 	if p.packetizer != nil {
-		samples := p.packetizer.queuedSamples
+		rawSamples := p.packetizer.queuedSamples
 		for _, packet := range packets {
-			samples += len(packet.pcm)
+			if !p.agentSession.rejects(packet.itemID, packet.generation) {
+				rawSamples += len(packet.pcm)
+			}
 		}
-		if samples > (cap(p.queue)-len(p.queue))*p.packetizer.packetSamples {
+		// A bounded rate correction cannot rescue a grossly oversized batch.
+		// Reject before scanning PCM; preserve the transactional retry path.
+		if rawSamples > (cap(p.queue)-len(p.queue))*p.packetizer.packetSamples*104/100+p.media.sampleRate()/100 {
 			return len(p.queue) * 20, errCarrierPacerOverflow
 		}
+		// Stage both packetization and adaptation. Queue-full retries are pure:
+		// no samples, source offsets, priming or rate debt advance on rejection.
+		state := p.agentPlayout
+		if state.tuning.cfg.Mode == "" {
+			state.tuning = newAgentPlayoutTuning(p.agentSession, int(state.reserve/time.Millisecond))
+		}
+		packetizer := *p.packetizer
+		packetizer.segments = append([]carrierAudioSegment(nil), p.packetizer.segments...)
 		var ready []sipRTPOutboundPacket
 		for _, packet := range packets {
 			if p.agentSession.rejects(packet.itemID, packet.generation) {
 				continue
 			}
-			if len(packet.pcm) > 0 {
-				now := receivedAt
-				if p.agentPlayout.readyAt.IsZero() || (!p.agentPlayout.exhaustedAt.IsZero() && now.Sub(p.agentPlayout.exhaustedAt) >= sipAgentRecoveryIdle) {
-					p.agentPlayout.readyAt = now.Add(p.agentPlayout.reserve)
-					p.agentPlayout.starts++
-				} else if !p.agentPlayout.exhaustedAt.IsZero() {
-					p.agentPlayout.readyAt = now
-					p.agentPlayout.recoveries++
-				}
-				p.agentPlayout.exhaustedAt = time.Time{}
-				p.agentPlayout.lastInputAt = now
+			if len(packet.pcm) == 0 {
+				continue
 			}
-			for _, frame := range p.packetizer.addAt(packet.pcm, len(packet.pcm)*24000/p.media.sampleRate(), realtimeBridgeControl{ItemID: packet.itemID, Generation: packet.generation, AudioEndMS: packet.audioEndMS, Silence: packet.silence}, packet.enqueuedAt) {
-				ready = append(ready, sipRTPOutboundPacket{pcm: frame.PCM, itemID: frame.ItemID, generation: frame.Generation, audioEndMS: frame.AudioEndMS, silence: frame.Silence, enqueuedAt: frame.EnqueuedAt})
+			now := receivedAt
+			initial := state.readyAt.IsZero() || (!state.exhaustedAt.IsZero() && now.Sub(state.exhaustedAt) >= time.Duration(state.recoveryIdleMS())*time.Millisecond)
+			if initial {
+				state.tuning.resetStream()
+			}
+			sourceSamples := len(packet.pcm) * 24000 / p.media.sampleRate()
+			frame := realtimeBridgeControl{ItemID: packet.itemID, Generation: packet.generation, AudioEndMS: packet.audioEndMS, Silence: packet.silence}
+			pcm := state.tuning.process(packet.pcm, p.media.sampleRate(), (len(p.queue)+len(ready))*20+carrierSamplesToMS(packetizer.queuedSamples, p.media.sampleRate()), frame, now)
+			state.reserve = time.Duration(state.tuning.stats.TargetMS) * time.Millisecond
+			if initial {
+				state.readyAt = now.Add(state.reserve)
+				state.starts++
+			} else if !state.exhaustedAt.IsZero() {
+				state.readyAt = now
+				state.recoveries++
+			}
+			state.exhaustedAt = time.Time{}
+			state.lastInputAt = now
+			for _, f := range packetizer.addAt(pcm, sourceSamples, frame, packet.enqueuedAt) {
+				ready = append(ready, sipRTPOutboundPacket{pcm: f.PCM, itemID: f.ItemID, generation: f.Generation, audioEndMS: f.AudioEndMS, silence: f.Silence, enqueuedAt: f.EnqueuedAt})
 			}
 		}
+		slots := len(ready)
+		if packetizer.queuedSamples > 0 {
+			slots++
+		}
+		if slots > cap(p.queue)-len(p.queue) {
+			return len(p.queue) * 20, errCarrierPacerOverflow
+		}
+		*p.packetizer = packetizer
+		p.agentPlayout = state
+		p.agentSession.publishPlayout(state.tuning)
 		packets = ready
 	}
 	before := len(p.queue) + len(packets)
@@ -1071,7 +1107,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		frameMeta := nextFrame
 		nextFrame = realtimeBridgeControl{}
 		var queued int
-		err = agentSession.withPlaybackPressure(ctx, frameMeta, func() error { var e error; queued, e = pacer.enqueue(packets); return e })
+		receivedAt := time.Now()
+		err = agentSession.withPlaybackPressure(ctx, frameMeta, func() error { var e error; queued, e = pacer.enqueueAt(packets, receivedAt); return e })
 		if err != nil {
 			if writeErr := agentSession.overflow(coreWriter, frameMeta.ItemID, frameMeta.Generation, "carrier_queue_overflow"); writeErr != nil {
 				return

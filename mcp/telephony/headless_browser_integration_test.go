@@ -216,7 +216,9 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	var mediaConnections int
 	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", hostOrigin)
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		// The shipped client correlates call reads with X-Request-ID.
+		// Real browser preflights must accept it before outage injection begins.
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.URL.Path == "/fixture/logout" && authSidecar != nil && r.Method == http.MethodPost {
 			result := authSidecar.POST("/logout", map[string]any{"refresh_token": refreshToken}, nil)

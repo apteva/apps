@@ -52,6 +52,9 @@ type agentClearReceipt struct {
 }
 
 type agentAudioSnapshot struct {
+	TimingTrace        []agentAudioTraceEvent        `json:"timing_trace,omitempty"`
+	TraceOmitted       uint64                        `json:"trace_omitted"`
+	Playout            agentPlayoutStats             `json:"playout"`
 	CoreLink           *agentCoreLinkSnapshot        `json:"core_link,omitempty"`
 	PlaybackPressure   agentPlaybackPressureSnapshot `json:"playback_pressure"`
 	Capabilities       agentAudioCapabilities        `json:"capabilities"`
@@ -65,6 +68,9 @@ type agentAudioSnapshot struct {
 }
 
 type agentAudioSession struct {
+	trace                    []agentAudioTraceEvent
+	traceOmitted             uint64
+	playout                  agentPlayoutStats
 	link                     *agentCoreLink
 	pressure                 agentPlaybackPressureSnapshot
 	mu                       sync.Mutex
@@ -187,6 +193,7 @@ func (s *agentAudioSession) acceptAt(f realtimeBridgeControl, at time.Time) bool
 	if f.Silence {
 		s.silentFrames++
 	}
+	s.traceReceiveLocked(f, at)
 	s.observeCoreReplyLocked(f, at)
 	return true
 }
@@ -200,6 +207,9 @@ func (s *agentAudioSession) ready(w *websocketWriterPump, evidence string) error
 	ready := map[string]any{"type": "playback.ready", "version": 1, "evidence": evidence}
 	if capacity := s.playbackCapacityMS(); capacity > 0 {
 		ready["capacity_ms"] = capacity
+	}
+	if s.profile.Playout.TraceFrames > 0 {
+		ready["timing_trace"] = true
 	}
 	raw, _ := json.Marshal(ready)
 	return w.Write(ws.OpText, raw)
@@ -273,7 +283,7 @@ func (s *agentAudioSession) snapshot() *agentAudioSnapshot {
 		v := s.link.snapshot()
 		link = &v
 	}
-	return &agentAudioSnapshot{CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, PlaybackCapacityMS: s.playbackCapacityMS(), Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
+	return &agentAudioSnapshot{TimingTrace: append([]agentAudioTraceEvent(nil), s.trace...), TraceOmitted: s.traceOmitted, Playout: s.playout, CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, PlaybackCapacityMS: s.playbackCapacityMS(), Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
 }
 
 type agentBridgeConn struct {

@@ -88,6 +88,7 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 		if op != ws.OpBinary || len(raw) == 0 || session.mediaFormat() == "pcm16" && len(raw)%2 != 0 {
 			continue
 		}
+		frame.receivedAt = time.Now()
 		if !session.accept(frame) {
 			frame = realtimeBridgeControl{}
 			continue
@@ -101,6 +102,9 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 		}
 		if count < len(pcm) {
 			packets = append(packets, carrierPacedPacket{PCM: append([]int16(nil), pcm[count:]...), ItemID: frame.ItemID, Generation: frame.Generation, Silence: frame.Silence, AudioEndMS: frame.AudioEndMS})
+		}
+		for i := range packets {
+			packets[i].receivedAt = frame.receivedAt
 		}
 		err = session.withPlaybackPressure(ctx, frame, func() error { _, _, e := pacer.enqueue(ctx, packets); return e })
 		if err != nil {

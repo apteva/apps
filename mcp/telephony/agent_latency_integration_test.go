@@ -47,6 +47,18 @@ func TestAgentAudioMatchedLatency(t *testing.T) {
 	if !live || os.Getenv("TELEPHONY_LATENCY_SIP") == "1" {
 		paths = append(paths, struct{ provider, direction string }{"sip-PCMA", "inbound"}, struct{ provider, direction string }{"sip-PCMA", "outbound"}, struct{ provider, direction string }{"sip-G722", "inbound"}, struct{ provider, direction string }{"sip-G722", "outbound"})
 	}
+	if selected := os.Getenv("TELEPHONY_LATENCY_PATH"); selected != "" {
+		kept := paths[:0]
+		for _, path := range paths {
+			if path.provider+"/"+path.direction == selected {
+				kept = append(kept, path)
+			}
+		}
+		paths = kept
+		if len(paths) == 0 {
+			t.Fatal("unknown latency path", selected)
+		}
+	}
 	samples, _ := strconv.Atoi(os.Getenv("TELEPHONY_LATENCY_SAMPLES"))
 	if samples < 1 {
 		samples = 1

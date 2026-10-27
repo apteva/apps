@@ -14,14 +14,15 @@ import (
 )
 
 type agentAudioProfile struct {
-	Transport     string `json:"transport,omitempty"`
-	Format        string `json:"format,omitempty"`
-	Mode          string `json:"mode"`
-	Interruption  string `json:"interruption"`
-	Preprocessing string `json:"preprocessing"`
-	SpeechStartMS int    `json:"speech_start_ms"`
-	SendAheadMS   int    `json:"send_ahead_ms"`
-	BacklogMS     int    `json:"backlog_ms"`
+	Playout       agentPlayoutConfig `json:"playout"`
+	Transport     string             `json:"transport,omitempty"`
+	Format        string             `json:"format,omitempty"`
+	Mode          string             `json:"mode"`
+	Interruption  string             `json:"interruption"`
+	Preprocessing string             `json:"preprocessing"`
+	SpeechStartMS int                `json:"speech_start_ms"`
+	SendAheadMS   int                `json:"send_ahead_ms"`
+	BacklogMS     int                `json:"backlog_ms"`
 }
 
 func resolveAgentAudioProfile(p agentAudioProfile) (agentAudioProfile, error) {
@@ -67,7 +68,9 @@ func resolveAgentAudioProfile(p agentAudioProfile) (agentAudioProfile, error) {
 	if p.BacklogMS < 200 || p.BacklogMS > 2000 || p.BacklogMS%20 != 0 {
 		return p, errors.New("backlog_ms must be 200..2000 in 20 ms steps")
 	}
-	return p, nil
+	var err error
+	p.Playout, err = resolveAgentPlayoutConfig(p.Playout, p.SendAheadMS, p.BacklogMS)
+	return p, err
 }
 
 func agentAudioScopes(row *callRow) []string {

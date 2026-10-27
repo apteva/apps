@@ -12,6 +12,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/pion/rtp"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -112,13 +113,18 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 	row := testCall(provider+"-"+direction, "in-progress")
 	row.ProjectID = ctx.CurrentProject()
 	row.PeerKind = peerKindRealtime
+	profile := agentAudioProfile{Playout: agentPlayoutConfig{Mode: os.Getenv("TELEPHONY_AGENT_PLAYOUT")}}
+	profile.Playout.SpeedPercent, _ = strconv.Atoi(os.Getenv("TELEPHONY_AGENT_SPEED"))
+	profile.Playout.TraceFrames, _ = strconv.Atoi(os.Getenv("TELEPHONY_AGENT_TRACE"))
 	if live && os.Getenv("TELEPHONY_AGENT_AUDIO_LOCAL_INTERRUPT") == "1" {
-		p, err := resolveAgentAudioProfile(agentAudioProfile{Interruption: "local"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		row.preparedAgentAudio = &p
+		profile.Interruption = "local"
 	}
+	resolved, err := resolveAgentAudioProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.preparedAgentAudio = &resolved
+
 	row.Direction = direction
 	row.ThreadID = auth.Thread
 	row.AudioBridgeURL = "ws" + strings.TrimPrefix(server.url, "http") + "/api/realtime/audio?agent_id=42&thread=" + url.QueryEscape(auth.Thread) + "&token=" + url.QueryEscape(auth.Token)
@@ -447,14 +453,24 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				// paced by the actual Core using receipts, without deleting words.
 				beforeBurst := probe.frames.Load()
 				agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": "large-burst", "ms": 2500}, nil)
+				expectedBurstPackets := func() int64 {
+					if !strings.HasPrefix(provider, "sip-") {
+						return 125
+					}
+					stats := a.liveAgentAudio(row.ID).Playout
+					// Speed tuning changes rendered duration, never the source
+					// receipt. SIP re-packetizes the adjusted PCM into 20 ms.
+					return int64(math.Ceil((2500 + stats.ExpandedMS - stats.CompressedMS) / 20))
+				}
 				waitAgentPipeline(t, 6*time.Second, func() bool {
 					var stats agentPipelineStats
 					agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
-					return probe.frames.Load() >= beforeBurst+125 && stats.Pending == 0 && stats.Awaiting == 0
+					return probe.frames.Load() >= beforeBurst+expectedBurstPackets() && stats.Pending == 0 && stats.Awaiting == 0
 				})
-				if got := probe.frames.Load() - beforeBurst; got != 125 {
-					t.Fatal("large provider burst lost or duplicated carrier frames", got)
+				if got := probe.frames.Load() - beforeBurst; got != expectedBurstPackets() {
+					t.Fatal("rendered burst packet count does not match adjusted duration", got, expectedBurstPackets())
 				}
+
 				burst := a.liveAgentAudio(row.ID)
 				if len(burst.Clears) != 0 || burst.PlaybackPressure.Exhausted != 0 || burst.CoreLink.OutputOmittedMS != 0 || burst.CoreLink.Reconnects != 0 {
 					t.Fatal("large provider burst overflowed or reset the bridge", burst)

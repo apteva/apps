@@ -3,17 +3,26 @@ import {mkdtemp,mkdir,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 const root=resolve(import.meta.dir,"../..");
 const opts=new Map<string,string>();
-for(let i=2;i<process.argv.length;i+=2){const k=process.argv[i],v=process.argv[i+1];if(!["--core","--server","--output","--live","--latency"].includes(k)||!v||opts.has(k))throw Error("Invalid option");opts.set(k,v)}
+for(let i=2;i<process.argv.length;i+=2){const k=process.argv[i],v=process.argv[i+1];if(!["--core","--server","--output","--live","--latency","--transport","--playout","--speed","--trace","--path","--samples"].includes(k)||!v||opts.has(k))throw Error("Invalid option");opts.set(k,v)}
 if(!opts.has("--core")||!opts.has("--server"))throw Error("--core /path/core --server /path/server required");
 if(opts.has("--live")&&opts.get("--live")!=="true")throw Error("--live true required");
 const live=opts.get("--live")==="true";
 if(opts.has("--latency")&&opts.get("--latency")!=="true")throw Error("--latency true required");
 const latency=opts.get("--latency")==="true";
 if(live&&!process.env.OPENAI_API_KEY)throw Error("OPENAI_API_KEY must be supplied securely in the environment");
+const transport=opts.get("--transport")??"websocket";
+if(!["websocket","webrtc"].includes(transport))throw Error("--transport must be websocket or webrtc");
+const playout=opts.get("--playout")??"fixed";
+if(!["fixed","adaptive"].includes(playout))throw Error("--playout must be fixed or adaptive");
+const speed=Number(opts.get("--speed")??0),trace=Number(opts.get("--trace")??0);
+if(!Number.isInteger(speed)||speed<0||speed>3||!Number.isInteger(trace)||trace<0||trace>2000)throw Error("Invalid speed or trace limit");
+const samples=Number(opts.get("--samples")??process.env.TELEPHONY_LATENCY_SAMPLES??1);
+if(!Number.isInteger(samples)||samples<1||samples>5)throw Error("--samples must be 1..5");
+const path=opts.get("--path")??"";
 const output=resolve(opts.get("--output")??join(tmpdir(),`telephony-agent-audio-${Date.now()}`));
 await mkdir(output,{recursive:false});
 const temp=await mkdtemp(join(tmpdir(),"telephony-agent-build-"));
-const env={...process.env,GOWORK:"off",TELEMETRY_URL:"",TELEMETRY_LIVE_URL:"",SERVER_URL:"",TELEPHONY_AGENT_AUDIO_LIVE:live?"1":"0",TELEPHONY_AGENT_AUDIO_LATENCY:latency?"1":"0"} as NodeJS.ProcessEnv;
+const env={...process.env,GOWORK:"off",TELEMETRY_URL:"",TELEMETRY_LIVE_URL:"",SERVER_URL:"",TELEPHONY_LATENCY_PATH:path,TELEPHONY_LATENCY_SAMPLES:String(samples),TELEPHONY_AGENT_AUDIO_TRANSPORT:transport,TELEPHONY_AGENT_PLAYOUT:playout,TELEPHONY_AGENT_SPEED:String(speed),TELEPHONY_AGENT_TRACE:String(trace),TELEPHONY_AGENT_AUDIO_LIVE:live?"1":"0",TELEPHONY_AGENT_AUDIO_LATENCY:latency?"1":"0"} as NodeJS.ProcessEnv;
 // Never log credentials or include them in generated source/command arguments.
 function redact(s:string){const key=process.env.OPENAI_API_KEY;return (key?s.split(key).join("[REDACTED]"):s).replace(/sk-[A-Za-z0-9_-]{16,}/g,"[REDACTED]")}
 async function sourceHashes(cwd:string){
@@ -23,7 +32,7 @@ async function sourceHashes(cwd:string){
  const result:Record<string,string>={};for(const file of files){result[file]=new Bun.CryptoHasher("sha256").update(await Bun.file(join(cwd,file)).arrayBuffer()).digest("hex")};return result
 }
 try{
- const metadata:Record<string,unknown>={live,created_at:new Date().toISOString(),telephony_sources:await sourceHashes(root)};
+ const metadata:Record<string,unknown>={live,transport,playout,speed,trace,samples,path,created_at:new Date().toISOString(),telephony_sources:await sourceHashes(root)};
  for(const component of ["core","server"]){
   const cwd=resolve(opts.get(`--${component}`)!);
   const source=component==="core"?join(import.meta.dir,"core_fixture.go.txt"):join(root,"benchmarks/internal-audio/server_fixture.go.txt");

@@ -10,6 +10,7 @@ const sipAgentRecoveryIdle = time.Second
 // Protected by queueMu. A single bounded cushion belongs to the continuous
 // stream, not each provider chunk or playback ID. Human pacing is unchanged.
 type sipAgentPlayout struct {
+	tuning        agentPlayoutTuning
 	reserve       time.Duration
 	readyAt       time.Time
 	lastInputAt   time.Time
@@ -39,7 +40,7 @@ func (p *sipRTPPacer) agentPlayoutSnapshot() *sipAgentPlayoutDiagnostics {
 		ReserveMS: int(p.agentPlayout.reserve / time.Millisecond),
 		Starts:    p.agentPlayout.starts, QueueExhaustions: p.agentPlayout.exhaustions,
 		PaddingMS:           float64(p.agentPlayout.paddedSamples) * 1000 / float64(p.media.sampleRate()),
-		ImmediateRecoveries: p.agentPlayout.recoveries, RecoveryIdleMS: int(sipAgentRecoveryIdle / time.Millisecond),
+		ImmediateRecoveries: p.agentPlayout.recoveries, RecoveryIdleMS: p.agentPlayout.recoveryIdleMS(),
 	}
 }
 
@@ -79,4 +80,11 @@ func (p *sipRTPPacer) prepareAgentTick(now time.Time) bool {
 		p.queue <- packet
 	}
 	return true
+}
+
+func (p *sipAgentPlayout) recoveryIdleMS() int {
+	if p.tuning.cfg.RecoveryIdleMS > 0 {
+		return p.tuning.cfg.RecoveryIdleMS
+	}
+	return 1000
 }

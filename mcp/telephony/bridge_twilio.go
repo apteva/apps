@@ -213,15 +213,17 @@ func realtimeInterruptControl(data []byte) bool {
 }
 
 type realtimeBridgeControl struct {
-	Generation    int64  `json:"session_generation,omitempty"`
-	Silence       bool   `json:"silence,omitempty"`
-	RequestedAtMS int64  `json:"requested_at_ms,omitempty"`
-	Type          string `json:"type"`
-	ResponseID    string `json:"response_id,omitempty"`
-	ItemID        string `json:"item_id,omitempty"`
-	AudioEndMS    int    `json:"audio_end_ms,omitempty"`
-	Source        string `json:"source,omitempty"`
-	Reason        string `json:"reason,omitempty"`
+	receivedAt    time.Time
+	Timing        *agentCoreAudioTiming `json:"timing,omitempty"`
+	Generation    int64                 `json:"session_generation,omitempty"`
+	Silence       bool                  `json:"silence,omitempty"`
+	RequestedAtMS int64                 `json:"requested_at_ms,omitempty"`
+	Type          string                `json:"type"`
+	ResponseID    string                `json:"response_id,omitempty"`
+	ItemID        string                `json:"item_id,omitempty"`
+	AudioEndMS    int                   `json:"audio_end_ms,omitempty"`
+	Source        string                `json:"source,omitempty"`
+	Reason        string                `json:"reason,omitempty"`
 }
 
 func parseRealtimeBridgeControl(data []byte) (realtimeBridgeControl, bool) {
@@ -658,11 +660,15 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
+		nextFrame.receivedAt = time.Now()
 		if !agentSession.accept(nextFrame) {
 			nextFrame = realtimeBridgeControl{}
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
+		if agentSession.continuous() && sourceAt.IsZero() {
+			sourceAt = time.Now()
+		}
 		pcm8 := agentOutput.output(data)
 		if len(pcm8) == 0 {
 			continue

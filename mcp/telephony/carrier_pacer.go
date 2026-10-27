@@ -18,6 +18,7 @@ var (
 )
 
 type carrierPacedPacket struct {
+	receivedAt time.Time
 	Generation int64
 	Silence    bool
 	EnqueuedAt time.Time
@@ -317,6 +318,7 @@ func (p *jsonCarrierAudioPacer) finish(err error) {
 }
 
 func (p *jsonCarrierAudioPacer) run() {
+	tuning := newAgentPlayoutTuning(p.policy.agentSession, p.policy.bufferMS)
 	var (
 		queue           []carrierPacedPacket
 		queuedSamples   int
@@ -436,6 +438,7 @@ func (p *jsonCarrierAudioPacer) run() {
 			return err
 		}
 		p.policy.agentSession.observeSent(packet.ItemID, packet.Generation, packet.Silence, time.Time{})
+		p.policy.agentSession.traceSent(packet.ItemID, packet.Generation, packet.Silence, packet.AudioEndMS, carrierSamplesToMS(len(packet.PCM), p.sampleRate), "carrier_write", time.Now(), time.Since(writeStarted))
 		if p.policy.onSent != nil {
 			p.policy.onSent(packet.Silence)
 		}
@@ -514,6 +517,7 @@ func (p *jsonCarrierAudioPacer) run() {
 	}
 	handleCommand := func(command carrierPacerCommand) error {
 		if command.cancel != nil {
+			tuning.resetStream()
 			c := command.cancel
 			fadeAfterClear = p.policy.agentSession.continuous()
 			receipt := agentClearReceipt{Scope: "local"}
@@ -559,6 +563,7 @@ func (p *jsonCarrierAudioPacer) run() {
 			return err
 		}
 		if command.clear {
+			tuning.resetStream()
 			clearedMS, err := clearPlayback()
 			command.response <- carrierPacerResult{clearedMS: clearedMS, err: err}
 			return err
@@ -579,6 +584,41 @@ func (p *jsonCarrierAudioPacer) run() {
 			command.response <- carrierPacerResult{clearedMS: clearedMS, err: err}
 			return nil
 		}
+		if p.policy.agentSession.continuous() {
+			candidate := tuning
+			adjusted := append([]carrierPacedPacket(nil), command.packets...)
+			total := 0
+			now := time.Now()
+			leadMS := max(0, int(bufferedThrough.Sub(now)/time.Millisecond))
+			for i := range adjusted {
+				f := &adjusted[i]
+				if p.policy.agentSession.rejects(f.ItemID, f.Generation) {
+					f.PCM = nil
+					continue
+				}
+				arrival := f.receivedAt
+				if arrival.IsZero() {
+					arrival = now
+				}
+				f.PCM = candidate.process(f.PCM, p.sampleRate, carrierSamplesToMS(queuedSamples+total, p.sampleRate)+leadMS, realtimeBridgeControl{ItemID: f.ItemID, Generation: f.Generation, Silence: f.Silence}, arrival)
+				total += len(f.PCM)
+			}
+			if queuedSamples+total > maxQueuedSamples {
+				command.response <- carrierPacerResult{err: errCarrierPacerOverflow}
+				return nil
+			}
+			tuning = candidate
+			command.packets = adjusted[:0]
+			for _, f := range adjusted {
+				if len(f.PCM) > 0 {
+					command.packets = append(command.packets, f)
+				}
+			}
+			incoming = total
+			bufferWindow = time.Duration(tuning.stats.TargetMS) * time.Millisecond
+			p.policy.agentSession.publishPlayout(tuning)
+		}
+
 		if !adaptiveUntil.IsZero() && time.Now().After(adaptiveUntil) {
 			activeMaxQueuedSamples = maxQueuedSamples
 			adaptiveUntil = time.Time{}

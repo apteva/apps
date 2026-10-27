@@ -586,11 +586,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if op != ws.OpBinary || len(data) == 0 || agentSession.mediaFormat() == "pcm16" && len(data)%2 != 0 {
 			continue
 		}
+		nextFrame.receivedAt = time.Now()
 		if !agentSession.accept(nextFrame) {
 			nextFrame = realtimeBridgeControl{}
 			continue
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
+		if agentSession.continuous() && sourceAt.IsZero() {
+			sourceAt = time.Now()
+		}
 		pcmCarrier := agentOutput.output(data)
 		if len(pcmCarrier) == 0 {
 			continue
@@ -598,6 +602,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		packets := packetizer.addAt(pcmCarrier, agentSession.pcm24Samples(len(data)), nextFrame, sourceAt)
 		if agentSession.continuous() {
 			packets = append(packets, packetizer.flushPartial()...)
+		}
+		for i := range packets {
+			packets[i].receivedAt = nextFrame.receivedAt
 		}
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
