@@ -52,6 +52,11 @@ func nativeFilter(c Collection, f *Filter) any {
 	if f.Op == "starts_with" {
 		op = "$prefix"
 	}
+	// Non-null equality already excludes null. Keeping a redundant $ne here
+	// prevents the native count planner from proving scalar index coverage.
+	if f.Op == "eq" && value != nil {
+		return map[string]any{f.Field: map[string]any{op: value}}
+	}
 	// Portable comparisons exclude null, including ne/lt/lte. Keep that gate
 	// separate so it cannot collide with an explicit $ne predicate.
 	return map[string]any{"$and": []any{map[string]any{f.Field: map[string]any{"$ne": nil}}, map[string]any{f.Field: map[string]any{op: value}}}}
@@ -293,6 +298,25 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
+	if len(t.pending) == 0 && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
+		p := plan(c, r.Query)
+		if r.RequireIndex && !p.IndexedLookup {
+			return nil, fail("query_too_expensive", "query requires a selective index")
+		}
+		h, e := t.readCollection(c)
+		if e != nil {
+			return nil, e
+		}
+		opts := native.CountOptions{MaxMemoryBytes: int64(t.backend.options.QueryWorkBytes)}
+		if p.IndexedLookup {
+			opts.Hint = p.Index
+		}
+		count, e := h.CountDocuments(t.ctx, marshal(nativeFilter(c, r.Where)), opts)
+		if e != nil {
+			return nil, nativeError(e)
+		}
+		return []Record{{r.Metrics[0].Name: strconv.FormatInt(count, 10)}}, t.ctx.Err()
+	}
 	if r.Where == nil && !r.RequireIndex && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
 		h, e := t.readCollection(c)
 		if e != nil {
