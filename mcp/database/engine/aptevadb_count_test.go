@@ -14,6 +14,9 @@ func TestAptevaCountDocumentsContract(t *testing.T) {
 		t.Run(fmt.Sprint(cache), func(t *testing.T) {
 			o := DefaultAptevaOptions()
 			o.CacheBytes = cache
+			if cache > 0 {
+				o.MemtableBytes = cache / 2
+			}
 			m, e := OpenWithConfig(t.TempDir(), ManagerOptions{Apteva: &o})
 			checkErr(t, e)
 			t.Cleanup(func() { checkErr(t, m.Close()) })

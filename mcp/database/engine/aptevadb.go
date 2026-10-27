@@ -67,6 +67,10 @@ func nativeAptevaOptions(options AptevaOptions) native.Options {
 		durable.SyncMode = native.SyncOS
 	}
 	durable.CacheBytes = options.CacheBytes
+	durable.MemtableBytes = options.MemtableBytes
+	if durable.MemtableBytes == 0 {
+		durable.MemtableBytes = -1
+	}
 	durable.Parallelism = options.AggregateWorkers
 	if options.Realtime != nil {
 		durable.ChangeFeed = nativeFeedOptions(*options.Realtime)

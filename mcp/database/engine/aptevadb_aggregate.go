@@ -86,7 +86,7 @@ func nativeSumBoundSafe(count, low, high int64) bool {
 func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	spec := nativeAggregatePlan(c, r)
 
-	p, e := native.ParsePipeline(marshal([]any{map[string]any{"$group": spec.group}}))
+	p, e := native.ParsePipeline(nativeAggregatePipeline(r, spec))
 	if e != nil {
 		return nil, nativeError(e)
 	}

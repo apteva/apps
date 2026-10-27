@@ -50,10 +50,11 @@ func (m *Manager) realtimeOperation(ctx context.Context, scope, op string, r Req
 	if r.Database == "" {
 		r.Database = "default"
 	}
-	d, e := m.resolve(ctx, scope, r.Database, "", false)
+	d, release, e := m.acquireDatabase(ctx, scope, r.Database, "", false)
 	if e != nil {
 		return nil, e
 	}
+	defer release()
 	if op == "realtime_describe" {
 		d.mu.RLock()
 		defer d.mu.RUnlock()
@@ -245,9 +246,25 @@ func (m *Manager) OpenWatch(ctx context.Context, scope string, r Request) (*Watc
 			return nil, Invalid("initial must read a selected collection without a page cursor")
 		}
 	}
-	d, e := m.resolve(ctx, scope, r.Database, "", false)
+	d, release, e := m.acquireDatabase(ctx, scope, r.Database, "", false)
 	if e != nil {
 		return nil, e
+	}
+	defer release()
+	if d.info.Adapter != "aptevadb" {
+		return nil, fail("unsupported", "realtime currently requires aptevadb")
+	}
+	initialCtx := ctx
+	if r.Initial != nil {
+		var cancel context.CancelFunc
+		initialCtx, cancel = context.WithTimeout(ctx, initialTimeout)
+		done, err := m.acquireNativeQuery(initialCtx)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		defer done()
+		defer cancel()
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -304,11 +321,9 @@ func (m *Manager) OpenWatch(ctx context.Context, scope string, r Request) (*Watc
 		return nil, watchError(e)
 	}
 	if snap != nil {
-		initialCtx, cancel := context.WithTimeout(ctx, initialTimeout)
 		tx := &aptevaTx{ctx: initialCtx, backend: b, snapshot: snap}
 		w.Initial, e = execute(tx, r.Initial.Op, r.Initial.Request, d.key)
 		snap.Close()
-		cancel()
 		if e != nil {
 			return nil, e
 		}

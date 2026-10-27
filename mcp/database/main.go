@@ -44,7 +44,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return e
 	}
 	a.manager = m
-	ctx.Logger().Info("database mounted", "durability_profile", options.SQLiteDurability, "aptevadb_sync_mode", options.Apteva.SyncMode, "aptevadb_cache_bytes", options.Apteva.CacheBytes, "aptevadb_aggregate_workers", options.Apteva.AggregateWorkers, "aptevadb_query_memory_bytes", options.Apteva.QueryWorkBytes)
+	ctx.Logger().Info("database mounted", "durability_profile", options.SQLiteDurability, "aptevadb_sync_mode", options.Apteva.SyncMode, "aptevadb_cache_bytes", options.Apteva.CacheBytes, "aptevadb_memtable_bytes", options.Apteva.MemtableBytes, "aptevadb_total_cache_bytes", options.AptevaCacheBudgetBytes, "aptevadb_max_concurrent_queries", options.MaxConcurrentAptevaQueries, "aptevadb_aggregate_workers", options.Apteva.AggregateWorkers, "aptevadb_query_memory_bytes", options.Apteva.QueryWorkBytes)
 	return nil
 }
 func (a *App) OnUnmount(*sdk.AppCtx) error {
