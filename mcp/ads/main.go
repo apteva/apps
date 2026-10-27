@@ -4859,6 +4859,11 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if firstString(args, "audience_type") == "grouped" {
+		for _, key := range []string{"provenance_status", "source_platform", "source_account_id", "source_channel_id", "source_asset_id", "interaction_type"} {
+			if firstString(args, key) != "" {
+				return mcpError("verified provenance filters use normalized audience_list with type=grouped, not legacy audience_type=grouped"), nil
+			}
+		}
 		acct, def, out := a.resolveAdAccount(ctx, args)
 		if out != nil {
 			return out, nil

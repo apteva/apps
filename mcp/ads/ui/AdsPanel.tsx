@@ -1,3 +1,5 @@
+import AudienceProvenance, { type Provenance } from "./AudienceProvenance";
+import { audienceTypeLabel } from "./audiencePresentation";
 import AudienceFields, { freshAudienceDraft, audienceDefinition, audienceDefinitionValid, audienceDraftFromMetadata } from "./AudienceFields";
 import CampaignSettings from "./CampaignSettings";
 import CampaignBuilder from "./CampaignBuilder";
@@ -174,6 +176,8 @@ interface AdsEventData {
 }
 
 interface Audience {
+  provenance?: Provenance;
+  source_label?: string;
   id: number;
   ad_account_id: number;
   platform: string;
@@ -1045,19 +1049,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   return <div className="flex items-start justify-between gap-3 px-4 py-2.5"><span className="text-xs text-text-dim">{label}</span><span className="min-w-0 truncate text-right text-xs font-medium text-text" style={{ maxWidth: "65%" }} title={value}>{value}</span></div>;
 }
 
-function audienceTypeLabel(type: string): string {
-  return ({
-    custom_segment: "Custom segment",
-    grouped: "Grouped audience",
-    remarketing: "Remarketing / engagement",
-    customer_list: "Customer list",
-    website: "Website visitors",
-    app_activity: "App activity",
-    engagement: "Engagement",
-    lookalike: "Lookalike",
-    saved_targeting: "Saved targeting",
-  } as Record<string, string>)[type] || type.replaceAll("_", " ");
-}
 
 function audienceSize(audience: Audience): string {
   const lower = Number(audience.metadata?.approximate_count_lower_bound || 0);
@@ -1090,6 +1081,7 @@ function AudienceWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Audience | null>(null);
+  const [provenanceTarget, setProvenanceTarget] = useState<Audience | null>(null);
   const [syncTarget, setSyncTarget] = useState<Audience | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Audience | null>(null);
   const [usageTarget, setUsageTarget] = useState<Audience | null>(null);
@@ -1256,13 +1248,14 @@ function AudienceWorkspace({
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div>
-                  <div className="mt-0.5 truncate text-xs text-text-dim">{audienceTypeLabel(audience.type)} · {audience.native_id}</div>
+                  <div className="mt-0.5 truncate text-xs text-text-dim">{audienceTypeLabel(audience.type)} · {audience.native_id}</div><div className="mt-1 break-all text-xs text-text-muted">{audience.source_label || "Source unverified"}{audience.provenance?.status === "verified" && " · Verified manually"}</div>
                 </div>
                 <span className={`shrink-0 rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span>
               </div>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <div className="text-xs text-text-muted"><span className="text-text-dim">Size </span>{audienceSize(audience)}</div>
                 <div className="flex flex-wrap justify-end gap-1.5">
+                  <button type="button" onClick={() => setProvenanceTarget(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Verify source</button>
                   {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
                   {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
                   {audience.capabilities.includes("update") && <button type="button" onClick={() => startEditAudience(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
@@ -1274,17 +1267,18 @@ function AudienceWorkspace({
         </div>
         <div className="hidden overflow-auto md:block">
           <table className="w-full table-fixed text-sm" style={{ minWidth: "58rem" }}>
-            <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim"><tr><th className="w-72 px-4 py-2 text-left font-medium">Audience</th><th className="w-36 px-3 py-2 text-left font-medium">Type</th><th className="w-28 px-3 py-2 text-left font-medium">Status</th><th className="w-28 px-3 py-2 text-right font-medium">Size</th><th className="w-44 px-3 py-2 text-left font-medium">Updated</th><th className="px-4 py-2 text-right font-medium">Actions</th></tr></thead>
+            <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim"><tr><th className="w-72 px-4 py-2 text-left font-medium">Audience</th><th className="w-36 px-3 py-2 text-left font-medium">Type</th><th className="w-52 px-3 py-2 text-left font-medium">Source</th><th className="w-28 px-3 py-2 text-left font-medium">Status</th><th className="w-28 px-3 py-2 text-right font-medium">Size</th><th className="w-44 px-3 py-2 text-left font-medium">Updated</th><th className="px-4 py-2 text-right font-medium">Actions</th></tr></thead>
             <tbody className="divide-y divide-border">
               {audiences.map((audience) => (
                 <tr key={audience.id} className="hover:bg-bg-input/40">
                   <td className="px-4 py-3"><div className="truncate font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div><div className="truncate text-xs text-text-dim">{audience.native_id}</div></td>
-                  <td className="px-3 py-3 text-text-muted">{audienceTypeLabel(audience.type)}</td>
+                  <td className="px-3 py-3 text-text-muted">{audienceTypeLabel(audience.type)}</td><td className="max-w-52 break-words px-3 py-3 text-xs text-text-muted">{audience.source_label || "Source unverified"}{audience.provenance?.status === "verified" && <div className="mt-1 text-text-dim">Verified manually</div>}</td>
                   <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span></td>
                   <td className="px-3 py-3 text-right tabular-nums text-text-muted">{audienceSize(audience)}</td>
                   <td className="px-3 py-3 text-xs text-text-muted">{audience.refreshed_at ? new Date(audience.refreshed_at).toLocaleString() : "-"}</td>
                   <td className="px-4 py-3"><div className="flex justify-end gap-1.5">
-                    {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
+                    <button type="button" onClick={() => setProvenanceTarget(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Verify source</button>
+                  {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
                     {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
                     {audience.capabilities.includes("update") && <button type="button" onClick={() => startEditAudience(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
                     {audience.capabilities.includes("delete") && <button type="button" onClick={() => setDeleteTarget(audience)} aria-label={`Delete ${audience.name}`} title="Delete audience" className="grid h-8 w-8 place-items-center rounded border border-border text-text-muted hover:border-red/50 hover:text-red">×</button>}
@@ -1310,6 +1304,8 @@ function AudienceWorkspace({
           <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && account.platform !== "google" && !sourceAudienceID) || (account.platform === "google" && !audienceDefinitionValid(kind, definition)) || (kind === "engagement" && !sourceResourceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
         </form>
       </Modal>}
+
+      {provenanceTarget && <Modal title="Verify audience source" description={provenanceTarget.name} size="large" onClose={() => setProvenanceTarget(null)} labelledBy="ads-audience-provenance-title"><AudienceProvenance audienceId={provenanceTarget.id} adAccountId={account.id} provenance={provenanceTarget.provenance} callTool={callTool} onClose={() => setProvenanceTarget(null)} onSaved={() => { setProvenanceTarget(null); load(false); }} /></Modal>}
 
       {editTarget && <Modal title="Edit audience" description={editTarget.name} onClose={() => !busy && setEditTarget(null)} labelledBy="ads-audience-edit-title"><form onSubmit={(event) => { event.preventDefault(); saveAudience(); }}><div className="grid gap-4 px-4 py-4"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label>{account.platform === "google" && editTarget.type === "custom_segment" && <AudienceFields kind={editTarget.type} draft={definition} onChange={setDefinition} audiences={audiences} adAccountId={account.id} callTool={callTool} />}</div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setEditTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim()} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Saving..." : "Save"}</button></footer></form></Modal>}
 

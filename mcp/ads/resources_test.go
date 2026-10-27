@@ -50,7 +50,7 @@ func resourceByProviderType(t *testing.T, ctx *sdk.AppCtx, accountID int64, prov
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
 		        capabilities_json, metadata_json, managed_by_app,
-		        COALESCE(refreshed_at,'')
+		        COALESCE(refreshed_at,''), audience_provenance_json
 		 FROM ad_resources
 		 WHERE project_id='test-proj' AND ad_account_id=? AND provider_type=?`,
 		accountID, providerType,

@@ -1,0 +1,25 @@
+import { useState } from "react";
+export type Provenance = { status?: string; source_platform?: string; source_name?: string; source_account_id?: string; source_channel_id?: string; source_asset_id?: string; interaction_type?: string; verification_evidence?: string; verification_reference?: string; verification_method?: string; verified_at?: string };
+const field = "w-full min-w-0 rounded border border-border bg-bg-input px-3 py-2 text-sm text-text";
+export function provenanceInputValid(p: Provenance): boolean { return !!(p.source_platform?.trim() && (p.source_account_id?.trim() || p.source_channel_id?.trim() || p.source_asset_id?.trim()) && p.interaction_type?.trim() && p.verification_evidence?.trim()); }
+export default function AudienceProvenance({ audienceId, adAccountId, provenance, callTool, onSaved, onClose }: { audienceId: number; adAccountId: number; provenance?: Provenance; callTool: (name: string, args: Record<string, unknown>) => Promise<any>; onSaved: () => void; onClose: () => void }) {
+  const [draft, setDraft] = useState<Provenance>({ source_platform: provenance?.source_platform || "", source_name: provenance?.source_name || "", source_account_id: provenance?.source_account_id || "", source_channel_id: provenance?.source_channel_id || "", source_asset_id: provenance?.source_asset_id || "", interaction_type: provenance?.interaction_type || "", verification_evidence: provenance?.verification_evidence || "", verification_reference: provenance?.verification_reference || "" });
+  const [confirmed, setConfirmed] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const save = async (clear = false) => { setBusy(true); setError(""); try { await callTool("audience_provenance_set", { ad_account_id: adAccountId, audience_id: audienceId, confirmed, ...(clear ? { clear: true } : { provenance: draft }) }); onSaved(); } catch(e) { setError((e as Error).message); } finally { setBusy(false); } };
+  const input = (key: keyof Provenance, label: string, placeholder = "") => <label className="grid min-w-0 gap-1 text-xs text-text-muted">{label}<input className={field} value={draft[key] || ""} placeholder={placeholder} onChange={e => setDraft({ ...draft, [key]: e.target.value })} /></label>;
+  return <form onSubmit={e => { e.preventDefault(); save(); }}><fieldset disabled={busy} className="grid min-w-0 gap-4 px-4 py-4 sm:grid-cols-2">
+    <p className="text-xs text-text-muted sm:col-span-2">Record the source you checked for this exact audience. Audience names alone do not verify a channel or interaction. This local association survives provider refreshes.</p>
+    {provenance?.status === "verified" && <p className="break-words text-xs text-text-muted sm:col-span-2">Saved manual verification: {provenance.verified_at ? new Date(provenance.verified_at).toLocaleString() : "date unavailable"}</p>}
+    {input("source_name", "Source name (optional)")}
+    {input("source_platform", "Source platform", "youtube, facebook, website, crm…")}
+    {input("interaction_type", "Interaction / event", "video_view, channel_subscription…")}
+    {input("source_account_id", "Source account ID (optional)")}
+    {input("source_channel_id", "Source channel / page ID (optional)")}
+    <div className="sm:col-span-2">{input("source_asset_id", "Source asset / app / site ID (optional)")}</div>
+    <p className="text-xs text-text-muted sm:col-span-2">At least one source account, channel or asset ID is required.</p>
+    <label className="grid gap-1 text-xs text-text-muted sm:col-span-2">Verification evidence<textarea rows={3} className={field} value={draft.verification_evidence} placeholder="What configuration did you check to establish this mapping?" onChange={e => setDraft({ ...draft, verification_evidence: e.target.value })} /></label>
+    <div className="sm:col-span-2">{input("verification_reference", "Evidence reference (optional)", "Screenshot, document or source configuration reference")}</div>
+    <label className="flex items-start gap-2 text-xs text-text sm:col-span-2"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /><span>I checked this audience's source configuration and confirm this association, or confirm clearing the saved verification.</span></label>
+    {error && <p role="alert" className="text-sm text-red sm:col-span-2">{error}</p>}
+  </fieldset><footer className="flex flex-wrap justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={onClose} className="h-9 rounded border border-border px-3 text-sm">Cancel</button>{provenance?.status === "verified" && <button type="button" disabled={busy || !confirmed} onClick={() => save(true)} className="h-9 rounded border border-border px-3 text-sm">Clear verification</button>}<button type="submit" disabled={busy || !confirmed || !provenanceInputValid(draft)} className="h-9 rounded bg-accent px-3 text-sm text-black disabled:opacity-50">{busy ? "Saving…" : "Save verification"}</button></footer></form>;
+}

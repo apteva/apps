@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.52
+version: 0.1.53
 description: |
+  v0.1.53 remembers verified audience provenance independently of provider
+  metadata across refreshes. Shared tools and UI record source identities,
+  interaction, evidence and verification time for every provider. Google
+  RULE_BASED audiences keep a neutral label until their source is verified.
   v0.1.52 extends the shared audience lifecycle and UI with Google custom
   keyword/URL/app segments, first-party seeded lookalikes, grouped composition,
   interest discovery and named campaign targeting. Capabilities report provider
@@ -171,6 +175,8 @@ provides:
       description: "A performance refresh failed and was scheduled for retry."
     - name: audience.created
       description: "An audience was created and normalized into the account resource registry."
+    - name: audience.provenance.updated
+      description: "A local verified audience-source association was saved or cleared."
     - name: audience.updated
       description: "Audience metadata or targeting was updated."
     - name: audience.deleted
@@ -251,6 +257,7 @@ provides:
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
     - { name: audience_list,                description: "List audiences in the ad account." }
     - { name: audience_capabilities_get,    description: "Discover provider-supported audience kinds, creation fields, lifecycle operations, seed eligibility and API restrictions." }
+    - { name: audience_provenance_set, description: "Save or clear a locally verified source association with evidence; survives provider refreshes." }
     - { name: audience_get,                 description: "Get one normalized project-scoped audience." }
     - { name: audience_create,              description: "Create a normalized provider audience using capability-driven fields." }
     - { name: audience_update,              description: "Update supported audience metadata or saved targeting." }
@@ -278,7 +285,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.52
+    ref: ads/v0.1.53
     entry: mcp/ads
   port: 8080
   health_check: /health

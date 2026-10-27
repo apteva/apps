@@ -46,8 +46,8 @@ func extendAudienceCapabilities(platform string, out map[string]any) {
 		return
 	}
 	out["custom_segment"] = map[string]any{"member_types": []string{"keyword", "url", "app"}, "modes": []string{"interests", "search_terms"}, "member_match": "any", "required_integration_tool": "custom_audience_mutate"}
-	out["lookalike"] = map[string]any{"expansion_levels": []string{"narrow", "balanced", "broad"}, "country_codes_required": true, "minimum_active_matched_seed_members": 100, "eligibility": "provider_evaluated", "campaign_types": []string{"demand_gen", "video"}, "seed_types": []string{"customer_list", "website", "app_activity", "remarketing"}, "ready_immediately": false, "update": false, "delete": false, "mutation_restriction": "Google v23 rejects lookalike updates and removal with USER_LIST_MUTATE_NOT_SUPPORTED, including readOnly=false lists"}
-	out["engagement"] = map[string]any{"create": false, "discover": true, "seed_existing": true, "classification": "remarketing; exact channel/action is not exposed", "reason": "Google Ads API cannot create YouTube viewer/subscriber lists", "setup_url": "https://ads.google.com/aw/audiences/management"}
+	out["lookalike"] = map[string]any{"expansion_levels": []string{"narrow", "balanced", "broad"}, "country_codes_required": true, "minimum_active_matched_seed_members": 100, "eligibility": "provider_evaluated", "campaign_types": []string{"demand_gen", "video"}, "seed_types": []string{"customer_list", "website", "app_activity", "remarketing", "rule_based"}, "ready_immediately": false, "update": false, "delete": false, "mutation_restriction": "Google v23 rejects lookalike updates and removal with USER_LIST_MUTATE_NOT_SUPPORTED, including readOnly=false lists"}
+	out["engagement"] = map[string]any{"create": false, "discover": true, "seed_existing": true, "classification": "provider list types do not verify the source; use verified audience provenance", "reason": "Google Ads API cannot create YouTube viewer/subscriber lists", "setup_url": "https://ads.google.com/aw/audiences/management"}
 	out["grouped"] = map[string]any{"segment_types": []string{"user_list", "custom_segment", "interest"}, "local_ids_field": "segment_audience_ids", "targeting_field": "audience_resource_ids", "delete": false}
 }
 
@@ -81,7 +81,7 @@ func (a *App) extendAudienceTools(tools []sdk.Tool) []sdk.Tool {
 			p["audience_resource_ids"] = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Local grouped audience IDs in this account. Google Demand Gen resolves these to native Audience resources; mutually exclusive with native audience_ids."}
 		}
 	}
-	return tools
+	return a.extendAudienceProvenanceTools(tools)
 }
 
 var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -204,7 +204,7 @@ func (a *App) googleLookalikeInfo(ctx *sdk.AppCtx, acct *adAccount, args map[str
 			return nil, fmt.Errorf("source_audience_ids must reference active first-party user lists in this ad account")
 		}
 		kind := normalizedAudienceType(firstString(r.Metadata, "type"))
-		if !containsString([]string{"customer_list", "website", "app_activity", "remarketing"}, kind) {
+		if !containsString([]string{"customer_list", "website", "app_activity", "remarketing", "rule_based"}, kind) {
 			return nil, fmt.Errorf("lookalike seeds must be first-party user lists, not lookalikes or custom segments")
 		}
 		if !containsString(seeds, r.NativeID) {
@@ -518,7 +518,7 @@ func (a *App) discoverGoogleAudiences(ctx *sdk.AppCtx, acct *adAccount) ([]disco
 				metadata["readiness"] = "unknown"
 				metadata["eligibility"] = "provider_evaluated"
 			}
-			if kind == "remarketing" {
+			if kind == "remarketing" || kind == "rule_based" {
 				metadata["engagement_source"] = "unknown"
 				metadata["creation"] = "provider_managed"
 			}
@@ -656,7 +656,7 @@ func googleUserListKind(native string) string {
 	case "CRM_BASED":
 		return "customer_list"
 	case "RULE_BASED":
-		return "website"
+		return "rule_based"
 	case "REMARKETING", "EXTERNAL_REMARKETING":
 		return "remarketing"
 	case "LOOKALIKE", "SIMILAR":
