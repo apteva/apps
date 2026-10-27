@@ -96,6 +96,7 @@ func newRTCOpusDecoderWithFEC(fec bool) (rtcOpusDecoder, error) {
 // Repair only small, explicit packet losses on an established 20 ms timeline.
 // Timestamp gaps with consecutive sequence numbers are DTX, never lost speech.
 type rtcDecodeTimeline struct {
+	epoch   uint64
 	ssrc    uint32
 	valid   bool
 	seq     uint16

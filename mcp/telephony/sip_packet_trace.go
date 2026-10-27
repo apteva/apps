@@ -65,7 +65,9 @@ func (t *sipPacketTrace) render(ts uint32, now time.Time) {
 	for n := 0; n < min(t.size, 32); n++ {
 		i := (t.head + len(t.slots) - 1 - n) % len(t.slots)
 		if t.slots[i].Timestamp == ts {
-			t.slots[i].PlayedNS = now.UnixNano()
+			if t.slots[i].PlayedNS == 0 {
+				t.slots[i].PlayedNS = now.UnixNano()
+			}
 			return
 		}
 	}

@@ -346,7 +346,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 								input.QueueAudio(frame)
 								pcm = pcm[n:]
 							}
-						})
+						}, c.ReceiveEstimator)
 					})
 				})
 				// Negotiation is independent of the read loop, so stop/keepalive remains

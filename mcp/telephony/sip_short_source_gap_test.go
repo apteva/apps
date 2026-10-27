@@ -196,7 +196,7 @@ func TestSIPShortSourceGapContinuity(t *testing.T) {
 			}
 		}
 	})
-	for _, codec := range []string{"G722", "PCMA"} {
+	for _, codec := range []string{"G722", "PCMA", "PCMU"} {
 		for _, scenario := range []string{"normal", "report_shaped", "report_jitter", "wrapped_report", "40ms", "20ms", "10ms_partial", "repeated_short_silence", "jitter", "arrival_gap_60", "loss", "long_stall", "timestamp_discontinuity_2s"} {
 			t.Run(codec+"/"+scenario, func(t *testing.T) {
 				r := replaySIPShortSourceGaps(t, codec, scenario)
@@ -257,7 +257,7 @@ func mustShortGapJSON(v any) string {
 }
 
 func TestSIPSourceGapTelemetrySeparateFromConcealment(t *testing.T) {
-	for _, codec := range []string{"G722", "PCMA"} {
+	for _, codec := range []string{"G722", "PCMA", "PCMU"} {
 		t.Run(codec, func(t *testing.T) {
 			a, _ := withTelephonyTestContext(t, &answerPlatform{})
 			row := recoveryCall(t, a, "source-gap-telemetry", "telnyx")

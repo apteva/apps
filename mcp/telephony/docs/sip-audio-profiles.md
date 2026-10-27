@@ -39,6 +39,50 @@ before entering the source-clock estimator and counted explicitly. This is
 conservative handling of an ambiguous clock boundary, not evidence of a clock
 step in the reported production incidents.
 
+## Recovery after an empty receive queue
+
+Initial playback still builds the configured reserve. Once the adaptive receiver
+has started, starvation is a separate state: admissible returning audio can
+render on the next consumer tick without rebuilding that initial reserve.
+Intentional hold and source/clock resets still start a new playback epoch.
+The reference receiver keeps its previous priming behavior.
+
+The existing target remains an operating target for bounded sample correction;
+capacity and age limits do not increase. Locally generated concealment does not
+own real-audio admission capacity. Recovery removes retained synthetic PCM but
+preserves fresh received PCM and G.722 decoder continuity. The configured
+crossfade also applies when returning from long silence.
+
+Diagnostics distinguish `receive_starved`, `receive_audio_returned` and
+`receive_playback_resumed`. The SIP jitter snapshot exposes
+`receive_playback_state`, `receive_starved_at`, `receive_returning_at`,
+`receive_rendered_at`, `receive_resume_ms`, `receive_max_resume_ms`,
+`receive_recoveries`, `encoded_queue_ms` and `decoded_queue_ms`.
+Rendering means the receive framer produced real PCM, not that a browser or
+remote listener heard it. Generated silence cannot complete recovery. Optional
+packet timing records the first real rendering, not a synthetic frame or a later
+partial continuation. Event history remains bounded by the existing 64 slots.
+
+Repeat the constructed 140/180/220 ms gap scenarios and targeted guards with:
+
+```sh
+GOWORK=off TELEPHONY_RECEIVE_RECOVERY_RESULTS=/tmp/sip-receive.json \
+  go test -run '^TestSIP(Starvation|ReceiveRecovery|ShortSourceGapContinuity)' -count=1 -v .
+```
+
+The scenarios use recorded human speech through G.722, PCMA and PCMU, with three
+repeated delivery interruptions, followed by either a stable delivery offset or
+catch-up bursts. They are not an exact replay of the reported call, which lacked
+packet timing. Tests check next-tick recovery, decoded speech, initial-word
+preservation, continuous 20 ms output, combined capacity, local residence,
+G.722 decoder state, hold/source reset and truthful recovery diagnostics.
+
+The severe recovery guards allow bounded damage from missing delivery and
+capacity trims. The exported speech `Accepted` field separately uses the existing
+strict smooth-speech budget (99% active coverage, 80 ms maximum interruption,
+100 ms added delay); passing recovery tests does not make a degraded network
+scenario smooth. Catch-up bursts exceeding capacity still require trims.
+
 ## Configuration
 
 Operator UI: **SIP media → SIP audio profile** on an inbound route, or the
@@ -170,3 +214,11 @@ Use staged matched G.722/PCMA listening and load comparisons before production
 adoption. Source phase and modeled added delay are not synchronized carrier-to-ear
 measurements. Native Linux timestamp handling requires Linux execution beyond a
 macOS cross-build and injected-clock tests.
+
+## Optional receive delay estimator
+
+`rtp_playback.delay_estimator` accepts `ewma` (existing default) or
+`distribution` for the adaptive receiver. The latter uses a bounded rolling delay
+distribution without increasing configured capacity or age limits. See
+[receive timing recovery](receive-timing-recovery.md) for configuration, measured
+tradeoffs, WebRTC recovery, and local verification.

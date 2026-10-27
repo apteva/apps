@@ -29,6 +29,7 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	ReceiveEstimator string
 	socketPolicy     func(*net.UDPConn) sdk.SocketPolicyResult
 	NetworkPolicy    *phoneNetworkPolicy
 	ClientICEServers []webrtc.ICEServer
@@ -62,6 +63,13 @@ func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
 	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000}
+	c.ReceiveEstimator = values["softphone_webrtc_receive_estimator"]
+	if c.ReceiveEstimator == "" {
+		c.ReceiveEstimator = "fixed"
+	}
+	if c.ReceiveEstimator != "fixed" && c.ReceiveEstimator != "distribution" {
+		return c, errors.New("invalid WebRTC receive estimator")
+	}
 	if v := values["softphone_webrtc_encoder_input_rate"]; v != "" {
 		rate, err := strconv.Atoi(v)
 		if err != nil || (rate != 24000 && rate != 48000) {
@@ -165,6 +173,7 @@ func (c *rtcHubConn) queueWhisper(data []byte, valid func() bool) bool {
 }
 
 type rtcMediaSnapshot struct {
+	Timing                 rtcTimingSnapshot   `json:"receive_timing"`
 	ICEEvents              []mediaSessionEvent `json:"ice_events,omitempty"`
 	Ingress                rtcIngressSnapshot  `json:"rtp_ingress"`
 	CoachingMixedMS        int64               `json:"coaching_mixed_ms,omitempty"`
@@ -200,6 +209,13 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.value
+	v.Timing.Events = append([]rtcTimingEvent(nil), v.Timing.Events...)
+	if v.Timing.Rejections != nil {
+		v.Timing.Rejections = make(map[string]uint64, len(s.value.Timing.Rejections))
+		for k, n := range s.value.Timing.Rejections {
+			v.Timing.Rejections[k] = n
+		}
+	}
 	if ice := s.ice.Load(); ice != nil {
 		v.ICEEvents = ice.snapshot()
 	}
@@ -215,7 +231,7 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch reason {
-	case "webrtc_capture_source_age", "webrtc_capture_release_overflow", "webrtc_capture_release_recovery":
+	case "webrtc_capture_timeline_reset", "webrtc_capture_source_age", "webrtc_capture_release_overflow", "webrtc_capture_release_recovery":
 		s.value.IngressDiscardedMS += int64(duration)
 	case "webrtc_rtp_rejected":
 		s.value.IngressRejectedPackets++
@@ -251,6 +267,20 @@ func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
 	a.Ingress = mergeRTCIngress(a.Ingress, b.Ingress)
 	a.IngressDiscardedMS += b.IngressDiscardedMS
 	a.CaptureMaxQueueMS = max(a.CaptureMaxQueueMS, b.CaptureMaxQueueMS)
+	a.Timing.Resynchronizations += b.Timing.Resynchronizations
+	a.Timing.DecodedRecoveries += b.Timing.DecodedRecoveries
+	a.Timing.BridgeHandoffs += b.Timing.BridgeHandoffs
+	a.Timing.TargetMS = max(a.Timing.TargetMS, b.Timing.TargetMS)
+	if a.Timing.Rejections == nil {
+		a.Timing.Rejections = map[string]uint64{}
+	}
+	for k, n := range b.Timing.Rejections {
+		a.Timing.Rejections[k] += n
+	}
+	a.Timing.Events = append(a.Timing.Events, b.Timing.Events...)
+	if len(a.Timing.Events) > 32 {
+		a.Timing.Events = a.Timing.Events[len(a.Timing.Events)-32:]
+	}
 	a.IngressRejectedPackets += b.IngressRejectedPackets
 	a.IngressQueueDrops += b.IngressQueueDrops
 	a.IngressPaddingPackets += b.IngressPaddingPackets
@@ -271,13 +301,30 @@ func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
 // discard duplicates and packets >320ms behind their original timeline.
 // RTP wraps are compared modulo 2^32. DTX gaps never become PCM sequence loss.
 type rtcJitter struct {
-	baseTS  uint32
-	base    time.Time
-	last    uint32
-	played  bool
-	packets []rtcPacket
-	arrival time.Time
-	discard func(*rtp.Packet)
+	epoch        uint64
+	lastRecovery time.Time
+	candidate    rtcTimingCandidate
+	highSeq      uint16
+	haveSeq      bool
+	ssrc         uint32
+	reserve      time.Duration
+	distribution audioDelayDistribution
+	delaySeen    [128]struct {
+		seq   uint16
+		ts    uint32
+		valid bool
+	}
+	adaptive   bool
+	lastReject string
+	validate   func([]byte) bool
+	onTiming   func(rtcTimingEvent)
+	baseTS     uint32
+	base       time.Time
+	last       uint32
+	played     bool
+	packets    []rtcPacket
+	arrival    time.Time
+	discard    func(*rtp.Packet)
 }
 type rtcPacket struct {
 	packet *rtp.Packet
@@ -285,58 +332,99 @@ type rtcPacket struct {
 }
 
 func (j *rtcJitter) push(p *rtp.Packet, now time.Time) bool {
+	j.lastReject = ""
 	if len(p.Payload) == 0 || len(p.Payload) > 1275 {
-		return false
+		j.candidate = rtcTimingCandidate{}
+		return j.reject("invalid_payload_size", p, now, now)
 	}
 	if j.base.IsZero() {
 		j.baseTS = p.Timestamp
 		j.base = now.Add(60 * time.Millisecond)
+		j.reserve = 60 * time.Millisecond
+		j.ssrc = p.SSRC
+		j.timing("initialized", "", p, now, j.base)
+	}
+	if p.SSRC != j.ssrc {
+		return j.reject("unexpected_ssrc", p, now, now)
+	}
+	forward := !j.haveSeq || int16(p.SequenceNumber-j.highSeq) > 0
+	if forward {
+		j.highSeq = p.SequenceNumber
+		j.haveSeq = true
 	}
 	delta := int32(p.Timestamp - j.baseTS)
-	// A discontinuous source timestamp starts a fresh bounded epoch.
-	if delta < -48000 || delta > 48000*3600 {
-		j.baseTS = p.Timestamp
-		j.base = now.Add(60 * time.Millisecond)
-		j.played = false
-		j.packets = nil
-		delta = 0
-	}
-	due := j.base.Add(time.Duration(delta) * time.Second / 48000)
-	// Follow oscillator drift slowly (at most 200ppm); a delayed batch cannot
-	// move the timeline by seconds. Earlier delivery can reduce the cushion.
-	desired := now.Add(60*time.Millisecond - time.Duration(delta)*time.Second/48000)
-	if desired.Before(j.base) {
-		j.base = desired
-	} else if !j.arrival.IsZero() {
-		j.base = j.base.Add(min(desired.Sub(j.base), max(0, now.Sub(j.arrival))/5000))
-	}
-	j.arrival = now
-	due = j.base.Add(time.Duration(delta) * time.Second / 48000)
-	if j.played && int32(p.Timestamp-j.last) <= 0 || now.Sub(due) > 320*time.Millisecond || due.Sub(now) > 320*time.Millisecond {
-		return false
-	}
-	for _, queued := range j.packets {
-		if queued.packet.Timestamp == p.Timestamp {
-			return false
+	due := j.base.Add(time.Duration(delta)*time.Second/48000 + j.reserve - 60*time.Millisecond)
+	for _, q := range j.packets {
+		if q.packet.Timestamp == p.Timestamp {
+			return j.reject("duplicate_timestamp", p, now, due)
 		}
 	}
-	if len(j.packets) >= 16 {
-		return false
+	if j.adaptive && int16(j.highSeq-p.SequenceNumber) >= 0 && uint16(j.highSeq-p.SequenceNumber) <= 32 {
+		seen := &j.delaySeen[p.SequenceNumber%128]
+		if !seen.valid || seen.seq != p.SequenceNumber || seen.ts != p.Timestamp {
+			seen.valid = true
+			seen.seq = p.SequenceNumber
+			seen.ts = p.Timestamp
+			relative := float64(now.Sub(j.base.Add(time.Duration(delta)*time.Second/48000-60*time.Millisecond))) / float64(time.Millisecond)
+			if relative >= -320 && relative <= 320 {
+				j.distribution.observe(now, relative, 60, 100)
+			}
+		}
 	}
-	payload := append([]byte(nil), p.Payload...)
+	reason := ""
+	if j.played && int32(p.Timestamp-j.last) <= 0 {
+		reason = "already_played"
+	} else if now.Sub(due) > 320*time.Millisecond {
+		reason = "too_late"
+	} else if due.Sub(now) > 320*time.Millisecond {
+		reason = "too_early"
+	}
+	if reason != "" {
+		if !j.considerRecovery(p, now, due, forward) {
+			return j.reject(reason, p, now, due)
+		}
+		delta = 0
+	} else {
+		j.candidate = rtcTimingCandidate{}
+	}
+	// Only ordered, admitted traffic adjusts the oscillator and playback reserve.
+	if forward {
+		desired := now.Add(60*time.Millisecond - time.Duration(delta)*time.Second/48000)
+		if desired.Before(j.base) {
+			j.base = desired
+		} else if !j.arrival.IsZero() {
+			j.base = j.base.Add(min(desired.Sub(j.base), max(0, now.Sub(j.arrival))/5000))
+		}
+
+		if j.adaptive {
+			target := time.Duration(max(60, j.distribution.target)) * time.Millisecond
+			j.reserve += max(-125*time.Microsecond, min(125*time.Microsecond, target-j.reserve))
+		}
+		j.arrival = now
+	}
+	due = j.base.Add(time.Duration(delta)*time.Second/48000 + j.reserve - 60*time.Millisecond)
+	if len(j.packets) >= 16 {
+		return j.reject("queue_full", p, now, due)
+	}
 	cp := *p
-	cp.Payload = payload
+	cp.Payload = append([]byte(nil), p.Payload...)
 	j.packets = append(j.packets, rtcPacket{&cp, due})
 	for n := len(j.packets) - 1; n > 0 && j.packets[n].due.Before(j.packets[n-1].due); n-- {
 		j.packets[n], j.packets[n-1] = j.packets[n-1], j.packets[n]
 	}
 	return true
 }
+
 func (j *rtcJitter) pop(now time.Time) *rtp.Packet {
 	for len(j.packets) > 0 && !j.packets[0].due.After(now) {
 		q := j.packets[0]
 		j.packets = j.packets[1:]
 		if now.Sub(q.due) > 320*time.Millisecond || (j.played && int32(q.packet.Timestamp-j.last) <= 0) {
+			reason := "expired_before_playout"
+			if j.played && int32(q.packet.Timestamp-j.last) <= 0 {
+				reason = "already_played"
+			}
+			j.reject(reason, q.packet, now, q.due)
 			if j.discard != nil {
 				j.discard(q.packet)
 			}
@@ -460,7 +548,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 			go stop()
 			return
 		}
-		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled()) })
+		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled(), c.ReceiveEstimator) })
 	})
 	setupContext, cancelSetup := context.WithTimeout(context.Background(), rtcSetupTimeout)
 	defer cancelSetup()
@@ -575,13 +663,13 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: queueWhisper, disconnect: disconnect}, stop, nil
 }
 
-func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
-	receiveRTCAudio(remote, stats, done, stop, fec, func(samples []int16, at time.Time) { queueMicrophoneSource(input, pcm16ToBytes(samples), at, true) })
+func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, estimator ...string) {
+	receiveRTCAudio(remote, stats, done, stop, fec, func(samples []int16, at time.Time) { queueMicrophoneSource(input, pcm16ToBytes(samples), at, true) }, estimator...)
 }
 
 // The source instant follows the RTP timeline, including the bounded jitter
 // cushion. Consumers can enforce a shorter lease/age budget before forwarding.
-func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, forward func([]int16, time.Time)) {
+func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, forward func([]int16, time.Time), estimator ...string) {
 	direction := stats.direction
 	if direction == "" {
 		direction = "operator_to_carrier"
@@ -631,9 +719,32 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 	timer.Stop()
 	defer timer.Stop()
 	var due <-chan time.Time
-	j := rtcJitter{discard: func(p *rtp.Packet) {
+	j := rtcJitter{onTiming: stats.timing, discard: func(p *rtp.Packet) {
 		stats.drop("webrtc_rtp_rejected", direction, uint64(p.SequenceNumber), 0)
 	}}
+	if len(estimator) > 0 {
+		j.adaptive = estimator[0] == "distribution"
+	}
+	// A separate decoder validates recovery candidates without disturbing the
+	// active decoder's prediction state. Allocate only on a timing disturbance.
+	var candidateDecoder rtcOpusDecoder
+	defer func() {
+		if candidateDecoder != nil {
+			candidateDecoder.Close()
+		}
+	}()
+	candidatePCM := make([]int16, 2880)
+	j.validate = func(payload []byte) bool {
+		if candidateDecoder == nil {
+			var err error
+			candidateDecoder, err = newRTCOpusDecoderWithFEC(fec)
+			if err != nil {
+				return false
+			}
+		}
+		n, err := candidateDecoder.decode(payload, candidatePCM)
+		return err == nil && n > 0 && n <= 2880
+	}
 	pcm := make([]int16, 24000*120/1000)
 	var timeline rtcDecodeTimeline
 	var release rtcAudioRelease
@@ -651,6 +762,10 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			if !j.push(p, received.at) {
 				stats.drop("webrtc_rtp_rejected", direction, uint64(p.SequenceNumber), 0)
 			}
+			if release.epoch != j.epoch {
+				release.resetTimeline(stats, direction, j.epoch, time.Now())
+				timeline.valid = false
+			}
 		case <-due:
 		}
 		now := time.Now()
@@ -659,6 +774,10 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 		}
 		if f, ok := release.pop(now, stats, direction); ok {
 			forward(f.pcm, f.source)
+			if release.recoveryEpoch != 0 {
+				stats.timing(rtcTimingEvent{At: now.UTC(), Kind: "bridge_handoff", Epoch: release.recoveryEpoch})
+				release.recoveryEpoch = 0
+			}
 		}
 		if !timer.Stop() {
 			select {
@@ -684,6 +803,11 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 // decodeRTCPacket is shared by live reception and deterministic speech replays.
 // It preserves RTP source time and repair order; it never owns a network clock.
 func decodeRTCPacket(p *rtp.Packet, j *rtcJitter, timeline *rtcDecodeTimeline, release *rtcAudioRelease, decoder rtcOpusDecoder, pcm []int16, stats *rtcMediaStats, direction string, fec bool, now time.Time, queueDepth int) {
+	recovering := timeline.epoch != j.epoch
+	if recovering {
+		release.resetTimeline(stats, direction, j.epoch, now)
+		timeline.valid = false
+	}
 	if timeline.ssrc != p.SSRC {
 		timeline.valid = false
 	}
@@ -701,12 +825,15 @@ func decodeRTCPacket(p *rtp.Packet, j *rtcJitter, timeline *rtcDecodeTimeline, r
 		stats.ingress.observe(p, now, now, queueDepth, stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
 	}
 	n, err := decoder.decode(p.Payload, pcm)
-	if err != nil {
+	if err != nil || n <= 0 || n > len(pcm) {
 		timeline.valid = false
 		stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
 		return
 	}
-	*timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+	*timeline = rtcDecodeTimeline{epoch: j.epoch, ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+	if recovering {
+		j.timing("decoded", "", p, now, now)
+	}
 	release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond), stats, direction)
 }
 

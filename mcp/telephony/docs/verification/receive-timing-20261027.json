@@ -1,0 +1,295 @@
+{
+  "date": "2026-10-27",
+  "baseline": "Telephony 0.12.59, frozen rtcJitter test reference",
+  "scope": "local deterministic speech replay and loopback UDP; no production/staging deployment",
+  "recovery": [
+    {
+      "scenario": "normal",
+      "legacy": true,
+      "Accepted": 1500,
+      "Rejected": 0,
+      "Decoded": 1500,
+      "Forwarded": 1500,
+      "Recoveries": 0,
+      "FirstForwardMS": 0,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "normal",
+      "legacy": false,
+      "Accepted": 1500,
+      "Rejected": 0,
+      "Decoded": 1500,
+      "Forwarded": 1500,
+      "Recoveries": 0,
+      "FirstForwardMS": 0,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "backward500",
+      "legacy": true,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "backward500",
+      "legacy": false,
+      "Accepted": 1495,
+      "Rejected": 5,
+      "Decoded": 1492,
+      "Forwarded": 1492,
+      "Recoveries": 1,
+      "FirstForwardMS": 160,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "reset",
+      "legacy": true,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "reset",
+      "legacy": false,
+      "Accepted": 1495,
+      "Rejected": 5,
+      "Decoded": 1492,
+      "Forwarded": 1492,
+      "Recoveries": 1,
+      "FirstForwardMS": 160,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "delivery500",
+      "legacy": true,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "delivery500",
+      "legacy": false,
+      "Accepted": 1495,
+      "Rejected": 5,
+      "Decoded": 1492,
+      "Forwarded": 1492,
+      "Recoveries": 1,
+      "FirstForwardMS": 160,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "dtx",
+      "legacy": true,
+      "Accepted": 1500,
+      "Rejected": 0,
+      "Decoded": 1497,
+      "Forwarded": 1497,
+      "Recoveries": 0,
+      "FirstForwardMS": 60,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "dtx",
+      "legacy": false,
+      "Accepted": 1500,
+      "Rejected": 0,
+      "Decoded": 1497,
+      "Forwarded": 1497,
+      "Recoveries": 0,
+      "FirstForwardMS": 60,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "duplicate",
+      "legacy": true,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "duplicate",
+      "legacy": false,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "batch",
+      "legacy": true,
+      "Accepted": 19,
+      "Rejected": 1481,
+      "Decoded": 16,
+      "Forwarded": 1,
+      "Recoveries": 0,
+      "FirstForwardMS": 0,
+      "DecodeErrors": 0,
+      "MaxQueue": 8
+    },
+    {
+      "scenario": "batch",
+      "legacy": false,
+      "Accepted": 19,
+      "Rejected": 1481,
+      "Decoded": 16,
+      "Forwarded": 1,
+      "Recoveries": 0,
+      "FirstForwardMS": 0,
+      "DecodeErrors": 0,
+      "MaxQueue": 8
+    },
+    {
+      "scenario": "malformed",
+      "legacy": true,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    },
+    {
+      "scenario": "malformed",
+      "legacy": false,
+      "Accepted": 0,
+      "Rejected": 1500,
+      "Decoded": 0,
+      "Forwarded": 0,
+      "Recoveries": 0,
+      "FirstForwardMS": -1,
+      "DecodeErrors": 0,
+      "MaxQueue": 4
+    }
+  ],
+  "webrtc_distribution": {
+    "pattern": "95ms extra delay every tenth packet; 50s total; final40s counters",
+    "fixed": {
+      "rejected": 200,
+      "max_residence_ms": 80,
+      "speech_coverage": 0.9685,
+      "longest_damaged_speech_ms": 40,
+      "total_rejected_50s": 250
+    },
+    "distribution": {
+      "rejected": 0,
+      "max_residence_ms": 100,
+      "speech_coverage": 0.9991,
+      "longest_damaged_speech_ms": 20,
+      "total_rejected_50s": 13
+    }
+  },
+  "sip_distribution": {
+    "codecs": [
+      "G722",
+      "PCMA",
+      "PCMU"
+    ],
+    "pattern": "0-18ms ordinary variation over 50s; residence measured final15s",
+    "ewma_mean_residence_ms": 79.02,
+    "distribution_mean_residence_ms": 59.01,
+    "discarded_ms": 0,
+    "concealment_ms": 0,
+    "waveform_coverage_regressed": false
+  },
+  "guards": [
+    "sequence and timestamp wrap",
+    "DTX",
+    "duplicates",
+    "malformed Opus",
+    "instantaneous batch",
+    "two separate faults",
+    "decoded queue reset accounting",
+    "bounded reason histories",
+    "concurrent snapshot reads",
+    "healthy bit-identical Opus PCM in both modes",
+    "repeat fault during cooldown recovers after cooldown",
+    "zero delay-estimator heap allocations per observation",
+    "severe SIP burst waveform non-regression across three codecs"
+  ],
+  "validation": {
+    "focused": "passed",
+    "full_go": {
+      "command": "GOWORK=off go test ./... -count=1 -timeout 12m",
+      "status": "passed",
+      "seconds": 448.366
+    },
+    "race": {
+      "command": "GOWORK=off go test -race -run '^Test(RTC(Timeline|Timing|Receive)|AudioDelayDistribution|ReceiveEstimator|SIPDelayDistribution|SIPReceive|SIPShortSource)' -count=1 -timeout 5m -v .",
+      "status": "passed",
+      "seconds": 31.844,
+      "includes": "Supplemental burst/cooldown/allocation tests added after full suite compilation"
+    },
+    "frontend": {
+      "command": "bun run test:frontend",
+      "passed": 437,
+      "failed": 0
+    },
+    "git_diff_check": "passed"
+  },
+  "limitations": [
+    "Not a reproduction of the unrecorded production trigger",
+    "Recovery160ms excludes preceding delivery outage and rejects five qualification packets",
+    "Waveform proxy is not subjective audio quality",
+    "Opt-in distribution estimator is not universally better under severe bursts",
+    "No new general WSOLA stage",
+    "Bridge handoff is not proof of playback"
+  ],
+  "sip_burst_safety": {
+    "pattern": "same ordinary variation plus80ms on four packets every500ms",
+    "codecs": [
+      "G722",
+      "PCMA",
+      "PCMU"
+    ],
+    "mean_residence_ms_both_modes": 100.12,
+    "g722": {
+      "ewma_coverage": 0.9292,
+      "distribution_coverage": 0.9297,
+      "longest_damaged_speech_ms_both": 180,
+      "ewma_discarded_ms": 1460,
+      "distribution_discarded_ms": 1440
+    },
+    "pcma_pcmu": {
+      "ewma_coverage": 0.9616,
+      "distribution_coverage": 0.9621,
+      "longest_damaged_speech_ms_both": 120,
+      "discarded_ms_both": 1460
+    },
+    "conclusion": "No measured regression; severe burst speech damage remains."
+  }
+}

@@ -10,13 +10,15 @@ type rtcReleaseFrame struct {
 	source time.Time
 }
 type rtcAudioRelease struct {
-	frames      [16]rtcReleaseFrame
-	storage     [16][480]int16
-	head, count int
-	next        time.Time
-	tail        [120]int16
-	tailN       int
-	crossfade   bool
+	epoch         uint64
+	recoveryEpoch uint64
+	frames        [16]rtcReleaseFrame
+	storage       [16][480]int16
+	head, count   int
+	next          time.Time
+	tail          [120]int16
+	tailN         int
+	crossfade     bool
 }
 
 func (q *rtcAudioRelease) push(pcm []int16, at time.Time, stats *rtcMediaStats, direction string) {
@@ -87,4 +89,26 @@ func (q *rtcAudioRelease) pop(now time.Time, stats *rtcMediaStats, direction str
 		return f, true
 	}
 	return rtcReleaseFrame{}, false
+}
+
+// Drop only this receiver's old-epoch decoded queue. Retain the rendered tail
+// for a short fade; never carry the old loss-repair cursor into the new epoch.
+func (q *rtcAudioRelease) resetTimeline(stats *rtcMediaStats, direction string, epoch uint64, now time.Time) {
+	if q.epoch == epoch {
+		return
+	}
+	q.epoch = epoch
+	if q.next.IsZero() || now.Sub(q.next) > 60*time.Millisecond {
+		clear(q.tail[:])
+	}
+	for q.count > 0 {
+		f := q.frames[q.head]
+		stats.drop("webrtc_capture_timeline_reset", direction, 0, len(f.pcm)*1000/24000)
+		q.frames[q.head] = rtcReleaseFrame{}
+		q.head = (q.head + 1) % len(q.frames)
+		q.count--
+	}
+	q.next = time.Time{}
+	q.crossfade = true
+	q.recoveryEpoch = epoch
 }

@@ -230,6 +230,15 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 }
 
 type sipJitterSnapshot struct {
+	ReceiveStartedAt         time.Time          `json:"receive_starved_at,omitempty"`
+	EncodedQueueMS           float64            `json:"encoded_queue_ms"`
+	DecodedQueueMS           float64            `json:"decoded_queue_ms"`
+	ReceiveState             string             `json:"receive_playback_state"`
+	ReceiveRecoveries        int                `json:"receive_recoveries"`
+	ReceiveReturningAt       time.Time          `json:"receive_returning_at,omitempty"`
+	ReceiveRenderedAt        time.Time          `json:"receive_rendered_at,omitempty"`
+	ReceiveResumeMS          float64            `json:"receive_resume_ms"`
+	ReceiveMaxResumeMS       float64            `json:"receive_max_resume_ms"`
 	DecoderWarmupPackets     int                `json:"decoder_warmup_packets"`
 	DecoderStateResets       int                `json:"decoder_state_resets"`
 	PacketTiming             []sipPacketTiming  `json:"packet_timing,omitempty"`
@@ -481,7 +490,18 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	// Arrival age alone cannot establish an RTP transport failure: DTX may be
 	// silent indefinitely. Confirmed read/write/security failures remain distinct.
 	if j := m.jitterTelemetry.Load(); j != nil && j.mu.TryLock() {
-		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+j.pendingPCMSamples.Load()) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		decodedSamples := j.pendingPCMSamples.Load()
+		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+decodedSamples) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		j.syncReceiveRecovery()
+		s.Jitter.ReceiveStartedAt = j.receiveRecovery.started
+		s.Jitter.EncodedQueueMS = float64(j.buffered) / 8
+		s.Jitter.DecodedQueueMS = float64(decodedSamples) / 8
+		s.Jitter.ReceiveState = j.receiveRecovery.state
+		s.Jitter.ReceiveRecoveries = j.receiveRecovery.count
+		s.Jitter.ReceiveReturningAt = j.receiveRecovery.returned
+		s.Jitter.ReceiveRenderedAt = j.receiveRecovery.rendered
+		s.Jitter.ReceiveResumeMS = j.receiveRecovery.resumeMS
+		s.Jitter.ReceiveMaxResumeMS = j.receiveRecovery.maxResumeMS
 		policy := j.policy
 		s.Jitter.EffectivePolicy = &policy
 		s.Jitter.DecoderWarmupPackets, s.Jitter.DecoderStateResets = j.decodeWarmups, j.decodeResets
