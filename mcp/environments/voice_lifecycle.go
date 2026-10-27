@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,6 +49,18 @@ func (s *service) beginVoiceOperation(parent context.Context, runID string) (con
 	if op := s.runStops[runID]; op != nil {
 		return nil, nil, errors.New("environment is stopping")
 	}
+	id := "voiceop_" + token(12)
+	insert, err := s.db.db.Exec(`INSERT INTO environment_voice_operations(id,run_id,status,started_at) SELECT ?,id,'active',? FROM environment_runs WHERE id=? AND status='running'`, id, time.Now().UTC().Format(time.RFC3339Nano), runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	changed, err := insert.RowsAffected()
+	if err != nil {
+		return nil, nil, err
+	}
+	if changed != 1 {
+		return nil, nil, errors.New("environment is stopping")
+	}
 	ctx, cancel := context.WithCancelCause(parent)
 	op := &voiceOperation{cancel: cancel, done: make(chan struct{})}
 	if s.voiceOperations == nil {
@@ -56,10 +70,28 @@ func (s *service) beginVoiceOperation(parent context.Context, runID string) (con
 		s.voiceOperations[runID] = map[*voiceOperation]bool{}
 	}
 	s.voiceOperations[runID][op] = true
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var status string
+				err := s.db.db.QueryRow(`SELECT status FROM environment_runs WHERE id=?`, runID).Scan(&status)
+				if errors.Is(err, sql.ErrNoRows) || (err == nil && status != "running") {
+					cancel(errVoiceCancelled)
+					return
+				}
+			}
+		}
+	}()
 	var once sync.Once
 	return ctx, func() {
 		once.Do(func() {
 			cancel(nil)
+			_, _ = s.db.db.Exec(`UPDATE environment_voice_operations SET status='finished',finished_at=COALESCE(finished_at,?) WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), id)
 			s.voiceMu.Lock()
 			defer s.voiceMu.Unlock()
 			delete(s.voiceOperations[runID], op)
@@ -125,8 +157,42 @@ wait:
 			break wait
 		}
 	}
+	// Other serving processes and restarted sidecars share this persisted gate.
+	// Wait for their handlers too, without decoding saved voice/spec payloads.
+	var stateErr error
+	if !timedOut {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var pending int
+			queryErr := s.db.db.QueryRow(`SELECT (SELECT COUNT(*) FROM environment_voice_operations WHERE run_id=? AND status='active')+(SELECT COUNT(*) FROM environment_voice_calls WHERE run_id=? AND status='running')`, run.ID, run.ID).Scan(&pending)
+			if queryErr != nil {
+				stateErr = queryErr
+				timedOut = true
+				break
+			}
+			if pending == 0 {
+				break
+			}
+			select {
+			case <-deadline.C:
+				timedOut = true
+			case <-ticker.C:
+			}
+			if timedOut {
+				break
+			}
+		}
+	}
+	if timedOut {
+		_, _ = s.db.db.Exec(`UPDATE environment_voice_operations SET status='abandoned',finished_at=COALESCE(finished_at,?) WHERE run_id=? AND status='active'`, time.Now().UTC().Format(time.RFC3339Nano), run.ID)
+	}
 	// On restart there may be persisted voice rows with no surviving handler.
 	// Preserve those partial results rather than claiming finalization succeeded.
+	var voiceErrors []string
+	if stateErr != nil {
+		voiceErrors = append(voiceErrors, stateErr.Error())
+	}
 	if calls, e := s.db.listVoiceCalls(run.ID); e == nil {
 		for i := range calls {
 			if calls[i].Status == "running" {
@@ -135,12 +201,23 @@ wait:
 				calls[i].Cleanup = &VoiceCleanup{Status: "finalization_incomplete", Errors: []string{"voice handler did not finish before runtime cleanup"}}
 				finished := time.Now().UTC()
 				calls[i].FinishedAt = &finished
-				_ = s.db.saveVoiceCall(&calls[i])
+				if saveErr := s.db.saveVoiceCall(&calls[i]); saveErr != nil {
+					voiceErrors = append(voiceErrors, saveErr.Error())
+				}
+			}
+			if calls[i].Cleanup != nil && calls[i].Cleanup.Status != "complete" {
+				voiceErrors = append(voiceErrors, "voice finalization partial: "+calls[i].Cleanup.Status)
 			}
 		}
+	} else {
+		voiceErrors = append(voiceErrors, e.Error())
 	}
 	err = s.destroyStoppedRun(current)
 	status, message := "complete", ""
+	if len(voiceErrors) > 0 {
+		status = "partial"
+		message = strings.Join(voiceErrors, "; ")
+	}
 	if timedOut {
 		status = "forced_cleanup"
 		message = "voice_finalization_timeout"
@@ -151,6 +228,9 @@ wait:
 	}
 	_, persistErr := s.db.db.Exec(`UPDATE environment_run_shutdown SET status=?,error=?,finished_at=COALESCE(finished_at,?) WHERE run_id=?`, status, message, time.Now().UTC().Format(time.RFC3339Nano), run.ID)
 	op.err = errors.Join(err, persistErr)
+	if len(voiceErrors) > 0 {
+		op.err = errors.Join(op.err, errors.New(strings.Join(voiceErrors, "; ")))
+	}
 	if timedOut {
 		op.err = errors.Join(op.err, fmt.Errorf("voice_finalization_timeout: runtime cleanup forced after %s", grace))
 	}
@@ -173,30 +253,42 @@ func (s store) runShutdown(id string) (*RunShutdown, error) {
 }
 
 func (s *service) abortedVoiceCleanup(parent context.Context, runtime string, call *VoiceCall) {
-	if call.Cleanup != nil {
+	if call.Cleanup != nil && call.Cleanup.Status != "pending" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+	ctx, cancel := voiceCleanupContext(parent, call)
 	defer cancel()
-	call.Cleanup = &VoiceCleanup{Status: "partial"}
-	// Startup failures have no media finalizer yet. Deferred thread stops run
-	// first; retain whatever persisted evidence is available for both sides.
-	for _, side := range []struct {
-		agent, thread string
-		events        bool
-	}{{call.Spec.TargetAgent, call.TargetThreadID, true}, {call.CallerAgentAlias, call.CallerThreadID, false}} {
-		if side.agent == "" || side.thread == "" || ctx.Err() != nil {
-			continue
-		}
-		events, err := newTelemetryHistory(s.runtime()).list(runtime, side.agent, call.StartedAt, 1000)
-		if err != nil {
-			call.Cleanup.Errors = append(call.Cleanup.Errors, err.Error())
-			continue
-		}
-		if side.events {
+	var prior []string
+	if call.Cleanup != nil {
+		prior = call.Cleanup.Errors
+	}
+	call.Cleanup = &VoiceCleanup{Status: "complete", Errors: prior}
+	if len(prior) > 0 {
+		call.Cleanup.Status = "partial"
+	}
+	for agent, thread := range call.startedThreads {
+		var lastErr error
+		var events []sdk.RuntimeTelemetryEvent
+		history := newTelemetryHistory(s.runtime())
+		finalized := waitForVoiceCompletionEvidence(ctx, 15*time.Second, voiceCompletionPoll, func() bool {
+			latest, err := history.list(runtime, agent, call.StartedAt, 1000)
+			lastErr = err
+			if latest != nil {
+				events = latest
+			}
+			return err == nil && voiceThreadFinalized(events, thread)
+		})
+		if agent == call.Spec.TargetAgent {
 			call.TargetTelemetry = events
 		} else {
 			call.CallerTelemetry = events
+		}
+		if !finalized {
+			call.Cleanup.Status = "partial"
+			call.Cleanup.Errors = append(call.Cleanup.Errors, "finalization_timeout")
+		}
+		if lastErr != nil {
+			call.Cleanup.Errors = append(call.Cleanup.Errors, lastErr.Error())
 		}
 	}
 	call.Transcript = voiceTranscript(call.TargetTelemetry, call.TargetThreadID, call.StartedAt)
@@ -225,6 +317,9 @@ func cancelVoiceResult(ctx context.Context, call *VoiceCall) {
 }
 
 func (s *service) inspectStoredRun(run *Run) (map[string]any, error) {
+	if run == nil {
+		return nil, errors.New("run not found")
+	}
 	shutdown, err := s.db.runShutdown(run.ID)
 	if err != nil {
 		return nil, err
@@ -245,4 +340,21 @@ func (s *service) inspectStoredRun(run *Run) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+func recordVoiceCleanupError(call *VoiceCall, err error) {
+	if err == nil {
+		return
+	}
+	if call.Cleanup == nil {
+		call.Cleanup = &VoiceCleanup{Status: "pending"}
+	}
+	call.Cleanup.Errors = append(call.Cleanup.Errors, err.Error())
+}
+
+func voiceCleanupContext(parent context.Context, call *VoiceCall) (context.Context, context.CancelFunc) {
+	if call.cleanupDeadline.IsZero() {
+		call.cleanupDeadline = time.Now().Add(15 * time.Second)
+	}
+	return context.WithDeadline(context.WithoutCancel(parent), call.cleanupDeadline)
 }

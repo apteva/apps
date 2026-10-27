@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.14-rc.1
+version: 0.7.14
 description: Isolated environments with continuous microphone simulation, transport diagnostics, and coordinated voice shutdown before runtime deletion.
 author: Apteva
 icon: /ui/icon.svg
@@ -68,6 +68,7 @@ provides:
     - { name: snapshot.created, description: "A reusable environment snapshot was captured." }
     - { name: environment.voice_call.started, description: "A simulated realtime voice call started." }
     - { name: environment.voice_call.progress, description: "A simulated voice call produced additional transcript turns." }
+    - { name: environment.voice_call.cancelled, description: "An operator-cancelled operation finished bounded cleanup." }
     - { name: environment.voice_call.completed, description: "A simulated realtime voice call completed." }
     - { name: environment.voice_call.invalid, description: "A simulated voice call did not produce a valid two-sided conversation." }
     - { name: environment.voice_call.failed, description: "A simulated realtime voice call failed." }
@@ -75,7 +76,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: release/environments-evals-duplex, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.14, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

@@ -516,6 +516,9 @@ func (s *service) runNext(ctx context.Context) error {
 		return nil
 	}
 	defer s.runnerMu.Unlock()
+	if err := s.recoverCancellations(); err != nil {
+		return err
+	}
 	run, err := s.db.claimRun()
 	if err != nil || run == nil {
 		return err
@@ -553,12 +556,16 @@ func (s *service) cancelExperiment(id string) error {
 		if !requested || run.Status == "queued" {
 			continue
 		}
-		if run.EnvironmentRunID != "" {
-			c = &evalRunControl{environment: run.EnvironmentRunID}
-			s.stopControlledEnvironment(c)
-			if err := s.db.saveAttempt(&run, run.SimulationAttempt, "", c.cleanup); err != nil {
-				return err
-			}
+		c = &evalRunControl{environment: run.EnvironmentRunID}
+		s.stopControlledEnvironment(c)
+		run.Status, run.Stage = "cancelled", "cancelled"
+		finished := time.Now().UTC()
+		run.FinishedAt = &finished
+		if len(c.cleanup) == 0 {
+			c.cleanup = json.RawMessage(`{"status":"unavailable","reason":"environment_run_id_not_recorded"}`)
+		}
+		if err := s.db.saveAttempt(&run, run.SimulationAttempt, c.runtime, c.cleanup); err != nil {
+			return err
 		}
 		if err := s.db.finishCancelled(run.ID); err != nil {
 			return err

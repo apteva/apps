@@ -123,3 +123,42 @@ func TestVoiceStopForcesBoundedCleanupAndPreservesPartialResult(t *testing.T) {
 		t.Fatalf("shutdown=%+v", shutdown)
 	}
 }
+
+func TestVoiceShutdownCoordinatesAcrossServingProcesses(t *testing.T) {
+	owner, p := auditService(t)
+	stopper := &service{db: owner.db, ctx: owner.ctx}
+	run := &Run{ID: "run", RuntimeID: "rt", Status: "running", StartedAt: time.Now()}
+	if err := owner.db.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	ctx, finish, err := owner.beginVoiceOperation(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finish()
+	done := make(chan error, 1)
+	go func() { done <- stopper.stopRun(run) }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("persisted stop did not cancel the other process's voice handler")
+	}
+	if p.destroyed != 0 {
+		t.Fatal("other serving process destroyed an active voice handler")
+	}
+	if _, _, err := owner.beginVoiceOperation(context.Background(), run.ID); err == nil {
+		t.Fatal("persisted stop admitted new work")
+	}
+	finish()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("persisted voice lease did not release")
+	}
+	if p.destroyed != 1 {
+		t.Fatalf("destroyed=%d", p.destroyed)
+	}
+}

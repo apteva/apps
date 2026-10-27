@@ -562,7 +562,7 @@ func (s store) cancelExperiment(id string) error {
 	if _, err = tx.Exec(`UPDATE eval_experiments SET cancel_requested_at=COALESCE(cancel_requested_at,?) WHERE id=?`, now, id); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`UPDATE eval_runs SET cancel_requested_at=COALESCE(cancel_requested_at,?),status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,stage=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancelling' END,finished_at=CASE WHEN status='queued' THEN COALESCE(finished_at,?) ELSE finished_at END WHERE experiment_id=? AND status IN ('queued','running')`, now, now, id); err != nil {
+	if _, err = tx.Exec(`UPDATE eval_runs SET cancel_requested_at=COALESCE(cancel_requested_at,?),status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,outcome=CASE WHEN status='queued' THEN 'cancelled' ELSE outcome END,stage=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancelling' END,finished_at=CASE WHEN status='queued' THEN COALESCE(finished_at,?) ELSE finished_at END WHERE experiment_id=? AND status IN ('queued','running')`, now, now, id); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

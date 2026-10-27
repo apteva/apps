@@ -160,6 +160,8 @@ type ProtocolFixtureEvent struct {
 }
 
 type VoiceCall struct {
+	cleanupDeadline          time.Time
+	startedThreads           map[string]string
 	ID                       string                                `json:"id"`
 	RunID                    string                                `json:"run_id"`
 	Status                   string                                `json:"status"`

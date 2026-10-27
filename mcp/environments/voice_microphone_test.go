@@ -106,7 +106,6 @@ func TestMicrophoneDirectSilencePacingAndCancellation(t *testing.T) {
 		defer close(done)
 		pumpVoiceAudio(ctx, source, destination, voiceBridgeLegCallerToTarget, voiceBridgeCaller, voiceBridgeTarget, "caller", activity, &capture, nil, nil, exits)
 	}()
-	var previous time.Time
 	for i := 0; i < 6; i++ {
 		_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
 		kind, data, err := receiver.ReadMessage()
@@ -116,16 +115,19 @@ func TestMicrophoneDirectSilencePacingAndCancellation(t *testing.T) {
 		if kind != websocket.BinaryMessage || len(data) != 960 || !isSilentPCM(data) {
 			t.Fatalf("unexpected idle message kind=%d bytes=%d", kind, len(data))
 		}
-		now := time.Now()
-		if !previous.IsZero() && now.Sub(previous) < 10*time.Millisecond {
-			t.Fatalf("idle catch-up burst: gap=%s", now.Sub(previous))
-		}
-		previous = now
 	}
 	if active, _ := activity.snapshot(); active {
 		t.Fatal("transport silence is active speech")
 	}
 	diag := activity.inputSnapshot()[string(voiceBridgeLegCallerToTarget)]
+	deadline := time.Now().Add(time.Second)
+	for diag.Frames < 6 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		diag = activity.inputSnapshot()[string(voiceBridgeLegCallerToTarget)]
+	}
+	if diag.SmallestInputGapMS < 15 {
+		t.Fatalf("writer emitted a catch-up burst: %+v", diag)
+	}
 	if diag.Frames < 6 || diag.SpeechAudioMS != 0 || diag.IdleAudioMS < 120 || diag.FirstFrameAt == nil {
 		t.Fatalf("diagnostics=%+v", diag)
 	}

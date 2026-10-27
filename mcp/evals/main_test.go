@@ -25,6 +25,8 @@ func testStore(t *testing.T) store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Match the SDK app writer pool: serialize SQLite writers.
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql", "migrations/006_inline_environments.sql", "migrations/007_agentic_quality_v2.sql", "migrations/008_cancellation_attempts.sql"} {
 		migration, err := os.ReadFile(path)
@@ -457,7 +459,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.9.5" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.6" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {

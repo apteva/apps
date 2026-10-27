@@ -212,6 +212,10 @@ type CollaboratorExecution struct {
 }
 
 type EnvironmentVoiceCall struct {
+	FinalExchange            json.RawMessage            `json:"final_exchange,omitempty"`
+	InputTransport           map[string]json.RawMessage `json:"input_transport,omitempty"`
+	Cleanup                  json.RawMessage            `json:"cleanup,omitempty"`
+	CancellationReason       string                     `json:"cancellation_reason,omitempty"`
 	ID                       string                     `json:"id"`
 	Status                   string                     `json:"status"`
 	Error                    string                     `json:"error,omitempty"`
@@ -231,10 +235,13 @@ type VoiceCallValidity struct {
 }
 
 type VoiceTranscriptTurn struct {
-	Speaker string    `json:"speaker"`
-	Text    string    `json:"text"`
-	Time    time.Time `json:"time"`
-	AtMS    int64     `json:"at_ms"`
+	Status             string    `json:"status,omitempty"`
+	TranscriptID       string    `json:"transcript_id,omitempty"`
+	FinalizationReason string    `json:"finalization_reason,omitempty"`
+	Speaker            string    `json:"speaker"`
+	Text               string    `json:"text"`
+	Time               time.Time `json:"time"`
+	AtMS               int64     `json:"at_ms"`
 }
 
 type VoiceCallMetrics struct {

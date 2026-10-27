@@ -119,6 +119,8 @@ func (a *voiceMediaActivity) frameActivity(speaker string, relay *voiceMediaRela
 }
 
 type VoiceInputTransportMetrics struct {
+	ConnectedAt         time.Time  `json:"connected_at"`
+	FirstInputDelayMS   float64    `json:"first_input_delay_ms"`
 	Format              string     `json:"format"`
 	SampleRate          int        `json:"sample_rate"`
 	ContinuousInput     bool       `json:"continuous_input"`
@@ -128,6 +130,7 @@ type VoiceInputTransportMetrics struct {
 	IdleAudioMS         float64    `json:"idle_audio_ms"`
 	SpeechAudioMS       float64    `json:"speech_audio_ms"`
 	LargestInputGapMS   float64    `json:"largest_input_gap_ms"`
+	SmallestInputGapMS  float64    `json:"smallest_input_gap_ms"`
 	MaxPacingLatenessMS float64    `json:"max_pacing_lateness_ms"`
 	lastFrame           time.Time
 }
@@ -143,9 +146,16 @@ func (a *voiceMediaActivity) inputFrame(leg voiceBridgeLeg, format string, rate,
 	if d.FirstFrameAt == nil {
 		first := at.UTC()
 		d.FirstFrameAt = &first
+		if !d.ConnectedAt.IsZero() {
+			d.FirstInputDelayMS = float64(at.Sub(d.ConnectedAt)) / float64(time.Millisecond)
+		}
 	}
 	if !d.lastFrame.IsZero() {
-		d.LargestInputGapMS = max(d.LargestInputGapMS, float64(at.Sub(d.lastFrame))/float64(time.Millisecond))
+		gap := float64(at.Sub(d.lastFrame)) / float64(time.Millisecond)
+		d.LargestInputGapMS = max(d.LargestInputGapMS, gap)
+		if d.SmallestInputGapMS == 0 || gap < d.SmallestInputGapMS {
+			d.SmallestInputGapMS = gap
+		}
 	}
 	d.MaxPacingLatenessMS = max(d.MaxPacingLatenessMS, float64(at.Sub(scheduled))/float64(time.Millisecond))
 	d.lastFrame = at
@@ -155,6 +165,17 @@ func (a *voiceMediaActivity) inputFrame(leg voiceBridgeLeg, format string, rate,
 	d.SpeechAudioMS += speechMS
 	d.IdleAudioMS += max(0, float64(voiceFrameDuration/time.Millisecond)-speechMS)
 	a.inputTransport[string(leg)] = d
+}
+
+func (a *voiceMediaActivity) inputConnected(leg voiceBridgeLeg, format string, rate int, continuous bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inputTransport == nil {
+		a.inputTransport = map[string]VoiceInputTransportMetrics{}
+	}
+	if _, exists := a.inputTransport[string(leg)]; !exists {
+		a.inputTransport[string(leg)] = VoiceInputTransportMetrics{ConnectedAt: time.Now().UTC(), Format: format, SampleRate: rate, ContinuousInput: continuous}
+	}
 }
 
 func (a *voiceMediaActivity) inputSnapshot() map[string]VoiceInputTransportMetrics {
@@ -181,7 +202,7 @@ func validateMicrophoneMode(mode string) error {
 }
 
 func (r *voiceMediaRelay) interruptPlayback(item string, generation int64) int {
-	if item == "" {
+	if item == "" && generation == 0 {
 		n := r.queue.bytes
 		r.interrupt()
 		return n
@@ -189,7 +210,7 @@ func (r *voiceMediaRelay) interruptPlayback(item string, generation int64) int {
 	var kept []voiceAudioChunk
 	discarded := 0
 	for _, chunk := range r.queue.chunks {
-		if chunk.itemID == item && (generation == 0 || chunk.generation == generation) {
+		if (item == "" || chunk.itemID == item) && (generation == 0 || chunk.generation == generation) {
 			discarded += len(chunk.audio) - chunk.offset
 		} else {
 			kept = append(kept, chunk)

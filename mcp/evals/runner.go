@@ -133,6 +133,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("run voice call: %w", err)
 		}
 		run.VoiceCall = &call
+		if err := s.acceptVoiceCancellation(run, &call); err != nil {
+			return err
+		}
 		run.Execution = call.Execution
 		run.Assertions = append(run.Assertions, voiceAssertionResults(voice, &call)...)
 		if issues := voiceSimulationIssues(&call); len(issues) > 0 {

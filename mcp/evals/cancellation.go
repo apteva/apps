@@ -43,7 +43,7 @@ func (s store) cancellationRequested(id string) (bool, error) {
 }
 
 func (s store) finishCancelled(id string) error {
-	_, err := s.db.Exec(`UPDATE eval_runs SET status='cancelled',stage='cancelled',finished_at=COALESCE(finished_at,?),correctness_score=NULL,judge_score=NULL,quality_score=NULL,overall_score=NULL,judge_json=NULL WHERE id=? AND (cancel_requested_at IS NOT NULL OR status='cancelled')`, formatTime(time.Now().UTC()), id)
+	_, err := s.db.Exec(`UPDATE eval_runs SET status='cancelled',stage='cancelled',outcome='cancelled',finished_at=COALESCE(finished_at,?),correctness_score=NULL,judge_score=NULL,quality_score=NULL,overall_score=NULL,judge_json=NULL WHERE id=? AND (cancel_requested_at IS NOT NULL OR status='cancelled')`, formatTime(time.Now().UTC()), id)
 	return err
 }
 
@@ -108,9 +108,26 @@ func (s *service) stopControlledEnvironment(c *evalRunControl) {
 				result = map[string]any{}
 			}
 			result["request_error"] = err.Error()
+			var stored map[string]any
+			if inspectErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_get", map[string]any{"id": environment}, &stored); inspectErr == nil {
+				result["inspection"] = stored
+			} else {
+				result["inspection_error"] = inspectErr.Error()
+			}
+		}
+		inspection := result
+		if stored, ok := result["inspection"].(map[string]any); ok {
+			inspection = stored
+		}
+		var runtime string
+		if run, ok := inspection["run"].(map[string]any); ok {
+			runtime, _ = run["runtime_id"].(string)
 		}
 		raw, _ := json.Marshal(result)
 		c.mu.Lock()
+		if c.runtime == "" {
+			c.runtime = runtime
+		}
 		c.cleanup = raw
 		c.cleanupErr = err
 		c.mu.Unlock()
@@ -161,12 +178,16 @@ func (s *service) completeRunControl(run *Run, attempt int, c *evalRunControl) e
 	var persistErr error
 	if requested {
 		run.Status = "cancelled"
+		run.Outcome = "cancelled"
 		run.Stage = "cancelled"
 		run.CorrectnessScore = nil
 		run.JudgeScore = nil
 		run.QualityScore = nil
 		run.OverallScore = nil
 		persistErr = s.db.finishCancelled(run.ID)
+		if s.ctx != nil {
+			s.ctx.Emit("eval.run.cancelled", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": "cancelled"})
+		}
 	}
 	if attempt == run.SimulationAttempt {
 		if run.FinishedAt == nil {
@@ -219,3 +240,66 @@ func (s *service) prepareRetry(run *Run, issues []string) error {
 }
 
 func joinIssues(issues []string) string { return strings.Join(issues, "; ") }
+
+func (s *service) acceptVoiceCancellation(run *Run, call *EnvironmentVoiceCall) error {
+	if call.Status != "cancelled" && call.Validity.Status != "cancelled" {
+		return nil
+	}
+	_, err := s.db.db.Exec(`UPDATE eval_runs SET cancel_requested_at=COALESCE(cancel_requested_at,?),stage='cancelling' WHERE id=? AND status='running'`, formatTime(time.Now().UTC()), run.ID)
+	if err != nil {
+		return err
+	}
+	return errRunCancelled
+}
+
+// Resume persisted cancellation after a sidecar restart. This reads only ids
+// for pending work; idle workers do not decode every saved case or experiment.
+func (s *service) recoverCancellations() error {
+	rows, err := s.db.db.Query(`SELECT id,experiment_id,environment_run_id,simulation_attempt FROM eval_runs WHERE status='running' AND cancel_requested_at IS NOT NULL LIMIT 50`)
+	if err != nil {
+		return err
+	}
+	var pending []Run
+	for rows.Next() {
+		var run Run
+		if err := rows.Scan(&run.ID, &run.ExperimentID, &run.EnvironmentRunID, &run.SimulationAttempt); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, run)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, run := range pending {
+		s.controlMu.Lock()
+		active := s.controls[run.ID] != nil
+		s.controlMu.Unlock()
+		if active {
+			continue
+		}
+		stored, loadErr := s.db.getRun(run.ID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if stored == nil {
+			continue
+		}
+		run = *stored
+		c := &evalRunControl{environment: run.EnvironmentRunID}
+		s.stopControlledEnvironment(c)
+		run.Status = "cancelled"
+		if err := s.db.saveAttempt(&run, run.SimulationAttempt, c.runtime, c.cleanup); err != nil {
+			return err
+		}
+		if err := s.db.finishCancelled(run.ID); err != nil {
+			return err
+		}
+		if err := s.db.rollupExperiment(run.ExperimentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}

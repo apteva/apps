@@ -360,7 +360,9 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		cancelVoiceResult(ctx, call)
 		_ = s.db.saveVoiceCall(call)
 		topic := "environment.voice_call.completed"
-		if call.Status == "failed" {
+		if call.Status == "cancelled" {
+			topic = "environment.voice_call.cancelled"
+		} else if call.Status == "failed" {
 			topic = "environment.voice_call.failed"
 		} else if call.Status == "invalid_simulation" {
 			topic = "environment.voice_call.invalid"
@@ -392,8 +394,20 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if err != nil {
 		return call, fmt.Errorf("spawn receptionist voice: %w", err)
 	}
-	defer s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
+	if call.startedThreads == nil {
+		call.startedThreads = map[string]string{}
+	}
+	call.startedThreads[spec.TargetAgent] = call.TargetThreadID
+	targetThreadStopped := false
+	defer func() {
+		if !targetThreadStopped {
+			recordVoiceCleanupError(call, s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID))
+		}
+	}()
 
+	if ctx.Err() != nil {
+		return call, ctx.Err()
+	}
 	caller, err := s.runtime().SpawnRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, sdk.RuntimeRealtimeSpawnRequest{
 		ThreadID: call.CallerThreadID, Directive: callerDirective,
 		Provider: firstNonEmpty(spec.CallerProvider, spec.Provider), Voice: spec.CallerVoice,
@@ -402,7 +416,16 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if err != nil {
 		return call, fmt.Errorf("spawn caller voice: %w", err)
 	}
-	defer s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID)
+	if call.startedThreads == nil {
+		call.startedThreads = map[string]string{}
+	}
+	call.startedThreads[call.CallerAgentAlias] = call.CallerThreadID
+	callerThreadStopped := false
+	defer func() {
+		if !callerThreadStopped {
+			recordVoiceCleanupError(call, s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID))
+		}
+	}()
 	if target.AudioBridgeURL == "" || caller.AudioBridgeURL == "" {
 		return call, errors.New("realtime threads returned no audio bridge")
 	}
@@ -436,7 +459,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, voiceBridgeLegCallerToTarget, voiceBridgeCaller, voiceBridgeTarget, "caller", mediaActivity, &callerAudio, deliveredCapture, audioPipeline, bridgeExits)
 
 	endedBy, monitorErr := s.monitorVoiceExchange(ctx, history, run.RuntimeID, call, mediaActivity, bridgeExits)
-	cleanupCtx, finishCleanup := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	cleanupCtx, finishCleanup := voiceCleanupContext(ctx, call)
 	defer finishCleanup()
 	targetSocket.close()
 	callerSocket.close()
@@ -448,8 +471,10 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		PostToolIdleSeconds: 1, RequireActivity: true,
 	})
 	// Stop only after the finishing period, then poll stored terminal evidence.
-	_ = s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
-	_ = s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID)
+	targetStopErr := s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
+	targetThreadStopped = true
+	callerStopErr := s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID)
+	callerThreadStopped = true
 	finalizationErr := s.finalizeVoiceTelemetry(cleanupCtx, history, run.RuntimeID, call, mediaActivity, endedBy)
 	targetEvents, callerEvents := call.TargetTelemetry, call.CallerTelemetry
 
@@ -463,7 +488,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredPCM)) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
 	}
-	setVoiceCleanup(call, finalizationErr)
+	setVoiceCleanup(call, finalizationErr, targetStopErr, callerStopErr)
 	call.Validity = assessVoiceCall(call)
 	cancelVoiceResult(ctx, call)
 	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistPCM); err != nil {
@@ -640,6 +665,7 @@ func pumpVoiceAudio(
 	result chan<- voiceBridgeExit,
 ) {
 	defer activity.update(speaker, false, time.Time{})
+	activity.inputConnected(leg, "pcm16", voiceSampleRate, continuousVoiceInput(activity.microphoneMode, destination.audioCapabilities(), false))
 	stopClose := context.AfterFunc(ctx, func() { source.conn.Close(); destination.conn.Close() })
 	defer stopClose()
 	incoming := make(chan voiceRelayEvent, 128)
@@ -1085,6 +1111,9 @@ func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAud
 					fail(errors.New("unscoped interrupt on scoped renderer"))
 					return
 				}
+				if event.ItemID == "" && event.Generation > 0 {
+					cancelled[fmt.Sprintf("%d/*", event.Generation)] = true
+				}
 				if event.ItemID != "" {
 					cancelled[fmt.Sprintf("%d/%s", event.Generation, event.ItemID)] = true
 					if len(cancelled) > 256 {
@@ -1105,7 +1134,7 @@ func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAud
 			fail(errors.New("unaligned PCM16 audio"))
 			return
 		}
-		if generation < latestGeneration || cancelled[fmt.Sprintf("%d/%s", generation, itemID)] || cancelled["0/"+itemID] {
+		if generation < latestGeneration || cancelled[fmt.Sprintf("%d/%s", generation, itemID)] || cancelled["0/"+itemID] || cancelled[fmt.Sprintf("%d/*", generation)] {
 			itemID = ""
 			audioEndMS = 0
 			continue

@@ -92,6 +92,43 @@ state, playback receipts, and persisted `thread.done` events. A partial simulati
 does not erase successful booking or ownership evidence in tool results; these
 outcomes should be evaluated separately from simulation completeness.
 
+## Microphone transport and cancellation
+
+`microphone_mode` is `auto` by default. Direct audio follows the negotiated
+renderer contract (`audio_protocol=1`, `X-Apteva-Audio-Session`); an explicit
+continuous-input requirement takes precedence over continuous-conversation mode.
+The simulated carrier supplies continuous microphone input by default. Explicit
+`continuous` and `discontinuous` modes are available for controlled fixtures.
+Unsupported formats or capability contracts fail setup with an attributable error.
+
+Microphone input uses one paced writer per destination: 24 kHz mono PCM16
+(960 bytes per 20 ms), or 8 kHz PCMU (160 samples per 20 ms). Silence is generated
+on demand before speech, after the VAD tail, and through backend waits. It is
+never queued as catch-up audio or counted as generated speech, activity, playback
+or turn delivery. Existing noisy-input VAD commit tails remain intact. Playback
+receipts and scoped interruptions preserve their session generation.
+
+Each call exposes `input_transport`, keyed by relay leg, with connection/first
+input times, first-input delay, input bytes/frames, idle and speech durations,
+smallest/largest gaps and maximum pacing lateness. These measure simulator writes;
+they do not by themselves prove receipt at the provider or resolve its startup
+errors.
+
+Stopping a run persists `stopping` before cancelling admitted voice operations.
+The admission gate and active operation records are durable across serving
+processes. Media closes immediately; callbacks, thread finalization and available
+results get an independent shared 15-second cleanup budget. Runtime destruction
+waits for handlers and persisted active operations, with a 20-second forced
+cleanup deadline. Forced, partial and failed cleanup remain explicit; original
+voice errors are retained separately. Cancellation also runs the finalizer during
+startup and failed carrier setup. An operator-cancelled call is `cancelled` and
+emits `environment.voice_call.cancelled`.
+
+Repeated stops preserve the first terminal timestamp. `environment_run_get`
+returns stored metadata, voice results and `shutdown` even after runtime deletion,
+with an explicit `runtime_state`. Unexpected live lookup/callback errors remain
+visible. Evals 0.9.6 consumes this shutdown contract.
+
 ## Performance and retention
 
 The reconciliation worker keeps its 15-second interval. It polls lifecycle

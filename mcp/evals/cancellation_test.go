@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
 	"strings"
 	"sync"
 	"testing"
@@ -126,5 +128,96 @@ func TestAttemptHistoryPreservesOriginalFailureAndCleanup(t *testing.T) {
 	}
 	if rows[1].Attempt != 2 || rows[1].RuntimeID != "rt-second" || rows[1].Status != "cancelled" {
 		t.Fatalf("second attempt lost: %+v", rows[1])
+	}
+}
+
+func TestPersistedCancellationRecoversAfterRunnerRestart(t *testing.T) {
+	db, run := cancellationRun(t)
+	if err := db.updateRunProgress(run.ID, "agent_running", "environment-run-cancel"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.cancelExperiment(run.ExperimentID); err != nil {
+		t.Fatal(err)
+	}
+	platform := &cancellationPlatformStub{stopped: make(chan struct{}), stopCalls: make(chan string, 2)}
+	svc := &service{db: db, ctx: sdk.NewAppCtxForTest(nil, db.db, nil, platform, nil)}
+	if err := svc.recoverCancellations(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.getRun(run.ID)
+	if err != nil || stored.Status != "cancelled" || stored.Stage != "cancelled" || stored.OverallScore != nil || len(stored.Attempts) != 1 {
+		t.Fatalf("recovered=%+v err=%v", stored, err)
+	}
+	if err := svc.recoverCancellations(); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.stopCalls) != 1 {
+		t.Fatal("recovery repeated a completed stop")
+	}
+}
+
+type failedCleanupPlatform struct{ *cancellationPlatformStub }
+
+func (p *failedCleanupPlatform) CallAppResult(_, tool string, _ map[string]any, out any) error {
+	if tool == "environment_run_stop" {
+		return errors.New("closing callback HTTP 404")
+	}
+	if tool == "environment_run_get" {
+		raw := []byte(`{"run":{"id":"env","runtime_id":"rt"},"shutdown":{"status":"partial","error":"closing callback HTTP 404"},"voice_calls":[{"error":"context_injection_incomplete"}]}`)
+		return json.Unmarshal(raw, out)
+	}
+	return fmt.Errorf("unexpected tool %s", tool)
+}
+func TestFailedCleanupPreventsRetryAndRetainsOriginalEvidence(t *testing.T) {
+	db, run := cancellationRun(t)
+	run.EnvironmentRunID = "env"
+	p := &failedCleanupPlatform{cancellationPlatformStub: &cancellationPlatformStub{}}
+	control := &evalRunControl{environment: "env"}
+	svc := &service{db: db, ctx: sdk.NewAppCtxForTest(nil, db.db, nil, p, nil), controls: map[string]*evalRunControl{run.ID: control}}
+	if err := svc.prepareRetry(run, []string{"original provider timeout"}); err == nil || !strings.Contains(err.Error(), "cleanup incomplete") {
+		t.Fatalf("cleanup failure allowed retry: %v", err)
+	}
+	rows, err := db.listAttempts(run.ID)
+	if err != nil || len(rows) != 1 || !strings.Contains(rows[0].PrimaryError, "original provider timeout") || !strings.Contains(string(rows[0].Cleanup), "context_injection_incomplete") || !strings.Contains(string(rows[0].Cleanup), "HTTP 404") || rows[0].RuntimeID != "rt" {
+		t.Fatalf("evidence=%+v err=%v", rows, err)
+	}
+	stored, _ := db.getRun(run.ID)
+	if stored.SimulationAttempt != 0 {
+		t.Fatal("cleanup failure advanced automatic retry")
+	}
+}
+
+func TestCancelUnownedRunnerPreservesTerminalAttempt(t *testing.T) {
+	db, run := cancellationRun(t)
+	if err := db.updateRunProgress(run.ID, "agent_running", "environment-run-cancel"); err != nil {
+		t.Fatal(err)
+	}
+	platform := &cancellationPlatformStub{stopped: make(chan struct{}), stopCalls: make(chan string, 2)}
+	svc := &service{db: db, ctx: sdk.NewAppCtxForTest(nil, db.db, nil, platform, nil)}
+	if err := svc.cancelExperiment(run.ExperimentID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.getRun(run.ID)
+	if err != nil || stored.Status != "cancelled" || stored.Outcome != "cancelled" || len(stored.Attempts) != 1 || stored.Attempts[0].Status != "cancelled" || stored.Attempts[0].FinishedAt == nil {
+		t.Fatalf("cancelled orphan=%+v err=%v", stored, err)
+	}
+}
+
+func TestDirectEnvironmentCancellationCannotBecomeSimulationRetry(t *testing.T) {
+	db, run := cancellationRun(t)
+	svc := &service{db: db}
+	call := &EnvironmentVoiceCall{Status: "cancelled", CancellationReason: "environment_stopped"}
+	if err := svc.acceptVoiceCancellation(run, call); !errors.Is(err, errRunCancelled) {
+		t.Fatalf("environment cancellation ignored: %v", err)
+	}
+	if retried, err := db.retryInvalidSimulation(run); err != nil || retried {
+		t.Fatalf("cancelled environment retried=%v err=%v", retried, err)
+	}
+	if err := db.finishCancelled(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := db.getRun(run.ID)
+	if stored.Status != "cancelled" || stored.OverallScore != nil {
+		t.Fatalf("environment cancellation scored: %+v", stored)
 	}
 }
