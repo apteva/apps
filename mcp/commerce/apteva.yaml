@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.9.1
+version: 0.10.0
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -19,7 +19,9 @@ description: |
   storefront drives every provider through one canonical event vocabulary.
   Version 0.9.1 validates CJ Dropshipping catalog responses so silently
   ignored page-size, keyword, and price filters surface as errors instead of
-  mismatched products.
+  mismatched products. Version 0.10.0 adds authorized partial and full Stripe
+  refunds through Commerce, with durable duplicate protection, recovery, and
+  reconciled sale and payment outcomes. Billing remains the refund executor.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
@@ -45,6 +47,7 @@ requires:
     - name: orders
       optional: true
     - name: billing
+      version: ">=0.13.0"
       optional: false
     - name: content
       optional: true
@@ -100,6 +103,8 @@ provides:
     - { name: commerce_checkout_mark_paid, description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id." }
     - { name: commerce_sales_list, description: "List sales with profitability totals. Args: store_id?, status?, payment_status?, profitability_status?, limit?." }
     - { name: commerce_sales_get, description: "Fetch one sale. Args: id." }
+    - { name: commerce_sale_refund, description: "Execute an authorized partial or full Stripe refund through Billing with durable duplicate protection; return actual request status and reconciled sale state." }
+    - { name: commerce_sale_refunds_list, description: "List sale refund requests and original idempotency keys for safe recovery." }
     - { name: commerce_sale_financials_record, description: "Idempotently record an exact sale cost, payment fee, refund, or signed adjustment." }
     - { name: commerce_sale_financials_list, description: "List the immutable financial events behind a sale's profitability totals." }
     - { name: commerce_sale_financials_reconcile, description: "Reconcile a sale's refunds and exact fee fields from Billing, then recompute profitability." }
@@ -164,7 +169,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.9.1
+    ref: commerce/v0.10.0
     entry: mcp/commerce
   port: 8080
   health_check: /health
