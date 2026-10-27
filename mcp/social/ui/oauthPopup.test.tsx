@@ -74,8 +74,7 @@ test("Pinterest popup completes across origins through authenticated status poll
   await act(async () => root!.render(<SocialPanel appName="social" installId={1} projectId="test-proj" />));
   await click("Accounts");
   await click("+ Add account");
-  await click("Direct");
-  await click("Connect another account");
+  await click("Connect new account");
   expect(popup.location.href).toBe("https://pinterest.example/authorize");
   expect(finalized).toBe(false);
 
