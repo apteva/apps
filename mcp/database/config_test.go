@@ -4,7 +4,7 @@ import "testing"
 
 func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	defaults, err := managerOptions(nil, func(string) string { return "" })
-	if err != nil || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 0 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 {
+	if err != nil || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 64<<20 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 || defaults.Apteva.MemtableBytes != 0 || defaults.AptevaCacheBudgetBytes != 256<<20 || defaults.MaxConcurrentAptevaQueries != 2 {
 		t.Fatal(defaults, err)
 	}
 	getenv := func(name string) string {
@@ -14,10 +14,14 @@ func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	if e != nil || o.Apteva.SyncMode != "os" || o.Apteva.CacheBytes != 0 || o.Apteva.AggregateWorkers != 4 || o.Apteva.QueryWorkBytes != 32<<20 {
 		t.Fatal(o, e)
 	}
-	for _, config := range []map[string]string{{"aptevadb_sync_mode": "async"}, {"aptevadb_sync_mode": "typo"}, {"aptevadb_cache_mib": "-1"}, {"aptevadb_cache_mib": "1025"}, {"aptevadb_aggregate_workers": "0"}, {"aptevadb_aggregate_workers": "65"}, {"aptevadb_query_memory_mib": "257"}, {"aptevadb_query_memory_mib": "NaN"}} {
+	for _, config := range []map[string]string{{"aptevadb_total_cache_mib": "32"}, {"aptevadb_memtable_mib": "-1"}, {"aptevadb_memtable_mib": "257"}, {"aptevadb_total_cache_mib": "8193"}, {"aptevadb_max_concurrent_queries": "0"}, {"aptevadb_max_concurrent_queries": "65"}, {"aptevadb_sync_mode": "async"}, {"aptevadb_sync_mode": "typo"}, {"aptevadb_cache_mib": "-1"}, {"aptevadb_cache_mib": "1025"}, {"aptevadb_aggregate_workers": "0"}, {"aptevadb_aggregate_workers": "65"}, {"aptevadb_query_memory_mib": "257"}, {"aptevadb_query_memory_mib": "NaN"}} {
 		if _, e := managerOptions(config, func(string) string { return "" }); e == nil {
 			t.Fatal("invalid configuration accepted", config)
 		}
+	}
+	bounded, e := managerOptions(map[string]string{"aptevadb_cache_mib": "128", "aptevadb_total_cache_mib": "512", "aptevadb_memtable_mib": "16", "aptevadb_max_concurrent_queries": "3"}, func(string) string { return "" })
+	if e != nil || bounded.Apteva.CacheBytes != 128<<20 || bounded.Apteva.MemtableBytes != 16<<20 || bounded.AptevaCacheBudgetBytes != 512<<20 || bounded.MaxConcurrentAptevaQueries != 3 {
+		t.Fatal(bounded, e)
 	}
 	for _, mode := range []string{"full", "barrier", "os"} {
 		o, e := managerOptions(map[string]string{"aptevadb_sync_mode": mode}, getenv)

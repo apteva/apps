@@ -52,20 +52,26 @@ type database struct {
 	key       []byte
 	closed    bool
 	schemas   schemaCache
+	users     int    // protected by Manager.mu
+	lastUse   uint64 // protected by Manager.mu
 }
 type Manager struct {
-	watchMu      sync.Mutex
-	watchCount   int
-	watchCallers map[string]int
-	mu           sync.Mutex
-	registry     *sql.DB
-	root         string
-	databases    map[string]*database
-	names        map[databaseName]*database
-	secret       string
-	durability   string
-	apteva       AptevaOptions
-	closed       bool
+	watchMu               sync.Mutex
+	watchCount            int
+	watchCallers          map[string]int
+	mu                    sync.Mutex
+	registry              *sql.DB
+	root                  string
+	databases             map[string]*database
+	names                 map[databaseName]*database
+	secret                string
+	durability            string
+	apteva                AptevaOptions
+	closed                bool
+	nativeCacheBudget     int64
+	nativeQueries         chan struct{}
+	nativeQueryAdmissions chan struct{}
+	cacheClock            uint64
 }
 
 func Open(root string) (*Manager, error) {
@@ -95,6 +101,20 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
+	cacheBudget := options.AptevaCacheBudgetBytes
+	if cacheBudget == 0 {
+		cacheBudget = max(256<<20, apteva.CacheBytes)
+	}
+	if cacheBudget < 1<<20 || cacheBudget > 8<<30 || cacheBudget < apteva.CacheBytes {
+		return nil, Invalid("native total cache target must be 1–8192 MiB and cover one database cache")
+	}
+	concurrency := options.MaxConcurrentAptevaQueries
+	if concurrency == 0 {
+		concurrency = 2
+	}
+	if concurrency < 1 || concurrency > 64 {
+		return nil, Invalid("native query concurrency must be 1–64")
+	}
 	if e := os.MkdirAll(root, 0700); e != nil {
 		return nil, e
 	}
@@ -116,7 +136,7 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
-	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva}
+	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva, nativeCacheBudget: cacheBudget, nativeQueries: make(chan struct{}, concurrency), nativeQueryAdmissions: make(chan struct{}, concurrency+maxQueuedNativeQueries)}
 	if e = db.QueryRow(`SELECT value FROM settings WHERE name='secret'`).Scan(&m.secret); e != nil {
 		db.Close()
 		return nil, e
@@ -160,6 +180,9 @@ func (m *Manager) list(ctx context.Context, scope string) ([]DatabaseInfo, error
 func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, create bool) (*database, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.resolveLocked(ctx, scope, name, adapter, create)
+}
+func (m *Manager) resolveLocked(ctx context.Context, scope, name, adapter string, create bool) (*database, error) {
 	if m.closed {
 		return nil, fail("storage_error", "database app is closed")
 	}
@@ -208,6 +231,11 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 	}
 	if len(m.databases) >= 128 {
 		return nil, fail("resource_limit", "at most 128 open databases per app")
+	}
+	if info.Adapter == "aptevadb" {
+		if e = m.makeNativeCacheRoom(); e != nil {
+			return nil, e
+		}
 	}
 	dir := filepath.Join(m.root, "databases", info.ID)
 	if e := os.MkdirAll(dir, 0700); e != nil {
@@ -283,9 +311,17 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "databases_list" {
 		return m.list(ctx, scope)
 	}
-	d, e := m.resolve(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default")
+	d, release, e := m.acquireDatabase(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default")
 	if e != nil {
 		return nil, e
+	}
+	defer release()
+	if d.info.Adapter == "aptevadb" && (op == "find" || op == "count" || op == "aggregate") {
+		done, err := m.acquireNativeQuery(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer done()
 	}
 	if op == "database_create" || op == "database_describe" {
 		return d.info, nil

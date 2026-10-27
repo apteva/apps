@@ -53,6 +53,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		name string
 		set  func(int)
 	}{
+		{"DB_HUGE_AGG_MEMTABLE_MIB", func(v int) { options.MemtableBytes = int64(v) << 20 }},
 		{"DB_HUGE_AGG_CACHE_MIB", func(v int) { options.CacheBytes = int64(v) << 20 }},
 		{"DB_HUGE_AGG_WORKERS", func(v int) { options.AggregateWorkers = v }},
 		{"DB_HUGE_AGG_MEMORY_MIB", func(v int) { options.QueryWorkBytes = v << 20 }},
@@ -167,11 +168,15 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 			return
 		}
 		direct := hugeNativeAggregate(t, m, r)
+		nativeExpectedError := expectedError
+		if adapter == "aptevadb" && name == "one_group_per_record_top1" {
+			nativeExpectedError = "resource_limit"
+		}
 		if calls%2 == 0 {
 			measureOne("app_engine", app, name, r, verify, expectedError)
-			measureOne("native_driver", direct, name, r, verify, expectedError)
+			measureOne("native_driver", direct, name, r, verify, nativeExpectedError)
 		} else {
-			measureOne("native_driver", direct, name, r, verify, expectedError)
+			measureOne("native_driver", direct, name, r, verify, nativeExpectedError)
 			measureOne("app_engine", app, name, r, verify, expectedError)
 		}
 		calls++
@@ -245,7 +250,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 	}
 	// Force ordering by an aggregate metric so LIMIT 1 is not an input-row limit.
 	expectedError := "resource_limit"
-	if adapter == "sqlite" {
+	if adapter == "sqlite" || adapter == "aptevadb" {
 		expectedError = ""
 	}
 	for repeat := 0; repeat < 3; repeat++ {
@@ -255,6 +260,20 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 				t.Fatal(rows)
 			}
 		}, expectedError)
+	}
+	// Uniqueness of input values alone is insufficient for the PK rewrite.
+	// This column has one distinct value per row but no uniqueness constraint.
+	nonPrimaryError := "resource_limit"
+	if adapter == "sqlite" {
+		nonPrimaryError = ""
+	}
+	for repeat := 0; repeat < 3; repeat++ {
+		measure("one_group_per_non_primary_value_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{OrderBy: []Order{{"count", "desc"}}, Limit: 1}}, func(v any) {
+			rows := v.(map[string]any)["rows"].([]Record)
+			if len(rows) != 1 || rows[0]["i"] != "0" || rows[0]["count"] != "1" {
+				t.Fatal(rows)
+			}
+		}, nonPrimaryError)
 	}
 	checkErr(t, m.Close())
 }

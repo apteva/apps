@@ -82,9 +82,27 @@ config_schema:
   - name: aptevadb_cache_mib
     type: select
     options: ["0", "32", "64", "128", "256", "512"]
-    default: "0"
+    default: "64"
     label: AptevaDB cache target (MiB)
-    description: Per-database logical cache target. Zero keeps the engine cache uncapped. This is not a process memory cap.
+    description: Per-database logical cache target. Zero explicitly opts out of cache-target admission. This is not a process memory cap.
+  - name: aptevadb_total_cache_mib
+    type: select
+    options: ["0", "128", "256", "512", "1024", "2048"]
+    default: "0"
+    label: AptevaDB total cache targets (MiB)
+    description: Zero selects the larger of 256 MiB or one database cache. Idle native handles close and reopen automatically; active queries and watches keep their handles. This is not an RSS limit. Uncapped per-database caches explicitly opt out.
+  - name: aptevadb_memtable_mib
+    type: select
+    options: ["0", "8", "16", "32", "64", "128", "256"]
+    default: "0"
+    label: AptevaDB write buffer (MiB)
+    description: Zero disables write buffering. Positive values opt into native buffering independently of the cache target. Writes keep the selected synchronous durability.
+  - name: aptevadb_max_concurrent_queries
+    type: select
+    options: ["1", "2", "4", "8"]
+    default: "2"
+    label: Concurrent AptevaDB queries
+    description: App-wide slots for find, count, aggregate and watch initial snapshots. Waiting uses the request deadline without retaining a native snapshot. Point gets are not queued here.
   - name: aptevadb_aggregate_workers
     type: select
     options: ["1", "2", "4", "8"]

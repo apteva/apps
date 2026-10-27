@@ -33,9 +33,18 @@ AptevaDB tuning is available through app configuration or environment variables 
 | App configuration | Environment | Default | Accepted range |
 |---|---|---:|---|
 | `aptevadb_sync_mode` | `DATABASE_APTEVADB_SYNC_MODE` | full | full, barrier, os |
-| `aptevadb_cache_mib` | `DATABASE_APTEVADB_CACHE_MIB` | 0 (uncapped) | 0–1024 MiB |
+| `aptevadb_cache_mib` | `DATABASE_APTEVADB_CACHE_MIB` | 64 | 0 (explicit uncapped opt-out) or 1–1024 MiB |
+| `aptevadb_total_cache_mib` | `DATABASE_APTEVADB_TOTAL_CACHE_MIB` | max(256 MiB, one cache) | 0 (auto), or 1–8192 MiB; must cover one cache |
+| `aptevadb_memtable_mib` | `DATABASE_APTEVADB_MEMTABLE_MIB` | 0 (disabled) | 0–256 MiB |
+| `aptevadb_max_concurrent_queries` | `DATABASE_APTEVADB_MAX_CONCURRENT_QUERIES` | 2 | 1–64 |
 | `aptevadb_aggregate_workers` | `DATABASE_APTEVADB_AGGREGATE_WORKERS` | min(4, GOMAXPROCS); panel default 4 | 1–64 |
 | `aptevadb_query_memory_mib` | `DATABASE_APTEVADB_QUERY_MEMORY_MIB` | 16 | 1–256 MiB |
+
+The total cache setting bounds the sum of configured native cache targets across open handles. Least-recently-used idle native handles are closed without deleting their registry entries or files, and reopen on demand. Active requests and registered watches pin their handles; if all possible eviction candidates are pinned, opening another native database returns `resource_limit`. Explicit per-database cache=0 opts out of cache-target admission. File mappings, WAL, snapshots and other native allocations remain outside this target, so it is not an RSS cap. SQLite and Pebble handles are unchanged.
+
+Write buffering is separately opt-in: setting a finite cache no longer implicitly enables the engine's default half-cache memtable. Query slots are shared across native databases and acquired before creating read snapshots; queue time counts toward the query deadline. At most 64 additional queries may wait; excess requests return `resource_limit`. Point reads and watch polling without initial snapshots bypass this queue. The per-query 16 MiB work budget is unchanged.
+
+Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. Arbitrary high-cardinality grouping still needs native ordered aggregation or disk spilling.
 
 Flush modes apply when the app mounts; restart/remount it to apply a changed setting to all owned native databases. `full` requests a drive-cache flush on macOS. `os` requests ordinary `fsync`, like SQLite WAL/FULL with `fullfsync=OFF`; `barrier` orders writes without forcing the drive cache to stable media. OS and barrier provide weaker power-loss protection on macOS. On other supported systems the modes use `fsync`. Every exposed mode keeps native `Sync: true`; there is no async option. `explain` and startup logs report the effective mode. For a SQLite-comparable ordinary-flush test, select `aptevadb_sync_mode: os` or set:
 

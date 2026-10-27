@@ -298,6 +298,9 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
+	if rows, ok, err := t.aggregatePrimaryCount(c, r); ok {
+		return rows, err
+	}
 	if len(t.pending) == 0 && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
 		p := plan(c, r.Query)
 		if r.RequireIndex && !p.IndexedLookup {
