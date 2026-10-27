@@ -121,7 +121,7 @@ test("private metadata stays distinct from membership and unavailable fields sta
   expect(text).toContain("Membership audienceUnknown");
   expect(text).toContain("Original filenameUnknown");
   expect(text).toContain("Original bytes0");
-  expect(text).toContain("Provider publication timeUnknown");
+  expect(text).toContain("Native publication timeUnknown");
   expect(text).toContain("not independent public access verification");
   expect(text).not.toContain("members-only");
 });

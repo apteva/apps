@@ -778,8 +778,8 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	if targets[0]["platform_post_id"] != "123" {
 		t.Fatalf("post_create target platform_post_id = %v, want 123", targets[0]["platform_post_id"])
 	}
-	if purl, _ := targets[0]["platform_url"].(string); !strings.Contains(purl, "/status/123") {
-		t.Fatalf("post_create target platform_url = %q, want twitter status URL", purl)
+	if purl, _ := targets[0]["platform_url"].(string); purl != "" {
+		t.Fatalf("post_create target platform_url = %q, want unknown URL until the provider returns one", purl)
 	}
 
 	// post_tweet was called with text=body (Twitter's BodyField is "text").
@@ -805,7 +805,7 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	if ppid != "123" {
 		t.Errorf("platform_post_id = %q", ppid)
 	}
-	if !strings.Contains(purl, "/status/123") {
+	if purl != "" {
 		t.Errorf("platform_url = %q", purl)
 	}
 
@@ -1990,7 +1990,7 @@ func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *test
 		}
 		if status != "published" || requestedMode != postModePublish || source != "provider" ||
 			createdAt != "2026-02-26T14:33:43.886Z" || scheduleAt != "2026-02-26T14:33:42.520Z" ||
-			publishedAt != "2026-02-26T14:33:46.829Z" {
+			publishedAt != "" {
 			t.Fatalf("stored parent = status=%q mode=%q source=%q created=%q scheduled=%q published=%q",
 				status, requestedMode, source, createdAt, scheduleAt, publishedAt)
 		}
@@ -2004,7 +2004,7 @@ func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *test
 		}
 		if targetStatus != "published" || platformID != "urn:li:share:7432795016680497152" ||
 			platformURL != "https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/" ||
-			targetPublishedAt != "2026-02-26T14:33:46.829Z" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
+			targetPublishedAt != "" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
 			t.Fatalf("stored target = status=%q platform_id=%q url=%q published=%q provider_id=%q attempts=%d",
 				targetStatus, platformID, platformURL, targetPublishedAt, providerID, attempts)
 		}
@@ -2129,7 +2129,7 @@ func TestProviderReconcilerManagedOnlyReadsExactKnownPost(t *testing.T) {
 	).Scan(&parentStatus, &targetStatus, &platformID, &publishedAt); err != nil {
 		t.Fatal(err)
 	}
-	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "2026-08-01T09:05:00Z" {
+	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "" {
 		t.Fatalf("managed reconciliation stored parent=%q target=%q id=%q published=%q", parentStatus, targetStatus, platformID, publishedAt)
 	}
 }
@@ -4556,11 +4556,11 @@ func TestWalkPath(t *testing.T) {
 
 func TestExtractPostIdentity(t *testing.T) {
 	id, url := extractPostIdentity("twitter", json.RawMessage(`{"data":{"id":"123"}}`))
-	if id != "123" || !strings.Contains(url, "/status/123") {
+	if id != "123" || url != "" {
 		t.Errorf("twitter: id=%q url=%q", id, url)
 	}
 	id, url = extractPostIdentity("facebook", json.RawMessage(`{"id":"100_500"}`))
-	if id != "100_500" || !strings.Contains(url, "100_500") {
+	if id != "100_500" || url != "" {
 		t.Errorf("facebook: id=%q url=%q", id, url)
 	}
 }

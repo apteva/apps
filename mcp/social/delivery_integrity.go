@@ -117,20 +117,20 @@ func providerPublicationResult(raw json.RawMessage, account string) (string, str
 // failure. Known provider operations are queried before considering recovery.
 func (a *App) recoverDeliveries(ctx *sdk.AppCtx) {
 	a.recoverTikTokDeliveries(ctx)
-	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,a.provider_account_id,t.provider_post_id
+	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,a.provider_account_id,t.provider_post_id,a.platform
  FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id
  WHERE p.project_id=? AND t.status='publishing' AND a.provider_slug='zernio' AND t.provider_post_id!='' ORDER BY COALESCE(t.provider_updated_at,'') LIMIT 100`, projectScope(ctx))
 	if err != nil {
 		return
 	}
 	type pending struct {
-		id, post, conn      int64
-		account, providerID string
+		id, post, conn                int64
+		account, providerID, platform string
 	}
 	var list []pending
 	for rows.Next() {
 		var p pending
-		if rows.Scan(&p.id, &p.post, &p.conn, &p.account, &p.providerID) == nil {
+		if rows.Scan(&p.id, &p.post, &p.conn, &p.account, &p.providerID, &p.platform) == nil {
 			list = append(list, p)
 		}
 	}
@@ -146,7 +146,7 @@ func (a *App) recoverDeliveries(ctx *sdk.AppCtx) {
 			}
 			id, url, err := providerPublicationResult(res.Data, p.account)
 			if err == nil {
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,platform_url=?,published_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing'`, nullable(id), nullable(url), p.id)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,platform_url=?,delivery_recorded_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing'`, nullable(id), nullable(safePublicationURL(p.platform, url)), p.id)
 			} else {
 				var pending *providerPendingError
 				if errors.As(err, &pending) {
@@ -234,11 +234,15 @@ func publishDueBatch(runCtx context.Context, ids []int64, run func(int64)) {
 	wg.Wait()
 }
 
-func persistPublishOperation(ctx *sdk.AppCtx, targetID int64, id string) error {
+func persistPublishOperation(ctx *sdk.AppCtx, targetID int64, id string, expectedAttempt ...int) error {
+	attempt := -1
+	if len(expectedAttempt) > 0 && expectedAttempt[0] > 0 {
+		attempt = expectedAttempt[0]
+	}
 	if targetID == 0 {
 		return nil
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=? WHERE id=? AND status='publishing'`, id, targetID)
+	res, err := ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=? WHERE id=? AND status='publishing' AND (?<0 OR attempts=?) AND (COALESCE(publish_operation_id,'')='' OR publish_operation_id=?)`, id, targetID, attempt, attempt, id)
 	if err != nil {
 		return err
 	}
@@ -277,8 +281,11 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 			if !currentTikTokAttempt(ctx, op.id, op.attempt, op.op) {
 				return
 			}
-			_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, op.id)
+			_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=datetime('now','+5 minutes') WHERE id=? AND attempts=? AND publish_operation_id=?`, op.id, op.attempt, op.op)
 			d := loadDeliveryDiagnostics(ctx, op.id)
+			if !d.bound || d.boundAttempt != op.attempt || d.boundOperation != op.op {
+				return
+			}
 			d.AutomaticPollAttempts++
 			if err := d.save(ctx, op.id); err != nil {
 				return
@@ -301,7 +308,7 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 				if len(ids) > 0 {
 					id = ids[0]
 				}
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing' AND attempts=? AND publish_operation_id=?`, nullable(id), op.id, op.attempt, op.op)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,delivery_recorded_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing' AND attempts=? AND publish_operation_id=?`, nullable(id), op.id, op.attempt, op.op)
 			} else {
 				return
 			}

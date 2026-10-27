@@ -237,7 +237,7 @@ func TestHistoryVisibilityUnknownMetadataAndInspection(t *testing.T) {
 		}
 		m := out.(map[string]any)
 		n := m["native_metadata"].(nativePost)
-		if valueOrEmpty(n.Visibility) != tc.visibility || n.Audience != nil || m["public_live_verified"] != false || n.PublishedAt == nil {
+		if valueOrEmpty(n.Visibility) != tc.visibility || n.Audience != nil || m["public_live_verified"] != false || n.PublishedAt != nil || n.UploadedAt == nil {
 			t.Fatalf("invented audience/time: %+v", m)
 		}
 	}

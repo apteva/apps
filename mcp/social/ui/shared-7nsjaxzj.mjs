@@ -1,4 +1,4 @@
 var s=14400000;function u(t,e=Date.now()){if(!t||t.status==="failed")return!1;if(!t.updated_at)return!0;let n=Date.parse(t.updated_at);return!Number.isFinite(n)||e-n>=14400000}function o(t){return Object.entries(t||{}).filter(([e])=>!e.startsWith("_")&&!e.startsWith("total_")&&!e.endsWith("_total")).map(([e,n])=>({name:e,points:n})).filter(({points:e})=>e.length>=2)}function l(t){return t.data_status==="pending"||t.data_status==="unavailable"||t.value==null||!Number.isFinite(t.value)?null:t.value}function i(t){return new Intl.DateTimeFormat(void 0,{day:"numeric",month:"long",year:"numeric",timeZone:"UTC"}).format(new Date(t))}function c(t){let e=[...new Set(t)].sort(),n=[];for(let r of e){let a=n.at(-1);if(a&&Date.parse(r)-Date.parse(a[1])===86400000)a[1]=r;else n.push([r,r])}return n.map(([r,a])=>r===a?i(r):`${i(r)} – ${i(a)}`).join(", ")}
-export{s as M,u as N,o as O,l as P,i as Q,c as R};
+export{s as N,u as O,o as P,l as Q,i as R,c as S};
 
-//# debugId=DE5D8CC9B174CAEC64756E2164756E21
+//# debugId=BBC23B5A76C0DCE264756E2164756E21

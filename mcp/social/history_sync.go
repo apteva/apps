@@ -19,21 +19,24 @@ import (
 // Metadata is observation evidence, never publishing intent. Null means the
 // provider did not expose the field. Visibility does not imply membership.
 type nativePost struct {
-	ID               string         `json:"native_post_id"`
-	URL              *string        `json:"url"`
-	Title            *string        `json:"title"`
-	Body             *string        `json:"body"`
-	PublishedAt      *string        `json:"published_at"`
-	Visibility       *string        `json:"visibility"`
-	Audience         *string        `json:"audience"`
-	ProcessingState  *string        `json:"processing_state"`
-	OriginalFilename *string        `json:"original_filename"`
-	Bytes            *int64         `json:"bytes"`
-	DurationSeconds  *float64       `json:"duration_seconds"`
-	ObservedAt       string         `json:"observed_at"`
-	ProviderPostID   *string        `json:"provider_post_id"`
-	MediaURLs        []string       `json:"-"`
-	Options          map[string]any `json:"-"`
+	ID                    string         `json:"native_post_id"`
+	URL                   *string        `json:"url"`
+	Title                 *string        `json:"title"`
+	Body                  *string        `json:"body"`
+	UploadedAt            *string        `json:"uploaded_at"`
+	ProviderPublishedAt   *string        `json:"provider_reported_published_at"`
+	PublicationTimeSource string         `json:"publication_time_source"`
+	PublishedAt           *string        `json:"published_at"`
+	Visibility            *string        `json:"visibility"`
+	Audience              *string        `json:"audience"`
+	ProcessingState       *string        `json:"processing_state"`
+	OriginalFilename      *string        `json:"original_filename"`
+	Bytes                 *int64         `json:"bytes"`
+	DurationSeconds       *float64       `json:"duration_seconds"`
+	ObservedAt            string         `json:"observed_at"`
+	ProviderPostID        *string        `json:"provider_post_id"`
+	MediaURLs             []string       `json:"-"`
+	Options               map[string]any `json:"-"`
 }
 type historyAccount struct {
 	destinationAccount
@@ -408,6 +411,7 @@ func mergeLastKnown(oldRaw string, current nativePost) string {
 	return string(raw)
 }
 func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePost, runIDs ...string) (string, int64, int64, error) {
+	n = normalizeNativeObservation(b, n)
 	if n.ID == "" {
 		return "", 0, 0, errors.New("native post ID required")
 	}
@@ -489,7 +493,7 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 			options["title"] = *n.Title
 		}
 		opt, _ := json.Marshal(options)
-		res, e = tx.Exec(`INSERT INTO post_targets(post_id,social_account_id,status,platform_post_id,platform_url,published_at,options,retryable) VALUES(?,?,?,?,?,?,?,0)`, postID, b.ID, observedStatus, n.ID, nullable(valueOrEmpty(n.URL)), nullable(valueOrEmpty(n.PublishedAt)), string(opt))
+		res, e = tx.Exec(`INSERT INTO post_targets(post_id,social_account_id,status,platform_post_id,platform_url,published_at,native_uploaded_at,publication_observed_at,publication_time_source,options,retryable) VALUES(?,?,?,?,?,?,?,?,?,?,0)`, postID, b.ID, observedStatus, n.ID, nullable(valueOrEmpty(n.URL)), nullable(valueOrEmpty(n.PublishedAt)), n.UploadedAt, optionalText(n.ObservedAt), n.PublicationTimeSource, string(opt))
 		if e != nil {
 			return "", 0, 0, e
 		}

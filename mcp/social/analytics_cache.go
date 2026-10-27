@@ -30,6 +30,10 @@ func (q analyticsQuery) cacheKey() string {
 	sort.Strings(dims)
 	groups := canonicalDimensions(q.GroupBy)
 	sort.Strings(groups)
+	version := 4
+	if containsFold(groups, "post") {
+		version = 5
+	}
 	raw, _ := json.Marshal(struct {
 		Version                   int
 		Scope, DestinationID      string
@@ -38,7 +42,7 @@ func (q analyticsQuery) cacheKey() string {
 		Start, End                string
 		Filters                   map[string][]string
 		Dimensions, Groups        []string
-	}{4, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
+	}{version, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
 	return string(raw)
 }
 func (q analyticsQuery) snapshotPeriod(metric string) string {

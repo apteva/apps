@@ -56,9 +56,21 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		if b.ExternalID != "" && historyString(raw, "board_id") != b.ExternalID {
 			return nil, errors.New("Pin is not on this legacy board account")
 		}
-		return []nativePost{{ID: id, URL: optionalText("https://www.pinterest.com/pin/" + id + "/"), Title: optionalText(historyString(raw, "title")), Body: optionalText(historyString(raw, "description")), PublishedAt: nativeTimestamp(historyString(raw, "created_at"))}}, nil
+		profile, err := historyExecute(ctx, b, "get_user_account", map[string]any{})
+		if err != nil {
+			return nil, err
+		}
+		owner := historyString(profile, "username")
+		if owner == "" || historyString(historyMap(raw, "board_owner"), "username") != owner {
+			return nil, errors.New("Pinterest Pin ownership was not verified for this account")
+		}
+		if err := verifyHistoryOwner(ctx, b, run, owner); err != nil {
+			return nil, err
+		}
+
+		return []nativePost{{ID: id, URL: optionalText(historyString(raw, "permalink_url", "share_url")), Title: optionalText(historyString(raw, "title")), Body: optionalText(historyString(raw, "description")), PublishedAt: nativeTimestamp(historyString(raw, "created_at"))}}, nil
 	case "facebook":
-		if b.ExternalID == "" || !strings.HasPrefix(id, b.ExternalID+"_") {
+		if b.ExternalID == "" {
 			return nil, errors.New("Facebook native post ID does not match the selected Page")
 		}
 		token := extractPageToken(b.PageCredentials)
@@ -72,10 +84,14 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		if historyString(raw, "id") != id {
 			return nil, errors.New("Facebook native ID mismatch")
 		}
-		if owner := historyString(historyMap(raw, "from"), "id"); owner != "" && owner != b.ExternalID {
+		if owner := historyString(historyMap(raw, "from"), "id"); owner != b.ExternalID && !(owner == "" && strings.HasPrefix(id, b.ExternalID+"_")) {
 			return nil, errors.New("Facebook author mismatch")
 		}
-		return []nativePost{{ID: id, Body: optionalText(historyString(raw, "message")), URL: optionalText(historyString(raw, "permalink_url")), PublishedAt: nativeTimestamp(historyString(raw, "created_time"))}}, nil
+		at := nativeTimestamp(historyString(raw, "created_time"))
+		if published, ok := raw["is_published"].(bool); ok && !published {
+			at = nil
+		}
+		return []nativePost{{ID: id, Body: optionalText(historyString(raw, "message")), URL: optionalText(historyString(raw, "permalink_url")), PublishedAt: at}}, nil
 	case "instagram":
 		token := extractPageToken(b.PageCredentials)
 		if token == "" || b.ExternalID == "" {
@@ -106,7 +122,7 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		if historyString(m, "id") != id || historyString(m, "author_id") != owner {
 			return nil, errors.New("X post is not owned by this Social account")
 		}
-		return []nativePost{{ID: id, Body: optionalText(historyString(m, "text")), URL: optionalText("https://x.com/i/web/status/" + id), PublishedAt: nativeTimestamp(historyString(m, "created_at"))}}, nil
+		return []nativePost{{ID: id, Body: optionalText(historyString(m, "text")), URL: optionalText(historyString(m, "permalink_url", "share_url")), PublishedAt: nativeTimestamp(historyString(m, "created_at"))}}, nil
 	case "tiktok":
 		raw, err := historyExecute(ctx, b, "query_videos", map[string]any{"fields": "id,title,video_description,create_time,share_url,duration", "filters": map[string]any{"video_ids": []string{id}}})
 		if err != nil {
@@ -119,7 +135,7 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		for _, m := range items {
 			if historyString(m, "id") == id {
 				var at *string
-				if seconds := nativeBytes(m["create_time"]); seconds != nil {
+				if seconds := nativeBytes(m["create_time"]); seconds != nil && *seconds > 0 {
 					value := time.Unix(*seconds, 0).UTC().Format(time.RFC3339)
 					at = &value
 				}

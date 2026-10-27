@@ -49,7 +49,7 @@ func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (a
 			if len(ids) > 0 {
 				identity = ids[0]
 			}
-			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL,failure_code='',upstream_status=0,retryable=0 WHERE id=? AND attempts=? AND publish_operation_id=?`, nullable(identity), targetID, attempt, operation)
+			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,delivery_recorded_at=CURRENT_TIMESTAMP,last_error=NULL,failure_code='',upstream_status=0,retryable=0 WHERE id=? AND attempts=? AND publish_operation_id=?`, nullable(identity), targetID, attempt, operation)
 			if err == nil {
 				a.rollupPostStatus(ctx, postID)
 			}

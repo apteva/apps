@@ -43,7 +43,7 @@ an operator changes access in YouTube Studio. The target and parent post show
 publications. Post details links to Studio and requires explicit confirmation of
 members-only access and the requested tiers. Confirmation records
 `audience_status=human_confirmed`, time and actor; it is an operator attestation,
-not provider API verification. The confirmation route is authenticated and is not
+not provider API verification. Confirmation never assigns a native publication timestamp; the original upload and independent membership dates retain their meanings. The confirmation route is authenticated and is not
 an MCP tool.
 
 ## Upload dependency and recovery

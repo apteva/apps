@@ -259,7 +259,7 @@ func (a *App) youtubeNativePosts(ctx *sdk.AppCtx, b historyAccount, run *history
 		details := historyMap(item, "contentDetails")
 		file := historyMap(item, "fileDetails")
 		processing := historyMap(item, "processingDetails")
-		out = append(out, nativePost{ID: id, URL: optionalText("https://www.youtube.com/watch?v=" + id), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
+		out = append(out, nativePost{ID: id, URL: optionalText(historyString(item, "share_url", "permalink_url")), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
 	}
 	if len(seen) != len(wanted) {
 		run.Incomplete = true
@@ -337,7 +337,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 		page := nativePage{Next: historyString(raw, "bookmark")}
 		for _, m := range items {
 			id := historyString(m, "id")
-			page.Posts = append(page.Posts, nativePost{ID: id, URL: optionalText("https://www.pinterest.com/pin/" + id + "/"), Title: nativeText(m, "title"), Body: nativeText(m, "description"), PublishedAt: nativeTimestamp(historyString(m, "created_at")), Options: map[string]any{"destination_id": historyString(m, "board_id"), "board_section_id": historyString(m, "board_section_id"), "link": historyString(m, "link"), "alt_text": historyString(m, "alt_text")}, MediaURLs: []string{firstDeepString(m["media"], "url")}})
+			page.Posts = append(page.Posts, nativePost{ID: id, URL: optionalText(historyString(m, "permalink_url", "share_url")), Title: nativeText(m, "title"), Body: nativeText(m, "description"), PublishedAt: nativeTimestamp(historyString(m, "created_at")), Options: map[string]any{"destination_id": historyString(m, "board_id"), "board_section_id": historyString(m, "board_section_id"), "link": historyString(m, "link"), "alt_text": historyString(m, "alt_text")}, MediaURLs: []string{firstDeepString(m["media"], "url")}})
 		}
 		return page, nil
 	case "facebook", "instagram":
@@ -426,7 +426,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 		}
 		for _, m := range items {
 			var at *string
-			if seconds := nativeBytes(m["create_time"]); seconds != nil {
+			if seconds := nativeBytes(m["create_time"]); seconds != nil && *seconds > 0 {
 				value := time.Unix(*seconds, 0).UTC().Format(time.RFC3339)
 				at = &value
 			}
@@ -468,7 +468,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 				return nativePage{}, errors.New("X returned another account's post")
 			}
 			id := historyString(m, "id")
-			page.Posts = append(page.Posts, nativePost{ID: id, Body: nativeText(m, "text"), URL: optionalText("https://x.com/i/web/status/" + id), PublishedAt: nativeTimestamp(historyString(m, "created_at")), MediaURLs: nativeTweetMedia(m)})
+			page.Posts = append(page.Posts, nativePost{ID: id, Body: nativeText(m, "text"), URL: optionalText(historyString(m, "permalink_url", "share_url")), PublishedAt: nativeTimestamp(historyString(m, "created_at")), MediaURLs: nativeTweetMedia(m)})
 		}
 		return page, nil
 	case "linkedin":
@@ -502,7 +502,7 @@ func (a *App) fetchHistoryPage(ctx *sdk.AppCtx, b historyAccount, run *historyRu
 			}
 			id := historyString(m, "id")
 			var at *string
-			if ms := nativeBytes(m["publishedAt"]); ms != nil {
+			if ms := nativeBytes(m["publishedAt"]); ms != nil && *ms > 0 {
 				value := time.UnixMilli(*ms).UTC().Format(time.RFC3339)
 				at = &value
 			}
@@ -612,7 +612,7 @@ func (a *App) toolPostNativeInspect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if len(posts) != 1 || run.Incomplete {
 		return map[string]any{"status": "not_found", "social_account_id": b.ID, "native_post_id": id, "limitation": "Provider did not return this ID under the connected account; existence/access remains unknown."}, nil
 	}
-	n := posts[0]
+	n := normalizeNativeObservation(b, posts[0])
 	n.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	_, post, target, err := a.upsertNativeHistory(ctx, b, n)
 	if err != nil {

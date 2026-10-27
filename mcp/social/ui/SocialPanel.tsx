@@ -1,3 +1,4 @@
+import { PublicationFacts, type PublicationFactsData } from "./PublicationFacts";
 import { NativePostObservation, type NativePostMetadata } from "./NativePostObservation";
 import { syncAccountHistory, historySyncMessage } from "./historySync";
 // SocialPanel — accounts + compose + posts in a single panel.
@@ -139,12 +140,14 @@ interface PostTarget {
   attempts: number;
   last_error: string;
   published_at: string;
+  delivery_recorded_at?: string;
   options?: Record<string, any>;
   failure_code?: string;
   retryable?: boolean;
   upstream_status?: number;
   existing_post_id?: string;
   native_metadata?: NativePostMetadata;
+ publication_facts?: PublicationFactsData;
   provider_sync_status?: string;
   audience_capabilities?: AudienceCapabilities;
   destination_capabilities?: DestinationCapabilities;
@@ -170,6 +173,7 @@ interface Post {
   status: string;
   created_at: string;
   published_at: string;
+  delivery_recorded_at?: string;
   targets: PostTarget[];
   profile_id?: number;
   revision: number;
@@ -5045,7 +5049,8 @@ function PostDetailPanel({
           <section className="p-4 border-b border-border grid grid-cols-2 gap-3 text-xs">
             <div><div className="text-text-dim uppercase">Created</div><div className="text-text mt-1">{new Date(post.created_at).toLocaleString()}</div></div>
             <div><div className="text-text-dim uppercase">Scheduled</div><div className="text-text mt-1">{post.schedule_at ? new Date(post.schedule_at).toLocaleString() : "—"}</div></div>
-            <div><div className="text-text-dim uppercase">Published</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Native publication</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "Unknown"}</div></div>
+            <div><div className="text-text-dim uppercase">Delivery recorded</div><div className="text-text mt-1">{post.delivery_recorded_at ? new Date(post.delivery_recorded_at).toLocaleString() : "Unknown"}</div></div>
             <div><div className="text-text-dim uppercase">Targets</div><div className="text-text mt-1">{post.targets.length}</div></div>
             <div><div className="text-text-dim uppercase">Revision</div><div className="text-text mt-1">{post.revision || 1}</div></div>
             <div><div className="text-text-dim uppercase">Approval</div><div className="text-text mt-1">{post.approval_status || "not requested"}</div></div>
@@ -5082,7 +5087,7 @@ function PostDetailPanel({
                   </div>
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
                   {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
-                  <NativePostObservation metadata={target.native_metadata}/>
+                  <PublicationFacts facts={target.publication_facts}/><NativePostObservation metadata={target.native_metadata}/>
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
                   {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
                   {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
@@ -6173,7 +6178,7 @@ function MetricsView({
                         {p.body || <span className="text-text-dim italic">no body</span>}
                       </div>
                       <div className="text-text-dim text-xs mt-0.5">
-						{new Date(p.published_at || p.created_at).toLocaleString()}
+						{p.published_at ? "Native publication: " : p.delivery_recorded_at ? "Delivery recorded: " : "Created: "}{new Date(p.published_at || p.delivery_recorded_at || p.created_at).toLocaleString()}
                         {p.targets && p.targets.length > 0 && (
                           <span className="ml-2">
                             · {p.targets.length} target{p.targets.length !== 1 ? "s" : ""}

@@ -1029,7 +1029,7 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	}
 	ctx.Logger().Info("publishZernio: calling create_post",
 		"platform", j.platform, "provider_account_id", j.providerAccountID, "media_count", len(j.media))
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "create_post", input)
+	res, err := executePublicationWrite(ctx, j, "create_post", input)
 	if err != nil {
 		return "", "", err
 	}
@@ -1197,11 +1197,7 @@ func (a *App) reconcileZernioItem(
 	if publishedAt == "" {
 		publishedAt = firstString(item, "publishedAt", "published_at")
 	}
-	if status == "published" && publishedAt == "" {
-		// Keep the fallback provider-owned. Import/synchronization time
-		// must never be substituted for an upstream publication time.
-		publishedAt = firstString(item, "updatedAt", "updated_at", "createdAt", "created_at")
-	}
+
 	return a.reconcileImportedProviderPost(
 		ctx, pid, accountID, profileID, body, providerPostID, platformPostID, url,
 		status, requestedMode, scheduleAt, createdAt, publishedAt, zernioMediaURLs(item), item,

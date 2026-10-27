@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 // decision bound to its exact revision/source/attempt, and one consumed grant.
 type recoveryTarget struct {
 	PostID, TargetID, AccountID, ConnectionID                                      int64
+	DeliveryRevision                                                               int
 	Revision, Attempts                                                             int
 	ApprovalRequired                                                               int
 	ApprovedRevision                                                               int
@@ -29,7 +31,7 @@ func loadRecoveryTarget(ctx *sdk.AppCtx, post, target int64) (recoveryTarget, er
 }
 func loadRecoveryTargetFrom(db recoveryQueryer, project string, post, target int64) (r recoveryTarget, err error) {
 	r.PostID, r.TargetID = post, target
-	err = db.QueryRow(`SELECT t.social_account_id,a.connection_id,p.revision,t.attempts,p.approval_required,COALESCE(p.approved_revision,0),t.status,a.status,a.platform,COALESCE(a.provider_slug,'native'),COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),p.body,COALESCE(t.options,'{}'),COALESCE(p.media_storage_ids,'[]'),COALESCE(p.media_project_id,''),t.failure_code,COALESCE(t.last_error,''),COALESCE(t.youtube_upload_session,''),COALESCE(a.external_account_id,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.id=? AND t.id=? AND p.project_id=? AND a.project_id=p.project_id`, post, target, project).Scan(&r.AccountID, &r.ConnectionID, &r.Revision, &r.Attempts, &r.ApprovalRequired, &r.ApprovedRevision, &r.Status, &r.AccountStatus, &r.Platform, &r.Provider, &r.Operation, &r.PublicID, &r.Body, &r.Options, &r.MediaIDs, &r.MediaProject, &r.Failure, &r.LastError, &r.Session, &r.ExternalID)
+	err = db.QueryRow(`SELECT t.social_account_id,a.connection_id,p.revision,t.attempts,p.approval_required,COALESCE(p.approved_revision,0),t.status,a.status,a.platform,COALESCE(a.provider_slug,'native'),COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),p.body,COALESCE(t.options,'{}'),COALESCE(p.media_storage_ids,'[]'),COALESCE(p.media_project_id,''),t.failure_code,COALESCE(t.last_error,''),COALESCE(t.youtube_upload_session,''),COALESCE(a.external_account_id,''),t.delivery_revision FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.id=? AND t.id=? AND p.project_id=? AND a.project_id=p.project_id`, post, target, project).Scan(&r.AccountID, &r.ConnectionID, &r.Revision, &r.Attempts, &r.ApprovalRequired, &r.ApprovedRevision, &r.Status, &r.AccountStatus, &r.Platform, &r.Provider, &r.Operation, &r.PublicID, &r.Body, &r.Options, &r.MediaIDs, &r.MediaProject, &r.Failure, &r.LastError, &r.Session, &r.ExternalID, &r.DeliveryRevision)
 	return
 }
 func (r recoveryTarget) fingerprint(source string) string {
@@ -55,12 +57,20 @@ func (a *App) toolPostDeliveryInspect(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return mcpError("target not found in this project"), nil
 	}
+	if err := validateDeliveryAccount(args, r.AccountID); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	evidence, _, err := a.deliveryRecoveryDecision(ctx, r, false)
 	if err != nil {
 		return nil, err
 	}
 	evidence["targets"] = a.loadTargets(ctx, post)
 	evidence["delivery_diagnostics"] = loadDeliveryDiagnostics(ctx, target)
+	ledger, err := deliveryRecordingHistory(ctx, target, int64(intArg(args, "history_after_id", 0)), intArg(args, "history_limit", 50))
+	if err != nil {
+		return nil, err
+	}
+	evidence["delivery_recording_history"] = ledger
 	snapshots, err := ctx.AppDB().Query(`SELECT correlation_id,diagnostics,created_at FROM video_delivery_attempts WHERE project_id=? AND target_id=? ORDER BY created_at DESC,rowid DESC LIMIT 50`, projectScope(ctx), target)
 	if err != nil {
 		return nil, err
@@ -121,7 +131,7 @@ func (a *App) toolPostDeliveryInspect(ctx *sdk.AppCtx, args map[string]any) (any
 }
 
 func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, validateSource bool, reviewExpired ...bool) (map[string]any, string, error) {
-	e := map[string]any{"post_id": r.PostID, "target_id": r.TargetID, "decision": "blocked", "reason": "nonpublication has not been established", "revision": r.Revision, "source_attempt": r.Attempts}
+	e := map[string]any{"post_id": r.PostID, "target_id": r.TargetID, "decision": "blocked", "reason": "nonpublication has not been established", "revision": r.Revision, "source_attempt": r.Attempts, "social_account_id": r.AccountID, "platform": r.Platform}
 	decision := "blocked"
 	if r.PublicID != "" || r.Status == "published" || r.Status == "awaiting_audience_setup" {
 		e["decision"] = "published"
@@ -242,6 +252,15 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	e["source_sha256"], e["source_bytes"] = p.SHA256, p.Size
 	e["storage_install_id"] = p.Diagnostics.StorageInstallID
 	sourceProof := fmt.Sprintf("%s:%d:%s:%d", p.SHA256, p.Diagnostics.StorageInstallID, p.Diagnostics.MediaProjectID, p.Diagnostics.SourceFileID)
+	if e["recovery_kind"] == "expired_zero_byte_upload" {
+		receipt, err := loadUploadReceipt(ctx, r)
+		if err != nil || receipt.SourceSHA256 != p.SHA256 {
+			e["decision"] = "blocked"
+			e["reason"] = "source checksum differs from the original upload attempt"
+			return e, "", nil
+		}
+	}
+
 	if decision == "resume" {
 		var id string
 		var probeErr error
@@ -323,6 +342,9 @@ func (a *App) toolPostDeliveryRevalidate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return mcpError("target not found in this project"), nil
 	}
+	if err := validateDeliveryAccount(args, r.AccountID); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	reviewExpired, _ := boolOption(args, "review_expired_upload")
 	e, source, err := a.deliveryRecoveryDecision(ctx, r, true, reviewExpired)
 	if err != nil {
@@ -351,6 +373,15 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	unlock := lockSocialPost(ctx, post)
 	defer unlock()
+	if _, present := args["social_account_id"]; present {
+		scoped, err := loadRecoveryTarget(ctx, post, target)
+		if err != nil {
+			return mcpError("target not found in this project"), nil
+		}
+		if err := validateDeliveryAccount(args, scoped.AccountID); err != nil {
+			return mcpError(err.Error()), nil
+		}
+	}
 	var fingerprint, decision, status, expires, result, preparedEvidence string
 	err = ctx.AppDB().QueryRow(`SELECT fingerprint,decision,status,expires_at,result,evidence FROM delivery_recovery_requests WHERE id=? AND project_id=? AND post_id=? AND target_id=?`, id, projectScope(ctx), post, target).Scan(&fingerprint, &decision, &status, &expires, &result, &preparedEvidence)
 	if err != nil {
@@ -371,6 +402,9 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	r, err := loadRecoveryTarget(ctx, post, target)
 	if err != nil {
 		return nil, err
+	}
+	if err := validateDeliveryAccount(args, r.AccountID); err != nil {
+		return mcpError(err.Error()), nil
 	}
 	var prepared map[string]any
 	_ = json.Unmarshal([]byte(preparedEvidence), &prepared)
@@ -472,7 +506,7 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 		if !ok || len(ids) == 0 || ids[0] == "" {
 			return mcpError("completed membership session has no identity; inspect it again"), nil
 		}
-		if _, err = tx.Exec(`UPDATE post_targets SET status='awaiting_audience_setup',platform_post_id=?,platform_url=?,audience_status='awaiting_setup',published_at=NULL,retryable=0,last_error=?,failure_code='' WHERE id=?`, ids[0], "https://www.youtube.com/watch?v="+ids[0], (&awaitingAudienceError{}).Error(), target); err != nil {
+		if _, err = tx.Exec(`UPDATE post_targets SET status='awaiting_audience_setup',platform_post_id=?,platform_url=?,audience_status='awaiting_setup',published_at=NULL,retryable=0,last_error=?,failure_code='' WHERE id=?`, ids[0], "", (&awaitingAudienceError{}).Error(), target); err != nil {
 			return nil, err
 		}
 	} else if decision == "published" {
@@ -480,7 +514,7 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 		if ids, ok := e["platform_post_ids"].([]string); ok && len(ids) > 0 {
 			publicID = ids[0]
 		}
-		if _, err = tx.Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=COALESCE(published_at,CURRENT_TIMESTAMP),retryable=0,last_error=NULL,failure_code='' WHERE id=?`, nullable(publicID), target); err != nil {
+		if _, err = tx.Exec(`UPDATE post_targets SET status='published',platform_post_id=?,delivery_recorded_at=COALESCE(delivery_recorded_at,CURRENT_TIMESTAMP),retryable=0,last_error=NULL,failure_code='' WHERE id=?`, nullable(publicID), target); err != nil {
 			return nil, err
 		}
 	}
@@ -507,4 +541,16 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	raw, _ := json.Marshal(out)
 	_, err = ctx.AppDB().Exec(`UPDATE delivery_recovery_requests SET status='complete',result=? WHERE id=?`, string(raw), id)
 	return out, err
+}
+
+func validateDeliveryAccount(args map[string]any, actual int64) error {
+	raw, present := args["social_account_id"]
+	if !present {
+		return nil
+	}
+	requested, err := strconv.ParseInt(fmt.Sprint(raw), 10, 64)
+	if err != nil || requested <= 0 || requested != actual {
+		return errors.New("target does not belong to the requested Social account")
+	}
+	return nil
 }

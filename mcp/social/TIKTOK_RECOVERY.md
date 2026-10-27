@@ -1,6 +1,6 @@
 # Expired TikTok upload recovery
 
-Social 0.20.4 adds an explicit, target-scoped recovery decision for expired
+Social 0.20.5 extends an explicit, target-scoped recovery decision for expired
 native TikTok FILE_UPLOAD operations. Ordinary retry and background status
 polling do not automatically retire a PROCESSING_UPLOAD operation.
 
@@ -18,7 +18,7 @@ Social requires all of the following before offering replacement:
   still-active uploader stays blocked. Accepted/ambiguous upload responses stay
   blocked. The stop receipt also retains in-memory acknowledgements if saving
   the ordinary diagnostic snapshot failed.
-- Two distinct, successful, fresh status observations after expiry and uploader
+- Two distinct, successful, fresh account-bound status observations after expiry and uploader
   termination, both PROCESSING_UPLOAD with explicit uploaded_bytes=0 and no
   publication identity. Missing values stay unknown; positive downloaded bytes
   or any previous positive uploaded/downloaded high-water value block recovery.
@@ -83,3 +83,8 @@ positive progress, failed or conflicting status reads, source/account/approval/
 privacy changes, expired or replayed grants, and late polling/upload/init results
 (including an operation ID reused with a different attempt). Existing YouTube
 same-session retry and all other Social regression tests remain release gates.
+
+0.20.5 also requires the original account/content bindings and source checksum;
+a replacement must not silently adopt changed approved copy, options, account,
+connection or a resumable sender. Complete recording history is available through
+`post_delivery_inspect` pagination. See [PUBLICATION_FACTS.md](PUBLICATION_FACTS.md).

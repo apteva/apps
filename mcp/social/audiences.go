@@ -377,13 +377,41 @@ func (a *App) handleAudienceConfirm(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "authenticated_operator"
 	}
-	result, err := ctx.AppDB().Exec(`UPDATE post_targets SET status='published',audience_status='human_confirmed',audience_confirmed_at=CURRENT_TIMESTAMP,audience_confirmation_actor=?,published_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND post_id=? AND status='awaiting_audience_setup' AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=? AND p.revision=?)`, actor, body.TargetID, body.PostID, pid, body.ExpectedRevision)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		http.Error(w, "confirmation failed", 500)
+		return
+	}
+	defer tx.Rollback()
+	current, err := loadRecoveryTargetFrom(tx, pid, body.PostID, body.TargetID)
+	if err != nil {
+		http.Error(w, "stale confirmation", 409)
+		return
+	}
+	facts, err := loadPublicationFacts(tx, pid, body.TargetID)
+	if err != nil {
+		http.Error(w, "confirmation failed", 500)
+		return
+	}
+	if facts.PublishedAt != nil {
+		facts.PublishedAt = nil
+		facts.TimeSource = "unknown_membership_publication"
+		if _, err = correctPublicationFacts(tx, pid, current, facts, map[string]any{"kind": "audience_confirmation_is_not_publication_time", "actor": actor}); err != nil {
+			http.Error(w, "stale confirmation", 409)
+			return
+		}
+	}
+	result, err := tx.Exec(`UPDATE post_targets SET status='published',audience_status='human_confirmed',audience_confirmed_at=CURRENT_TIMESTAMP,audience_confirmation_actor=?,published_at=NULL,delivery_recorded_at=COALESCE(delivery_recorded_at,CURRENT_TIMESTAMP),last_error=NULL WHERE id=? AND post_id=? AND status='awaiting_audience_setup' AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=? AND p.revision=?)`, actor, body.TargetID, body.PostID, pid, body.ExpectedRevision)
 	if err != nil {
 		http.Error(w, "confirmation failed", 500)
 		return
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		http.Error(w, "stale confirmation", 409)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "confirmation failed", 500)
 		return
 	}
 	status := a.rollupPostStatus(ctx, body.PostID)

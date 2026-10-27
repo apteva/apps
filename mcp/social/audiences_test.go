@@ -414,7 +414,7 @@ func TestMembershipMigrationPreservesExistingPosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if entry.Name() == "022_audiences.sql" || !strings.HasSuffix(entry.Name(), ".sql") {
+		if entry.Name() >= "022_audiences.sql" || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
 		source, err := os.ReadFile("migrations/" + entry.Name())

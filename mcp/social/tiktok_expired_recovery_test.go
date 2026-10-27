@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,12 +17,15 @@ import (
 func expiredUploadFixture(t *testing.T) (*App, *sdk.AppCtx, *membershipPlatform, int64, int64, int64) {
 	t.Helper()
 	a, ctx, pf, post, target, sibling := recoveryFixture(t, "tiktok")
+	ctx.AppDB().Exec(`UPDATE post_targets SET delivery_revision=1 WHERE id=?`, target)
 	at := time.Now().UTC().Add(-2 * time.Hour)
 	d := loadDeliveryDiagnostics(ctx, target)
 	d.CorrelationID = "original-upload-receipt"
 	d.OperationID = "existing-operation"
 	d.ProgressVersion = 1
 	d.Method = "FILE_UPLOAD"
+	d.SourceSHA256 = imageSHA(testMP4)
+	d.MediaProjectID = "test-proj"
 	d.SourceFileID = 7
 	d.SourceBytes = 24
 	d.UploadURLSHA256 = uploadURLHash("https://upload.tiktok.test/upload/?upload_token=SECRET")
@@ -38,6 +43,8 @@ func expiredUploadFixture(t *testing.T) (*App, *sdk.AppCtx, *membershipPlatform,
 	if err != nil {
 		t.Fatal(err)
 	}
+	r, _ := loadRecoveryTarget(ctx, post, target)
+	ctx.AppDB().Exec(`UPDATE delivery_upload_operations SET account_binding=?,content_binding=?,source_sha256=? WHERE target_id=?`, uploadRecoveryAccountBinding(projectScope(ctx), r), uploadRecoveryContentBinding(r), imageSHA(testMP4), target)
 	pf.executeResponses["get_publish_status"] = analyticsOK(`{"data":{"status":"PROCESSING_UPLOAD","uploaded_bytes":0},"error":{"code":"ok"}}`)
 	return a, ctx, pf, post, target, sibling
 }
@@ -59,6 +66,8 @@ func TestExpiredTikTokUploadRecoveryAuditedTargetOnlyOnce(t *testing.T) {
 	}
 	account, _ := result.LastInsertId()
 	ctx.AppDB().Exec(`UPDATE post_targets SET social_account_id=? WHERE id=?`, account, target)
+	r, _ := loadRecoveryTarget(ctx, post, target)
+	ctx.AppDB().Exec(`UPDATE delivery_upload_operations SET account_binding=?,content_binding=?,source_sha256=? WHERE target_id=?`, uploadRecoveryAccountBinding(projectScope(ctx), r), uploadRecoveryContentBinding(r), imageSHA(testMP4), target)
 	result, err = ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,display_name,status) VALUES('test-proj','youtube',43,'YouTube','active')`)
 	if err != nil {
 		t.Fatal(err)
@@ -96,13 +105,22 @@ func TestExpiredTikTokUploadRecoveryAuditedTargetOnlyOnce(t *testing.T) {
 	zero := pf.executeResponses["get_publish_status"]
 	pf.executeQueues["get_publish_status"] = []*sdk.ExecuteResult{zero, zero, zero, zero}
 	pf.executeResponses["get_publish_status"] = analyticsOK(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":["new-tiktok-video"]},"error":{"code":"ok"}}`)
-	out, err := a.toolPostDeliveryRecover(ctx, recoverArgs(post, target, grant))
-	if err != nil {
-		t.Fatal(err)
+	var wg sync.WaitGroup
+	results := make(chan any, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out, err := a.toolPostDeliveryRecover(ctx, recoverArgs(post, target, grant))
+			if err != nil {
+				t.Error(err)
+			}
+			results <- out
+		}()
 	}
-	if _, err = a.toolPostDeliveryRecover(ctx, recoverArgs(post, target, grant)); err != nil {
-		t.Fatal(err)
-	}
+	wg.Wait()
+	close(results)
+	out := <-results
 	inits := 0
 	for _, c := range pf.executeCalls {
 		if c.Tool == "post_video" {
@@ -426,5 +444,164 @@ func TestTikTokLateUploadAcknowledgementCannotOverwriteReplacement(t *testing.T)
 	receipt, err := loadUploadReceipt(ctx, recoveryTarget{TargetID: target, Operation: "old-upload"})
 	if err != nil || receipt.UploaderState != "stopped" || receipt.StopEvidence.AcknowledgedBytes == nil || *receipt.StopEvidence.AcknowledgedBytes != 24 {
 		t.Fatal("lost accepted upload evidence", receipt, err)
+	}
+}
+
+func TestExpiredTikTokUploadOriginalAccountContentAndSenderBindings(t *testing.T) {
+	for _, scenario := range []string{"changed_account", "changed_connection", "changed_copy", "changed_options", "changed_source_bytes", "resumable_sender", "missing_original_checksum"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, ctx, pf, post, target, _ := expiredUploadFixture(t)
+			switch scenario {
+			case "changed_account":
+				res, _ := ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,display_name,status) VALUES('test-proj','tiktok',42,'Other','active')`)
+				other, _ := res.LastInsertId()
+				ctx.AppDB().Exec(`UPDATE post_targets SET social_account_id=? WHERE id=?`, other, target)
+			case "changed_connection":
+				ctx.AppDB().Exec(`UPDATE social_accounts SET connection_id=43 WHERE id=(SELECT social_account_id FROM post_targets WHERE id=?)`, target)
+			case "changed_copy":
+				ctx.AppDB().Exec(`UPDATE posts SET body='Changed copy',revision=revision+1 WHERE id=?`, post)
+			case "changed_options":
+				ctx.AppDB().Exec(`UPDATE post_targets SET options='{"privacy_level":"SELF_ONLY"}' WHERE id=?`, target)
+			case "resumable_sender":
+				ctx.AppDB().Exec(`UPDATE post_targets SET youtube_upload_session='retained-sender' WHERE id=?`, target)
+			case "missing_original_checksum":
+				ctx.AppDB().Exec(`UPDATE delivery_upload_operations SET source_sha256='' WHERE target_id=?`, target)
+			case "changed_source_bytes":
+				changed := append([]byte(nil), testMP4...)
+				changed[len(changed)-1] ^= 1
+				source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "video/mp4")
+					w.Write(changed)
+				}))
+				defer source.Close()
+				setSourceURL(pf.recordingPlatform, source.URL)
+			}
+			grant := reviewExpiry(t, a, ctx, post, target)
+			if grant["decision"] == "retry" {
+				t.Fatal("changed original binding authorized replacement", scenario, grant)
+			}
+			for _, call := range pf.executeCalls {
+				if call.Tool == "post_video" {
+					t.Fatal("review published")
+				}
+			}
+		})
+	}
+}
+
+func TestTikTokLostInitializationResponseRemainsUnknownAfterRestart(t *testing.T) {
+	a, ctx, pf, post, target, _ := recoveryFixture(t, "tiktok")
+	ctx.AppDB().Exec(`UPDATE post_targets SET status='pending',publish_operation_id='',delivery_diagnostics='{}',failure_code='',last_error=NULL WHERE id=?`, target)
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: false, Status: 502, Data: json.RawMessage(`{"message":"initialization response lost"}`)}
+	a.publishSelectedPostTargets(ctx, post, target)
+	restarted := &App{}
+	restarted.toolPostRetry(ctx, map[string]any{"post_id": post, "target_id": target})
+	grant := reviewExpiry(t, restarted, ctx, post, target)
+	if grant["decision"] == "retry" {
+		t.Fatal(grant)
+	}
+	inits := 0
+	for _, call := range pf.executeCalls {
+		if call.Tool == "post_video" {
+			inits++
+		}
+	}
+	if inits != 1 {
+		t.Fatal("lost initialization was duplicated", inits)
+	}
+	d := loadDeliveryDiagnostics(ctx, target)
+	if d.OperationState != "unknown" || d.Initialization == nil || d.AcknowledgedBytes == nil || *d.AcknowledgedBytes != 0 {
+		t.Fatal(d)
+	}
+	// Local acknowledged zero is not provider received zero or proof of expiry.
+	if d.ProviderObservation != nil && d.ProviderObservation.UploadedBytes != nil {
+		t.Fatal("provider progress invented", d)
+	}
+}
+
+func TestTikTokAlternatePublicationEvidenceBlocksExpiredRecovery(t *testing.T) {
+	for _, field := range []string{"publicly_available_post_id", "post_id"} {
+		t.Run(field, func(t *testing.T) {
+			a, ctx, pf, post, target, _ := expiredUploadFixture(t)
+			value := any([]string{"already-published"})
+			if field == "post_id" {
+				value = "already-published"
+			}
+			raw, _ := json.Marshal(map[string]any{"data": map[string]any{"status": "PROCESSING_UPLOAD", "uploaded_bytes": 0, field: value}, "error": map[string]any{"code": "ok"}})
+			pf.executeResponses["get_publish_status"] = analyticsOK(string(raw))
+			grant := reviewExpiry(t, a, ctx, post, target)
+			if grant["decision"] == "retry" {
+				t.Fatal("conflicting publication identity authorized replacement", grant)
+			}
+		})
+	}
+}
+
+func TestDeliveryRecoveryOptionalAccountFilterRejectsMismatchAndReplay(t *testing.T) {
+	a, ctx, pf, post, target, _ := recoveryFixture(t, "tiktok")
+	grant := mustRevalidate(t, a, ctx, post, target)
+	ctx.AppDB().Exec(`UPDATE delivery_recovery_requests SET status='complete' WHERE id=?`, grant["recovery_id"])
+	before := len(pf.executeCalls)
+	for _, account := range []any{999, 0, -1, 1.5, "invalid"} {
+		for _, op := range []string{"inspect", "revalidate", "recover"} {
+			args := recoverArgs(post, target, grant)
+			args["social_account_id"] = account
+			var out any
+			var err error
+			switch op {
+			case "inspect":
+				out, err = a.toolPostDeliveryInspect(ctx, args)
+			case "revalidate":
+				out, err = a.toolPostDeliveryRevalidate(ctx, args)
+			case "recover":
+				out, err = a.toolPostDeliveryRecover(ctx, args)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.(map[string]any)["isError"] != true {
+				t.Fatal(op, account, out)
+			}
+		}
+	}
+	if len(pf.executeCalls) != before {
+		t.Fatal("mismatched account reached the provider")
+	}
+}
+
+func TestExpiredTikTokHistoricalReceiptIsFoundBeyondUnrelatedSnapshots(t *testing.T) {
+	a, ctx, _, post, target, _ := expiredUploadFixture(t)
+	var original string
+	ctx.AppDB().QueryRow(`SELECT diagnostics FROM video_delivery_attempts WHERE target_id=? AND correlation_id='original-upload-receipt'`, target).Scan(&original)
+	ctx.AppDB().Exec(`DELETE FROM delivery_upload_operations WHERE target_id=?`, target)
+	ctx.AppDB().Exec(`DELETE FROM video_delivery_attempts WHERE target_id=?`, target)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 205; i++ {
+		if _, err = tx.Exec(`INSERT INTO video_delivery_attempts(project_id,target_id,correlation_id,diagnostics) VALUES('test-proj',?,?,'{"operation_id":"unrelated","purpose":"recovery_validation"}')`, target, fmt.Sprintf("unrelated-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO video_delivery_attempts(project_id,target_id,correlation_id,diagnostics) VALUES('test-proj',?,'original-upload-receipt',?)`, target, original); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if grant := reviewExpiry(t, a, ctx, post, target); grant["decision"] != "retry" {
+		t.Fatal(grant)
+	}
+}
+
+func TestTikTokQueuedIdentityResolutionFencesReusedOperationID(t *testing.T) {
+	a, ctx, pf, _, target, _ := expiredUploadFixture(t)
+	ctx.AppDB().Exec(`UPDATE post_targets SET attempts=2 WHERE id=?`, target)
+	if _, err := a.resolveTikTokPublicPostID(ctx, metricsTarget{TargetID: target, ConnID: 42, PublishOperationID: "existing-operation", DeliveryAttempt: 1}); err == nil {
+		t.Fatal("old queued identity task reached a new attempt")
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatal(pf.executeCalls)
 	}
 }

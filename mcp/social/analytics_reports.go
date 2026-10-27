@@ -216,6 +216,7 @@ func (a *App) getPostMetricsQuery(ctx *sdk.AppCtx, target metricsTarget, q analy
 			if t, e := time.Parse(time.RFC3339, stamp); e == nil && time.Since(t) < analyticsReportTTL("ok") {
 				var out targetMetricsOutcome
 				if json.Unmarshal([]byte(raw), &out) == nil && time.Since(t) < analyticsReportTTL(out.Status) {
+					out.PlatformURL = safePublicationURL(target.Platform, out.PlatformURL)
 					return out
 				}
 			}
@@ -223,7 +224,7 @@ func (a *App) getPostMetricsQuery(ctx *sdk.AppCtx, target metricsTarget, q analy
 	}
 	var out targetMetricsOutcome
 	if target.Platform == "pinterest" && (target.ProviderSlug == "" || target.ProviderSlug == "native") && target.ExtPostID != "" {
-		out = a.fetchPinterestPostReport(ctx, targetMetricsOutcome{TargetID: target.TargetID, SocialAccountID: target.SocialAccountID, Platform: target.Platform, PlatformPostID: target.ExtPostID, PlatformURL: target.ExtURL}, target.ConnID, q)
+		out = a.fetchPinterestPostReport(ctx, targetMetricsOutcome{TargetID: target.TargetID, SocialAccountID: target.SocialAccountID, Platform: target.Platform, PlatformPostID: target.ExtPostID, PlatformURL: safePublicationURL(target.Platform, target.ExtURL)}, target.ConnID, q)
 	} else {
 		out = a.fetchPostMetrics(ctx, target)
 	}
@@ -247,7 +248,7 @@ func (a *App) getPostMetricsQuery(ctx *sdk.AppCtx, target metricsTarget, q analy
 	return out
 }
 func postReportCacheKey(t metricsTarget, q analyticsQuery) string {
-	return fmt.Sprintf("%s:%d:%s:%s:%s:%s", t.Platform, t.ConnID, t.ExtPostID, t.ProviderSlug, t.ProviderPostID, q.cacheKey())
+	return fmt.Sprintf("publication-facts-v1:%s:%d:%s:%s:%s:%s", t.Platform, t.ConnID, t.ExtPostID, t.ProviderSlug, t.ProviderPostID, q.cacheKey())
 }
 func normalizedMetricValues(m *normalizedMetrics) map[string]int64 {
 	if m == nil {
@@ -296,7 +297,7 @@ func (a *App) addKnownPostReport(ctx *sdk.AppCtx, pid string, out *accountMetric
         a.connection_id, COALESCE(a.external_account_id,''), COALESCE(a.page_credentials,''),
         COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,''),
         COALESCE(t.provider_post_id,''), COALESCE(t.publish_operation_id,''),
-        p.body, COALESCE(p.published_at,'')
+        p.body, COALESCE(t.published_at,'')
  FROM post_targets t JOIN posts p ON p.id=t.post_id
  JOIN social_accounts a ON a.id=t.social_account_id
  WHERE p.project_id=? AND a.project_id=? AND a.id=? AND t.status='published'
@@ -336,6 +337,9 @@ func accountReportBinding(connID int64, provider, providerID, externalID string)
 }
 
 func presentAccountReport(out accountMetricsResult, q analyticsQuery) accountMetricsResult {
+	for i := range out.PostRows {
+		out.PostRows[i].URL = safePublicationURL(out.Platform, out.PostRows[i].URL)
+	}
 	if !containsFold(q.GroupBy, "post") {
 		out.PostRows = nil
 	} else if out.PostRows != nil {
