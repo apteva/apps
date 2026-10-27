@@ -222,7 +222,16 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, pid, str(args, "session_id"))
+	filter, values := "", []any{pid, str(args, "session_id")}
+	if raw, present := args["id"]; present {
+		id, ok := raw.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, errors.New("id must be a nonempty Catalog asset ID; use content_catalog_assets_get for a direct read")
+		}
+		filter = " AND a.id=?"
+		values = append(values, strings.TrimSpace(id))
+	}
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+filter+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, values...)
 	if err != nil {
 		return nil, err
 	}

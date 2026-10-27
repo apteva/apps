@@ -146,7 +146,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_session_upload_target", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Return the exact Storage folder and install ID for explicit uploads into a session. Does not scan or upload. Args: session_id.", InputSchema: schema("session_id"), Handler: a.sessionUploadTarget},
 		{Name: "content_catalog_assets_attach_uploaded", Description: "Attach a file uploaded to the session's exact Storage folder after verifying its Storage metadata. Idempotent. Args: session_id, storage_file_id.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttachUploaded},
 		{Name: "content_catalog_import_preview", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read up to 200 Storage files under a session brand root. Return candidates needing human review; no files or Catalog records are changed. Args: session_id.", InputSchema: schema("session_id"), Handler: a.importPreview},
-		{Name: "content_catalog_assets_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List session assets, active by default. lifecycle=archived/all enables inspection; archived parent sessions also make assets ineligible.", InputSchema: assetListSchema("session_id"), Handler: a.assetsList},
+		{Name: "content_catalog_assets_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List session assets, active by default. Optional id is an exact Catalog asset ID filter: zero or one match within the specified session, project and visibility filters, never an unfiltered fallback. Use content_catalog_assets_get(id) for direct reads when the session is unknown or for archived/intermediate inspection. Workers must check returned asset IDs before acting. lifecycle=archived/all enables inspection; archived parent sessions also make assets ineligible.", InputSchema: sessionAssetListSchema(), Handler: a.assetsList},
 		{Name: "content_catalog_assets_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get an asset with lifecycle, eligibility, revision, original session, source lineage, hosting, and publication history. Archived identities remain readable. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
 		{Name: "content_catalog_assets_link_source", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}, Description: "Add one immediate source link. Returns status=inserted, unchanged (identical), or conflict with linked=false and actual saved sources. Existing values are never silently overwritten; correct them with content_catalog_assets_sources_replace. New links increment the child revision and retain audit evidence. Writes only Catalog.", InputSchema: sourceLinkSchema(false), Handler: a.assetLinkSource},
 		{Name: "content_catalog_assets_sources_replace", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true}, Description: "Explicitly replace the entire immediate source list atomically, including removing unwanted links. Requires expected_revision, expected_sources (all four saved edge fields), sources, reason and a stable idempotency_key. Read the child first; reuse identical arguments/key on retry. Ownership, cycle checks, revision and before/after audit are transactional. Empty sources removes all links. Returns actual saved sources and revision. Changes Catalog lineage only; never changes files, renders, review, hosting or publication.", InputSchema: sourceLinkSchema(true), Handler: a.assetSourcesReplace},
@@ -276,6 +276,16 @@ func (a *App) handleList(name string) http.HandlerFunc {
 			return
 		}
 		args := map[string]any{}
+		if name == "content_catalog_assets_list" {
+			if ids, present := r.URL.Query()["id"]; present {
+				if len(ids) != 1 || strings.TrimSpace(ids[0]) == "" {
+					http.Error(w, "id must be one nonempty Catalog asset ID", http.StatusBadRequest)
+					return
+				}
+				args["id"] = ids[0]
+			}
+		}
+
 		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "role", "output_type", "include_intermediates", "id", "entity_type", "destination", "account_ref", "audience_type", "access_policy", "group_scope", "group_id", "status", "cursor", "limit", "external_post_id"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				if key == "include_intermediates" {
