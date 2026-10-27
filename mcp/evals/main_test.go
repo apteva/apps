@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql", "migrations/006_inline_environments.sql", "migrations/007_agentic_quality_v2.sql", "migrations/008_cancellation_attempts.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -46,7 +47,7 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 	item := &Case{
 		ID: "case-one", SuiteID: suite.ID, Name: "Answer a caller", Mode: "voice",
-		Prompt: "Help the caller book an appointment", Goals: []string{"The appointment is booked"},
+		Prompt: "Help the caller book an appointment", Goals: []Goal{{Text: "The appointment is booked"}},
 		Assertions: []Assertion{{Name: "record", Type: "app_state", App: "crm", Tool: "contacts_get"}},
 		Voice: &VoiceCase{
 			CallerGoal: "Book an appointment for tomorrow", CallerPersona: "A concise customer",
@@ -109,6 +110,43 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 }
 
+func TestCancelledRunCannotBeAdvancedOrFinished(t *testing.T) {
+	db := testStore(t)
+	suite := &Suite{ID: "suite-cancel-guard", Name: "Cancellation guard", RequiredPassRate: 1, Enabled: true}
+	if err := db.saveSuite(suite); err != nil {
+		t.Fatal(err)
+	}
+	item := Case{ID: "case-cancel-guard", SuiteID: suite.ID, Name: "Task", Prompt: "Complete it", Goals: []Goal{{Text: "Complete it"}}, Enabled: true}
+	if err := db.saveCase(&item); err != nil {
+		t.Fatal(err)
+	}
+	experiment := &Experiment{ID: "exp-cancel-guard", SuiteID: suite.ID, SuiteRevision: 1, Name: "Cancel", TriggerType: "manual", Targets: []Target{{Draft: &sdk.RuntimeAgentDraft{Name: "Ephemeral", Directive: "Complete it."}}}, Repetitions: 1, CreatedAt: time.Now().UTC()}
+	if err := db.createExperiment(experiment, []Case{item}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.claimRun()
+	if err != nil || run == nil {
+		t.Fatalf("claim run: run=%#v err=%v", run, err)
+	}
+	if err := db.cancelExperiment(experiment.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateRunProgress(run.ID, "agent_running", "environment-too-late"); !errors.Is(err, errRunCancelled) {
+		t.Fatalf("advance cancelled run error=%v", err)
+	}
+	run.Status, run.Stage = "pass", "completed"
+	if err := db.finishRun(run); !errors.Is(err, errRunCancelled) {
+		t.Fatalf("finish cancelled run error=%v", err)
+	}
+	stored, err := db.getRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "running" || stored.Stage != "cancelling" || stored.CancelRequestedAt == nil || stored.EnvironmentRunID != "" {
+		t.Fatalf("cancelled run was overwritten: %#v", stored)
+	}
+}
+
 func TestInvalidSimulationRetriesSameLogicalRunOnce(t *testing.T) {
 	db := testStore(t)
 	suite := &Suite{ID: "suite-retry", Name: "Retry", RequiredPassRate: 1, Enabled: true}
@@ -117,7 +155,7 @@ func TestInvalidSimulationRetriesSameLogicalRunOnce(t *testing.T) {
 	}
 	item := Case{
 		ID: "case-retry", SuiteID: suite.ID, Name: "Voice", Mode: "voice",
-		Prompt: "Complete the call", Goals: []string{"Finish naturally"},
+		Prompt: "Complete the call", Goals: []Goal{{Text: "Finish naturally"}},
 		Voice: &VoiceCase{CallerGoal: "Complete the call"}, Enabled: true,
 	}
 	if err := db.saveCase(&item); err != nil {
@@ -170,6 +208,36 @@ func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	status, _, _, overall = scoreRun(nil, &JudgeVerdict{Passed: true, Score: 82})
 	if status != "pass" || *overall != 82 {
 		t.Fatalf("judge-only status=%s score=%v", status, *overall)
+	}
+}
+
+func TestAgenticQualityV2GradesWithoutFailureCliff(t *testing.T) {
+	status, outcome, correctness, judgeScore, quality := scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 3}, {Passed: false, Weight: 1}},
+		&JudgeVerdict{Score: 90, Passed: true})
+	if status != "pass" || outcome != "passed" || *correctness != 75 || *judgeScore != 90 || *quality != 79.5 {
+		t.Fatalf("status=%s outcome=%s correctness=%v judge=%v quality=%v", status, outcome, *correctness, *judgeScore, *quality)
+	}
+
+	status, outcome, _, _, quality = scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 1}, {Passed: false, Weight: 1, Critical: true}}, nil)
+	if status != "fail" || outcome != "failed" || *quality != 50 {
+		t.Fatalf("critical result status=%s outcome=%s quality=%v", status, outcome, *quality)
+	}
+
+	_, outcome, _, _, quality = scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 4}, {Passed: false, Weight: 1, Disqualify: true}}, nil)
+	if outcome != "unsafe_disqualified" || *quality != 80 {
+		t.Fatalf("disqualified outcome=%s quality=%v", outcome, *quality)
+	}
+}
+
+func TestWeightedJudgeDoesNotClampToWeakestGoal(t *testing.T) {
+	high, low := 100.0, 40.0
+	verdict := &JudgeVerdict{PerGoal: []GoalVerdict{{Score: &high}, {Score: &low}}}
+	alignJudgeGoals(verdict, []Goal{{Text: "Primary", Weight: 4}, {Text: "Polish", Weight: 1}}, agenticQualityV2Profile)
+	if verdict.Score != 88 || verdict.Passed || verdict.PerGoal[0].Weight != 4 {
+		t.Fatalf("verdict=%+v", verdict)
 	}
 }
 
@@ -353,7 +421,7 @@ func TestAlignJudgeGoalsUsesConfiguredGoalsAndFailsMissingResults(t *testing.T) 
 		Score:   90,
 		PerGoal: []GoalVerdict{{Goal: "paraphrased goal", Score: &first, Passed: true, Why: "Met"}},
 	}
-	alignJudgeGoals(verdict, []string{"Greet the caller", "Confirm the callback"})
+	alignJudgeGoals(verdict, []Goal{{Text: "Greet the caller"}, {Text: "Confirm the callback"}}, "")
 	if verdict.Passed || verdict.Score != 45 || len(verdict.PerGoal) != 2 {
 		t.Fatalf("verdict=%#v", verdict)
 	}
@@ -389,7 +457,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.9" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.5" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -434,6 +502,12 @@ func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
 			t.Errorf("target schema is missing %q", field)
 		}
 	}
+	if _, found := targetProperties["draft"]; !found {
+		t.Error("target schema is missing draft")
+	}
+	if choices, ok := targetItems["oneOf"].([]any); !ok || len(choices) != 2 {
+		t.Fatalf("target schema must require exactly one of agent_id or draft: %#v", targetItems)
+	}
 	argsWithProject := map[string]any{"_project_id": "project-one", "suite_id": "suite-one", "targets": []any{map[string]any{"agent_id": 7.0}}}
 	var decoded experimentInput
 	if err := decodeStrictArgs(argsWithProject, &decoded); err != nil || decoded.SuiteID != "suite-one" || len(decoded.Targets) != 1 {
@@ -444,6 +518,53 @@ func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
 	}
 	if _, err := (&App{}).toolCreateExperiment(nil, map[string]any{"suite_id": "suite-one", "targets": []any{}, "unexpected": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("strict experiment arguments error=%v", err)
+	}
+}
+
+func TestDraftTargetsAreCreatedOnDemandAndComparedTogether(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-drafts", Name: "Draft comparison"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-drafts", SuiteID: "suite-drafts", Name: "Resolve", Prompt: "Resolve support request", Goals: []Goal{{Text: "Resolve the request"}}}, true); err != nil {
+		t.Fatal(err)
+	}
+	targets := []Target{
+		{Draft: &sdk.RuntimeAgentDraft{Name: "Concise", Directive: "Resolve the request concisely."}, Model: "openai/gpt-test"},
+		{Draft: &sdk.RuntimeAgentDraft{Name: "Thorough", Directive: "Resolve the request and explain every step.", Mode: "cautious", Config: `{"unconscious":false}`}, Model: "openai/gpt-test"},
+	}
+	experiment, err := svc.createExperiment("suite-drafts", "Two hidden setups", "manual", targets, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(experiment.Targets) != 2 || len(experiment.Runs) != 2 {
+		t.Fatalf("experiment=%#v", experiment)
+	}
+	if got := experiment.Targets[0]; got.AgentID != 0 || got.AgentName != "Concise" || got.Directive != targets[0].Draft.Directive || got.Draft == nil || got.Draft.Mode != "autonomous" || got.Draft.Config != "{}" || got.Provider != "openai" || got.Model != "gpt-test" {
+		t.Fatalf("normalized first draft=%#v", got)
+	}
+	for range 2 {
+		if err := svc.runNext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if platform.spawned != 2 || len(platform.spawnInputs) != 2 {
+		t.Fatalf("spawned=%d inputs=%#v", platform.spawned, platform.spawnInputs)
+	}
+	for i, input := range platform.spawnInputs {
+		agent, ok := input["agent"].(map[string]any)
+		if !ok {
+			t.Fatalf("spawn %d agent=%#v", i, input["agent"])
+		}
+		if _, found := agent["source_agent_id"]; found {
+			t.Fatalf("draft spawn %d leaked source_agent_id: %#v", i, agent)
+		}
+		draft, ok := agent["draft"].(map[string]any)
+		if !ok || draft["name"] != targets[i].Draft.Name || agent["alias"] != "main" {
+			t.Fatalf("draft spawn %d=%#v", i, agent)
+		}
 	}
 }
 
@@ -491,6 +612,8 @@ type evalCampaignPlatformStub struct {
 	judgeInputs            []map[string]any
 	collaboratorExecutions map[string]sdk.RuntimeAgentExecution
 	collaboratorWaits      []string
+	mainWaitScopes         []string
+	mainExecution          *sdk.RuntimeAgentExecution
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -525,7 +648,10 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 	var value any
 	switch tool {
 	case "environment_catalog":
-		value = map[string]any{"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}}
+		value = map[string]any{
+			"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"},
+			"apps":            []map[string]any{{"install_id": 30, "name": "code", "status": "running"}},
+		}
 	case "environment_get":
 		id, _ := input["id"].(string)
 		value = s.definitions[id]
@@ -555,12 +681,19 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 			}
 			value = execution
 		} else {
+			if wait, ok := input["wait"].(map[string]any); ok {
+				scope, _ := wait["scope"].(string)
+				s.mainWaitScopes = append(s.mainWaitScopes, scope)
+			}
 			value = sdk.RuntimeAgentExecution{
 				Status:   "completed",
 				ThreadID: "main",
 				Turns:    1,
 				Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "support request resolved"}},
 				Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 8, TokensOut: 4},
+			}
+			if s.mainExecution != nil {
+				value = *s.mainExecution
 			}
 		}
 	case "environment_assert":
@@ -581,6 +714,100 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+type cancellationPlatformStub struct {
+	testkit.BasePlatformClient
+	waitStarted chan struct{}
+	stopped     chan struct{}
+	stopCalls   chan string
+	stopOnce    sync.Once
+}
+
+func (s *cancellationPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app != "environments" {
+		return fmt.Errorf("unexpected app call %s/%s", app, tool)
+	}
+	var value any
+	switch tool {
+	case "environment_run_create":
+		value = EnvironmentRun{ID: "environment-run-cancel", RuntimeID: "runtime-cancel", Status: "running"}
+	case "environment_agent_spawn":
+		value = sdk.RuntimeAgent{Alias: "main", Status: "paused"}
+	case "environment_agent_send", "environment_agent_control":
+		value = map[string]any{"ok": true}
+	case "environment_agent_wait":
+		close(s.waitStarted)
+		<-s.stopped
+		value = sdk.RuntimeAgentExecution{Status: "failed", Reason: "agent_stopped", ThreadID: "main"}
+	case "environment_run_stop":
+		runID, _ := input["id"].(string)
+		s.stopCalls <- runID
+		s.stopOnce.Do(func() { close(s.stopped) })
+		value = map[string]any{"ok": true}
+	default:
+		return fmt.Errorf("unexpected environment tool %s", tool)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func TestCancelExperimentStopsRunningEnvironmentAndPreservesCancelledStatus(t *testing.T) {
+	platform := &cancellationPlatformStub{
+		waitStarted: make(chan struct{}),
+		stopped:     make(chan struct{}),
+		stopCalls:   make(chan string, 4),
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-cancel", Name: "Cancellation"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-cancel", SuiteID: "suite-cancel", Name: "Long task", Prompt: "Wait", Goals: []Goal{{Text: "Complete the task"}}, Enabled: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-cancel", "", "manual", []Target{{Draft: &sdk.RuntimeAgentDraft{Name: "Ephemeral", Directive: "Complete the task."}}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- svc.runNext(context.Background()) }()
+	select {
+	case <-platform.waitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("eval run did not reach environment_agent_wait")
+	}
+	if err := svc.cancelExperiment(experiment.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner returned cancellation as an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not exit after cancellation stopped the environment")
+	}
+
+	select {
+	case runID := <-platform.stopCalls:
+		if runID != "environment-run-cancel" {
+			t.Fatalf("stopped environment %q", runID)
+		}
+	default:
+		t.Fatal("active environment was not stopped")
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || len(completed.Runs) != 1 || completed.Runs[0].Status != "cancelled" || completed.Runs[0].Stage != "cancelled" {
+		t.Fatalf("cancelled experiment=%#v", completed)
+	}
 }
 
 func TestCaseRejectsUnsupportedAssertionBeforePersistence(t *testing.T) {
@@ -659,6 +886,107 @@ func TestOutputEqualsRunIsEvaluatedInsideEvals(t *testing.T) {
 	}
 }
 
+func TestTimedOutAgentExecutionIsStillCheckedAndJudged(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Minute)
+	finished := time.Now().UTC()
+	platform := &evalCampaignPlatformStub{
+		t:           t,
+		models:      []LLMModel{{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"}},
+		definitions: map[string]EnvironmentDefinition{},
+		mainExecution: &sdk.RuntimeAgentExecution{
+			Status: "timeout", Reason: "timeout", ThreadID: "main", Turns: 8,
+			StartedAt: started, FinishedAt: finished,
+			Trace:   []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "partial work"}},
+			Metrics: sdk.RuntimeAgentMetrics{LLMCalls: 8, TokensIn: 80, TokensOut: 20},
+		},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-timeout", Name: "Timeout grading"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-timeout", SuiteID: "suite-timeout", Name: "Grade partial work", Prompt: "Help",
+		Goals:      []Goal{{Text: "Help the user"}},
+		Assertions: []Assertion{{Name: "CRM state", Type: "app_state", App: "crm", Tool: "record_get", Path: "status", Equals: "done"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-timeout", "", "manual", []Target{{AgentID: 7}}, 1, 0, "openai-codex/gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	run := completed.Runs[0]
+	if run.Status != "pass" || run.Outcome != "passed" || run.Execution == nil || run.Execution.Status != "timeout" {
+		t.Fatalf("timed-out execution was not graded: %#v", run)
+	}
+	if len(run.Assertions) != 1 || !run.Assertions[0].Passed || run.Judge == nil || run.OverallScore == nil {
+		t.Fatalf("checks/judge missing after timeout: %#v", run)
+	}
+	if platform.asserted != 1 || platform.judgeCalls != 1 || platform.stopped != 1 {
+		t.Fatalf("asserted=%d judged=%d stopped=%d", platform.asserted, platform.judgeCalls, platform.stopped)
+	}
+}
+
+func TestInlineEnvironmentResolvesAppNamesAndRunsWithoutSavedDefinition(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-inline", Name: "Inline environment"}, true); err != nil {
+		t.Fatal(err)
+	}
+	inline := map[string]any{
+		"version": 1, "apps": []any{"code"}, "network_mode": "block", "integration_mode": "mock",
+		"seeds": []any{map[string]any{"app": "code", "tool": "repos_create", "input": map[string]any{"name": "Fixture"}}},
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-inline", SuiteID: "suite-inline", Name: "Inline Code", Prompt: "Inspect Code",
+		Environment: inline,
+		Assertions:  []Assertion{{Name: "done", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-inline", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 || completed.Runs[0].Status != "pass" {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	if len(platform.createdSpecs) != 1 {
+		t.Fatalf("created specs=%#v", platform.createdSpecs)
+	}
+	spec := platform.createdSpecs[0]
+	if _, leaked := spec["apps"]; leaked || fmt.Sprint(spec["app_install_ids"]) != "[30]" || len(spec["seeds"].([]any)) != 1 {
+		t.Fatalf("resolved inline spec=%#v", spec)
+	}
+	if fmt.Sprint(completed.Runs[0].CaseSnapshot.Environment["apps"]) != "[code]" || platform.stopped != 1 {
+		t.Fatalf("snapshot=%#v stopped=%d", completed.Runs[0].CaseSnapshot.Environment, platform.stopped)
+	}
+}
+
+func TestInlineEnvironmentRejectsUnavailableAppBeforeRuntimeCreation(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	spec := map[string]any{"apps": []any{"missing-app"}}
+	err := svc.resolveInlineEnvironment(spec, 60)
+	if err == nil || !strings.Contains(err.Error(), `required app "missing-app" is not installed and running`) || platform.created != 0 {
+		t.Fatalf("error=%v created=%d", err, platform.created)
+	}
+}
+
 func TestAssertionExecutionErrorPreservesJudgeAndDoesNotScoreAgent(t *testing.T) {
 	platform := &evalCampaignPlatformStub{
 		t:            t,
@@ -672,7 +1000,7 @@ func TestAssertionExecutionErrorPreservesJudgeAndDoesNotScoreAgent(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := svc.saveCase(&Case{
-		ID: "case-assertion-error", SuiteID: "suite-assertion-error", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"},
+		ID: "case-assertion-error", SuiteID: "suite-assertion-error", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}},
 		Assertions: []Assertion{{Name: "CRM state", Type: "app_state", App: "crm", Tool: "record_get", Path: "status", Equals: "done"}},
 	}, true); err != nil {
 		t.Fatal(err)
@@ -713,7 +1041,7 @@ func TestExperimentCanonicalizesJudgeModelBeforeQueueingRuns(t *testing.T) {
 	if _, err := svc.saveSuite(&Suite{ID: "suite-judge", Name: "Judge resolution"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.saveCase(&Case{ID: "case-judge", SuiteID: "suite-judge", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+	if _, err := svc.saveCase(&Case{ID: "case-judge", SuiteID: "suite-judge", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := svc.resolveJudgeModel("openai-codex/gpt-5.6-sol")
@@ -746,7 +1074,7 @@ func TestExperimentRejectsUnknownOrAmbiguousJudgeModelBeforeQueueingRuns(t *test
 			if _, err := svc.saveSuite(&Suite{ID: "suite-reject", Name: "Judge rejection"}, true); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := svc.saveCase(&Case{ID: "case-reject", SuiteID: "suite-reject", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+			if _, err := svc.saveCase(&Case{ID: "case-reject", SuiteID: "suite-reject", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := svc.createExperiment("suite-reject", "", "manual", []Target{{AgentID: 7}}, 1, 0, test.requested); err == nil || !strings.Contains(err.Error(), test.wantError) || !strings.Contains(err.Error(), "eval_catalog.models[].gateway_model") {
@@ -811,6 +1139,14 @@ func TestFourCaseCampaignRunsPromptsAssertionsAndStopsEnvironments(t *testing.T)
 	if platform.created != 4 || platform.spawned != 4 || len(platform.prompts) != 4 || platform.asserted != 4 || platform.stopped != 4 {
 		t.Fatalf("orchestration created=%d spawned=%d prompts=%d asserted=%d stopped=%d", platform.created, platform.spawned, len(platform.prompts), platform.asserted, platform.stopped)
 	}
+	if len(platform.mainWaitScopes) != 4 {
+		t.Fatalf("main wait scopes=%#v", platform.mainWaitScopes)
+	}
+	for _, scope := range platform.mainWaitScopes {
+		if scope != "tree" {
+			t.Fatalf("main wait scope=%q, want tree", scope)
+		}
+	}
 	for _, prompt := range platform.prompts {
 		if !strings.Contains(prompt, "support request") {
 			t.Errorf("agent did not receive case prompt: %q", prompt)
@@ -855,7 +1191,7 @@ func TestMultiAgentEnvironmentPreservesAndCapturesCollaborators(t *testing.T) {
 	}
 	if _, err := svc.saveCase(&Case{
 		ID: "case-team", SuiteID: "suite-team", Name: "Delegate", Prompt: "Resolve with the specialist",
-		Goals:      []string{"Use the specialist to resolve the request"},
+		Goals:      []Goal{{Text: "Use the specialist to resolve the request"}},
 		Assertions: []Assertion{{Name: "Final response", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
 	}, true); err != nil {
 		t.Fatal(err)
@@ -874,6 +1210,9 @@ func TestMultiAgentEnvironmentPreservesAndCapturesCollaborators(t *testing.T) {
 	run := completed.Runs[0]
 	if run.Status != "pass" || run.Execution == nil || len(run.Collaborators) != 1 {
 		t.Fatalf("run=%#v", run)
+	}
+	if run.Judge == nil || run.Judge.PromptVersion != judgePromptVersion || run.Judge.RubricVersion != judgeRubricVersion {
+		t.Fatalf("persisted judge versions=%#v", run.Judge)
 	}
 	collaborator := run.Collaborators[0]
 	if collaborator.Alias != "specialist" || collaborator.SourceAgentID != 8 || !collaborator.Participated || collaborator.Execution == nil || len(collaborator.Execution.Trace) != 1 {
@@ -950,7 +1289,7 @@ func TestEnvironmentAgentMappingRejectedBeforeRuntimeCreation(t *testing.T) {
 			if _, err := svc.saveSuite(&Suite{ID: "suite-invalid-team", Name: "Invalid team", EnvironmentID: "env-invalid"}, true); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := svc.saveCase(&Case{ID: "case-invalid-team", SuiteID: "suite-invalid-team", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+			if _, err := svc.saveCase(&Case{ID: "case-invalid-team", SuiteID: "suite-invalid-team", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 				t.Fatal(err)
 			}
 			experiment, err := svc.createExperiment("suite-invalid-team", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")

@@ -108,6 +108,7 @@ type VoiceFixtureSpec struct {
 	ProtocolFixture    string                `json:"protocol_fixture,omitempty"`
 	AudioConditions    *VoiceAudioConditions `json:"audio_conditions,omitempty"`
 	FinalReplyContains []string              `json:"final_reply_contains,omitempty"`
+	MicrophoneMode     string                `json:"microphone_mode,omitempty"`
 }
 
 type VoiceAudioConditions struct {
@@ -159,28 +160,31 @@ type ProtocolFixtureEvent struct {
 }
 
 type VoiceCall struct {
-	ID                       string                      `json:"id"`
-	RunID                    string                      `json:"run_id"`
-	Status                   string                      `json:"status"`
-	Error                    string                      `json:"error,omitempty"`
-	Validity                 VoiceCallValidity           `json:"validity"`
-	Spec                     VoiceFixtureSpec            `json:"spec"`
-	TargetThreadID           string                      `json:"target_thread_id"`
-	CallerThreadID           string                      `json:"caller_thread_id"`
-	CallerAgentAlias         string                      `json:"caller_agent_alias"`
-	Transcript               []VoiceTranscriptTurn       `json:"transcript"`
-	Metrics                  VoiceCallMetrics            `json:"metrics"`
-	TargetRecording          string                      `json:"target_recording,omitempty"`
-	CallerRecording          string                      `json:"caller_recording,omitempty"`
-	DeliveredCallerRecording string                      `json:"delivered_caller_recording,omitempty"`
-	StartedAt                time.Time                   `json:"started_at"`
-	FinishedAt               *time.Time                  `json:"finished_at,omitempty"`
-	TargetTelemetry          []sdk.RuntimeTelemetryEvent `json:"target_telemetry,omitempty"`
-	CallerTelemetry          []sdk.RuntimeTelemetryEvent `json:"caller_telemetry,omitempty"`
-	Execution                *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
-	ProtocolEvents           []ProtocolFixtureEvent      `json:"protocol_events,omitempty"`
-	BridgeExits              []VoiceBridgeExitResult     `json:"bridge_exits,omitempty"`
-	FinalExchange            *VoiceFinalExchangeResult   `json:"final_exchange,omitempty"`
+	ID                       string                                `json:"id"`
+	RunID                    string                                `json:"run_id"`
+	Status                   string                                `json:"status"`
+	Error                    string                                `json:"error,omitempty"`
+	Validity                 VoiceCallValidity                     `json:"validity"`
+	Spec                     VoiceFixtureSpec                      `json:"spec"`
+	TargetThreadID           string                                `json:"target_thread_id"`
+	CallerThreadID           string                                `json:"caller_thread_id"`
+	CallerAgentAlias         string                                `json:"caller_agent_alias"`
+	Transcript               []VoiceTranscriptTurn                 `json:"transcript"`
+	Metrics                  VoiceCallMetrics                      `json:"metrics"`
+	TargetRecording          string                                `json:"target_recording,omitempty"`
+	CallerRecording          string                                `json:"caller_recording,omitempty"`
+	DeliveredCallerRecording string                                `json:"delivered_caller_recording,omitempty"`
+	StartedAt                time.Time                             `json:"started_at"`
+	FinishedAt               *time.Time                            `json:"finished_at,omitempty"`
+	TargetTelemetry          []sdk.RuntimeTelemetryEvent           `json:"target_telemetry,omitempty"`
+	CallerTelemetry          []sdk.RuntimeTelemetryEvent           `json:"caller_telemetry,omitempty"`
+	Execution                *sdk.RuntimeAgentExecution            `json:"execution,omitempty"`
+	ProtocolEvents           []ProtocolFixtureEvent                `json:"protocol_events,omitempty"`
+	BridgeExits              []VoiceBridgeExitResult               `json:"bridge_exits,omitempty"`
+	FinalExchange            *VoiceFinalExchangeResult             `json:"final_exchange,omitempty"`
+	InputTransport           map[string]VoiceInputTransportMetrics `json:"input_transport,omitempty"`
+	Cleanup                  *VoiceCleanup                         `json:"cleanup,omitempty"`
+	CancellationReason       string                                `json:"cancellation_reason,omitempty"`
 }
 
 type VoiceCallValidity struct {

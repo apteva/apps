@@ -56,13 +56,14 @@ func (a *voiceMediaActivity) acknowledged(speaker string, ack voicePlaybackAck) 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e := a.evidenceLocked(speaker)
-	previous := e.acknowledged[ack.itemID]
+	key := fmt.Sprintf("%d/%s", ack.generation, ack.itemID)
+	previous := e.acknowledged[key]
 	if ack.audioEndMS > previous {
 		// The paced chunk gives the exact byte boundary; audio_end_ms rounds
 		// fractional milliseconds and cannot represent every PCM sample.
 		e.PlaybackAcknowledgedBytes += int64(ack.audioBytes)
 		e.PlaybackAcknowledgedBytes = min(e.PlaybackAcknowledgedBytes, e.ForwardedBytes)
-		e.acknowledged[ack.itemID] = ack.audioEndMS
+		e.acknowledged[key] = ack.audioEndMS
 	}
 }
 
@@ -310,6 +311,7 @@ func (s *service) monitorVoiceExchange(ctx context.Context, history *telemetryHi
 				continue
 			}
 			call.TargetTelemetry, call.CallerTelemetry = target, caller
+			call.InputTransport = media.inputSnapshot()
 			call.Transcript = voiceTranscript(target, call.TargetThreadID, call.StartedAt)
 			applyVoiceTurnDeliveryMetrics(&call.Metrics, voiceTurnDelivery(target, call.TargetThreadID, caller, call.CallerThreadID))
 			result := voiceExchangeEvidence(call, media, target, caller)
@@ -363,6 +365,7 @@ func voiceThreadFinalized(events []sdk.RuntimeTelemetryEvent, threadID string) b
 }
 
 func (s *service) finalizeVoiceTelemetry(ctx context.Context, history *telemetryHistory, runtimeID string, call *VoiceCall, media *voiceMediaActivity, endedBy string) error {
+	call.InputTransport = media.inputSnapshot()
 	var targetErr, callerErr error
 	finalized := waitForVoiceCompletionEvidence(ctx, voiceCompletionGrace, voiceCompletionPoll, func() bool {
 		var target, caller []sdk.RuntimeTelemetryEvent

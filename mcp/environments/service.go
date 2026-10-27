@@ -16,12 +16,16 @@ import (
 )
 
 type service struct {
-	ctx          *sdk.AppCtx
-	db           store
-	fixtureMu    sync.Mutex
-	catalogMu    sync.Mutex
-	catalogValue map[string]any
-	catalogUntil time.Time
+	ctx              *sdk.AppCtx
+	db               store
+	fixtureMu        sync.Mutex
+	catalogMu        sync.Mutex
+	catalogValue     map[string]any
+	catalogUntil     time.Time
+	voiceMu          sync.Mutex
+	voiceOperations  map[string]map[*voiceOperation]bool
+	runStops         map[string]*runStopOperation
+	voiceStopTimeout time.Duration
 }
 
 const startingRunGracePeriod = 2 * time.Minute
@@ -242,10 +246,7 @@ func (s *service) stopDefinition(id string) error {
 	}
 	return firstErr
 }
-func (s *service) stopRun(run *Run) error {
-	if err := s.db.updateRun(run.ID, "stopping", ""); err != nil {
-		return err
-	}
+func (s *service) destroyStoppedRun(run *Run) error {
 	if err := s.db.setWebFixturesStatus(run.ID, "stopping"); err != nil {
 		return err
 	}
@@ -254,10 +255,9 @@ func (s *service) stopRun(run *Run) error {
 	}
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
 	if err != nil && !runtimeNotFound(err) {
-		_ = s.db.updateRun(run.ID, "stopping", err.Error())
 		return err
 	}
-	if err := s.db.updateRun(run.ID, "stopped", ""); err != nil {
+	if _, err := s.db.db.Exec(`UPDATE environment_runs SET status='stopped',stopped_at=COALESCE(stopped_at,?) WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), run.ID); err != nil {
 		return err
 	}
 	if err := s.db.setWebFixturesStatus(run.ID, "stopped"); err != nil {

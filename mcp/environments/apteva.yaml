@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.13
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.13 avoids idle specification decoding by reconciling lifecycle metadata and loading current specs only for eligible starts or recovery.
+version: 0.7.14-rc.1
+description: Isolated environments with continuous microphone simulation, transport diagnostics, and coordinated voice shutdown before runtime deletion.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 icon: /ui/icon.svg
@@ -73,7 +73,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: environments/v0.7.13
+    ref: release/environments-evals-duplex
     entry: mcp/environments
   port: 8080
   health_check: /health

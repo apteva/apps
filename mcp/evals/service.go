@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -15,9 +16,11 @@ import (
 )
 
 type service struct {
-	ctx      *sdk.AppCtx
-	db       store
-	runnerMu sync.Mutex
+	ctx       *sdk.AppCtx
+	db        store
+	runnerMu  sync.Mutex
+	controlMu sync.Mutex
+	controls  map[string]*evalRunControl
 }
 
 func (s *service) saveSuite(item *Suite, creating bool) (*Suite, error) {
@@ -67,12 +70,24 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	if item.SuiteID == "" || item.Name == "" || item.Prompt == "" {
 		return nil, errors.New("suite_id, name, and prompt required")
 	}
+	item.EnvironmentID = strings.TrimSpace(item.EnvironmentID)
+	if item.EnvironmentID != "" && len(item.Environment) > 0 {
+		return nil, errors.New("environment_id and inline environment are mutually exclusive")
+	}
+	if err := validateInlineEnvironment(item.Environment); err != nil {
+		return nil, err
+	}
 	if item.Mode != "text" && item.Mode != "voice" {
 		return nil, errors.New("mode must be text or voice")
 	}
 	if item.Mode == "voice" {
 		if item.Voice == nil {
 			return nil, errors.New("voice settings required")
+		}
+		switch item.Voice.MicrophoneMode {
+		case "", "auto", "continuous", "discontinuous":
+		default:
+			return nil, errors.New("invalid microphone_mode")
 		}
 		item.Voice.CallerGoal = strings.TrimSpace(item.Voice.CallerGoal)
 		if item.Voice.CallerGoal == "" {
@@ -99,13 +114,22 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	} else if suite == nil {
 		return nil, errors.New("suite not found")
 	}
-	goals := make([]string, 0, len(item.Goals))
+	goals := make([]Goal, 0, len(item.Goals))
 	for _, goal := range item.Goals {
-		if value := strings.TrimSpace(goal); value != "" {
-			goals = append(goals, value)
+		goal.Text = strings.TrimSpace(goal.Text)
+		goal.Category = strings.TrimSpace(goal.Category)
+		if goal.Text != "" {
+			if goal.Weight < 0 {
+				return nil, errors.New("goal weight must not be negative")
+			}
+			goals = append(goals, goal)
 		}
 	}
 	item.Goals = goals
+	item.RatingProfile = strings.TrimSpace(item.RatingProfile)
+	if item.RatingProfile != "" && item.RatingProfile != agenticQualityV2Profile {
+		return nil, fmt.Errorf("unsupported rating_profile %q", item.RatingProfile)
+	}
 	if len(item.Goals) == 0 && len(item.Assertions) == 0 {
 		return nil, errors.New("case requires a goal or deterministic assertion")
 	}
@@ -127,6 +151,52 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	return s.db.getCase(item.ID)
 }
 
+func validateInlineEnvironment(spec map[string]any) error {
+	if len(spec) == 0 {
+		return nil
+	}
+	if version, ok := spec["version"]; ok {
+		switch value := version.(type) {
+		case float64:
+			if value != 1 {
+				return errors.New("inline environment version must be 1")
+			}
+		case int:
+			if value != 1 {
+				return errors.New("inline environment version must be 1")
+			}
+		default:
+			return errors.New("inline environment version must be a number")
+		}
+	}
+	if apps, ok := spec["apps"]; ok {
+		values, ok := apps.([]any)
+		if !ok {
+			if typed, typedOK := apps.([]string); typedOK {
+				values = make([]any, len(typed))
+				for i := range typed {
+					values[i] = typed[i]
+				}
+			} else {
+				return errors.New("inline environment apps must be an array of app names")
+			}
+		}
+		seen := map[string]bool{}
+		for _, raw := range values {
+			name, ok := raw.(string)
+			name = strings.TrimSpace(name)
+			if !ok || name == "" {
+				return errors.New("inline environment apps must contain non-empty app names")
+			}
+			if seen[name] {
+				return fmt.Errorf("inline environment contains duplicate app %q", name)
+			}
+			seen[name] = true
+		}
+	}
+	return nil
+}
+
 const outputEqualsAssertionType = "output_equals"
 
 func (s *service) validateAssertions(assertions []Assertion) error {
@@ -142,6 +212,18 @@ func (s *service) validateAssertions(assertions []Assertion) error {
 		supported[assertionType] = true
 	}
 	for i := range assertions {
+		if assertions[i].Weight < 0 {
+			return fmt.Errorf("assertion %q: weight must not be negative", assertions[i].Name)
+		}
+		if len(assertions[i].EvidenceAnyOf) > 0 {
+			if assertions[i].Type != "" {
+				return fmt.Errorf("assertion %q: type and evidence_any_of are mutually exclusive", assertions[i].Name)
+			}
+			if err := s.validateAssertions(assertions[i].EvidenceAnyOf); err != nil {
+				return fmt.Errorf("assertion %q: %w", assertions[i].Name, err)
+			}
+			continue
+		}
 		assertions[i].Type = strings.TrimSpace(assertions[i].Type)
 		if !supported[assertions[i].Type] {
 			return fmt.Errorf("unsupported assertion type %q; supported types: %s. For agent output, use goals or the Evals-native %s assertion", assertions[i].Type, strings.Join(assertionTypes, ", "), outputEqualsAssertionType)
@@ -229,7 +311,7 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 		if !item.Enabled {
 			continue
 		}
-		if item.EnvironmentID == "" {
+		if item.EnvironmentID == "" && len(item.Environment) == 0 {
 			item.EnvironmentID = suite.EnvironmentID
 		}
 		if item.EnvironmentID != "" && !validatedEnvironments[item.EnvironmentID] {
@@ -248,27 +330,43 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 		return nil, errors.New("suite has no enabled cases")
 	}
 
-	runtimeAPI := s.ctx.RuntimeAPI()
-	if runtimeAPI == nil {
-		return nil, errors.New("runtime catalog API unavailable")
-	}
-	agents, err := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
-	if err != nil {
-		return nil, fmt.Errorf("list target agents: %w", err)
-	}
 	byID := map[int64]sdk.RuntimeCatalogAgent{}
-	for _, agent := range agents {
-		byID[agent.ID] = agent
+	needsCatalog := false
+	for i := range targets {
+		hasAgent, hasDraft := targets[i].AgentID > 0, targets[i].Draft != nil
+		if hasAgent == hasDraft {
+			return nil, fmt.Errorf("target %d: exactly one of agent_id or draft is required", i)
+		}
+		needsCatalog = needsCatalog || hasAgent
+	}
+	if needsCatalog {
+		runtimeAPI := s.ctx.RuntimeAPI()
+		if runtimeAPI == nil {
+			return nil, errors.New("runtime catalog API unavailable")
+		}
+		agents, listErr := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+		if listErr != nil {
+			return nil, fmt.Errorf("list target agents: %w", listErr)
+		}
+		for _, agent := range agents {
+			byID[agent.ID] = agent
+		}
 	}
 	for i := range targets {
-		if targets[i].AgentID <= 0 {
-			return nil, fmt.Errorf("target %d: agent_id required", i)
+		if targets[i].Draft != nil {
+			if err := normalizeRuntimeDraft(targets[i].Draft); err != nil {
+				return nil, fmt.Errorf("target %d: %w", i, err)
+			}
+			targets[i].AgentName = targets[i].Draft.Name
+			targets[i].Directive = targets[i].Draft.Directive
+			targets[i].DirectiveETag = ""
+		} else {
+			agent, ok := byID[targets[i].AgentID]
+			if !ok {
+				return nil, fmt.Errorf("target %d: agent not found", i)
+			}
+			targets[i].AgentName, targets[i].Directive, targets[i].DirectiveETag = agent.Name, agent.Directive, agent.DirectiveETag
 		}
-		agent, ok := byID[targets[i].AgentID]
-		if !ok {
-			return nil, fmt.Errorf("target %d: agent not found", i)
-		}
-		targets[i].AgentName, targets[i].Directive, targets[i].DirectiveETag = agent.Name, agent.Directive, agent.DirectiveETag
 		if targets[i].Provider == "" && strings.Contains(targets[i].Model, "/") {
 			parts := strings.SplitN(targets[i].Model, "/", 2)
 			targets[i].Provider, targets[i].Model = parts[0], parts[1]
@@ -280,6 +378,34 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 	}
 	s.ctx.Emit("eval.experiment.created", map[string]any{"experiment_id": exp.ID, "suite_id": suite.ID, "trigger_type": trigger})
 	return s.db.getExperiment(exp.ID)
+}
+
+func normalizeRuntimeDraft(draft *sdk.RuntimeAgentDraft) error {
+	draft.Name = strings.TrimSpace(draft.Name)
+	if draft.Name == "" {
+		return errors.New("draft.name required")
+	}
+	if strings.TrimSpace(draft.Directive) == "" {
+		return errors.New("draft.directive required")
+	}
+	draft.Mode = strings.TrimSpace(draft.Mode)
+	if draft.Mode == "" {
+		draft.Mode = "autonomous"
+	}
+	switch draft.Mode {
+	case "autonomous", "cautious", "learn":
+	default:
+		return errors.New("draft.mode must be autonomous, cautious, or learn")
+	}
+	draft.Config = strings.TrimSpace(draft.Config)
+	if draft.Config == "" {
+		draft.Config = "{}"
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(draft.Config), &config); err != nil || config == nil {
+		return errors.New("draft.config must be a JSON object")
+	}
+	return nil
 }
 
 func (s *service) resolveJudgeModel(requested string) (string, error) {
@@ -398,6 +524,51 @@ func (s *service) runNext(ctx context.Context) error {
 		"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage,
 	})
 	return s.executeRun(ctx, run)
+}
+
+func (s *service) cancelExperiment(id string) error {
+	experiment, err := s.db.getExperiment(id)
+	if err != nil {
+		return err
+	}
+	if experiment == nil {
+		return errors.New("experiment not found")
+	}
+	if err := s.db.cancelExperiment(id); err != nil {
+		return err
+	}
+
+	for _, run := range experiment.Runs {
+		s.controlMu.Lock()
+		c := s.controls[run.ID]
+		s.controlMu.Unlock()
+		if c != nil {
+			c.notifyOnce.Do(func() { close(c.requested) })
+			continue
+		}
+		requested, err := s.db.cancellationRequested(run.ID)
+		if err != nil {
+			return err
+		}
+		if !requested || run.Status == "queued" {
+			continue
+		}
+		if run.EnvironmentRunID != "" {
+			c = &evalRunControl{environment: run.EnvironmentRunID}
+			s.stopControlledEnvironment(c)
+			if err := s.db.saveAttempt(&run, run.SimulationAttempt, "", c.cleanup); err != nil {
+				return err
+			}
+		}
+		if err := s.db.finishCancelled(run.ID); err != nil {
+			return err
+		}
+	}
+	if err := s.db.rollupExperiment(id); err != nil {
+		return err
+	}
+	s.emitExperimentCompleted(id)
+	return nil
 }
 
 func (s *service) applySuggestion(id string) (*sdk.RuntimeCatalogAgent, error) {

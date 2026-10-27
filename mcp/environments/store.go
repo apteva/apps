@@ -183,7 +183,7 @@ func (s store) updateRun(id, status, msg string) error {
 	if status == "stopped" || status == "failed" || status == "expired" {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=?`, status, msg, stopped, id)
+	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=CASE WHEN ? IN ('starting','running') THEN NULL ELSE COALESCE(stopped_at,?) END WHERE id=?`, status, msg, status, stopped, id)
 	return err
 }
 
@@ -192,7 +192,7 @@ func (s store) transitionRun(id, from, status, msg string) (bool, error) {
 	if status == "stopped" || status == "failed" || status == "expired" {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	result, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=? AND status=?`, status, msg, stopped, id, from)
+	result, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=CASE WHEN ? IN ('starting','running') THEN NULL ELSE COALESCE(stopped_at,?) END WHERE id=? AND status=?`, status, msg, status, stopped, id, from)
 	if err != nil {
 		return false, err
 	}
@@ -316,7 +316,7 @@ func (s store) saveVoiceCall(call *VoiceCall) error {
 	}
 	_, err = s.db.Exec(`INSERT INTO environment_voice_calls(id,run_id,status,spec_json,result_json,error,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at`,
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at WHERE environment_voice_calls.status != 'cancelled'`,
 		call.ID, call.RunID, call.Status, string(spec), string(result), call.Error, created.Format(time.RFC3339Nano), now)
 	return err
 }
