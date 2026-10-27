@@ -29,6 +29,9 @@ type cancelledVoiceRuntime struct {
 }
 
 func (p *cancelledVoiceRuntime) SpawnRuntimeAgent(_ string, r sdk.RuntimeAgentSpawnRequest) (*sdk.RuntimeAgent, error) {
+	if r.StartPaused {
+		return nil, fmt.Errorf("voice caller requested a global startup pause")
+	}
 	return &sdk.RuntimeAgent{Alias: r.Alias}, nil
 }
 func (p *cancelledVoiceRuntime) SpawnRuntimeRealtimeThread(_, agent string, r sdk.RuntimeRealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {

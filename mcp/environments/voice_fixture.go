@@ -379,7 +379,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 			Mode:      "autonomous",
 		},
 		Alias:       call.CallerAgentAlias,
-		StartPaused: true,
+		StartPaused: false,
 	}); err != nil {
 		return call, fmt.Errorf("spawn caller agent: %w", err)
 	}
