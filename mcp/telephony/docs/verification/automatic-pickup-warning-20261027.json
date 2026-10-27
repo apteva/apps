@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-27",
+  "version": "0.12.57",
+  "deployment_changes": false,
+  "warning_default": "off; opt-in through existing scoped policy",
+  "tests": {
+    "full_go": {
+      "passed": true,
+      "seconds": 449.868,
+      "log": "/private/tmp/telephony-warning-all-go.log"
+    },
+    "frontend": {
+      "passed": 437,
+      "failed": 0,
+      "log": "/private/tmp/telephony-warning-all-frontend.log"
+    },
+    "final_warning_tests": {
+      "passed": 28,
+      "failed": 0,
+      "log": "/private/tmp/telephony-warning-final-targeted.log"
+    },
+    "focused_race": {
+      "passed": true,
+      "seconds": 58.588,
+      "log": "/private/tmp/telephony-warning-race.log"
+    },
+    "real_chromium_pickup": {
+      "passed": 5,
+      "failed": 0,
+      "log": "/private/tmp/telephony-warning-caller-proof.log"
+    },
+    "caller_audio_isolation": {
+      "microphone_pcm_frames": 13,
+      "non_silent_samples": 0,
+      "warning_rendered_locally": true
+    },
+    "inspector_chromium": {
+      "passed": 6,
+      "failed": 0,
+      "log": "/private/tmp/telephony-warning-inspector.log"
+    },
+    "managed_media_renewal": {
+      "passed": true,
+      "log": "/private/tmp/telephony-warning-managed-media.log"
+    },
+    "backend_final": {
+      "passed": true,
+      "log": "/private/tmp/telephony-warning-backend-final.log"
+    },
+    "typecheck_panels_go_vet_linux_amd64_release_consistency": {
+      "passed": true
+    }
+  },
+  "scope": "Telephony and shared softphone only; no embedding application, server or SDK dependency change",
+  "limits": [
+    "Browser output rendering cannot prove physical audibility",
+    "Real-browser fixtures use a local fake carrier and silent microphone; no live carrier call placed",
+    "Selected non-default output is verified with a sink-selection unit fixture; a physical headset still requires user acceptance"
+  ],
+  "sample": {
+    "frequency_hz": 880,
+    "tone_ms": 180,
+    "attack_ms": 10,
+    "release_ms": 20,
+    "window_ms": 1000,
+    "volume_fraction": 0.2
+  }
+}

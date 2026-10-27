@@ -12,19 +12,28 @@ import (
 	"time"
 )
 
+type autoAnswerWarningPolicy struct {
+	Enabled  bool `json:"enabled"`
+	WindowMS int  `json:"window_ms"`
+}
 type autoAnswerPolicy struct {
-	Mode                 string `json:"mode"`
-	DelayMS              int    `json:"delay_ms"`
-	AllowAdviserOverride *bool  `json:"allow_adviser_override,omitempty"`
+	WarningTone          *autoAnswerWarningPolicy `json:"warning_tone,omitempty"`
+	Mode                 string                   `json:"mode"`
+	DelayMS              int                      `json:"delay_ms"`
+	AllowAdviserOverride *bool                    `json:"allow_adviser_override,omitempty"`
 }
 type autoAnswerEffective struct {
-	Mode                 string `json:"mode"`
-	DelayMS              int    `json:"delay_ms"`
-	Source               string `json:"source"`
-	AllowAdviserOverride bool   `json:"allow_adviser_override"`
+	WarningTone          *autoAnswerWarningPolicy `json:"warning_tone,omitempty"`
+	Mode                 string                   `json:"mode"`
+	DelayMS              int                      `json:"delay_ms"`
+	Source               string                   `json:"source"`
+	AllowAdviserOverride bool                     `json:"allow_adviser_override"`
 }
 
 func (p autoAnswerPolicy) validate() error {
+	if p.WarningTone != nil && p.WarningTone.WindowMS != 0 && (p.WarningTone.WindowMS < 750 || p.WarningTone.WindowMS > 3000) {
+		return errors.New("warning window must be between 750 and 3000 ms")
+	}
 	if p.Mode != "manual" && p.Mode != "automatic" && p.Mode != "inherit" {
 		return errors.New("answer mode must be inherit, manual or automatic")
 	}
@@ -66,6 +75,12 @@ func (a *App) effectiveAutoAnswer(project, principal, route, dest string) (autoA
 		}
 		if p.Mode != "inherit" {
 			e.Mode, e.DelayMS, e.Source = p.Mode, p.DelayMS, target[0]
+			e.WarningTone = p.WarningTone
+			if e.WarningTone != nil && e.WarningTone.WindowMS == 0 {
+				w := *e.WarningTone
+				w.WindowMS = 1000
+				e.WarningTone = &w
+			}
 		}
 		if target[0] != "adviser" && p.AllowAdviserOverride != nil {
 			e.AllowAdviserOverride = e.AllowAdviserOverride && *p.AllowAdviserOverride
@@ -94,17 +109,18 @@ func autoAnswerSessionID(id string) bool {
 func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project string) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	var args struct {
-		Scope         string            `json:"scope"`
-		ScopeID       string            `json:"scope_id"`
-		Identity      *phoneIdentity    `json:"identity,omitempty"`
-		Policy        *autoAnswerPolicy `json:"policy,omitempty"`
-		Inherit       bool              `json:"inherit,omitempty"`
-		SessionID     string            `json:"session_id"`
-		Available     bool              `json:"available"`
-		Takeover      bool              `json:"takeover"`
-		CallID        string            `json:"call_id"`
-		DestinationID string            `json:"destination_id"`
-		Cancel        bool              `json:"cancel"`
+		Scope            string            `json:"scope"`
+		ScopeID          string            `json:"scope_id"`
+		Identity         *phoneIdentity    `json:"identity,omitempty"`
+		Policy           *autoAnswerPolicy `json:"policy,omitempty"`
+		Inherit          bool              `json:"inherit,omitempty"`
+		SessionID        string            `json:"session_id"`
+		Available        bool              `json:"available"`
+		WarningSupported bool              `json:"warning_tone_supported"`
+		Takeover         bool              `json:"takeover"`
+		CallID           string            `json:"call_id"`
+		DestinationID    string            `json:"destination_id"`
+		Cancel           bool              `json:"cancel"`
 	}
 	if r.Method != "GET" && r.Method != "POST" {
 		http.Error(w, "GET or POST required", 405)
@@ -313,7 +329,7 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 			http.Error(w, "session unavailable", 503)
 			return
 		}
-		res, err := a.db().db.Exec(`INSERT INTO telephony_auto_answer_sessions VALUES(?,?,?,?) ON CONFLICT(project_id,principal) DO UPDATE SET session_id=excluded.session_id,expires_at=excluded.expires_at WHERE telephony_auto_answer_sessions.session_id=excluded.session_id OR ?`, project, principal, args.SessionID, now+30000, args.Takeover)
+		res, err := a.db().db.Exec(`INSERT INTO telephony_auto_answer_sessions(project_id,principal,session_id,expires_at,warning_supported) VALUES(?,?,?,?,?) ON CONFLICT(project_id,principal) DO UPDATE SET session_id=excluded.session_id,expires_at=excluded.expires_at,warning_supported=excluded.warning_supported WHERE telephony_auto_answer_sessions.session_id=excluded.session_id OR ?`, project, principal, args.SessionID, now+30000, args.WarningSupported, args.Takeover)
 		if err != nil {
 			http.Error(w, "session unavailable", 503)
 			return
@@ -385,16 +401,47 @@ func (a *App) handleAutoAnswer(w http.ResponseWriter, r *http.Request, project s
 			writeJSON(w, map[string]any{"eligible": false, "effective": effective})
 			return
 		}
+		var selected *ringOffer
+		for i := range offers {
+			if offers[i].Kind == "browser" && offers[i].DestinationID == dest {
+				selected = &offers[i]
+				break
+			}
+		}
+		if selected == nil {
+			writePhoneOfferExpired(w)
+			return
+		}
+		if effective.WarningTone != nil && effective.WarningTone.Enabled {
+			var supported bool
+			err = a.db().db.QueryRow(`SELECT warning_supported FROM telephony_auto_answer_sessions WHERE project_id=? AND principal=? AND session_id=? AND expires_at>?`, project, principal, args.SessionID, time.Now().UnixMilli()).Scan(&supported)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeJSONStatus(w, 503, map[string]any{"code": "auto_answer_session_unavailable"})
+				return
+			}
+			if err != nil || !supported {
+				writeJSONStatus(w, 409, map[string]any{"code": "auto_answer_warning_unsupported"})
+				return
+			}
+		}
 		if err = a.reserveAutoAnswer(project, principal, args.SessionID, row.ID, dest, effective.DelayMS); err != nil {
 			http.Error(w, err.Error(), 409)
 			return
 		}
 		log.Printf("auto_answer reserved at=%s call=%s project=%s principal_hash=%s source=%s delay_ms=%d", ringTime(time.Now()), row.ID, project, phoneHash(principal)[:12], effective.Source, effective.DelayMS)
-		writeJSON(w, map[string]any{"eligible": true, "call_id": row.ID, "destination_id": dest, "effective": effective})
+		writeJSON(w, map[string]any{"eligible": true, "call_id": row.ID, "destination_id": dest, "offer_id": selected.ID, "offer_ttl_ms": autoAnswerOfferTTL(selected.ExpiresAt), "effective": effective})
 	default:
 		http.NotFound(w, r)
 	}
 }
+func autoAnswerOfferTTL(expires string) int64 {
+	at, err := time.Parse(time.RFC3339Nano, expires)
+	if err != nil {
+		return 0
+	}
+	return max(0, time.Until(at).Milliseconds())
+}
+
 func (a *App) reserveAutoAnswer(project, principal, session, call, dest string, delay int) error {
 	now := time.Now().UnixMilli()
 	tx, err := a.db().db.Begin()
@@ -436,17 +483,21 @@ func (a *App) reserveAutoAnswer(project, principal, session, call, dest string, 
 	}
 	return tx.Commit()
 }
-func (a *App) validateAutoAnswer(r *http.Request, row *callRow, session, dest string) error {
+func (a *App) validateAutoAnswer(r *http.Request, row *callRow, session, dest string, warningCompleted bool) error {
 	principal := autoAnswerOwner(r)
 	var expiry int64
 	var storedDest string
-	err := a.db().db.QueryRow(`SELECT r.expires_at,r.destination_id FROM telephony_auto_answer_reservations r JOIN telephony_auto_answer_sessions s ON s.project_id=r.project_id AND s.principal=r.principal AND s.session_id=r.session_id WHERE r.project_id=? AND r.principal=? AND r.session_id=? AND r.call_id=? AND s.expires_at>?`, row.ProjectID, principal, session, row.ID, time.Now().UnixMilli()).Scan(&expiry, &storedDest)
+	var warningSupported bool
+	err := a.db().db.QueryRow(`SELECT r.expires_at,r.destination_id,s.warning_supported FROM telephony_auto_answer_reservations r JOIN telephony_auto_answer_sessions s ON s.project_id=r.project_id AND s.principal=r.principal AND s.session_id=r.session_id WHERE r.project_id=? AND r.principal=? AND r.session_id=? AND r.call_id=? AND s.expires_at>?`, row.ProjectID, principal, session, row.ID, time.Now().UnixMilli()).Scan(&expiry, &storedDest, &warningSupported)
 	if err != nil || expiry <= time.Now().UnixMilli() || storedDest != dest {
 		return errors.New("automatic answer reservation expired")
 	}
 	e, err := a.effectiveAutoAnswer(row.ProjectID, principal, row.RouteID, dest)
 	if err != nil {
 		return err
+	}
+	if e.WarningTone != nil && e.WarningTone.Enabled && (!warningSupported || !warningCompleted) {
+		return errors.New("auto_answer_warning_required")
 	}
 	if e.Mode != "automatic" {
 		return errors.New("automatic answering is now disabled")

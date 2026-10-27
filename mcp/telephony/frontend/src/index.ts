@@ -26,7 +26,7 @@ export type {NetworkPolicy,NetworkPolicyView} from "./network-policy";
 export {DEFAULT_NETWORK_POLICY} from "./network-policy";
 export type {NetworkCheckOptions,NetworkCheckResult,NetworkPathResult,NetworkCheckPath} from "./network-check";
 
-export type {AutoAnswerPolicy,AutoAnswerPolicyRequest,AutoAnswerPolicyView,AutoAnswerSnapshot,AutoAnswerEffective} from "./auto-answer";
+export type {AutoAnswerWarningPolicy,AutoAnswerPolicy,AutoAnswerPolicyRequest,AutoAnswerPolicyView,AutoAnswerSnapshot,AutoAnswerEffective} from "./auto-answer";
 
 export type {WatchCallFailure} from "./client";
 export type {RequestDiagnostic,RequestFailureCategory,CallWatchDiagnostics,OfferBrowserEvent,OfferBrowserStage} from "./telemetry";

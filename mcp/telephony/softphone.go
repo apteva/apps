@@ -1307,9 +1307,10 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	a.autoAnswerMu.Lock()
 	defer a.autoAnswerMu.Unlock()
 	var request struct {
-		DestinationID     string `json:"destination_id"`
-		Rejoin            bool   `json:"rejoin"`
-		AutoAnswerSession string `json:"auto_answer_session,omitempty"`
+		DestinationID              string `json:"destination_id"`
+		Rejoin                     bool   `json:"rejoin"`
+		AutoAnswerSession          string `json:"auto_answer_session,omitempty"`
+		AutoAnswerWarningCompleted bool   `json:"auto_answer_warning_completed,omitempty"`
 	}
 	if r.ContentLength != 0 {
 		if err := decodeJSONBody(r, &request); err != nil {
@@ -1420,7 +1421,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	}
 
 	if request.AutoAnswerSession != "" {
-		if err := a.validateAutoAnswer(r, row, request.AutoAnswerSession, request.DestinationID); err != nil {
+		if err := a.validateAutoAnswer(r, row, request.AutoAnswerSession, request.DestinationID, request.AutoAnswerWarningCompleted); err != nil {
+			if err.Error() == "auto_answer_warning_required" {
+				writeJSONStatus(w, 409, map[string]any{"code": "auto_answer_warning_required"})
+				return
+			}
 			http.Error(w, err.Error(), 409)
 			return
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -257,5 +258,68 @@ func TestAutoAnswerValidationAndStorageFailures(t *testing.T) {
 	w := phoneTestRequest(a, nil, "POST", "/softphone/auto-answer-policy", map[string]any{})
 	if w.Code != 503 {
 		t.Fatalf("policy storage failure hidden %d %s", w.Code, w.Body)
+	}
+}
+
+func TestAutoAnswerWarningPolicyAndLegacyClientGate(t *testing.T) {
+	a := autoAnswerTestSetup(t)
+	alice := phoneTestIdentity("alice")
+	row := phoneTestRingOfferCall(t, a, "warning-gate")
+	autoAnswerTestPolicy(t, a, map[string]any{"scope": "adviser", "identity": alice, "policy": map[string]any{"mode": "automatic", "warning_tone": map[string]any{"enabled": true}}})
+	e, err := a.effectiveAutoAnswer("project-a", alice.key(), "", "sales")
+	if err != nil || e.WarningTone == nil || !e.WarningTone.Enabled || e.WarningTone.WindowMS != 1000 {
+		t.Fatalf("effective: %+v %v", e, err)
+	}
+	autoAnswerTestAvailable(t, a, &alice, autoAnswerTestSession)
+	offer := map[string]any{"session_id": autoAnswerTestSession, "call_id": row.ID, "destination_id": "sales"}
+	w := phoneTestRequest(a, &alice, "POST", "/softphone/auto-answer-offer", offer)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "auto_answer_warning_unsupported") {
+		t.Fatalf("old client permitted: %d %s", w.Code, w.Body)
+	}
+	w = phoneTestRequest(a, &alice, "POST", "/softphone/auto-answer-session", map[string]any{"session_id": autoAnswerTestSession, "available": true, "warning_tone_supported": true})
+	if w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	w = phoneTestRequest(a, &alice, "POST", "/softphone/auto-answer-offer", offer)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "offer_ttl_ms") {
+		t.Fatalf("reservation: %d %s", w.Code, w.Body)
+	}
+	for _, completed := range []bool{false, true} {
+		request := httptest.NewRequest("POST", "/", nil)
+		pp, principalErr := a.phonePrincipal("project-a", alice)
+		if principalErr != nil {
+			t.Fatal(principalErr)
+		}
+		request = request.WithContext(context.WithValue(request.Context(), phonePrincipalKey{}, pp))
+		if err = a.validateAutoAnswer(request, &row, autoAnswerTestSession, "sales", completed); (err == nil) != completed {
+			t.Fatalf("completion %v: %v", completed, err)
+		}
+	}
+	w = phoneTestRequest(a, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales", "auto_answer_session": autoAnswerTestSession})
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "auto_answer_warning_required") {
+		t.Fatalf("unconfirmed warning bypassed HTTP gate: %d %s", w.Code, w.Body)
+	}
+	w = phoneTestRequest(a, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"})
+	if w.Code != 200 {
+		t.Fatalf("manual answer blocked by warning policy: %d %s", w.Code, w.Body)
+	}
+	// A separate adviser retains the manual default, with no warning policy.
+	other, _ := a.effectiveAutoAnswer("project-a", phoneTestIdentity("bob").key(), "", "sales")
+	if other.Mode != "manual" || other.WarningTone != nil {
+		t.Fatal("policy leaked")
+	}
+}
+func TestAutoAnswerWarningBounds(t *testing.T) {
+	for _, ms := range []int{-1, 1, 749, 3001} {
+		p := autoAnswerPolicy{Mode: "automatic", WarningTone: &autoAnswerWarningPolicy{Enabled: true, WindowMS: ms}}
+		if p.validate() == nil {
+			t.Fatalf("accepted %d", ms)
+		}
+	}
+	for _, ms := range []int{0, 750, 1000, 3000} {
+		p := autoAnswerPolicy{Mode: "automatic", WarningTone: &autoAnswerWarningPolicy{Enabled: true, WindowMS: ms}}
+		if err := p.validate(); err != nil {
+			t.Fatal(ms, err)
+		}
 	}
 }
