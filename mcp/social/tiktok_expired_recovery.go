@@ -20,6 +20,9 @@ type uploadStopEvidence struct {
 }
 
 type uploadOperationReceipt struct {
+	AccountBinding    string             `json:"account_binding"`
+	ContentBinding    string             `json:"content_binding"`
+	SourceSHA256      string             `json:"source_sha256"`
 	CorrelationID     string             `json:"correlation_id"`
 	SourceAttempt     int                `json:"source_attempt"`
 	InitializedAt     string             `json:"initialized_at"`
@@ -38,7 +41,11 @@ func guardedTikTokUpload(ctx *sdk.AppCtx, target int64, p *preparedVideo, d *del
 	if !d.bound || d.Initialization == nil || d.Initialization.Result != "operation_persisted" {
 		return errors.New("upload receipt is not bound to a current attempt")
 	}
-	res, err := ctx.AppDB().Exec(`INSERT INTO delivery_upload_operations(project_id,target_id,operation_id,correlation_id,source_attempt,initialized_at,uploader_state,provenance) SELECT ?,id,?,?,attempts,?,'active','social_upload_receipt' FROM post_targets WHERE id=? AND attempts=? AND publish_operation_id=? AND status='publishing'`, projectScope(ctx), d.OperationID, d.CorrelationID, d.Initialization.At, target, d.boundAttempt, d.OperationID)
+	r, err := loadRecoveryTarget(ctx, postForTarget(ctx, target), target)
+	if err != nil || r.DeliveryRevision != r.Revision {
+		return errors.New("source attempt does not match the approved revision")
+	}
+	res, err := ctx.AppDB().Exec(`INSERT INTO delivery_upload_operations(project_id,target_id,operation_id,correlation_id,source_attempt,initialized_at,uploader_state,provenance,account_binding,content_binding,source_sha256) SELECT ?,id,?,?,attempts,?,'active','social_upload_receipt',?,?,? FROM post_targets WHERE id=? AND attempts=? AND publish_operation_id=? AND status='publishing'`, projectScope(ctx), d.OperationID, d.CorrelationID, d.Initialization.At, uploadRecoveryAccountBinding(projectScope(ctx), r), uploadRecoveryContentBinding(r), p.SHA256, target, d.boundAttempt, d.OperationID)
 	if err != nil {
 		return errors.New("could not persist uploader guard; upload not started")
 	}
@@ -57,7 +64,7 @@ func guardedTikTokUpload(ctx *sdk.AppCtx, target int64, p *preparedVideo, d *del
 func loadUploadReceipt(ctx *sdk.AppCtx, r recoveryTarget) (uploadOperationReceipt, error) {
 	var receipt uploadOperationReceipt
 	var stopRaw string
-	err := ctx.AppDB().QueryRow(`SELECT correlation_id,source_attempt,initialized_at,uploader_state,COALESCE(uploader_stopped_at,''),provenance,stop_evidence FROM delivery_upload_operations WHERE project_id=? AND target_id=? AND operation_id=?`, projectScope(ctx), r.TargetID, r.Operation).Scan(&receipt.CorrelationID, &receipt.SourceAttempt, &receipt.InitializedAt, &receipt.UploaderState, &receipt.UploaderStoppedAt, &receipt.Provenance, &stopRaw)
+	err := ctx.AppDB().QueryRow(`SELECT correlation_id,source_attempt,initialized_at,uploader_state,COALESCE(uploader_stopped_at,''),provenance,stop_evidence,account_binding,content_binding,source_sha256 FROM delivery_upload_operations WHERE project_id=? AND target_id=? AND operation_id=?`, projectScope(ctx), r.TargetID, r.Operation).Scan(&receipt.CorrelationID, &receipt.SourceAttempt, &receipt.InitializedAt, &receipt.UploaderState, &receipt.UploaderStoppedAt, &receipt.Provenance, &stopRaw, &receipt.AccountBinding, &receipt.ContentBinding, &receipt.SourceSHA256)
 	if err == nil {
 		err = json.Unmarshal([]byte(stopRaw), &receipt.StopEvidence)
 	}
@@ -70,7 +77,7 @@ func loadUploadReceipt(ctx *sdk.AppCtx, r recoveryTarget) (uploadOperationReceip
 // full versioned, first-chunk 404 receipt plus initialization/URL binding. All
 // other legacy evidence stays unknown and requires external investigation.
 func reviewStoredUploadReceipt(ctx *sdk.AppCtx, r recoveryTarget) error {
-	rows, err := ctx.AppDB().Query(`SELECT diagnostics FROM video_delivery_attempts WHERE project_id=? AND target_id=? ORDER BY rowid LIMIT 200`, projectScope(ctx), r.TargetID)
+	rows, err := ctx.AppDB().Query(`SELECT diagnostics FROM video_delivery_attempts WHERE project_id=? AND target_id=? AND json_valid(diagnostics) AND json_extract(diagnostics,'$.operation_id')=? AND COALESCE(json_extract(diagnostics,'$.purpose'),'')='' ORDER BY rowid LIMIT 200`, projectScope(ctx), r.TargetID, r.Operation)
 	if err != nil {
 		return err
 	}
@@ -81,7 +88,7 @@ func reviewStoredUploadReceipt(ctx *sdk.AppCtx, r recoveryTarget) error {
 			break
 		}
 		var d deliveryDiagnostics
-		if json.Unmarshal([]byte(raw), &d) != nil || d.AttemptPurpose != "" || d.OperationID != r.Operation || d.ProgressVersion < 1 || d.SourceAttempt != nil && *d.SourceAttempt != r.Attempts || d.Method != "FILE_UPLOAD" || d.CorrelationID == "" || d.AcknowledgedBytes == nil || *d.AcknowledgedBytes != 0 || d.Initialization == nil || d.Initialization.Result != "operation_persisted" || d.Initialization.HTTPStatus < 200 || d.Initialization.HTTPStatus >= 300 || d.LastUpload == nil {
+		if json.Unmarshal([]byte(raw), &d) != nil || d.AttemptPurpose != "" || d.OperationID != r.Operation || d.SourceSHA256 == "" || r.DeliveryRevision != r.Revision || d.ProgressVersion < 1 || d.SourceAttempt != nil && *d.SourceAttempt != r.Attempts || d.Method != "FILE_UPLOAD" || d.CorrelationID == "" || d.AcknowledgedBytes == nil || *d.AcknowledgedBytes != 0 || d.Initialization == nil || d.Initialization.Result != "operation_persisted" || d.Initialization.HTTPStatus < 200 || d.Initialization.HTTPStatus >= 300 || d.LastUpload == nil {
 			continue
 		}
 		last := d.LastUpload
@@ -106,7 +113,7 @@ func reviewStoredUploadReceipt(ctx *sdk.AppCtx, r recoveryTarget) error {
 		return errors.New("legacy evidence review required: no complete application-owned initialization and stopped-uploader receipt; unknown bytes remain unknown")
 	}
 	proof, _ := json.Marshal(uploadStopEvidence{AcknowledgedBytes: candidate.AcknowledgedBytes, LastUpload: candidate.LastUpload})
-	_, err = ctx.AppDB().Exec(`INSERT INTO delivery_upload_operations(project_id,target_id,operation_id,correlation_id,source_attempt,initialized_at,uploader_state,uploader_stopped_at,provenance,stop_evidence) SELECT ?,id,?,?,attempts,?,'stopped',?,'reviewed_stored_receipt',? FROM post_targets WHERE id=? AND attempts=? AND publish_operation_id=? AND COALESCE(platform_post_id,'')='' ON CONFLICT(project_id,target_id,operation_id) DO NOTHING`, projectScope(ctx), r.Operation, candidate.CorrelationID, candidate.Initialization.At, candidate.LastUpload.At, string(proof), r.TargetID, r.Attempts, r.Operation)
+	_, err = ctx.AppDB().Exec(`INSERT INTO delivery_upload_operations(project_id,target_id,operation_id,correlation_id,source_attempt,initialized_at,uploader_state,uploader_stopped_at,provenance,stop_evidence,account_binding,content_binding,source_sha256) SELECT ?,id,?,?,attempts,?,'stopped',?,'reviewed_stored_receipt',?,?,?,? FROM post_targets WHERE id=? AND attempts=? AND publish_operation_id=? AND COALESCE(platform_post_id,'')='' ON CONFLICT(project_id,target_id,operation_id) DO UPDATE SET account_binding=excluded.account_binding,content_binding=excluded.content_binding,source_sha256=excluded.source_sha256,provenance=excluded.provenance WHERE delivery_upload_operations.account_binding='' AND delivery_upload_operations.uploader_state='stopped' AND delivery_upload_operations.correlation_id=excluded.correlation_id AND delivery_upload_operations.source_attempt=excluded.source_attempt`, projectScope(ctx), r.Operation, candidate.CorrelationID, candidate.Initialization.At, candidate.LastUpload.At, string(proof), uploadRecoveryAccountBinding(projectScope(ctx), r), uploadRecoveryContentBinding(r), candidate.SourceSHA256, r.TargetID, r.Attempts, r.Operation)
 	return err
 }
 
@@ -124,7 +131,7 @@ func zeroTikTokObservation(d deliveryDiagnostics, now, floor time.Time) bool {
 func (a *App) expiredTikTokRecovery(ctx *sdk.AppCtx, r recoveryTarget) (map[string]any, bool) {
 	evidence := map[string]any{"eligible": false, "reason": "expired upload evidence is incomplete"}
 	receipt, err := loadUploadReceipt(ctx, r)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) || err == nil && receipt.AccountBinding == "" {
 		if err = reviewStoredUploadReceipt(ctx, r); err == nil {
 			receipt, err = loadUploadReceipt(ctx, r)
 		}
@@ -134,6 +141,10 @@ func (a *App) expiredTikTokRecovery(ctx *sdk.AppCtx, r recoveryTarget) (map[stri
 		return evidence, false
 	}
 	evidence["receipt"] = receipt
+	if r.Session != "" || receipt.AccountBinding != uploadRecoveryAccountBinding(projectScope(ctx), r) || receipt.ContentBinding != uploadRecoveryContentBinding(r) || receipt.SourceSHA256 == "" {
+		evidence["reason"] = "operation account, approved content, source checksum or resumable-sender evidence is missing or changed"
+		return evidence, false
+	}
 	stop := receipt.StopEvidence
 	if stop.AcknowledgedBytes == nil || *stop.AcknowledgedBytes != 0 || stop.LastUpload == nil || stop.LastUpload.Result != "http_rejected" || stop.LastUpload.HTTPStatus < 400 || stop.LastUpload.HTTPStatus >= 500 {
 		evidence["reason"] = "uploader did not retain an explicit zero-acknowledgement rejection; ambiguous or accepted uploads cannot be replaced"
@@ -190,4 +201,18 @@ func persistTikTokUploadOperation(ctx *sdk.AppCtx, target int64, d *deliveryDiag
 		return errors.New("stale initialization result; operation not attached")
 	}
 	return nil
+}
+
+func postForTarget(ctx *sdk.AppCtx, target int64) int64 {
+	var post int64
+	_ = ctx.AppDB().QueryRow(`SELECT post_id FROM post_targets WHERE id=?`, target).Scan(&post)
+	return post
+}
+func uploadRecoveryAccountBinding(project string, r recoveryTarget) string {
+	raw, _ := json.Marshal([]any{project, r.AccountID, r.ConnectionID, r.Platform, r.Provider, r.ExternalID})
+	return imageSHA(raw)
+}
+func uploadRecoveryContentBinding(r recoveryTarget) string {
+	raw, _ := json.Marshal([]any{r.PostID, r.TargetID, r.Revision, r.DeliveryRevision, r.Body, r.Options, r.MediaIDs, r.MediaProject})
+	return imageSHA(raw)
 }

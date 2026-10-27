@@ -277,6 +277,15 @@ func (a *App) reconcileImportedProviderPost(
 	if providerPostID == "" {
 		return false, errors.New("provider post id required")
 	}
+	var platform string
+	if err := ctx.AppDB().QueryRow(`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid).Scan(&platform); err != nil {
+		return false, err
+	}
+	platformURL = safePublicationURL(platform, platformURL)
+	// Provider-indexed timestamps remain in provider_data; they are not native inspection.
+	providerPublishedAt := nativeTimestamp(publishedAt)
+	publishedAt = ""
+
 	var suppressed int
 	tombstoneErr := ctx.AppDB().QueryRow(
 		`SELECT 1 FROM provider_import_tombstones
@@ -315,12 +324,12 @@ func (a *App) reconcileImportedProviderPost(
 			targetStatus = "draft"
 		}
 		if source == "provider" && !reviewing {
-			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),published_at=CASE WHEN ?='published' THEN NULLIF(?,'') ELSE NULL END,body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, status, publishedAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
+			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
 			if err != nil {
 				return false, err
 			}
 		}
-		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,published_at=CASE WHEN ?='published' THEN ? ELSE NULL END WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID)
+		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,provider_reported_published_at=? WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, providerPublishedAt, targetID)
 		if err != nil {
 			return false, err
 		}
@@ -369,7 +378,7 @@ func (a *App) reconcileImportedProviderPost(
 	// Imported provider drafts retain the selected destination in their initial
 	// revision. Existing reviewed targets are never silently rewritten.
 	options := map[string]any{}
-	var platform, providerAccountID string
+	var providerAccountID string
 	if err := tx.QueryRow(`SELECT platform,COALESCE(provider_account_id,'') FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid).Scan(&platform, &providerAccountID); err != nil {
 		return false, err
 	}
@@ -388,11 +397,11 @@ func (a *App) reconcileImportedProviderPost(
 	_, err = tx.Exec(
 		`INSERT INTO post_targets
 		 (post_id, social_account_id, status, platform_post_id, platform_url, provider_post_id,
-		  provider_data, provider_sync_status, provider_updated_at, options, published_at)
+		  provider_data, provider_sync_status, provider_updated_at, options, published_at,provider_reported_published_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?,
-		         CASE WHEN ?='published' THEN ? ELSE NULL END)`,
+		         CASE WHEN ?='published' THEN ? ELSE NULL END,?)`,
 		postID, accountID, status, nullable(platformPostID), nullable(platformURL), providerPostID,
-		string(rawJSON), status, string(optionsJSON), status, nullable(publishedAt),
+		string(rawJSON), status, string(optionsJSON), status, nullable(publishedAt), providerPublishedAt,
 	)
 	if err != nil {
 		return false, err

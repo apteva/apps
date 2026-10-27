@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Megaphone } from "lucide-react";
 import { Card, CardHeader, type CardVendor } from "@apteva/ui-kit";
 import { platformPresentation } from "./platformPresentation";
-import { postLifecycleDate } from "./postCalendar";
+import { postLifecycleDate, postLifecycleDateLabel } from "./postCalendar";
 import {
   fetchSocialPost,
   isPostLifecycleEvent,
@@ -79,7 +79,7 @@ export default function SocialPostCard({ post_id, projectId, preview }: Props) {
       <CardHeader
         vendor={socialVendor}
         title={postTitle(post)}
-        subtitle={date ? date.toLocaleString() : `Post #${post.id}`}
+        subtitle={date ? `${postLifecycleDateLabel(post)} · ${date.toLocaleString()}` : `Post #${post.id}`}
         status={{ label: post.status, variant: postStatusVariant(post.status) }}
         action={{ label: "Open post", href: `/apps/social?post=${post.id}` }}
       />

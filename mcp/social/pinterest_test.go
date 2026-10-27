@@ -70,7 +70,7 @@ func TestPublishPinterestBuildsNestedImagePin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "987654321" || pinURL != "https://www.pinterest.com/pin/987654321/" {
+	if id != "987654321" || pinURL != "" {
 		t.Fatalf("identity = %q %q", id, pinURL)
 	}
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "create_pin" {
@@ -145,7 +145,7 @@ func TestImportPinterestPreservesDescriptionTitleAndUpstreamTime(t *testing.T) {
 	if body != "Full description" || publishedAt != "2026-02-03T04:05:06Z" || targetPublishedAt != publishedAt {
 		t.Fatalf("imported dates/body = %q %q %q", body, publishedAt, targetPublishedAt)
 	}
-	if platformURL != "https://www.pinterest.com/pin/pin-1/" || !containsJSONValue(targetOptions, "title", "Separate title") {
+	if platformURL != "" || !containsJSONValue(targetOptions, "title", "Separate title") {
 		t.Fatalf("url/options = %q %s", platformURL, targetOptions)
 	}
 }

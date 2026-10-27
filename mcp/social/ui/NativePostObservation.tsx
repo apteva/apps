@@ -1,5 +1,6 @@
 export interface NativePostMetadata {
   native_post_id: string; observed_at: string;
+  uploaded_at?: string | null;
   title: string | null; body: string | null; published_at: string | null;
   visibility: string | null; audience: string | null; processing_state: string | null;
   original_filename: string | null; bytes: number | null; duration_seconds: number | null;
@@ -13,7 +14,8 @@ export function NativePostObservation({ metadata }: { metadata?: NativePostMetad
       <dt>Native visibility</dt><dd>{metadata.visibility ?? "Unknown"}</dd>
       <dt>Membership audience</dt><dd>{metadata.audience ?? "Unknown"}</dd>
       <dt>Processing state</dt><dd>{metadata.processing_state ?? "Unknown"}</dd>
-      <dt>Provider publication time</dt><dd>{metadata.published_at ?? "Unknown"}</dd>
+      <dt>Native publication time</dt><dd>{metadata.published_at ?? "Unknown"}</dd>
+      <dt>Native upload time</dt><dd>{metadata.uploaded_at ?? "Unknown"}</dd>
       <dt>Original filename</dt><dd>{metadata.original_filename ?? "Unknown"}</dd>
       <dt>Original bytes</dt><dd>{metadata.bytes == null ? "Unknown" : metadata.bytes.toLocaleString()}</dd>
       <dt>Duration</dt><dd>{metadata.duration_seconds == null ? "Unknown" : `${metadata.duration_seconds} seconds`}</dd>

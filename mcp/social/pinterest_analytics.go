@@ -216,7 +216,7 @@ func (a *App) pinterestBatchReport(ctx *sdk.AppCtx, connID int64, pins []pintere
 			}
 		}
 		for _, pin := range batch {
-			row := analyticsPostRow{ID: pin.ID, Title: pin.Title, URL: "https://www.pinterest.com/pin/" + pin.ID + "/", PublishedAt: pin.CreatedAt, Status: "ok", Metrics: map[string]int64{}, Report: newAnalyticsReport("post", pin.ID, "provider", q, "range")}
+			row := analyticsPostRow{ID: pin.ID, Title: pin.Title, URL: "", PublishedAt: valueOrEmpty(nativeTimestamp(pin.CreatedAt)), Status: "ok", Metrics: map[string]int64{}, Report: newAnalyticsReport("post", pin.ID, "provider", q, "range")}
 			row.Report.Identity = "pinterest:post:" + pin.ID
 			raw, ok := payload[pin.ID]
 			m := pinterestNormalized(raw)

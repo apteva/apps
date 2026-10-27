@@ -82,7 +82,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 		return "", "", err
 	}
 	if id != "" {
-		return id, "https://www.youtube.com/watch?v=" + url.QueryEscape(id), &awaitingAudienceError{}
+		return id, "", &awaitingAudienceError{}
 	}
 	if retryAt != "" {
 		if until, e := time.Parse(time.RFC3339Nano, retryAt); e == nil && time.Now().Before(until) {
@@ -260,7 +260,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	d.OperationState = "published"
 	d.ProviderStatus = "complete"
 	d.event(ctx, j.targetID, deliveryEvent{Stage: "processing", Result: "awaiting_audience_setup"})
-	watch := "https://www.youtube.com/watch?v=" + url.QueryEscape(id)
+	watch := ""
 	// Save remote identity before any thumbnail call or final status write.
 	if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET platform_post_id=?,platform_url=?,audience_status='awaiting_setup',youtube_upload_retry_after=NULL WHERE id=?`, id, watch, j.targetID); err != nil {
 		return "", "", err

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -285,8 +286,10 @@ func uploadTikTokChunks(ctx *sdk.AppCtx, target int64, prepared *preparedVideo, 
 			count = prepared.Size - first
 		}
 		last := first + count - 1
-		request, err := http.NewRequest(http.MethodPut, uploadURL, io.NewSectionReader(prepared.File, first, count))
+		requestCtx, cancelRequest := context.WithCancel(context.Background())
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodPut, uploadURL, io.NewSectionReader(prepared.File, first, count))
 		if err != nil {
+			cancelRequest()
 			return err
 		}
 		request.ContentLength = count
@@ -298,17 +301,20 @@ func uploadTikTokChunks(ctx *sdk.AppCtx, target int64, prepared *preparedVideo, 
 		}
 		outcome := deliveryOutcome{StartedAt: time.Now().UTC().Format(time.RFC3339Nano), ExpectedStatus: expected, Chunk: chunk + 1, ContentRange: request.Header.Get("Content-Range"), URLSHA256: uploadURLHash(request.URL.String()), Result: "request_started"}
 		if outcome.URLSHA256 != d.UploadURLSHA256 {
+			cancelRequest()
 			outcome.Result = "url_binding_mismatch"
 			_ = d.uploadOutcome(ctx, target, outcome)
 			return errors.New("upload URL changed while preparing the request")
 		}
 		*d.AttemptedBytes += count
 		if err := d.uploadOutcome(ctx, target, outcome); err != nil {
+			cancelRequest()
 			return errors.New("could not persist upload attempt")
 		}
 		response, err := client.Do(request)
 		outcome.At = time.Now().UTC().Format(time.RFC3339Nano)
 		if err != nil {
+			cancelRequest()
 			outcome.Result = "transport_error"
 			outcome.ResponseExcerpt = deliveryExcerpt([]byte(err.Error()))
 			_ = d.uploadOutcome(ctx, target, outcome)
@@ -316,6 +322,7 @@ func uploadTikTokChunks(ctx *sdk.AppCtx, target int64, prepared *preparedVideo, 
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<10))
 		response.Body.Close()
+		cancelRequest()
 		outcome.HTTPStatus = response.StatusCode
 		outcome.RequestID = responseRequestID(response.Header)
 		outcome.ResponseExcerpt = deliveryExcerpt(raw)
@@ -351,7 +358,7 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "invalid target", 400)
 		return
 	}
-	args := projectArgsFromRequest(r)
+	args := scopedQueryArgs(r, "social_account_id", "history_after_id", "history_limit")
 	var handler func(*sdk.AppCtx, map[string]any) (any, error)
 	switch action {
 	case "inspect":
@@ -366,9 +373,10 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var body struct {
-			RecoveryID    string `json:"recovery_id"`
-			Confirm       bool   `json:"confirm"`
-			ReviewExpired bool   `json:"review_expired_upload"`
+			RecoveryID      string `json:"recovery_id"`
+			Confirm         bool   `json:"confirm"`
+			ReviewExpired   bool   `json:"review_expired_upload"`
+			SocialAccountID int64  `json:"social_account_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 			http.Error(w, "invalid JSON", 400)
@@ -377,6 +385,9 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 		args["recovery_id"] = body.RecoveryID
 		args["confirm"] = body.Confirm
 		args["review_expired_upload"] = body.ReviewExpired
+		if body.SocialAccountID != 0 {
+			args["social_account_id"] = body.SocialAccountID
+		}
 		if action == "revalidate" {
 			handler = a.toolPostDeliveryRevalidate
 		} else {

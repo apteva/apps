@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.4
+version: 0.20.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -84,6 +84,16 @@ requires:
       capabilities: [jobs.schedule]
       required: false
       label: "Jobs (optional)"
+    - role: editorial
+      kind: app
+      compatible_app_names: [editorial]
+      required: false
+      label: "Editorial record repair (optional)"
+    - role: content-catalog
+      kind: app
+      compatible_app_names: [content-catalog]
+      required: false
+      label: "Content Catalog record repair (optional)"
     - role: social_provider
       kind: integration
       compatible_slugs: [zernio]
@@ -125,6 +135,7 @@ provides:
     - { name: post_draft_reject,          description: "Reject the exact revision in review with a reason." }
     - { name: post_draft_publish,         description: "Publish or schedule a stored draft with explicit mode and expected_revision." }
     - { name: post_list,                  description: "List stored posts with profile filters, pagination, and separate post/target totals." }
+    - { name: post_publication_reconcile, description: "Preview or apply account-scoped publication link/time corrections; repair existing linked records without publishing." }
     - { name: post_delivery_inspect, description: "Inspect one target and native operation without resubmitting." }
     - { name: post_delivery_revalidate, description: "Audit source and remote state; prepare an expiring recovery decision." }
     - { name: post_delivery_recover, description: "Explicitly consume one audited recovery decision for one target." }
@@ -216,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.4
+    ref: social/v0.20.5
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1009,7 +1020,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "post_list",
 			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
-			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, from/to, social_account_id, query (title/body/original filename) and exact native_post_id before pagination. compact=true omits delivery diagnostics. Includes stored history coverage/freshness per account. Unknown native fields are null. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
+			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, from/to, social_account_id, query (title/body/original filename) and exact native_post_id before pagination. compact=true omits delivery diagnostics. Includes stored history coverage/freshness per account. Unknown native fields are null. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. published_at is authoritative native publication only; publication_facts separates submission, provider acceptance, local delivery recording, native upload and observation; legacy times remain evidence. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
 			InputSchema: schemaObject(map[string]any{
 				"limit":             map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
 				"offset":            map[string]any{"type": "integer", "default": 0, "minimum": 0},
@@ -1029,19 +1040,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "post_delivery_inspect",
 			Description: "Inspect one existing destination and its native operation without retrying or changing publication status. Args: post_id, target_id.",
 			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
-			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}}, []string{"post_id", "target_id"}),
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "social_account_id": map[string]any{"type": "integer", "minimum": 1}, "target_id": map[string]any{"type": "integer"}, "history_after_id": map[string]any{"type": "integer", "minimum": 0}, "history_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"post_id", "target_id"}),
 			Handler:     a.toolPostDeliveryInspect,
 		},
 		{
 			Name:        "post_delivery_revalidate",
 			Description: "Audit source, account, options and known remote state for one target. Returns decision, evidence and an expiring recovery_id; never publishes. Args: post_id, target_id, review_expired_upload? (explicit review of application-owned receipts).",
-			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "review_expired_upload": map[string]any{"type": "boolean", "description": "Explicitly review expiry evidence for a zero-byte TikTok FILE_UPLOAD. Missing legacy evidence blocks replacement."}}, []string{"post_id", "target_id"}),
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "social_account_id": map[string]any{"type": "integer", "minimum": 1}, "target_id": map[string]any{"type": "integer"}, "review_expired_upload": map[string]any{"type": "boolean", "description": "Explicitly review expiry evidence for a zero-byte TikTok FILE_UPLOAD. Missing legacy evidence blocks replacement."}}, []string{"post_id", "target_id"}),
 			Handler:     a.toolPostDeliveryRevalidate,
 		},
 		{
 			Name:        "post_delivery_recover",
 			Description: "Consume one audited recovery decision with confirm=true. Rechecks source and remote state, reconciles completed/pending operations, or retries only this eligible target once per revision. Expired zero-byte uploads require verified receipts and a stopped uploader. Args: post_id, target_id, recovery_id, confirm.",
-			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "recovery_id": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"}}, []string{"post_id", "target_id", "recovery_id", "confirm"}),
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "social_account_id": map[string]any{"type": "integer", "minimum": 1}, "target_id": map[string]any{"type": "integer"}, "recovery_id": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"}}, []string{"post_id", "target_id", "recovery_id", "confirm"}),
 			Handler:     a.toolPostDeliveryRecover,
 		},
 		{
@@ -1262,7 +1273,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolInboxSync,
 		},
 	}
-	tools = append(tools, a.historyTools()...)
+	tools = append(tools, append(a.historyTools(), publicationReconcileTool(a))...)
 	tools = append(tools, a.profileTools()...)
 	tools = append(tools, a.audienceTools()...)
 	tools = append(tools, destinationTools(a)...)
@@ -2867,6 +2878,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 				continue
 			}
 			platformPostID, platformURL, err := a.publishZernio(ctx, j)
+			platformURL = safePublicationURL(j.platform, platformURL)
 			var pending *providerPendingError
 			if errors.As(err, &pending) {
 				continue
@@ -2877,7 +2889,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 				continue
 			}
 			_, _ = ctx.AppDB().Exec(
-				`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, published_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?`,
+				`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?`,
 				nullable(platformPostID), nullable(platformURL), j.targetID,
 			)
 			ctx.Emit("target.published", map[string]any{
@@ -2938,7 +2950,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 					    SET status='published', platform_post_id=?, platform_url=?,
 					        publish_operation_id=?, identity_resolve_attempts=0,
 					        identity_resolve_after=CASE WHEN ?!='' THEN datetime('now','+5 minutes') ELSE NULL END,
-					        published_at=CURRENT_TIMESTAMP, last_error=?
+					        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?
 					  WHERE id=? AND attempts=? AND status='publishing'`,
 					nullable(platformPostID), nullable(platformURL), warning.operationID,
 					warning.operationID, warning.Error(), j.targetID, j.deliveryAttempt,
@@ -2959,7 +2971,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			`UPDATE post_targets
 			    SET status='published', platform_post_id=?, platform_url=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
-			        published_at=CURRENT_TIMESTAMP, last_error=NULL
+			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL
 			  WHERE id=? AND attempts=? AND status='publishing'`,
 			nullable(platformPostID), nullable(platformURL), j.targetID, j.deliveryAttempt,
 		)
@@ -2992,7 +3004,7 @@ func (e *publishedWarningError) Error() string { return e.warning }
 func claimPostTarget(ctx *sdk.AppCtx, targetID int64) (bool, error) {
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
-		    SET status='publishing', delivery_revision=(SELECT revision FROM posts WHERE id=post_id), attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
+		    SET status='publishing',submitted_at=NULL,provider_accepted_at=NULL,delivery_recorded_at=CURRENT_TIMESTAMP, delivery_revision=(SELECT revision FROM posts WHERE id=post_id), attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
 		  WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.status IN ('publishing','scheduled','failed','partial','awaiting_audience_setup') AND (p.approval_required=0 OR p.approved_revision=p.revision))`,
 		targetID,
 	)
@@ -3068,7 +3080,7 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 	}
 	if finalStatus == "published" || finalStatus == "partial" {
 		_, _ = ctx.AppDB().Exec(
-			`UPDATE posts SET status=?, published_at=COALESCE(published_at, CURRENT_TIMESTAMP) WHERE id=?`,
+			`UPDATE posts SET status=?, delivery_recorded_at=COALESCE(delivery_recorded_at,CURRENT_TIMESTAMP),published_at=(SELECT CASE WHEN COUNT(*)=COUNT(t.published_at) THEN MIN(t.published_at) ELSE NULL END FROM post_targets t WHERE t.post_id=posts.id AND t.status='published') WHERE id=?`,
 			finalStatus, postID,
 		)
 	} else {
@@ -3084,6 +3096,10 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 // platform-side post id + URL on success, or an error to record on the
 // target row.
 func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	id, link, err := a.runStrategyRaw(ctx, def, j)
+	return id, safePublicationURL(j.platform, link), err
+}
+func (a *App) runStrategyRaw(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
 	defer unlock()
 	audience, err := parseAudience(j.options)
@@ -3211,7 +3227,7 @@ func (a *App) publishPinterest(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 			input[key] = value
 		}
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	res, err := executePublicationWrite(ctx, j, def.PostTool, input)
 	if err != nil {
 		return "", "", fmt.Errorf("create_pin: %w", err)
 	}
@@ -3442,7 +3458,7 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 			return "", "", errors.New("could not persist upload initialization guard")
 		}
 	}
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, tool, input)
+	out, err := executePublicationWrite(ctx, j, tool, input)
 	if err != nil {
 		ctx.Logger().Error("publishSingle: ExecuteIntegrationTool err",
 			"platform", def.Platform, "tool", tool, "err", redactDeliverySecrets(err.Error()))
@@ -3506,7 +3522,7 @@ func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	}
 	ctx.Logger().Info("publishTwitter: calling post_tweet",
 		"media_count", len(j.media), "has_media_ids", input["media"] != nil)
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	out, err := executePublicationWrite(ctx, j, def.PostTool, input)
 	if err != nil {
 		return "", "", fmt.Errorf("post_tweet: %w", err)
 	}
@@ -3920,7 +3936,7 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	}
 	ctx.Logger().Info("publishInstagram: create container",
 		"is_video", first.IsVideo(), "ig_account", j.extID, "has_token", pageToken != "")
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, containerInput)
+	out, err := executePublicationWrite(ctx, j, def.PostTool, containerInput)
 	if err != nil {
 		return "", "", fmt.Errorf("create_media_container: %w", err)
 	}
@@ -3953,7 +3969,7 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	}
 	ctx.Logger().Info("publishInstagram: publish container",
 		"container_id", containerID, "ig_account", j.extID)
-	out2, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PublishTool, publishInput)
+	out2, err := executePublicationWrite(ctx, j, def.PublishTool, publishInput)
 	if err != nil {
 		return "", "", fmt.Errorf("publish_media_container: %w", err)
 	}
@@ -4093,7 +4109,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 		return "", "", err
 	}
 	resource := struct{ ID string }{ID: videoID}
-	url := "https://www.youtube.com/watch?v=" + videoID
+	url := "" // A native ID is not a returned permalink.
 	if thumbnail != nil {
 		if err := a.setBinaryThumbnail(ctx, def, j.connID, resource.ID, *thumbnail); err != nil {
 			// The video is already uploaded at this point. Do not return
@@ -4259,7 +4275,7 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 		"media_type": "PHOTO",
 	}
 	ctx.Logger().Info("publishTikTok: init photo post", "image_count", len(images), "cover_index", coverIndex)
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "post_photo", input)
+	out, err := executePublicationWrite(ctx, j, "post_photo", input)
 	if err != nil {
 		return "", "", fmt.Errorf("post_photo: %w", err)
 	}
@@ -4408,7 +4424,7 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	}
 	ctx.Logger().Info("publishTikTok: init upload",
 		"video_size", first.Bytes, "chunk_size", chunkSize, "total_chunks", totalChunks)
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
+	out, err := executePublicationWrite(ctx, j, def.PostTool, initInput)
 	d.Initialization.At = time.Now().UTC().Format(time.RFC3339Nano)
 	d.Initialization.HTTPStatus = executeStatus(out)
 	captureProviderDiagnostics(&d, out)
@@ -4551,11 +4567,13 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
 	var payload struct {
 		Data struct {
-			Status          string        `json:"status"`
-			Fail            string        `json:"fail_reason"`
-			PostIDs         []exactJSONID `json:"publicaly_available_post_id"`
-			UploadedBytes   *int64        `json:"uploaded_bytes"`
-			DownloadedBytes *int64        `json:"downloaded_bytes"`
+			Status           string        `json:"status"`
+			Fail             string        `json:"fail_reason"`
+			PostIDs          []exactJSONID `json:"publicaly_available_post_id"`
+			AlternatePostIDs []exactJSONID `json:"publicly_available_post_id"`
+			PostID           exactJSONID   `json:"post_id"`
+			UploadedBytes    *int64        `json:"uploaded_bytes"`
+			DownloadedBytes  *int64        `json:"downloaded_bytes"`
 		} `json:"data"`
 		Error struct {
 			Code  string `json:"code"`
@@ -4566,13 +4584,17 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	if res != nil {
 		parseErr = json.Unmarshal(res.Data, &payload)
 	}
+	payload.Data.PostIDs = append(payload.Data.PostIDs, payload.Data.AlternatePostIDs...)
+	if payload.Data.PostID != "" {
+		payload.Data.PostIDs = append(payload.Data.PostIDs, payload.Data.PostID)
+	}
 	observation := tikTokProgressObservation{At: time.Now().UTC().Format(time.RFC3339Nano), Status: safeRequestID(payload.Data.Status), HTTPStatus: executeStatus(res), ErrorCode: safeRequestID(payload.Error.Code), RequestID: safeRequestID(payload.Error.LogID), UploadedBytes: payload.Data.UploadedBytes, DownloadedBytes: payload.Data.DownloadedBytes}
 	if (payload.Data.UploadedBytes != nil && *payload.Data.UploadedBytes < 0) || (payload.Data.DownloadedBytes != nil && *payload.Data.DownloadedBytes < 0) {
 		parseErr = errors.New("negative TikTok progress")
 		observation.UploadedBytes = nil
 		observation.DownloadedBytes = nil
 	}
-	observation.QuerySucceeded = parseErr == nil && err == nil && res != nil && res.Success && (payload.Error.Code == "" || payload.Error.Code == "ok") && payload.Data.Status != ""
+	observation.QuerySucceeded = parseErr == nil && err == nil && res != nil && res.Success && res.Status >= 200 && res.Status < 300 && (payload.Error.Code == "" || payload.Error.Code == "ok") && payload.Data.Status != ""
 	if parseErr != nil {
 		a.recordTikTokStatus(ctx, bindings, publishID, "", "", "", "", res, parseErr, observation)
 		return "", "", nil, errors.New("TikTok returned malformed operation status; outcome is unknown")
@@ -5092,7 +5114,7 @@ func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, fai
 	msg = redactDeliverySecrets(msg)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets
-		    SET status='failed', last_error=?, failure_code=?, retryable=?,
+		    SET status='failed',delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?, failure_code=?, retryable=?,
 		        upstream_status=?, existing_post_id=?
 		  WHERE id=? AND (?<0 OR attempts=?)`,
 		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, targetID, attempt, attempt,
@@ -5146,7 +5168,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
 	fields := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
-	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0),
+	             status, created_at, COALESCE(published_at,''), COALESCE(delivery_recorded_at,''), COALESCE(profile_id,0),
 	             revision, approval_status, approved_revision, approval_required,
 	             COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)`
 	where := ` FROM posts WHERE project_id=?`
@@ -5247,7 +5269,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		schedAt                                                                             string
 		status                                                                              string
 		created                                                                             string
-		pubAt                                                                               string
+		pubAt, recordedAt                                                                   string
 		revision, approvedRevision                                                          int64
 		approvalRequired                                                                    bool
 		approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
@@ -5256,10 +5278,10 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 	for rows.Next() {
 		var (
 			id, profID, revision, approvedRevision, approvalRequired                            int64
-			body, mediaJSON, extMediaJSON, schedAt, status, createdAt, pubAt                    string
+			body, mediaJSON, extMediaJSON, schedAt, status, createdAt, pubAt, recordedAt        string
 			approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
 		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID,
+		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &recordedAt, &profID,
 			&revision, &approvalStatus, &approvedRevision, &approvalRequired, &rejectionReason,
 			&requestedMode, &providerSyncMode, &source, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan post: %w", err)
@@ -5269,16 +5291,17 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		var extMedia []string
 		_ = json.Unmarshal([]byte(extMediaJSON), &extMedia)
 		postRows = append(postRows, postRow{
-			id:       id,
-			profID:   profID,
-			body:     body,
-			mediaIDs: mediaIDs,
-			extMedia: extMedia,
-			schedAt:  schedAt,
-			status:   status,
-			created:  createdAt,
-			pubAt:    pubAt,
-			revision: revision, approvedRevision: approvedRevision, approvalRequired: approvalRequired != 0,
+			id:         id,
+			profID:     profID,
+			body:       body,
+			mediaIDs:   mediaIDs,
+			extMedia:   extMedia,
+			schedAt:    schedAt,
+			status:     status,
+			created:    createdAt,
+			pubAt:      pubAt,
+			recordedAt: recordedAt,
+			revision:   revision, approvedRevision: approvedRevision, approvalRequired: approvalRequired != 0,
 			approvalStatus: approvalStatus, rejectionReason: rejectionReason, requestedMode: requestedMode,
 			providerSyncMode: providerSyncMode, source: source, updatedAt: updatedAt,
 		})
@@ -5308,7 +5331,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		if boolArg(args, "compact", false) {
 			for i, target := range targets {
 				keep := map[string]any{}
-				for _, key := range []string{"id", "social_account_id", "platform", "status", "platform_post_id", "platform_url", "published_at", "native_metadata", "last_known_native_metadata", "native_observed_at"} {
+				for _, key := range []string{"id", "social_account_id", "platform", "status", "platform_post_id", "platform_url", "published_at", "publication_facts", "native_metadata", "last_known_native_metadata", "native_observed_at"} {
 					if value, ok := target[key]; ok {
 						keep[key] = value
 					}
@@ -5329,25 +5352,26 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 			p.body = historySnippet(p.body, 300)
 		}
 		out = append(out, map[string]any{
-			"id":                  p.id,
-			"body":                p.body,
-			"media_storage_ids":   p.mediaIDs,
-			"external_media_urls": p.extMedia,
-			"profile_id":          p.profID,
-			"schedule_at":         p.schedAt,
-			"status":              p.status,
-			"created_at":          p.created,
-			"published_at":        p.pubAt,
-			"updated_at":          p.updatedAt,
-			"revision":            p.revision,
-			"approval_status":     p.approvalStatus,
-			"approved_revision":   p.approvedRevision,
-			"approval_required":   p.approvalRequired,
-			"rejection_reason":    p.rejectionReason,
-			"requested_mode":      p.requestedMode,
-			"provider_sync_mode":  p.providerSyncMode,
-			"source":              p.source,
-			"targets":             targets,
+			"id":                   p.id,
+			"body":                 p.body,
+			"media_storage_ids":    p.mediaIDs,
+			"external_media_urls":  p.extMedia,
+			"profile_id":           p.profID,
+			"schedule_at":          p.schedAt,
+			"status":               p.status,
+			"created_at":           p.created,
+			"published_at":         p.pubAt,
+			"delivery_recorded_at": p.recordedAt,
+			"updated_at":           p.updatedAt,
+			"revision":             p.revision,
+			"approval_status":      p.approvalStatus,
+			"approved_revision":    p.approvedRevision,
+			"approval_required":    p.approvalRequired,
+			"rejection_reason":     p.rejectionReason,
+			"requested_mode":       p.requestedMode,
+			"provider_sync_mode":   p.providerSyncMode,
+			"source":               p.source,
+			"targets":              targets,
 		})
 	}
 	if err := tx.Commit(); err != nil {
@@ -5368,18 +5392,18 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 
 func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map[string]any, error) {
 	var (
-		id, profileID, revision, approvedRevision, approvalRequired                         int64
-		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt           string
-		approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
+		id, profileID, revision, approvedRevision, approvalRequired                           int64
+		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt, recordedAt string
+		approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt   string
 	)
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
-		        status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0),
+		        status, created_at, COALESCE(published_at,''), COALESCE(delivery_recorded_at,''), COALESCE(profile_id,0),
 		        revision, approval_status, approved_revision, approval_required,
 		        COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)
 		   FROM posts WHERE id=? AND project_id=?`,
 		postID, projectID,
-	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &profileID,
+	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &recordedAt, &profileID,
 		&revision, &approvalStatus, &approvedRevision, &approvalRequired, &rejectionReason,
 		&requestedMode, &providerSyncMode, &source, &updatedAt)
 	if err != nil {
@@ -5390,27 +5414,28 @@ func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map
 	var externalURLs []string
 	_ = json.Unmarshal([]byte(externalJSON), &externalURLs)
 	return map[string]any{
-		"id":                  id,
-		"body":                body,
-		"media_storage_ids":   mediaIDs,
-		"external_media_urls": externalURLs,
-		"profile_id":          profileID,
-		"schedule_at":         scheduleAt,
-		"status":              status,
-		"created_at":          createdAt,
-		"published_at":        publishedAt,
-		"updated_at":          updatedAt,
-		"revision":            revision,
-		"approval_status":     approvalStatus,
-		"approved_revision":   approvedRevision,
-		"approval_required":   approvalRequired != 0,
-		"rejection_reason":    rejectionReason,
-		"requested_mode":      requestedMode,
-		"provider_sync_mode":  providerSyncMode,
-		"source":              source,
-		"targets":             a.loadTargets(ctx, id),
-		"reviews":             a.loadPostReviews(ctx, id),
-		"revisions":           a.loadPostRevisions(ctx, id),
+		"id":                   id,
+		"body":                 body,
+		"media_storage_ids":    mediaIDs,
+		"external_media_urls":  externalURLs,
+		"profile_id":           profileID,
+		"schedule_at":          scheduleAt,
+		"status":               status,
+		"created_at":           createdAt,
+		"published_at":         publishedAt,
+		"delivery_recorded_at": recordedAt,
+		"updated_at":           updatedAt,
+		"revision":             revision,
+		"approval_status":      approvalStatus,
+		"approved_revision":    approvedRevision,
+		"approval_required":    approvalRequired != 0,
+		"rejection_reason":     rejectionReason,
+		"requested_mode":       requestedMode,
+		"provider_sync_mode":   providerSyncMode,
+		"source":               source,
+		"targets":              a.loadTargets(ctx, id),
+		"reviews":              a.loadPostReviews(ctx, id),
+		"revisions":            a.loadPostRevisions(ctx, id),
 	}, nil
 }
 
@@ -5486,7 +5511,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,'')
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5497,6 +5522,7 @@ func loadTargetsFrom(db interface {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
+		var facts publicationFacts
 		var (
 			tid, acctID                                                                     int64
 			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw          string
@@ -5508,7 +5534,7 @@ func loadTargetsFrom(db interface {
 			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5527,18 +5553,22 @@ func loadTargetsFrom(db interface {
 		if operationID == "" {
 			operationID, _ = videoDiagnostics["operation_id"].(string)
 		}
+		facts.URL = optionalText(safePublicationURL(platform, purl))
+		facts.PublishedAt = optionalText(pubAt)
 		out = append(out, map[string]any{
+			"publication_facts":           facts,
 			"publish_operation_id":        safeRequestID(operationID),
 			"delivery_diagnostics":        videoDiagnostics,
 			"media_delivery_diagnostics":  mediaDiagnostics,
 			"id":                          tid,
 			"social_account_id":           acctID,
 			"platform":                    platform,
+			"provider":                    targetProvider,
 			"display_name":                name,
 			"avatar_url":                  avatar,
 			"status":                      status,
 			"platform_post_id":            ppid,
-			"platform_url":                purl,
+			"platform_url":                safePublicationURL(platform, purl),
 			"attempts":                    attempts,
 			"last_error":                  redactDeliverySecrets(lastErr),
 			"published_at":                pubAt,
@@ -5579,8 +5609,8 @@ func loadTargetsFrom(db interface {
 		_ = json.Unmarshal([]byte(known), &k)
 		for _, target := range out {
 			if target["id"] == id {
-				target["native_metadata"] = c
-				target["last_known_native_metadata"] = k
+				target["native_metadata"] = normalizeNativeMetadataMap(toString(target["platform"]), toString(target["provider"]), c)
+				target["last_known_native_metadata"] = normalizeNativeMetadataMap(toString(target["platform"]), toString(target["provider"]), k)
 				target["native_observed_at"] = at
 			}
 		}
@@ -5702,7 +5732,7 @@ func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCt
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.connection_id,
-		        COALESCE(t.platform_post_id,''), COALESCE(t.publish_operation_id,'')
+		        COALESCE(t.platform_post_id,''), COALESCE(t.publish_operation_id,''),t.attempts
 		   FROM post_targets t
 		   JOIN posts p ON p.id=t.post_id
 		   JOIN social_accounts a ON a.id=t.social_account_id
@@ -5726,7 +5756,7 @@ func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCt
 		var target metricsTarget
 		if err := rows.Scan(
 			&target.TargetID, &target.SocialAccountID, &target.ConnID,
-			&target.ExtPostID, &target.PublishOperationID,
+			&target.ExtPostID, &target.PublishOperationID, &target.DeliveryAttempt,
 		); err == nil {
 			target.Platform = "tiktok"
 			targets = append(targets, target)
@@ -5750,8 +5780,8 @@ func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCt
 				          ELSE datetime('now','+7 days')
 				        END,
 				        last_error=?
-				  WHERE id=? AND COALESCE(publish_operation_id,'')=? AND COALESCE(platform_post_id,'')=?`,
-				err.Error(), target.TargetID, target.PublishOperationID, target.ExtPostID,
+				  WHERE id=? AND COALESCE(publish_operation_id,'')=? AND COALESCE(platform_post_id,'')=? AND attempts=?`,
+				err.Error(), target.TargetID, target.PublishOperationID, target.ExtPostID, target.DeliveryAttempt,
 			)
 			continue
 		}
@@ -5917,6 +5947,7 @@ type targetMetricsOutcome struct {
 // endpoints reject user-level tokens.
 type metricsTarget struct {
 	TargetID, SocialAccountID, ConnID int64
+	DeliveryAttempt                   int
 	Platform, ExtPostID, ExtURL       string
 	ExternalAccountID                 string
 	PageCreds                         string
@@ -5939,7 +5970,7 @@ func (a *App) fetchPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetr
 		SocialAccountID: target.SocialAccountID,
 		Platform:        target.Platform,
 		PlatformPostID:  target.ExtPostID,
-		PlatformURL:     target.ExtURL,
+		PlatformURL:     safePublicationURL(target.Platform, target.ExtURL),
 	}
 	if target.ExtPostID == "" && target.ProviderPostID == "" && target.PublishOperationID == "" {
 		out.Status = "skipped"
@@ -6303,9 +6334,10 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, ta
 		return out
 	}
 	v := resp.Data.Videos[0]
+	v.ShareURL = safePublicationURL("tiktok", v.ShareURL)
 	if v.ShareURL != "" {
 		out.PlatformURL = v.ShareURL
-		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, v.ShareURL, target.TargetID)
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=? AND social_account_id=? AND platform_post_id=?`, v.ShareURL, target.TargetID, target.SocialAccountID, publicID)
 	}
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
@@ -6335,6 +6367,9 @@ func (a *App) resolveTikTokPublicPostID(ctx *sdk.AppCtx, target metricsTarget) (
 	var attempt int
 	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(publish_operation_id,''),attempts,COALESCE(platform_post_id,'') FROM post_targets WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, target.TargetID, projectScope(ctx)).Scan(&expectedOperation, &attempt, &expectedPublic); err != nil {
 		return "", err
+	}
+	if target.DeliveryAttempt > 0 && target.DeliveryAttempt != attempt {
+		return "", errors.New("stale queued TikTok attempt")
 	}
 	if expectedPublic != target.ExtPostID || expectedOperation != operationID && !(expectedOperation == "" && target.ExtPostID == operationID) {
 		return "", errors.New("stale TikTok identity operation")
@@ -6438,9 +6473,10 @@ func (a *App) getFacebookPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, 
 		out.Status, out.Error = "failed", err.Error()
 		return out
 	}
+	base.Permalink = safePublicationURL("facebook", base.Permalink)
 	if base.Permalink != "" {
 		out.PlatformURL = base.Permalink
-		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, base.Permalink, out.TargetID)
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=? AND social_account_id=? AND platform_post_id=?`, base.Permalink, out.TargetID, out.SocialAccountID, out.PlatformPostID)
 	}
 	rawParts := map[string]json.RawMessage{"base": baseRaw}
 	shares := int64(0)
@@ -6504,9 +6540,10 @@ func (a *App) getInstagramPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 			values["likes"] = media.LikeCount
 			values["comments"] = media.CommentCount
 			available = append(available, "likes", "comments")
+			media.Permalink = safePublicationURL("instagram", media.Permalink)
 			if media.Permalink != "" {
 				out.PlatformURL = media.Permalink
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, media.Permalink, out.TargetID)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=? AND social_account_id=? AND platform_post_id=?`, media.Permalink, out.TargetID, out.SocialAccountID, out.PlatformPostID)
 			}
 		}
 		rawParts["media"] = sanitizeRawJSON(mediaRes.Data)
@@ -8682,6 +8719,12 @@ func (a *App) insertImportedPostWithOptions(
 	mediaURLs []string,
 	targetOptions map[string]any,
 ) (bool, error) {
+	b, err := loadHistoryAccountForRead(ctx.WithProject(pid), accountID)
+	if err != nil {
+		return false, err
+	}
+	native := normalizeNativeObservation(b, nativePost{ID: platformPostID, URL: optionalText(platformURL), PublishedAt: optionalText(publishedAt)})
+	platformURL, publishedAt = valueOrEmpty(native.URL), valueOrEmpty(native.PublishedAt)
 	var existing int64
 	_ = ctx.AppDB().QueryRow(
 		`SELECT id FROM post_targets WHERE social_account_id=? AND platform_post_id=?`,
@@ -10935,38 +10978,17 @@ func (a *App) handleAvatar(w http.ResponseWriter, r *http.Request) {
 // field can't be located. Different platforms use different shapes;
 // full coverage will land as we add platforms.
 func extractPostIdentity(platform string, raw json.RawMessage) (string, string) {
-	if len(raw) == 0 {
-		return "", ""
-	}
 	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	if json.Unmarshal(raw, &obj) != nil {
 		return "", ""
 	}
-	switch platform {
-	case "twitter":
-		// {data: {id, text}}
-		if data, ok := obj["data"].(map[string]any); ok {
-			id := toString(data["id"])
-			if id != "" {
-				return id, "https://twitter.com/i/web/status/" + id
-			}
-		}
-	case "facebook":
-		// {id: "<page_id>_<post_id>"}
-		id := toString(obj["id"])
-		if id != "" {
-			return id, "https://www.facebook.com/" + id
-		}
-	case "pinterest":
-		id := toString(obj["id"])
-		if id != "" {
-			return id, "https://www.pinterest.com/pin/" + id + "/"
-		}
+	item := obj
+	if data, ok := obj["data"].(map[string]any); ok {
+		item = data
 	}
-	if id := toString(obj["id"]); id != "" {
-		return id, ""
-	}
-	return "", ""
+	id := toString(item["id"])
+	link := firstString(item, "permalink_url", "permalink", "share_url", "url", "platformPostUrl")
+	return id, safePublicationURL(platform, link)
 }
 
 // walkPath supports dotted paths like "picture.data.url" so a single

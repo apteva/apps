@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
-import { groupPostsByLocalDay, localDateKey, moveCalendarCursor, postLifecycleDate } from "./postCalendar";
+import { groupPostsByLocalDay, localDateKey, moveCalendarCursor, postLifecycleDate, postLifecycleDateLabel } from "./postCalendar";
 import { postStatusVariant, postTitle, type SocialPost } from "./socialCardData";
 import { platformPresentation } from "./platformPresentation";
 import { previewPublishingSummary, publishingWindow, socialPageLink, useWidgetData, widgetPreferences, widgetURL, type HomeWidgetProps, type PublishingSummary } from "./homeWidgetData";
@@ -78,7 +78,7 @@ function PostRow({ post, props, compact = false }: { post: SocialPost; props: Ho
     {lead && <img src={lead} alt="" loading="lazy" onError={event => { event.currentTarget.hidden = true; }} className={`rounded object-cover ${compact ? "h-16 w-full" : "h-10 w-10 shrink-0"}`} />}
     <div className="min-w-0 flex-1"><p className={`text-xs font-semibold text-text ${compact ? "line-clamp-2" : "truncate"}`}>{postTitle(post)}</p>
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-text-muted">
-        <span>{date?.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>
+        <span title={postLifecycleDateLabel(post)}>{date?.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>
         {platforms.map(platform => { const item = platformPresentation(platform); return <span key={platform} title={item.label} aria-label={item.label} className="rounded border border-border px-1 font-bold" style={{ color: item.key === "x" || item.key === "threads" ? "var(--text)" : item.color }}>{item.mark}</span>; })}
         <span className={variant === "error" ? "text-error" : variant === "warn" ? "text-warn" : variant === "live" ? "text-success" : "text-text-dim"}>{post.status.replace(/_/g, " ")}</span>
       </div>

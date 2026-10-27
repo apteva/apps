@@ -63,7 +63,7 @@ local history and creates no Jobs, schedules, retries, uploads or provider write
 Native uploads that are processing/unknown are not recorded as confirmed local
 publication. Provider local-deletion tombstones are honored and limit completeness.
 
-Current metadata contains nullable native URL, title/body, publication time,
+Current metadata contains nullable returned native URL, title/body, publication time, native upload time and time source,
 visibility, audience, processing state, original filename, byte size and duration.
 `observed_at` is separate from `published_at`; no observation/playlist-entry time
 is substituted for an unknown native publication time. Later omissions remain
@@ -117,3 +117,10 @@ account_history_status and post_inspect. Verify each account's required capabili
 before removing direct provider verification/preflight connectors. Preserve unrelated
 apps and unsupported-platform/Patreon workflows. Workflow changes are prepared
 separately, not automatically applied by this app release.
+
+Since 0.20.5, owner-private/unlisted YouTube snippet timestamps are upload times,
+not native publication or membership-availability times. Returned URLs are
+normalized against trusted platform hosts; missing permalinks stay unknown.
+Native observations remain separate from managed publishing state; use
+`post_publication_reconcile` for audited corrections to existing delivery/linked
+records. See [PUBLICATION_FACTS.md](PUBLICATION_FACTS.md).

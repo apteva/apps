@@ -10,6 +10,7 @@ import {
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
+  postLifecycleDateLabel,
   stableSquareStyle,
   type CalendarScale,
 } from "./postCalendar";
@@ -245,7 +246,7 @@ function CalendarEvent({ post, compact = false }: { post: SocialPost; compact?: 
           className={`${compact ? "text-[9px]" : "text-xs"} text-text tabular-nums flex-shrink-0`}
           style={{ display: "inline-flex", alignItems: "center", height: markSize, lineHeight: 1 }}
         >
-          {date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          <span title={postLifecycleDateLabel(post)}>{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
         </span>
         <span className="min-w-0" style={{ display: "flex", alignItems: "center", gap: 2 }}>
           {platforms.slice(0, compact ? 1 : 3).map((platform) => <PlatformMark key={platform} platform={platform} compact={compact} />)}
