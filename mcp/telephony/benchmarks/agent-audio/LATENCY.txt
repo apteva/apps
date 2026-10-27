@@ -57,3 +57,18 @@ diagnostics. Baseline observations on 24 October:
 These short local tests establish a normal reference and a reproducible bad
 queue path. They do not certify all model turns, load levels, real carrier
 delivery or the production call's full 2..5s response delays as resolved.
+
+0.12.58 recovery verification additions:
+- TELEPHONY_LATENCY_SIP=1 includes inbound/outbound G.722 and PCMA in the paid
+  matched latency comparison, as well as the PCM and carrier-stream paths.
+- For --live true without --latency, TELEPHONY_AGENT_AUDIO_CARRIER=sip-G722
+  (or sip-PCMA) selects a real loopback RTP receiver. The default is telnyx.
+- TELEPHONY_AGENT_AUDIO_LOCAL_INTERRUPT=1 pins the existing local-interruption
+  policy only inside the isolated test database. Without it, a provider-owned
+  interruption contract is preserved; a model that continues speaking may fail
+  the explicit-clear acceptance test. Do not relabel that failure as a pass.
+- Live SIP results retain Core events, decoded carrier audio and rtp-arrivals.json.
+  RTP gaps include intentional silence and cannot alone establish lost speech.
+- Run go test -run 'TestAgentSIPRecovery|TestAgentAudioSIP' for deterministic
+  recorded-speech recovery, ten-minute stream-time and actual UDP gap gates.
+  These tests require no model credentials or deployed server.

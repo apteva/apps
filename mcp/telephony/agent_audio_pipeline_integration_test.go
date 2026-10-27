@@ -27,12 +27,13 @@ import (
 )
 
 type agentPipelineStats struct {
-	InputFrames int64           `json:"input_frames"`
-	InputBytes  int64           `json:"input_bytes"`
-	Pending     int             `json:"pending"`
-	Awaiting    int             `json:"awaiting"`
-	Delivery    map[string]any  `json:"delivery"`
-	Transcripts json.RawMessage `json:"transcripts"`
+	InputFrames int64             `json:"input_frames"`
+	InputBytes  int64             `json:"input_bytes"`
+	Pending     int               `json:"pending"`
+	Awaiting    int               `json:"awaiting"`
+	Delivery    map[string]any    `json:"delivery"`
+	Transcripts json.RawMessage   `json:"transcripts"`
+	Events      []json.RawMessage `json:"events"`
 }
 
 func agentFixtureJSON(t *testing.T, method, target string, body, out any) {
@@ -59,14 +60,17 @@ func agentFixtureJSON(t *testing.T, method, target string, body, out any) {
 }
 
 type agentCarrierProbe struct {
-	mu         sync.Mutex
-	received   []int16
-	frames     atomic.Int64
-	clears     atomic.Int64
-	stop       func()
-	send       func([]int16) error
-	sampleRate int
-	audible    chan time.Time
+	mu           sync.Mutex
+	received     []int16
+	arrivals     []map[string]any
+	lastArrival  time.Time
+	sequenceLoss int
+	frames       atomic.Int64
+	clears       atomic.Int64
+	stop         func()
+	send         func([]int16) error
+	sampleRate   int
+	audible      chan time.Time
 }
 
 func (p *agentCarrierProbe) observePCM(pcm []int16) {
@@ -108,6 +112,13 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 	row := testCall(provider+"-"+direction, "in-progress")
 	row.ProjectID = ctx.CurrentProject()
 	row.PeerKind = peerKindRealtime
+	if live && os.Getenv("TELEPHONY_AGENT_AUDIO_LOCAL_INTERRUPT") == "1" {
+		p, err := resolveAgentAudioProfile(agentAudioProfile{Interruption: "local"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		row.preparedAgentAudio = &p
+	}
 	row.Direction = direction
 	row.ThreadID = auth.Thread
 	row.AudioBridgeURL = "ws" + strings.TrimPrefix(server.url, "http") + "/api/realtime/audio?agent_id=42&thread=" + url.QueryEscape(auth.Thread) + "&token=" + url.QueryEscape(auth.Token)
@@ -117,6 +128,11 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 	}
 	if err := a.db().insertCall(row); err != nil {
 		t.Fatal(err)
+	}
+	if row.preparedAgentAudio != nil {
+		if _, err := a.pinAgentAudioProfile(&row); err != nil {
+			t.Fatal(err)
+		}
 	}
 	probe := &agentCarrierProbe{audible: make(chan time.Time, 1024)}
 	if strings.HasPrefix(provider, "conversations-pcm") {
@@ -199,6 +215,7 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 		go func() {
 			buf := make([]byte, 2048)
 			decoder := &sipRTPMedia{offer: media.offer}
+			var previous uint16
 			for {
 				n, _, err := peer.ReadFromUDP(buf)
 				if err != nil {
@@ -206,7 +223,20 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 				}
 				var packet rtp.Packet
 				if packet.Unmarshal(buf[:n]) == nil {
-					probe.observePCM(decoder.decodeAudio(packet.Payload))
+					pcm := decoder.decodeAudio(packet.Payload)
+					now := time.Now()
+					probe.mu.Lock()
+					gap := 0.0
+					if !probe.lastArrival.IsZero() {
+						gap = float64(now.Sub(probe.lastArrival)) / float64(time.Millisecond)
+						probe.sequenceLoss += int(uint16(packet.SequenceNumber-previous)) - 1
+					}
+					previous = packet.SequenceNumber
+					probe.lastArrival = now
+					probe.received = append(probe.received, pcm...)
+					probe.arrivals = append(probe.arrivals, map[string]any{"at_unix_ns": now.UnixNano(), "sequence": packet.SequenceNumber, "rtp_timestamp": packet.Timestamp, "gap_ms": gap})
+					probe.mu.Unlock()
+					probe.observePCM(pcm)
 				}
 				probe.frames.Add(1)
 			}
@@ -512,7 +542,14 @@ func TestAgentAudioActualLiveCarrierPath(t *testing.T) {
 	if os.Getenv("TELEPHONY_AGENT_AUDIO_LIVE") != "1" {
 		t.Skip("paid Live verification is opt-in")
 	}
-	a, row, core, probe, output := newAgentPipeline(t, "telnyx", "outbound", true)
+	provider := os.Getenv("TELEPHONY_AGENT_AUDIO_CARRIER")
+	if provider == "" {
+		provider = "telnyx"
+	}
+	if provider != "telnyx" && provider != "sip-G722" && provider != "sip-PCMA" {
+		t.Fatal("unsupported test carrier")
+	}
+	a, row, core, probe, output := newAgentPipeline(t, provider, "outbound", true)
 	response, err := http.Get(core.url + "/caller")
 	if err != nil {
 		t.Fatal(err)
@@ -586,10 +623,14 @@ func TestAgentAudioActualLiveCarrierPath(t *testing.T) {
 	var stats agentPipelineStats
 	agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
 	snapshot := a.liveAgentAudio(row.ID)
-	if snapshot.Evidence != "carrier_mark" {
+	wantEvidence := "carrier_mark"
+	if strings.HasPrefix(provider, "sip-") {
+		wantEvidence = "rtp_transmitted"
+	}
+	if snapshot.Evidence != wantEvidence {
 		t.Fatal("Telnyx playback certainty overstated", snapshot.Evidence)
 	}
-	raw, _ := json.MarshalIndent(map[string]any{"model": "gpt-live-1", "path": "Telephony Telnyx media WebSocket -> actual Server proxy -> actual Core -> OpenAI Live", "caller_clip_start_to_clear_ms": float64(clearDelay) / float64(time.Millisecond), "carrier_frames": probe.frames.Load(), "core": stats, "telephony": snapshot}, "", "  ")
+	raw, _ := json.MarshalIndent(map[string]any{"model": "gpt-live-1", "path": provider + " loopback -> Telephony -> actual Server proxy -> actual Core -> OpenAI Live", "caller_clip_start_to_clear_ms": float64(clearDelay) / float64(time.Millisecond), "carrier_frames": probe.frames.Load(), "core": stats, "telephony": snapshot}, "", "  ")
 	if os.WriteFile(filepath.Join(output, "result.json"), raw, 0600) != nil {
 		t.Fatal("write result")
 	}
@@ -598,5 +639,15 @@ func TestAgentAudioActualLiveCarrierPath(t *testing.T) {
 	probe.mu.Unlock()
 	writeSpeechAcceptanceWAV(t, filepath.Join(output, "carrier-output.wav"), probe.sampleRate, received)
 	writeSpeechAcceptanceWAV(t, filepath.Join(output, "caller-input.wav"), probe.sampleRate, callerPCM)
+	probe.mu.Lock()
+	wire, _ := json.MarshalIndent(map[string]any{"arrivals": probe.arrivals, "sequence_loss": probe.sequenceLoss}, "", "  ")
+	loss := probe.sequenceLoss
+	probe.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(output, "rtp-arrivals.json"), wire, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if loss != 0 {
+		t.Fatalf("RTP sequence loss=%d", loss)
+	}
 	t.Logf("Live media resumed; caller speech recognized; clip-start to Telephony clear command %.1f ms", float64(clearDelay)/float64(time.Millisecond))
 }

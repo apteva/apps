@@ -366,6 +366,7 @@ func (p *sipRTPPacer) run() {
 			}
 			if len(p.queue) == 0 && p.packetizer != nil && p.packetizer.queuedSamples == 0 {
 				p.agentPlayout.readyAt = time.Time{}
+				p.agentPlayout.exhaustedAt = time.Time{}
 			}
 			p.queueMu.Unlock()
 			command.reply <- agentClearReceipt{Scope: "local", LocalMS: cleared}
@@ -551,6 +552,7 @@ func (p *sipRTPPacer) drain() int {
 	if p.packetizer != nil {
 		p.packetizer.clear()
 		p.agentPlayout.readyAt = time.Time{}
+		p.agentPlayout.exhaustedAt = time.Time{}
 	}
 	count := 0
 	for {
@@ -586,10 +588,14 @@ func (p *sipRTPPacer) enqueueAt(packets []sipRTPOutboundPacket, receivedAt time.
 			}
 			if len(packet.pcm) > 0 {
 				now := receivedAt
-				if p.agentPlayout.readyAt.IsZero() {
+				if p.agentPlayout.readyAt.IsZero() || (!p.agentPlayout.exhaustedAt.IsZero() && now.Sub(p.agentPlayout.exhaustedAt) >= sipAgentRecoveryIdle) {
 					p.agentPlayout.readyAt = now.Add(p.agentPlayout.reserve)
 					p.agentPlayout.starts++
+				} else if !p.agentPlayout.exhaustedAt.IsZero() {
+					p.agentPlayout.readyAt = now
+					p.agentPlayout.recoveries++
 				}
+				p.agentPlayout.exhaustedAt = time.Time{}
 				p.agentPlayout.lastInputAt = now
 			}
 			for _, frame := range p.packetizer.addAt(packet.pcm, len(packet.pcm)*24000/p.media.sampleRate(), realtimeBridgeControl{ItemID: packet.itemID, Generation: packet.generation, AudioEndMS: packet.audioEndMS, Silence: packet.silence}, packet.enqueuedAt) {
