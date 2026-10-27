@@ -49,6 +49,9 @@ func exportLegacyPage(ctx *sdk.AppCtx, pid string, install int64, queries map[st
 		if cursor < 0 || limit < 1 || limit > 2000 {
 			return nil, errors.New("invalid legacy export cursor or page size")
 		}
+		// Force a rowid range scan: choosing the run_id index sorts the entire
+		// multi-run archive for every page and defeats keyset pagination.
+		query = strings.Replace(query, "FROM "+table+" WHERE", "FROM "+table+" NOT INDEXED WHERE", 1)
 		query = strings.Replace(query, "SELECT * FROM ", "SELECT rowid AS _migration_rowid, * FROM ", 1) + " AND rowid>? ORDER BY rowid LIMIT ?"
 		rows, err := readResearchRows(ctx.AppDB(), query, pid, cursor, limit)
 		if err != nil {
