@@ -1,0 +1,209 @@
+schema: apteva-app/v1
+name: strategies
+display_name: Strategies
+version: 0.1.0
+description: Automated strategy authoring, scheduling, research, event backtests, validation and performance attribution.
+  Integrates with Trading for market data, authoritative portfolios and order execution. Rule programs remain research-only.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/strategies
+icon: /ui/icon.svg
+icon_style: monochrome
+tags:
+- strategies
+- research
+- backtesting
+- trading
+scopes:
+- project
+min_apteva_version: 0.10.0
+requires:
+  permissions:
+  - db.write.app
+  - platform.apps.call
+  - platform.instances.read
+  - platform.environments.read
+  - platform.environments.call
+  - platform.environments.manage
+  apps:
+  - name: trading
+    optional: false
+    version: '>=0.16.0'
+  integrations:
+  - role: trading
+    kind: app
+    required: true
+    compatible_app_names:
+    - trading
+    capabilities:
+    - trading.read
+    - trading.execute
+    label: Trading
+    hint: Portfolios, market data and execution. Strategies never connects to a broker directly.
+provides:
+  http_routes:
+  - prefix: /
+  mcp_tools:
+  - name: portfolio_list
+    description: List portfolios visible to this agent.
+  - name: portfolio_get
+    description: Snapshot of one portfolio (mandate, equity, cash, status, watchlist).
+  - name: account_summary
+    description: Equity, cash, buying power, day and open P&L for one portfolio.
+  - name: positions_list
+    description: Open positions for one portfolio.
+  - name: orders_list
+    description: Working / filled / cancelled orders for one portfolio.
+  - name: market_quote
+    description: "Latest mark for a symbol \u2014 equity/crypto USD or polymarket YES/NO probabilities."
+  - name: market_history
+    description: OHLCV bars or probability history for a symbol.
+  - name: market_source
+    description: "Report the live data source per asset class \u2014 provider name, errors_60s, staleness."
+  - name: journal_read
+    description: Read journal entries for a portfolio (recent or filtered by kind).
+  - name: strategy_catalog
+    description: Discover allocation and trading-rule syntax, workflow and complete examples.
+  - name: strategy_create
+    description: Create an allocation strategy or generic trading-rules/1 trade program; call strategy_catalog first.
+  - name: strategy_update
+    description: Update a deterministic strategy; definition changes create a new version.
+  - name: strategy_get
+    description: Fetch one saved deterministic strategy.
+  - name: strategy_list
+    description: List saved deterministic strategies.
+  - name: strategy_validate
+    description: Validate a deterministic strategy definition without saving it.
+  - name: strategy_evaluate
+    description: Evaluate current allocation targets. For trade-rule performance use completed backtests, strategy_scorecard_evaluate
+      and validation suites.
+  - name: strategy_assign
+    description: Assign a saved strategy to a portfolio for strategy or hybrid control.
+  - name: market_data_import
+    description: Normalize sourced CSV bid/ask quote and OHLC exports into portable event inputs; explicit timestamps,
+      column maps and price basis. No synthetic prices or broker connection.
+  - name: strategy_backtest_create
+    description: Create an event backtest; trading-rule programs require a complete sourced OHLC/quote tape and
+      execution configuration.
+  - name: backtest_control
+    description: Run, step, pause, cancel or inspect an event simulation.
+  - name: backtest_artifact
+    description: Export or import a portable reproducible backtest bundle.
+  - name: strategy_validate_backtest
+    description: Run fixed-parameter strategy validation with in-sample and out-of-sample backtests.
+  - name: strategy_scorecard_get
+    description: Get scorecard policy, promotion stage, and durable evaluations.
+  - name: strategy_scorecard_update
+    description: Configure generic scorecard metric thresholds and enforcement.
+  - name: strategy_scorecard_evaluate
+    description: Evaluate a completed strategy backtest against its scorecard.
+  - name: strategy_promotion_update
+    description: Promote, demote, or suspend a strategy under its scorecard gate.
+  - name: validation_create
+    description: Plan validation windows and scenario batches from captured backtests.
+  - name: validation_list
+    description: List validation suites.
+  - name: validation_control
+    description: Run, pause, cancel or inspect a validation suite.
+  - name: validation_report
+    description: Read validation distributions and export reproducible suite artifacts.
+  - name: agent_backtest_create
+    description: Create an agent simulation from a complete event tape.
+  - name: backtest_observation
+    description: Read current event replay observations.
+  - name: backtest_events
+    description: Read observed replay events.
+  - name: backtest_decision_finish
+    description: Seal an agent replay decision and memory.
+  - name: backtest_agent_exchange
+    description: Internal agent replay mailbox.
+    exposure: app_only
+  - name: legacy_import
+    description: Import saved strategies and research from Trading v0.15 into an empty Strategies app. Assignments
+      and interrupted runs import paused; explicit resume is required.
+  - name: replay_order_place
+    description: Stage an order intent in an isolated agent replay; unavailable outside replay.
+  - name: replay_order_cancel
+    description: Stage an order intent in an isolated agent replay; unavailable outside replay.
+  ui_panels:
+  - label: Strategies
+    icon: chart-no-axes-combined
+    entry: /ui/StrategiesPanel.mjs
+    slot: project.page
+  ui_components:
+  - name: strategy-live
+    label: Live strategies
+    description: Realized and open P&L attributed to the strategy that traded it.
+    entry: /ui/StrategyLiveWidget.mjs
+    slots:
+    - dashboard.home
+    visibility: project
+    supported_sizes:
+    - half
+    - full
+    default_size: full
+    refresh_topics:
+    - strategy.assigned
+    - strategy.updated
+    - strategy.created
+    - strategy.promotion.changed
+    - order.placed
+    - order.filled
+    - order.rejected
+    - order.cancelled
+    - position.changed
+    - portfolio.performance.updated
+    - risk.limit.breached
+    settings_schema:
+      type: object
+      properties:
+        scope:
+          type: string
+          title: Show
+          default: live
+          enum:
+          - live
+          - all
+        primary_metric:
+          type: string
+          title: Headline
+          default: total_pnl
+          enum:
+          - total_pnl
+          - realized_pnl
+          - unrealized_pnl
+          - execution_cost
+        row_limit:
+          type: integer
+          title: Visible rows
+          default: 6
+          minimum: 1
+          maximum: 15
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: strategies/v0.1.0
+    entry: mcp/strategies
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/strategies.db
+  migrations: migrations/
+config_schema:
+- name: backtest_max_market_rows
+  type: text
+  default: '500000'
+  label: Backtest market-data row budget
+  description: 'Maximum captured OHLCV rows across all symbols in one backtest. The default supports
+
+    a full year of 5-minute crypto data for four symbols, or decades of hourly data.
+
+    Raise this only when the app has enough memory and disk for larger immutable replays.
+
+    '
+- name: tick_seconds
+  type: text
+  default: '5'
+  label: Strategy scheduling interval (seconds)
+upgrade_policy: auto-patch

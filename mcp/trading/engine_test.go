@@ -9,6 +9,7 @@ package main
 // regression can't reappear silently.
 
 import (
+	"context"
 	"math"
 	"strings"
 	"sync"
@@ -109,59 +110,20 @@ func TestEngine_TickFills_Market(t *testing.T) {
 	}
 }
 
-func TestEngine_LivePaperStrategyAssignmentRunsOnCadence(t *testing.T) {
+func TestEngine_DoesNotExecuteStrategyAssignments(t *testing.T) {
 	ctx := newTestCtx(t)
-	id := mustCreatePortfolio(t, ctx, "Paper Strategy", []string{"crypto"})
-	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
-		ProjectID: "test-proj",
-		Name:      "BTC paper allocation",
-		Status:    "active",
-		Definition: map[string]any{
-			"universe": []any{"BTC-USD"},
-			"cadence":  "1h",
-			"rules": []any{
-				map[string]any{
-					"name":     "always 50% BTC",
-					"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.5}},
-				},
-			},
-		},
-		Version: 1,
-	})
-	if err != nil {
+	id := mustCreatePortfolio(t, ctx, "Agent-owned portfolio", []string{"crypto"})
+	sid := mustCreateFixedStrategy(t, ctx, "Legacy assignment", "BTC-USD", 0.1)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{ProjectID: "test-proj", PortfolioID: id, StrategyID: sid, StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
-		ProjectID: "test-proj", PortfolioID: id, StrategyID: strategyID,
-		ControlMode: "strategy", Cadence: "1h",
-	}); err != nil {
+	globalEngine.provider = newMockProvider()
+	if err := markTick(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := markTick(nil, ctx); err != nil {
-		t.Fatal(err)
-	}
-	filled, _ := dbListOrders(ctx.AppDB(), id, "filled", 10)
-	if len(filled) != 1 {
-		t.Fatalf("filled orders after first tick=%d, want 1", len(filled))
-	}
-	if filled[0].Source != "strategy" {
-		t.Fatalf("order source=%q, want strategy", filled[0].Source)
-	}
-	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if assignment.LastEvaluatedAt == "" {
-		t.Fatal("assignment was not stamped as evaluated")
-	}
-
-	if err := markTick(nil, ctx); err != nil {
-		t.Fatal(err)
-	}
-	allOrders, _ := dbListOrders(ctx.AppDB(), id, "all", 10)
-	if len(allOrders) != 1 {
-		t.Fatalf("orders after immediate second tick=%d, want 1", len(allOrders))
+	orders, err := dbListOrders(ctx.AppDB(), id, "all", 100)
+	if err != nil || len(orders) != 0 {
+		t.Fatalf("Trading executed a strategy: %#v %v", orders, err)
 	}
 }
 

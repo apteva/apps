@@ -91,3 +91,11 @@ let each app cut its own release without coordinating with siblings.
 The `apteva/app-registry` registry points at
 `raw.githubusercontent.com/apteva/apps/main/<bucket>/<name>/apteva.yaml`,
 so updates land for users on the next refresh.
+
+## Trading and Strategies
+
+`mcp/trading` owns portfolios and execution for humans, agents and connected
+apps. `mcp/strategies` owns automated strategy research and scheduling, and uses
+Trading as a required integration. Agents can use Trading independently.
+See [the migration guide](mcp/strategies/MIGRATION.md) when upgrading from the
+combined Trading v0.15 app.

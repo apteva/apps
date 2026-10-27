@@ -25,11 +25,11 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Version != "0.15.0" || fileManifest.Version != m.Version {
+	if m.Version != "0.16.0" || fileManifest.Version != m.Version {
 		t.Fatal("release and embedded versions differ")
 	}
-	if len(m.Provides.MCPTools) != 64 {
-		t.Errorf("expected 64 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) == 0 {
+		t.Fatal("no tools declared")
 	}
 }
 

@@ -1,372 +1,57 @@
 # Trading
 
-Multi-portfolio, multi-asset trading desk for Apteva agents, covering
-equity, ETF, crypto, and Polymarket prediction markets. It supports paper
-and broker-backed live execution, deterministic strategies, and backtests.
-Version 0.6 adds a provider-neutral security master, revisioned corporate-action
-ledger, authoritative exchange sessions, forward point-in-time universe
-snapshots, auditable portfolio postings, and an event-driven data-quality desk.
-Version 0.7 adds native portfolio risk profiles, enforceable percentage limits,
-high-water drawdown halts, and percentage objectives with live progress.
-Version 0.8 adds venue-neutral execution profiles, maker/taker economics,
-quote-aware spread and slippage simulation, exchange constraints, runtime venue
-health, and an auditable fee/funding/cost ledger shared by paper and live modes.
-Version 0.9 adds enforced portfolio tradable-universe policies and durable,
-generic strategy scorecards with backtest evidence and staged paper/live
-promotion gates.
+Trading v0.16 owns portfolio management and execution. Humans, project agents,
+and connected apps use the same order and risk pipeline. Agents do not need
+Strategies to place trades or inspect performance.
 
-Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
-sidecar serving MCP tools + REST routes, with UI surfaces under `ui/` — a
-dashboard panel, two dashboard widgets, and a rich trader-terminal SPA.
+- Portfolios, cash, balances, positions, orders, cancellations, fills and journals.
+- Paper execution, broker-paper and broker-live execution, broker reconciliation.
+- Market data, reference data, venue constraints, fees and execution costs.
+- Portfolio risk limits, tradable universes, objectives, pauses and live arming.
+- Portfolio performance and order origin/decision attribution.
 
-Version 0.14 attributes realized and open P&L to the strategy that traded it.
-See [Strategy P&L attribution](#strategy-pl-attribution).
+Automated strategy authoring, scheduling, backtests, validation and strategy P&L
+now belong to [Strategies](../strategies/README.md). Strategies depends on
+Trading; Trading has no dependency on Strategies.
 
-Version 0.15 adds generic trade programs, a visual rule editor, sourced CSV
-quote/bar import and real-agent strategy research acceptance tests.
+## Direct agent usage
 
-Generic event-driven trade programs, the three screenshot examples, offline
-backtesting and proof commands are documented in [RULE_ENGINE.md](RULE_ENGINE.md).
+Use `portfolio_list` / `portfolio_get`, `market_quote` / `market_history`,
+`order_place` / `order_cancel`, `positions_list`, `orders_list`,
+`account_summary` and `journal_write` / `journal_read`. Orders require a rationale
+and pass the same portfolio risk, cash, venue and live-arming checks regardless
+of their source. Stable `idempotency_key` values make retries safe.
 
-Version 0.11 adds out-of-sample and walk-forward selection, robustness grids,
-stress scenarios, and seeded Monte Carlo execution uncertainty with persisted
-progress, isolated runs, and replayable artifacts. See [Validation suites](VALIDATION.md).
+App-submitted orders also record the authenticated origin app/install and an
+optional `decision_ref`, `external_strategy_id` and `external_strategy_version`.
+Those external identifiers are attribution, not a local saved strategy or an
+exemption from Trading's execution rules.
 
-## Layout
+REST remains mounted under `/api/apps/trading/*`. The dashboard retains
+Portfolios, Trade, Positions, Risk, Agents, Brokers and Journal, plus the
+portfolio watch widget and standalone desk.
 
-```
-apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 64 mcp_tools
-├── go.mod / go.sum
-├── main.go                 # App impl, HTTP routes, Workers wiring
-├── tools.go                # MCP tools (the agent's surface)
-├── store.go                # DB layer
-├── exec.go                 # Paper-execution + alert engine (Workers)
-├── strategy_attribution.go # Strategy-own lot book + fills-ledger rebuild
-├── strategy_live.go        # /strategies/live rollup for the dashboard widget
-├── pricing.go              # Explicit offline mock provider
-├── pricing_live.go         # Live market-data router
-├── handlers_test.go        # Tier 1 — in-process handler tests
-├── manifest_test.go        # Cross-check declared tools vs handlers
-├── integration_test.go     # Tier 2 — //go:build integration; spawned-binary
-├── migrations/001_init.sql # portfolios, positions, orders, fills, journal, marks, watchlist, alerts, day_baselines
-├── prompts/risk_rules.md   # appended to each instance directive at boot
-├── scenarios/              # Tier 3 — live-agent YAML scenarios
-│   ├── 01-create-portfolio.yaml
-│   ├── 02-place-and-fill.yaml
-│   ├── 03-cap-rebalance.yaml
-│   └── 04-poly-fade.yaml
-└── ui/
-    ├── panel/              # the dashboard widget — vanilla HTML+JS
-    │   ├── TradingPanel.html / .css / .js
-    └── desk/               # the rich trader terminal — React + Tailwind 4
-        ├── package.json · build.ts · tsconfig.json
-        ├── src/
-        │   ├── api/        # client, types, portfolios, markets
-        │   ├── hooks/      # usePortfolios, usePortfolio, useUniverse, useFetch
-        │   ├── lib/        # format, spark, agentIcon
-        │   ├── components/ # AgentIcon, Header, PortfolioSidebar, ...
-        │   ├── App.tsx · main.tsx · index.css
-        └── dist/           # committed build
+## Upgrading from v0.15
+
+The database upgrade pauses legacy strategy assignments. Trading no longer runs
+the strategy scheduler or exposes strategy/backtest/validation authoring routes.
+Existing portfolios, broker bindings, orders, fills, performance and research
+rows are preserved. Legacy schema and private compatibility helpers remain so
+an upgrade does not require deleting or rewriting the existing ledger.
+
+Install Strategies and bind this Trading installation, then use **Import legacy
+research** in Strategies, or its `legacy_import` tool. Imported assignments stay
+paused; explicitly assign a strategy again when it should run. See the complete
+[migration procedure](../strategies/MIGRATION.md).
+
+## Development
+
+```sh
+env GOWORK=off go build .
+env GOWORK=off go test -short ./...
+env GOWORK=off go test -tags integration -run 'TestSidecar_(OrderFillRoundTrip|LimitDoesNotFillUnlessCrossed|PolymarketYesFlow)' .
+bun run ../../scripts/build-panels.ts --app trading
 ```
 
-## Build + run locally
-
-```bash
-# Build the sidecar binary.
-go build .
-
-# Run with mock pricing, fast tick.
-APTEVA_APP_PORT=8080 APTEVA_PROJECT_ID=demo APTEVA_APP_TOKEN=dev \
-APTEVA_APP_CONFIG='{"starting_cash":"100000","tick_seconds":"3","pricing_provider":"mock"}' \
-DB_PATH=/tmp/trading-data/trading.db \
-./trading
-
-# In another shell:
-curl -s http://127.0.0.1:8080/health
-curl -s -X POST http://127.0.0.1:8080/portfolios \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Demo","mandate":"crypto trend","allowed_classes":["crypto"],"starting_cash":50000}'
-curl -s -X POST http://127.0.0.1:8080/portfolios/1/orders \
-  -H "Content-Type: application/json" \
-  -d '{"symbol":"BTC-USD","side":"buy","type":"market","qty":0.05,
-       "rationale":"starter position via REST — testing the order placement path."}'
-# Wait for tick…
-curl -s "http://127.0.0.1:8080/portfolios/1/orders?status=all"
-```
-
-## REST surface
-
-Mounted under `/api/apps/trading/*` when the sidecar is reverse-proxied
-by apteva-server. Bare paths shown here.
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET`  | `/health` | Liveness — auto-mounted by the SDK |
-| `GET`  | `/portfolios` | List (project-scoped) |
-| `POST` | `/portfolios` | Create |
-| `GET`  | `/portfolios/{id}` | Snapshot |
-| `PATCH`| `/portfolios/{id}` | Status only — `{ "status": "active\|paused\|halted" }` |
-| `GET`  | `/portfolios/{id}/positions` | Open positions, mark-decorated |
-| `GET`  | `/portfolios/{id}/execution-costs` | Fee, rebate, spread, slippage, and funding ledger with totals |
-| `POST` | `/portfolios/{id}/funding` | Idempotently record a venue-reported funding payment |
-| `GET/PUT` | `/portfolios/{id}/risk` | Resolved policy and state / set preset or custom limits |
-| `GET/PUT` | `/portfolios/{id}/universe-policy` | Read or enforce allowed symbols, exclusions, or a reference universe |
-| `GET/POST` | `/portfolios/{id}/objectives` | List live objective progress / create objective |
-| `PATCH` | `/portfolios/{id}/objectives/{objective_id}` | Update, pause, or archive objective |
-| `GET` | `/risk-profiles` | Conservative, balanced, and aggressive defaults |
-| `GET`  | `/portfolios/{id}/orders?status=…&limit=…` | Working / filled / cancelled / rejected / all |
-| `POST` | `/portfolios/{id}/orders` | Place order — same body as MCP `order_place` |
-| `GET`  | `/portfolios/{id}/journal?kind=…&limit=…` | Read journal |
-| `GET`  | `/quotes/{symbol}` | Latest mark |
-| `GET`  | `/universe` | All currently-known marks |
-| `GET/PUT` | `/execution/venues` | List or update venue/class/symbol execution profiles |
-| `GET`  | `/healthz/details` | Engine, stream, provider, and reference-data health |
-| `GET`  | `/reference/status` | Coverage counts, checkpoints, and survivorship status |
-| `GET`  | `/reference/securities?q=…&as_of=…` | Stable security and dated listing identities |
-| `GET`  | `/reference/corporate-actions` | Latest normalized corporate-action revisions |
-| `GET`  | `/reference/sessions` | Authoritative normalized exchange sessions |
-| `GET`  | `/reference/quality` | Open ingestion, identity, and accounting issues |
-| `GET`  | `/reference/postings?portfolio_id=…` | Auditable broker-observed and simulated action effects |
-| `POST` | `/reference/sync` | Trigger an immediate idempotent reference-data reconciliation |
-| `GET/PUT` | `/strategies/{id}/scorecard?portfolio_id=…` | Read scorecard evidence / configure generic pass criteria |
-| `POST` | `/strategies/{id}/scorecard/evaluate` | Persist an immutable evaluation for a completed backtest |
-| `POST` | `/strategies/{id}/promotion` | Promote, demote, or suspend one strategy for one portfolio |
-| `GET`  | `/strategies/live?scope=live&include_unattributed=…` | Per-strategy realized, open, and total P&L with run health |
-
-## Strategy P&L attribution
-
-`position_accounting` is keyed `(portfolio_id, symbol, outcome)` and has no
-strategy dimension, so when two strategies hold the same symbol a closing fill
-has no attributable cost basis. `strategy_position_accounting` keeps a parallel
-average-cost book scoped to the strategy that originated each fill, read from
-`orders.strategy_id`.
-
-The convention is that **a strategy closes against its own lots, never the
-portfolio's blend**. Where a symbol has exactly one owner the two books agree
-exactly; where several owners overlap they diverge by construction, and
-`/strategies/live` reports `shared_symbols` so a caller can say so rather than
-present a convention-dependent number as the only one.
-
-`strategy_id` 0 is the unattributed bucket — manual orders, agent orders, and
-imported broker history — so the strategy books plus bucket 0 reconcile against
-the portfolio book.
-
-Like `position_accounting`, the table is rebuilt from the append-only fills
-ledger on mount and after a broker import (`dbRebuildStrategyAttribution`). The
-rebuild is a full, idempotent replay, so it is also self-healing. It cannot
-recover imported opening balances or corporate actions, which never pass
-through fills; those stay in the portfolio book and show up as the gap between
-it and the strategy books.
-
-## Reference-data behavior
-
-Alpaca Market Data supplies the broad corporate-action feed and live SSE
-mutations. Alpaca Trading supplies assets, sessions, and account activities.
-Unbound integrations degrade visibly through `reference_data_status`; they do
-not fabricate reference data. Current Alpaca asset snapshots establish
-survivorship coverage from the first successful sync forward. Historical runs
-before that watermark are explicitly marked `survivorship_safe: false`.
-
-Paper portfolios automatically apply deterministic splits, cash distributions,
-symbol changes, and worthless removals exactly once. Multi-leg actions remain
-visible for broker reconciliation instead of being guessed from incomplete
-terms. Broker-backed portfolios treat broker positions and activities as the
-accounting source of truth.
-
-## Execution profiles and costs
-
-Every order resolves one execution profile in this order: built-in venue and
-asset-class defaults, the stored venue wildcard, an optional symbol override,
-then authoritative instrument constraints. Profiles cover venue status,
-calendar/session policy, maker and taker fee bps, fee currency, spread and
-slippage models, minimum quantity/notional, quantity step, price tick, funding,
-and post-only/reduce-only capabilities.
-
-New orders fail with structured rejection codes when a venue is in maintenance
-or outage, its retry circuit is open, the session is closed, or quantity,
-notional, step, and tick rules are invalid. Existing paper orders wait through
-temporary closures and resume when the venue is executable. Crypto profiles are
-continuous by default; exchange-traded assets use the normalized calendar.
-
-Paper market orders cross the current bid/ask (or a configured fallback spread)
-and apply taker slippage. Resting limit orders use maker economics; marketable
-limits use taker economics and respect their price cap. Each fill records its
-fee currency, liquidity role, spread cost, slippage cost, venue, and source.
-Broker commissions are retained in their native currency and converted to the
-portfolio quote currency when a trustworthy conversion mark exists. Actual
-funding payments are ingested idempotently rather than inferred from a rate.
-
-Venue adapter failures feed a per-venue health circuit. Five consecutive
-failures open an exponential retry window, reject new orders visibly, and emit
-`venue.health.changed`; successful reconciliation closes it. Profile edits,
-funding, and fills also publish app-bus events consumed by the execution desk.
-
-## Trading governance
-
-Each portfolio can enforce one of three tradable-universe modes: all symbols in
-its allowed asset classes, an explicit symbol allowlist, or point-in-time
-membership in a normalized reference universe. Explicit exclusions and optional
-active-listing checks apply to every common order path and automated strategy.
-A symbol removed from the universe may still be sold down from an existing
-holding, while outstanding exit orders are reserved to prevent an accidental
-oversell or short.
-
-Strategy scorecards are portfolio-specific and accept generic minimum/maximum
-criteria over recorded backtest metrics. Evaluations persist the strategy
-version, dataset identity, metric values, checks, and the exact policy hash.
-Changing a scorecard therefore invalidates old evidence for future promotion.
-Promotion proceeds one stage at a time through research, paper candidate,
-paper, live candidate, and live; suspension immediately blocks execution.
-Enforcement is opt-in for existing portfolios, then requires paper stage for a
-broker-paper portfolio and live stage for a broker-live portfolio.
-
-## MCP tools (50)
-
-**Portfolio and execution (19):** `portfolio_create`, `brokers_list`,
-`portfolio_list`, `portfolio_get`, `account_summary`, `positions_list`,
-`orders_list`, `order_place`, `order_cancel`, `watchlist_add`,
-`watchlist_remove`, `portfolio_pause`, `portfolio_arm_live`,
-`venue_profiles_list`, `venue_profile_update`, `execution_costs_list`,
-`funding_payment_record`, `portfolio_universe_get`,
-`portfolio_universe_update`.
-
-**Market and reference data (8):** `market_quote`, `market_history`,
-`market_source`, `market_calendar`, `reference_data_status`,
-`security_resolve`, `corporate_actions_list`, `exchange_sessions_list`.
-
-**Strategy and backtesting (16):** `strategy_create`, `strategy_update`,
-`strategy_get`, `strategy_list`, `strategy_validate`, `strategy_evaluate`,
-`strategy_assign`, `strategy_backtest_create`, `strategy_validate_backtest`,
-`backtest_control`, `backtest_artifact`,
-`backtest_market_step`, `strategy_scorecard_get`,
-`strategy_scorecard_update`, `strategy_scorecard_evaluate`,
-`strategy_promotion_update`.
-
-**Alerts and journal (3):** `alert_create`, `journal_write`, `journal_read`.
-
-**Risk and objectives (6):** `risk_profiles_list`, `portfolio_risk_get`,
-`portfolio_risk_update`, `portfolio_objective_create`,
-`portfolio_objectives_list`, `portfolio_objective_update`.
-
-`order_place` always takes a `rationale` (≥ 30 chars). On reject, the
-status field is `"rejected"` with a structured `code` + `detail` —
-**not** an MCP error. The agent reads it on its next loop and
-adjusts.
-
-Risk limits are enforced by the common order path for human and agent orders,
-automated strategies, simulation, broker paper, and armed broker-live execution.
-Open buy orders count toward projected position and gross exposure so a client
-cannot evade limits by stacking working orders. Daily loss and high-water
-drawdown breaches halt the portfolio; live portfolios first attempt to cancel
-all working broker orders. Existing portfolios retain the legacy daily-loss
-setting and otherwise permissive 100% limits until a risk profile is selected.
-
-## Test pyramid
-
-| Tier | What | How | Speed |
-|---|---|---|---|
-| **1** in-process | Every MCP handler exercised against in-memory SQLite | `go test ./...` | < 0.1s |
-| **2** real binary | Spawned sidecar talked to via JSON-RPC + REST; engine ticks for real | `go test -tags integration ./...` | ~8s |
-| **3** live agent | YAML scenarios run by `apteva test ./scenarios/` — real agent, real LLM | `apteva test ./scenarios/` | tens of seconds + LLM cost |
-
-Strategy Tier 3 coverage lives in `scenarios/strategies/`, with entry links in
-`scenarios/` so the normal Tier 3 command also includes it. Run it explicitly
-with `apteva test --tier 3 ./scenarios/strategies/`. It checks real agent
-creation of the three screenshot strategies, fresh EMA/SMA strategy authoring,
-completed winning and losing synthetic backtests, persisted scorecard verdicts,
-cost robustness, evidence export and versioned revision. These are acceptance
-fixtures, not historical profitability results. Tests use clean installations
-and assert saved state as well as successful tool calls. Provider/model choices
-belong to the test invocation rather than the strategy definitions.
-
-## Pricing provider
-
-The default `pricing_provider: live` routes crypto to Binance public REST,
-prediction markets to Polymarket Gamma, and equity/ETF data to Alpaca when it
-is bound. Alpaca quotes, trades, minute bars, corrections, market status, and
-broker order updates stream over WebSockets; REST snapshots remain the retry
-and recovery path. Yahoo Finance is the unauthenticated display/backtest
-fallback, but broker-backed equity orders require Alpaca marks by default.
-The active feed (`sip`, `iex`, or `delayed_sip`) and stream health are exposed
-to the dashboard. Set `pricing_provider: mock` for deterministic tests and
-offline demos.
-
-Portfolios use an explicit execution environment: `simulation`,
-`broker_paper`, `broker_live`, or `backtest`. Broker-live portfolios start
-disarmed and reject orders and automated strategy runs until an operator arms
-them with the exact `LIVE MONEY` confirmation. Strategy executions claim each
-closed signal bar durably before order submission, preventing duplicate broker
-orders after a restart. Backtests capture data source, adjustment, execution
-model, row count, and a SHA-256 dataset identity alongside professional risk
-metrics.
-
-Strategy backtests compute indicators from completed candles at the strategy's
-cadence. The replay interval defaults to that cadence; finer intervals can supply
-execution prices and equity marks without changing indicator windows. Daily and
-weekly equity signals follow US trading sessions, including holidays and early
-closes. `rebalance_every` counts completed strategy candles, and signals execute
-at the next replay bar's open. Coarser replay intervals are rejected because they
-cannot reconstruct the strategy's candles. Realized P&L accumulates across closed
-positions and survives pause/resume; total return also includes execution costs.
-Previously completed backtests must be rerun to obtain corrected results.
-
-New strategy and agent runs use the discrete-event simulator with background
-execution, latency and partial fills, generic feature/news inputs, benchmark
-metrics, and portable result bundles. Agents receive past-only observations,
-stage trading commands, and explicitly checkpoint decisions and memory. Recorded
-agent decisions replay without model calls. See [Event backtesting](EVENT_BACKTESTING.md) for configuration,
-API/MCP usage, feed adapters, reproduction, and execution-model assumptions.
-
-Validation suites run chronological holdouts, rolling/expanding walk-forward windows,
-strategy parameter grids, stress scenarios, and seeded execution Monte Carlo batches
-for strategies and agents. See [Validation suites](VALIDATION.md) for the UI,
-API/MCP, statistical assumptions, budgets, and reproducible reports.
-
-## Approvals — by design, not in the sidecar
-
-If a portfolio's mandate calls for human sign-off above some notional,
-the **agent** does the asking via its existing `channel-chat` (or
-Slack / Telegram) channel. The trading sidecar never knows about
-approvals, never expires a token, never reconciles state across
-systems — that policy lives where it belongs, in the agent's directive
-per portfolio. See `prompts/risk_rules.md` for the language that ships
-with the app.
-
-
-## Broker execution and recovery
-
-Broker paper is supported through verified Alpaca paper endpoints and OKX demo
-credentials (`simulated` or `demo`). The environment is checked at portfolio
-creation, explicit account binding, and every execution/reconciliation resolution.
-Binance, Kraken, Coinbase, Bybit, Bitstamp and Polymarket currently have fixed live
-connector URLs and reject `broker_paper`; use local `simulation` for paper trading
-with those providers. The Binance catalog's `testnet` flag does not currently
-change its transport URL and is not proof of a test environment.
-
-Alpaca advertises the implemented market, limit and stop order types. Lost
-submissions use the dedicated `get_order_by_client_order_id` connector tool; ship
-the updated `integrations/src/apps/alpaca-trading.json` alongside this app.
-OKX, Bybit, Binance and Bitstamp recover using the original client ID, then save
-the broker ID. Bybit also queries historical status when its recent-order cache
-no longer contains an order. Coinbase and Kraken submissions without a returned
-broker ID still require reconciliation; the app never blindly resubmits them.
-
-Crypto open orders are imported at creation and rediscovered during periodic
-account reconciliation. History import supports Coinbase, Kraken, OKX and Bybit
-pagination, plus Binance history for pairs found in positions, orders or the
-portfolio watchlist. Pages are bounded at 100 per request sequence; failures and
-stalled cursors are logged as incomplete imports. This covers the provider's
-available history window, not a guaranteed lifetime archive. Bitstamp's connector
-exposes open orders and transactions, but no closed-order listing; it imports open
-orders with an execution baseline rather than inventing closed orders from cash
-transactions. Non-USD/USDT pairs and unsupported quote-sized open Coinbase orders
-are excluded from this USD-based spot model.
-
-Imported order identity, cumulative fill baseline and audit metadata commit
-atomically and are deduplicated per portfolio. Import does not debit broker cash
-again; fees absent from history are recorded as unknown. Account snapshots remain
-authoritative. Automated tests use provider fixtures and local transport mocks;
-these checks do not certify a real account connection or place venue orders.
-
-Indicator formulas, templates and research sources: [INDICATOR_STRATEGIES.md](INDICATOR_STRATEGIES.md). Discover them through `strategy_catalog` or `GET /strategies/catalog`.
+The source installation builds this directory independently with the pinned
+App SDK. No sibling app module or shared database is required.
