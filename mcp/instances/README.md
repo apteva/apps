@@ -756,3 +756,13 @@ Refresh the provider integration catalog before using these tools. Release
 DigitalOcean, Vultr and Linode definitions. Missing operations fail preflight
 before compute is ordered. No firewall is created for requests that omit the
 optional policy.
+
+## Ingress provider 0.15.0
+
+Public deployment ingress is coordinated by Server through one independent
+provider contract. Instances supplies the Caddy host adapter; its native compute
+backend no longer provisions or publishes public routes. Fresh preparation and
+explicit existing-proxy adoption feed the same publication operation. Use the
+matching Server controller changes before upgrading public deployments; app
+updates do not rewrite existing proxies. See the [contract, migration, safety and
+validation guide](runtime/ingress-provider.md).
