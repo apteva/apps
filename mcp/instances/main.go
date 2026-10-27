@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.14.2
+version: 0.15.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -104,6 +104,7 @@ provides:
   http_routes:
     - prefix: /
     - prefix: /_apteva/runtime/backends/native
+    - prefix: /_apteva/ingress/providers/caddy
   mcp_tools:
     - name: instance_firewall_capabilities
       description: Discover managed firewall capabilities for a provider or instance.
@@ -228,7 +229,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.14.2
+    ref: instances/v0.15.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -330,6 +331,7 @@ func main() { sdk.Run(&App{}) }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: nativePrefix + "/", Handler: a.handleNativeRuntime},
+		{Pattern: proxyPrefix + "/", Handler: a.handleProxyAdapter},
 		{Pattern: "/api/instances-register", Handler: a.httpRegister},
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},

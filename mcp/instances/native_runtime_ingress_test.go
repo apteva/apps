@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	sdk "github.com/apteva/app-sdk"
 	"strings"
 	"testing"
 )
 
-func (f *nativeFake) Ingress(context.Context, *Instance, nativeRecord, bool) error { return nil }
-func (f *nativeFake) RemoveIngress(context.Context, *Instance, nativeRecord) error { return nil }
-func TestNativeManagedIngressLifecycleAndSurfaceIsolation(t *testing.T) {
+func TestNativeLegacyIngressMetadataDoesNotPublishRoutes(t *testing.T) {
 	b, _, r := newNativeTest(t)
 	r.Manifest.Runtime.Ingress = &sdk.RuntimeIngress{Routes: []sdk.RuntimeIngressRoute{{Path: "/browser/*"}}, Endpoints: map[string]string{"browser": ""}, BrowserPath: "/browser"}
 	r.Options["ingress"] = map[string]any{"hostname": "voice.example.com"}
@@ -26,9 +23,11 @@ func TestNativeManagedIngressLifecycleAndSurfaceIsolation(t *testing.T) {
 	if _, w := nativeCall(t, b, "start", start); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if _, w := nativeCall(t, b, "publish-ingress", r); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
+
+	if _, w := nativeCall(t, b, "publish-ingress", r); w.Code != 404 {
+		t.Fatal("native backend still orchestrates public ingress", w.Code)
 	}
+
 	if _, w := nativeCall(t, b, "stop", r); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
