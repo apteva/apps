@@ -163,3 +163,31 @@ test("late inspection cannot leak into another project/target", async () => {
   )!;
   expect(button.disabled).toBe(false);
 });
+
+test("a normalized successful acknowledgement is resolved evidence without a resend action", async () => {
+  await render(
+    <TargetDelivery
+      postId={913}
+      targetId={1034}
+      projectId="project"
+      diagnostics={{
+        ...diagnostics,
+        local_diagnostic: undefined,
+        acknowledged_upload_bytes: 15864632,
+        latest_upload_error: {
+          http_status: 201,
+          result: "invalid_acknowledgement",
+        },
+        upload_acknowledgement_resolution: {
+          http_status: 201,
+          result: "acknowledged",
+        },
+      }}
+    />,
+  );
+  const text = browser.document.body.textContent!;
+  expect(text).toContain("acknowledgement reconciled");
+  expect(text).toContain("Previous acknowledgement warning (resolved)");
+  expect(text).not.toContain("Upload stalled");
+  expect(text).not.toContain("Recover this target");
+});

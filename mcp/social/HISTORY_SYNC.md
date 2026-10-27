@@ -15,8 +15,13 @@ Integration connection IDs remain inside Social's provider adapters.
    receipt without advancing again. Provider calls have bounded read timeouts;
    the loop also checks its time budget between pages.
 4. Check `coverage.complete`, `coverage.scope`, `pagination_exhausted`,
-   limitations and observation time. A completed traversal uses two bounded head
-   reconciliation pages. This is best-effort provider pagination, not an atomic
+   limitations and observation time. A completed traversal begins a bounded head
+   reconciliation. Comparable provider
+   totals are retained (for YouTube, the uploads playlist total, not the channel's
+   public-only video count). A count mismatch, overlapping pages, changing totals
+   or newly discovered IDs extends reconciliation to a second traversal, capped at
+   100 pages across the same resumable calls. This is best-effort provider pagination,
+   not an atomic
    provider snapshot or a guarantee that deleted/inaccessible lifetime history
    exists. Failed, repeated-cursor/page, suppressed or omitted records cannot
    establish complete stored coverage. No automatic sync setting is changed.
@@ -34,7 +39,14 @@ Integration connection IDs remain inside Social's provider adapters.
 
 Receipts include status, observation/completion time, imported/updated/unchanged
 counts, distinct native IDs observed, pagination/coverage and an opaque Social
-continuation cursor. Provider cursors, signed pagination URLs and credentials are
+continuation cursor. Coverage separates first-traversal identities, reconciliation
+identities and their union, duplicate entries, comparable provider totals, changing
+totals, reconciliation page budget/exhaustion and any unexplained count gap. A
+remaining mismatch, changing total or exhausted reconciliation budget is incomplete.
+When no comparable total is exposed, count verification is unknown/false and an
+explicit pagination-only limitation is returned. Pre-0.20.2 coverage receipts must
+be refreshed rather than reused as complete evidence. Provider cursors, signed
+pagination URLs and credentials are
 not returned. Counts reconcile through a transactionally stored per-run identity
 ledger; repeated observations may put an ID in more than one activity category.
 
@@ -79,7 +91,11 @@ click. The legacy multi-account import action remains a bounded recent import.
 
 ## Validation and rollout
 
-The fixture reconciles 299 native YouTube videos with 28 managed records,
+The fixtures reconcile 299 native YouTube videos with 28 managed records,
+including two traversals of 296 different IDs whose union is 299. Repeating the
+sync never duplicates posts or creates publishing work. They also cover unresolved
+count gaps, changing totals, bounded reconciliation and old receipt invalidation,
+plus
 overlapping pages, repeat runs and accepted-operation preservation. Other tests
 cover literal search beyond page one, account/project/owner/cursor isolation,
 failed-page resume, fixed page sizes, provider cursor cycles, unknown versus zero

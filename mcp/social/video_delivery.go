@@ -38,47 +38,48 @@ type deliveryEvent struct {
 	Result     string `json:"result,omitempty"`
 }
 type deliveryDiagnostics struct {
-	AttemptPurpose              string                     `json:"purpose,omitempty"`
-	ProviderUploadedHighWater   *int64                     `json:"provider_uploaded_high_water,omitempty"`
-	ProviderDownloadedHighWater *int64                     `json:"provider_downloaded_high_water,omitempty"`
-	ProgressVersion             int                        `json:"progress_version,omitempty"`
-	VerifiedSourceBytes         *int64                     `json:"verified_source_bytes"`
-	AttemptedBytes              *int64                     `json:"attempted_upload_bytes"`
-	AcknowledgedBytes           *int64                     `json:"acknowledged_upload_bytes"`
-	LegacyTransferredBytes      *int64                     `json:"legacy_transferred_bytes,omitempty"`
-	Initialization              *deliveryOutcome           `json:"initialization,omitempty"`
-	LastUpload                  *deliveryOutcome           `json:"last_upload,omitempty"`
-	FirstUploadError            *deliveryOutcome           `json:"first_upload_error,omitempty"`
-	LatestUploadError           *deliveryOutcome           `json:"latest_upload_error,omitempty"`
-	ProviderObservation         *tikTokProgressObservation `json:"provider_observation,omitempty"`
-	LastProgressAt              string                     `json:"last_progress_at,omitempty"`
-	LocalDiagnostic             string                     `json:"local_diagnostic,omitempty"`
-	AutomaticPollAttempts       int                        `json:"automatic_poll_attempts,omitempty"`
-	AutomaticPollingStopped     bool                       `json:"automatic_polling_stopped"`
-	NextPollAt                  string                     `json:"next_poll_at,omitempty"`
-	UploadURLSHA256             string                     `json:"upload_url_sha256,omitempty"`
-	CorrelationID               string                     `json:"correlation_id"`
-	StorageInstallID            int64                      `json:"storage_install_id"`
-	MediaProjectID              string                     `json:"media_project_id"`
-	SourceFileID                int64                      `json:"source_file_id"`
-	SourceSHA256                string                     `json:"source_sha256,omitempty"`
-	ExpectedBytes               int64                      `json:"expected_bytes,omitempty"`
-	SourceHTTPStatus            int                        `json:"source_http_status,omitempty"`
-	SourceRoute                 string                     `json:"source_route,omitempty"`
-	SourceBytes                 int64                      `json:"source_bytes,omitempty"`
-	SourceContentType           string                     `json:"source_content_type,omitempty"`
-	Method                      string                     `json:"method,omitempty"`
-	Stage                       string                     `json:"stage"`
-	OperationState              string                     `json:"operation_state"`
-	OperationID                 string                     `json:"operation_id,omitempty"`
-	ProviderStatus              string                     `json:"provider_status,omitempty"`
-	FailReason                  string                     `json:"fail_reason,omitempty"`
-	ErrorCode                   string                     `json:"error_code,omitempty"`
-	ProviderRequestID           string                     `json:"provider_request_id,omitempty"`
-	TransferredBytes            int64                      `json:"transferred_bytes"`
-	Reconciliation              string                     `json:"reconciliation,omitempty"`
-	RetryEligibility            string                     `json:"retry_eligibility,omitempty"`
-	Events                      []deliveryEvent            `json:"events"`
+	AttemptPurpose                  string                     `json:"purpose,omitempty"`
+	ProviderUploadedHighWater       *int64                     `json:"provider_uploaded_high_water,omitempty"`
+	ProviderDownloadedHighWater     *int64                     `json:"provider_downloaded_high_water,omitempty"`
+	ProgressVersion                 int                        `json:"progress_version,omitempty"`
+	VerifiedSourceBytes             *int64                     `json:"verified_source_bytes"`
+	AttemptedBytes                  *int64                     `json:"attempted_upload_bytes"`
+	AcknowledgedBytes               *int64                     `json:"acknowledged_upload_bytes"`
+	LegacyTransferredBytes          *int64                     `json:"legacy_transferred_bytes,omitempty"`
+	Initialization                  *deliveryOutcome           `json:"initialization,omitempty"`
+	LastUpload                      *deliveryOutcome           `json:"last_upload,omitempty"`
+	FirstUploadError                *deliveryOutcome           `json:"first_upload_error,omitempty"`
+	UploadAcknowledgementResolution *deliveryOutcome           `json:"upload_acknowledgement_resolution,omitempty"`
+	LatestUploadError               *deliveryOutcome           `json:"latest_upload_error,omitempty"`
+	ProviderObservation             *tikTokProgressObservation `json:"provider_observation,omitempty"`
+	LastProgressAt                  string                     `json:"last_progress_at,omitempty"`
+	LocalDiagnostic                 string                     `json:"local_diagnostic,omitempty"`
+	AutomaticPollAttempts           int                        `json:"automatic_poll_attempts,omitempty"`
+	AutomaticPollingStopped         bool                       `json:"automatic_polling_stopped"`
+	NextPollAt                      string                     `json:"next_poll_at,omitempty"`
+	UploadURLSHA256                 string                     `json:"upload_url_sha256,omitempty"`
+	CorrelationID                   string                     `json:"correlation_id"`
+	StorageInstallID                int64                      `json:"storage_install_id"`
+	MediaProjectID                  string                     `json:"media_project_id"`
+	SourceFileID                    int64                      `json:"source_file_id"`
+	SourceSHA256                    string                     `json:"source_sha256,omitempty"`
+	ExpectedBytes                   int64                      `json:"expected_bytes,omitempty"`
+	SourceHTTPStatus                int                        `json:"source_http_status,omitempty"`
+	SourceRoute                     string                     `json:"source_route,omitempty"`
+	SourceBytes                     int64                      `json:"source_bytes,omitempty"`
+	SourceContentType               string                     `json:"source_content_type,omitempty"`
+	Method                          string                     `json:"method,omitempty"`
+	Stage                           string                     `json:"stage"`
+	OperationState                  string                     `json:"operation_state"`
+	OperationID                     string                     `json:"operation_id,omitempty"`
+	ProviderStatus                  string                     `json:"provider_status,omitempty"`
+	FailReason                      string                     `json:"fail_reason,omitempty"`
+	ErrorCode                       string                     `json:"error_code,omitempty"`
+	ProviderRequestID               string                     `json:"provider_request_id,omitempty"`
+	TransferredBytes                int64                      `json:"transferred_bytes"`
+	Reconciliation                  string                     `json:"reconciliation,omitempty"`
+	RetryEligibility                string                     `json:"retry_eligibility,omitempty"`
+	Events                          []deliveryEvent            `json:"events"`
 }
 
 func randomDeliveryID() string {
@@ -309,6 +310,7 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 		d.Method = previous.Method
 		d.Initialization = previous.Initialization
 		d.LastUpload = previous.LastUpload
+		d.UploadAcknowledgementResolution = previous.UploadAcknowledgementResolution
 		d.FirstUploadError = previous.FirstUploadError
 		d.LatestUploadError = previous.LatestUploadError
 		d.ProviderObservation = previous.ProviderObservation

@@ -68,31 +68,40 @@ func (b historyAccount) binding() string {
 }
 
 type historyRun struct {
-	PageSize      int             `json:"page_size"`
-	LastPageHash  string          `json:"last_page_hash,omitempty"`
-	RepeatedPages int             `json:"repeated_pages,omitempty"`
-	ID            string          `json:"run_id"`
-	Mode          string          `json:"mode"`
-	Status        string          `json:"status"`
-	Phase         string          `json:"phase"`
-	Token         string          `json:"provider_cursor,omitempty"`
-	Resource      string          `json:"resource,omitempty"`
-	Owner         string          `json:"owner,omitempty"`
-	StartedAt     string          `json:"started_at"`
-	ObservedAt    string          `json:"observed_at"`
-	CompletedAt   *string         `json:"completed_at"`
-	Imported      int             `json:"imported"`
-	Updated       int             `json:"updated"`
-	Unchanged     int             `json:"unchanged"`
-	Scanned       int             `json:"scanned"`
-	Pages         int             `json:"pages"`
-	OverlapPages  int             `json:"overlap_pages"`
-	Limitations   []string        `json:"limitations"`
-	Scope         string          `json:"scope"`
-	Incomplete    bool            `json:"incomplete"`
-	Error         string          `json:"error,omitempty"`
-	CursorHashes  map[string]bool `json:"cursor_hashes"`
-	Revision      int             `json:"-"`
+	CoverageVersion         int                    `json:"coverage_version"`
+	ProviderTotal           *int64                 `json:"provider_total"`
+	ProviderTotals          []historyProviderTotal `json:"provider_totals"`
+	ProviderTotalsChanged   bool                   `json:"provider_totals_changed"`
+	Counts                  historyPassCounts      `json:"counts"`
+	TraversalExhausted      bool                   `json:"traversal_exhausted"`
+	ReconciliationExhausted bool                   `json:"reconciliation_exhausted"`
+	ReconciliationFull      bool                   `json:"reconciliation_full"`
+	ReconciliationReasons   []string               `json:"reconciliation_reasons"`
+	PageSize                int                    `json:"page_size"`
+	LastPageHash            string                 `json:"last_page_hash,omitempty"`
+	RepeatedPages           int                    `json:"repeated_pages,omitempty"`
+	ID                      string                 `json:"run_id"`
+	Mode                    string                 `json:"mode"`
+	Status                  string                 `json:"status"`
+	Phase                   string                 `json:"phase"`
+	Token                   string                 `json:"provider_cursor,omitempty"`
+	Resource                string                 `json:"resource,omitempty"`
+	Owner                   string                 `json:"owner,omitempty"`
+	StartedAt               string                 `json:"started_at"`
+	ObservedAt              string                 `json:"observed_at"`
+	CompletedAt             *string                `json:"completed_at"`
+	Imported                int                    `json:"imported"`
+	Updated                 int                    `json:"updated"`
+	Unchanged               int                    `json:"unchanged"`
+	Scanned                 int                    `json:"scanned"`
+	Pages                   int                    `json:"pages"`
+	OverlapPages            int                    `json:"overlap_pages"`
+	Limitations             []string               `json:"limitations"`
+	Scope                   string                 `json:"scope"`
+	Incomplete              bool                   `json:"incomplete"`
+	Error                   string                 `json:"error,omitempty"`
+	CursorHashes            map[string]bool        `json:"cursor_hashes"`
+	Revision                int                    `json:"-"`
 }
 type historyReceipt struct {
 	Platform    string         `json:"platform"`
@@ -171,7 +180,7 @@ func saveHistoryRun(ctx *sdk.AppCtx, b historyAccount, run *historyRun) error {
 func receiptForHistory(ctx *sdk.AppCtx, b historyAccount, run historyRun) historyReceipt {
 	var unique int
 	_ = ctx.AppDB().QueryRow(`SELECT count(*),COALESCE(sum(imported),0),COALESCE(sum(updated),0),COALESCE(sum(unchanged),0) FROM social_history_seen WHERE run_id=?`, run.ID).Scan(&unique, &run.Imported, &run.Updated, &run.Unchanged)
-	out := historyReceipt{Platform: b.Platform, AccountID: b.ID, RunID: run.ID, Status: run.Status, ObservedAt: run.ObservedAt, CompletedAt: run.CompletedAt, Imported: run.Imported, Updated: run.Updated, Unchanged: run.Unchanged, Scanned: run.Scanned, UniquePosts: unique, Pages: run.Pages, Limitations: run.Limitations, Error: run.Error, Coverage: map[string]any{"complete": run.Status == "complete" && run.Mode == "full" && !run.Incomplete, "scope": run.Scope, "mode": run.Mode, "overlap_pages": run.OverlapPages, "pagination_exhausted": run.CompletedAt != nil, "all_listed_ids_resolved": !run.Incomplete, "optional_fields_may_be_unknown": true, "consistency": "best_effort_provider_pagination_with_bounded_head_reconciliation"}}
+	out := historyReceipt{Platform: b.Platform, AccountID: b.ID, RunID: run.ID, Status: run.Status, ObservedAt: run.ObservedAt, CompletedAt: run.CompletedAt, Imported: run.Imported, Updated: run.Updated, Unchanged: run.Unchanged, Scanned: run.Scanned, UniquePosts: unique, Pages: run.Pages, Limitations: run.Limitations, Error: run.Error, Coverage: historyCoverage(run)}
 	if run.Status == "partial" || run.Status == "failed" {
 		cursor := historyCursor(run)
 		out.Cursor = &cursor
@@ -228,6 +237,9 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 			return nil, errors.New("invalid stored history state")
 		}
 		run.Revision = savedRevision
+		if run.CoverageVersion != historyCoverageVersion {
+			return mcpError("history cursor predates count reconciliation; start a new sync"), nil
+		}
 		if _, explicit := args["page_size"]; explicit && pageSize != run.PageSize {
 			return mcpError("cursor page_size differs from original run"), nil
 		}
@@ -240,7 +252,7 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 			return receiptForHistory(ctx, b, run), nil
 		}
 	} else {
-		run = historyRun{PageSize: pageSize, ID: randomDeliveryID(), Mode: mode, Status: "partial", Phase: "scan", Scope: "provider_accessible_history", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Limitations: []string{}, CursorHashes: map[string]bool{}}
+		run = historyRun{CoverageVersion: historyCoverageVersion, PageSize: pageSize, ID: randomDeliveryID(), Mode: mode, Status: "partial", Phase: "scan", Scope: "provider_accessible_history", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Limitations: []string{}, CursorHashes: map[string]bool{}}
 		raw, _ := json.Marshal(run)
 		_, err = ctx.AppDB().Exec(`INSERT INTO social_history_runs(id,project_id,social_account_id,binding,state) VALUES(?,?,?,?,?)`, run.ID, b.Project, b.ID, b.binding(), string(raw))
 		if err != nil {
@@ -294,6 +306,9 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 			}
 			run.Scanned++
 		}
+		if err = observeHistoryPage(ctx, &run, page); err != nil {
+			return nil, err
+		}
 		ids := []string{}
 		for _, post := range page.Posts {
 			ids = append(ids, post.ID)
@@ -330,18 +345,22 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 				run.Status = "limited"
 				addHistoryLimitation(&run, "Recent bounded sync does not establish full history coverage.")
 			} else if run.Phase == "scan" && page.Next == "" {
+				run.TraversalExhausted = true
+				if run.ProviderTotal != nil && int64(run.Counts.TraversalUnique) != *run.ProviderTotal {
+					requireHistoryReconciliation(&run, "provider_count_discrepancy")
+				}
 				run.Phase = "overlap"
 				run.Token = ""
 				run.CursorHashes = map[string]bool{}
 				run.LastPageHash = ""
 				run.RepeatedPages = 0
-			} else if run.Phase == "overlap" && (page.Next == "" || run.OverlapPages >= 2) {
-				run.Status = "complete"
-				if run.Incomplete {
-					run.Status = "limited"
+			} else if run.Phase == "overlap" && (page.Next == "" || (!run.ReconciliationFull && run.OverlapPages >= 2) || run.OverlapPages >= historyReconciliationPageLimit) {
+				run.ReconciliationExhausted = page.Next == ""
+				if run.ReconciliationFull && page.Next != "" {
+					run.Incomplete = true
+					addHistoryLimitation(&run, "Reconciliation page budget exhausted before the second traversal completed.")
 				}
-				now := run.ObservedAt
-				run.CompletedAt = &now
+				finishHistoryCoverage(&run)
 			}
 		}
 		run.Revision++
@@ -533,13 +552,16 @@ func historyState(ctx *sdk.AppCtx, b historyAccount) map[string]any {
 			out["limitations"] = run.Limitations
 			out["scope"] = run.Scope
 			out["observed_at"] = run.ObservedAt
+			out["coverage"] = historyCoverage(run)
+			out["needs_resync"] = run.CoverageVersion != historyCoverageVersion
 			first = false
 		}
-		if run.Mode == "full" && run.Status == "complete" && !run.Incomplete {
+		if historyCoverage(run)["complete"] == true {
 			out["complete"] = true
 			out["last_completed_at"] = run.CompletedAt
 			out["completed_limitations"] = run.Limitations
 			out["completed_scope"] = run.Scope
+			out["completed_coverage"] = historyCoverage(run)
 			t, e := time.Parse(time.RFC3339Nano, run.ObservedAt)
 			out["current"] = b.Status == "active" && e == nil && time.Since(t) <= 15*time.Minute && out["latest_status"] != "failed" && !(out["latest_mode"] == "full" && out["latest_status"] == "limited")
 			break
