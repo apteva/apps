@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.5.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.5.1. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.5.0.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.5.1.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -22,7 +22,9 @@ Independent Apteva sidecar app, version 0.5.0. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.5` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. The native format is 10: opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.7` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+
+The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
 The adapter stores typed scalar documents and encodes JSON fields as opaque JSON strings to preserve exact nested numbers and the app’s JSON depth contract. Native compound indexes provide ordered reads and nullable uniqueness. Atomic native batches plus a snapshot/write overlay implement cross-collection writes and read-your-writes. Collection/index changes use a durable intent journal so restart completes schema publication before accepting queries. Compatible broad aggregates use the native parallel streaming pipeline with up to four workers by default; indexed filtered aggregates keep their streaming index path. Native AVG and non-null field counts now use alpha.4 reducers. Integer SUM uses native exact reduction with per-group range proofs; out-of-int64 totals fail with `resource_limit`, and uncertain intermediate sums rescan the same snapshot through the checked accumulator. Staged write overlays keep that accumulator and decode only required fields into reusable query-local storage. The projected reader validates the pinned codec and uses the public decoder for other layouts. Reads default to a 16 MiB retained results/sort/group budget; projected sorts stream into a bounded top-page heap.
 
@@ -47,7 +49,7 @@ Cache targets apply per owned database; query budgets apply per operation. Neith
 
 ## Build and run
 
-Use Go 1.25.1 or newer. This module pins app-sdk v0.102.0, the latest published tag by commit topology at release preparation.
+Use Go 1.25.1 or newer. This module pins app-sdk v0.109.0, the latest published tag by commit topology at release preparation.
 
 ```sh
 cd apps/mcp/database
