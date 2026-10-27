@@ -12,7 +12,8 @@ import (
 func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (any, bool, error) {
 	var status, platform, provider, operation, postIdentity, failure, lastError string
 	var connection int64
-	err := ctx.AppDB().QueryRow(`SELECT t.status,a.platform,COALESCE(a.provider_slug,'native'),a.connection_id,COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),t.failure_code,COALESCE(t.last_error,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE t.id=? AND p.id=? AND p.project_id=?`, targetID, postID, projectScope(ctx)).Scan(&status, &platform, &provider, &connection, &operation, &postIdentity, &failure, &lastError)
+	var attempt int
+	err := ctx.AppDB().QueryRow(`SELECT t.status,a.platform,COALESCE(a.provider_slug,'native'),a.connection_id,COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),t.failure_code,COALESCE(t.last_error,''),t.attempts FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE t.id=? AND p.id=? AND p.project_id=?`, targetID, postID, projectScope(ctx)).Scan(&status, &platform, &provider, &connection, &operation, &postIdentity, &failure, &lastError, &attempt)
 	if err != nil {
 		return mcpError("target not found in this post/project"), true, nil
 	}
@@ -39,13 +40,16 @@ func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (a
 		if err != nil {
 			return nil, true, fmt.Errorf("reconcile selected TikTok operation: %w", err)
 		}
+		if !currentTikTokAttempt(ctx, targetID, attempt, operation) {
+			return mcpError("TikTok operation changed; inspect the current attempt"), true, nil
+		}
 		switch remote {
 		case "PUBLISH_COMPLETE":
 			identity := ""
 			if len(ids) > 0 {
 				identity = ids[0]
 			}
-			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL,failure_code='',upstream_status=0,retryable=0 WHERE id=?`, nullable(identity), targetID)
+			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL,failure_code='',upstream_status=0,retryable=0 WHERE id=? AND attempts=? AND publish_operation_id=?`, nullable(identity), targetID, attempt, operation)
 			if err == nil {
 				a.rollupPostStatus(ctx, postID)
 			}
@@ -61,7 +65,7 @@ func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (a
 			if _, err = tx.Exec(`INSERT OR IGNORE INTO target_delivery_attempts(target_id,operation_id,status,reason) VALUES(?,?,'failed',?)`, targetID, operation, reason); err != nil {
 				return nil, true, err
 			}
-			if _, err = tx.Exec(`UPDATE post_targets SET status='failed',publish_operation_id='',retryable=CASE WHEN ?='picture_size_check_failed' THEN 1 ELSE retryable END WHERE id=? AND publish_operation_id=?`, reason, targetID, operation); err != nil {
+			if _, err = tx.Exec(`UPDATE post_targets SET status='failed',publish_operation_id='',retryable=CASE WHEN ?='picture_size_check_failed' THEN 1 ELSE retryable END WHERE id=? AND attempts=? AND publish_operation_id=?`, reason, targetID, attempt, operation); err != nil {
 				return nil, true, err
 			}
 			if err = tx.Commit(); err != nil {
@@ -69,7 +73,7 @@ func (a *App) reconcileSelectedRetry(ctx *sdk.AppCtx, postID, targetID int64) (a
 			}
 
 		default:
-			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='publishing',identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, targetID)
+			_, err = ctx.AppDB().Exec(`UPDATE post_targets SET status='publishing',identity_resolve_after=datetime('now','+5 minutes') WHERE id=? AND attempts=? AND publish_operation_id=?`, targetID, attempt, operation)
 			if err == nil {
 				a.rollupPostStatus(ctx, postID)
 			}

@@ -271,7 +271,7 @@ func (d *deliveryDiagnostics) scheduleTikTokPoll(ctx *sdk.AppCtx, target int64) 
 	}
 	_ = d.save(ctx, target)
 	if d.NextPollAt != "" {
-		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=? WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, d.NextPollAt, target, projectScope(ctx))
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=? WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?) AND attempts=? AND COALESCE(publish_operation_id,'')=?`, d.NextPollAt, target, projectScope(ctx), d.boundAttempt, d.boundOperation)
 	}
 }
 
@@ -366,8 +366,9 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		var body struct {
-			RecoveryID string `json:"recovery_id"`
-			Confirm    bool   `json:"confirm"`
+			RecoveryID    string `json:"recovery_id"`
+			Confirm       bool   `json:"confirm"`
+			ReviewExpired bool   `json:"review_expired_upload"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 			http.Error(w, "invalid JSON", 400)
@@ -375,6 +376,7 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 		}
 		args["recovery_id"] = body.RecoveryID
 		args["confirm"] = body.Confirm
+		args["review_expired_upload"] = body.ReviewExpired
 		if action == "revalidate" {
 			handler = a.toolPostDeliveryRevalidate
 		} else {

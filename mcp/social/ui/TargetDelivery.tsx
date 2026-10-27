@@ -58,6 +58,8 @@ export function TargetDelivery({
     decision: string;
     reason?: string;
     recovery_id?: string;
+    recovery_kind?: string;
+    expired_upload_review?: { reason?: string };
   }>();
   const identity = `${projectId}:${postId}:${targetId}`;
   const current = useRef(identity);
@@ -75,7 +77,11 @@ export function TargetDelivery({
   useEffect(() => {
     setLocal(diagnostics);
   }, [diagnostics]);
-  const run = async (action: "inspect" | "revalidate" | "recover") => {
+  const run = async (
+    action: "inspect" | "revalidate" | "recover",
+    reviewExpired = false,
+  ) => {
+    if (action === "revalidate") setDecision(undefined);
     const captured = identity;
     setBusy(true);
     setError("");
@@ -96,7 +102,9 @@ export function TargetDelivery({
                   recovery_id: decision?.recovery_id,
                   confirm: true,
                 })
-              : undefined,
+              : reviewExpired
+                ? JSON.stringify({ review_expired_upload: true })
+                : undefined,
         },
       );
       if (!response.ok) throw new Error(await response.text());
@@ -217,6 +225,17 @@ export function TargetDelivery({
         <button type="button" disabled={busy} onClick={() => run("revalidate")}>
           Check recovery eligibility
         </button>
+        {d?.provider_status === "PROCESSING_UPLOAD" &&
+          d.acknowledged_upload_bytes === 0 &&
+          d.latest_upload_error && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => run("revalidate", true)}
+            >
+              Review expired upload
+            </button>
+          )}
         {decision?.recovery_id &&
           (decision.decision === "retry" || decision.decision === "resume") && (
             <button
@@ -224,13 +243,17 @@ export function TargetDelivery({
               disabled={busy}
               onClick={() => run("recover")}
             >
-              Recover this target
+              {decision.recovery_kind === "expired_zero_byte_upload"
+                ? "Retire expired upload and recover this target"
+                : "Recover this target"}
             </button>
           )}
       </div>
       {decision && (
         <p role="status" className="mt-1">
           {decision.decision}: {decision.reason}
+          {decision.expired_upload_review?.reason &&
+            ` · ${decision.expired_upload_review.reason}`}
         </p>
       )}
       {error && (

@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.3
+version: 0.20.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -216,7 +216,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.3
+    ref: social/v0.20.4
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1034,13 +1034,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_delivery_revalidate",
-			Description: "Audit source, account, options and known remote state for one target. Returns decision, evidence and an expiring recovery_id; never publishes. Args: post_id, target_id.",
-			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}}, []string{"post_id", "target_id"}),
+			Description: "Audit source, account, options and known remote state for one target. Returns decision, evidence and an expiring recovery_id; never publishes. Args: post_id, target_id, review_expired_upload? (explicit review of application-owned receipts).",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "review_expired_upload": map[string]any{"type": "boolean", "description": "Explicitly review expiry evidence for a zero-byte TikTok FILE_UPLOAD. Missing legacy evidence blocks replacement."}}, []string{"post_id", "target_id"}),
 			Handler:     a.toolPostDeliveryRevalidate,
 		},
 		{
 			Name:        "post_delivery_recover",
-			Description: "Consume one audited recovery decision with confirm=true. Rechecks source and remote state, reconciles completed/pending operations, or retries only this eligible target once per revision. Never replaces unknown operations. Args: post_id, target_id, recovery_id, confirm.",
+			Description: "Consume one audited recovery decision with confirm=true. Rechecks source and remote state, reconciles completed/pending operations, or retries only this eligible target once per revision. Expired zero-byte uploads require verified receipts and a stopped uploader. Args: post_id, target_id, recovery_id, confirm.",
 			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "recovery_id": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"}}, []string{"post_id", "target_id", "recovery_id", "confirm"}),
 			Handler:     a.toolPostDeliveryRecover,
 		},
@@ -2742,6 +2742,7 @@ func (a *App) retryFailedSchedule(ctx *sdk.AppCtx, pid string, postID int64, sch
 // to the platform-specific publish strategy.
 type publishJob struct {
 	targetID, connID  int64
+	deliveryAttempt   int
 	platform, extID   string
 	providerSlug      string
 	providerAccountID string
@@ -2852,6 +2853,9 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		if !claimed {
 			continue
 		}
+		if err := ctx.AppDB().QueryRow(`SELECT attempts FROM post_targets WHERE id=?`, j.targetID).Scan(&j.deliveryAttempt); err != nil {
+			continue
+		}
 		if j.providerSlug == zernioProviderSlug {
 			if len(mediaIDs) > 0 && (mediaErr != nil || len(j.media) == 0) {
 				msg := "attached media could not be resolved"
@@ -2908,17 +2912,23 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			continue
 		}
 		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
+		if j.platform == "tiktok" {
+			var current int
+			if checkErr := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE id=? AND attempts=? AND status='publishing'`, j.targetID, j.deliveryAttempt).Scan(&current); checkErr != nil || current != 1 {
+				continue
+			}
+		}
 		if err != nil {
 			var awaiting *awaitingAudienceError
 			if errors.As(err, &awaiting) && platformPostID != "" {
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0 WHERE id=?`, platformPostID, platformURL, awaiting.Error(), j.targetID)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0 WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), j.targetID, j.deliveryAttempt)
 				ctx.Emit("target.awaiting_audience_setup", map[string]any{"target_id": j.targetID, "platform": j.platform, "platform_post_id": platformPostID})
 				continue
 			}
 			var warning *publishedWarningError
 			if errors.As(err, &warning) && (platformPostID != "" || warning.operationID != "") {
 				if warning.pending {
-					_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=?,last_error=?,retryable=0,identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, warning.operationID, warning.Error(), j.targetID)
+					_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=?,last_error=?,retryable=0,identity_resolve_after=datetime('now','+5 minutes') WHERE id=? AND attempts=? AND status='publishing'`, warning.operationID, warning.Error(), j.targetID, j.deliveryAttempt)
 					ctx.Emit("target.pending", map[string]any{"target_id": j.targetID, "platform": j.platform, "reason": warning.Error()})
 					continue
 				}
@@ -2929,9 +2939,9 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 					        publish_operation_id=?, identity_resolve_attempts=0,
 					        identity_resolve_after=CASE WHEN ?!='' THEN datetime('now','+5 minutes') ELSE NULL END,
 					        published_at=CURRENT_TIMESTAMP, last_error=?
-					  WHERE id=?`,
+					  WHERE id=? AND attempts=? AND status='publishing'`,
 					nullable(platformPostID), nullable(platformURL), warning.operationID,
-					warning.operationID, warning.Error(), j.targetID,
+					warning.operationID, warning.Error(), j.targetID, j.deliveryAttempt,
 				)
 				ctx.Emit("target.published_warning", map[string]any{
 					"target_id": j.targetID,
@@ -2941,7 +2951,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 				successes++
 				continue
 			}
-			a.markTargetError(ctx, j.targetID, err)
+			a.markTargetError(ctx, j.targetID, err, j.deliveryAttempt)
 			failures++
 			continue
 		}
@@ -2950,8 +2960,8 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			    SET status='published', platform_post_id=?, platform_url=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
 			        published_at=CURRENT_TIMESTAMP, last_error=NULL
-			  WHERE id=?`,
-			nullable(platformPostID), nullable(platformURL), j.targetID,
+			  WHERE id=? AND attempts=? AND status='publishing'`,
+			nullable(platformPostID), nullable(platformURL), j.targetID, j.deliveryAttempt,
 		)
 		ctx.Emit("target.published", map[string]any{
 			"target_id":        j.targetID,
@@ -4428,19 +4438,22 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 		_ = d.save(ctx, j.targetID)
 		return "", "", errors.New("post_video init: missing upload_url or publish_id; verify the remote outcome before retrying")
 	}
-	if err := persistPublishOperation(ctx, j.targetID, publishID); err != nil {
+	if err := persistTikTokUploadOperation(ctx, j.targetID, &d, publishID); err != nil {
 		return "", "", &publishedWarningError{warning: err.Error(), operationID: publishID, pending: true}
 	}
 	d.OperationID = publishID
+	d.boundOperation = publishID
 	d.Initialization.Result = "operation_persisted"
 	d.UploadURLSHA256 = uploadURLHash(uploadURL)
 	d.OperationState = "pending"
 	captureProviderDiagnostics(&d, out)
-	d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "operation_persisted"})
+	if err := d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "operation_persisted"}); err != nil {
+		return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: "could not persist upload receipt; upload not started"}
+	}
 	ctx.Logger().Info("publishTikTok: init done",
 		"publish_id", publishID, "upload_url_len", len(uploadURL))
 
-	if err := uploadTikTokChunks(ctx, j.targetID, prepared, &d, uploadURL, chunkSize, totalChunks); err != nil {
+	if err := guardedTikTokUpload(ctx, j.targetID, prepared, &d, uploadURL, chunkSize, totalChunks); err != nil {
 		return "", "", &publishedWarningError{pending: true, operationID: publishID, warning: err.Error() + "; inspect existing operation before recovery"}
 	}
 
@@ -4534,6 +4547,7 @@ func (id *exactJSONID) UnmarshalJSON(raw []byte) error {
 }
 
 func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID string) (string, string, []string, error) {
+	bindings := tikTokStatusBindings(ctx, connID, publishID)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
 	var payload struct {
 		Data struct {
@@ -4560,16 +4574,16 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	}
 	observation.QuerySucceeded = parseErr == nil && err == nil && res != nil && res.Success && (payload.Error.Code == "" || payload.Error.Code == "ok") && payload.Data.Status != ""
 	if parseErr != nil {
-		a.recordTikTokStatus(ctx, connID, publishID, "", "", "", "", res, parseErr, observation)
+		a.recordTikTokStatus(ctx, bindings, publishID, "", "", "", "", res, parseErr, observation)
 		return "", "", nil, errors.New("TikTok returned malformed operation status; outcome is unknown")
 	}
 	if payload.Data.Status != "PUBLISH_COMPLETE" && len(payload.Data.PostIDs) > 0 {
 		observation.QuerySucceeded = false
 		conflict := errors.New("TikTok returned a public identity with a non-complete status; outcome is unknown")
-		a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, conflict, observation)
+		a.recordTikTokStatus(ctx, bindings, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, conflict, observation)
 		return "", "", nil, conflict
 	}
-	a.recordTikTokStatus(ctx, connID, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, err, observation)
+	a.recordTikTokStatus(ctx, bindings, publishID, payload.Data.Status, payload.Data.Fail, payload.Error.Code, payload.Error.LogID, res, err, observation)
 	if err != nil {
 		return "", "", nil, errors.New(redactDeliverySecrets(err.Error()))
 	}
@@ -5046,9 +5060,12 @@ func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 	a.markTargetFailure(ctx, targetID, msg, publishFailure{Code: "validation_error", Retryable: false})
 }
 
-func (a *App) markTargetError(ctx *sdk.AppCtx, targetID int64, err error) {
+func (a *App) markTargetError(ctx *sdk.AppCtx, targetID int64, err error, expectedAttempt ...int) {
 	failure := classifyPublishFailure(err)
 	d := loadDeliveryDiagnostics(ctx, targetID)
+	if len(expectedAttempt) > 0 && d.boundAttempt != expectedAttempt[0] {
+		return
+	}
 	if d.OperationState == "unknown" || d.OperationState == "pending" && failure.Code != "upload_incomplete" {
 		failure.Code, failure.Retryable = "outcome_unknown", false
 	}
@@ -5064,17 +5081,21 @@ func (a *App) markTargetError(ctx *sdk.AppCtx, targetID int64, err error) {
 		}
 		_ = d.save(ctx, targetID)
 	}
-	a.markTargetFailure(ctx, targetID, redactDeliverySecrets(err.Error()), failure)
+	a.markTargetFailure(ctx, targetID, redactDeliverySecrets(err.Error()), failure, expectedAttempt...)
 }
 
-func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, failure publishFailure) {
+func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, failure publishFailure, expectedAttempt ...int) {
+	attempt := -1
+	if len(expectedAttempt) > 0 {
+		attempt = expectedAttempt[0]
+	}
 	msg = redactDeliverySecrets(msg)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='failed', last_error=?, failure_code=?, retryable=?,
 		        upstream_status=?, existing_post_id=?
-		  WHERE id=?`,
-		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, targetID,
+		  WHERE id=? AND (?<0 OR attempts=?)`,
+		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, targetID, attempt, attempt,
 	)
 	ctx.Emit("target.failed", map[string]any{
 		"target_id":        targetID,
@@ -5729,8 +5750,8 @@ func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCt
 				          ELSE datetime('now','+7 days')
 				        END,
 				        last_error=?
-				  WHERE id=?`,
-				err.Error(), target.TargetID,
+				  WHERE id=? AND COALESCE(publish_operation_id,'')=? AND COALESCE(platform_post_id,'')=?`,
+				err.Error(), target.TargetID, target.PublishOperationID, target.ExtPostID,
 			)
 			continue
 		}
@@ -6310,6 +6331,14 @@ func (a *App) resolveTikTokPublicPostID(ctx *sdk.AppCtx, target metricsTarget) (
 	if operationID == "" {
 		return "", errors.New("TikTok target has no public post ID")
 	}
+	var expectedOperation, expectedPublic string
+	var attempt int
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(publish_operation_id,''),attempts,COALESCE(platform_post_id,'') FROM post_targets WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, target.TargetID, projectScope(ctx)).Scan(&expectedOperation, &attempt, &expectedPublic); err != nil {
+		return "", err
+	}
+	if expectedPublic != target.ExtPostID || expectedOperation != operationID && !(expectedOperation == "" && target.ExtPostID == operationID) {
+		return "", errors.New("stale TikTok identity operation")
+	}
 	status, failReason, postIDs, err := a.getTikTokPublishStatus(ctx, target.ConnID, operationID)
 	if err != nil {
 		return "", fmt.Errorf("TikTok public post ID could not be resolved: %w", err)
@@ -6321,16 +6350,19 @@ func (a *App) resolveTikTokPublicPostID(ctx *sdk.AppCtx, target metricsTarget) (
 		return "", fmt.Errorf("TikTok public post ID is not available yet (status %s)", status)
 	}
 	publicID := postIDs[0]
-	_, err = ctx.AppDB().Exec(
+	updated, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET platform_post_id=?, publish_operation_id='',
 		        identity_resolve_attempts=0, identity_resolve_after=NULL,
 		        last_error=NULL
-		  WHERE id=?`,
-		publicID, target.TargetID,
+		  WHERE id=? AND attempts=? AND COALESCE(publish_operation_id,'')=? AND COALESCE(platform_post_id,'')=?`,
+		publicID, target.TargetID, attempt, expectedOperation, expectedPublic,
 	)
 	if err != nil {
 		return "", err
+	}
+	if n, _ := updated.RowsAffected(); n != 1 {
+		return "", errors.New("stale TikTok identity result ignored")
 	}
 	return publicID, nil
 }

@@ -32,6 +32,11 @@ func TestTikTok404NeverAcknowledgesRejectedBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := loadDeliveryDiagnostics(ctx, target)
+	r, _ := loadRecoveryTarget(ctx, post, target)
+	receipt, receiptErr := loadUploadReceipt(ctx, r)
+	if receiptErr != nil || receipt.UploaderState != "stopped" || receipt.StopEvidence.AcknowledgedBytes == nil || *receipt.StopEvidence.AcknowledgedBytes != 0 || receipt.StopEvidence.LastUpload == nil || receipt.StopEvidence.LastUpload.HTTPStatus != 404 {
+		t.Fatal("uploader termination receipt missing", receipt, receiptErr)
+	}
 	if d.AcknowledgedBytes == nil || *d.AcknowledgedBytes != 0 || d.TransferredBytes != 0 || d.AttemptedBytes == nil || *d.AttemptedBytes != 24 || d.VerifiedSourceBytes == nil || *d.VerifiedSourceBytes != 24 {
 		t.Fatalf("wrong counters: %+v", d)
 	}

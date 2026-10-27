@@ -253,18 +253,19 @@ func persistPublishOperation(ctx *sdk.AppCtx, targetID int64, id string) error {
 }
 
 func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
-	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,t.publish_operation_id FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND t.status='publishing' AND a.platform='tiktok' AND t.publish_operation_id<>'' AND COALESCE(json_extract(CASE WHEN json_valid(t.delivery_diagnostics) THEN t.delivery_diagnostics ELSE '{}' END,'$.automatic_polling_stopped'),0)=0 AND (t.identity_resolve_after IS NULL OR datetime(t.identity_resolve_after)<=CURRENT_TIMESTAMP) LIMIT 20`, projectScope(ctx))
+	rows, err := ctx.AppDB().Query(`SELECT t.id,t.post_id,a.connection_id,t.publish_operation_id,t.attempts FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND t.status='publishing' AND a.platform='tiktok' AND t.publish_operation_id<>'' AND COALESCE(json_extract(CASE WHEN json_valid(t.delivery_diagnostics) THEN t.delivery_diagnostics ELSE '{}' END,'$.automatic_polling_stopped'),0)=0 AND (t.identity_resolve_after IS NULL OR datetime(t.identity_resolve_after)<=CURRENT_TIMESTAMP) LIMIT 20`, projectScope(ctx))
 	if err != nil {
 		return
 	}
 	type operation struct {
 		id, post, conn int64
+		attempt        int
 		op             string
 	}
 	var ops []operation
 	for rows.Next() {
 		var op operation
-		if rows.Scan(&op.id, &op.post, &op.conn, &op.op) == nil {
+		if rows.Scan(&op.id, &op.post, &op.conn, &op.op, &op.attempt) == nil {
 			ops = append(ops, op)
 		}
 	}
@@ -273,6 +274,9 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 		func() {
 			unlock := lockSocialPost(ctx, op.post)
 			defer unlock()
+			if !currentTikTokAttempt(ctx, op.id, op.attempt, op.op) {
+				return
+			}
 			_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, op.id)
 			d := loadDeliveryDiagnostics(ctx, op.id)
 			d.AutomaticPollAttempts++
@@ -281,6 +285,9 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 			}
 			status, reason, ids, err := a.getTikTokPublishStatus(ctx, op.conn, op.op)
 			d = loadDeliveryDiagnostics(ctx, op.id)
+			if !currentTikTokAttempt(ctx, op.id, op.attempt, op.op) {
+				return
+			}
 			if err != nil || (status != "FAILED" && status != "PUBLISH_COMPLETE") {
 				d.scheduleTikTokPoll(ctx, op.id)
 			}
@@ -288,13 +295,13 @@ func (a *App) recoverTikTokDeliveries(ctx *sdk.AppCtx) {
 				return
 			}
 			if status == "FAILED" {
-				a.markTargetError(ctx, op.id, &upstreamCallError{Status: 422, Body: "TikTok publish failed: " + reason})
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='failed',last_error=?,failure_code='upstream_rejected',retryable=0,upstream_status=422 WHERE id=? AND attempts=? AND publish_operation_id=?`, "TikTok publish failed: "+safeRequestID(reason), op.id, op.attempt, op.op)
 			} else if status == "PUBLISH_COMPLETE" {
 				id := ""
 				if len(ids) > 0 {
 					id = ids[0]
 				}
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing'`, nullable(id), op.id)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='published',platform_post_id=?,published_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='publishing' AND attempts=? AND publish_operation_id=?`, nullable(id), op.id, op.attempt, op.op)
 			} else {
 				return
 			}
