@@ -284,24 +284,26 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusMethodNotAllowed, errors.New("GET only"))
 			return
 		}
-		runtime, err := a.svc.runtime().GetRuntime(run.RuntimeID)
+		out, err := a.svc.inspectStoredRun(run)
 		if err != nil {
-			httpError(w, http.StatusBadGateway, err)
+			httpError(w, http.StatusInternalServerError, err)
 			return
 		}
-		edge, err := a.svc.runtime().ListRuntimeEdgeCalls(run.RuntimeID)
-		if err != nil {
-			httpError(w, http.StatusBadGateway, err)
-			return
-		}
-		out := map[string]any{"run": run, "runtime": runtime, "edge_calls": edge, "web_fixtures": run.WebFixtures}
-		if agent := strings.TrimSpace(r.URL.Query().Get("agent")); agent != "" {
-			events, err := a.svc.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, agent, time.Time{}, 500)
-			if err != nil {
-				httpError(w, http.StatusBadGateway, err)
-				return
+		if out["runtime_state"] == "available" {
+			edge, edgeErr := a.svc.runtime().ListRuntimeEdgeCalls(run.RuntimeID)
+			if edgeErr != nil {
+				out["edge_error"] = edgeErr.Error()
+			} else {
+				out["edge_calls"] = edge
 			}
-			out["telemetry"] = events
+			if agent := strings.TrimSpace(r.URL.Query().Get("agent")); agent != "" {
+				events, telemetryErr := a.svc.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, agent, time.Time{}, 500)
+				if telemetryErr != nil {
+					out["telemetry_error"] = telemetryErr.Error()
+				} else {
+					out["telemetry"] = events
+				}
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return

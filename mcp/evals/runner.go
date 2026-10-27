@@ -13,20 +13,34 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+var errRunCancelled = errors.New("eval run cancelled")
+
 func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	started := time.Now().UTC()
 	run.StartedAt = &started
-	var environmentRun *EnvironmentRun
+	control := s.registerRunControl(run)
+	attempt := run.SimulationAttempt
 	defer func() {
-		if environmentRun != nil {
-			var ignored map[string]any
-			_ = s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_stop", map[string]any{"id": environmentRun.ID}, &ignored)
-		}
+		defer func() {
+			if cleanupErr := s.completeRunControl(run, attempt, control); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+		}()
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("eval runner panic: %v", recovered)
 		}
 		if err != nil {
-			run.Status, run.Stage, run.Error = "error", "failed", err.Error()
+			cancelled := errors.Is(err, errRunCancelled)
+			if !cancelled {
+				current, currentErr := s.db.getRun(run.ID)
+				cancelled = currentErr == nil && current != nil && (current.Status == "cancelled" || current.CancelRequestedAt != nil)
+			}
+			if cancelled {
+				s.emitExperimentCompleted(run.ExperimentID)
+				err = nil
+				return
+			}
+			run.Status, run.Outcome, run.Stage, run.Error = "error", "invalid_harness", "failed", err.Error()
 			finished := time.Now().UTC()
 			run.FinishedAt = &finished
 			_ = s.db.finishRun(run)
@@ -39,7 +53,12 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return err
 	}
 	spec := map[string]any{"version": 1, "ttl_seconds": run.CaseSnapshot.TimeoutSeconds + 300, "network_mode": "block", "integration_mode": "mock"}
-	if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
+	if len(run.CaseSnapshot.Environment) > 0 {
+		spec = cloneMap(run.CaseSnapshot.Environment)
+		if err = s.resolveInlineEnvironment(spec, run.CaseSnapshot.TimeoutSeconds); err != nil {
+			return fmt.Errorf("resolve inline environment: %w", err)
+		}
+	} else if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
 		var definition EnvironmentDefinition
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": environmentID}, &definition); err != nil {
 			return fmt.Errorf("load environment: %w", err)
@@ -58,14 +77,23 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_create", map[string]any{"kind": "eval", "spec": spec}, &created); err != nil {
 		return fmt.Errorf("start environment: %w", err)
 	}
-	environmentRun = &created
+	control.mu.Lock()
+	control.environment = created.ID
+	control.runtime = created.RuntimeID
+	control.mu.Unlock()
 	run.EnvironmentRunID = created.ID
+	if _, err = s.db.db.Exec(`UPDATE eval_runs SET environment_run_id=? WHERE id=? AND status='running'`, created.ID, run.ID); err != nil {
+		return err
+	}
+	if err = s.db.saveAttempt(run, attempt, created.RuntimeID, nil); err != nil {
+		return err
+	}
 
 	if err = s.setRunStage(run, "spawning_agent"); err != nil {
 		return err
 	}
 	var spawned sdk.RuntimeAgent
-	spawnArgs := map[string]any{"run_id": created.ID, "agent": map[string]any{"source_agent_id": run.TargetSnapshot.AgentID, "alias": "main", "start_paused": true, "provider": run.TargetSnapshot.Provider, "model": run.TargetSnapshot.Model}}
+	spawnArgs := map[string]any{"run_id": created.ID, "agent": targetAgentSpec(run.TargetSnapshot)}
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
 		return fmt.Errorf("spawn agent: %w", err)
 	}
@@ -77,22 +105,24 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		input := map[string]any{
 			"run_id": created.ID,
 			"voice": map[string]any{
-				"target_agent":       "main",
-				"target_directive":   run.TargetSnapshot.Directive,
-				"caller_name":        voice.CallerName,
-				"caller_persona":     voice.CallerPersona,
-				"caller_goal":        voice.CallerGoal,
-				"caller_behavior":    voice.CallerBehavior,
-				"provider":           voice.Provider,
-				"voice":              voice.Voice,
-				"caller_provider":    voice.CallerProvider,
-				"caller_voice":       voice.CallerVoice,
-				"greeting":           voice.Greeting,
-				"timeout_seconds":    run.CaseSnapshot.TimeoutSeconds,
-				"disconnect_on_done": true,
-				"transport":          voice.Transport,
-				"protocol_fixture":   voice.ProtocolFixture,
-				"audio_conditions":   voice.AudioConditions,
+				"target_agent":         "main",
+				"target_directive":     run.TargetSnapshot.Directive,
+				"caller_name":          voice.CallerName,
+				"caller_persona":       voice.CallerPersona,
+				"caller_goal":          voice.CallerGoal,
+				"caller_behavior":      voice.CallerBehavior,
+				"provider":             voice.Provider,
+				"voice":                voice.Voice,
+				"caller_provider":      voice.CallerProvider,
+				"caller_voice":         voice.CallerVoice,
+				"greeting":             voice.Greeting,
+				"timeout_seconds":      run.CaseSnapshot.TimeoutSeconds,
+				"disconnect_on_done":   true,
+				"transport":            voice.Transport,
+				"protocol_fixture":     voice.ProtocolFixture,
+				"audio_conditions":     voice.AudioConditions,
+				"microphone_mode":      voice.MicrophoneMode,
+				"final_reply_contains": voice.FinalReplyContains,
 			},
 		}
 		if err = s.setRunStage(run, "connecting_voice_call"); err != nil {
@@ -103,6 +133,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("run voice call: %w", err)
 		}
 		run.VoiceCall = &call
+		if err := s.acceptVoiceCancellation(run, &call); err != nil {
+			return err
+		}
 		run.Execution = call.Execution
 		run.Assertions = append(run.Assertions, voiceAssertionResults(voice, &call)...)
 		if issues := voiceSimulationIssues(&call); len(issues) > 0 {
@@ -124,14 +157,16 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return err
 		}
 		var execution sdk.RuntimeAgentExecution
-		wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
+		wait := map[string]any{"scope": "tree", "timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
 			return fmt.Errorf("wait for agent: %w", err)
 		}
 		run.Execution = &execution
-		if execution.Status == "failed" || execution.Status == "timeout" {
-			return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
-		}
+		// A started agent that times out or fails is still evidence about the
+		// target. Preserve its trace and continue through deterministic checks
+		// and judging so imperfect work receives a quality score instead of
+		// being mislabeled as a harness failure. Failures before an execution is
+		// returned still take the error path above and remain invalid_harness.
 	}
 	collaboratorErrors := []string{}
 	if len(collaborators) > 0 {
@@ -146,16 +181,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	}
 	assertionErrors := []string{}
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		var result AssertionResult
-		var assertionErr error
-		if assertion.Type == outputEqualsAssertionType {
-			result, assertionErr = evaluateOutputEquals(assertion, run.Execution)
-		} else {
-			input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
-			assertionErr = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
-		}
+		result, assertionErr := s.evaluateAssertion(created.ID, assertion, run.Execution)
 		if assertionErr != nil {
-			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error()}
+			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error(), Weight: assertion.Weight, Critical: assertion.Critical, Category: assertion.Category, Disqualify: assertion.Disqualify}
 			assertionErrors = append(assertionErrors, fmt.Sprintf("%s: %v", assertion.Name, assertionErr))
 		}
 		if result.Name == "" {
@@ -177,7 +205,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("judge: %w", judgeErr)
 		}
 		run.Judge = verdict
-		if len(assertionErrors) == 0 && len(collaboratorErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
+		if run.TargetSnapshot.AgentID > 0 && len(assertionErrors) == 0 && len(collaboratorErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
 			suggestion := &Suggestion{ID: "suggest_" + token(10), RunID: run.ID, AgentID: run.TargetSnapshot.AgentID, Directive: verdict.DirectiveSuggestion.Directive, ExpectedETag: run.TargetSnapshot.DirectiveETag, Reason: verdict.DirectiveSuggestion.Reason, Status: "proposed", CreatedAt: time.Now().UTC()}
 			_ = s.db.saveSuggestion(suggestion)
 		}
@@ -185,7 +213,8 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	evaluationErrors := append(collaboratorErrors, assertionErrors...)
 	if len(evaluationErrors) > 0 {
 		run.Status, run.Stage = "error", "failed"
-		run.CorrectnessScore, run.OverallScore = nil, nil
+		run.Outcome = "invalid_harness"
+		run.CorrectnessScore, run.QualityScore, run.OverallScore = nil, nil, nil
 		if run.Judge != nil {
 			value := run.Judge.Score
 			run.JudgeScore = &value
@@ -203,14 +232,15 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return nil
 	}
 
-	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
-	run.Status, run.Stage, run.CorrectnessScore, run.JudgeScore, run.OverallScore = status, "completed", correctness, judgeScore, overall
+	status, outcome, correctness, judgeScore, quality := scoreRunProfile(run.CaseSnapshot.RatingProfile, run.Assertions, run.Judge)
+	run.Status, run.Outcome, run.Stage = status, outcome, "completed"
+	run.CorrectnessScore, run.JudgeScore, run.QualityScore, run.OverallScore = correctness, judgeScore, quality, quality
 	finished := time.Now().UTC()
 	run.FinishedAt = &finished
 	if err = s.db.finishRun(run); err != nil {
 		return err
 	}
-	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "status": status, "score": overall})
+	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "status": status, "outcome": outcome, "score": quality})
 	s.emitExperimentCompleted(run.ExperimentID)
 	if experiment.TriggerType == "schedule" {
 		updated, _ := s.db.getExperiment(run.ExperimentID)
@@ -222,6 +252,117 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 	return nil
+}
+
+func (s *service) evaluateAssertion(environmentRunID string, assertion Assertion, execution *sdk.RuntimeAgentExecution) (AssertionResult, error) {
+	if len(assertion.EvidenceAnyOf) > 0 {
+		result := AssertionResult{Name: assertion.Name, Weight: assertion.Weight, Critical: assertion.Critical, Category: assertion.Category, Disqualify: assertion.Disqualify}
+		var failures []string
+		for _, alternative := range assertion.EvidenceAnyOf {
+			if alternative.Name == "" {
+				alternative.Name = assertion.Name
+			}
+			item, err := s.evaluateAssertion(environmentRunID, alternative, execution)
+			result.Evidence = append(result.Evidence, item)
+			if err != nil {
+				failures = append(failures, err.Error())
+				continue
+			}
+			if item.Passed {
+				result.Passed, result.Actual = true, item.Actual
+				result.Message = "accepted equivalent evidence: " + alternative.Name
+				return result, nil
+			}
+		}
+		if len(failures) == len(assertion.EvidenceAnyOf) {
+			return result, errors.New(strings.Join(failures, "; "))
+		}
+		result.Message = "none of the equivalent evidence paths passed"
+		return result, nil
+	}
+	var result AssertionResult
+	var err error
+	if assertion.Type == outputEqualsAssertionType {
+		result, err = evaluateOutputEquals(assertion, execution)
+	} else {
+		input := map[string]any{"run_id": environmentRunID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
+		err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
+	}
+	result.Weight, result.Critical, result.Category, result.Disqualify = assertion.Weight, assertion.Critical, assertion.Category, assertion.Disqualify
+	return result, err
+}
+
+func (s *service) resolveInlineEnvironment(spec map[string]any, timeoutSeconds int) error {
+	if _, ok := spec["version"]; !ok {
+		spec["version"] = 1
+	}
+	if _, ok := spec["ttl_seconds"]; !ok {
+		spec["ttl_seconds"] = timeoutSeconds + 300
+	}
+	if _, ok := spec["network_mode"]; !ok {
+		spec["network_mode"] = "block"
+	}
+	if _, ok := spec["integration_mode"]; !ok {
+		spec["integration_mode"] = "mock"
+	}
+	rawApps, ok := spec["apps"]
+	if !ok {
+		return nil
+	}
+	requested := []string{}
+	switch values := rawApps.(type) {
+	case []any:
+		for _, raw := range values {
+			name, _ := raw.(string)
+			requested = append(requested, strings.TrimSpace(name))
+		}
+	case []string:
+		for _, name := range values {
+			requested = append(requested, strings.TrimSpace(name))
+		}
+	default:
+		return errors.New("apps must be an array of app names")
+	}
+	var catalog struct {
+		Apps []struct {
+			InstallID int64  `json:"install_id"`
+			Name      string `json:"name"`
+			Status    string `json:"status"`
+		} `json:"apps"`
+	}
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &catalog); err != nil {
+		return fmt.Errorf("load app catalog: %w", err)
+	}
+	available := map[string]int64{}
+	for _, app := range catalog.Apps {
+		if app.InstallID > 0 && app.Status == "running" {
+			available[app.Name] = app.InstallID
+		}
+	}
+	ids := make([]int64, 0, len(requested))
+	for _, name := range requested {
+		id := available[name]
+		if id == 0 {
+			return fmt.Errorf("required app %q is not installed and running in this project", name)
+		}
+		ids = append(ids, id)
+	}
+	spec["app_install_ids"] = ids
+	delete(spec, "apps")
+	return nil
+}
+
+func targetAgentSpec(target Target) map[string]any {
+	agent := map[string]any{
+		"alias": "main", "start_paused": true,
+		"provider": target.Provider, "model": target.Model,
+	}
+	if target.Draft != nil {
+		agent["draft"] = target.Draft
+	} else {
+		agent["source_agent_id"] = target.AgentID
+	}
+	return agent
 }
 
 func (s *service) setRunStage(run *Run, stage string) error {
@@ -300,8 +441,12 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	if err != nil {
 		return nil, err
 	}
-	alignJudgeGoals(verdict, run.CaseSnapshot.Goals)
+	alignJudgeGoals(verdict, run.CaseSnapshot.Goals, run.CaseSnapshot.RatingProfile)
 	verdict.Model, verdict.Usage = response.Model, response.Usage
+	verdict.PromptVersion, verdict.RubricVersion = judgePromptVersion, judgeRubricVersion
+	if run.CaseSnapshot.RatingProfile == agenticQualityV2Profile {
+		verdict.PromptVersion, verdict.RubricVersion = judgePromptVersionV2, judgeRubricVersionV2
+	}
 	return verdict, nil
 }
 
@@ -337,9 +482,18 @@ func prepareEnvironmentSpec(spec map[string]any, target Target) (map[string]any,
 			return nil, nil, fmt.Errorf("duplicate environment agent alias %q at indexes %d and %d", effectiveAlias, previous, i)
 		}
 		aliases[effectiveAlias] = i
-		if agents[i].SourceAgentID == target.AgentID {
+		if target.AgentID > 0 && agents[i].SourceAgentID == target.AgentID {
 			matches = append(matches, i)
 		}
+	}
+	if target.Draft != nil {
+		for i, agent := range agents {
+			if agent.Alias == "" || agent.Alias == "main" {
+				return nil, nil, fmt.Errorf("environment agent at index %d uses reserved evaluation alias %q; draft targets already occupy main", i, "main")
+			}
+		}
+		spec["agents"] = agents
+		return spec, agents, nil
 	}
 	if len(matches) == 0 {
 		return nil, nil, fmt.Errorf("environment agents do not declare evaluation target agent_id %d by source_agent_id", target.AgentID)
@@ -529,6 +683,9 @@ func voiceTranscriptCounts(transcript []VoiceTranscriptTurn) (receptionist, call
 }
 
 func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
+	if err := s.prepareRetry(run, issues); err != nil {
+		return err
+	}
 	retried, err := s.db.retryInvalidSimulation(run)
 	if err != nil {
 		return err
@@ -543,7 +700,9 @@ func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
 		run.Assertions = nil
 		run.CorrectnessScore = nil
 		run.JudgeScore = nil
+		run.QualityScore = nil
 		run.OverallScore = nil
+		run.Outcome = ""
 		run.StartedAt = nil
 		run.FinishedAt = nil
 		run.Error = ""
@@ -555,10 +714,12 @@ func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
 	}
 
 	run.Status = "error"
+	run.Outcome = "invalid_harness"
 	run.Stage = "invalid_simulation"
 	run.Error = "Voice simulation invalid: " + strings.Join(issues, "; ")
 	run.CorrectnessScore = nil
 	run.JudgeScore = nil
+	run.QualityScore = nil
 	run.OverallScore = nil
 	finished := time.Now().UTC()
 	run.FinishedAt = &finished
@@ -577,7 +738,14 @@ func judgeRequest(model string, payload map[string]any) map[string]any {
 	return map[string]any{"model": model, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
 }
 
-const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied target trace, collaborator executions, and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+const (
+	agenticQualityV2Profile = "agentic-quality-v2"
+	judgePromptVersion      = "goal-evidence-v1"
+	judgeRubricVersion      = "required-goals-v1"
+	judgePromptVersionV2    = "goal-evidence-v2"
+	judgeRubricVersionV2    = "weighted-goals-v2"
+	judgePrompt             = `You grade an autonomous agent execution. Use only evidence in the supplied target trace, collaborator executions, and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+)
 
 func parseJudge(raw string) (*JudgeVerdict, error) {
 	raw = strings.TrimSpace(raw)
@@ -636,7 +804,7 @@ func normalizeJudgeVerdict(verdict *JudgeVerdict) {
 	}
 }
 
-func alignJudgeGoals(verdict *JudgeVerdict, expected []string) {
+func alignJudgeGoals(verdict *JudgeVerdict, expected []Goal, ratingProfile string) {
 	if len(expected) == 0 {
 		return
 	}
@@ -645,20 +813,52 @@ func alignJudgeGoals(verdict *JudgeVerdict, expected []string) {
 	for i, goal := range expected {
 		if i < len(returned) {
 			item := returned[i]
-			item.Goal = goal
+			item.Goal, item.Weight, item.Critical, item.Category = goal.Text, goal.Weight, goal.Critical, goal.Category
 			aligned = append(aligned, item)
 			continue
 		}
 		value := 0.0
 		aligned = append(aligned, GoalVerdict{
-			Goal:   goal,
+			Goal:   goal.Text,
 			Score:  &value,
 			Passed: false,
 			Why:    "The judge did not return a result for this goal.",
+			Weight: goal.Weight, Critical: goal.Critical, Category: goal.Category,
 		})
 	}
 	verdict.PerGoal = aligned
-	normalizeJudgeVerdict(verdict)
+	if ratingProfile == agenticQualityV2Profile {
+		normalizeWeightedJudgeVerdict(verdict)
+	} else {
+		normalizeJudgeVerdict(verdict)
+	}
+}
+
+func normalizeWeightedJudgeVerdict(verdict *JudgeVerdict) {
+	weighted, totalWeight := 0.0, 0.0
+	allPassed := true
+	for i := range verdict.PerGoal {
+		goal := &verdict.PerGoal[i]
+		value := 0.0
+		if goal.Score != nil {
+			value = clampScore(*goal.Score)
+		}
+		goal.Score = &value
+		goal.Passed = value >= goalPassScore
+		weight := goal.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		weighted += value * weight
+		totalWeight += weight
+		if !goal.Passed {
+			allPassed = false
+		}
+	}
+	if totalWeight > 0 {
+		verdict.Score = weighted / totalWeight
+	}
+	verdict.Passed = allPassed
 }
 
 func clampScore(value float64) float64 {
@@ -719,6 +919,83 @@ func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float
 		status = "pass"
 	}
 	return status, correctness, judgeScore, &overall
+}
+
+// scoreRunProfile preserves the frozen legacy contract unless a case opts in
+// to v2. Agentic Quality v2 grades imperfect work continuously and reports the
+// categorical outcome independently from the execution status.
+func scoreRunProfile(profile string, assertions []AssertionResult, judge *JudgeVerdict) (string, string, *float64, *float64, *float64) {
+	if profile != agenticQualityV2Profile {
+		status, correctness, judgeScore, overall := scoreRun(assertions, judge)
+		outcome := "failed"
+		if status == "pass" {
+			outcome = "passed"
+		} else if status == "error" {
+			outcome = "invalid_harness"
+		}
+		return status, outcome, correctness, judgeScore, overall
+	}
+
+	weightedPassed, totalWeight := 0.0, 0.0
+	criticalFailed, disqualified := false, false
+	for _, result := range assertions {
+		if result.Error != "" || result.Gating {
+			continue
+		}
+		weight := result.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		totalWeight += weight
+		if result.Passed {
+			weightedPassed += weight
+		} else {
+			criticalFailed = criticalFailed || result.Critical
+			disqualified = disqualified || result.Disqualify
+		}
+	}
+	var correctness *float64
+	if totalWeight > 0 {
+		value := 100 * weightedPassed / totalWeight
+		correctness = &value
+	}
+	var judgeScore *float64
+	if judge != nil {
+		value := clampScore(judge.Score)
+		judgeScore = &value
+		for _, goal := range judge.PerGoal {
+			if goal.Critical && !goal.Passed {
+				criticalFailed = true
+			}
+		}
+	}
+	if correctness == nil && judgeScore == nil {
+		return "error", "invalid_harness", nil, nil, nil
+	}
+	quality := 0.0
+	switch {
+	case correctness != nil && judgeScore != nil:
+		quality = .7**correctness + .3**judgeScore
+	case correctness != nil:
+		quality = *correctness
+	default:
+		quality = *judgeScore
+	}
+	quality = clampScore(quality)
+	outcome := "partial"
+	switch {
+	case disqualified:
+		outcome = "unsafe_disqualified"
+	case criticalFailed || quality < 40:
+		outcome = "failed"
+	case quality >= 70:
+		outcome = "passed"
+	}
+	status := "fail"
+	if outcome == "passed" {
+		status = "pass"
+	}
+	return status, outcome, correctness, judgeScore, &quality
 }
 
 func cloneMap(value map[string]any) map[string]any {
