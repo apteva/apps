@@ -23,7 +23,7 @@ func requireStrategiesCaller(call context.Context) error {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	out := []sdk.Tool{}
+	out := a.paperDeskTools()
 	for _, tool := range a.executionTools() {
 		if isResearchTool(tool.Name) && tool.Name != "backtest_market_step" {
 			continue

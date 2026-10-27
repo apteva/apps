@@ -141,11 +141,12 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "reference_activity_sync", Schedule: "@every 5m", Run: syncReferenceActivities},
 		{Name: "corporate_action_projector", Schedule: "@every 5m", Run: applyDueCorporateActions},
 		{Name: "mark_tick", Schedule: tickEvery, Run: markTick},
+		{Name: "paper_desk_exits", Schedule: "@every 5s", Run: paperDeskTick},
 		{Name: "alert_tick", Schedule: "@every 60s", Run: alertTick},
 	}
 }
 
-// newProvider picks the pricing path. "live" composes public Binance
+// newProvider picks the pricing path. "live" composes public Coinbase USD products
 // (crypto) + Polymarket gamma-api (polymarket) + Yahoo Finance
 // (equity/etf). "mock" is explicit and reserved for tests and air-gapped
 // demos; live mode never silently executes against synthetic data.

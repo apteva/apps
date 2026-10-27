@@ -2,12 +2,12 @@ package main
 
 // liveProvider — the production pricing path. Composes:
 //
-//   crypto      via binancePublic       (api.binance.com/api/v3)
+//   crypto      via coinbasePublic      (api.exchange.coinbase.com, USD pairs)
 //   polymarket  via polymarketPublic    (gamma-api.polymarket.com)
 //   equity/etf  via Alpaca market data or Yahoo Finance
 //
 // Every Quote / Universe call goes through a per-symbol cache to
-// keep the engine tick from hammering Binance or gamma-api. Provider
+// keep the engine tick from hammering Coinbase or gamma-api. Provider
 // failures are surfaced and never converted into synthetic executable marks.
 
 import (
@@ -31,7 +31,7 @@ const (
 )
 
 type liveProvider struct {
-	crypto           *binancePublic
+	crypto           *coinbasePublic
 	poly             *polymarketPublic
 	equity           *alpacaMarketData // nil until SetPlatform is called from OnMount
 	yahoo            *yahooPublic
@@ -49,7 +49,7 @@ type liveProvider struct {
 
 func newLiveProvider() *liveProvider {
 	return &liveProvider{
-		crypto:      newBinancePublic(),
+		crypto:      newCoinbasePublic(),
 		poly:        newPolymarketPublic(),
 		yahoo:       newYahooPublic(),
 		cache:       newMarkCache(cacheTTL),
@@ -85,11 +85,11 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 			p.health.note("crypto", err)
 			return nil, err
 		}
-		m, err = p.normalizeProviderMark("crypto", "binance-public", m)
+		m, err = p.normalizeProviderMark("crypto", coinbasePublicSource, m)
 		if err != nil {
 			return nil, err
 		}
-		p.health.ok("crypto", "binance-public")
+		p.health.ok("crypto", coinbasePublicSource)
 		p.cache.put(m)
 		return m, nil
 	case "polymarket":
@@ -160,15 +160,15 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 func (p *liveProvider) Universe() []*Mark {
 	out := make([]*Mark, 0, 24)
 
-	// Crypto — single batched ticker call.
+	// Crypto — exact USD products; unavailable products are omitted.
 	cryptoSyms := cryptoSymbolsKnown()
 	if cMarks, err := p.crypto.UniverseBatch(cryptoSyms); err == nil {
-		cMarks, err = p.normalizeProviderMarks("crypto", "binance-public", cMarks)
+		cMarks, err = p.normalizeProviderMarks("crypto", coinbasePublicSource, cMarks)
 		if err != nil {
 			p.health.note("crypto", err)
 		}
 		if len(cMarks) > 0 {
-			p.health.ok("crypto", "binance-public")
+			p.health.ok("crypto", coinbasePublicSource)
 			for _, m := range cMarks {
 				p.cache.put(m)
 			}
@@ -257,7 +257,7 @@ func (p *liveProvider) Universe() []*Mark {
 	return out
 }
 
-// Bars routes history fetches by asset class. Crypto = Binance klines.
+// Bars routes history fetches by asset class. Crypto = Coinbase USD candles.
 // Equity/etf = Yahoo Finance chart (no auth) — Alpaca stock_bars is a
 // follow-up (needs the alpaca-market-data connection to be threaded
 // through). Polymarket history remains unavailable until gamma
@@ -272,12 +272,12 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 			p.health.note("crypto", err)
 			return nil, err
 		}
-		bars, err = normalizeBars(symbol, "binance-public", bars)
+		bars, err = normalizeBars(symbol, coinbasePublicSource, bars)
 		if err != nil {
 			p.health.note("crypto", err)
 			return nil, err
 		}
-		p.health.ok("crypto", "binance-public")
+		p.health.ok("crypto", coinbasePublicSource)
 		return bars, nil
 	case "equity", "etf":
 		if p.equity != nil && p.equity.available() {
@@ -361,7 +361,7 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 		}
 		end := strategyClosedCandleBoundary(now().UTC(), interval)
 		start := end.Add(-dur * time.Duration(limit))
-		// Binance treats endTime as inclusive. Stop one millisecond before
+		// Stop one millisecond before
 		// the boundary so the currently forming candle can never be returned.
 		end = end.Add(-time.Millisecond)
 		bars, err := p.crypto.BacktestBars(symbol, interval, start, end, limit)
@@ -369,12 +369,12 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 			p.health.note("crypto", err)
 			return nil, err
 		}
-		bars, err = normalizeBars(symbol, "binance-public", bars)
+		bars, err = normalizeBars(symbol, coinbasePublicSource, bars)
 		if err != nil {
 			p.health.note("crypto", err)
 			return nil, err
 		}
-		p.health.ok("crypto", "binance-public")
+		p.health.ok("crypto", coinbasePublicSource)
 		return bars, nil
 	}
 	if class == "equity" || class == "etf" {

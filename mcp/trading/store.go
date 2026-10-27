@@ -1336,7 +1336,8 @@ func dbUpsertMarkExec(exec sqlExecer, m *Mark) error {
 			last_trade_size = excluded.last_trade_size,
 			feed = CASE WHEN excluded.feed != '' THEN excluded.feed ELSE marks.feed END,
 			quote_at = excluded.quote_at
-		WHERE julianday(excluded.marked_at) >= julianday(marks.marked_at)`,
+		WHERE julianday(excluded.marked_at) >= julianday(marks.marked_at)
+		   OR (excluded.source='coinbase-public' AND marks.source='binance-public' AND excluded.asset_class='crypto')`,
 		normalized.Symbol, normalized.Symbol, normalized.AssetClass, normalized.Price, nullable(normalized.NoPrice), nullable(normalized.PrevClose),
 		nullable(normalized.Volume24h), normalized.MarkedAt, normalized.Source, normalized.TimestampKind,
 		normalized.VolumeUnit, normalized.ReceivedAt, nullable(normalized.BidPrice), nullable(normalized.AskPrice),
@@ -1354,6 +1355,12 @@ func (e insertOnlyInstrument) Exec(query string, args ...any) (sql.Result, error
 	return e.sqlExecer.Exec(query, args...)
 }
 func dbInsertQuoteInstrument(exec sqlExecer, i *Instrument) error {
+	// Coinbase's verified product metadata replaces the old Binance/USDT
+	// identity as well as its price. Equity reference-master identity remains
+	// insert-only; it must not be overwritten by a quote snapshot.
+	if i != nil && i.AssetClass == "crypto" && i.Source == coinbasePublicSource && i.QuoteCurrency == "USD" {
+		return dbUpsertInstrumentExec(exec, i)
+	}
 	return dbUpsertInstrumentExec(insertOnlyInstrument{exec}, i)
 }
 
