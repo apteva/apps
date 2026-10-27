@@ -75,6 +75,16 @@ func assetListSchema(required ...string) map[string]any {
 	return s
 }
 
+// Session reads use id for the session; asset lists use it for an exact child.
+// Keep these contracts distinct instead of inheriting a vague shared id field.
+func sessionAssetListSchema() map[string]any {
+	s := assetListSchema("session_id")
+	props := s["properties"].(map[string]any)
+	delete(props, "brand_id")
+	props["id"] = map[string]any{"type": "string", "minLength": 1, "description": "Optional exact Catalog asset ID (not a Storage file ID). Returns at most one match within session_id and the selected lifecycle/purpose filters; missing or excluded IDs return an empty assets array. For direct inspection use content_catalog_assets_get(id)."}
+	return s
+}
+
 func purposeHistory(db *sql.DB, pid, id string) ([]map[string]any, error) {
 	rows, err := db.Query(`SELECT previous_role,role,previous_output_type,output_type,created_at FROM asset_purpose_events WHERE project_id=? AND asset_id=? ORDER BY created_at DESC,id DESC LIMIT 100`, pid, id)
 	if err != nil {

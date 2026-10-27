@@ -1,5 +1,22 @@
 # Content Catalog
 
+## Version 0.6.10: exact asset ID on session lists
+
+`content_catalog_assets_list` and HTTP `GET /assets` now honor optional `id` as
+an exact **Catalog asset ID**, within the required `session_id`. The filter is
+applied before ordering/limits and combined with project, lifecycle and purpose
+visibility. Results contain zero or one asset. An unknown ID, a different
+session/project, or a visibility exclusion never falls back to a whole-session
+list. Explicit empty/non-string IDs fail; repeated HTTP `id` parameters fail.
+Omitting `id` retains the normal session listing.
+
+For individual inspection, especially when the session is unknown or an asset
+is archived/intermediate, workers should call `content_catalog_assets_get` with
+its Catalog `id`. Always verify the returned asset ID before downstream action;
+a filtered empty list is not an instruction to use the first session asset.
+Storage file IDs are a different namespace. Read-only MCP annotations remain
+unchanged. No business records, files, SOPs or publishing Actors are changed.
+
 ## Version 0.6.9: provider-neutral publication audiences
 
 Existing shared posts now have `audience_type` (`public`, `restricted`, `private`,
