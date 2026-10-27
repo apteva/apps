@@ -40,7 +40,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}
 			return exportResearchSnapshot(ctx, args, false)
 		}},
-		sdk.Tool{Name: "research_legacy_export", Exposure: sdk.ToolExposureAppOnly, Description: "Export preserved legacy strategy and research data; never resume execution.", InputSchema: schemaObject(nil, nil), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+		sdk.Tool{Name: "research_legacy_export", Exposure: sdk.ToolExposureAppOnly, Description: "Export preserved legacy strategy and research data; never resume execution.", InputSchema: schemaObject(map[string]any{"phase": map[string]any{"type": "string"}, "table": map[string]any{"type": "string"}, "after_row_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, nil), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			if err := requireStrategiesCaller(call); err != nil {
 				return nil, err
 			}
@@ -97,6 +97,9 @@ func exportResearchSnapshot(ctx *sdk.AppCtx, args map[string]any, legacy bool) (
 		for _, table := range []string{"marks", "instruments", "venue_execution_profiles", "securities", "security_identifiers", "security_listings", "exchange_sessions", "universe_memberships"} {
 			queries[table] = "SELECT * FROM " + table
 		}
+	}
+	if legacy && strArg(args, "phase") != "" {
+		return exportLegacyPage(ctx, pid, installID, queries, args)
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
