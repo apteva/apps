@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.14
-description: Isolated environments with continuous microphone simulation, transport diagnostics, and coordinated voice shutdown before runtime deletion.
+version: 0.7.15
+description: Isolated environments with reliable voice finalization evidence, bounded silent connections, and unpaused simulated callers.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -76,7 +76,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.14, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.15, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
