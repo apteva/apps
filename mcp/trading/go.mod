@@ -3,13 +3,11 @@ module github.com/apteva/apps/mcp/trading
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.99.0
+	github.com/apteva/app-sdk v0.109.0
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )
 
-// Local SDK source used during development — same pattern crm + storage
-// follow until the v0.1.3 release lands publicly. The `replace` is
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/dustin/go-humanize v1.0.1 // indirect

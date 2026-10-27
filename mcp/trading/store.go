@@ -66,29 +66,34 @@ type Position struct {
 }
 
 type Order struct {
-	ID              string   `json:"id"`
-	PortfolioID     int64    `json:"portfolio_id"`
-	Symbol          string   `json:"symbol"`
-	SecurityID      string   `json:"security_id,omitempty"`
-	AssetClass      string   `json:"asset_class"`
-	Side            string   `json:"side"`
-	Outcome         string   `json:"outcome,omitempty"`
-	Type            string   `json:"type"`
-	Qty             float64  `json:"qty"`
-	FilledQty       float64  `json:"filled_qty"`
-	AvgFillPrice    float64  `json:"avg_fill_price,omitempty"`
-	LimitPrice      *float64 `json:"limit_price,omitempty"`
-	StopPrice       *float64 `json:"stop_price,omitempty"`
-	TIF             string   `json:"tif"`
-	Status          string   `json:"status"`
-	Rationale       string   `json:"rationale"`
-	Source          string   `json:"source"`
-	LiquidityRole   string   `json:"liquidity_role,omitempty"`
-	VenueFeeBps     float64  `json:"-"`
-	RejectionCode   string   `json:"rejection_code,omitempty"`
-	RejectionDetail string   `json:"rejection_detail,omitempty"`
-	PlacedAt        string   `json:"placed_at"`
-	ResolvedAt      string   `json:"resolved_at,omitempty"`
+	ID                      string   `json:"id"`
+	PortfolioID             int64    `json:"portfolio_id"`
+	Symbol                  string   `json:"symbol"`
+	SecurityID              string   `json:"security_id,omitempty"`
+	AssetClass              string   `json:"asset_class"`
+	Side                    string   `json:"side"`
+	Outcome                 string   `json:"outcome,omitempty"`
+	Type                    string   `json:"type"`
+	Qty                     float64  `json:"qty"`
+	FilledQty               float64  `json:"filled_qty"`
+	AvgFillPrice            float64  `json:"avg_fill_price,omitempty"`
+	LimitPrice              *float64 `json:"limit_price,omitempty"`
+	StopPrice               *float64 `json:"stop_price,omitempty"`
+	TIF                     string   `json:"tif"`
+	Status                  string   `json:"status"`
+	Rationale               string   `json:"rationale"`
+	Source                  string   `json:"source"`
+	LiquidityRole           string   `json:"liquidity_role,omitempty"`
+	VenueFeeBps             float64  `json:"-"`
+	RejectionCode           string   `json:"rejection_code,omitempty"`
+	RejectionDetail         string   `json:"rejection_detail,omitempty"`
+	PlacedAt                string   `json:"placed_at"`
+	ResolvedAt              string   `json:"resolved_at,omitempty"`
+	OriginApp               string   `json:"origin_app,omitempty"`
+	OriginInstallID         int64    `json:"origin_install_id,omitempty"`
+	DecisionRef             string   `json:"decision_ref,omitempty"`
+	ExternalStrategyID      int64    `json:"external_strategy_id,omitempty"`
+	ExternalStrategyVersion int      `json:"external_strategy_version,omitempty"`
 }
 
 type Fill struct {
@@ -890,7 +895,7 @@ func dbGetOrder(db *sql.DB, projectID, id string) (*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, ''), liquidity_role
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role, origin_app, origin_install_id, decision_ref, external_strategy_id, external_strategy_version
 		FROM orders WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanOrder(row)
 }
@@ -900,7 +905,7 @@ func dbGetOrderAnyProject(db *sql.DB, id string) (*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, ''), liquidity_role
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role, origin_app, origin_install_id, decision_ref, external_strategy_id, external_strategy_version
 		FROM orders WHERE id = ?`, id)
 	return scanOrder(row)
 }
@@ -915,7 +920,7 @@ func dbListOrdersInternal(db *sql.DB, portfolioID int64, status string, limit in
 	q := `SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 	             limit_price, stop_price, tif, status, rationale, source,
 	             COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-	             placed_at, COALESCE(resolved_at, ''), liquidity_role
+	             placed_at, COALESCE(resolved_at, ''), liquidity_role, origin_app, origin_install_id, decision_ref, external_strategy_id, external_strategy_version
 	      FROM orders WHERE portfolio_id = ?`
 	args := []any{portfolioID}
 	if status != "" && status != "all" {
@@ -950,7 +955,7 @@ func dbWorkingOrders(db *sql.DB) ([]*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, ''), liquidity_role
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role, origin_app, origin_install_id, decision_ref, external_strategy_id, external_strategy_version
 		FROM orders WHERE status = 'working' ORDER BY placed_at`)
 	if err != nil {
 		return nil, err
@@ -974,7 +979,7 @@ func scanOrder(row *sql.Row) (*Order, error) {
 	if err := row.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.SecurityID, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
-		&o.PlacedAt, &resolvedAt, &o.LiquidityRole); err != nil {
+		&o.PlacedAt, &resolvedAt, &o.LiquidityRole, &o.OriginApp, &o.OriginInstallID, &o.DecisionRef, &o.ExternalStrategyID, &o.ExternalStrategyVersion); err != nil {
 		return nil, err
 	}
 	if lp.Valid {
@@ -998,7 +1003,7 @@ func scanOrderRows(rows *sql.Rows) (*Order, error) {
 	if err := rows.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.SecurityID, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
-		&o.PlacedAt, &resolvedAt, &o.LiquidityRole); err != nil {
+		&o.PlacedAt, &resolvedAt, &o.LiquidityRole, &o.OriginApp, &o.OriginInstallID, &o.DecisionRef, &o.ExternalStrategyID, &o.ExternalStrategyVersion); err != nil {
 		return nil, err
 	}
 	if lp.Valid {

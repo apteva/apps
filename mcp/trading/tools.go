@@ -23,9 +23,9 @@ import (
 var orderPlacementMu sync.Mutex
 var brokerHistoryMu sync.Mutex
 
-func (a *App) MCPTools() []sdk.Tool {
+func (a *App) executionTools() []sdk.Tool {
 	definitions := []sdk.Tool{
-		{Name: "strategy_catalog", Description: "Discover allocation and generic trading-rule syntax, capabilities, workflow and complete examples. Call before composing a strategy; rule_presets include the three trade examples and simulation specifications.", InputSchema: schemaObject(map[string]any{"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, nil), Handler: a.toolStrategyCatalog},
+
 		// ─── Lifecycle ────────────────────────────────────────────
 		{Name: "portfolio_create", Description: "Create a portfolio. execution_environment is simulation, broker_paper, or broker_live. Legacy mode=paper|live remains accepted. Broker portfolios pull balances from the bound broker.",
 			InputSchema: schemaObject(map[string]any{
@@ -209,30 +209,43 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ─── Writes ───────────────────────────────────────────────
 		{Name: "order_place", Description: "Place a paper order. Required rationale ≥ 30 chars; subject to mandate + size cap + daily-loss halt.",
 			InputSchema: schemaObject(map[string]any{
-				"idempotency_key": map[string]any{"type": "string", "description": "Stable unique key for retrying this exact order intent"},
-				"portfolio_id":    map[string]any{"type": "integer"},
-				"symbol":          map[string]any{"type": "string"},
-				"side":            map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
-				"outcome":         map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
-				"type":            map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
-				"qty":             map[string]any{"type": "number"},
-				"limit_price":     map[string]any{"type": "number"},
-				"stop_price":      map[string]any{"type": "number"},
-				"expires_at":      map[string]any{"type": "string", "description": "Explicit simulated expiry for day orders in event replay"},
-				"tif":             map[string]any{"type": "string"},
-				"rationale":       map[string]any{"type": "string"},
+				"idempotency_key":           map[string]any{"type": "string", "description": "Stable unique key for retrying this exact order intent"},
+				"decision_ref":              map[string]any{"type": "string"},
+				"external_strategy_id":      map[string]any{"type": "integer"},
+				"external_strategy_version": map[string]any{"type": "integer"},
+				"portfolio_id":              map[string]any{"type": "integer"},
+				"symbol":                    map[string]any{"type": "string"},
+				"side":                      map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
+				"outcome":                   map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
+				"type":                      map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
+				"qty":                       map[string]any{"type": "number"},
+				"limit_price":               map[string]any{"type": "number"},
+				"stop_price":                map[string]any{"type": "number"},
+				"expires_at":                map[string]any{"type": "string", "description": "Explicit simulated expiry for day orders in event replay"},
+				"tif":                       map[string]any{"type": "string"},
+				"rationale":                 map[string]any{"type": "string"},
 			}, []string{"portfolio_id", "symbol", "side", "type", "qty", "rationale"}),
 			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				copy := map[string]any{}
 				for k, v := range args {
 					copy[k] = v
 				}
+				delete(copy, "_origin_app")
+				delete(copy, "_origin_install_id")
 				if caller := sdk.CallerFrom(call); caller != nil {
 					if caller.ProjectID != "" {
 						copy["_project_id"] = caller.ProjectID
 					}
+					copy["_origin_app"] = caller.AppName
+					copy["_origin_install_id"] = caller.AppInstallID
 					if strArg(copy, "idempotency_key") == "" && caller.ToolCallID != "" {
 						copy["idempotency_key"] = "mcp:" + caller.ToolCallID
+					}
+				}
+				if app := strArg(copy, "_origin_app"); app != "" {
+					key := strArg(copy, "idempotency_key")
+					if key != "" {
+						copy["idempotency_key"] = fmt.Sprintf("app:%s:%d:%s", app, int64Arg(copy, "_origin_install_id", 0), key)
 					}
 				}
 				return a.toolOrderPlace(ctx, copy)
@@ -302,138 +315,6 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPortfolioArmLive},
 
 		// ─── Strategies ───────────────────────────────────────────
-		{Name: "strategy_create", Description: "Create a versioned strategy: allocation rules or engine=rules with a trading-rules/1 program. Call strategy_catalog for generic trade examples and syntax, and strategy_validate to check a definition before saving.",
-			InputSchema: schemaObject(map[string]any{
-				"name":                map[string]any{"type": "string"},
-				"description":         map[string]any{"type": "string"},
-				"status":              map[string]any{"type": "string"},
-				"definition":          map[string]any{"type": []string{"object", "string"}, "description": "For trade rules: engine=rules, universe=[program.symbol], cadence=program.timeframe, program={version:trading-rules/1,symbol,timeframe,timezone,rules,...}. Complete examples and authoring guidance are returned by strategy_catalog."},
-				"created_by_agent_id": map[string]any{"type": "integer"},
-			}, []string{"name", "definition"}),
-			Handler: a.toolStrategyCreate},
-
-		{Name: "strategy_update", Description: "Update a deterministic strategy. Supplying definition creates a new strategy version.",
-			InputSchema: schemaObject(map[string]any{
-				"strategy_id": map[string]any{"type": "integer"},
-				"name":        map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"status":      map[string]any{"type": "string"},
-				"definition":  map[string]any{"type": []string{"object", "string"}, "description": "Complete definition object or JSON object text; both use the same strict program validation."},
-			}, []string{"strategy_id"}),
-			Handler: a.toolStrategyUpdate},
-
-		{Name: "strategy_get", Description: "Fetch one saved deterministic strategy.",
-			InputSchema: schemaObject(map[string]any{
-				"strategy_id": map[string]any{"type": "integer"},
-			}, []string{"strategy_id"}),
-			Handler: a.toolStrategyGet},
-
-		{Name: "strategy_list", Description: "List saved deterministic strategies in this project.",
-			InputSchema: schemaObject(map[string]any{
-				"status": map[string]any{"type": "string"},
-			}, nil),
-			Handler: a.toolStrategyList},
-
-		{Name: "strategy_validate", Description: "Validate a deterministic strategy definition without saving it.",
-			InputSchema: schemaObject(map[string]any{
-				"definition": map[string]any{"type": []string{"object", "string"}, "description": "Complete definition object or JSON object text; both use the same strict program validation."},
-			}, []string{"definition"}),
-			Handler: a.toolStrategyValidate},
-
-		{Name: "strategy_evaluate", Description: "Evaluate an allocation strategy against current market data and return target allocations. For engine=rules historical performance use completed strategy_backtest_create runs, strategy_scorecard_evaluate and validation suites.",
-			InputSchema: schemaObject(map[string]any{
-				"strategy_id": map[string]any{"type": "integer"},
-			}, []string{"strategy_id"}),
-			Handler: a.toolStrategyEvaluate},
-
-		{Name: "strategy_assign", Description: "Assign a saved strategy to a portfolio for strategy or hybrid control.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"},
-				"strategy_id":  map[string]any{"type": "integer"},
-				"control_mode": map[string]any{"type": "string"},
-				"cadence":      map[string]any{"type": "string"},
-			}, []string{"portfolio_id", "strategy_id"}),
-			Handler: a.toolStrategyAssign},
-
-		{Name: "market_data_import", Description: "Normalize supplied historical CSV exports into sourced inputs for rule backtests. Supports any symbol, observed bid/ask quotes and closed OHLC bars, explicit column maps, timestamp units/layouts/timezones, and price basis. Reports gaps and byte hashes; never fabricates prices. No download or broker connection. Use returned inputs with strategy_backtest_create; contract/fee/FX configuration remains explicit.", InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}, "streams": map[string]any{"type": "array", "items": map[string]any{"type": "object", "description": "kind=quotes|bars, csv with header, source; optional columns field-to-header map, delimiter, timestamp_format (RFC3339, unix_s/ms/us or Go layout), timezone. Bars require timeframe and price_basis=bid|ask|mid|last; timestamp is candle start. Quotes require timestamp,bid,ask; bars timestamp,open,high,low,close; optional volume."}}}, []string{"symbol", "streams"}), Handler: a.toolMarketDataImport},
-
-		{Name: "strategy_backtest_create", Description: "Create a deterministic event-driven strategy backtest. engine=rules requires a complete sourced OHLC/quote tape; allocation strategies can add feature events to fetched history.",
-			InputSchema: schemaObject(map[string]any{
-				"simulation":      map[string]any{"type": "object", "description": "Execution configuration: seed, latency, fill limits, benchmark_symbol, costs, symbol_costs and explicit contracts (multiplier, currency_rate, margin_fraction)."},
-				"inputs":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Events with id, type, symbol, source, event_time, available_at and data. Rule strategies require complete market.bar.close OHLC candles (metadata.timeframe) and executable market.quote events. Sentiment uses feature.sentiment with data.score."},
-				"portfolio_id":    map[string]any{"type": "integer"},
-				"strategy_id":     map[string]any{"type": "integer"},
-				"name":            map[string]any{"type": "string"},
-				"start_at":        map[string]any{"type": "string"},
-				"end_at":          map[string]any{"type": "string"},
-				"interval":        map[string]any{"type": "string"},
-				"starting_cash":   map[string]any{"type": "number"},
-				"fee_bps":         map[string]any{"type": "number"},
-				"slippage_bps":    map[string]any{"type": "number"},
-				"adjustment_mode": map[string]any{"type": "string", "enum": []string{"provider_adjusted", "raw", "split_adjusted", "price_return", "total_return"}},
-			}, []string{"portfolio_id", "strategy_id"}),
-			Handler: a.toolStrategyBacktestCreate},
-
-		{Name: "backtest_control", Description: "Read, run, step, pause or cancel an event simulation. Running returns immediately; progress is persisted and streamed.", InputSchema: schemaObject(map[string]any{"backtest_id": map[string]any{"type": "integer"}, "action": map[string]any{"type": "string", "enum": []string{"status", "run", "step", "pause", "cancel"}}}, []string{"backtest_id", "action"}), Handler: a.toolBacktestControl},
-		{Name: "backtest_artifact", Description: "Export a portable reproducible result bundle by backtest_id, or import an artifact into portfolio_id as a fresh queued replay.", InputSchema: schemaObject(map[string]any{"backtest_id": map[string]any{"type": "integer"}, "portfolio_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "artifact": map[string]any{"type": "object"}}, nil), Handler: a.toolBacktestArtifact},
-		{Name: "strategy_validate_backtest", Description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id":    map[string]any{"type": "integer"},
-				"strategy_id":     map[string]any{"type": "integer"},
-				"name":            map[string]any{"type": "string"},
-				"start_at":        map[string]any{"type": "string"},
-				"end_at":          map[string]any{"type": "string"},
-				"interval":        map[string]any{"type": "string"},
-				"split_pct":       map[string]any{"type": "number"},
-				"starting_cash":   map[string]any{"type": "number"},
-				"fee_bps":         map[string]any{"type": "number"},
-				"slippage_bps":    map[string]any{"type": "number"},
-				"adjustment_mode": map[string]any{"type": "string", "enum": []string{"provider_adjusted", "raw", "split_adjusted", "price_return", "total_return"}},
-			}, []string{"portfolio_id", "strategy_id"}),
-			Handler: a.toolStrategyValidateBacktest},
-
-		{Name: "strategy_scorecard_get", Description: "Get a portfolio strategy's scorecard policy, promotion stage, and durable evaluation history.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"},
-			}, []string{"portfolio_id", "strategy_id"}), Handler: a.toolStrategyScorecardGet},
-
-		{Name: "strategy_scorecard_update", Description: "Configure generic metric thresholds and enforcement for a portfolio strategy scorecard.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"},
-				"criteria":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-				"min_completed_runs": map[string]any{"type": "integer"}, "require_out_of_sample": map[string]any{"type": "boolean"},
-				"enforcement_enabled": map[string]any{"type": "boolean"},
-			}, []string{"portfolio_id", "strategy_id"}), Handler: a.toolStrategyScorecardUpdate},
-
-		{Name: "strategy_scorecard_evaluate", Description: "Evaluate and durably snapshot a completed strategy backtest against its current scorecard policy.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"}, "backtest_run_id": map[string]any{"type": "integer"},
-			}, []string{"portfolio_id", "strategy_id", "backtest_run_id"}), Handler: a.toolStrategyScorecardEvaluate},
-
-		{Name: "strategy_promotion_update", Description: "Promote one scorecard stage at a time after passing the required distinct runs, demote it, or suspend it.",
-			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"},
-				"promotion_stage": map[string]any{"type": "string", "enum": []string{"research", "paper_candidate", "paper", "live_candidate", "live", "suspended"}},
-			}, []string{"portfolio_id", "strategy_id", "promotion_stage"}), Handler: a.toolStrategyPromotionUpdate},
-
-		{Name: "agent_backtest_create", Description: "Create an agent simulation from a complete timestamped event tape (quotes, sentiment, news and custom events). Uses the shared event engine; returns queued without running the model.", InputSchema: schemaObject(map[string]any{"portfolio_id": map[string]any{"type": "integer"}, "agent_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "starting_cash": map[string]any{"type": "number"}, "symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "inputs": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "agent_simulation": map[string]any{"type": "object", "description": "directive, trigger_types (optional wildcard suffix), max_decisions, timeout_seconds, history_limit"}, "simulation": map[string]any{"type": "object"}}, []string{"portfolio_id", "inputs", "agent_simulation"}), Handler: a.toolAgentBacktestCreate},
-
-		{Name: "backtest_observation", Description: "Read the current event replay observation, simulated portfolio, past events, and agent memory.", InputSchema: schemaObject(nil, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-			return nil, errors.New("active agent replay required")
-		}},
-		{Name: "backtest_events", Description: "Read only events already observed in this replay turn, optionally filtered by symbol.", InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}}, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-			return nil, errors.New("active agent replay required")
-		}},
-		{Name: "backtest_decision_finish", Description: "Seal this replay decision and checkpoint memory for the next event. Always call this even when making no trades.", InputSchema: schemaObject(map[string]any{"decision_id": map[string]any{"type": "string"}, "rationale": map[string]any{"type": "string"}, "memory": map[string]any{"type": "string"}}, []string{"decision_id", "rationale", "memory"}), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-			return nil, errors.New("active agent replay required")
-		}},
-		{Name: "backtest_agent_exchange", Exposure: sdk.ToolExposureAppOnly, Description: "Internal event replay mailbox.", InputSchema: schemaObject(map[string]any{"operation": map[string]any{"type": "string"}, "turn": map[string]any{"type": "object"}, "decision_id": map[string]any{"type": "string"}}, []string{"operation"}), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-			caller := sdk.CallerFrom(call)
-			if caller == nil || caller.AgentID != 0 || caller.AppName != "trading" || caller.AppInstallID == 0 {
-				return nil, errors.New("authenticated trading runner required")
-			}
-			return a.toolAgentExchange(ctx, args)
-		}},
 
 		{Name: "backtest_market_step", Exposure: sdk.ToolExposureAppOnly, Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
@@ -445,13 +326,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "run_id", "step", "replay_at", "prices"}),
 			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				caller := sdk.CallerFrom(call)
-				if caller == nil || caller.AgentID != 0 || caller.AppName != "trading" || caller.AppInstallID == 0 {
+				if caller == nil || caller.AgentID != 0 || caller.AppName != "strategies" || caller.AppInstallID == 0 {
 					return nil, errors.New("replay mutation requires authenticated trading runner")
 				}
 				return a.toolBacktestMarketStep(ctx, args)
 			}},
 	}
-	definitions = append(definitions, a.validationTools()...)
+
 	for i := range definitions {
 		original := definitions[i]
 		name := original.Name
@@ -472,9 +353,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					cloned["idempotency_key"] = "mcp:" + caller.ToolCallID
 				}
 			}
-			if out, handled, err := replayAgentTool(ctx, name, cloned); handled {
-				return out, err
-			}
+
 			if original.HandlerCtx != nil {
 				return original.HandlerCtx(call, ctx, args)
 			}
@@ -1811,6 +1690,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// Live mode appends ":live" so audit queries can split paper from live
 	// without joining onto the portfolio row.
 	source := "agent"
+	if app := strArg(args, "_origin_app"); app != "" {
+		source = "app:" + app
+	}
 	if so, ok := args["source_override"].(string); ok && so != "" {
 		source = so
 	}
@@ -1852,6 +1734,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	if err == nil {
 		_, err = tx.Exec(`UPDATE orders SET placed_at=COALESCE((SELECT replay_at FROM replay_steps WHERE portfolio_id=?),placed_at) WHERE id=?`, pf.ID, o.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`UPDATE orders SET origin_app=?,origin_install_id=?,decision_ref=?,external_strategy_id=?,external_strategy_version=? WHERE id=?`, strArg(args, "_origin_app"), int64Arg(args, "_origin_install_id", 0), strArg(args, "decision_ref"), int64Arg(args, "external_strategy_id", 0), int64Arg(args, "external_strategy_version", 0), o.ID)
 	}
 	if err == nil && strategyID > 0 {
 		_, err = tx.Exec(`UPDATE orders SET strategy_id=?,strategy_version=(SELECT version FROM strategies WHERE id=?) WHERE id=?`, strategyID, strategyID, o.ID)

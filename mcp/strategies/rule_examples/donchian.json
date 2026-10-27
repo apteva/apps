@@ -1,0 +1,183 @@
+{
+  "id": "donchian_breakout",
+  "name": "Donchian channel breakout",
+  "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
+  "definition": {
+    "engine": "rules",
+    "universe": [
+      "XAUUSD"
+    ],
+    "cadence": "1m",
+    "program": {
+      "version": "trading-rules/1",
+      "symbol": "XAUUSD",
+      "timeframe": "1m",
+      "timezone": "UTC",
+      "calculations": {
+        "upper": {
+          "metric": "highest_high",
+          "timeframe": "1h",
+          "period": 175
+        },
+        "lower": {
+          "metric": "lowest_low",
+          "timeframe": "1h",
+          "period": 175
+        },
+        "midpoint": {
+          "op": "/",
+          "args": [
+            {
+              "op": "+",
+              "args": [
+                {
+                  "name": "upper"
+                },
+                {
+                  "name": "lower"
+                }
+              ]
+            },
+            {
+              "value": 2
+            }
+          ]
+        }
+      },
+      "rules": [
+        {
+          "id": "buy_breakout",
+          "on": "bar.close",
+          "timeframe": "1m",
+          "repeat": "until_reset",
+          "reset": {
+            "op": "<=",
+            "args": [
+              {
+                "metric": "close"
+              },
+              {
+                "name": "midpoint"
+              }
+            ]
+          },
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "==",
+                "args": [
+                  {
+                    "metric": "position_qty"
+                  },
+                  {
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "op": ">",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "name": "upper"
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "enter",
+              "side": "buy",
+              "order_type": "market",
+              "stop_pct": 0.005,
+              "target_pct": 0.01,
+              "trail_activation_pct": 0.005,
+              "trail_distance_pct": 0.001,
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            }
+          ]
+        },
+        {
+          "id": "sell_breakout",
+          "on": "bar.close",
+          "timeframe": "1m",
+          "repeat": "until_reset",
+          "reset": {
+            "op": ">=",
+            "args": [
+              {
+                "metric": "close"
+              },
+              {
+                "name": "midpoint"
+              }
+            ]
+          },
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "==",
+                "args": [
+                  {
+                    "metric": "position_qty"
+                  },
+                  {
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "op": "<",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "name": "lower"
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "enter",
+              "side": "sell",
+              "order_type": "market",
+              "stop_pct": 0.005,
+              "target_pct": 0.01,
+              "trail_activation_pct": 0.005,
+              "trail_distance_pct": 0.001,
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "simulation": {
+    "seed": 1,
+    "starting_cash": 100000,
+    "contracts": {
+      "XAUUSD": {
+        "multiplier": 1,
+        "currency_rate": 1,
+        "margin_fraction": 0.1
+      }
+    },
+    "costs": {
+      "qty_step": 0.001
+    }
+  }
+}

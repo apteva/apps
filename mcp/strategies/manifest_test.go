@@ -1,0 +1,58 @@
+package main
+
+import (
+	sdk "github.com/apteva/app-sdk"
+	"os"
+	"testing"
+)
+
+// The embedded manifest must always parse — it's our single source of
+// truth for the manifest the binary advertises.
+func TestEmbeddedManifest_Valid(t *testing.T) {
+	app := &App{}
+	m := app.Manifest()
+	if m.Name != "strategies" {
+		t.Errorf("manifest.Name=%q, want strategies", m.Name)
+	}
+	if m.Version == "" {
+		t.Error("manifest.Version is empty")
+	}
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileManifest, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != "0.1.0" || fileManifest.Version != m.Version {
+		t.Fatal("release and embedded versions differ")
+	}
+	if len(m.Provides.MCPTools) == 0 {
+		t.Fatal("no tools declared")
+	}
+}
+
+// Tool list parity — adding a tool to the handler list without
+// declaring it (or vice versa) is the most common single drift.
+func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
+	app := &App{}
+	declared := map[string]bool{}
+	for _, t := range app.Manifest().Provides.MCPTools {
+		declared[t.Name] = true
+	}
+	implemented := map[string]bool{}
+	for _, t := range app.MCPTools() {
+		implemented[t.Name] = true
+	}
+	for name := range declared {
+		if !implemented[name] {
+			t.Errorf("manifest declares tool %q but no handler implements it", name)
+		}
+	}
+	for name := range implemented {
+		if !declared[name] {
+			t.Errorf("handler implements %q but manifest doesn't declare it", name)
+		}
+	}
+}

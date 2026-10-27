@@ -1,0 +1,2397 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+	sim "github.com/apteva/apps/mcp/strategies/internal/backtest"
+	rules "github.com/apteva/apps/mcp/strategies/internal/ruleengine"
+	"github.com/google/uuid"
+)
+
+type StrategyDefinition struct {
+	Engine         string         `json:"engine,omitempty"`
+	Program        *rules.Program `json:"program,omitempty"`
+	Universe       []string       `json:"universe"`
+	Cadence        string         `json:"cadence,omitempty"`
+	RebalanceEvery int            `json:"rebalance_every,omitempty"`
+	Rules          []StrategyRule `json:"rules"`
+	Risk           StrategyRisk   `json:"risk,omitempty"`
+}
+
+type StrategyRule struct {
+	Name     string               `json:"name,omitempty"`
+	When     *StrategyCondition   `json:"when,omitempty"`
+	Allocate []StrategyAllocation `json:"allocate,omitempty"`
+	Rank     *StrategyRank        `json:"rank,omitempty"`
+}
+
+type StrategyCondition struct {
+	All       []StrategyCondition `json:"all,omitempty"`
+	Any       []StrategyCondition `json:"any,omitempty"`
+	Symbol    string              `json:"symbol,omitempty"`
+	Indicator string              `json:"indicator"`
+	Operator  string              `json:"operator"`
+	Value     float64             `json:"value,omitempty"`
+	Compare   string              `json:"compare,omitempty"`
+}
+
+type StrategyAllocation struct {
+	Symbol string  `json:"symbol"`
+	Weight float64 `json:"weight"`
+}
+
+type StrategyRank struct {
+	VolatilityPeriod int                `json:"volatility_period,omitempty"`
+	VolatilityFloor  float64            `json:"volatility_floor,omitempty"`
+	Where            *StrategyCondition `json:"where,omitempty"`
+	Direction        string             `json:"direction,omitempty"`
+	Budget           float64            `json:"budget,omitempty"`
+	Symbols          []string           `json:"symbols"`
+	By               string             `json:"by"`
+	Top              int                `json:"top"`
+	Weight           string             `json:"weight,omitempty"`
+	Min              float64            `json:"min,omitempty"`
+}
+
+type StrategyRisk struct {
+	MaxPositionWeight float64 `json:"max_position_weight,omitempty"`
+}
+
+type StrategyEvaluation struct {
+	StrategyID        int64                `json:"strategy_id,omitempty"`
+	StrategyVersion   int                  `json:"strategy_version,omitempty"`
+	AsOf              string               `json:"as_of"`
+	TargetAllocations []StrategyAllocation `json:"target_allocations"`
+	Decisions         []string             `json:"decisions"`
+	Warnings          []string             `json:"warnings,omitempty"`
+}
+
+type StrategyValidationResult struct {
+	StrategyID      int64                        `json:"strategy_id"`
+	StrategyVersion int                          `json:"strategy_version"`
+	SplitPct        float64                      `json:"split_pct"`
+	MarketSource    string                       `json:"market_source"`
+	Train           *StrategyValidationPeriod    `json:"train"`
+	Test            *StrategyValidationPeriod    `json:"test"`
+	Verdict         string                       `json:"verdict"`
+	Scorecard       *StrategyScorecardEvaluation `json:"scorecard,omitempty"`
+}
+
+type StrategyValidationPeriod struct {
+	Label       string               `json:"label"`
+	Run         *BacktestRun         `json:"run"`
+	Performance *BacktestPerformance `json:"performance,omitempty"`
+	Metrics     map[string]float64   `json:"metrics,omitempty"`
+}
+
+type strategyMarket struct {
+	prices      map[string]float64
+	history     map[string][]float64
+	asOf        time.Time
+	barTimes    []time.Time
+	signalStep  int
+	signalCount int
+	features    map[string]map[string]float64
+}
+
+func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
+	if raw == nil {
+		return nil, errors.New("definition required")
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var def StrategyDefinition
+	if err := json.Unmarshal(buf, &def); err != nil {
+		return nil, err
+	}
+	if def.Engine != "" && def.Engine != "allocation" && def.Engine != "rules" {
+		return nil, errors.New("unknown strategy engine")
+	}
+	if def.Engine == "rules" {
+		programJSON, err := json.Marshal(raw["program"])
+		if err != nil {
+			return nil, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(programJSON))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&def.Program); err != nil {
+			return nil, fmt.Errorf("program: %w", err)
+		}
+		if err := rules.Validate(def.Program); err != nil {
+			return nil, err
+		}
+		def.Universe = cleanSymbols(def.Universe)
+		if len(def.Universe) != 1 || def.Universe[0] != def.Program.Symbol || def.Cadence != def.Program.Timeframe {
+			return nil, errors.New("rule universe/cadence must match program symbol/base timeframe")
+		}
+		if len(def.Rules) > 0 {
+			return nil, errors.New("allocation and rule programs cannot be mixed in one definition")
+		}
+		return &def, nil
+	}
+	if def.Program != nil {
+		return nil, errors.New("program requires engine=rules")
+	}
+	def.Universe = cleanSymbols(def.Universe)
+	for i := range def.Rules {
+		def.Rules[i].Allocate = cleanAllocations(def.Rules[i].Allocate)
+		if def.Rules[i].Rank != nil {
+			def.Rules[i].Rank.Symbols = cleanSymbols(def.Rules[i].Rank.Symbols)
+			if def.Rules[i].Rank.Top <= 0 {
+				def.Rules[i].Rank.Top = 1
+			}
+			if def.Rules[i].Rank.By == "" {
+				def.Rules[i].Rank.By = "return_20"
+			}
+		}
+	}
+	if len(def.Universe) == 0 {
+		for _, r := range def.Rules {
+			def.Universe = append(def.Universe, conditionSymbols(r.When)...)
+			for _, a := range r.Allocate {
+				def.Universe = append(def.Universe, a.Symbol)
+			}
+			if r.Rank != nil {
+				def.Universe = append(def.Universe, r.Rank.Symbols...)
+			}
+		}
+		def.Universe = cleanSymbols(def.Universe)
+	}
+	if len(def.Universe) == 0 {
+		return nil, errors.New("strategy universe required")
+	}
+	if len(def.Rules) == 0 {
+		return nil, errors.New("at least one strategy rule required")
+	}
+	if def.Risk.MaxPositionWeight <= 0 || def.Risk.MaxPositionWeight > 1 {
+		def.Risk.MaxPositionWeight = 1
+	}
+	return &def, nil
+}
+
+func cleanAllocations(in []StrategyAllocation) []StrategyAllocation {
+	out := []StrategyAllocation{}
+	seen := map[string]bool{}
+	for _, a := range in {
+		symbol := strings.ToUpper(strings.TrimSpace(a.Symbol))
+		if symbol == "" || symbol == "CASH" || a.Weight <= 0 || seen[symbol] {
+			continue
+		}
+		seen[symbol] = true
+		out = append(out, StrategyAllocation{Symbol: symbol, Weight: a.Weight})
+	}
+	return out
+}
+
+func validateStrategyDefinition(raw map[string]any) (*StrategyDefinition, []string, error) {
+	def, err := parseStrategyDefinition(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	warnings := []string{}
+	if def.Engine == "rules" {
+		return def, []string{"Rule programs require event-driven evaluation; live adapters must explicitly support their execution capabilities."}, nil
+	}
+	universe := make(map[string]bool, len(def.Universe))
+	for _, symbol := range def.Universe {
+		universe[symbol] = true
+	}
+	for _, rule := range def.Rules {
+		if len(rule.Allocate) == 0 && rule.Rank == nil {
+			warnings = append(warnings, fmt.Sprintf("rule %q has no allocation output", nonEmpty(rule.Name, "(unnamed)")))
+		}
+		if err := validateCondition(rule.When, universe, 0); err != nil {
+			return nil, nil, err
+		}
+
+		for _, allocation := range rule.Allocate {
+			if !universe[allocation.Symbol] {
+				return nil, nil, fmt.Errorf("rule %q allocation symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), allocation.Symbol)
+			}
+		}
+		if rule.Rank != nil {
+			if _, err := parseIndicator(rule.Rank.By); err != nil {
+				return nil, nil, err
+			}
+			if err := validateCondition(rule.Rank.Where, universe, 0); err != nil {
+				return nil, nil, err
+			}
+			if rule.Rank.Direction != "" && rule.Rank.Direction != "asc" && rule.Rank.Direction != "desc" {
+				return nil, nil, errors.New("rank direction must be asc or desc")
+			}
+			if rule.Rank.Budget < 0 || rule.Rank.Budget > 1 {
+				return nil, nil, errors.New("rank budget must be between 0 and 1")
+			}
+			if rule.Rank.Weight != "" && rule.Rank.Weight != "equal_weight" && rule.Rank.Weight != "inverse_volatility" {
+				return nil, nil, errors.New("rank weight must be equal_weight or inverse_volatility")
+			}
+			if rule.Rank.Weight == "inverse_volatility" {
+				if rule.Rank.VolatilityPeriod < 2 || rule.Rank.VolatilityPeriod > 999 || !finite(rule.Rank.VolatilityFloor) || rule.Rank.VolatilityFloor < 1e-8 || rule.Rank.VolatilityFloor > 1 {
+					return nil, nil, errors.New("inverse_volatility requires volatility_period from 2 to 999 and volatility_floor in [1e-8,1] per-bar log-return units")
+				}
+			} else if rule.Rank.VolatilityPeriod != 0 || rule.Rank.VolatilityFloor != 0 {
+				return nil, nil, errors.New("volatility sizing fields require inverse_volatility weight")
+			}
+			for _, symbol := range rule.Rank.Symbols {
+				if !universe[symbol] {
+					return nil, nil, fmt.Errorf("rule %q rank symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), symbol)
+				}
+			}
+		}
+	}
+	return def, warnings, nil
+}
+
+func evaluateStrategy(strategy *Strategy, market strategyMarket) (*StrategyEvaluation, error) {
+	if strategy == nil {
+		return nil, errors.New("strategy required")
+	}
+	def, warnings, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if def.Engine == "rules" {
+		return nil, errors.New("rule strategies must be evaluated through an event backtest with their market tape and state")
+	}
+	out := &StrategyEvaluation{
+		StrategyID:      strategy.ID,
+		StrategyVersion: strategy.Version,
+		AsOf:            market.asOf.UTC().Format(time.RFC3339),
+		Decisions:       []string{},
+		Warnings:        warnings,
+	}
+	for _, rule := range def.Rules {
+		ok := true
+		reason := "default rule"
+		if rule.When != nil {
+			ok, reason, err = evalStrategyCondition(*rule.When, def, market)
+			if err != nil {
+				out.Warnings = append(out.Warnings, err.Error())
+				ok = false
+			}
+		}
+		if !ok {
+			continue
+		}
+		allocs := rule.Allocate
+		if rule.Rank != nil {
+			allocs, reason, err = evalStrategyRank(*rule.Rank, market)
+			if err != nil {
+				out.Warnings = append(out.Warnings, err.Error())
+				continue
+			}
+		}
+		out.TargetAllocations = capAllocations(normalizeAllocations(allocs), def.Risk.MaxPositionWeight)
+		out.Decisions = append(out.Decisions, fmt.Sprintf("%s: %s", nonEmpty(rule.Name, "rule"), reason))
+		return out, nil
+	}
+	out.Decisions = append(out.Decisions, "no rule matched; holding cash")
+	out.TargetAllocations = []StrategyAllocation{}
+	return out, nil
+}
+
+func evalStrategyCondition(c StrategyCondition, def *StrategyDefinition, market strategyMarket) (bool, string, error) {
+	if len(c.All) > 0 || len(c.Any) > 0 {
+		group, all := c.All, true
+		if len(c.Any) > 0 {
+			group, all = c.Any, false
+		}
+		matched := 0
+		reasons := []string{}
+		for _, child := range group {
+			ok, reason, err := evalStrategyCondition(child, def, market)
+			if err != nil {
+				return false, "", err
+			}
+			if ok {
+				matched++
+			}
+			reasons = append(reasons, reason)
+		}
+		return (all && matched == len(group)) || (!all && matched > 0), strings.Join(reasons, "; "), nil
+	}
+
+	symbol := strings.ToUpper(strings.TrimSpace(c.Symbol))
+	if symbol == "" && len(def.Universe) > 0 {
+		symbol = def.Universe[0]
+	}
+	lhs, err := strategyMetric(symbol, c.Indicator, market)
+	if err != nil {
+		return false, "", err
+	}
+	rhs := c.Value
+	label := fmt.Sprintf("%s %s %.4f", c.Indicator, c.Operator, rhs)
+	if strings.TrimSpace(c.Compare) != "" {
+		rhs, err = strategyMetric(symbol, c.Compare, market)
+		if err != nil {
+			return false, "", err
+		}
+		label = fmt.Sprintf("%s %s %s", c.Indicator, c.Operator, c.Compare)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Operator)) {
+	case "crosses_above", "crosses_below":
+		h := market.history[symbol]
+		if len(h) < 2 {
+			return false, "", errors.New("crossover requires a previous closed bar")
+		}
+		previous := strategyMarket{history: map[string][]float64{symbol: h[:len(h)-1]}, prices: map[string]float64{symbol: h[len(h)-2]}}
+		pl, err := strategyMetric(symbol, c.Indicator, previous)
+		if err != nil {
+			return false, "", err
+		}
+		pr := c.Value
+		if c.Compare != "" {
+			pr, err = strategyMetric(symbol, c.Compare, previous)
+			if err != nil {
+				return false, "", err
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(c.Operator), "crosses_above") {
+			return pl <= pr && lhs > rhs, label, nil
+		}
+		return pl >= pr && lhs < rhs, label, nil
+	case ">", "above":
+		return lhs > rhs, fmt.Sprintf("%s: %.4f > %.4f", label, lhs, rhs), nil
+	case ">=", "at_or_above":
+		return lhs >= rhs, fmt.Sprintf("%s: %.4f >= %.4f", label, lhs, rhs), nil
+	case "<", "below":
+		return lhs < rhs, fmt.Sprintf("%s: %.4f < %.4f", label, lhs, rhs), nil
+	case "<=", "at_or_below":
+		return lhs <= rhs, fmt.Sprintf("%s: %.4f <= %.4f", label, lhs, rhs), nil
+	default:
+		return false, "", fmt.Errorf("unsupported operator %q", c.Operator)
+	}
+}
+
+func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAllocation, string, error) {
+	symbols := cleanSymbols(rank.Symbols)
+	if len(symbols) == 0 {
+		return nil, "", errors.New("rank symbols required")
+	}
+	type row struct {
+		symbol string
+		value  float64
+	}
+	rows := []row{}
+	for _, symbol := range symbols {
+		if rank.Where != nil {
+			ok, _, err := evalStrategyCondition(*rank.Where, &StrategyDefinition{Universe: []string{symbol}}, market)
+			if err != nil {
+				return nil, "", err
+			}
+			if !ok {
+				continue
+			}
+		}
+		v, err := strategyMetric(symbol, rank.By, market)
+		if err != nil {
+			return nil, "", fmt.Errorf("rank %s metric unavailable for %s: %w", rank.By, symbol, err)
+		}
+		rows = append(rows, row{symbol: symbol, value: v})
+	}
+	if len(rows) == 0 {
+		return []StrategyAllocation{}, "no symbols passed the indicator filter; holding cash", nil
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rank.Direction == "asc" {
+			return rows[i].value < rows[j].value
+		}
+		return rows[i].value > rows[j].value
+	})
+	rankedValues := make([]string, 0, len(rows))
+	for _, r := range rows {
+		rankedValues = append(rankedValues, fmt.Sprintf("%s %.4f", r.symbol, r.value))
+	}
+	if rank.Min != 0 {
+		filtered := rows[:0]
+		for _, r := range rows {
+			if r.value >= rank.Min {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+		if len(rows) == 0 {
+			return []StrategyAllocation{}, fmt.Sprintf("ranked by %s: no symbol met min %.4f; values: %s", rank.By, rank.Min, strings.Join(rankedValues, ", ")), nil
+		}
+	}
+	top := rank.Top
+	if top <= 0 {
+		top = 1
+	}
+	if top > len(rows) {
+		top = len(rows)
+	}
+	budget := rank.Budget
+	if budget == 0 {
+		budget = 1
+	}
+	scores := make([]float64, top)
+	total := 0.0
+	for i, r := range rows[:top] {
+		scores[i] = 1
+		if rank.Weight == "inverse_volatility" {
+			vol, err := strategyMetric(r.symbol, fmt.Sprintf("volatility_%d", rank.VolatilityPeriod), market)
+			if err != nil {
+				return nil, "", fmt.Errorf("volatility sizing unavailable for %s: %w", r.symbol, err)
+			}
+			scores[i] = 1 / math.Max(vol, rank.VolatilityFloor)
+		}
+		total += scores[i]
+	}
+	out := make([]StrategyAllocation, 0, top)
+	picked := []string{}
+	for i, r := range rows[:top] {
+		weight := budget * scores[i] / total
+		out = append(out, StrategyAllocation{Symbol: r.symbol, Weight: weight})
+		picked = append(picked, fmt.Sprintf("%s %.4f", r.symbol, r.value))
+	}
+	return out, "ranked by " + rank.By + ": " + strings.Join(picked, ", "), nil
+}
+
+func strategyMetric(symbol, indicator string, market strategyMarket) (float64, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	indicator = strings.ToLower(strings.TrimSpace(indicator))
+	spec, err := parseIndicator(indicator)
+	if err != nil {
+		return 0, err
+	}
+	if symbol == "" {
+		return 0, errors.New("symbol required")
+	}
+	if indicator == "" || indicator == "price" {
+		if v := market.prices[symbol]; v > 0 {
+			return v, nil
+		}
+		return 0, fmt.Errorf("price unavailable for %s", symbol)
+	}
+	if strings.HasPrefix(indicator, "feature:") {
+		name, field, ok := strings.Cut(strings.TrimPrefix(indicator, "feature:"), ".")
+		if !ok {
+			return 0, errors.New("feature indicator must be feature:name.field")
+		}
+		values := market.features[symbol+"/"+name]
+		if values == nil {
+			values = market.features["/"+name]
+		}
+		if value, ok := values[field]; ok {
+			return value, nil
+		}
+		return 0, fmt.Errorf("feature %s unavailable for %s", indicator, symbol)
+	}
+	history := market.history[symbol]
+	if len(history) == 0 {
+		if v := market.prices[symbol]; v > 0 {
+			history = []float64{v}
+		}
+	}
+	switch spec.kind {
+	case "ema_sma", "rsi_wilder", "macd", "macd_signal", "macd_hist", "bb_upper", "bb_lower", "bb_width", "bb_percent_b", "zscore":
+		return extendedIndicator(spec, history)
+	}
+	switch {
+	case spec.kind == "sma":
+		return latestFloatSMA(history, parseMetricWindow(indicator, "sma", 20))
+	case spec.kind == "ema":
+		return latestFloatEMA(history, parseMetricWindow(indicator, "ema", 20))
+	case strings.HasPrefix(indicator, "rsi_") || indicator == "rsi":
+		return latestFloatRSI(history, parseMetricWindow(indicator, "rsi", 14))
+	case strings.HasPrefix(indicator, "return_") || indicator == "return":
+		return latestFloatReturn(history, parseMetricWindow(indicator, "return", 20))
+	case strings.HasPrefix(indicator, "volatility_") || indicator == "volatility":
+		return latestFloatVolatility(history, parseMetricWindow(indicator, "volatility", 20))
+	default:
+		return 0, fmt.Errorf("unsupported indicator %q", indicator)
+	}
+}
+
+func parseMetricWindow(name, prefix string, fallback int) int {
+	name = strings.TrimPrefix(name, prefix+"_")
+	if name == prefix || name == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(name, "%d", &n); err == nil && n > 0 {
+		return n
+	}
+	return fallback
+}
+
+func latestFloatSMA(values []float64, window int) (float64, error) {
+	if len(values) < window {
+		return 0, fmt.Errorf("need %d bars", window)
+	}
+	return avgFloat(values[len(values)-window:]), nil
+}
+
+func latestFloatEMA(values []float64, window int) (float64, error) {
+	if len(values) < window {
+		return 0, fmt.Errorf("need %d bars", window)
+	}
+	alpha := 2.0 / float64(window+1)
+	ema := values[0]
+	for _, v := range values[1:] {
+		ema = v*alpha + ema*(1-alpha)
+	}
+	return ema, nil
+}
+
+func latestFloatRSI(values []float64, window int) (float64, error) {
+	if len(values) <= window {
+		return 0, fmt.Errorf("need %d bars", window+1)
+	}
+	var gains, losses float64
+	start := len(values) - window
+	for i := start; i < len(values); i++ {
+		delta := values[i] - values[i-1]
+		if delta >= 0 {
+			gains += delta
+		} else {
+			losses -= delta
+		}
+	}
+	avgLoss := losses / float64(window)
+	if avgLoss == 0 {
+		return 100, nil
+	}
+	rs := (gains / float64(window)) / avgLoss
+	return 100 - 100/(1+rs), nil
+}
+
+func latestFloatReturn(values []float64, window int) (float64, error) {
+	if len(values) <= window {
+		return 0, fmt.Errorf("need %d bars", window+1)
+	}
+	first := values[len(values)-1-window]
+	if first <= 0 {
+		return 0, errors.New("zero starting price")
+	}
+	return (values[len(values)-1]/first - 1) * 100, nil
+}
+
+func latestFloatVolatility(values []float64, window int) (float64, error) {
+	if len(values) <= window {
+		return 0, fmt.Errorf("need %d bars", window+1)
+	}
+	returns := []float64{}
+	for i := len(values) - window; i < len(values); i++ {
+		if values[i-1] > 0 {
+			returns = append(returns, math.Log(values[i]/values[i-1]))
+		}
+	}
+	return stddevFloat(returns), nil
+}
+
+func avgFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range values {
+		sum += v
+	}
+	return sum / float64(len(values))
+}
+
+func stddevFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	mean := avgFloat(values)
+	var sum float64
+	for _, v := range values {
+		d := v - mean
+		sum += d * d
+	}
+	return math.Sqrt(sum / float64(len(values)))
+}
+
+func normalizeAllocations(in []StrategyAllocation) []StrategyAllocation {
+	in = cleanAllocations(in)
+	var total float64
+	for _, a := range in {
+		total += a.Weight
+	}
+	if total <= 0 {
+		return []StrategyAllocation{}
+	}
+	out := make([]StrategyAllocation, 0, len(in))
+	scale := 1.0
+	if total > 1 {
+		scale = 1 / total
+	}
+	for _, a := range in {
+		out = append(out, StrategyAllocation{Symbol: a.Symbol, Weight: round4(a.Weight * scale)})
+	}
+	return out
+}
+
+func capAllocations(in []StrategyAllocation, maxWeight float64) []StrategyAllocation {
+	if maxWeight <= 0 || maxWeight >= 1 {
+		return in
+	}
+	for i := range in {
+		if in[i].Weight > maxWeight {
+			in[i].Weight = maxWeight
+		}
+	}
+	return in
+}
+
+func shouldRebalanceStrategy(def *StrategyDefinition, interval string, step int) bool {
+	if step <= 1 {
+		return true
+	}
+	every := strategyRebalanceEvery(def, interval)
+	return every <= 1 || (step-1)%every == 0
+}
+
+func strategyRebalanceEvery(def *StrategyDefinition, interval string) int {
+	if def == nil {
+		return 1
+	}
+	if def.RebalanceEvery > 1 {
+		return def.RebalanceEvery
+	}
+	cadence := strings.ToLower(strings.TrimSpace(def.Cadence))
+	if cadence == "" {
+		return 1
+	}
+	if n, err := strconv.Atoi(cadence); err == nil && n > 0 {
+		return n
+	}
+	cadenceDuration, ok := strategyCadenceDuration(cadence)
+	if !ok {
+		return 1
+	}
+	intervalDuration := backtestIntervalDuration(interval)
+	if intervalDuration <= 0 {
+		return 1
+	}
+	every := int(math.Round(float64(cadenceDuration) / float64(intervalDuration)))
+	if every < 1 {
+		return 1
+	}
+	return every
+}
+
+func strategyCadenceDuration(cadence string) (time.Duration, bool) {
+	switch cadence {
+	case "1m":
+		return time.Minute, true
+	case "5m":
+		return 5 * time.Minute, true
+	case "15m":
+		return 15 * time.Minute, true
+	case "1h":
+		return time.Hour, true
+	case "4h":
+		return 4 * time.Hour, true
+	case "1d":
+		return 24 * time.Hour, true
+	case "1w":
+		return 7 * 24 * time.Hour, true
+	default:
+		return 0, false
+	}
+}
+
+type strategyBarsProvider interface {
+	StrategyBars(symbol, interval string, limit int) ([]Bar, error)
+}
+
+func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarket, error) {
+	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: time.Now().UTC()}
+	interval := strategyHistoryInterval(def)
+	limit := strategyRequiredBars(def)
+	if scheduleLimit := strategyRebalanceEvery(def, interval) + 1; scheduleLimit > limit {
+		limit = scheduleLimit
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if globalEngine == nil || globalEngine.provider == nil {
+		return market, errors.New("live strategy market provider not ready")
+	}
+	type historyResult struct {
+		symbol string
+		bars   []Bar
+		err    error
+	}
+	results := make(chan historyResult, len(def.Universe))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, symbol := range def.Universe {
+		symbol := symbol
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit)
+			<-sem
+			results <- historyResult{symbol: symbol, bars: bars, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	loaded := make(map[string]historyResult, len(def.Universe))
+	for result := range results {
+		loaded[result.symbol] = result
+	}
+	scheduleSymbol := def.Universe[0]
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			scheduleSymbol = symbol
+			break
+		}
+	}
+	var aligned []int64
+	for _, symbol := range def.Universe {
+		result, ok := loaded[symbol]
+		if !ok || result.err != nil {
+			if ok {
+				return market, fmt.Errorf("strategy history unavailable for %s: %w", symbol, result.err)
+			}
+			return market, fmt.Errorf("strategy history unavailable for %s", symbol)
+		}
+		var times []int64
+		for _, bar := range result.bars {
+			if bar.T > 0 && strategyBarPrice(bar) > 0 {
+				times = append(times, bar.T)
+			}
+		}
+		if aligned == nil {
+			aligned = times
+		} else {
+			if len(aligned) != len(times) {
+				return market, errors.New("strategy histories have different closed-bar coverage")
+			}
+			for i := range times {
+				if times[i] != aligned[i] {
+					return market, errors.New("strategy histories are not aligned")
+				}
+			}
+		}
+		appendStrategyHistory(market.history, symbol, result.bars)
+		h := market.history[symbol]
+		if len(h) < limit {
+			return market, fmt.Errorf("strategy history incomplete for %s: need %d valid closed bars, got %d", symbol, limit, len(h))
+		}
+		market.prices[symbol] = h[len(h)-1]
+		if symbol == scheduleSymbol {
+			for _, bar := range result.bars {
+				if bar.T > 0 && strategyBarPrice(bar) > 0 {
+					market.barTimes = append(market.barTimes, time.Unix(bar.T, 0).UTC())
+				}
+			}
+		}
+	}
+	if len(market.barTimes) == 0 {
+		return market, errors.New("strategy schedule has no completed market bars")
+	}
+	sort.Slice(market.barTimes, func(i, j int) bool { return market.barTimes[i].Before(market.barTimes[j]) })
+	if _, live := globalEngine.provider.(*tradingProvider); live {
+		maxAge := 2 * backtestIntervalDuration(interval)
+		if maxAge < time.Minute {
+			maxAge = time.Minute
+		}
+		if class := inferAssetClass(scheduleSymbol); class == "equity" || class == "etf" {
+			if maxAge < 5*24*time.Hour {
+				maxAge = 5 * 24 * time.Hour
+			}
+		}
+		if time.Since(market.barTimes[len(market.barTimes)-1]) > maxAge {
+			return market, errors.New("strategy closed-bar history is stale")
+		}
+	}
+	deduped := market.barTimes[:0]
+	for _, barAt := range market.barTimes {
+		if len(deduped) == 0 || !barAt.Equal(deduped[len(deduped)-1]) {
+			deduped = append(deduped, barAt)
+		}
+	}
+	market.barTimes = deduped
+	market.asOf = market.barTimes[len(market.barTimes)-1]
+	return market, nil
+}
+
+func strategyBarPrice(bar Bar) float64 {
+	if bar.C > 0 {
+		return bar.C
+	}
+	if bar.Yes > 0 {
+		return bar.Yes
+	}
+	return bar.O
+}
+
+func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int) ([]Bar, error) {
+	if provider == nil {
+		return nil, errors.New("provider not ready")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if sp, ok := provider.(strategyBarsProvider); ok {
+		return sp.StrategyBars(symbol, interval, limit)
+	}
+	return provider.Bars(symbol, "3M")
+}
+
+func appendStrategyHistory(history map[string][]float64, symbol string, bars []Bar) {
+	for _, b := range bars {
+		price := strategyBarPrice(b)
+		if price > 0 {
+			history[symbol] = append(history[symbol], price)
+		}
+	}
+}
+
+func strategyHistoryInterval(def *StrategyDefinition) string {
+	if def == nil {
+		return "1d"
+	}
+	cadence := strings.ToLower(strings.TrimSpace(def.Cadence))
+	if _, ok := strategyCadenceDuration(cadence); ok {
+		return cadence
+	}
+	return "1d"
+}
+
+func strategyRequiredBars(def *StrategyDefinition) int {
+	if def != nil && def.Engine == "rules" {
+		return rules.RequiredBaseBars(def.Program)
+	}
+	maxBars := 1
+	if def != nil {
+		for _, rule := range def.Rules {
+			if rule.When != nil {
+				maxBars = max(maxBars, conditionRequiredBars(rule.When))
+			}
+			if rule.Rank != nil {
+				maxBars = max(maxBars, indicatorRequiredBars(rule.Rank.By), conditionRequiredBars(rule.Rank.Where))
+				if rule.Rank.Weight == "inverse_volatility" {
+					maxBars = max(maxBars, rule.Rank.VolatilityPeriod+1)
+				}
+			}
+		}
+	}
+	if maxBars < 1 {
+		return 1
+	}
+	if maxBars > 1000 {
+		return 1000
+	}
+	return maxBars
+}
+
+func indicatorRequiredBars(indicator string) int {
+	spec, err := parseIndicator(indicator)
+	if err != nil {
+		return 1
+	}
+	return spec.bars
+}
+
+// Some agent transports preserve object arguments as JSON text. Both wire
+// forms must reach the same validator and durable definition, never a silent
+// no-op during updates. This does not relax the trading-program schema.
+func strategyDefinitionArgument(value any) (map[string]any, error) {
+	if object, ok := value.(map[string]any); ok && object != nil {
+		return object, nil
+	}
+	if text, ok := value.(string); ok {
+		var object map[string]any
+		if err := json.Unmarshal([]byte(text), &object); err == nil && object != nil {
+			return object, nil
+		}
+	}
+	return nil, errors.New("definition must be an object or JSON object text")
+}
+
+func (a *App) toolStrategyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(strArg(args, "name"))
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := validateStrategyDefinition(defRaw); err != nil {
+		return nil, err
+	}
+	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
+		ProjectID:        pid,
+		Name:             name,
+		Description:      strArg(args, "description"),
+		Status:           nonEmpty(strArg(args, "status"), "draft"),
+		Definition:       defRaw,
+		Version:          1,
+		CreatedByAgentID: int64Arg(args, "created_by_agent_id", 0),
+	})
+	if err != nil {
+		return nil, err
+	}
+	strategy, _ := dbGetStrategy(ctx.AppDB(), pid, id)
+	emit("strategy.created", map[string]any{"id": id, "name": name})
+	return map[string]any{"strategy": strategy}, nil
+}
+
+func (a *App) toolStrategyUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "strategy_id", 0)
+	if id <= 0 {
+		return nil, errors.New("strategy_id required")
+	}
+	patch := &Strategy{Name: strArg(args, "name"), Description: strArg(args, "description"), Status: strArg(args, "status")}
+	if raw, supplied := args["definition"]; supplied {
+		def, err := strategyDefinitionArgument(raw)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := validateStrategyDefinition(def); err != nil {
+			return nil, err
+		}
+		patch.Definition = def
+	}
+	strategy, err := dbUpdateStrategy(ctx.AppDB(), pid, id, patch)
+	if err != nil {
+		return nil, err
+	}
+	emit("strategy.updated", map[string]any{"id": id, "name": strategy.Name, "version": strategy.Version})
+	return map[string]any{"strategy": strategy}, nil
+}
+
+func (a *App) toolStrategyGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "strategy_id", 0)
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+		return nil, err
+	}
+	return map[string]any{"strategy": strategy}, nil
+}
+
+func (a *App) toolStrategyList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbListStrategies(ctx.AppDB(), pid, strArg(args, "status"))
+	if err != nil {
+		return nil, err
+	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, rows, time.Now()); err != nil {
+		return nil, err
+	}
+	return map[string]any{"strategies": rows, "count": len(rows)}, nil
+}
+
+func enrichStrategyRuntime(db *sql.DB, projectID string, strategies []*Strategy, now time.Time) error {
+	assignments, err := dbActiveStrategyAssignmentsForProject(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolios, err := dbListPortfolios(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolioNames := map[int64]string{}
+	for _, portfolio := range portfolios {
+		portfolioNames[portfolio.ID] = portfolio.Name
+	}
+	byStrategy := map[int64][]*StrategyAssignment{}
+	for _, assignment := range assignments {
+		assignment.PortfolioName = portfolioNames[assignment.PortfolioID]
+		pinned, err := dbGetStrategyVersion(db, projectID, assignment.StrategyID, assignment.StrategyVersion)
+		if err == nil {
+			if def, _, validationErr := validateStrategyDefinition(pinned.Definition); validationErr == nil {
+				decorateStrategyAssignmentSchedule(assignment, def, now)
+			}
+		}
+		byStrategy[assignment.StrategyID] = append(byStrategy[assignment.StrategyID], assignment)
+	}
+	for _, strategy := range strategies {
+		strategy.Assignments = byStrategy[strategy.ID]
+		if len(strategy.Assignments) == 0 {
+			strategy.AssignmentStatus = "unassigned"
+		} else {
+			strategy.AssignmentStatus = "assigned"
+		}
+	}
+	return nil
+}
+
+func decorateStrategyAssignmentSchedule(assignment *StrategyAssignment, def *StrategyDefinition, now time.Time) {
+	if !strategyHasStocks(def) {
+		slot, _ := strategyAssignmentCheckSlot(def, now)
+		if strategyAssignmentCheckDue(assignment, slot) {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "cadence_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		duration, ok := strategyCadenceDuration(strategyHistoryInterval(def))
+		if !ok || duration <= 0 {
+			duration = time.Hour
+		}
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = slot.Add(duration).UTC().Format(time.RFC3339)
+		return
+	}
+
+	session := usEquitySessionAt(now)
+	if session.OpenDay {
+		assignment.SessionOpenAt = session.Open.UTC().Format(time.RFC3339)
+		assignment.SessionCloseAt = session.Close.UTC().Format(time.RFC3339)
+	}
+	if !session.OpenDay {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = session.Reason
+		assignment.NextEligibleAt = nextUSEquityOpen(now).Format(time.RFC3339)
+		return
+	}
+	if now.Before(session.Open) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "before_market_open"
+		assignment.NextEligibleAt = session.Open.UTC().Format(time.RFC3339)
+		return
+	}
+	if !now.Before(session.Close) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "market_closed"
+		assignment.NextEligibleAt = nextUSEquityOpen(session.Close.Add(time.Second)).Format(time.RFC3339)
+		return
+	}
+	slot, ok := strategyAssignmentCheckSlot(def, now)
+	if !ok || !strategyAssignmentCheckDue(assignment, slot) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = nextStockStrategyCheck(def, slot, session).Format(time.RFC3339)
+		return
+	}
+	if globalEngine != nil {
+		if _, live := globalEngine.provider.(*tradingProvider); !live {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "regular_session_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		for _, symbol := range def.Universe {
+			class := inferAssetClass(symbol)
+			if class != "equity" && class != "etf" {
+				continue
+			}
+			mark, err := dbGetMark(globalEngine.db, symbol)
+			if err != nil || !markFresh(mark, now.UTC()) {
+				assignment.Eligibility = "waiting"
+				assignment.EligibilityReason = "waiting_for_fresh_market_data"
+				assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+				return
+			}
+		}
+	}
+	assignment.Eligibility = "eligible"
+	assignment.EligibilityReason = "regular_session_ready"
+	assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+}
+
+func strategyHasStocks(def *StrategyDefinition) bool {
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			return true
+		}
+	}
+	return false
+}
+
+func nextStockStrategyCheck(def *StrategyDefinition, slot time.Time, session usEquitySession) time.Time {
+	cadence := strategyHistoryInterval(def)
+	if cadence == "1d" {
+		return nextUSEquityOpen(session.Close.Add(time.Second))
+	}
+	if cadence == "1w" {
+		return nextUSEquityOpen(slot.AddDate(0, 0, 7))
+	}
+	duration, ok := strategyCadenceDuration(cadence)
+	if !ok || duration <= 0 {
+		duration = time.Hour
+	}
+	next := slot.Add(duration)
+	if next.Before(session.Close) {
+		return next.UTC()
+	}
+	return nextUSEquityOpen(session.Close.Add(time.Second))
+}
+
+func (a *App) toolStrategyValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
+	}
+	def, warnings, err := validateStrategyDefinition(defRaw)
+	if err != nil {
+		return map[string]any{"valid": false, "error": err.Error()}, nil
+	}
+	return map[string]any{"valid": true, "definition": def, "warnings": warnings}, nil
+}
+
+func (a *App) toolStrategyEvaluate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, int64Arg(args, "strategy_id", 0))
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		return nil, err
+	}
+	eval, err := evaluateStrategy(strategy, market)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"evaluation": eval}, nil
+}
+
+func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	strategyID := int64Arg(args, "strategy_id", 0)
+	if portfolioID <= 0 || strategyID <= 0 {
+		return nil, errors.New("portfolio_id and strategy_id required")
+	}
+	portfolio, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if def.Engine == "rules" {
+		return nil, errors.New("rule programs are available in event backtests; current live adapters do not support protected rule execution or linear contracts")
+	}
+	if err := validateStrategyUniverseForPortfolio(ctx.AppDB(), portfolio, def); err != nil {
+		return nil, err
+	}
+	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategy.ID); !allowed {
+		return nil, fmt.Errorf("strategy scorecard gate: %s", reason)
+	}
+	cadence := strings.TrimSpace(strArg(args, "cadence"))
+	if cadence == "" {
+		cadence = strings.TrimSpace(def.Cadence)
+	}
+	id, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: pid, PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: strategy.Version,
+		ControlMode:     nonEmpty(strArg(args, "control_mode"), "strategy"),
+		Cadence:         nonEmpty(cadence, "1d"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	assignment, _ := dbActiveStrategyAssignment(ctx.AppDB(), pid, portfolioID)
+	emit("strategy.assigned", map[string]any{"id": id, "portfolio_id": portfolioID, "strategy_id": strategyID, "strategy_version": strategy.Version})
+	return map[string]any{"assignment": assignment}, nil
+}
+
+func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	strategyID := int64Arg(args, "strategy_id", 0)
+	if portfolioID <= 0 || strategyID <= 0 {
+		return nil, errors.New("portfolio_id and strategy_id required")
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if def.Engine == "rules" {
+		if raw, ok := args["inputs"]; ok {
+			data, _ := json.Marshal(raw)
+			var inputs []sim.Input
+			if err := json.Unmarshal(data, &inputs); err != nil {
+				return nil, err
+			}
+			var config *sim.Config
+			if raw, ok := args["simulation"]; ok {
+				data, _ := json.Marshal(raw)
+				if err := json.Unmarshal(data, &config); err != nil {
+					return nil, err
+				}
+			}
+			run, err := createRuleEventBacktest(ctx, pf, strategy, strArg(args, "name"), floatArg(args, "starting_cash", 0), config, inputs)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"backtest": run}, nil
+		}
+		return nil, errors.New("rule backtests require a sourced OHLC and quote event tape in inputs")
+	}
+	interval, err := normalizeStrategyReplayInterval(def, strArg(args, "interval"))
+	if err != nil {
+		return nil, err
+	}
+	startAt, endAt, err := resolveBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
+	if err != nil {
+		return nil, err
+	}
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
+	if err != nil {
+		return nil, err
+	}
+	if steps <= 0 {
+		return nil, errors.New("market data range must contain at least one step")
+	}
+	startingCash := floatArg(args, "starting_cash", 0)
+	if startingCash <= 0 {
+		startingCash = pf.StartingCash
+	}
+	name := strArg(args, "name")
+	if name == "" {
+		name = fmt.Sprintf("%s strategy backtest", strategy.Name)
+	}
+	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID:         pid,
+		PortfolioID:       portfolioID,
+		StrategyID:        strategyID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt.Format("2006-01-02"),
+		EndAt:             endAt.Format("2006-01-02"),
+		Interval:          interval,
+		StartingCash:      startingCash,
+		FeeBps:            floatArg(args, "fee_bps", 0),
+		SlippageBps:       floatArg(args, "slippage_bps", defaultSlippageBps),
+		AdjustmentMode:    adjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+		TotalSteps:        steps,
+		Summary: map[string]any{
+			"portfolio_name": pf.Name,
+			"strategy_name":  strategy.Name,
+			"market_source":  marketSource,
+			"market_data":    summarizeBacktestMarketCapture(marketBars, def.Universe, startAt, endAt),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), id, marketBars); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	var options *sim.Config
+	var extra []sim.Input
+	if raw, ok := args["simulation"]; ok {
+		data, _ := json.Marshal(raw)
+		if err := json.Unmarshal(data, &options); err != nil {
+			return nil, err
+		}
+	}
+	if raw, ok := args["inputs"]; ok {
+		data, _ := json.Marshal(raw)
+		if err := json.Unmarshal(data, &extra); err != nil {
+			return nil, err
+		}
+	}
+	if err := enableEventBacktest(ctx.AppDB(), pid, id, options, extra); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	run, _ := dbGetBacktestRun(ctx.AppDB(), pid, id)
+	_, _ = dbInsertBacktestEvent(ctx.AppDB(), id, "created", "Strategy backtest created", map[string]any{"strategy_id": strategyID, "symbols": def.Universe, "market_source": marketSource, "bars": len(marketBars)})
+	emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "strategy_id": strategyID, "run_kind": "strategy"})
+	return map[string]any{"backtest": run}, nil
+}
+
+func (a *App) toolStrategyValidateBacktest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	result, err := a.createStrategyValidation(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"validation": result}, nil
+}
+
+func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*StrategyValidationResult, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	strategyID := int64Arg(args, "strategy_id", 0)
+	if portfolioID <= 0 || strategyID <= 0 {
+		return nil, errors.New("portfolio_id and strategy_id required")
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	interval, err := normalizeStrategyReplayInterval(def, strArg(args, "interval"))
+	if err != nil {
+		return nil, err
+	}
+	startAt, endAt, err := resolveBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
+	if err != nil {
+		return nil, err
+	}
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
+	if err != nil {
+		return nil, err
+	}
+	splitPct := floatArg(args, "split_pct", 0.7)
+	if splitPct <= 0 {
+		splitPct = 0.7
+	}
+	if splitPct >= 1 {
+		return nil, errors.New("split_pct must be between 0 and 1")
+	}
+	trainSteps := int(math.Floor(float64(steps) * splitPct))
+	testSteps := steps - trainSteps
+	if trainSteps < 2 || testSteps < 2 {
+		return nil, fmt.Errorf("validation needs at least 2 train and 2 test steps; got %d/%d", trainSteps, testSteps)
+	}
+	startingCash := floatArg(args, "starting_cash", 0)
+	if startingCash <= 0 {
+		startingCash = pf.StartingCash
+	}
+	name := strArg(args, "name")
+	if name == "" {
+		name = fmt.Sprintf("%s validation", strategy.Name)
+	}
+	feeBps := floatArg(args, "fee_bps", 0)
+	slippageBps := floatArg(args, "slippage_bps", defaultSlippageBps)
+	train, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:          "in_sample",
+		Name:           name + " · in sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexBacktestMarketBars(marketBars, 1, trainSteps),
+	})
+	if err != nil {
+		return nil, err
+	}
+	test, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:          "out_of_sample",
+		Name:           name + " · out of sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyReplayWarmupSteps(def, interval)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := &StrategyValidationResult{
+		StrategyID:      strategy.ID,
+		StrategyVersion: strategy.Version,
+		SplitPct:        splitPct,
+		MarketSource:    marketSource,
+		Train:           train,
+		Test:            test,
+	}
+	result.Verdict = strategyValidationVerdict(train.Metrics, test.Metrics)
+	scorecard, scoreErr := evaluateAndStoreStrategyScorecard(ctx.AppDB(), pid, portfolioID, strategyID, test.Run.ID)
+	if scoreErr != nil {
+		return nil, fmt.Errorf("persist validation scorecard: %w", scoreErr)
+	}
+	result.Scorecard = scorecard
+	emit("strategy.scorecard.evaluated", map[string]any{"portfolio_id": portfolioID, "strategy_id": strategyID, "evaluation": scorecard})
+	return result, nil
+}
+
+type strategyValidationRunSpec struct {
+	Label          string
+	Name           string
+	Interval       string
+	StartingCash   float64
+	FeeBps         float64
+	SlippageBps    float64
+	MarketSource   string
+	AdjustmentMode string
+	Bars           []*BacktestMarketBar
+}
+
+func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy, def *StrategyDefinition, spec strategyValidationRunSpec) (*StrategyValidationPeriod, error) {
+	if len(spec.Bars) == 0 {
+		return nil, fmt.Errorf("%s validation period has no market bars", spec.Label)
+	}
+	startAt, endAt := marketBarDateRange(spec.Bars)
+	steps := maxBacktestMarketStep(spec.Bars)
+	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID:         pf.ProjectID,
+		PortfolioID:       pf.ID,
+		StrategyID:        strategy.ID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              spec.Name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt,
+		EndAt:             endAt,
+		Interval:          spec.Interval,
+		StartingCash:      spec.StartingCash,
+		FeeBps:            spec.FeeBps,
+		SlippageBps:       spec.SlippageBps,
+		AdjustmentMode:    spec.AdjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt, endAt, spec.AdjustmentMode),
+		TotalSteps:        steps,
+		Summary: map[string]any{
+			"portfolio_name":    pf.Name,
+			"strategy_name":     strategy.Name,
+			"market_source":     spec.MarketSource,
+			"dataset_sha256":    backtestMarketBarsChecksum(spec.Bars),
+			"validation_period": spec.Label,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), id, spec.Bars); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	if err := enableEventBacktest(ctx.AppDB(), pf.ProjectID, id, nil, nil); err != nil {
+		return nil, err
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), pf.ProjectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := runStrategyBacktestToEnd(run); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	run, err = dbGetBacktestRun(ctx.AppDB(), pf.ProjectID, id)
+	if err != nil {
+		return nil, err
+	}
+	perf, err := backtestPerformance(run)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = dbInsertBacktestEvent(ctx.AppDB(), id, "validation", fmt.Sprintf("%s validation completed", spec.Label), map[string]any{"period": spec.Label})
+	return &StrategyValidationPeriod{Label: spec.Label, Run: run, Performance: perf, Metrics: perf.Metrics}, nil
+}
+
+func reindexBacktestMarketBars(rows []*BacktestMarketBar, fromStep, toStep int) []*BacktestMarketBar {
+	out := []*BacktestMarketBar{}
+	for _, row := range rows {
+		if row == nil || row.Step < fromStep || row.Step > toStep {
+			continue
+		}
+		cp := *row
+		cp.Step = row.Step - fromStep + 1
+		out = append(out, &cp)
+	}
+	return out
+}
+
+func reindexValidationMarketBars(rows []*BacktestMarketBar, fromStep, toStep, warmupSteps int) []*BacktestMarketBar {
+	if warmupSteps < 0 {
+		warmupSteps = 0
+	}
+	warmupFrom := maxInt(1, fromStep-warmupSteps)
+	out := []*BacktestMarketBar{}
+	for _, row := range rows {
+		if row == nil || row.Step < warmupFrom || row.Step > toStep {
+			continue
+		}
+		cp := *row
+		cp.Step = row.Step - fromStep + 1
+		out = append(out, &cp)
+	}
+	return out
+}
+
+func marketBarDateRange(rows []*BacktestMarketBar) (string, string) {
+	var minT, maxT int64
+	for _, row := range rows {
+		if row == nil || row.T <= 0 || row.Step < 1 {
+			continue
+		}
+		if minT == 0 || row.T < minT {
+			minT = row.T
+		}
+		if row.T > maxT {
+			maxT = row.T
+		}
+	}
+	if minT == 0 {
+		today := time.Now().UTC().Format("2006-01-02")
+		return today, today
+	}
+	return time.Unix(minT, 0).UTC().Format("2006-01-02"), time.Unix(maxT, 0).UTC().Format("2006-01-02")
+}
+
+func maxBacktestMarketStep(rows []*BacktestMarketBar) int {
+	maxStep := 0
+	for _, row := range rows {
+		if row != nil && row.Step > maxStep {
+			maxStep = row.Step
+		}
+	}
+	return maxStep
+}
+
+func strategyValidationVerdict(train, test map[string]float64) string {
+	testReturn := test["return_pct"]
+	testSharpe, hasTestSharpe := test["sharpe_ratio"]
+	if testReturn > 0 && (!hasTestSharpe || testSharpe > 0) {
+		return "pass"
+	}
+	trainReturn := train["return_pct"]
+	if trainReturn > 0 && testReturn <= 0 {
+		return "overfit_risk"
+	}
+	return "fail"
+}
+
+func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/strategies")
+	rest = strings.Trim(rest, "/")
+	if rest == "catalog" {
+		if r.Method != http.MethodGet {
+			httpErr(w, 405, "GET")
+			return
+		}
+		httpJSON(w, 200, strategyCatalog(strings.Split(r.URL.Query().Get("symbols"), ",")))
+		return
+	}
+	if rest == "live" {
+		a.handleHTTPStrategiesLive(w, r)
+		return
+	}
+	if rest == "" {
+		switch r.Method {
+		case http.MethodGet:
+			rows, err := dbListStrategies(globalCtx.AppDB(), pid, r.URL.Query().Get("status"))
+			if err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+			if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, rows, time.Now()); err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+			httpJSON(w, 200, map[string]any{"strategies": rows})
+		case http.MethodPost:
+			var body struct {
+				Name             string         `json:"name"`
+				Description      string         `json:"description"`
+				Status           string         `json:"status"`
+				Definition       map[string]any `json:"definition"`
+				CreatedByAgentID int64          `json:"created_by_agent_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+			out, err := a.toolStrategyCreate(globalCtx, map[string]any{
+				"_project_id":         pid,
+				"name":                body.Name,
+				"description":         body.Description,
+				"status":              body.Status,
+				"definition":          body.Definition,
+				"created_by_agent_id": body.CreatedByAgentID,
+			})
+			if err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+			httpJSON(w, 201, out)
+		default:
+			httpErr(w, 405, "GET or POST")
+		}
+		return
+	}
+	parts := strings.Split(rest, "/")
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		httpErr(w, 400, "strategy id must be integer")
+		return
+	}
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+	subaction := ""
+	if len(parts) > 2 {
+		subaction = parts[2]
+	}
+	switch {
+	case action == "" && r.Method == http.MethodGet:
+		strategy, err := dbGetStrategy(globalCtx.AppDB(), pid, id)
+		if err != nil {
+			httpErr(w, 404, "strategy not found")
+			return
+		}
+		if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, map[string]any{"strategy": strategy})
+	case action == "" && r.Method == http.MethodPatch:
+		var body struct {
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			Status      string         `json:"status"`
+			Definition  map[string]any `json:"definition"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		args := map[string]any{
+			"_project_id": pid,
+			"strategy_id": id,
+			"name":        body.Name,
+			"description": body.Description,
+			"status":      body.Status,
+		}
+		if body.Definition != nil {
+			args["definition"] = body.Definition
+		}
+		out, err := a.toolStrategyUpdate(globalCtx, args)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "evaluate" && r.Method == http.MethodPost:
+		out, err := a.toolStrategyEvaluate(globalCtx, map[string]any{"_project_id": pid, "strategy_id": id})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "validate" && r.Method == http.MethodPost:
+		var body struct {
+			PortfolioID  int64   `json:"portfolio_id"`
+			Name         string  `json:"name"`
+			StartAt      string  `json:"start_at"`
+			EndAt        string  `json:"end_at"`
+			Interval     string  `json:"interval"`
+			SplitPct     float64 `json:"split_pct"`
+			StartingCash float64 `json:"starting_cash"`
+			FeeBps       float64 `json:"fee_bps"`
+			SlippageBps  float64 `json:"slippage_bps"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		out, err := a.toolStrategyValidateBacktest(globalCtx, map[string]any{
+			"_project_id":   pid,
+			"strategy_id":   id,
+			"portfolio_id":  body.PortfolioID,
+			"name":          body.Name,
+			"start_at":      body.StartAt,
+			"end_at":        body.EndAt,
+			"interval":      body.Interval,
+			"split_pct":     body.SplitPct,
+			"starting_cash": body.StartingCash,
+			"fee_bps":       body.FeeBps,
+			"slippage_bps":  body.SlippageBps,
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "assign" && r.Method == http.MethodPost:
+		var body struct {
+			PortfolioID int64  `json:"portfolio_id"`
+			ControlMode string `json:"control_mode"`
+			Cadence     string `json:"cadence"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		out, err := a.toolStrategyAssign(globalCtx, map[string]any{
+			"_project_id": pid, "strategy_id": id, "portfolio_id": body.PortfolioID,
+			"control_mode": body.ControlMode, "cadence": body.Cadence,
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodGet:
+		out, err := a.toolStrategyScorecardGet(globalCtx, map[string]any{
+			"_project_id": pid, "strategy_id": id, "portfolio_id": r.URL.Query().Get("portfolio_id"), "limit": r.URL.Query().Get("limit"),
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "evaluate" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardEvaluate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "promotion" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyPromotionUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	default:
+		httpErr(w, 404, "no such strategy route")
+	}
+}
+
+type strategyBacktestState struct {
+	RealizedPnL float64
+	Cash        float64
+	Positions   map[string]*Position
+}
+
+func startStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		return startEventSimulation(run, true)
+	}
+	if run.Status != "queued" && run.Status != "failed" {
+		return map[string]any{"backtest": run}, nil
+	}
+	if err := initializeStrategyBacktestRun(run); err != nil {
+		return nil, err
+	}
+	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	return stepStrategyBacktestRun(next)
+}
+
+func initializeStrategyBacktestRun(run *BacktestRun) error {
+	if run == nil {
+		return errors.New("backtest run required")
+	}
+	if run.StrategyID <= 0 {
+		return errors.New("strategy_id required")
+	}
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), run.ProjectID, run.StrategyID, run.StrategyVersion)
+	if err != nil {
+		return err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return err
+	}
+	if err := validateStrategyReplayInterval(def, run.Interval); err != nil {
+		return err
+	}
+	if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
+		return err
+	}
+	_ = dbUpsertBacktestSnapshot(globalCtx.AppDB(), &BacktestSnapshot{
+		RunID: run.ID, Step: 0, Equity: run.StartingCash, Cash: run.StartingCash,
+		BuyingPower: run.StartingCash, Positions: []*Position{}, Orders: []*Order{}, Prices: []map[string]any{},
+	})
+	_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "started", "Strategy replay started", map[string]any{"strategy_id": run.StrategyID})
+	emitBacktest("trading.backtest.started", run.ID, map[string]any{"portfolio_id": run.PortfolioID, "strategy_id": run.StrategyID, "run_kind": "strategy"})
+	return nil
+}
+
+func runStrategyBacktestToEnd(run *BacktestRun) (map[string]any, error) {
+	return runStrategyBacktestToEndContext(context.Background(), run)
+}
+func runStrategyBacktestToEndContext(call context.Context, run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
+			return nil, err
+		}
+		return runEventSimulation(call, run, false)
+	}
+	strategyReplayMu.Lock()
+	defer strategyReplayMu.Unlock()
+	if run.Status == "queued" || run.Status == "failed" {
+		if err := initializeStrategyBacktestRun(run); err != nil {
+			return nil, err
+		}
+	} else if run.Status == "paused" {
+		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
+			return nil, err
+		}
+	} else if run.Status != "running" {
+		return nil, fmt.Errorf("backtest is %s; cannot run", run.Status)
+	}
+	next, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), next.ProjectID, next.StrategyID, next.StrategyVersion)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	state, err := loadStrategyBacktestState(next)
+	if err != nil {
+		return nil, err
+	}
+	market, err := backtestStrategyMarket(next, def, next.CurrentStep)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		if err := call.Err(); err != nil {
+			return nil, err
+		}
+		fresh, err := dbGetBacktestRun(globalCtx.AppDB(), next.ProjectID, next.ID)
+		if err != nil {
+			return nil, err
+		}
+		next = fresh
+		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
+			if fresh, err := dbGetBacktestRun(globalCtx.AppDB(), next.ProjectID, next.ID); err == nil && fresh != nil {
+				next = fresh
+			}
+			return map[string]any{"backtest": next, "status": next.Status}, nil
+		}
+		next, err = runStrategyBacktestStep(next, strategy, state, &market)
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		return startEventSimulation(run, true)
+	}
+	strategyReplayMu.Lock()
+	defer strategyReplayMu.Unlock()
+	fresh, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	run = fresh
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	if run.Status == "paused" {
+		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
+			return nil, err
+		}
+		run.Status = "running"
+	}
+	if run.Status != "running" && run.Status != "paused" {
+		return nil, fmt.Errorf("backtest is %s, not running", run.Status)
+	}
+	step := run.CurrentStep + 1
+	if step > run.TotalSteps {
+		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
+		return map[string]any{"status": "completed", "backtest": run}, nil
+	}
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), run.ProjectID, run.StrategyID, run.StrategyVersion)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	state, err := loadStrategyBacktestState(run)
+	if err != nil {
+		return nil, err
+	}
+	market, err := backtestStrategyMarket(run, def, run.CurrentStep)
+	if err != nil {
+		return nil, err
+	}
+	next, err := runStrategyBacktestStep(run, strategy, state, &market)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"backtest": next}, nil
+}
+
+func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strategyBacktestState, market *strategyMarket) (*BacktestRun, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	if strategy == nil {
+		return nil, errors.New("strategy required")
+	}
+	if state == nil {
+		return nil, errors.New("strategy backtest state required")
+	}
+	step := run.CurrentStep + 1
+	if step > run.TotalSteps {
+		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
+		next := *run
+		next.Status = "completed"
+		return &next, nil
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	var executionEval *StrategyEvaluation
+	executedSignalStep := 0
+	if step > 1 && strategyReplaySignalDue(def, step-1, *market) {
+		executionEval, err = evaluateStrategy(strategy, *market)
+		if err != nil {
+			return nil, err
+		}
+		executedSignalStep = step - 1
+	}
+	prices, err := advanceBacktestStrategyMarket(run, def, step, market)
+	if err != nil {
+		return nil, err
+	}
+	eval, rebalance, err := evaluateStrategyBacktestStep(strategy, def, run, step, *market)
+	if err != nil {
+		return nil, err
+	}
+	stepRun := *run
+	stepRun.CurrentStep = step - 1
+	orders := []*Order{}
+	if executionEval != nil {
+		orders = applyStrategyTargets(&stepRun, state, executionEval.TargetAllocations, backtestExecutionPrices(prices))
+	}
+	snap := strategySnapshot(&stepRun, step, state, prices, orders)
+	status := run.Status
+	if status == "" {
+		status = "running"
+	}
+	if step >= run.TotalSteps {
+		status = "completed"
+	}
+	summary := map[string]any{
+		"last_step":            step,
+		"prices":               prices,
+		"rebalance":            rebalance,
+		"strategy_id":          strategy.ID,
+		"strategy_name":        strategy.Name,
+		"target_allocations":   eval.TargetAllocations,
+		"decisions":            eval.Decisions,
+		"signal_as_of":         eval.AsOf,
+		"executed_signal_step": executedSignalStep,
+		"execution_model":      "next_bar_open",
+	}
+	if err := commitStrategyStep(globalCtx.AppDB(), run.ID, step, summary, status, snap); err != nil {
+		return nil, err
+	}
+	_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "step", fmt.Sprintf("Strategy step %d/%d evaluated", step, run.TotalSteps), summary)
+	if len(orders) > 0 {
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "orders", fmt.Sprintf("Strategy generated %d order(s)", len(orders)), map[string]any{"orders": orders})
+	}
+	emitBacktest("trading.backtest.tick", run.ID, map[string]any{
+		"portfolio_id": run.PortfolioID, "step": step, "total_steps": run.TotalSteps, "prices": prices, "run_kind": "strategy",
+	})
+	if status == "completed" {
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Strategy backtest completed", summary)
+		emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID, "run_kind": "strategy"})
+	}
+	next := *run
+	next.CurrentStep = step
+	next.Status = status
+	next.Summary = summary
+	return &next, nil
+}
+
+func evaluateStrategyBacktestStep(strategy *Strategy, def *StrategyDefinition, run *BacktestRun, step int, market strategyMarket) (*StrategyEvaluation, bool, error) {
+	if strategyReplaySignalDue(def, step, market) {
+		eval, err := evaluateStrategy(strategy, market)
+		return eval, true, err
+	}
+	every := strategyRebalanceEvery(def, strategyHistoryInterval(def))
+	return &StrategyEvaluation{
+		StrategyID:        strategy.ID,
+		StrategyVersion:   strategy.Version,
+		AsOf:              market.asOf.Format(time.RFC3339),
+		TargetAllocations: nil,
+		Decisions:         []string{fmt.Sprintf("holding existing allocation; next rebalance every %d completed strategy bar(s)", every)},
+	}, false, nil
+}
+
+func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error) {
+	state := &strategyBacktestState{Cash: run.StartingCash, Positions: map[string]*Position{}}
+	snaps, err := dbListBacktestSnapshots(globalCtx.AppDB(), run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(snaps) == 0 {
+		return state, nil
+	}
+	last := snaps[len(snaps)-1]
+	state.Cash = last.Cash
+	state.RealizedPnL = last.RealizedPnL
+	for _, p := range last.Positions {
+		if p != nil && p.Qty > 0 {
+			cp := *p
+			state.Positions[strings.ToUpper(p.Symbol)] = &cp
+		}
+	}
+	return state, nil
+}
+
+func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, targets []StrategyAllocation, prices []map[string]any) []*Order {
+	priceBySymbol := backtestPriceMap(prices)
+	policy := decodeReplayPolicy(run)
+	targetBySymbol := map[string]float64{}
+	for _, target := range targets {
+		targetBySymbol[strings.ToUpper(target.Symbol)] = target.Weight
+	}
+	equity := state.Cash
+	for symbol, pos := range state.Positions {
+		price := priceBySymbol[symbol]
+		if price <= 0 {
+			price = pos.AvgCost
+		}
+		equity += pos.Qty * price
+	}
+	type plannedTrade struct {
+		symbol     string
+		price      float64
+		diff       float64
+		currentQty float64
+	}
+	plans := []plannedTrade{}
+	symbols := cleanSymbols(run.Symbols)
+	seen := map[string]bool{}
+	for _, target := range targets {
+		symbols = append(symbols, target.Symbol)
+	}
+	for _, symbol := range symbols {
+		if seen[symbol] {
+			continue
+		}
+		seen[symbol] = true
+		price := priceBySymbol[symbol]
+		if price <= 0 {
+			continue
+		}
+		pos := state.Positions[symbol]
+		currentQty := 0.0
+		if pos != nil {
+			currentQty = pos.Qty
+		}
+		currentValue := currentQty * price
+		targetValue := equity * targetBySymbol[symbol]
+		diff := targetValue - currentValue
+		if math.Abs(diff) < math.Max(1, equity*0.001) {
+			continue
+		}
+		plans = append(plans, plannedTrade{symbol: symbol, price: price, diff: diff, currentQty: currentQty})
+	}
+
+	sort.SliceStable(plans, func(i, j int) bool {
+		if (plans[i].diff < 0) != (plans[j].diff < 0) {
+			return plans[i].diff < 0
+		}
+		return plans[i].symbol < plans[j].symbol
+	})
+	orders := []*Order{}
+	for _, plan := range plans {
+		symbol, price, diff, currentQty := plan.symbol, plan.price, plan.diff, plan.currentQty
+		pos := state.Positions[symbol]
+		side := "buy"
+		qty := math.Abs(diff) / price
+		feeBps := run.FeeBps
+		fillPrice := applySlippage(price, side, run.SlippageBps)
+		if diff < 0 {
+			side = "sell"
+			fillPrice = applySlippage(price, side, run.SlippageBps)
+			if qty > currentQty {
+				qty = currentQty
+			}
+		}
+		if policy != nil {
+			if profile, ok := policy.Profiles[symbol]; ok {
+				profile.SlippageBps = math.Max(profile.SlippageBps, run.SlippageBps)
+				estimate := estimateSimulationExecution(&Mark{Symbol: symbol, Price: price, Source: "backtest"}, side, "market", qty, price, profile, "taker")
+				fillPrice = estimate.Price
+				feeBps = math.Max(feeBps, estimate.FeeBps)
+			}
+		}
+		if side == "buy" && fillPrice > 0 {
+			qty = math.Min(qty, state.Cash/(fillPrice*(1+math.Max(0, feeBps)/10000)))
+		}
+		qty = floor4(qty)
+		if qty <= 0 {
+			continue
+		}
+		if policy != nil {
+			profile, ok := policy.Profiles[symbol]
+			if !ok {
+				continue
+			}
+			if profile.QtyStep > 0 {
+				qty = math.Floor(qty/profile.QtyStep+1e-9) * profile.QtyStep
+			}
+			if violation := validateExecutionOrderAt(profile, policy.Instruments[symbol], &Mark{Source: "backtest"}, qty, fillPrice, backtestReplayTime(run, run.CurrentStep+1)); violation != nil {
+				continue
+			}
+			if side == "buy" {
+				if !policy.Allowed[symbol] {
+					continue
+				}
+				gross, symbolValue := 0.0, 0.0
+				for key, pos := range state.Positions {
+					value := pos.Qty * priceBySymbol[key]
+					gross += value
+					if key == symbol {
+						symbolValue = value
+					}
+				}
+				if exposureBreach(policy.Risk, equity, qty*fillPrice, symbolValue, gross) != nil {
+					continue
+				}
+				var high float64 = run.StartingCash
+				if globalCtx != nil {
+					_ = globalCtx.AppDB().QueryRow(`SELECT COALESCE(MAX(equity),?) FROM backtest_snapshots WHERE run_id=?`, high, run.ID).Scan(&high)
+				}
+				if high > 0 && (equity/high-1)*100 < -policy.Risk.MaxDrawdownPct {
+					continue
+				}
+				if globalCtx != nil {
+					day := backtestReplayTime(run, run.CurrentStep+1).UTC().Format("2006-01-02")
+					baseline := run.StartingCash
+					_ = globalCtx.AppDB().QueryRow(`SELECT s.equity FROM backtest_snapshots s JOIN backtest_market_bars b ON b.run_id=s.run_id AND b.step=s.step WHERE s.run_id=? AND date(b.t,'unixepoch')<? ORDER BY s.step DESC LIMIT 1`, run.ID, day).Scan(&baseline)
+					if baseline > 0 && (equity/baseline-1)*100 < -policy.Risk.MaxDailyLossPct {
+						continue
+					}
+				}
+			}
+		}
+		if side == "buy" {
+			fee := fillFee(qty, fillPrice, feeBps)
+			cost := qty*fillPrice + fee
+			if cost > state.Cash && fillPrice > 0 {
+				feeRate := math.Max(0, feeBps) / 10_000
+				qty = floor4(math.Max(0, state.Cash/(fillPrice*(1+feeRate))))
+				fee = fillFee(qty, fillPrice, feeBps)
+				cost = qty*fillPrice + fee
+			}
+			if qty <= 0 {
+				continue
+			}
+			state.Cash -= cost
+			if pos == nil {
+				pos = &Position{Symbol: symbol, AssetClass: inferAssetClass(symbol)}
+				state.Positions[symbol] = pos
+			}
+			newQty := pos.Qty + qty
+			if newQty > 0 {
+				pos.AvgCost = ((pos.AvgCost * pos.Qty) + (fillPrice * qty)) / newQty
+			}
+			pos.Qty = newQty
+		} else {
+			fee := fillFee(qty, fillPrice, feeBps)
+			proceeds := qty*fillPrice - fee
+			state.Cash += proceeds
+			if pos != nil {
+				realized := (fillPrice - pos.AvgCost) * qty
+				state.RealizedPnL += realized
+				pos.RealizedPnL += realized
+				pos.Qty -= qty
+				if pos.Qty <= 1e-9 {
+					delete(state.Positions, symbol)
+				}
+			}
+		}
+		order := &Order{
+			ID:           "bt-" + uuid.NewString(),
+			PortfolioID:  run.PortfolioID,
+			Symbol:       symbol,
+			AssetClass:   inferAssetClass(symbol),
+			Side:         side,
+			Type:         "market",
+			Qty:          qty,
+			FilledQty:    qty,
+			AvgFillPrice: fillPrice,
+			TIF:          "day",
+			Status:       "filled",
+			Rationale:    "strategy target rebalance",
+			Source:       "strategy",
+			PlacedAt:     backtestReplayTime(run, run.CurrentStep+1).Format(time.RFC3339),
+			ResolvedAt:   backtestReplayTime(run, run.CurrentStep+1).Format(time.RFC3339),
+		}
+		orders = append(orders, order)
+	}
+	return orders
+}
+
+func backtestExecutionPrices(prices []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(prices))
+	for _, row := range prices {
+		copyRow := make(map[string]any, len(row))
+		for key, value := range row {
+			copyRow[key] = value
+		}
+		if open := anyFloat(row["open"]); open > 0 {
+			copyRow["price"] = open
+		}
+		out = append(out, copyRow)
+	}
+	return out
+}
+
+func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, prices []map[string]any, orders []*Order) *BacktestSnapshot {
+	priceBySymbol := backtestPriceMap(prices)
+	positions := []*Position{}
+	for _, pos := range state.Positions {
+		cp := *pos
+		price := priceBySymbol[strings.ToUpper(cp.Symbol)]
+		if price <= 0 {
+			price = cp.AvgCost
+		}
+		cp.MarketPrice = price
+		cp.MarketValue = cp.Qty * price
+		cp.UnrealizedPnL = (price - cp.AvgCost) * cp.Qty
+		if cp.AvgCost > 0 {
+			cp.UnrealizedPnLPct = (price/cp.AvgCost - 1) * 100
+		}
+		positions = append(positions, &cp)
+	}
+	sort.Slice(positions, func(i, j int) bool { return positions[i].Symbol < positions[j].Symbol })
+	equity, openPnL, openPnLPct, _, exposure := valueBacktestPositions(state.Cash, positions, prices)
+	return &BacktestSnapshot{
+		RunID:       run.ID,
+		Step:        step,
+		Equity:      equity,
+		Cash:        state.Cash,
+		BuyingPower: state.Cash,
+		OpenPnL:     openPnL,
+		OpenPnLPct:  openPnLPct,
+		RealizedPnL: state.RealizedPnL,
+		Exposure:    exposure,
+		Positions:   positions,
+		Orders:      orders,
+		Prices:      prices,
+	}
+}
+
+func backtestPriceMap(prices []map[string]any) map[string]float64 {
+	out := map[string]float64{}
+	for _, row := range prices {
+		symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
+		price := anyFloat(row["price"])
+		if symbol != "" && price > 0 {
+			out[symbol] = price
+		}
+	}
+	return out
+}

@@ -1193,7 +1193,7 @@ function pnlClass(n: number | undefined): string {
 
 // ─── Main ──────────────────────────────────────────────────────────
 
-type TabId = "portfolios" | "trade" | "positions" | "risk" | "agents" | "strategies" | "backtests" | "brokers" | "journal";
+type TabId = "portfolios" | "trade" | "positions" | "risk" | "agents" | "brokers" | "journal";
 
 export default function TradingPanel(props: NativePanelProps) { return <TradingPanelInstance key={`${props.projectId}:${props.installId}`} {...props} />; }
 function TradingPanelInstance({ projectId, installId }: NativePanelProps) {
@@ -1286,7 +1286,7 @@ function TradingPanelInstance({ projectId, installId }: NativePanelProps) {
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["portfolios","trade","positions","risk","agents","strategies","backtests","brokers","journal"] as TabId[]).map((id) => {
+        {(["portfolios","trade","positions","risk","agents","brokers","journal"] as TabId[]).map((id) => {
           const active = id === tab;
           return (
             <button
@@ -1322,12 +1322,6 @@ function TradingPanelInstance({ projectId, installId }: NativePanelProps) {
         )}
         {tab === "agents" && (
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
-        )}
-        {tab === "strategies" && (
-          <StrategiesTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
-        )}
-        {tab === "backtests" && (
-          <BacktestsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
         )}
         {tab === "brokers" && (
           <BrokersTab api={api} setError={setError} />

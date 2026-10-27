@@ -69,22 +69,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// write through one queue. WAL still gives concurrent reads.
 	ctx.AppDB().SetMaxOpenConns(1)
 	globalCtx = ctx
-	if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused',error='Process restarted; resume from the saved event checkpoint' WHERE status='running' AND id IN (SELECT run_id FROM backtest_simulations)`); err != nil {
-		return err
-	}
 	if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
-		return fmt.Errorf("rebuild realized P&L: %w", err)
+		return err
 	}
 	if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
-		return fmt.Errorf("rebuild strategy attribution: %w", err)
-	}
-
-	if _, err := ctx.AppDB().Exec(`UPDATE validation_suites SET status='paused',error='Process restarted; resume the validation suite' WHERE status='running'`); err != nil {
 		return err
 	}
-	validationWorkers.Lock()
-	validationWorkers.stopping = false
-	validationWorkers.Unlock()
 	// Engine bootstrap — pricing provider, then the shared engine
 	// pointer the workers read.
 	provider := newProvider(ctx.Config().Get("pricing_provider"))
@@ -130,27 +120,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
-	if err := stopValidationWorkers(ctx.AppDB()); err != nil {
-		return err
-	}
-	if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused' WHERE status='running' AND id IN (SELECT run_id FROM backtest_simulations)`); err != nil {
-		return err
-	}
-	simulationWorkers.Lock()
-	ids := []int64{}
-	for id := range simulationWorkers.running {
-		ids = append(ids, id)
-	}
-	simulationWorkers.Unlock()
-	for _, id := range ids {
-		if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused' WHERE id=? AND status='running'`, id); err != nil {
-			return err
-		}
-		waitSimulationWorker(id)
-	}
-	return nil
-}
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error { return nil }
+
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -200,7 +171,7 @@ func newProvider(name string) Provider {
 
 // ─── HTTP routes — REST mirror for both UI surfaces ────────────────
 
-func (a *App) HTTPRoutes() []sdk.Route {
+func (a *App) legacyHTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/portfolios", Handler: a.handleHTTPPortfoliosCollection},
 		{Pattern: "/portfolios/", Handler: a.handleHTTPPortfolioItem},
@@ -211,12 +182,6 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/execution/", Handler: a.handleHTTPExecution},
 		{Pattern: "/risk-profiles", Handler: a.handleHTTPRiskProfiles},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
-		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
-		{Pattern: "/strategies/", Handler: a.handleHTTPStrategies},
-		{Pattern: "/validations", Handler: a.handleHTTPValidation},
-		{Pattern: "/validations/", Handler: a.handleHTTPValidation},
-		{Pattern: "/backtests", Handler: a.handleHTTPBacktests},
-		{Pattern: "/backtests/", Handler: a.handleHTTPBacktests},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},
 	}
 }
@@ -235,6 +200,10 @@ func (a *App) handleHTTPPortfoliosCollection(w http.ResponseWriter, r *http.Requ
 
 // /portfolios/{id}[/<sub>] — many sub-paths, one handler.
 func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
+	if researchPortfolioPath(r.URL.Path) {
+		httpErr(w, http.StatusGone, "Strategy research moved to the Strategies app")
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/portfolios/")
 	parts := strings.Split(rest, "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -338,10 +307,6 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, 200, out)
-
-	case sub == "backtests":
-		snap, _ := snapshotPortfolio(globalCtx.AppDB(), pf)
-		a.handleHTTPPortfolioBacktests(w, r, snap, pid)
 
 	case sub == "risk" && r.Method == http.MethodGet:
 		out, err := a.toolPortfolioRiskGet(globalCtx, map[string]any{"_project_id": pid, "portfolio_id": pf.ID})
