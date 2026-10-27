@@ -193,3 +193,35 @@ func TestAccountConnectionNumericJSONIDDoesNotUseExponentFormatting(t *testing.T
 		t.Fatal(out)
 	}
 }
+
+func TestAccountAddFreshOAuthKeepsExistingAccountsAcrossPlatforms(t *testing.T) {
+	for name, def := range platforms {
+		t.Run(name, func(t *testing.T) {
+			pf := newRecordingPlatform()
+			pf.connections = []sdk.PlatformConnection{connectionFixture(11, name, "test-proj", "active"), connectionFixture(12, name, "test-proj", "active")}
+			ctx := newSocialCtx(t, pf)
+			_, err := ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,display_name,status) VALUES('test-proj',?,11,'Existing account','active')`, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := (&App{}).toolAccountAdd(ctx, map[string]any{"platform": name, "force_new": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, ok := out.(map[string]any)
+			if !ok || result["authorize_url"] == nil || result["reused_connection"] != nil || len(pf.startOAuthCalls) != 1 || pf.startOAuthCalls[0].IntegrationSlug != def.IntegrationSlug || pf.startOAuthCalls[0].ProjectID != "test-proj" {
+				t.Fatalf("fresh OAuth did not start: %+v", out)
+			}
+			var existing, count int
+			if err = ctx.AppDB().QueryRow(`SELECT count(*) FROM social_accounts WHERE connection_id=11 AND status='active'`).Scan(&existing); err != nil || existing != 1 {
+				t.Fatal("existing account changed", err)
+			}
+			if err = ctx.AppDB().QueryRow(`SELECT count(*) FROM pending_accounts WHERE status='pending_oauth' AND connection_id=7 AND callback_token_hash<>''`).Scan(&count); err != nil || count != 1 {
+				t.Fatal("new OAuth lost token-validated handoff", err)
+			}
+			if len(pf.disconnectCalls) != 0 {
+				t.Fatal("existing connection disconnected")
+			}
+		})
+	}
+}

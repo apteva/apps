@@ -1,3 +1,5 @@
+import { NativePostObservation, type NativePostMetadata } from "./NativePostObservation";
+import { syncAccountHistory, historySyncMessage } from "./historySync";
 // SocialPanel — accounts + compose + posts in a single panel.
 //
 // Surface:
@@ -15,7 +17,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRequestGate } from "./requestIdentity";
 import {DestinationPicker,type DestinationCapabilities} from "./destinations";
-import {AccountConnectionChooser} from "./AccountConnectionChooser";
 import {TargetDelivery,type DeliveryDiagnostics} from "./TargetDelivery";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
@@ -143,6 +144,7 @@ interface PostTarget {
   retryable?: boolean;
   upstream_status?: number;
   existing_post_id?: string;
+  native_metadata?: NativePostMetadata;
   provider_sync_status?: string;
   audience_capabilities?: AudienceCapabilities;
   destination_capabilities?: DestinationCapabilities;
@@ -226,10 +228,8 @@ interface PlatformInfo {
   display_name: string;
   integration_slug: string;
   requires_picker: boolean;
-  // available — true when the operator has seeded an integration
-  // connection for this platform (Settings → Integrations). Without
-  // it, OAuth start would fail with "missing client_id" — we gray
-  // out the button instead of letting the user click into an error.
+  // Existing-connection hint only; environment-configured OAuth clients
+  // can start a new login even when no connection exists yet.
   available: boolean;
   zernio_available?: boolean;
   provider_only?: boolean;
@@ -605,9 +605,6 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
-  const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
-    setOauthLanding((current) => current?.pendingId === pendingId ? current : ({ pendingId, connectionId }));
-  }, []);
 
   return (
     <div className="h-full min-w-0 overflow-hidden flex flex-col">
@@ -643,7 +640,6 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             projectId={projectId}
             oauthLanding={oauthLanding}
             onClearLanding={clearOauthLanding}
-            onSetLanding={setOauthLandingFromReuse}
             onOAuthStarted={(pendingId, popup) => setPendingOAuthPopup({ pendingId, popup, projectId })}
             onChange={loadAccounts}
             onImported={loadPosts}
@@ -1075,14 +1071,13 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onOAuthStarted, onChange, onImported, setStatus,
+  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onOAuthStarted, onChange, onImported, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   activeProfile: Profile | null;
   projectId?: string | null;
   oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
-  onSetLanding: (pendingId: number, connectionId: number) => void;
   onOAuthStarted: (pendingId: number, popup: Window) => void;
   onChange: () => void;
   onImported: () => void;
@@ -1182,12 +1177,6 @@ function AccountsView({
           projectId={projectId}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
-          onReuseExisting={(pendingId, connId) => {
-            // Backend returned 'reusing existing connection' — skip the
-            // OAuth popup entirely, jump straight into the page picker.
-            onSetLanding(pendingId, connId);
-            setAdding(false);
-          }}
           onOAuthStarted={onOAuthStarted}
         />
       )}
@@ -2467,23 +2456,11 @@ function AccountCard({
   };
   const doImport = async () => {
     setImporting(true);
-    setStatus(`Importing recent posts from ${account.display_name}…`);
+    setStatus(`Syncing history from ${account.display_name}…`);
     try {
-      const res = await fetch(appURL(`/accounts/${account.id}/import?limit=25`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported: number; skipped_existing: number; error?: string; reason?: string };
-      if (data.status === "ok") {
-        setStatus(`Imported ${data.imported} new post${data.imported !== 1 ? "s" : ""}` +
-          (data.skipped_existing > 0 ? ` (${data.skipped_existing} already in)` : "") + ".");
-        onChange();
-      } else if (data.status === "unsupported") {
-        setStatus("Import unsupported: " + (data.reason || "platform not wired yet"));
-      } else {
-        setStatus("Import failed: " + (data.error || "unknown error"));
-      }
+      const data = await syncAccountHistory(account.id, projectId, receipt => setStatus(`${receipt.unique_posts || 0} native posts reconciled…`));
+      setStatus(historySyncMessage(data));
+      onChange();
     } catch (e) {
       setStatus("Import failed: " + (e as Error).message);
     } finally {
@@ -2629,18 +2606,28 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 export function AddAccountDialog({
-  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
+  platforms, activeProfile, projectId, onClose, setStatus, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
   activeProfile: Profile | null;
   projectId?: string | null;
   onClose: () => void;
   setStatus: (s: string) => void;
-  onReuseExisting: (pendingId: number, connectionId: number) => void;
   onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const [directPlatform,setDirectPlatform]=useState<PlatformInfo|null>(null);
+  const starting = useRef(false);
+  const startRequest = useRef<{ controller: AbortController; popup: Window } | null>(null);
+  useEffect(() => {
+    setBusy(null);
+    return () => {
+      const request = startRequest.current;
+      startRequest.current = null;
+      starting.current = false;
+      request?.controller.abort();
+      try { request?.popup.close(); } catch {}
+    };
+  }, [projectId, activeProfile?.id]);
   // Inline error inside the modal. The panel-header status used to
   // be the only failure surface, but the modal's fixed-inset overlay
   // sits on top of the header — so users never saw the message and
@@ -2649,34 +2636,37 @@ export function AddAccountDialog({
   const zernioConnected = platforms.some((p) => !!p.zernio_available);
   const visiblePlatforms = zernioConnected ? platforms : platforms.filter((p) => !p.provider_only);
 
-  const start = (p: PlatformInfo, provider: "native" | "zernio" = "native", connectionId?: number, forceNew=false) => {
-    const canStart = provider === "zernio" ? !!p.zernio_available : p.available;
-    if (!canStart) return;
+  const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
+    if (starting.current || (provider === "zernio" && !p.zernio_available)) return;
     setErr("");
-    // Selected existing grants need no popup. Fresh OAuth opens one here
-    // while the browser still has the click's user gesture.
-    const popup = connectionId ? null : window.open("about:blank", "social_oauth", "width=600,height=700");
-    if (!connectionId && !popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
+    // Open during the click so popup blockers allow the new account's login.
+    const popup = window.open("about:blank", "social_oauth", "width=600,height=700");
+    if (!popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
+    starting.current = true;
+    const request = { controller: new AbortController(), popup };
+    startRequest.current = request;
     const busyKey = provider === "zernio" ? `${p.platform}:zernio` : p.platform;
     setBusy(busyKey);
     setStatus("Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
     (async () => {
       const fail = (msg: string) => {
+        if (startRequest.current !== request) return;
+        startRequest.current = null;
         setErr(msg);
         setStatus(msg);
         setBusy(null);
-        try { popup?.close(); } catch {}
+        starting.current = false;
+        try { popup.close(); } catch {}
       };
       try {
         const payload: Record<string, any> = provider === "zernio"
           ? { platform: p.platform, provider: "zernio" }
-          : { platform: p.platform };
-        if(connectionId) payload.connection_id=connectionId;
-        if(forceNew) payload.force_new=true;
+          : { platform: p.platform, force_new: true };
         if (activeProfile?.id) payload.profile_id = activeProfile.id;
         const res = await fetch(appURL("/accounts/start", projectId), {
           method: "POST",
           credentials: "same-origin",
+          signal: request.controller.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
@@ -2685,6 +2675,7 @@ export function AddAccountDialog({
           return;
         }
         const data = await res.json();
+        if (startRequest.current !== request) return;
         // The backend tool returns MCP-shaped errors as 200 with
         // {isError: true, content: [{type: "text", text: "..."}]}
         // because the same handler serves agent MCP calls. Detect
@@ -2696,25 +2687,24 @@ export function AddAccountDialog({
           fail(inner || "OAuth start returned an error envelope");
           return;
         }
-        // Reuse-existing path: backend signals 'no OAuth needed' by
-        // omitting authorize_url and including reused_connection. Skip
-        // the popup, hand control back to the parent so it opens the
-        // page picker against the existing connection.
-        if (!data.authorize_url && data.pending_account_id && data.reused_connection) {
-          try { popup?.close(); } catch {}
-          setBusy(null);
-          onReuseExisting(data.pending_account_id, data.reused_connection);
+        if (!Number.isSafeInteger(data.pending_account_id) || data.pending_account_id <= 0 ||
+            typeof data.authorize_url !== "string") {
+          fail("The sign-in service returned an incomplete authorization request. Try connecting again.");
           return;
         }
-        if (!data.authorize_url || !popup) {
-          fail("Server didn't return authorize_url");
+        const authorizeURL = new URL(data.authorize_url);
+        if (authorizeURL.protocol !== "https:" || authorizeURL.username || authorizeURL.password) {
+          fail("The sign-in service returned an invalid authorization URL. Try connecting again.");
           return;
         }
-        // Navigate the already-open popup to the upstream authorize URL.
-        popup.location.href = data.authorize_url;
-        if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0) {
-          onOAuthStarted(data.pending_account_id, popup);
+        if (popup.closed) {
+          fail("The sign-in window was closed. Connect the account again to continue.");
+          return;
         }
+        // Hand off ownership so closing this dialog keeps the login open.
+        popup.location.href = authorizeURL.href;
+        startRequest.current = null;
+        onOAuthStarted(data.pending_account_id, popup);
         onClose();
       } catch (e) {
         fail("Start failed: " + (e as Error).message);
@@ -2733,23 +2723,22 @@ export function AddAccountDialog({
           <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="text-text-dim text-xs mb-3">
-          Choose an existing connection or sign in to add another account.
+          Choose a platform to connect a new account. Sign in as the account you want to add.
         </div>
         {err && (
           <div className="mb-3 border border-error rounded p-2 bg-error/10">
             <div className="text-error text-xs font-medium mb-1">Couldn't connect account</div>
             <div className="text-text-muted text-xs whitespace-pre-wrap break-words">{err}</div>
-            {/missing client_id/i.test(err) && (
+            {/missing client_(id|secret)|missing required shared configuration/i.test(err) && (
               <div className="text-text-dim text-[11px] mt-2">
-                This integration requires a per-deployment OAuth app. Register one with the platform (e.g. developers.facebook.com) and either set <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_ID</code> + <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_SECRET</code> as environment variables on apteva-server, or connect the integration once via Settings → Integrations to seed the credentials.
+                The server could not load this platform’s saved OAuth app configuration. Existing accounts do not need to be disconnected. Check the integration’s OAuth configuration in Settings → Integrations.
               </div>
             )}
           </div>
         )}
-        {directPlatform ? <AccountConnectionChooser platform={directPlatform.platform} label={directPlatform.display_name} projectId={projectId} busy={busy!==null} onBack={()=>{setDirectPlatform(null);setErr("")}} onExisting={id=>start(directPlatform,"native",id)} onNew={()=>start(directPlatform,"native",undefined,true)}/> : (
         <div className="flex flex-col gap-1">
           {visiblePlatforms.map((p) => {
-            const directDisabled = !p.available || !!busy;
+            const directDisabled = !!busy;
             const zernioDisabled = !p.zernio_available || !!busy;
             return (
               <div
@@ -2765,16 +2754,11 @@ export function AddAccountDialog({
                 <div className="flex items-center gap-2 shrink-0">
                   {!p.provider_only && (
                     <button
-                      onClick={() => {setDirectPlatform(p);setErr("")}}
+                      onClick={() => start(p)}
                       disabled={directDisabled}
-                      title={
-                        !p.available
-                          ? `No ${p.display_name} integration installed. Add one in Settings → Integrations to enable this.`
-                          : undefined
-                      }
                       className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
                     >
-                      Direct
+                      {zernioConnected ? "Connect directly" : "Connect new account"}
                     </button>
                   )}
                   {zernioConnected && (
@@ -2792,7 +2776,6 @@ export function AddAccountDialog({
             );
           })}
         </div>
-        )}
       </div>
     </div>
   );
@@ -5099,6 +5082,7 @@ function PostDetailPanel({
                   </div>
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
                   {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
+                  <NativePostObservation metadata={target.native_metadata}/>
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
                   {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
                   {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
@@ -5923,21 +5907,11 @@ function MetricsView({
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(appURL(`/accounts/${id}/import?limit=100`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported?: number; skipped_existing?: number; reason?: string; error?: string };
-      if (data.status === "ok") {
-        setSyncFor((prev) => ({ ...prev, [id]: "done" }));
-        if (!quiet) setStatus(`Imported ${data.imported || 0}; skipped ${data.skipped_existing || 0}`);
-        onPostsChanged();
-      } else if (data.status === "unsupported") {
-        setSyncFor((prev) => ({ ...prev, [id]: { error: data.reason || "import unsupported" } }));
-      } else {
-        throw new Error(data.error || "import failed");
-      }
+      const data = await syncAccountHistory(id, projectId, receipt => {if (!quiet) setStatus(`${receipt.unique_posts || 0} native posts reconciled…`);});
+      if (data.status === "unsupported") throw new Error(data.limitation || "History sync unsupported");
+      setSyncFor(prev => ({ ...prev, [id]: "done" }));
+      if (!quiet) setStatus(historySyncMessage(data));
+      onPostsChanged();
     } catch (e) {
       setSyncFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       if (!quiet) setStatus("Post sync failed: " + (e as Error).message);

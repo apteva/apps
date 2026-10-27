@@ -3454,7 +3454,7 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
 		Success: true,
 		Data: json.RawMessage(`{
-			"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
+			"items":[{"id":"fixture-channel","contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
 		}`),
 	}
 	pf.executeResponses["list_playlist_items"] = &sdk.ExecuteResult{
@@ -3471,6 +3471,8 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 			}]
 		}`),
 	}
+	pf.executeResponses["get_video"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[{"id":"video-1","snippet":{"channelId":"fixture-channel","title":"A distinct YouTube title","description":"The full YouTube description.\n\nWith a second paragraph.","publishedAt":"2026-08-23T12:00:00Z"},"status":{"privacyStatus":"public"}}]}`)}
+
 	ctx := newSocialCtx(t, pf)
 	accountRes, err := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3481,15 +3483,7 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 	}
 	accountID, _ := accountRes.LastInsertId()
 
-	result := (&App{}).importYoutubePosts(
-		ctx,
-		"test-proj",
-		importResult{AccountID: accountID, Platform: "youtube"},
-		accountID,
-		42,
-		0,
-		25,
-	)
+	result := (&App{}).importAccountPosts(ctx, "test-proj", accountID, 25)
 	if result.Status != "ok" || result.Imported != 1 {
 		t.Fatalf("import result = %+v, want one imported post", result)
 	}

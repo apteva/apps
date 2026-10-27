@@ -4,21 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 type nativeIngress struct {
 	Hostname string `json:"hostname"`
-}
-type nativeIngressTransport interface {
-	Ingress(context.Context, *Instance, nativeRecord, bool) error
-	RemoveIngress(context.Context, *Instance, nativeRecord) error
 }
 
 func validateNativeIngress(v *nativeIngress, manifest sdk.Manifest) error {
@@ -63,16 +57,21 @@ func nativeIngressConfig(d nativeRecord, publish bool) string {
 
 // One backend-owned proxy per target; every hostname has a durable installation
 // owner and a current deployment marker. No unrelated config/service is edited.
-func (nativeSSH) Ingress(c context.Context, i *Instance, d nativeRecord, publish bool) error {
+func (nativeSSH) PrepareCaddy(c context.Context, i *Instance, d nativeRecord) error {
 	root := nativeIngressRoot(d)
 	host := d.Options.Ingress.Hostname
 	owner := strconv.FormatInt(d.InstallID, 10)
 	unit := "apteva-ingress-" + nativeHash(root)[:16] + ".service"
-	config := nativeIngressConfig(d, publish)
+	config := nativeIngressConfig(d, false)
 	cmd := `set -eu; umask 077
  root=` + quoteShellArg(root) + `; host=` + quoteShellArg(host) + `; owner=` + quoteShellArg(owner) + `; unit=` + quoteShellArg(unit) + `
- test ! -L "$root"
+ for p in "$(dirname "$root")" "$root" "$root/hosts" "$root/data" "$root/config" "$root/caddy" "$root/Caddyfile" "$root/.controller-owner" "$root/$host.owner" "$root/hosts/$host.caddy";do test ! -L "$p";done
+ if test -d "$root";then
+  if test -f "$root/.controller-owner";then test "$(cat "$root/.controller-owner")" = "$root";else test -z "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)";fi
+ fi
+ test ! -e "$root/hosts/$host.caddy.apteva-owner.json"
  mkdir -p "$root/hosts" "$root/data" "$root/config"
+ printf '%s' "$root" > "$root/.controller-owner"
  exec 8>"$root/.lock"; flock -x 8
  if test -f "$root/$host.owner"; then test "$(cat "$root/$host.owner")" = "$owner"; else printf '%s' "$owner" > "$root/$host.owner"; fi
  if ! test -x "$root/caddy"; then
@@ -86,12 +85,7 @@ func (nativeSSH) Ingress(c context.Context, i *Instance, d nativeRecord, publish
   test -z "$(ss -H -lnt 'sport = :80 or sport = :443')"
   printf '{\n admin unix/%s/admin.sock\n}\nimport %s/hosts/*.caddy\n' "$root" "$root" > "$root/Caddyfile"
  fi
- if ` + func() string {
-		if publish {
-			return "true"
-		}
-		return "test ! -f \"$root/hosts/$host.caddy\""
-	}() + `; then
+ if test ! -f "$root/hosts/$host.caddy"; then
   printf '%s' ` + quoteShellArg(config) + ` > "$root/hosts/$host.caddy.tmp"
   printf '{\n admin unix/%s/admin.sock\n}\n' "$root" > "$root/candidate.conf"
   for existing in "$root"/hosts/*.caddy; do
@@ -113,60 +107,5 @@ func (nativeSSH) Ingress(c context.Context, i *Instance, d nativeRecord, publish
  if systemctl is-active --quiet "$unit"; then "$root/caddy" reload --address "unix/$root/admin.sock" --config "$root/Caddyfile" --adapter caddyfile >/dev/null 2>&1; else systemctl enable --now "$unit" >/dev/null 2>&1; fi
 `
 	_, e := nativeRun(c, i, cmd)
-	return e
-}
-func (nativeSSH) RemoveIngress(c context.Context, i *Instance, d nativeRecord) error {
-	if d.Options.Ingress == nil {
-		return nil
-	}
-	root := nativeIngressRoot(d)
-	host := d.Options.Ingress.Hostname
-	_, e := nativeRun(c, i, `set -eu; umask 077
- root=`+quoteShellArg(root)+`; host=`+quoteShellArg(host)+`
- test ! -L "$root"; test -d "$root" || exit 0
- exec 8>"$root/.lock"; flock -x 8
- test "$(cat "$root/$host.owner")" = `+quoteShellArg(strconv.FormatInt(d.InstallID, 10))+`
- if test "$(cat "$root/$host.deployment")" != `+quoteShellArg(d.ID)+`; then exit 0; fi
- printf '%s' `+quoteShellArg(nativeIngressConfig(d, false))+` > "$root/hosts/$host.caddy.tmp"
- mv "$root/hosts/$host.caddy.tmp" "$root/hosts/$host.caddy"
- "$root/caddy" reload --address "unix/$root/admin.sock" --config "$root/Caddyfile" --adapter caddyfile >/dev/null 2>&1
-`)
-	return e
-}
-func (b *nativeBackend) publishIngress(d nativeRecord, i *Instance) error {
-	if d.Options.Ingress == nil {
-		return nil
-	}
-	transport, ok := b.transport.(nativeIngressTransport)
-	if !ok {
-		return errors.New("transport cannot provision ingress")
-	}
-	c, cancel := context.WithTimeout(b.ctx, 20*time.Second)
-	defer cancel()
-	if e := transport.Ingress(c, i, d, true); e != nil {
-		return e
-	}
-	u, e := url.Parse("https://" + d.Options.Ingress.Hostname + "/.well-known/apteva-runtime-ready")
-	if e != nil || u.Hostname() != d.Options.Ingress.Hostname {
-		return errors.New("invalid ingress probe")
-	}
-	return nil
-}
-
-func (nativeSSH) DeleteIngress(c context.Context, i *Instance, d nativeRecord) error {
-	if d.Options.Ingress == nil {
-		return nil
-	}
-	root := nativeIngressRoot(d)
-	host := d.Options.Ingress.Hostname
-	_, e := nativeRun(c, i, `set -eu;root=`+quoteShellArg(root)+`;host=`+quoteShellArg(host)+`
- test ! -L "$root"; test -d "$root" || exit 0
- exec 8>"$root/.lock";flock -x 8
- test -f "$root/$host.owner" || exit 0
- test "$(cat "$root/$host.owner")" = `+quoteShellArg(strconv.FormatInt(d.InstallID, 10))+`
- test "$(cat "$root/$host.deployment")" = `+quoteShellArg(d.ID)+` || exit 0
- rm -- "$root/hosts/$host.caddy" "$root/$host.owner" "$root/$host.deployment"
- "$root/caddy" reload --address "unix/$root/admin.sock" --config "$root/Caddyfile" --adapter caddyfile >/dev/null 2>&1
-`)
 	return e
 }

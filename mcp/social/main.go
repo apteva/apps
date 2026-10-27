@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.19.3
+version: 0.20.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -109,6 +109,9 @@ provides:
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
     - { name: account_import_provider,    description: "Import provider-backed accounts such as Zernio into Social." }
     - { name: account_list,               description: "List connected social accounts." }
+    - { name: account_history_sync, description: "Bounded resumable native history sync for one Social account; no publishing or automatic-policy changes." }
+    - { name: account_history_status, description: "Read history coverage and freshness for one Social account." }
+    - { name: post_inspect, description: "Read native metadata through Social without publishing or implying membership." }
     - { name: account_provider_sync_update, description: "Set provider synchronization to off, managed_only, or explicitly opted-in full_history without changing publishing access." }
     - { name: account_audience_capabilities, description: "Optional account audience capabilities; no provider calls." }
     - { name: account_membership_levels, description: "Optional cached tier discovery; refresh=true queries the existing integration connection." }
@@ -213,7 +216,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.19.3
+    ref: social/v0.20.1
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -882,7 +885,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Configure automatic provider synchronization for one provider-backed account without changing its publishing or direct-scheduling access. " +
 				"managed_only (default) reads only provider posts already created, mirrored, or explicitly imported through Social; it never imports unrelated account history. " +
 				"off disables automatic provider reads. full_history explicitly opts into automatic discovery/import of recent provider history. " +
-				"Manual Import history remains an explicit one-time full import in every mode. Args: social_account_id, mode.",
+				"Manual history reads remain explicit and do not change automatic settings; account_history_sync mode=full is bounded and resumable. Args: social_account_id, mode.",
 			InputSchema: schemaObject(map[string]any{
 				"social_account_id": map[string]any{"type": "integer"},
 				"mode":              map[string]any{"type": "string", "enum": []string{providerImportModeOff, providerImportModeManaged, providerImportModeFullHistory}},
@@ -1006,15 +1009,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "post_list",
 			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
-			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
+			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, from/to, social_account_id, query (title/body/original filename) and exact native_post_id before pagination. compact=true omits delivery diagnostics. Includes stored history coverage/freshness per account. Unknown native fields are null. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
 			InputSchema: schemaObject(map[string]any{
-				"limit":      map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
-				"offset":     map[string]any{"type": "integer", "default": 0, "minimum": 0},
-				"status":     map[string]any{"type": "string", "description": "Exact post status; omitted includes all statuses."},
-				"profile_id": map[string]any{"type": "integer", "minimum": 0, "description": "Social profile ID from profile_list. Omitted or 0 includes all profiles unless a profile slug is supplied; a positive ID takes precedence over profile."},
-				"profile":    map[string]any{"type": "string", "description": "Social profile slug from profile_list."},
-				"from":       map[string]any{"type": "string", "description": "Inclusive RFC3339 lifecycle date: published_at for published/partial posts, otherwise schedule_at or created_at."},
-				"to":         map[string]any{"type": "string", "description": "Exclusive RFC3339 lifecycle date bound."},
+				"limit":             map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+				"offset":            map[string]any{"type": "integer", "default": 0, "minimum": 0},
+				"status":            map[string]any{"type": "string", "description": "Exact post status; omitted includes all statuses."},
+				"query":             map[string]any{"type": "string", "description": "Text search across stored title, body and known original filename before pagination."},
+				"social_account_id": map[string]any{"type": "integer", "minimum": 1, "description": "Social account ID from account_list; no provider connection IDs."},
+				"native_post_id":    map[string]any{"type": "string", "description": "Exact native post ID; combine with social_account_id for unambiguous lookup."},
+				"compact":           map[string]any{"type": "boolean", "description": "Return compact post/target summaries with native observations instead of delivery diagnostics."},
+				"profile_id":        map[string]any{"type": "integer", "minimum": 0, "description": "Social profile ID from profile_list. Omitted or 0 includes all profiles unless a profile slug is supplied; a positive ID takes precedence over profile."},
+				"profile":           map[string]any{"type": "string", "description": "Social profile slug from profile_list."},
+				"from":              map[string]any{"type": "string", "description": "Inclusive RFC3339 lifecycle date: published_at for published/partial posts, otherwise schedule_at or created_at."},
+				"to":                map[string]any{"type": "string", "description": "Exclusive RFC3339 lifecycle date bound."},
 			}, nil),
 			Handler: a.toolPostList,
 		},
@@ -1255,6 +1262,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolInboxSync,
 		},
 	}
+	tools = append(tools, a.historyTools()...)
 	tools = append(tools, a.profileTools()...)
 	tools = append(tools, a.audienceTools()...)
 	tools = append(tools, destinationTools(a)...)
@@ -1772,6 +1780,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"provider_account_id":  providerAccountID,
 			"provider_profile_id":  providerProfileID,
 			"provider_import_mode": providerImportMode,
+			"history_capabilities": historyCapabilities(platform, providerSlug, externalID),
 			"capabilities":         capabilities,
 		})
 	}
@@ -5119,6 +5128,19 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 	             revision, approval_status, approved_revision, approval_required,
 	             COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)`
 	where := ` FROM posts WHERE project_id=?`
+	accountID := int64(intArg(args, "social_account_id", 0))
+	if _, present := args["social_account_id"]; present && accountID <= 0 {
+		return mcpError("social_account_id must be positive"), nil
+	}
+	if accountID > 0 {
+		var found int
+		if e := ctx.AppDB().QueryRow(`SELECT count(*) FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid).Scan(&found); e != nil {
+			return nil, e
+		}
+		if found != 1 {
+			return mcpError("Social account not found in this project"), nil
+		}
+	}
 	qArgs := []any{pid}
 	effectiveTime := `CASE
 		WHEN status IN ('published','partial') AND COALESCE(published_at,'') != '' THEN published_at
@@ -5141,6 +5163,37 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		where += " AND datetime(" + effectiveTime + ") < datetime(?)"
 		qArgs = append(qArgs, to.UTC().Format(time.RFC3339))
 	}
+	if accountID > 0 {
+		where += ` AND EXISTS(SELECT 1 FROM post_targets st WHERE st.post_id=posts.id AND st.social_account_id=?)`
+		qArgs = append(qArgs, accountID)
+	}
+	nativeID := strings.TrimSpace(toString(args["native_post_id"]))
+	if len(nativeID) > 512 {
+		return mcpError("native_post_id too long"), nil
+	}
+	if nativeID != "" {
+		where += ` AND EXISTS(SELECT 1 FROM post_targets st WHERE st.post_id=posts.id AND st.platform_post_id=?`
+		qArgs = append(qArgs, nativeID)
+		if accountID > 0 {
+			where += ` AND st.social_account_id=?`
+			qArgs = append(qArgs, accountID)
+		}
+		where += `)`
+	}
+	query := strings.TrimSpace(toString(args["query"]))
+	if len(query) > 500 {
+		return mcpError("query too long (max 500 characters)"), nil
+	}
+	if query != "" {
+		where += ` AND (instr(lower(body),lower(?))>0 OR EXISTS(SELECT 1 FROM post_targets st LEFT JOIN social_native_posts hn ON hn.target_id=st.id AND hn.project_id=posts.project_id WHERE st.post_id=posts.id`
+		qArgs = append(qArgs, query)
+		if accountID > 0 {
+			where += ` AND st.social_account_id=?`
+			qArgs = append(qArgs, accountID)
+		}
+		where += ` AND (instr(lower(COALESCE(json_extract(CASE WHEN json_valid(st.options) THEN st.options ELSE '{}' END,'$.title'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(hn.metadata,'$.title'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(hn.metadata,'$.body'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(hn.last_known_metadata,'$.original_filename'),'')),lower(?))>0)))`
+		qArgs = append(qArgs, query, query, query, query)
+	}
 	// One read snapshot keeps totals, the page, and its targets consistent
 	// even when background publishing updates the database during this call.
 	tx, err := ctx.AppDB().Begin()
@@ -5149,7 +5202,11 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 	}
 	defer tx.Rollback()
 	var total, totalTargets int
-	if err := tx.QueryRow(postCountsSQL+where, qArgs...).Scan(&total, &totalTargets); err != nil {
+	countSQL := postCountsSQL
+	if accountID > 0 {
+		countSQL = fmt.Sprintf(`SELECT COUNT(*),COALESCE(SUM((SELECT COUNT(*) FROM post_targets tc WHERE tc.post_id=posts.id AND tc.social_account_id=%d)),0)`, accountID)
+	}
+	if err := tx.QueryRow(countSQL+where, qArgs...).Scan(&total, &totalTargets); err != nil {
 		return nil, fmt.Errorf("count posts: %w", err)
 	}
 	q := fields + where + " ORDER BY datetime(" + effectiveTime + ") DESC, id DESC LIMIT ? OFFSET ?"
@@ -5217,7 +5274,38 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		if err != nil {
 			return nil, fmt.Errorf("load post targets: %w", err)
 		}
+		if accountID > 0 {
+			filtered := []map[string]any{}
+			for _, target := range targets {
+				if target["social_account_id"] == accountID {
+					filtered = append(filtered, target)
+				}
+			}
+			targets = filtered
+		}
+		if boolArg(args, "compact", false) {
+			for i, target := range targets {
+				keep := map[string]any{}
+				for _, key := range []string{"id", "social_account_id", "platform", "status", "platform_post_id", "platform_url", "published_at", "native_metadata", "last_known_native_metadata", "native_observed_at"} {
+					if value, ok := target[key]; ok {
+						keep[key] = value
+					}
+				}
+				for _, key := range []string{"native_metadata", "last_known_native_metadata"} {
+					if m, ok := keep[key].(map[string]any); ok {
+						delete(m, "body")
+						if title, ok := m["title"].(string); ok {
+							m["title"] = historySnippet(title, 200)
+						}
+					}
+				}
+				targets[i] = keep
+			}
+		}
 		returnedTargets += len(targets)
+		if boolArg(args, "compact", false) {
+			p.body = historySnippet(p.body, 300)
+		}
 		out = append(out, map[string]any{
 			"id":                  p.id,
 			"body":                p.body,
@@ -5252,6 +5340,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		"posts": out, "total": total, "total_targets": totalTargets,
 		"returned_targets": returnedTargets, "limit": limit, "offset": offset,
 		"has_more": hasMore, "next_offset": nextOffset,
+		"history": postListHistoryStates(ctx, accountID, profileID),
 	}, nil
 }
 
@@ -5446,7 +5535,35 @@ func loadTargetsFrom(db interface {
 			"audience_setup_url":          audienceSetupURL(platform, targetProvider, ppid),
 		})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	metadata, e := db.Query(`SELECT hn.target_id,hn.metadata,hn.last_known_metadata,hn.observed_at FROM social_native_posts hn JOIN post_targets ht ON ht.id=hn.target_id JOIN posts hp ON hp.id=ht.post_id WHERE ht.post_id=? AND hn.project_id=hp.project_id AND hn.social_account_id=ht.social_account_id`, postID)
+	if e != nil {
+		return nil, e
+	}
+	defer metadata.Close()
+	for metadata.Next() {
+		var id int64
+		var current, known, at string
+		if e = metadata.Scan(&id, &current, &known, &at); e != nil {
+			return nil, e
+		}
+		var c, k any
+		_ = json.Unmarshal([]byte(current), &c)
+		_ = json.Unmarshal([]byte(known), &k)
+		for _, target := range out {
+			if target["id"] == id {
+				target["native_metadata"] = c
+				target["last_known_native_metadata"] = k
+				target["native_observed_at"] = at
+			}
+		}
+	}
+	return out, metadata.Err()
 }
 
 // ─── post_retry ───────────────────────────────────────────────────
@@ -8307,26 +8424,19 @@ func accountMetricsHistoryDays(period string, defaultDays int) (int, error) {
 // ─── import ───────────────────────────────────────────────────────
 //
 // Internal-only — NOT exposed as an MCP tool. Agents shouldn't be
-// triggering bulk reads of upstream content; this is a panel-only
-// affordance the user clicks deliberately.
-//
-// importAccountPosts pulls recent posts from one connected account
-// into our local posts/post_targets tables so they show up in the
-// Posts tab and the Metrics tab can query them like any locally-
-// authored post.
-//
-// Dedup is handled by a unique partial index on
-// post_targets(social_account_id, platform_post_id) — INSERT OR IGNORE
-// silently skips already-imported posts. Re-running import is safe.
+// Native history ingestion is shared by explicit panel actions and bounded
+// MCP account_history_sync calls. Automatic provider policies remain separate.
+// Observations do not overwrite managed post/delivery intent or schedule jobs.
 
 type importResult struct {
-	AccountID       int64  `json:"account_id"`
-	Platform        string `json:"platform"`
-	Imported        int    `json:"imported"`
-	SkippedExisting int    `json:"skipped_existing"`
-	Status          string `json:"status"` // ok | unsupported | failed
-	Reason          string `json:"reason,omitempty"`
-	Error           string `json:"error,omitempty"`
+	History         *historyReceipt `json:"history,omitempty"`
+	AccountID       int64           `json:"account_id"`
+	Platform        string          `json:"platform"`
+	Imported        int             `json:"imported"`
+	SkippedExisting int             `json:"skipped_existing"`
+	Status          string          `json:"status"` // ok | unsupported | failed
+	Reason          string          `json:"reason,omitempty"`
+	Error           string          `json:"error,omitempty"`
 }
 
 type importRunAccount struct {
@@ -8492,635 +8602,29 @@ func (a *App) handleImportsRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) importAccountPosts(ctx *sdk.AppCtx, pid string, accountID int64, limit int) importResult {
-	if limit <= 0 || limit > 200 {
+	if limit < 1 || limit > 200 {
 		limit = 25
 	}
-	var platform, extID, pageCreds, providerSlug, providerAccountID string
-	var connID int64
-	var profileID int64
-	err := ctx.AppDB().QueryRow(
-		`SELECT platform, COALESCE(external_account_id,''), connection_id,
-		        COALESCE(page_credentials,''), COALESCE(profile_id,0),
-		        COALESCE(provider_slug,'native'), COALESCE(provider_account_id,'')
-		 FROM social_accounts WHERE id=? AND project_id=?`,
-		accountID, pid,
-	).Scan(&platform, &extID, &connID, &pageCreds, &profileID, &providerSlug, &providerAccountID)
+	pages := (limit + 49) / 50
+	size := limit / pages
+	out, err := a.toolAccountHistorySync(ctx.WithProject(pid), map[string]any{"social_account_id": accountID, "mode": "recent", "max_pages": pages, "page_size": size})
 	if err != nil {
-		return importResult{AccountID: accountID, Status: "failed", Error: "account not found"}
+		return importResult{AccountID: accountID, Status: "failed", Error: err.Error()}
 	}
-	out := importResult{AccountID: accountID, Platform: platform}
-	if providerSlug == zernioProviderSlug {
-		return a.importZernioPosts(ctx, pid, out, accountID, connID, providerAccountID, profileID, limit)
+	if receipt, ok := out.(historyReceipt); ok {
+		status := "ok"
+		if receipt.Status == "failed" {
+			status = "failed"
+		}
+		return importResult{AccountID: accountID, Platform: receipt.Platform, Status: status, Imported: receipt.Imported, SkippedExisting: receipt.Unchanged + receipt.Updated, Error: receipt.Error, History: &receipt}
 	}
-	switch platform {
-	case "facebook":
-		return a.importFacebookPosts(ctx, pid, out, accountID, connID, extID, pageCreds, profileID, limit)
-	case "instagram":
-		return a.importInstagramPosts(ctx, pid, out, accountID, connID, extID, pageCreds, profileID, limit)
-	case "tiktok":
-		return a.importTikTokPosts(ctx, pid, out, accountID, connID, profileID, limit)
-	case "twitter":
-		return a.importTwitterPosts(ctx, pid, out, accountID, connID, profileID, limit)
-	case "youtube":
-		return a.importYoutubePosts(ctx, pid, out, accountID, connID, profileID, limit)
-	case "pinterest":
-		return a.importPinterestPosts(ctx, pid, out, accountID, connID, extID, profileID, limit)
-	default:
-		out.Status = "unsupported"
-		out.Reason = "import for this platform isn't wired yet"
-		return out
+	if result, ok := out.(map[string]any); ok {
+		if result["isError"] == true {
+			return importResult{AccountID: accountID, Status: "failed", Error: toString(result["error"])}
+		}
+		return importResult{AccountID: accountID, Status: "unsupported", Reason: toString(result["limitation"])}
 	}
-}
-
-func (a *App) importPinterestPosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64, boardID string,
-	profileID int64, limit int,
-) importResult {
-
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	bookmark := ""
-	seen := 0
-	for seen < limit {
-		pageSize := limit - seen
-		if pageSize > 250 {
-			pageSize = 250
-		}
-		args := map[string]any{"page_size": pageSize}
-		tool := "list_pins"
-		if boardID != "" {
-			args["board_id"] = boardID
-			tool = "list_board_pins"
-		}
-		if bookmark != "" {
-			args["bookmark"] = bookmark
-		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, args)
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if res == nil || !res.Success {
-			out.Status, out.Error = "failed", upstreamError(res).Error()
-			return out
-		}
-		var payload struct {
-			Items []struct {
-				ID             string         `json:"id"`
-				CreatedAt      string         `json:"created_at"`
-				Title          string         `json:"title"`
-				Description    string         `json:"description"`
-				Link           string         `json:"link"`
-				AltText        string         `json:"alt_text"`
-				BoardSectionID string         `json:"board_section_id"`
-				BoardID        string         `json:"board_id"`
-				Media          map[string]any `json:"media"`
-			} `json:"items"`
-			Bookmark string `json:"bookmark"`
-		}
-		if err := json.Unmarshal(res.Data, &payload); err != nil {
-			out.Status, out.Error = "failed", "decode pinterest pins: "+err.Error()
-			return out
-		}
-		if len(payload.Items) == 0 {
-			break
-		}
-		for _, pin := range payload.Items {
-			if pin.ID == "" || seen >= limit {
-				continue
-			}
-			seen++
-			options := map[string]any{}
-			for key, value := range map[string]string{
-				"title": pin.Title, "link": pin.Link, "alt_text": pin.AltText,
-				"board_section_id": pin.BoardSectionID, "destination_id": nonEmpty(pin.BoardID, boardID),
-			} {
-				if value != "" {
-					options[key] = value
-				}
-			}
-			mediaURL := firstDeepString(pin.Media, "url")
-			imported, err := a.insertImportedPostWithOptions(
-				ctx, pid, accountID, profileID,
-				pin.Description, pin.ID, "https://www.pinterest.com/pin/"+pin.ID+"/", pin.CreatedAt,
-				[]string{mediaURL}, options,
-			)
-			if err != nil {
-				ctx.Logger().Warn("import: insert pinterest pin failed", "pin_id", pin.ID, "err", err)
-				continue
-			}
-			if imported {
-				out.Imported++
-			} else {
-				out.SkippedExisting++
-			}
-		}
-		if payload.Bookmark == "" || payload.Bookmark == bookmark {
-			break
-		}
-		bookmark = payload.Bookmark
-	}
-	out.Status = "ok"
-	return out
-}
-
-func (a *App) importFacebookPosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64, pageID, pageCreds string,
-	profileID int64, limit int,
-) importResult {
-	if pageID == "" {
-		out.Status = "failed"
-		out.Error = "facebook account has no page id stored"
-		return out
-	}
-	token := extractPageToken(pageCreds)
-	if token == "" {
-		out.Status = "failed"
-		out.Error = "facebook page access_token missing — reconnect the account"
-		return out
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_posts", map[string]any{
-		"pageId":       pageID,
-		"limit":        limit,
-		"access_token": token,
-		"fields":       "id,message,created_time,full_picture,permalink_url",
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	var resp struct {
-		Data []struct {
-			ID           string `json:"id"`
-			Message      string `json:"message"`
-			CreatedTime  string `json:"created_time"`
-			FullPicture  string `json:"full_picture"`
-			PermalinkURL string `json:"permalink_url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(res.Data, &resp); err != nil {
-		out.Status, out.Error = "failed", "decode page posts: "+err.Error()
-		return out
-	}
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	for _, p := range resp.Data {
-		if p.ID == "" {
-			continue
-		}
-		// Pre-check dedupe so we know whether we created a new local
-		// post or skipped an already-imported one. Without this we'd
-		// have to reverse-engineer the result from rows-affected on
-		// the unique-constraint INSERT — not portable across drivers.
-		var existing int64
-		_ = ctx.AppDB().QueryRow(
-			`SELECT id FROM post_targets WHERE social_account_id=? AND platform_post_id=?`,
-			accountID, p.ID,
-		).Scan(&existing)
-		if existing > 0 {
-			out.SkippedExisting++
-			continue
-		}
-		// Encode the picture as a single-element external media array
-		// (or NULL when no image). Read-only references — we never
-		// download these into our storage app.
-		var extMediaJSON sql.NullString
-		if p.FullPicture != "" {
-			b, _ := json.Marshal([]string{p.FullPicture})
-			extMediaJSON = sql.NullString{String: string(b), Valid: true}
-		}
-		// Local post row — imported, body comes from the FB message.
-		postRes, err := ctx.AppDB().Exec(
-			`INSERT INTO posts (project_id, body, media_storage_ids, status, profile_id,
-			                    imported_at, external_media_urls, published_at)
-			 VALUES (?, ?, '[]', 'published', ?, CURRENT_TIMESTAMP, ?, ?)`,
-			pid, p.Message, profileID, extMediaJSON, nullable(p.CreatedTime),
-		)
-		if err != nil {
-			ctx.Logger().Warn("import: insert post failed", "fb_id", p.ID, "err", err)
-			continue
-		}
-		postID, _ := postRes.LastInsertId()
-		// Target row — already-published, with the upstream id + URL.
-		_, err = ctx.AppDB().Exec(
-			`INSERT INTO post_targets (post_id, social_account_id, status,
-			                           platform_post_id, platform_url, published_at)
-			 VALUES (?, ?, 'published', ?, ?, ?)`,
-			postID, accountID, p.ID, nullable(p.PermalinkURL), nullable(p.CreatedTime),
-		)
-		if err != nil {
-			ctx.Logger().Warn("import: insert target failed", "fb_id", p.ID, "err", err)
-			// Roll back the orphan post row so re-running import doesn't
-			// leave dangling locally-only entries.
-			_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
-			continue
-		}
-		out.Imported++
-	}
-	out.Status = "ok"
-	return out
-}
-
-func (a *App) importInstagramPosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64, instagramAccountID, pageCreds string,
-	profileID int64, limit int,
-) importResult {
-	if instagramAccountID == "" {
-		out.Status = "failed"
-		out.Error = "instagram account id missing"
-		return out
-	}
-	token := extractPageToken(pageCreds)
-	if token == "" {
-		out.Status = "failed"
-		out.Error = "instagram page access_token missing — reconnect the account"
-		return out
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_media", map[string]any{
-		"instagramAccountId": instagramAccountID,
-		"limit":              limit,
-		"fields":             "id,media_type,media_url,thumbnail_url,permalink,caption,timestamp,like_count,comments_count",
-		"access_token":       token,
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	var resp struct {
-		Data []struct {
-			ID           string `json:"id"`
-			Caption      string `json:"caption"`
-			MediaURL     string `json:"media_url"`
-			ThumbnailURL string `json:"thumbnail_url"`
-			Permalink    string `json:"permalink"`
-			Timestamp    string `json:"timestamp"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(res.Data, &resp); err != nil {
-		out.Status, out.Error = "failed", "decode instagram media: "+err.Error()
-		return out
-	}
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	for _, p := range resp.Data {
-		if p.ID == "" {
-			continue
-		}
-		mediaURL := p.MediaURL
-		if mediaURL == "" {
-			mediaURL = p.ThumbnailURL
-		}
-		imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, p.Caption, p.ID, p.Permalink, p.Timestamp, []string{mediaURL})
-		if err != nil {
-			ctx.Logger().Warn("import: insert instagram post failed", "media_id", p.ID, "err", err)
-			continue
-		}
-		if imported {
-			out.Imported++
-		} else {
-			out.SkippedExisting++
-		}
-	}
-	out.Status = "ok"
-	return out
-}
-
-func (a *App) importTikTokPosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64,
-	profileID int64, limit int,
-) importResult {
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	var cursor int64
-	seen := 0
-	for seen < limit {
-		maxCount := limit - seen
-		if maxCount > 20 {
-			maxCount = 20
-		}
-		args := map[string]any{
-			"max_count": maxCount,
-			"fields":    "id,title,video_description,create_time,cover_image_url,share_url,like_count,comment_count,share_count,view_count",
-		}
-		if cursor > 0 {
-			args["cursor"] = cursor
-		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_videos", args)
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if res == nil || !res.Success {
-			out.Status, out.Error = "failed", upstreamError(res).Error()
-			return out
-		}
-		var resp struct {
-			Data struct {
-				Videos []struct {
-					ID               string `json:"id"`
-					Title            string `json:"title"`
-					VideoDescription string `json:"video_description"`
-					CoverImageURL    string `json:"cover_image_url"`
-					ShareURL         string `json:"share_url"`
-					CreateTime       int64  `json:"create_time"`
-				} `json:"videos"`
-				Cursor  int64 `json:"cursor"`
-				HasMore bool  `json:"has_more"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(res.Data, &resp); err != nil {
-			out.Status, out.Error = "failed", "decode tiktok videos: "+err.Error()
-			return out
-		}
-		if len(resp.Data.Videos) == 0 {
-			break
-		}
-		for _, v := range resp.Data.Videos {
-			if v.ID == "" {
-				continue
-			}
-			seen++
-			body := v.Title
-			if body == "" {
-				body = v.VideoDescription
-			}
-			publishedAt := ""
-			if v.CreateTime > 0 {
-				publishedAt = time.Unix(v.CreateTime, 0).UTC().Format(time.RFC3339)
-			}
-			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, body, v.ID, v.ShareURL, publishedAt, []string{v.CoverImageURL})
-			if err != nil {
-				ctx.Logger().Warn("import: insert tiktok post failed", "video_id", v.ID, "err", err)
-				continue
-			}
-			if imported {
-				out.Imported++
-			} else {
-				out.SkippedExisting++
-			}
-		}
-		if !resp.Data.HasMore || resp.Data.Cursor == 0 || resp.Data.Cursor == cursor {
-			break
-		}
-		cursor = resp.Data.Cursor
-	}
-	out.Status = "ok"
-	return out
-}
-
-func (a *App) importTwitterPosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64,
-	profileID int64, limit int,
-) importResult {
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	userID, _, err := twitterAuthenticatedUser(ctx, connID)
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if userID == "" {
-		out.Status = "failed"
-		out.Error = "x authenticated user id missing"
-		return out
-	}
-	seen := 0
-	pageToken := ""
-	for seen < limit {
-		maxResults := limit - seen
-		if maxResults > 100 {
-			maxResults = 100
-		}
-		if maxResults < 5 {
-			maxResults = 5
-		}
-		args := map[string]any{
-			"user_id":      userID,
-			"max_results":  maxResults,
-			"tweet.fields": "id,text,created_at,public_metrics,entities,referenced_tweets",
-			"exclude":      "retweets",
-		}
-		if pageToken != "" {
-			args["pagination_token"] = pageToken
-		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_user_tweets", args)
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if res == nil || !res.Success {
-			out.Status, out.Error = "failed", upstreamError(res).Error()
-			return out
-		}
-		var resp struct {
-			Data []struct {
-				ID        string `json:"id"`
-				Text      string `json:"text"`
-				CreatedAt string `json:"created_at"`
-				Entities  struct {
-					URLs []struct {
-						ExpandedURL string `json:"expanded_url"`
-						URL         string `json:"url"`
-					} `json:"urls"`
-				} `json:"entities"`
-			} `json:"data"`
-			Meta struct {
-				NextToken string `json:"next_token"`
-			} `json:"meta"`
-		}
-		if err := json.Unmarshal(res.Data, &resp); err != nil {
-			out.Status, out.Error = "failed", "decode x posts: "+err.Error()
-			return out
-		}
-		if len(resp.Data) == 0 {
-			break
-		}
-		for _, p := range resp.Data {
-			if p.ID == "" {
-				continue
-			}
-			seen++
-			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, p.Text, p.ID, "https://twitter.com/i/web/status/"+p.ID, p.CreatedAt, twitterEntityMediaURLs(p.Entities.URLs))
-			if err != nil {
-				ctx.Logger().Warn("import: insert x post failed", "tweet_id", p.ID, "err", err)
-				continue
-			}
-			if imported {
-				out.Imported++
-			} else {
-				out.SkippedExisting++
-			}
-		}
-		if resp.Meta.NextToken == "" || resp.Meta.NextToken == pageToken {
-			break
-		}
-		pageToken = resp.Meta.NextToken
-	}
-	out.Status = "ok"
-	return out
-}
-
-func twitterEntityMediaURLs(urls []struct {
-	ExpandedURL string `json:"expanded_url"`
-	URL         string `json:"url"`
-}) []string {
-	out := []string{}
-	for _, u := range urls {
-		if u.ExpandedURL != "" {
-			out = append(out, u.ExpandedURL)
-		} else if u.URL != "" {
-			out = append(out, u.URL)
-		}
-	}
-	return out
-}
-
-func (a *App) importYoutubePosts(
-	ctx *sdk.AppCtx, pid string, out importResult,
-	accountID, connID int64,
-	profileID int64, limit int,
-) importResult {
-	chRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_my_channel", map[string]any{
-		"part": "contentDetails",
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if chRes == nil || !chRes.Success {
-		out.Status, out.Error = "failed", upstreamError(chRes).Error()
-		return out
-	}
-	var ch struct {
-		Items []struct {
-			ContentDetails struct {
-				RelatedPlaylists struct {
-					Uploads string `json:"uploads"`
-				} `json:"relatedPlaylists"`
-			} `json:"contentDetails"`
-		} `json:"items"`
-	}
-	_ = json.Unmarshal(chRes.Data, &ch)
-	if len(ch.Items) == 0 || ch.Items[0].ContentDetails.RelatedPlaylists.Uploads == "" {
-		out.Status = "failed"
-		out.Error = "youtube uploads playlist not found"
-		return out
-	}
-	if profileID == 0 {
-		profileID = projectDefaultProfileID(ctx, pid)
-	}
-	pageToken := ""
-	seen := 0
-	for seen < limit {
-		maxResults := limit - seen
-		if maxResults > 50 {
-			maxResults = 50
-		}
-		args := map[string]any{
-			"playlistId": ch.Items[0].ContentDetails.RelatedPlaylists.Uploads,
-			"maxResults": maxResults,
-			"part":       "snippet,contentDetails,status",
-		}
-		if pageToken != "" {
-			args["pageToken"] = pageToken
-		}
-		plRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_playlist_items", args)
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if plRes == nil || !plRes.Success {
-			out.Status, out.Error = "failed", upstreamError(plRes).Error()
-			return out
-		}
-		var pl struct {
-			NextPageToken string `json:"nextPageToken"`
-			Items         []struct {
-				Snippet struct {
-					Title       string `json:"title"`
-					Description string `json:"description"`
-					PublishedAt string `json:"publishedAt"`
-					ResourceID  struct {
-						VideoID string `json:"videoId"`
-					} `json:"resourceId"`
-					Thumbnails map[string]struct {
-						URL string `json:"url"`
-					} `json:"thumbnails"`
-				} `json:"snippet"`
-				ContentDetails struct {
-					VideoID          string `json:"videoId"`
-					VideoPublishedAt string `json:"videoPublishedAt"`
-				} `json:"contentDetails"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(plRes.Data, &pl); err != nil {
-			out.Status, out.Error = "failed", "decode youtube playlist: "+err.Error()
-			return out
-		}
-		if len(pl.Items) == 0 {
-			break
-		}
-		for _, item := range pl.Items {
-			videoID := item.ContentDetails.VideoID
-			if videoID == "" {
-				videoID = item.Snippet.ResourceID.VideoID
-			}
-			if videoID == "" {
-				continue
-			}
-			seen++
-			publishedAt := item.ContentDetails.VideoPublishedAt
-			if publishedAt == "" {
-				publishedAt = item.Snippet.PublishedAt
-			}
-			thumb := bestYoutubeThumb(item.Snippet.Thumbnails)
-			imported, err := a.insertImportedPostWithOptions(
-				ctx,
-				pid,
-				accountID,
-				profileID,
-				item.Snippet.Description,
-				videoID,
-				"https://www.youtube.com/watch?v="+videoID,
-				publishedAt,
-				[]string{thumb},
-				map[string]any{"title": item.Snippet.Title},
-			)
-			if err != nil {
-				ctx.Logger().Warn("import: insert youtube post failed", "video_id", videoID, "err", err)
-				continue
-			}
-			if imported {
-				out.Imported++
-			} else {
-				out.SkippedExisting++
-			}
-		}
-		if pl.NextPageToken == "" || pl.NextPageToken == pageToken {
-			break
-		}
-		pageToken = pl.NextPageToken
-	}
-	out.Status = "ok"
-	return out
+	return importResult{AccountID: accountID, Status: "failed", Error: "Unexpected history result"}
 }
 
 func (a *App) insertImportedPost(
@@ -10431,8 +9935,59 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
+	if len(parts) == 2 && (parts[1] == "history-sync" || parts[1] == "history" || parts[1] == "inspect") {
+		args := projectArgsFromRequest(r)
+		if parts[1] == "history" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET only", 405)
+				return
+			}
+		} else {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", 405)
+				return
+			}
+			var body struct {
+				Mode     string `json:"mode"`
+				Cursor   string `json:"cursor"`
+				MaxPages int    `json:"max_pages"`
+				NativeID string `json:"native_post_id"`
+			}
+			if e := json.NewDecoder(r.Body).Decode(&body); e != nil && e != io.EOF {
+				http.Error(w, "invalid JSON", 400)
+				return
+			}
+			if body.Mode != "" {
+				args["mode"] = body.Mode
+			}
+			if body.Cursor != "" {
+				args["cursor"] = body.Cursor
+			}
+			if body.MaxPages > 0 {
+				args["max_pages"] = body.MaxPages
+			}
+			args["native_post_id"] = body.NativeID
+		}
+		args["social_account_id"] = id
+		var out any
+		var err error
+		switch parts[1] {
+		case "history":
+			out, err = a.toolAccountHistoryStatus(globalCtx, args)
+		case "history-sync":
+			out, err = a.toolAccountHistorySync(globalCtx, args)
+		case "inspect":
+			out, err = a.toolPostNativeInspect(globalCtx, args)
+		}
+		if err != nil {
+			http.Error(w, redactDeliverySecrets(err.Error()), 500)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "import" && r.Method == http.MethodPost {
-		// Internal-only — panel route. Not registered as an MCP tool.
+		// Legacy bounded recent import; full sync uses history-sync / account_history_sync.
 		// Optional ?limit=N (default 25, max 200).
 		limit := 25
 		if v := r.URL.Query().Get("limit"); v != "" {
@@ -10491,7 +10046,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "offset", "from", "to"), 1000)
+		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "offset", "from", "to", "social_account_id", "native_post_id", "query", "compact"), 1000)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

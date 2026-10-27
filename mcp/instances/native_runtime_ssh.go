@@ -104,14 +104,18 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 	return nativeProbe{StateAvailableBytes: available, ABI: abi, SystemLibraries: libraries, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
 }
 
-// Remote locking and immutable ownership markers protect lost-response recovery.
-func nativeOwned(d nativeRecord, create bool) string {
-	s := `set -eu; umask 077
+func nativeHostIdentity(d nativeRecord) string {
+	return `set -eu; umask 077
  IFS= read -r machine < /etc/machine-id
  if test -f /etc/ssh/ssh_host_ed25519_key.pub; then IFS= read -r hostpub < /etc/ssh/ssh_host_ed25519_key.pub; else IFS= read -r hostpub < /etc/ssh/ssh_host_rsa_key.pub; fi
  identity=$(printf '%s\n%s' "$machine" "$hostpub" | sha256sum); identity=${identity%% *}
  test "linux-systemd:$identity" = ` + quoteShellArg(d.Execution.HostKey) + `
+`
+}
 
+// Remote locking and immutable ownership markers protect lost-response recovery.
+func nativeOwned(d nativeRecord, create bool) string {
+	s := nativeHostIdentity(d) + `
  root=` + quoteShellArg(d.ReleaseDir) + `
  data=` + quoteShellArg(d.DataDir) + `
  unit=` + quoteShellArg(d.Unit) + `
