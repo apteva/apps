@@ -78,6 +78,8 @@ type historyRun struct {
 	ReconciliationFull      bool                   `json:"reconciliation_full"`
 	ReconciliationReasons   []string               `json:"reconciliation_reasons"`
 	PageSize                int                    `json:"page_size"`
+	TraversalPageSize       int                    `json:"traversal_page_size"`
+	ReconciliationPageSize  int                    `json:"reconciliation_page_size"`
 	LastPageHash            string                 `json:"last_page_hash,omitempty"`
 	RepeatedPages           int                    `json:"repeated_pages,omitempty"`
 	ID                      string                 `json:"run_id"`
@@ -238,12 +240,16 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 		}
 		run.Revision = savedRevision
 		if run.CoverageVersion != historyCoverageVersion {
-			return mcpError("history cursor predates count reconciliation; start a new sync"), nil
+			return mcpError("history cursor predates page-boundary reconciliation; start a new sync"), nil
 		}
 		if _, explicit := args["page_size"]; explicit && pageSize != run.PageSize {
 			return mcpError("cursor page_size differs from original run"), nil
 		}
 		pageSize = run.PageSize
+		traversalSize, reconciliationSize := historyPageSizes(b, pageSize)
+		if run.TraversalPageSize != traversalSize || run.ReconciliationPageSize != reconciliationSize {
+			return mcpError("history cursor has invalid stored provider page sizes; start a new sync"), nil
+		}
 		if _, explicit := args["mode"]; explicit && run.Mode != mode {
 			return mcpError("cursor mode differs from requested mode"), nil
 		}
@@ -252,7 +258,8 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 			return receiptForHistory(ctx, b, run), nil
 		}
 	} else {
-		run = historyRun{CoverageVersion: historyCoverageVersion, PageSize: pageSize, ID: randomDeliveryID(), Mode: mode, Status: "partial", Phase: "scan", Scope: "provider_accessible_history", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Limitations: []string{}, CursorHashes: map[string]bool{}}
+		traversalSize, reconciliationSize := historyPageSizes(b, pageSize)
+		run = historyRun{CoverageVersion: historyCoverageVersion, PageSize: pageSize, TraversalPageSize: traversalSize, ReconciliationPageSize: reconciliationSize, ID: randomDeliveryID(), Mode: mode, Status: "partial", Phase: "scan", Scope: "provider_accessible_history", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Limitations: []string{}, CursorHashes: map[string]bool{}}
 		raw, _ := json.Marshal(run)
 		_, err = ctx.AppDB().Exec(`INSERT INTO social_history_runs(id,project_id,social_account_id,binding,state) VALUES(?,?,?,?,?)`, run.ID, b.Project, b.ID, b.binding(), string(raw))
 		if err != nil {
@@ -263,7 +270,11 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 	run.Error = ""
 	deadline := time.Now().Add(25 * time.Second)
 	for step := 0; step < pages && time.Now().Before(deadline); step++ {
-		page, e := a.fetchHistoryPage(ctx, b, &run, pageSize)
+		providerPageSize := run.TraversalPageSize
+		if run.Phase == "overlap" {
+			providerPageSize = run.ReconciliationPageSize
+		}
+		page, e := a.fetchHistoryPage(ctx, b, &run, providerPageSize)
 		if e != nil {
 			run.Status = "failed"
 			run.Error = redactDeliverySecrets(e.Error())

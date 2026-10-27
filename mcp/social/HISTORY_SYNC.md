@@ -12,7 +12,9 @@ Integration connection IDs remain inside Social's provider adapters.
    account/project until it is null. `max_pages` defaults to 2 (maximum 5),
    `page_size` defaults to 50 (maximum 50; individual providers can return less).
    Keep page_size fixed when resuming. Replayed step cursors return the latest
-   receipt without advancing again. Provider calls have bounded read timeouts;
+   receipt without advancing again. This is the original requested page size;
+   Social persists separate effective traversal and reconciliation sizes internally.
+   Provider calls have bounded read timeouts;
    the loop also checks its time budget between pages.
 4. Check `coverage.complete`, `coverage.scope`, `pagination_exhausted`,
    limitations and observation time. A completed traversal begins a bounded head
@@ -20,9 +22,13 @@ Integration connection IDs remain inside Social's provider adapters.
    totals are retained (for YouTube, the uploads playlist total, not the channel's
    public-only video count). A count mismatch, overlapping pages, changing totals
    or newly discovered IDs extends reconciliation to a second traversal, capped at
-   100 pages across the same resumable calls. This is best-effort provider pagination,
-   not an atomic
-   provider snapshot or a guarantee that deleted/inaccessible lifetime history
+   100 pages across the same resumable calls. Reconciliation starts at a different
+   supported page size (for example YouTube 50 → 49), with a fresh provider cursor.
+   Both sizes, cursor and accumulated IDs persist across bounded calls and retries;
+   provider tokens are never reused across sizes. Provider limits are respected,
+   including TikTok's 20-item maximum and X's 5-item minimum. Request/page budgets
+   are unchanged. This is best-effort provider pagination, not an atomic provider
+   snapshot or a guarantee that deleted/inaccessible lifetime history
    exists. Failed, repeated-cursor/page, suppressed or omitted records cannot
    establish complete stored coverage. No automatic sync setting is changed.
 5. Search `post_list` with `social_account_id`, `query` and/or exact
@@ -44,7 +50,7 @@ identities and their union, duplicate entries, comparable provider totals, chang
 totals, reconciliation page budget/exhaustion and any unexplained count gap. A
 remaining mismatch, changing total or exhausted reconciliation budget is incomplete.
 When no comparable total is exposed, count verification is unknown/false and an
-explicit pagination-only limitation is returned. Pre-0.20.2 coverage receipts must
+explicit pagination-only limitation is returned. Pre-0.20.3 coverage cursors/receipts must
 be refreshed rather than reused as complete evidence. Provider cursors, signed
 pagination URLs and credentials are
 not returned. Counts reconcile through a transactionally stored per-run identity
@@ -91,14 +97,14 @@ click. The legacy multi-account import action remains a bounded recent import.
 
 ## Validation and rollout
 
-The fixtures reconcile 299 native YouTube videos with 28 managed records,
-including two traversals of 296 different IDs whose union is 299. Repeating the
-sync never duplicates posts or creates publishing work. They also cover unresolved
-count gaps, changing totals, bounded reconciliation and old receipt invalidation,
-plus
-overlapping pages, repeat runs and accepted-operation preservation. Other tests
-cover literal search beyond page one, account/project/owner/cursor isolation,
-failed-page resume, fixed page sizes, provider cursor cycles, unknown versus zero
+The page-boundary fixture reports 300 native videos. Every size-50 traversal
+returns the same 298 with overlapping pages; size 49 returns a different 298.
+One logical sync reconciles the union to all 300 with zero gap. Interruption,
+resume, cursor replay and repeated sync preserve counts, managed records and
+accepted operations, without uploads, retries or publishing jobs. Negative
+fixtures cover identical omissions at both sizes, changing totals and exhausted
+reconciliation budgets. Other fixtures retain the 299-video/28-managed-record
+case, account/project/owner isolation, search beyond page one, unknown/zero
 metadata, private/unlisted handling and protected HTTP paths.
 
 Opt-in live tests run provider reads through an existing connection into a

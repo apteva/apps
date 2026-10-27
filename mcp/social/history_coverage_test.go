@@ -69,7 +69,7 @@ func TestHistoryTwo296TraversalsReconcile299WithoutPublishing(t *testing.T) {
 		t.Fatalf("incorrect union coverage: %+v", result)
 	}
 	reconciliation := result.Coverage["reconciliation"].(map[string]any)
-	if reconciliation["unique_posts"] != 296 || reconciliation["added_posts"] != 3 || reconciliation["pagination_exhausted"] != true || reconciliation["pages"] != 6 {
+	if reconciliation["unique_posts"] != 296 || reconciliation["added_posts"] != 3 || reconciliation["pagination_exhausted"] != true || reconciliation["pages"] != 7 {
 		t.Fatal(reconciliation)
 	}
 	total := result.Coverage["provider_total"].(*int64)
