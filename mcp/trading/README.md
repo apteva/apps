@@ -27,9 +27,24 @@ optional `decision_ref`, `external_strategy_id` and `external_strategy_version`.
 Those external identifiers are attribution, not a local saved strategy or an
 exemption from Trading's execution rules.
 
+For authenticated paper experiments with independent risk approval, durable
+stop/target/time exits and a learning scorecard, see [Agent paper desk](PAPER_DESK.md).
+
 REST remains mounted under `/api/apps/trading/*`. The dashboard retains
 Portfolios, Trade, Positions, Risk, Agents, Brokers and Journal, plus the
 portfolio watch widget and standalone desk.
+
+## Public crypto data
+
+The live public feed uses Coinbase Exchange's exact `BASE-USD` products for
+quotes and candles. Product metadata must confirm the base asset, USD quote
+currency and online status. Prices never fall back to USDT pairs. Quotes expose
+the provider symbol, venue, trade timestamp, bid/ask snapshot and receipt time;
+24-hour volume and candle volume are measured in the base asset.
+
+Existing Binance/USDT marks and instrument metadata are replaced when the USD
+feed refreshes. Simulation rejects legacy Binance stablecoin references for
+USD symbols. Broker adapters retain their own venue-specific wire symbols.
 
 ## Upgrading from v0.15
 
