@@ -1,3 +1,5 @@
+import { NativePostObservation, type NativePostMetadata } from "./NativePostObservation";
+import { syncAccountHistory, historySyncMessage } from "./historySync";
 // SocialPanel — accounts + compose + posts in a single panel.
 //
 // Surface:
@@ -143,6 +145,7 @@ interface PostTarget {
   retryable?: boolean;
   upstream_status?: number;
   existing_post_id?: string;
+  native_metadata?: NativePostMetadata;
   provider_sync_status?: string;
   audience_capabilities?: AudienceCapabilities;
   destination_capabilities?: DestinationCapabilities;
@@ -2467,23 +2470,11 @@ function AccountCard({
   };
   const doImport = async () => {
     setImporting(true);
-    setStatus(`Importing recent posts from ${account.display_name}…`);
+    setStatus(`Syncing history from ${account.display_name}…`);
     try {
-      const res = await fetch(appURL(`/accounts/${account.id}/import?limit=25`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported: number; skipped_existing: number; error?: string; reason?: string };
-      if (data.status === "ok") {
-        setStatus(`Imported ${data.imported} new post${data.imported !== 1 ? "s" : ""}` +
-          (data.skipped_existing > 0 ? ` (${data.skipped_existing} already in)` : "") + ".");
-        onChange();
-      } else if (data.status === "unsupported") {
-        setStatus("Import unsupported: " + (data.reason || "platform not wired yet"));
-      } else {
-        setStatus("Import failed: " + (data.error || "unknown error"));
-      }
+      const data = await syncAccountHistory(account.id, projectId, receipt => setStatus(`${receipt.unique_posts || 0} native posts reconciled…`));
+      setStatus(historySyncMessage(data));
+      onChange();
     } catch (e) {
       setStatus("Import failed: " + (e as Error).message);
     } finally {
@@ -5099,6 +5090,7 @@ function PostDetailPanel({
                   </div>
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
                   {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
+                  <NativePostObservation metadata={target.native_metadata}/>
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
                   {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
                   {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
@@ -5923,21 +5915,11 @@ function MetricsView({
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(appURL(`/accounts/${id}/import?limit=100`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported?: number; skipped_existing?: number; reason?: string; error?: string };
-      if (data.status === "ok") {
-        setSyncFor((prev) => ({ ...prev, [id]: "done" }));
-        if (!quiet) setStatus(`Imported ${data.imported || 0}; skipped ${data.skipped_existing || 0}`);
-        onPostsChanged();
-      } else if (data.status === "unsupported") {
-        setSyncFor((prev) => ({ ...prev, [id]: { error: data.reason || "import unsupported" } }));
-      } else {
-        throw new Error(data.error || "import failed");
-      }
+      const data = await syncAccountHistory(id, projectId, receipt => {if (!quiet) setStatus(`${receipt.unique_posts || 0} native posts reconciled…`);});
+      if (data.status === "unsupported") throw new Error(data.limitation || "History sync unsupported");
+      setSyncFor(prev => ({ ...prev, [id]: "done" }));
+      if (!quiet) setStatus(historySyncMessage(data));
+      onPostsChanged();
     } catch (e) {
       setSyncFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       if (!quiet) setStatus("Post sync failed: " + (e as Error).message);
