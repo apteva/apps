@@ -128,5 +128,7 @@ func TestLiveYouTubeHistoryReadOnly(t *testing.T) {
 	if scheduled != 0 || len(pf.callAppCalls) != 0 {
 		t.Fatal("live history created publishing work")
 	}
+	coverage, _ := json.Marshal(r.Coverage)
+	t.Logf("History coverage: %s", coverage)
 	t.Logf("Read-only YouTube history verified in temporary DB: %d distinct videos (%d private, %d unlisted), %d original filenames, %d provider reads, 0 publishing jobs; coverage=%s, limitations=%v", total, private, unlisted, filenames, pf.calls, r.Status, r.Limitations)
 }

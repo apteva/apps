@@ -7,8 +7,29 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const historyCoverageVersion = 1
+const historyCoverageVersion = 2
 const historyReconciliationPageLimit = 100
+
+// Choose different effective boundaries within the provider's supported range.
+// Account identity, filters and request/page budgets remain the same. The pair
+// is persisted with the run; a provider cursor is never moved between sizes.
+func historyPageSizes(account historyAccount, requested int) (int, int) {
+	minimum, maximum := 1, 50
+	if account.Provider == "native" || account.Provider == "" {
+		switch account.Platform {
+		case "tiktok":
+			maximum = 20
+		case "twitter":
+			minimum = 5
+		}
+	}
+	first := max(minimum, min(requested, maximum))
+	second := first - 1
+	if second < minimum {
+		second = first + 1
+	}
+	return first, second
+}
 
 type historyProviderTotal struct {
 	Source     string `json:"source"`
@@ -125,10 +146,10 @@ func historyCoverage(run historyRun) map[string]any {
 	return map[string]any{
 		"complete": complete, "scope": run.Scope, "mode": run.Mode, "coverage_version": run.CoverageVersion,
 		"traversal_complete": run.TraversalExhausted, "pagination_exhausted": run.TraversalExhausted,
-		"traversal_unique_posts": run.Counts.TraversalUnique, "reconciled_unique_posts": run.Counts.ReconciledUnique,
+		"traversal_page_size": run.TraversalPageSize, "traversal_unique_posts": run.Counts.TraversalUnique, "reconciled_unique_posts": run.Counts.ReconciledUnique,
 		"provider_total": run.ProviderTotal, "provider_totals": run.ProviderTotals, "provider_totals_changed": run.ProviderTotalsChanged,
 		"count_verified": run.ProviderTotal != nil && gap != nil && *gap == 0 && !run.ProviderTotalsChanged, "unexplained_count_gap": gap,
-		"reconciliation":    map[string]any{"attempted": run.OverlapPages > 0, "full_pass_required": run.ReconciliationFull, "reasons": run.ReconciliationReasons, "pages": run.OverlapPages, "max_pages": historyReconciliationPageLimit, "pagination_exhausted": run.ReconciliationExhausted, "unique_posts": run.Counts.ReconciliationUnique, "added_posts": run.Counts.ReconciledUnique - run.Counts.TraversalUnique},
+		"reconciliation":    map[string]any{"attempted": run.OverlapPages > 0, "page_size": run.ReconciliationPageSize, "full_pass_required": run.ReconciliationFull, "reasons": run.ReconciliationReasons, "pages": run.OverlapPages, "max_pages": historyReconciliationPageLimit, "pagination_exhausted": run.ReconciliationExhausted, "unique_posts": run.Counts.ReconciliationUnique, "added_posts": run.Counts.ReconciledUnique - run.Counts.TraversalUnique},
 		"duplicate_entries": run.Counts.TraversalDuplicates + run.Counts.ReconciliationDuplicates, "overlap_pages": run.OverlapPages,
 		"all_listed_ids_resolved": !run.Incomplete, "optional_fields_may_be_unknown": true, "consistency": "best_effort_provider_pagination_with_bounded_reconciliation",
 	}
