@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.17.0
+version: 0.17.1
 description: Portfolio management and paper or broker-backed trade execution for humans, agents and connected apps.
   Owns balances, positions, orders, fills, performance, market data, broker connections and enforced portfolio risk
   limits. Automated strategies and research are provided by the separate Strategies app.
@@ -401,7 +401,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: trading/v0.17.0
+    ref: trading/v0.17.1
     entry: mcp/trading
   port: 8080
   health_check: /health

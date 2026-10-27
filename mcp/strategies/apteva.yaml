@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: strategies
 display_name: Strategies
-version: 0.1.0
+version: 0.1.1
 description: Automated strategy authoring, scheduling, research, event backtests, validation and performance attribution.
   Integrates with Trading for market data, authoritative portfolios and order execution. Rule programs remain research-only.
 author: Apteva
@@ -182,7 +182,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: strategies/v0.1.0
+    ref: strategies/v0.1.1
     entry: mcp/strategies
   port: 8080
   health_check: /health

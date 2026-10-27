@@ -15,6 +15,11 @@ type researchSnapshot struct {
 	SourceInstallID int64                       `json:"source_install_id"`
 	ProjectID       string                      `json:"project_id"`
 	Tables          map[string][]map[string]any `json:"tables"`
+	TableNames      []string                    `json:"table_names,omitempty"`
+	PortfolioIDs    []int64                     `json:"portfolio_ids,omitempty"`
+	RowCounts       map[string]int64            `json:"row_counts,omitempty"`
+	NextRowID       int64                       `json:"next_row_id,omitempty"`
+	Done            bool                        `json:"done,omitempty"`
 }
 
 type researchQueryer interface {

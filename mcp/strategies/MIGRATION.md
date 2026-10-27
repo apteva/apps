@@ -31,6 +31,14 @@ Trading alone for direct execution and portfolio review.
    promotion/evidence requirements and Trading's live arming/risk controls still
    apply. Direct agent orders continue to use Trading independently.
 
+For large histories, Trading >=0.17.1 and Strategies >=0.1.1 provide a bounded,
+resumable transfer. Call `legacy_import` with `paged=true` and optionally
+`max_pages=8` (1..32), repeating while `status=importing` until `status=imported`.
+Each page is capped at 4 MiB and uses a keyset cursor. Rows and their checkpoint
+commit together, so a transport failure or process restart can resume without
+duplicating rows. Final table counts must match the source manifest before the
+import is marked complete. Imported assignments remain paused throughout.
+
 Trading retains the source rows after import. The migration neither deletes the
 old research nor transfers portfolio ownership. Avoid downgrading to a version
 that could resume the old scheduler while Strategies is active.

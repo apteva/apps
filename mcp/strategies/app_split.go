@@ -131,7 +131,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 		out = append(out, tool)
 	}
-	out = append(out, sdk.Tool{Name: "legacy_import", Description: "Import legacy research from Trading into an empty Strategies app; assignments import paused.", InputSchema: schemaObject(nil, nil), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out = append(out, sdk.Tool{Name: "legacy_import", Description: "Import legacy research from Trading into an empty Strategies app; assignments import paused.", InputSchema: schemaObject(map[string]any{"paged": map[string]any{"type": "boolean"}, "max_pages": map[string]any{"type": "integer"}}, nil), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if c := sdk.CallerFrom(call); c != nil && c.ProjectID != "" {
 			args["_project_id"] = c.ProjectID
 		}
@@ -375,6 +375,9 @@ func (a *App) handleResearchPortfolio(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) importLegacyResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if paged, _ := args["paged"].(bool); paged {
+		return a.importLegacyResearchPaged(ctx, args)
+	}
 	legacyImportMu.Lock()
 	defer legacyImportMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
