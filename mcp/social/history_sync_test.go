@@ -508,3 +508,34 @@ func TestHistoryHTTPPathOwnsAccountAndProject(t *testing.T) {
 		t.Fatal(response.Body.String())
 	}
 }
+
+func TestHistoryKnownProviderOperationGetsNativeIdentityWithoutDuplicating(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	r, e := ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,display_name,status,provider_slug,provider_account_id) VALUES('test-proj','linkedin',42,'Provider','active','zernio','owned')`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	account, _ := r.LastInsertId()
+	r, e = ctx.AppDB().Exec(`INSERT INTO posts(project_id,body,status,revision) VALUES('test-proj','Keep managed body','publishing',7)`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	post, _ := r.LastInsertId()
+	_, e = ctx.AppDB().Exec(`INSERT INTO post_targets(post_id,social_account_id,status,provider_post_id,publish_operation_id,attempts) VALUES(?,?,'publishing','provider-op','accepted-operation',3)`, post, account)
+	if e != nil {
+		t.Fatal(e)
+	}
+	pf.executeResponses["list_posts"] = analyticsOK(`{"posts":[{"id":"provider-op","content":"Native copy","platforms":[{"accountId":"owned","platform":"linkedin","platformPostId":"native","status":"published"}]}]}`)
+	receipt := finishHistory(t, ctx, account)
+	if receipt.Imported != 0 || receipt.Updated != 1 || receipt.UniquePosts != 1 {
+		t.Fatal(receipt)
+	}
+	var count, rev, attempts int
+	var body, status, operation, native string
+	_ = ctx.AppDB().QueryRow(`SELECT count(*) FROM posts`).Scan(&count)
+	e = ctx.AppDB().QueryRow(`SELECT p.body,p.revision,t.status,t.attempts,t.publish_operation_id,t.platform_post_id FROM posts p JOIN post_targets t ON t.post_id=p.id WHERE p.id=?`, post).Scan(&body, &rev, &status, &attempts, &operation, &native)
+	if e != nil || count != 1 || body != "Keep managed body" || rev != 7 || status != "publishing" || attempts != 3 || operation != "accepted-operation" || native != "native" {
+		t.Fatal("managed operation was replaced", e)
+	}
+}

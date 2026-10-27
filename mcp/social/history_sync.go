@@ -411,6 +411,22 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 	var postID, targetID int64
 	err = tx.QueryRow(`SELECT t.post_id,t.id FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.social_account_id=? AND t.platform_post_id=?`, b.Project, b.ID, n.ID).Scan(&postID, &targetID)
 	result := "unchanged"
+	// A known provider operation may acquire its native ID after Social accepted
+	// it. Attach evidence to that exact target instead of creating a second post.
+	if errors.Is(err, sql.ErrNoRows) && n.ProviderPostID != nil && b.Provider == zernioProviderSlug {
+		var existingNative string
+		err = tx.QueryRow(`SELECT t.post_id,t.id,COALESCE(t.platform_post_id,'') FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.social_account_id=? AND t.provider_post_id=?`, b.Project, b.ID, *n.ProviderPostID).Scan(&postID, &targetID, &existingNative)
+		if err == nil {
+			if existingNative != "" && existingNative != n.ID {
+				return "", 0, 0, errors.New("provider operation conflicts with the stored native identity")
+			}
+			if existingNative == "" {
+				if _, e := tx.Exec(`UPDATE post_targets SET platform_post_id=? WHERE id=? AND COALESCE(platform_post_id,'')=''`, n.ID, targetID); e != nil {
+					return "", 0, 0, e
+				}
+			}
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		filtered := []string{}
 		for _, u := range n.MediaURLs {
