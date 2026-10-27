@@ -93,7 +93,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return err
 	}
 	var spawned sdk.RuntimeAgent
-	spawnArgs := map[string]any{"run_id": created.ID, "agent": targetAgentSpec(run.TargetSnapshot)}
+	spawnArgs := map[string]any{"run_id": created.ID, "agent": targetAgentSpec(run.TargetSnapshot, run.CaseSnapshot.Mode)}
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
 		return fmt.Errorf("spawn agent: %w", err)
 	}
@@ -352,9 +352,12 @@ func (s *service) resolveInlineEnvironment(spec map[string]any, timeoutSeconds i
 	return nil
 }
 
-func targetAgentSpec(target Target) map[string]any {
+func targetAgentSpec(target Target, mode string) map[string]any {
 	agent := map[string]any{
-		"alias": "main", "start_paused": true,
+		// Text cases deliver their task before releasing the instance gate.
+		// Realtime cases need delegated workers immediately, so they must not
+		// install the instance-wide pause shared by those workers.
+		"alias": "main", "start_paused": mode != "voice",
 		"provider": target.Provider, "model": target.Model,
 	}
 	if target.Draft != nil {

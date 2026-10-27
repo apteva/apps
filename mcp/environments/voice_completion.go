@@ -346,22 +346,99 @@ func (s *service) monitorVoiceExchange(ctx context.Context, history *telemetryHi
 	}
 }
 
-func voiceThreadFinalized(events []sdk.RuntimeTelemetryEvent, threadID string) bool {
+// Thread termination and local persistence are independent of provider-final
+// recognition and playback. Inspect the whole evidence set, regardless of order.
+type VoiceThreadFinalization struct {
+	Terminated         bool     `json:"terminated"`
+	Status             string   `json:"status"`
+	Receipt            string   `json:"receipt,omitempty"`
+	PendingTranscripts int      `json:"pending_provider_transcripts"`
+	Errors             []string `json:"errors,omitempty"`
+}
+
+func collectVoiceThreadFinalization(events []sdk.RuntimeTelemetryEvent, threadID string) VoiceThreadFinalization {
+	out := VoiceThreadFinalization{Status: "missing_terminal_receipt"}
+	if threadID == "" {
+		return out
+	}
+	var legacyDone, legacyEnded, legacyReady, explicit, complete, failed bool
+	var persistenceErrors []sdk.RuntimeTelemetryEvent
+	var completedAt time.Time
 	for _, event := range events {
 		if event.ThreadID != threadID {
 			continue
 		}
-		if event.Type == "realtime.thread_ended" || event.Type == "thread.done" {
-			var data struct {
-				PendingTranscripts int `json:"pending_transcripts"`
+		if event.Type == "realtime.transcript_persistence_error" {
+			persistenceErrors = append(persistenceErrors, event)
+			continue
+		}
+		if event.Type != "realtime.thread_ended" && event.Type != "thread.done" {
+			continue
+		}
+		out.Terminated = true
+		var data struct {
+			PendingTranscripts int `json:"pending_transcripts"`
+			LocalFinalization  *struct {
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			} `json:"local_finalization"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			failed = true
+			out.Errors = append(out.Errors, "invalid terminal receipt: "+err.Error())
+			continue
+		}
+		out.PendingTranscripts = max(out.PendingTranscripts, data.PendingTranscripts)
+		if data.LocalFinalization != nil {
+			explicit = true
+			out.Receipt = "local_finalization"
+			if data.LocalFinalization.Status == "complete" {
+				complete = true
+				if event.Time.After(completedAt) {
+					completedAt = event.Time
+				}
+			} else {
+				failed = true
+				detail := data.LocalFinalization.Error
+				if detail == "" {
+					detail = "local finalization receipt is not complete"
+				}
+				out.Errors = append(out.Errors, detail)
 			}
-			if json.Unmarshal(event.Data, &data) == nil && data.PendingTranscripts > 0 {
-				return false
+		} else if event.Type == "thread.done" {
+			legacyDone = true
+		} else {
+			legacyEnded = true
+			if data.PendingTranscripts == 0 {
+				legacyReady = true
 			}
-			return true
 		}
 	}
-	return false
+	// A successful explicit receipt can certify a repaired earlier write error.
+	// A generic thread.done can never override an explicit failure.
+	for _, persistenceError := range persistenceErrors {
+		if explicit && complete && !persistenceError.Time.IsZero() && !completedAt.IsZero() && !persistenceError.Time.After(completedAt) {
+			continue
+		}
+		failed = true
+		out.Errors = append(out.Errors, string(persistenceError.Data))
+	}
+	switch {
+	case failed:
+		out.Status = "failed"
+	case explicit && complete:
+		out.Status = "complete"
+	case legacyDone || legacyEnded && legacyReady:
+		out.Status = "complete"
+		out.Receipt = "legacy_terminal"
+	case out.Terminated:
+		out.Status = "awaiting_local_finalization"
+	}
+	return out
+}
+func voiceThreadFinalizationSettled(events []sdk.RuntimeTelemetryEvent, threadID string) bool {
+	status := collectVoiceThreadFinalization(events, threadID).Status
+	return status == "complete" || status == "failed"
 }
 
 func (s *service) finalizeVoiceTelemetry(ctx context.Context, history *telemetryHistory, runtimeID string, call *VoiceCall, media *voiceMediaActivity, endedBy string) error {
@@ -377,7 +454,7 @@ func (s *service) finalizeVoiceTelemetry(ctx context.Context, history *telemetry
 		if caller != nil {
 			call.CallerTelemetry = caller
 		}
-		return targetErr == nil && callerErr == nil && voiceThreadFinalized(call.TargetTelemetry, call.TargetThreadID) && voiceThreadFinalized(call.CallerTelemetry, call.CallerThreadID)
+		return targetErr == nil && callerErr == nil && voiceThreadFinalizationSettled(call.TargetTelemetry, call.TargetThreadID) && voiceThreadFinalizationSettled(call.CallerTelemetry, call.CallerThreadID)
 	})
 	closingReason := endedBy
 	if call.FinalExchange != nil && call.FinalExchange.ClosingReason != "" {
@@ -385,9 +462,16 @@ func (s *service) finalizeVoiceTelemetry(ctx context.Context, history *telemetry
 	}
 	result := voiceExchangeEvidence(call, media, call.TargetTelemetry, call.CallerTelemetry)
 	result.ClosingReason = closingReason
+	result.ThreadFinalization = map[string]VoiceThreadFinalization{
+		"target": collectVoiceThreadFinalization(call.TargetTelemetry, call.TargetThreadID),
+		"caller": collectVoiceThreadFinalization(call.CallerTelemetry, call.CallerThreadID),
+	}
 	result.FinalizationStatus = "finalized"
 	if !finalized {
 		result.FinalizationStatus = "finalization_timeout"
+		result.Status = "incomplete"
+	} else if result.ThreadFinalization["target"].Status == "failed" || result.ThreadFinalization["caller"].Status == "failed" {
+		result.FinalizationStatus = "finalization_failed"
 		result.Status = "incomplete"
 	} else if result.Status == "complete" {
 		result.Stage = "simulation_finished"

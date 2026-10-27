@@ -210,3 +210,27 @@ Cloned apps using the updated SDK can call `ctx.Now()` or
 runtime expiry also continue to use wall time. Snapshots retain the clock,
 its advancement history, and the fixture rules; restoring one starts a new
 run at the captured logical time.
+
+### Terminal evidence and silent connections
+
+`final_exchange.thread_finalization` and `cleanup.thread_finalization` record
+thread termination and local transcript persistence separately. The collector
+examines every terminal event, including a legacy `thread.done` following a
+`realtime.thread_ended` that still reports pending provider transcripts. Optional
+runtime receipts reporting `local_finalization.status` are also honored. Existing
+Core versions remain supported without runtime changes. A failed explicit
+receipt or unrepaired legacy transcript write error remains
+`finalization_failed`; missing receipts remain subject to the bounded cleanup
+deadline and `finalization_timeout`.
+
+Successfully saving interrupted transcript fragments is clean local shutdown,
+while recognition, final reply and playback can still be incomplete. Cancellation
+retains its cancelled outcome. Idle incoming audio uses the call context and
+configured maximum duration as its policy: a healthy silent WebSocket has no
+independent two-minute read deadline, and cancellation closes the read promptly.
+
+Voice callers are spawned with `start_paused: false`; Evals applies the same
+policy to voice targets. The existing startup pause is instance-wide and would
+also freeze delegated work. Main can therefore run during a voice test; the
+harness does not claim main is frozen or issue a manual global resume. Explicit
+startup pauses for text workflows keep their existing instance-wide semantics.

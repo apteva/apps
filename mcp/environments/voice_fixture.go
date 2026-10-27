@@ -379,7 +379,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 			Mode:      "autonomous",
 		},
 		Alias:       call.CallerAgentAlias,
-		StartPaused: true,
+		StartPaused: false,
 	}); err != nil {
 		return call, fmt.Errorf("spawn caller agent: %w", err)
 	}
@@ -1048,9 +1048,14 @@ func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAud
 	var terminal sdk.RealtimeAudioTerminalMessage
 	cancelled := map[string]bool{}
 	source.conn.SetReadLimit(maxVoiceRelayBuffer + 4096)
+	// Listening and backend execution may produce no inbound messages. The call
+	// context/MaxDurationSeconds owns the idle deadline; absence of speech is not
+	// a network failure. Cancellation still unblocks a silent ReadMessage.
+	_ = source.conn.SetReadDeadline(time.Time{})
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = source.conn.Close() })
+	defer stopOnCancel()
 	fail := func(err error) { sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{err: err}) }
 	for {
-		_ = source.conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		messageType, payload, err := source.conn.ReadMessage()
 		if err != nil {
 			reason, code := voiceAudioTerminalDetails(err, terminal)

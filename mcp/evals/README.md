@@ -29,3 +29,11 @@ and scenario requirements, independent of provider/model names.
 Validation uses full Go race suites plus actual local WebSocket/HTTP fixtures.
 Live GPT-Live startup/long-pause/backend-delay validation is not claimed by this
 release; correcting idle input does not by itself prove the provider timeout fixed.
+
+### Voice startup policy
+
+Voice cases spawn their target with `start_paused: false`, allowing realtime
+workers to delegate on existing Core versions. Environments also leaves the
+simulated caller unpaused. Main may run during the test. Text cases retain the
+startup pause, inject their task and then release the instance gate as before.
+No manual resume or caller-opening injection is added by this startup change.

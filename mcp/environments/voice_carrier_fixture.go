@@ -122,7 +122,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	callerDirective := voiceCallerDirective(spec)
 	if _, err = s.runtime().SpawnRuntimeAgent(run.RuntimeID, sdk.RuntimeAgentSpawnRequest{
 		Draft: &sdk.RuntimeAgentDraft{Name: firstNonEmpty(spec.CallerName, "Evaluation caller"), Directive: callerDirective, Mode: "autonomous"},
-		Alias: call.CallerAgentAlias, StartPaused: true,
+		Alias: call.CallerAgentAlias, StartPaused: false,
 	}); err != nil {
 		return call, fmt.Errorf("spawn caller agent: %w", err)
 	}

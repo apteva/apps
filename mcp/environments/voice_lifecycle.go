@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	sdk "github.com/apteva/app-sdk"
 	"strings"
 	"sync"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 var errVoiceCancelled = errors.New("voice operation cancelled by environment stop")
@@ -30,8 +31,9 @@ type RunShutdown struct {
 }
 
 type VoiceCleanup struct {
-	Status string   `json:"status"`
-	Errors []string `json:"errors,omitempty"`
+	ThreadFinalization map[string]VoiceThreadFinalization `json:"thread_finalization,omitempty"`
+	Status             string                             `json:"status"`
+	Errors             []string                           `json:"errors,omitempty"`
 }
 
 // Registration and the persisted stopping transition share a gate. No lock is
@@ -262,7 +264,7 @@ func (s *service) abortedVoiceCleanup(parent context.Context, runtime string, ca
 	if call.Cleanup != nil {
 		prior = call.Cleanup.Errors
 	}
-	call.Cleanup = &VoiceCleanup{Status: "complete", Errors: prior}
+	call.Cleanup = &VoiceCleanup{Status: "complete", Errors: prior, ThreadFinalization: map[string]VoiceThreadFinalization{}}
 	if len(prior) > 0 {
 		call.Cleanup.Status = "partial"
 	}
@@ -276,12 +278,18 @@ func (s *service) abortedVoiceCleanup(parent context.Context, runtime string, ca
 			if latest != nil {
 				events = latest
 			}
-			return err == nil && voiceThreadFinalized(events, thread)
+			return err == nil && voiceThreadFinalizationSettled(events, thread)
 		})
 		if agent == call.Spec.TargetAgent {
 			call.TargetTelemetry = events
 		} else {
 			call.CallerTelemetry = events
+		}
+		evidence := collectVoiceThreadFinalization(events, thread)
+		call.Cleanup.ThreadFinalization[agent] = evidence
+		if evidence.Status == "failed" {
+			call.Cleanup.Status = "partial"
+			call.Cleanup.Errors = append(call.Cleanup.Errors, "finalization_failed: "+strings.Join(evidence.Errors, "; "))
 		}
 		if !finalized {
 			call.Cleanup.Status = "partial"
@@ -296,6 +304,9 @@ func (s *service) abortedVoiceCleanup(parent context.Context, runtime string, ca
 
 func setVoiceCleanup(call *VoiceCall, errs ...error) {
 	call.Cleanup = &VoiceCleanup{Status: "complete"}
+	if call.FinalExchange != nil {
+		call.Cleanup.ThreadFinalization = call.FinalExchange.ThreadFinalization
+	}
 	for _, err := range errs {
 		if err != nil {
 			call.Cleanup.Status = "partial"

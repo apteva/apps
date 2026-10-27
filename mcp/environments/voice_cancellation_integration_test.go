@@ -29,6 +29,9 @@ type cancelledVoiceRuntime struct {
 }
 
 func (p *cancelledVoiceRuntime) SpawnRuntimeAgent(_ string, r sdk.RuntimeAgentSpawnRequest) (*sdk.RuntimeAgent, error) {
+	if r.StartPaused {
+		return nil, fmt.Errorf("voice caller requested a global startup pause")
+	}
 	return &sdk.RuntimeAgent{Alias: r.Alias}, nil
 }
 func (p *cancelledVoiceRuntime) SpawnRuntimeRealtimeThread(_, agent string, r sdk.RuntimeRealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
@@ -60,6 +63,7 @@ func (p *cancelledVoiceRuntime) ListRuntimeAgentTelemetry(_, agent string, _ tim
 	var out []sdk.RuntimeTelemetryEvent
 	for thread := range p.stopped {
 		if (agent == "main") == strings.HasPrefix(thread, "reception-") {
+			out = append(out, sdk.RuntimeTelemetryEvent{ThreadID: thread, Type: "realtime.thread_ended", Time: time.Now(), Data: json.RawMessage(`{"pending_transcripts":5}`)})
 			out = append(out, sdk.RuntimeTelemetryEvent{ThreadID: thread, Type: "thread.done", Time: time.Now(), Data: json.RawMessage(`{}`)})
 		}
 	}
