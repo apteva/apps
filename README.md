@@ -84,6 +84,16 @@ tools with structured Demand Gen and YouTube engagement support. See
 [mcp/ads/DEMAND_GEN.md](mcp/ads/DEMAND_GEN.md) for the API contract, real-provider
 validation and provider-version limits.
 
+## Ads Google audiences
+
+The existing audience lifecycle and UI now expose structured Google custom
+segments (keywords, URLs and apps), first-party seeded lookalikes, grouped
+composition, interest discovery and named Demand Gen targeting. Capabilities
+report creation, editing, deletion and seed eligibility per type. Existing
+YouTube viewer/subscriber lists are discoverable seeds; Google requires creating
+those lists in Audience Manager. See [the API and validation guide](mcp/ads/GOOGLE_AUDIENCES.md).
+Custom segments require the companion integration catalog endpoint.
+
 ## Releasing
 
 Per-app version tags in the `name/vX.Y.Z` form (e.g. `crm/v0.2.0`)

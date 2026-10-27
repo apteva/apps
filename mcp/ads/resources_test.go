@@ -185,6 +185,9 @@ func TestGoogleResourceDiscoveryPaginatesAndKeepsQueriesScoped(t *testing.T) {
 		if strings.Contains(query, "FROM asset") {
 			return executeJSON(`{"results":[{"asset":{"id":"31","resourceName":"customers/1234567890/assets/31","name":"Quote form","type":"LEAD_FORM","leadFormAsset":{"businessName":"Example","headline":"Get a quote","privacyPolicyUrl":"https://example.com/privacy"}}}]}`), nil
 		}
+		if strings.Contains(query, "FROM custom_audience") || strings.Contains(query, "FROM audience") {
+			return executeJSON(`{"results":[]}`), nil
+		}
 		if !strings.Contains(query, "user_list") {
 			t.Fatalf("unexpected GAQL query: %s", query)
 		}

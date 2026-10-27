@@ -601,7 +601,11 @@ func TestAuditAudienceDeleteFindsUsageBeyondFirstPage(t *testing.T) {
 			if err != nil || mcpResultError(out) == nil || !strings.Contains(mcpErrorMessage(asMap(out)), "used") {
 				t.Fatalf("unsafe delete: %#v %v", out, err)
 			}
-			if calls != 2 {
+			expected := 2
+			if platform == "google" {
+				expected = 4
+			}
+			if calls != expected {
 				t.Fatalf("calls=%d", calls)
 			}
 		})

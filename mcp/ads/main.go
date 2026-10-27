@@ -1365,7 +1365,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "audience_create",
-			Description: "Create a normalized audience. Supported types are capability-driven: customer_list, website, app_activity, engagement, lookalike, and saved_targeting.",
+			Description: "Create a normalized audience using provider-supported create_kinds and by_kind fields from audience_capabilities_get.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
 				"type": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
@@ -1438,7 +1438,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "audience_create_custom",
-			Description: "Create a custom audience. Pass platform-specific source data via platform_options. Args: ad_account_id, name, description?, subtype? (e.g. CUSTOM, WEBSITE, ENGAGEMENT — Meta), platform_options.",
+			Description: "Create a reusable audience. Google audience_type=custom_segment or grouped uses structured fields; omitted audience_type retains the customer-list workflow. Provider-specific source fields remain available where supported.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":    map[string]any{"type": "integer"},
 				"name":             map[string]any{"type": "string"},
@@ -4426,11 +4426,15 @@ func (googleAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccou
 }
 
 func (googleAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	return mcpError("google audience_create_lookalike is not exposed as a generic operation; use audience_create_custom with platform_options.user_list"), nil
+	return a.googleStructuredAudienceCreate(ctx, acct, args, "lookalike")
 }
 
 func (a *App) toolAdSetCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	args, errOut = a.resolveGoogleAudienceTargeting(ctx, acct, args)
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4523,6 +4527,10 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	args, errOut = a.resolveGoogleAudienceTargeting(ctx, acct, args)
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4877,18 +4885,22 @@ func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (an
 		})
 	}
 	copyArgs := cloneMap(args)
-	copyArgs["type"] = "customer_list"
-	return a.audienceCreate(ctx, copyArgs)
+	if kind := firstString(args, "audience_type"); kind == "custom_segment" {
+		copyArgs["type"] = kind
+	} else {
+		copyArgs["type"] = "customer_list"
+	}
+	return a.withCreateRequest(ctx, copyArgs, "audience", a.audienceCreate)
 }
 
 func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	copyArgs := cloneMap(args)
 	copyArgs["type"] = "lookalike"
-	return a.audienceCreate(ctx, copyArgs)
+	return a.withCreateRequest(ctx, copyArgs, "audience", a.audienceCreate)
 }
 
 func (a *App) toolAudienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.audienceCreate(ctx, args)
+	return a.withCreateRequest(ctx, args, "audience", a.audienceCreate)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────

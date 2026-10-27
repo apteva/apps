@@ -242,10 +242,10 @@ provides:
     - { name: creative_asset_status,        description: "Inspect processing/readiness for an uploaded creative asset such as a Meta video." }
     - { name: creative_asset_delete,        description: "Delete an uploaded creative asset when supported by the provider." }
     - { name: creative_list,                description: "List creatives in the ad account." }
-    - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
+    - { name: audience_create_custom,       description: "Create a reusable customer list, Google custom segment or grouped audience using structured fields." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
     - { name: audience_list,                description: "List audiences in the ad account." }
-    - { name: audience_capabilities_get,    description: "Get provider-supported audience kinds, operations, sources, and privacy behavior." }
+    - { name: audience_capabilities_get,    description: "Discover provider-supported audience kinds, creation fields, lifecycle operations, seed eligibility and API restrictions." }
     - { name: audience_get,                 description: "Get one normalized project-scoped audience." }
     - { name: audience_create,              description: "Create a normalized provider audience using capability-driven fields." }
     - { name: audience_update,              description: "Update supported audience metadata or saved targeting." }

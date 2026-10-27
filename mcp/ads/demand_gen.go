@@ -90,9 +90,9 @@ func (a *App) extendDemandGenTools(tools []sdk.Tool) []sdk.Tool {
 	common := func(required string) map[string]any {
 		return schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}, required: str()}, []string{"ad_account_id", required})
 	}
-	return append(tools,
+	return a.extendAudienceTools(append(tools,
 		sdk.Tool{Name: "campaign_configuration_get", Description: "Read normalized campaign channel, bidding, budget, schedule, conversion-goal settings and targeting defaults.", InputSchema: common("campaign_id"), Handler: a.toolCampaignConfiguration},
-		sdk.Tool{Name: "adset_configuration_get", Description: "Read normalized Demand Gen placements, audiences, geography and languages for an existing managed ad group.", InputSchema: common("adset_id"), Handler: a.toolAdSetConfiguration})
+		sdk.Tool{Name: "adset_configuration_get", Description: "Read normalized Demand Gen placements, audiences, geography and languages for an existing managed ad group.", InputSchema: common("adset_id"), Handler: a.toolAdSetConfiguration}))
 }
 
 func (a *App) campaignSettings(ctx *sdk.AppCtx, acct *adAccount, id string) (map[string]any, error) {
