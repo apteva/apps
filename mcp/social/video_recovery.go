@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +22,14 @@ type recoveryTarget struct {
 	Body, Options, MediaIDs, MediaProject, Failure, LastError, Session, ExternalID string
 }
 
-func loadRecoveryTarget(ctx *sdk.AppCtx, post, target int64) (r recoveryTarget, err error) {
+type recoveryQueryer interface{ QueryRow(string, ...any) *sql.Row }
+
+func loadRecoveryTarget(ctx *sdk.AppCtx, post, target int64) (recoveryTarget, error) {
+	return loadRecoveryTargetFrom(ctx.AppDB(), projectScope(ctx), post, target)
+}
+func loadRecoveryTargetFrom(db recoveryQueryer, project string, post, target int64) (r recoveryTarget, err error) {
 	r.PostID, r.TargetID = post, target
-	err = ctx.AppDB().QueryRow(`SELECT t.social_account_id,a.connection_id,p.revision,t.attempts,p.approval_required,COALESCE(p.approved_revision,0),t.status,a.status,a.platform,COALESCE(a.provider_slug,'native'),COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),p.body,COALESCE(t.options,'{}'),COALESCE(p.media_storage_ids,'[]'),COALESCE(p.media_project_id,''),t.failure_code,COALESCE(t.last_error,''),COALESCE(t.youtube_upload_session,''),COALESCE(a.external_account_id,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.id=? AND t.id=? AND p.project_id=? AND a.project_id=p.project_id`, post, target, projectScope(ctx)).Scan(&r.AccountID, &r.ConnectionID, &r.Revision, &r.Attempts, &r.ApprovalRequired, &r.ApprovedRevision, &r.Status, &r.AccountStatus, &r.Platform, &r.Provider, &r.Operation, &r.PublicID, &r.Body, &r.Options, &r.MediaIDs, &r.MediaProject, &r.Failure, &r.LastError, &r.Session, &r.ExternalID)
+	err = db.QueryRow(`SELECT t.social_account_id,a.connection_id,p.revision,t.attempts,p.approval_required,COALESCE(p.approved_revision,0),t.status,a.status,a.platform,COALESCE(a.provider_slug,'native'),COALESCE(t.publish_operation_id,''),COALESCE(t.platform_post_id,''),p.body,COALESCE(t.options,'{}'),COALESCE(p.media_storage_ids,'[]'),COALESCE(p.media_project_id,''),t.failure_code,COALESCE(t.last_error,''),COALESCE(t.youtube_upload_session,''),COALESCE(a.external_account_id,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.id=? AND t.id=? AND p.project_id=? AND a.project_id=p.project_id`, post, target, project).Scan(&r.AccountID, &r.ConnectionID, &r.Revision, &r.Attempts, &r.ApprovalRequired, &r.ApprovedRevision, &r.Status, &r.AccountStatus, &r.Platform, &r.Provider, &r.Operation, &r.PublicID, &r.Body, &r.Options, &r.MediaIDs, &r.MediaProject, &r.Failure, &r.LastError, &r.Session, &r.ExternalID)
 	return
 }
 func (r recoveryTarget) fingerprint(source string) string {
@@ -90,10 +96,31 @@ func (a *App) toolPostDeliveryInspect(ctx *sdk.AppCtx, args map[string]any) (any
 		history = append(history, map[string]any{"operation_id": safeRequestID(op), "status": status, "reason": redactDeliverySecrets(reason), "created_at": at})
 	}
 	evidence["attempt_history"] = history
-	return evidence, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	receipts, err := ctx.AppDB().Query(`SELECT operation_id,correlation_id,source_attempt,initialized_at,uploader_state,COALESCE(uploader_stopped_at,''),provenance,COALESCE(abandoned_at,''),COALESCE(recovery_id,''),evidence FROM delivery_upload_operations WHERE project_id=? AND target_id=? ORDER BY initialized_at`, projectScope(ctx), target)
+	if err != nil {
+		return nil, err
+	}
+	defer receipts.Close()
+	uploads := []map[string]any{}
+	for receipts.Next() {
+		var op, correlation, initialized, state, stopped, provenance, abandoned, recovery, raw string
+		var attempt int
+		if err := receipts.Scan(&op, &correlation, &attempt, &initialized, &state, &stopped, &provenance, &abandoned, &recovery, &raw); err != nil {
+			return nil, err
+		}
+		var proof any
+		_ = json.Unmarshal([]byte(raw), &proof)
+		uploads = append(uploads, map[string]any{"operation_id": safeRequestID(op), "correlation_id": correlation, "source_attempt": attempt, "initialized_at": initialized, "uploader_state": state, "uploader_stopped_at": stopped, "provenance": provenance, "locally_abandoned_at": abandoned, "recovery_id": recovery, "evidence": proof})
+	}
+	evidence["upload_operations"] = uploads
+	return evidence, receipts.Err()
 }
 
-func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, validateSource bool) (map[string]any, string, error) {
+func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, validateSource bool, reviewExpired ...bool) (map[string]any, string, error) {
 	e := map[string]any{"post_id": r.PostID, "target_id": r.TargetID, "decision": "blocked", "reason": "nonpublication has not been established", "revision": r.Revision, "source_attempt": r.Attempts}
 	decision := "blocked"
 	if r.PublicID != "" || r.Status == "published" || r.Status == "awaiting_audience_setup" {
@@ -131,6 +158,16 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 				return e, "", nil
 			}
 		case "PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD", "SEND_TO_USER_INBOX":
+			if status == "PROCESSING_UPLOAD" && len(reviewExpired) > 0 && reviewExpired[0] {
+				expiry, eligible := a.expiredTikTokRecovery(ctx, r)
+				e["expired_upload_review"] = expiry
+				if eligible {
+					decision = "retry"
+					e["recovery_kind"] = "expired_zero_byte_upload"
+					e["reason"] = "explicitly reviewed expired upload; source revalidation required"
+					break
+				}
+			}
 			e["decision"] = "pending"
 			e["reason"] = "existing operation is processing; never resubmit"
 			return e, "", nil
@@ -239,6 +276,22 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 			return e, sourceProof, nil
 		}
 	}
+	if e["recovery_kind"] == "expired_zero_byte_upload" {
+		// Source revalidation may be slow; refresh evidence after it, too.
+		status, _, ids, err := a.getTikTokPublishStatus(ctx, r.ConnectionID, r.Operation)
+		if err != nil || status != "PROCESSING_UPLOAD" || len(ids) != 0 {
+			e["decision"] = "blocked"
+			e["reason"] = "remote state changed during source validation"
+			return e, "", nil
+		}
+		expiry, eligible := a.expiredTikTokRecovery(ctx, r)
+		e["expired_upload_review"] = expiry
+		if !eligible {
+			e["decision"] = "blocked"
+			e["reason"] = "expired upload evidence changed during source validation"
+			return e, "", nil
+		}
+	}
 	e["decision"] = decision
 	return e, sourceProof, nil
 }
@@ -270,7 +323,8 @@ func (a *App) toolPostDeliveryRevalidate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return mcpError("target not found in this project"), nil
 	}
-	e, source, err := a.deliveryRecoveryDecision(ctx, r, true)
+	reviewExpired, _ := boolOption(args, "review_expired_upload")
+	e, source, err := a.deliveryRecoveryDecision(ctx, r, true, reviewExpired)
 	if err != nil {
 		return nil, err
 	}
@@ -297,8 +351,8 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	unlock := lockSocialPost(ctx, post)
 	defer unlock()
-	var fingerprint, decision, status, expires, result string
-	err = ctx.AppDB().QueryRow(`SELECT fingerprint,decision,status,expires_at,result FROM delivery_recovery_requests WHERE id=? AND project_id=? AND post_id=? AND target_id=?`, id, projectScope(ctx), post, target).Scan(&fingerprint, &decision, &status, &expires, &result)
+	var fingerprint, decision, status, expires, result, preparedEvidence string
+	err = ctx.AppDB().QueryRow(`SELECT fingerprint,decision,status,expires_at,result,evidence FROM delivery_recovery_requests WHERE id=? AND project_id=? AND post_id=? AND target_id=?`, id, projectScope(ctx), post, target).Scan(&fingerprint, &decision, &status, &expires, &result, &preparedEvidence)
 	if err != nil {
 		return mcpError("recovery request not found in this project/target"), nil
 	}
@@ -318,11 +372,14 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	e, source, err := a.deliveryRecoveryDecision(ctx, r, true)
+	var prepared map[string]any
+	_ = json.Unmarshal([]byte(preparedEvidence), &prepared)
+	reviewExpired := prepared["recovery_kind"] == "expired_zero_byte_upload"
+	e, source, err := a.deliveryRecoveryDecision(ctx, r, true, reviewExpired)
 	if err != nil {
 		return nil, err
 	}
-	if e["decision"] != decision || r.fingerprint(source) != fingerprint {
+	if e["decision"] != decision || e["recovery_kind"] != prepared["recovery_kind"] || r.fingerprint(source) != fingerprint {
 		return mcpError("target/source/remote state changed; revalidate"), nil
 	}
 	if r.PublicID != "" || r.Status == "published" || r.Status == "awaiting_audience_setup" {
@@ -336,7 +393,34 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	defer tx.Rollback()
-	claimed, err := tx.Exec(`UPDATE delivery_recovery_requests SET status='consumed' WHERE id=? AND status='prepared' AND NOT EXISTS(SELECT 1 FROM delivery_recovery_requests other WHERE other.target_id=? AND other.revision=? AND other.status IN ('consumed','complete') AND other.decision IN ('retry','resume') AND delivery_recovery_requests.decision IN ('retry','resume'))`, id, target, r.Revision)
+	current, err := loadRecoveryTargetFrom(tx, projectScope(ctx), post, target)
+	if err != nil {
+		return nil, err
+	}
+	if current.fingerprint(source) != r.fingerprint(source) {
+		return mcpError("target changed during validation; no recovery executed"), nil
+	}
+	if reviewExpired {
+		// A poll can finish between revalidation and the transaction. Do not
+		// consume a grant if it has since recorded bytes or conflicting state.
+		var raw string
+		if err := tx.QueryRow(`SELECT delivery_diagnostics FROM post_targets WHERE id=?`, target).Scan(&raw); err != nil {
+			return nil, err
+		}
+		d := decodeDeliveryDiagnostics(raw, r.Platform, "")
+		expiry := e["expired_upload_review"].(map[string]any)
+		receipt := expiry["receipt"].(uploadOperationReceipt)
+		initAt, _ := time.Parse(time.RFC3339Nano, receipt.InitializedAt)
+		stoppedAt, _ := time.Parse(time.RFC3339Nano, receipt.UploaderStoppedAt)
+		floor := initAt.Add(tikTokUploadRecoveryAge)
+		if stoppedAt.After(floor) {
+			floor = stoppedAt
+		}
+		if d.OperationID != r.Operation || d.AcknowledgedBytes == nil || *d.AcknowledgedBytes != 0 || d.TransferredBytes != 0 || d.ProviderUploadedHighWater != nil && *d.ProviderUploadedHighWater != 0 || d.ProviderDownloadedHighWater != nil && *d.ProviderDownloadedHighWater != 0 || !zeroTikTokObservation(d, time.Now().UTC(), floor) {
+			return mcpError("upload progress changed; no recovery executed"), nil
+		}
+	}
+	claimed, err := tx.Exec(`UPDATE delivery_recovery_requests SET status='consumed' WHERE id=? AND status='prepared' AND julianday(expires_at)>julianday('now') AND NOT EXISTS(SELECT 1 FROM delivery_recovery_requests other WHERE other.target_id=? AND other.revision=? AND other.status IN ('consumed','complete') AND other.decision IN ('retry','resume') AND delivery_recovery_requests.decision IN ('retry','resume'))`, id, target, r.Revision)
 	if err != nil {
 		return nil, err
 	}
@@ -349,14 +433,29 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 		if historyID == "" {
 			historyID = fmt.Sprintf("attempt:%d:recovery:%s", r.Attempts, id)
 		}
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO target_delivery_attempts(target_id,operation_id,status,reason) VALUES(?,?,'failed',?)`, target, historyID, redactDeliverySecrets(r.LastError)); err != nil {
+		historyStatus := "failed"
+		if reviewExpired {
+			historyStatus = "locally_abandoned"
+			proof, _ := json.Marshal(e)
+			retired, err := tx.Exec(`UPDATE delivery_upload_operations SET uploader_state='locally_abandoned',abandoned_at=?,recovery_id=?,evidence=? WHERE project_id=? AND target_id=? AND operation_id=? AND source_attempt=? AND uploader_state='stopped'`, time.Now().UTC().Format(time.RFC3339Nano), id, string(proof), projectScope(ctx), target, r.Operation, r.Attempts)
+			if err != nil {
+				return nil, err
+			}
+			if n, _ := retired.RowsAffected(); n != 1 {
+				return mcpError("upload receipt changed; no recovery executed"), nil
+			}
+			if _, err = tx.Exec(`UPDATE delivery_recovery_requests SET evidence=? WHERE id=?`, string(proof), id); err != nil {
+				return nil, err
+			}
+		}
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO target_delivery_attempts(target_id,operation_id,status,reason) VALUES(?,?,?,?)`, target, historyID, historyStatus, redactDeliverySecrets(r.LastError)); err != nil {
 			return nil, err
 		}
 		operation := r.Operation
 		if decision == "retry" {
 			operation = ""
 		}
-		update, err := tx.Exec(`UPDATE post_targets SET status='pending',retryable=1,failure_code='',last_error=NULL,publish_operation_id=? WHERE id=? AND attempts=? AND status=? AND COALESCE(platform_post_id,'')=''`, operation, target, r.Attempts, r.Status)
+		update, err := tx.Exec(`UPDATE post_targets SET status='pending',retryable=1,failure_code='',last_error=NULL,publish_operation_id=? WHERE id=? AND attempts=? AND status=? AND COALESCE(publish_operation_id,'')=? AND COALESCE(platform_post_id,'')=''`, operation, target, r.Attempts, r.Status, r.Operation)
 		if err != nil {
 			return nil, err
 		}
@@ -390,6 +489,7 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	if decision == "retry" {
 		d := loadDeliveryDiagnostics(ctx, target)
+		d.CorrelationID = randomDeliveryID()
 		d.OperationID = ""
 		d.OperationState = "not_started"
 		d.AutomaticPollAttempts = 0

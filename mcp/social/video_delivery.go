@@ -38,6 +38,11 @@ type deliveryEvent struct {
 	Result     string `json:"result,omitempty"`
 }
 type deliveryDiagnostics struct {
+	// In-memory CAS binding captured before any provider/network call.
+	bound                           bool
+	boundAttempt                    int
+	boundOperation                  string
+	SourceAttempt                   *int                       `json:"source_attempt,omitempty"`
 	AttemptPurpose                  string                     `json:"purpose,omitempty"`
 	ProviderUploadedHighWater       *int64                     `json:"provider_uploaded_high_water,omitempty"`
 	ProviderDownloadedHighWater     *int64                     `json:"provider_downloaded_high_water,omitempty"`
@@ -134,9 +139,16 @@ func responseRequestID(h http.Header) string {
 	return ""
 }
 func loadDeliveryDiagnostics(ctx *sdk.AppCtx, target int64) deliveryDiagnostics {
-	var raw, platform, lastError string
-	_ = ctx.AppDB().QueryRow(`SELECT t.delivery_diagnostics,a.platform,COALESCE(t.last_error,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE t.id=? AND p.project_id=?`, target, projectScope(ctx)).Scan(&raw, &platform, &lastError)
-	return decodeDeliveryDiagnostics(raw, platform, lastError)
+	var raw, platform, lastError, operation string
+	var attempt int
+	err := ctx.AppDB().QueryRow(`SELECT t.delivery_diagnostics,a.platform,COALESCE(t.last_error,''),t.attempts,COALESCE(t.publish_operation_id,'') FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE t.id=? AND p.project_id=?`, target, projectScope(ctx)).Scan(&raw, &platform, &lastError, &attempt, &operation)
+	d := decodeDeliveryDiagnostics(raw, platform, lastError)
+	if err == nil && platform == "tiktok" && (d.OperationID != "" && operation != "" && d.OperationID != operation || d.SourceAttempt != nil && *d.SourceAttempt != attempt) {
+		// Never rebind old initialization/upload evidence to the next operation.
+		d = deliveryDiagnostics{CorrelationID: randomDeliveryID(), OperationID: operation, OperationState: "unknown"}
+	}
+	d.bound, d.boundAttempt, d.boundOperation = err == nil && platform == "tiktok", attempt, operation
+	return d
 }
 
 func (d *deliveryDiagnostics) save(ctx *sdk.AppCtx, target int64) error {
@@ -151,12 +163,27 @@ func (d *deliveryDiagnostics) save(ctx *sdk.AppCtx, target int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if d.bound {
+		var attempt int
+		var operation string
+		if err := tx.QueryRow(`SELECT attempts,COALESCE(publish_operation_id,'') FROM post_targets WHERE id=? AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, target, projectScope(ctx)).Scan(&attempt, &operation); err != nil {
+			return err
+		}
+		if attempt != d.boundAttempt || operation != d.boundOperation {
+			return errors.New("stale delivery attempt; result ignored")
+		}
+		currentAttempt := d.boundAttempt
+		d.SourceAttempt = &currentAttempt
+	}
 	if d.CorrelationID != "" {
 		var previous string
 		err := tx.QueryRow(`SELECT diagnostics FROM video_delivery_attempts WHERE project_id=? AND target_id=? AND correlation_id=?`, projectScope(ctx), target, d.CorrelationID).Scan(&previous)
 		if err == nil {
 			var old deliveryDiagnostics
 			if json.Unmarshal([]byte(previous), &old) == nil {
+				if old.OperationID != "" && d.OperationID != "" && old.OperationID != d.OperationID {
+					return errors.New("diagnostic receipt belongs to another operation")
+				}
 				d.mergeDeliveryEvidence(old)
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
@@ -301,7 +328,7 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			return nil, err
 		}
 	}
-	d := deliveryDiagnostics{CorrelationID: randomDeliveryID(), SourceFileID: item.ID, MediaProjectID: project, ExpectedBytes: item.Bytes, Method: method, Stage: "source_fetch", OperationState: "not_started", Events: []deliveryEvent{}}
+	d := deliveryDiagnostics{bound: previous.bound, boundAttempt: previous.boundAttempt, boundOperation: previous.boundOperation, CorrelationID: randomDeliveryID(), SourceFileID: item.ID, MediaProjectID: project, ExpectedBytes: item.Bytes, Method: method, Stage: "source_fetch", OperationState: "not_started", Events: []deliveryEvent{}}
 	if b := ctx.IntegrationFor("storage"); b != nil {
 		d.StorageInstallID = b.InstallID
 	}
@@ -318,6 +345,9 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 		d.AcknowledgedBytes = previous.AcknowledgedBytes
 		d.AttemptedBytes = previous.AttemptedBytes
 		d.ProgressVersion = previous.ProgressVersion
+		d.UploadURLSHA256 = previous.UploadURLSHA256
+		d.ProviderUploadedHighWater = previous.ProviderUploadedHighWater
+		d.ProviderDownloadedHighWater = previous.ProviderDownloadedHighWater
 		d.TransferredBytes = previous.TransferredBytes
 		d.LegacyTransferredBytes = previous.LegacyTransferredBytes
 	}
@@ -428,6 +458,23 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			continue
 		}
 		hash := hex.EncodeToString(digest.Sum(nil))
+		if method != "RECOVERY_VALIDATION" && j.targetID > 0 {
+			var proof string
+			err := ctx.AppDB().QueryRow(`SELECT r.evidence FROM delivery_recovery_requests r JOIN post_targets t ON t.id=r.target_id JOIN posts p ON p.id=t.post_id WHERE r.project_id=? AND r.target_id=? AND r.status='consumed' AND r.decision IN ('retry','resume') AND r.revision=p.revision AND r.source_attempt=t.attempts-1`, projectScope(ctx), j.targetID).Scan(&proof)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				cleanup()
+				return nil, err
+			}
+			if err == nil {
+				var evidence struct {
+					SHA string `json:"source_sha256"`
+				}
+				if json.Unmarshal([]byte(proof), &evidence) != nil || evidence.SHA == "" || evidence.SHA != hash {
+					cleanup()
+					return nil, &sourceDeliveryError{"source changed after recovery authorization", false}
+				}
+			}
+		}
 		if item.SHA256 != "" && !strings.EqualFold(hash, item.SHA256) {
 			cleanup()
 			event.Result = "checksum_mismatch"
@@ -481,21 +528,37 @@ func executeStatus(res *sdk.ExecuteResult) int {
 }
 
 // Capture provider-native state without retaining provider bodies or session URLs.
-func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, conn int64, operation, status, reason, code, logID string, res *sdk.ExecuteResult, callErr error, progress ...tikTokProgressObservation) {
-	rows, err := ctx.AppDB().Query(`SELECT t.id FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND a.connection_id=? AND a.platform='tiktok' AND t.publish_operation_id=?`, projectScope(ctx), conn, operation)
+type tikTokStatusBinding struct {
+	target  int64
+	attempt int
+}
+
+func tikTokStatusBindings(ctx *sdk.AppCtx, conn int64, operation string) []tikTokStatusBinding {
+	rows, err := ctx.AppDB().Query(`SELECT t.id,t.attempts FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts a ON a.id=t.social_account_id WHERE p.project_id=? AND a.connection_id=? AND a.platform='tiktok' AND t.publish_operation_id=?`, projectScope(ctx), conn, operation)
 	if err != nil {
-		return
+		return nil
 	}
-	var targets []int64
+	defer rows.Close()
+	var bindings []tikTokStatusBinding
 	for rows.Next() {
-		var id int64
-		if rows.Scan(&id) == nil {
-			targets = append(targets, id)
+		var b tikTokStatusBinding
+		if rows.Scan(&b.target, &b.attempt) == nil {
+			bindings = append(bindings, b)
 		}
 	}
-	rows.Close()
-	for _, id := range targets {
+	return bindings
+}
+
+// Bind before requesting status. A late result never attaches itself to a new
+// attempt, even if a provider were to reuse an operation identifier.
+func (a *App) recordTikTokStatus(ctx *sdk.AppCtx, bindings []tikTokStatusBinding, operation, status, reason, code, logID string, res *sdk.ExecuteResult, callErr error, progress ...tikTokProgressObservation) {
+	for _, b := range bindings {
+		id := b.target
 		d := loadDeliveryDiagnostics(ctx, id)
+		if !d.bound || d.boundAttempt != b.attempt || d.boundOperation != operation {
+			continue
+		}
+
 		d.OperationID = safeRequestID(operation)
 		if res != nil && res.Success && (code == "" || code == "ok") && status != "" {
 			d.ProviderStatus = safeRequestID(status)

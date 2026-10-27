@@ -191,3 +191,65 @@ test("a normalized successful acknowledgement is resolved evidence without a res
   expect(text).not.toContain("Upload stalled");
   expect(text).not.toContain("Recover this target");
 });
+
+test("expired upload review is separate from a confirmed, target-scoped recovery", async () => {
+  const calls: { url: string; body: any }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    calls.push({
+      url: String(input),
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return Response.json(
+      String(input).includes("revalidate")
+        ? {
+            decision: "retry",
+            recovery_kind: "expired_zero_byte_upload",
+            recovery_id: "expiry-proof",
+            reason: "Reviewed expiry evidence",
+            expired_upload_review: {
+              reason: "Stopped uploader and two fresh zero-byte observations",
+            },
+          }
+        : { targets: [] },
+    );
+  }) as typeof fetch;
+  await render(
+    <TargetDelivery
+      postId={908}
+      targetId={1022}
+      projectId="project"
+      diagnostics={diagnostics}
+    />,
+  );
+  await click("Review expired upload");
+  expect(calls).toEqual([
+    {
+      url: "/api/apps/social/posts/908/delivery/1022/revalidate?project_id=project",
+      body: { review_expired_upload: true },
+    },
+  ]);
+  expect(browser.document.body.textContent).toContain(
+    "Stopped uploader and two fresh zero-byte observations",
+  );
+  await click("Retire expired upload and recover this target");
+  expect(calls[1]).toEqual({
+    url: "/api/apps/social/posts/908/delivery/1022/recover?project_id=project",
+    body: { recovery_id: "expiry-proof", confirm: true },
+  });
+});
+
+test("unknown acknowledgement evidence never offers expiry recovery", async () => {
+  await render(
+    <TargetDelivery
+      postId={908}
+      targetId={1022}
+      diagnostics={{ ...diagnostics, acknowledged_upload_bytes: null }}
+    />,
+  );
+  expect(browser.document.body.textContent).not.toContain(
+    "Review expired upload",
+  );
+  expect(browser.document.body.textContent).not.toContain(
+    "Retire expired upload and recover this target",
+  );
+});
