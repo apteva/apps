@@ -30,6 +30,64 @@ Unknown provider list types are not mislabeled as writable customer lists.
 `targeting_catalog_search(type=interest, query=...)` returns Google interest IDs,
 names and native taxonomy metadata. Location and language searches remain.
 
+## Verified audience provenance (Ads 0.1.53)
+
+`audience_provenance_set` stores a local source association for any provider,
+including read-only audiences. It does not mutate the provider or targeting.
+
+```json
+{
+  "ad_account_id": 6,
+  "audience_id": 42,
+  "confirmed": true,
+  "provenance": {
+    "source_platform": "youtube",
+    "source_channel_id": "UC_verified_channel_id",
+    "source_name": "Channel checked in source configuration",
+    "interaction_type": "video_view",
+    "verification_evidence": "Checked this exact list ID, channel ID and interaction in Audience Manager.",
+    "verification_reference": "Optional screenshot or configuration reference"
+  }
+}
+```
+
+The source platform/event identifiers are generic strings. At least one source
+account, channel/page or asset/app/site ID is required; a friendly name cannot
+replace an identity ID. The caller must explicitly confirm the check and provide
+evidence. The server records the verification time and
+`verification_method=manual_attestation`; clients cannot claim provider
+verification or backdate it. These examples are not assertions about any real
+list or business channel.
+
+Audience list/get and generic resource/context reads return `provenance` and a
+`source_label`. Verification is stored in its own database column; provider
+refreshes, provider renames and ordinary metadata updates leave it intact.
+Provider metadata and audience names cannot supply or override that local
+verification. The timestamp records when the mapping was checked, rather than
+asserting that source configuration can never change.
+
+Use `audience_provenance_set(confirmed=true, clear=true)` to revoke the saved
+association. Use `audience_list` filters `provenance_status=verified|unknown`,
+`source_platform`, `source_account_id`, `source_channel_id`, `source_asset_id` and
+`interaction_type` to select exact verified mappings. Source filters exclude
+unknown records and never search audience names. A local confirmation is not a
+new claim that Google considers a seed eligible or a lookalike ready.
+
+The Audience workspace offers **Verify source** for every provider and displays
+manual verification next to the recorded source. Google `RULE_BASED` becomes
+`rule_based` (**Rule-based audience**), including cached data from earlier
+versions. This describes the mechanism, not a website source. Existing explicit
+Meta website/app/engagement labels remain unchanged. Rule-based lists remain
+available as first-party seeds; their eligibility is still evaluated by Google.
+
+The new migration is additive and needs no integration change. The opt-in
+`TestAudienceProvenanceLiveReadback` reads actual Google audiences into an isolated
+local test database, verifies neutral labels, saves a synthetic local association,
+refreshes the provider metadata, reopens it through a new App object, filters and
+clears it. It sends only `search` requests to the provider and makes no business
+channel assertion. Set `ADS_AUDIENCE_PROVENANCE_LIVE=1` to run it. Existing
+`ADS_LIVE_*` connection/configuration overrides apply.
+
 ## Custom segments
 
 ```json
@@ -136,8 +194,8 @@ Google Ads supports viewer/subscriber data segments in its UI, but the Google
 Ads API has no YouTube-list creation operation. Create those lists in
 [Audience Manager](https://ads.google.com/aw/audiences/management), then refresh
 here. Existing lists can be composed into groups or used as first-party
-lookalike seeds when Google allows them. The API's `REMARKETING` type does not
-reliably identify a specific channel/action, so the app reports the source as
+lookalike seeds when Google allows them. The API's `RULE_BASED` or `REMARKETING` type does not
+establish a specific channel/action, so the app initially reports the source as
 unknown rather than inferring that every remarketing list is a subscriber list.
 
 ## Integration dependency and verification

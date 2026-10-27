@@ -178,7 +178,7 @@ func TestGoogleAudiencesLive(t *testing.T) {
 		if row["type"] == "custom_segment" {
 			existing = row["id"]
 		}
-		if row["type"] == "website" && row["status"] == "active" {
+		if (row["type"] == "website" || row["type"] == "rule_based") && row["status"] == "active" {
 			seed = row["id"]
 		}
 	}

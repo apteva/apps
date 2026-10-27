@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-27",
+  "app_version": "0.1.53",
+  "go_race_suite": "PASS",
+  "go_vet": "PASS",
+  "go_build": "PASS",
+  "ui_tests": 19,
+  "ui_assertions": 78,
+  "typescript_check": "PASS",
+  "panel_build_and_import_check": "PASS",
+  "responsive_widths_px": [
+    390,
+    768,
+    1200
+  ],
+  "browser_errors": 0,
+  "persistence_regressions": [
+    "Google, Meta, X and Reddit",
+    "provider refresh and rename",
+    "ordinary resource upsert",
+    "new App instance reading persisted database",
+    "project/account isolation",
+    "read-only audience annotation",
+    "evidence and explicit attestation required",
+    "server-owned verification method/time",
+    "explicit clear",
+    "exact verified-source filtering",
+    "provider metadata/name cannot forge local verification",
+    "cached Google RULE_BASED metadata and labels corrected",
+    "rule-based first-party seeds remain eligible for provider checks"
+  ],
+  "live_readback": {
+    "test": "TestAudienceProvenanceLiveReadback",
+    "result": "PASS",
+    "provider": "Google Ads API v23",
+    "provider_read_requests": 6,
+    "rule_based_lists_labelled_neutrally": 3,
+    "annotations": "synthetic association in an isolated test DB only",
+    "real_business_mapping_asserted": false,
+    "provider_mutations": 0,
+    "production_provenance_mutations": 0
+  },
+  "release_scope": "Ads app only; no integration changes or running-install upgrades"
+}
