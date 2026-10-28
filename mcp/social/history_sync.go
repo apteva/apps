@@ -19,6 +19,7 @@ import (
 // Metadata is observation evidence, never publishing intent. Null means the
 // provider did not expose the field. Visibility does not imply membership.
 type nativePost struct {
+	MetadataUnavailable   bool           `json:"metadata_unavailable,omitempty"`
 	ID                    string         `json:"native_post_id"`
 	URL                   *string        `json:"url"`
 	Title                 *string        `json:"title"`
@@ -71,6 +72,10 @@ func (b historyAccount) binding() string {
 }
 
 type historyRun struct {
+	MetadataUnresolvedIDs   []string               `json:"metadata_unresolved_sample"`
+	MetadataUnresolved      int                    `json:"metadata_unresolved"`
+	MetadataRetryable       int                    `json:"metadata_retryable"`
+	MetadataReadbacks       int                    `json:"metadata_readbacks"`
 	CoverageVersion         int                    `json:"coverage_version"`
 	ProviderTotal           *int64                 `json:"provider_total"`
 	ProviderTotals          []historyProviderTotal `json:"provider_totals"`
@@ -243,7 +248,7 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 		}
 		run.Revision = savedRevision
 		if run.CoverageVersion != historyCoverageVersion {
-			return mcpError("history cursor predates page-boundary reconciliation; start a new sync"), nil
+			return mcpError("history cursor predates page-boundary/metadata reconciliation; start a new sync"), nil
 		}
 		if _, explicit := args["page_size"]; explicit && pageSize != run.PageSize {
 			return mcpError("cursor page_size differs from original run"), nil
@@ -273,6 +278,21 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 	run.Error = ""
 	deadline := time.Now().Add(25 * time.Second)
 	for step := 0; step < pages && time.Now().Before(deadline); step++ {
+		if run.Phase == "metadata" {
+			e := a.reconcileHistoryMetadata(ctx, b, &run)
+			if e != nil {
+				run.Status = "failed"
+				run.Error = redactDeliverySecrets(e.Error())
+			}
+			run.Revision++
+			if err = saveHistoryRun(ctx, b, &run); err != nil {
+				return nil, err
+			}
+			if run.Status != "partial" {
+				break
+			}
+			continue
+		}
 		providerPageSize := run.TraversalPageSize
 		if run.Phase == "overlap" {
 			providerPageSize = run.ReconciliationPageSize
@@ -319,6 +339,12 @@ func (a *App) toolAccountHistorySync(ctx *sdk.AppCtx, args map[string]any) (any,
 				run.Unchanged++
 			}
 			run.Scanned++
+		}
+		if err = refreshHistoryMetadataCounts(ctx, &run); err != nil {
+			return nil, err
+		}
+		if run.MetadataUnresolved > 0 {
+			requireHistoryReconciliation(&run, "unresolved_native_metadata")
 		}
 		if err = observeHistoryPage(ctx, &run, page); err != nil {
 			return nil, err
@@ -442,6 +468,16 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 		}
 	}
 
+	if n.MetadataUnavailable && len(runIDs) > 0 {
+		var resolved int
+		if e := tx.QueryRow(`SELECT count(*) FROM social_history_seen WHERE run_id=? AND native_post_id=? AND metadata_missing=0`, runIDs[0], n.ID).Scan(&resolved); e != nil {
+			return "", 0, 0, e
+		}
+		if resolved > 0 {
+			return "unchanged", 0, 0, nil
+		}
+	}
+
 	var postID, targetID int64
 	err = tx.QueryRow(`SELECT t.post_id,t.id FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.social_account_id=? AND t.platform_post_id=?`, b.Project, b.ID, n.ID).Scan(&postID, &targetID)
 	result := "unchanged"
@@ -525,7 +561,7 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 		default:
 			unchanged = 1
 		}
-		_, err = tx.Exec(`INSERT INTO social_history_seen(run_id,native_post_id,imported,updated,unchanged) VALUES(?,?,?,?,?) ON CONFLICT(run_id,native_post_id) DO UPDATE SET imported=max(imported,excluded.imported),updated=max(updated,excluded.updated),unchanged=max(unchanged,excluded.unchanged)`, runIDs[0], n.ID, imported, updated, unchanged)
+		_, err = tx.Exec(`INSERT INTO social_history_seen(run_id,native_post_id,imported,updated,unchanged,metadata_missing,metadata_observed_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,native_post_id) DO UPDATE SET imported=max(imported,excluded.imported),updated=max(updated,excluded.updated),unchanged=max(unchanged,excluded.unchanged),metadata_missing=excluded.metadata_missing,metadata_observed_at=excluded.metadata_observed_at,metadata_error=CASE WHEN excluded.metadata_missing=0 THEN '' ELSE metadata_error END`, runIDs[0], n.ID, imported, updated, unchanged, n.MetadataUnavailable, n.ObservedAt)
 		if err != nil {
 			return "", 0, 0, err
 		}

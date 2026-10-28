@@ -44,7 +44,15 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		if err := a.youtubeHistoryIdentity(ctx, b, run); err != nil {
 			return nil, err
 		}
-		return a.youtubeNativePosts(ctx, b, run, []string{id})
+		posts, err := a.youtubeNativePosts(ctx, b, run, []string{id})
+		if err == nil && len(posts) == 1 && posts[0].MetadataUnavailable {
+			posts, err = a.youtubeNativePostsWithParts(ctx, b, run, []string{id}, true)
+		}
+		if err == nil && len(posts) == 1 && posts[0].MetadataUnavailable {
+			run.Incomplete = true
+			addHistoryLimitation(run, "YouTube omitted this video after account-bound readback; metadata and inaccessible/deleted status remain unknown.")
+		}
+		return posts, err
 	case "pinterest":
 		raw, err := historyExecute(ctx, b, "get_pin", map[string]any{"pin_id": id})
 		if err != nil {

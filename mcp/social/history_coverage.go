@@ -7,7 +7,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const historyCoverageVersion = 2
+const historyCoverageVersion = 3
 const historyReconciliationPageLimit = 100
 
 // Choose different effective boundaries within the provider's supported range.
@@ -119,7 +119,16 @@ func observeHistoryPage(ctx *sdk.AppCtx, run *historyRun, page nativePage) error
 }
 
 func finishHistoryCoverage(run *historyRun) {
+	if run.MetadataUnresolved > 0 && run.MetadataRetryable > 0 && run.MetadataReadbacks < historyMetadataReadbackLimit {
+		run.Status = "partial"
+		run.Phase = "metadata"
+		return
+	}
 	run.Status = "complete"
+	if run.MetadataUnresolved > 0 {
+		run.Status = "limited"
+		addHistoryLimitation(run, fmt.Sprintf("%d listed native IDs remain without account-verified metadata after bounded readback; inaccessible/deleted status remains unknown.", run.MetadataUnresolved))
+	}
 	if run.ProviderTotal == nil {
 		addHistoryLimitation(run, "Provider did not expose a comparable listing total; coverage is based on accessible pagination, not a lifetime count proof.")
 	}
@@ -138,7 +147,7 @@ func finishHistoryCoverage(run *historyRun) {
 	run.CompletedAt = &now
 }
 func historyCoverage(run historyRun) map[string]any {
-	complete := run.CoverageVersion == historyCoverageVersion && run.Status == "complete" && run.Mode == "full" && !run.Incomplete && run.TraversalExhausted
+	complete := run.CoverageVersion == historyCoverageVersion && run.Status == "complete" && run.Mode == "full" && !run.Incomplete && run.MetadataUnresolved == 0 && run.TraversalExhausted
 	var gap *int64
 	if run.ProviderTotal != nil {
 		gap = bytePointer(*run.ProviderTotal - int64(run.Counts.ReconciledUnique))
@@ -151,6 +160,7 @@ func historyCoverage(run historyRun) map[string]any {
 		"count_verified": run.ProviderTotal != nil && gap != nil && *gap == 0 && !run.ProviderTotalsChanged, "unexplained_count_gap": gap,
 		"reconciliation":    map[string]any{"attempted": run.OverlapPages > 0, "page_size": run.ReconciliationPageSize, "full_pass_required": run.ReconciliationFull, "reasons": run.ReconciliationReasons, "pages": run.OverlapPages, "max_pages": historyReconciliationPageLimit, "pagination_exhausted": run.ReconciliationExhausted, "unique_posts": run.Counts.ReconciliationUnique, "added_posts": run.Counts.ReconciledUnique - run.Counts.TraversalUnique},
 		"duplicate_entries": run.Counts.TraversalDuplicates + run.Counts.ReconciliationDuplicates, "overlap_pages": run.OverlapPages,
-		"all_listed_ids_resolved": !run.Incomplete, "optional_fields_may_be_unknown": true, "consistency": "best_effort_provider_pagination_with_bounded_reconciliation",
+		"metadata":                map[string]any{"unresolved_posts": run.MetadataUnresolved, "unresolved_sample": run.MetadataUnresolvedIDs, "retryable_posts": run.MetadataRetryable, "budget_exhausted": run.MetadataUnresolved > 0 && (run.MetadataReadbacks >= historyMetadataReadbackLimit || run.MetadataRetryable == 0), "retry_readbacks": run.MetadataReadbacks, "max_readbacks": historyMetadataReadbackLimit, "max_attempts_per_post": historyMetadataAttemptsPerPost},
+		"all_listed_ids_resolved": !run.Incomplete && run.MetadataUnresolved == 0, "optional_fields_may_be_unknown": true, "consistency": "best_effort_provider_pagination_with_bounded_reconciliation",
 	}
 }
