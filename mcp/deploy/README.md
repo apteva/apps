@@ -454,6 +454,19 @@ can safely fill absent categories with `NONE`. Other combined legacy answers
 require explicit category answers or exact Apple declarations before apply.
 Legacy health/wellness levels are accepted on read and converted to booleans.
 
+Apple age-rating validation is pinned to the published OpenAPI 4.5.1 schema
+in `schemas/apple-age-rating-4.5.1.json`, with its upstream JSON digest recorded.
+All 13 frequency questions and 11 boolean questions have independent mapping
+tests. The six optional advanced fields are `kidsAgeBand`, `ageRatingOverride`
+(deprecated), `ageRatingOverrideV2`, `koreaAgeRatingOverride`,
+`gracRatingClassificationNumber` and `developerAgeRatingInfoUrl`. Advanced
+answers are checked for field names, types, enum values and URI syntax before
+provider calls. Documented nullable values remain supported. Invalid answers
+block classification apply while remaining editable in a draft. Classification
+is verified only when every requested answer matches Apple's readback;
+legacy frequency spellings are compared semantically. No rating is inferred
+from another question, and calculated age ratings remain Apple's decision.
+
 The workflow is:
 
 1. `deploy_store_update` saves metadata, media references, review details,

@@ -22,6 +22,7 @@ test("content rating edits independent questions and a boolean health answer", a
     if (path === "/host.js") return new Response(bundle,{headers:{"content-type":"text/javascript"}});
     if (path.endsWith("/deployments")) return Response.json({deployments:[deployment(1,true)]});
     if (path.endsWith("/deployments/1")) return Response.json({deployment:deployment(1,true),builds:[],releases:[],environments:[{id:1,name:"production"}]});
+    if (path.endsWith("/distribution")) return Response.json({platform:"ios",provider:"app_store_connect",channel:"internal",configured:false,audience:[],count:0,desired_configured:false,desired_audience:[],desired_count:0,synced:false,tester_access:"not_configured"});
     if (path.endsWith("/store-config")) {
       if (req.method === "PUT") saved = await req.json();
       return Response.json({desired:saved || desired,preflight});
@@ -38,15 +39,39 @@ test("content rating edits independent questions and a boolean health answer", a
     await page.getByRole("button",{name:"Store listing",exact:true}).click();
     await page.getByRole("button",{name:"Compliance",exact:true}).click();
     await page.getByText(/Older combined content answers need review/).waitFor();
-    await page.getByLabel("Cartoon or fantasy violence",{exact:true}).selectOption("INFREQUENT");
-    await page.getByLabel("Realistic violence",{exact:true}).selectOption("NONE");
-    await page.getByLabel("Prolonged graphic or sadistic realistic violence",{exact:true}).selectOption("NONE");
-    await page.getByLabel("Graphic sexual content and nudity",{exact:true}).selectOption("NONE");
-    await page.getByLabel("Health or wellness topics",{exact:true}).check();
+    const levels = [
+      ["violence_cartoon_fantasy","Cartoon or fantasy violence"],
+      ["violence_realistic","Realistic violence"],
+      ["violence_graphic_realistic","Prolonged graphic or sadistic realistic violence"],
+      ["sexual_content","Sexual content or nudity"],
+      ["sexual_content_graphic","Graphic sexual content and nudity"],
+      ["profanity","Profanity or crude humor"], ["drugs","Alcohol, tobacco, or drugs"],
+      ["gambling_simulation","Simulated gambling"], ["contests","Contests"],
+      ["weapons","Guns or other weapons"], ["horror_fear","Horror or fear"],
+      ["medical_information","Medical information"], ["mature_themes","Mature or suggestive themes"],
+    ] as const;
+    const flags = [
+      ["health_wellness","Health or wellness topics"], ["unrestricted_web_access","Unrestricted web access"],
+      ["real_money_gambling","Real-money gambling"], ["loot_boxes","Loot boxes"], ["advertising","Advertising"],
+      ["messaging_chat","Messaging and chat"], ["user_generated_content","User-generated content"],
+      ["parental_controls","Parental controls"], ["age_assurance","Age assurance"],
+      ["social_media","Social media"], ["social_media_age_gate","Social media restricted under 13"],
+    ] as const;
+    const expected: Record<string,string|boolean> = {};
+    for (const [index,[key,label]] of levels.entries()) {
+      const value = ["INFREQUENT","NONE","FREQUENT"][index%3];
+      await page.getByLabel(label,{exact:true}).selectOption(value);
+      expected[key] = value;
+    }
+    for (const [key,label] of flags) {
+      await page.getByLabel(label,{exact:true}).check();
+      expected[key] = true;
+    }
     const savedResponse = page.waitForResponse(response => response.request().method()==="PUT" && response.url().includes("store-config"));
     await page.getByRole("button",{name:"Save draft",exact:true}).click();
     await savedResponse;
-    expect(saved.classification.content_rating).toMatchObject({violence_cartoon_fantasy:"INFREQUENT",violence_realistic:"NONE",violence_graphic_realistic:"NONE",sexual_content_graphic:"NONE",health_wellness:true});
+    expect(Object.keys(expected)).toHaveLength(24);
+    expect(saved.classification.content_rating).toMatchObject(expected);
     expect(errors).toEqual([]);
   } finally { await browser.close(); server.stop(true); }
 },45000);
