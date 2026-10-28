@@ -75,7 +75,7 @@ done''',
             # Network/download and toolchains are the only substitutions.
             def download(url, dest):
                 shutil.copyfile(runner, dest)
-            pins = {'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[module.platform.machine()]: {'url': 'test://runner', 'sha256': hashlib.sha256(Path(runner).read_bytes()).hexdigest()}}
+            pins = {module.platform.system().lower() + '-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[module.platform.machine()]: {'url': 'test://runner', 'sha256': hashlib.sha256(Path(runner).read_bytes()).hexdigest()}}
             real_read = Path.read_text
             def read(path, *args, **kwargs):
                 return json.dumps(pins) if path.name == 'pipeline-runner.json' else real_read(path, *args, **kwargs)
