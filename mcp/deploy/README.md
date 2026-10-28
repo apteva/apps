@@ -444,6 +444,16 @@ validated against Apple display targets or Google icon, feature-graphic, and
 screenshot constraints. iPad screenshot requirements are inferred from the
 Xcode project, explicit Info.plist, or built IPA.
 
+Content ratings use independent `violence_cartoon_fantasy`, `violence_realistic`,
+`violence_graphic_realistic`, `sexual_content` and `sexual_content_graphic`
+levels. `health_wellness` is a boolean. Apple receives each answer separately;
+fantasy violence never implies realistic or graphic violence. Exact Apple
+answers in `classification.age_declaration` take precedence over the generic
+questionnaire. Legacy `violence: NONE` and non-graphic `sexual_content: NONE`
+can safely fill absent categories with `NONE`. Other combined legacy answers
+require explicit category answers or exact Apple declarations before apply.
+Legacy health/wellness levels are accepted on read and converted to booleans.
+
 The workflow is:
 
 1. `deploy_store_update` saves metadata, media references, review details,

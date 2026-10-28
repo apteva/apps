@@ -115,27 +115,78 @@ type StoreClassification struct {
 }
 
 type StoreContentRating struct {
-	Violence              string `json:"violence,omitempty"`
-	SexualContent         string `json:"sexual_content,omitempty"`
-	Profanity             string `json:"profanity,omitempty"`
-	Drugs                 string `json:"drugs,omitempty"`
-	GamblingSimulation    string `json:"gambling_simulation,omitempty"`
-	Contests              string `json:"contests,omitempty"`
-	Weapons               string `json:"weapons,omitempty"`
-	HorrorFear            string `json:"horror_fear,omitempty"`
-	MedicalInformation    string `json:"medical_information,omitempty"`
-	HealthWellness        string `json:"health_wellness,omitempty"`
-	MatureThemes          string `json:"mature_themes,omitempty"`
-	UnrestrictedWebAccess bool   `json:"unrestricted_web_access,omitempty"`
-	RealMoneyGambling     bool   `json:"real_money_gambling,omitempty"`
-	LootBoxes             bool   `json:"loot_boxes,omitempty"`
-	Advertising           bool   `json:"advertising,omitempty"`
-	MessagingChat         bool   `json:"messaging_chat,omitempty"`
-	UserGeneratedContent  bool   `json:"user_generated_content,omitempty"`
-	ParentalControls      bool   `json:"parental_controls,omitempty"`
-	AgeAssurance          bool   `json:"age_assurance,omitempty"`
-	SocialMedia           bool   `json:"social_media,omitempty"`
-	SocialMediaAgeGate    bool   `json:"social_media_age_gate,omitempty"`
+	// Violence is retained for legacy documents. Only NONE can be expanded
+	// safely; other legacy answers need the three independent questions.
+	Violence                 string `json:"violence,omitempty"`
+	ViolenceCartoonFantasy   string `json:"violence_cartoon_fantasy,omitempty"`
+	ViolenceRealistic        string `json:"violence_realistic,omitempty"`
+	ViolenceGraphicRealistic string `json:"violence_graphic_realistic,omitempty"`
+	SexualContent            string `json:"sexual_content,omitempty"`
+	SexualContentGraphic     string `json:"sexual_content_graphic,omitempty"`
+	Profanity                string `json:"profanity,omitempty"`
+	Drugs                    string `json:"drugs,omitempty"`
+	GamblingSimulation       string `json:"gambling_simulation,omitempty"`
+	Contests                 string `json:"contests,omitempty"`
+	Weapons                  string `json:"weapons,omitempty"`
+	HorrorFear               string `json:"horror_fear,omitempty"`
+	MedicalInformation       string `json:"medical_information,omitempty"`
+	HealthWellness           bool   `json:"health_wellness,omitempty"`
+	MatureThemes             string `json:"mature_themes,omitempty"`
+	UnrestrictedWebAccess    bool   `json:"unrestricted_web_access,omitempty"`
+	RealMoneyGambling        bool   `json:"real_money_gambling,omitempty"`
+	LootBoxes                bool   `json:"loot_boxes,omitempty"`
+	Advertising              bool   `json:"advertising,omitempty"`
+	MessagingChat            bool   `json:"messaging_chat,omitempty"`
+	UserGeneratedContent     bool   `json:"user_generated_content,omitempty"`
+	ParentalControls         bool   `json:"parental_controls,omitempty"`
+	AgeAssurance             bool   `json:"age_assurance,omitempty"`
+	SocialMedia              bool   `json:"social_media,omitempty"`
+	SocialMediaAgeGate       bool   `json:"social_media_age_gate,omitempty"`
+}
+
+func (rating *StoreContentRating) UnmarshalJSON(data []byte) error {
+	type ratingFields StoreContentRating
+	next := ratingFields(*rating)
+	var wire struct {
+		*ratingFields
+		Health json.RawMessage `json:"health_wellness"`
+	}
+	wire.ratingFields = &next
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Health) > 0 && string(wire.Health) != "null" {
+		if err := json.Unmarshal(wire.Health, &next.HealthWellness); err != nil {
+			var legacy string
+			if json.Unmarshal(wire.Health, &legacy) != nil {
+				return errors.New("content_rating.health_wellness must be a boolean")
+			}
+			switch normalizeAppleRatingLevel(legacy) {
+			case "NONE":
+				next.HealthWellness = false
+			case "INFREQUENT", "FREQUENT":
+				next.HealthWellness = true
+			default:
+				return errors.New("content_rating.health_wellness must be a boolean or a valid legacy rating level")
+			}
+		}
+	}
+	*rating = normalizeStoreContentRating(StoreContentRating(next))
+	return nil
+}
+
+func normalizeStoreContentRating(rating StoreContentRating) StoreContentRating {
+	if normalizeAppleRatingLevel(rating.Violence) == "NONE" {
+		for _, answer := range []*string{&rating.ViolenceCartoonFantasy, &rating.ViolenceRealistic, &rating.ViolenceGraphicRealistic} {
+			if *answer == "" {
+				*answer = "NONE"
+			}
+		}
+	}
+	if normalizeAppleRatingLevel(rating.SexualContent) == "NONE" && rating.SexualContentGraphic == "" {
+		rating.SexualContentGraphic = "NONE"
+	}
+	return rating
 }
 
 type StoreDistribution struct {
@@ -691,7 +742,7 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 				add("category.required", "error", "classification", "", "primary_category", "Primary App Store category is required.", "Select a category.", true)
 			}
 			if !storeContentRatingComplete(doc.Classification.ContentRating) && len(doc.Classification.AgeDeclaration) == 0 {
-				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are required.", "Complete the age-rating questionnaire.", true)
+				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are incomplete or contain older combined answers.", "Answer each violence and graphic-content question separately, or supply exact Apple declaration answers.", true)
 			}
 			if !doc.Privacy.ManualAttestations["apple_privacy_published"] && !providerCommitValidated(cfg, "app_privacy", doc.VersionName) {
 				findings = append(findings, StoreFinding{
@@ -1339,10 +1390,12 @@ func boolMapValue(values map[string]any, key string) bool {
 }
 
 func storeContentRatingComplete(rating StoreContentRating) bool {
+	rating = normalizeStoreContentRating(rating)
 	for _, value := range []string{
-		rating.Violence, rating.SexualContent, rating.Profanity, rating.Drugs,
+		rating.ViolenceCartoonFantasy, rating.ViolenceRealistic, rating.ViolenceGraphicRealistic,
+		rating.SexualContent, rating.SexualContentGraphic, rating.Profanity, rating.Drugs,
 		rating.GamblingSimulation, rating.Contests, rating.Weapons, rating.HorrorFear,
-		rating.MedicalInformation, rating.HealthWellness, rating.MatureThemes,
+		rating.MedicalInformation, rating.MatureThemes,
 	} {
 		switch strings.ToUpper(strings.TrimSpace(value)) {
 		case "NONE", "INFREQUENT", "FREQUENT", "INFREQUENT_OR_MILD", "FREQUENT_OR_INTENSE":
@@ -1361,13 +1414,18 @@ func appleAgeDeclaration(classification StoreClassification) map[string]any {
 	if !storeContentRatingComplete(classification.ContentRating) {
 		return attributes
 	}
-	rating := classification.ContentRating
+	rating := normalizeStoreContentRating(classification.ContentRating)
+	setDefault := func(key string, value any) {
+		if _, explicit := attributes[key]; !explicit {
+			attributes[key] = value
+		}
+	}
 	for key, value := range map[string]string{
-		"violenceCartoonOrFantasy":                    rating.Violence,
-		"violenceRealistic":                           rating.Violence,
-		"violenceRealisticProlongedGraphicOrSadistic": rating.Violence,
+		"violenceCartoonOrFantasy":                    rating.ViolenceCartoonFantasy,
+		"violenceRealistic":                           rating.ViolenceRealistic,
+		"violenceRealisticProlongedGraphicOrSadistic": rating.ViolenceGraphicRealistic,
 		"sexualContentOrNudity":                       rating.SexualContent,
-		"sexualContentGraphicAndNudity":               rating.SexualContent,
+		"sexualContentGraphicAndNudity":               rating.SexualContentGraphic,
 		"profanityOrCrudeHumor":                       rating.Profanity,
 		"alcoholTobaccoOrDrugUseOrReferences":         rating.Drugs,
 		"gamblingSimulated":                           rating.GamblingSimulation,
@@ -1375,21 +1433,25 @@ func appleAgeDeclaration(classification StoreClassification) map[string]any {
 		"gunsOrOtherWeapons":                          rating.Weapons,
 		"horrorOrFearThemes":                          rating.HorrorFear,
 		"medicalOrTreatmentInformation":               rating.MedicalInformation,
-		"healthOrWellnessTopics":                      rating.HealthWellness,
 		"matureOrSuggestiveThemes":                    rating.MatureThemes,
 	} {
-		attributes[key] = normalizeAppleRatingLevel(value)
+		setDefault(key, normalizeAppleRatingLevel(value))
 	}
-	attributes["unrestrictedWebAccess"] = rating.UnrestrictedWebAccess
-	attributes["gambling"] = rating.RealMoneyGambling
-	attributes["lootBox"] = rating.LootBoxes
-	attributes["advertising"] = rating.Advertising
-	attributes["messagingAndChat"] = rating.MessagingChat
-	attributes["userGeneratedContent"] = rating.UserGeneratedContent
-	attributes["parentalControls"] = rating.ParentalControls
-	attributes["ageAssurance"] = rating.AgeAssurance
-	attributes["socialMedia"] = rating.SocialMedia
-	attributes["socialMediaAgeRestricted"] = rating.SocialMediaAgeGate
+	for key, value := range map[string]bool{
+		"healthOrWellnessTopics":   rating.HealthWellness,
+		"unrestrictedWebAccess":    rating.UnrestrictedWebAccess,
+		"gambling":                 rating.RealMoneyGambling,
+		"lootBox":                  rating.LootBoxes,
+		"advertising":              rating.Advertising,
+		"messagingAndChat":         rating.MessagingChat,
+		"userGeneratedContent":     rating.UserGeneratedContent,
+		"parentalControls":         rating.ParentalControls,
+		"ageAssurance":             rating.AgeAssurance,
+		"socialMedia":              rating.SocialMedia,
+		"socialMediaAgeRestricted": rating.SocialMediaAgeGate,
+	} {
+		setDefault(key, value)
+	}
 	return attributes
 }
 

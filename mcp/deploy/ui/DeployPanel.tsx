@@ -342,8 +342,13 @@ interface StoreAsset {
 type StoreRatingLevel = "NONE" | "INFREQUENT" | "FREQUENT";
 
 interface StoreContentRating {
+  // Retained to flag older combined answers for review.
   violence?: StoreRatingLevel;
+  violence_cartoon_fantasy?: StoreRatingLevel;
+  violence_realistic?: StoreRatingLevel;
+  violence_graphic_realistic?: StoreRatingLevel;
   sexual_content?: StoreRatingLevel;
+  sexual_content_graphic?: StoreRatingLevel;
   profanity?: StoreRatingLevel;
   drugs?: StoreRatingLevel;
   gambling_simulation?: StoreRatingLevel;
@@ -351,7 +356,7 @@ interface StoreContentRating {
   weapons?: StoreRatingLevel;
   horror_fear?: StoreRatingLevel;
   medical_information?: StoreRatingLevel;
-  health_wellness?: StoreRatingLevel;
+  health_wellness?: boolean;
   mature_themes?: StoreRatingLevel;
   unrestricted_web_access?: boolean;
   real_money_gambling?: boolean;
@@ -483,8 +488,11 @@ const GOOGLE_CATEGORIES = [
 ] as const;
 
 const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
-  { key: "violence", label: "Violence" },
+  { key: "violence_cartoon_fantasy", label: "Cartoon or fantasy violence" },
+  { key: "violence_realistic", label: "Realistic violence" },
+  { key: "violence_graphic_realistic", label: "Prolonged graphic or sadistic realistic violence" },
   { key: "sexual_content", label: "Sexual content or nudity" },
+  { key: "sexual_content_graphic", label: "Graphic sexual content and nudity" },
   { key: "profanity", label: "Profanity or crude humor" },
   { key: "drugs", label: "Alcohol, tobacco, or drugs" },
   { key: "gambling_simulation", label: "Simulated gambling" },
@@ -492,7 +500,6 @@ const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
   { key: "weapons", label: "Guns or other weapons" },
   { key: "horror_fear", label: "Horror or fear" },
   { key: "medical_information", label: "Medical information" },
-  { key: "health_wellness", label: "Health or wellness topics" },
   { key: "mature_themes", label: "Mature or suggestive themes" },
 ];
 
@@ -3278,11 +3285,17 @@ function StoreListingDialog({
               </div>
               <section className="border-t border-border pt-4 space-y-3">
                 <div className="text-xs uppercase text-text-dim">Content rating</div>
+                {((doc.classification.content_rating?.violence && currentRatingLevel(doc.classification.content_rating.violence) !== "NONE" &&
+                    (!doc.classification.content_rating.violence_cartoon_fantasy || !doc.classification.content_rating.violence_realistic || !doc.classification.content_rating.violence_graphic_realistic)) ||
+                  (doc.classification.content_rating?.sexual_content && currentRatingLevel(doc.classification.content_rating.sexual_content) !== "NONE" && !doc.classification.content_rating.sexual_content_graphic)) && (
+                  <p className="text-xs text-warning">Older combined content answers need review. Answer each violence and graphic-content question separately before applying classification.</p>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {RATING_FIELDS.map(({ key, label }) => (
                     <label key={key} className="text-xs text-text-muted">
                       {label}
                       <select
+                        aria-label={label}
                         value={currentRatingLevel(doc.classification.content_rating?.[key])}
                         onChange={(e) => setDoc({
                           ...doc,
@@ -3306,6 +3319,7 @@ function StoreListingDialog({
                 </div>
                 <div className="flex flex-wrap gap-4">
                   {([
+                    ["health_wellness", "Health or wellness topics"],
                     ["unrestricted_web_access", "Unrestricted web access"],
                     ["real_money_gambling", "Real-money gambling"],
                     ["loot_boxes", "Loot boxes"],
@@ -3335,7 +3349,7 @@ function StoreListingDialog({
                 </div>
                 {isAppleTarget(deployment.target_kind) && (
                   <details className="text-xs text-text-muted">
-                    <summary className="cursor-pointer">Advanced Apple declaration fields</summary>
+                    <summary className="cursor-pointer">Advanced Apple answers (override the questionnaire)</summary>
                     <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={6} className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
                   </details>
                 )}
