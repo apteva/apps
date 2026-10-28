@@ -138,8 +138,12 @@ func TestPoseRemoteSourceCacheReusesVerifiedBytes(t *testing.T) {
 	_ = os.Symlink(python, filepath.Join(runtimeRoot, "venv/bin/python"))
 	f := &StorageFile{ID: 1, Name: "source.mov", SizeBytes: int64(len(data)), SHA256: digest}
 	req := poseRequest{Source: "file://" + source, SourceFile: f, SourceCacheMaxBytes: 100000, Positions: []int64{0, 500}}
-	fakeRuntime := `import json,sys,hashlib
+	fakeRuntime := `import ast,base64,json,sys,hashlib,os
+source=ast.parse(base64.b64decode('` + base64.StdEncoding.EncodeToString([]byte(poseRuntime)) + `'))
+selected=[n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='resolve_workspace_paths']
+exec(compile(ast.Module(body=selected,type_ignores=[]),'embedded-pose-runtime','exec'))
 r=json.load(open(sys.argv[1]))
+resolve_workspace_paths(r,sys.argv[1],sys.argv[2])
 assert hashlib.sha256(open(r['source'],'rb').read()).hexdigest()=='` + digest + `'
 print('APTEVA_POSE:verified')`
 	run := func(work string) (string, error) {

@@ -192,7 +192,7 @@ func compactCropAudit(raw []byte) map[string]any {
 				keys = "analysis_budget_seconds timings count_scope requested_samples analysed_samples engine algorithm_version model_sha256 runtime_version framing status failure_code valid_samples invalid_samples uncertain_samples failed_samples"
 			}
 			if key == "pose_failure" {
-				keys = "code at_ms attempts partial_result"
+				keys = "code at_ms attempts ffmpeg partial_result"
 			}
 			for _, k := range strings.Fields(keys) {
 				item, ok := fields[k]

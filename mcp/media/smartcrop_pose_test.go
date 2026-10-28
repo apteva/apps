@@ -279,7 +279,7 @@ func TestPoseFrameReadRetryRuntime(t *testing.T) {
 	script := `import ast,os,time,subprocess,tempfile
 from unittest.mock import patch
 source=ast.parse(open('smartcrop_pose_runtime.py').read())
-selected=[n for n in source.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('extract_frame','PoseRuntimeFailure')]
+selected=[n for n in source.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('extract_frame','PoseRuntimeFailure','ffmpeg_diagnostic')]
 exec(compile(ast.Module(body=selected,type_ignores=[]),'embedded-runtime','exec'))
 req={'ffmpeg':'ffmpeg','source':'private-source'}
 with tempfile.TemporaryDirectory() as work:
@@ -300,7 +300,7 @@ with tempfile.TemporaryDirectory() as work:
   assert open(path,'rb').read()==b'fresh-frame'
  with patch('subprocess.run',return_value=subprocess.CompletedProcess([],1)) as run,patch('time.sleep'):
   try:extract_frame(req,343500,path,time.monotonic()+60)
-  except PoseRuntimeFailure as e:assert e.code=='pose_source_frame_unavailable' and e.at_ms==343500 and e.attempts==3
+  except PoseRuntimeFailure as e:assert e.code=='pose_source_frame_unavailable' and e.at_ms==343500 and e.attempts==3 and e.ffmpeg['exit_code']==1
   else:raise AssertionError('exhaustion accepted')
   assert run.call_count==3
  with patch('subprocess.run') as run:
@@ -310,9 +310,19 @@ with tempfile.TemporaryDirectory() as work:
   run.assert_not_called()
  with patch('subprocess.run',side_effect=subprocess.TimeoutExpired('ffmpeg',15)) as run,patch('time.sleep'):
   try:extract_frame(req,344500,path,time.monotonic()+60)
-  except PoseRuntimeFailure as e:assert e.attempts==3
+  except PoseRuntimeFailure as e:assert e.attempts==3 and e.ffmpeg['timed_out'] and 'exit_code' not in e.ffmpeg
   else:raise AssertionError('decoder timeout ignored')
   assert run.call_count==3
+ with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0)),patch('time.sleep'):
+  try:extract_frame(req,345000,path,time.monotonic()+60)
+  except PoseRuntimeFailure as e:assert e.ffmpeg['exit_code']==0 and e.ffmpeg['empty_output']
+  else:raise AssertionError('empty output accepted')
+ with patch('subprocess.run',side_effect=FileNotFoundError(2,'private executable')),patch('time.sleep'):
+  try:extract_frame(req,345500,path,time.monotonic()+60)
+  except PoseRuntimeFailure as e:assert e.ffmpeg['start_errno']==2 and 'exit_code' not in e.ffmpeg
+  else:raise AssertionError('missing executable accepted')
+ diagnostic=ffmpeg_diagnostic(b'Error opening input /private/customer/token.mov: No such file or directory\nError opening input files: https://secret.invalid/?key=credential',1)
+ assert diagnostic=={'exit_code':1,'stderr':['No such file or directory','Error opening input files']}
 print('bounded retries, fresh-frame identity, empty outputs, exhaustion and deadlines verified')
 `
 	if out, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
@@ -515,5 +525,50 @@ func TestMediaPipeReportNativeRegression(t *testing.T) {
 			}
 			t.Logf("%s: engine=%s coverage=%s native=%dx%d", c.name, r.Audit.EffectiveEngine, r.Audit.Coverage, r.W, r.H)
 		})
+	}
+}
+
+func TestPoseFFmpegFailureIsSanitizedAndRetainedInReceipts(t *testing.T) {
+	output := `APTEVA_POSE_ERROR:{"code":"pose_source_frame_unavailable","at_ms":500,"attempts":3,"ffmpeg":{"exit_code":1,"stderr":["No such file or directory","https://private.invalid/?token=secret","No such file or directory","Error opening input files"],"command":"private-source"}}`
+	failure := parsePoseRuntimeFailure(output)
+	if failure == nil || failure.FFmpeg == nil || failure.FFmpeg.ExitCode == nil || *failure.FFmpeg.ExitCode != 1 || len(failure.FFmpeg.Stderr) != 2 {
+		t.Fatalf("failure=%+v", failure)
+	}
+	raw, _ := json.Marshal(&smartCropAudit{PoseFailure: failure})
+	summary := compactCropAudit(raw)
+	encoded, _ := json.Marshal(summary)
+	if strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), "secret") || !strings.Contains(string(encoded), `"exit_code":1`) || !strings.Contains(string(encoded), "No such file or directory") {
+		t.Fatal(string(encoded))
+	}
+	invalid := parsePoseRuntimeFailure(`APTEVA_POSE_ERROR:{"code":"pose_source_frame_unavailable","ffmpeg":{"exit_code":256,"start_errno":-1,"stderr":["private"]}}`)
+	if invalid == nil || invalid.FFmpeg.ExitCode != nil || invalid.FFmpeg.StartErrno != nil || len(invalid.FFmpeg.Stderr) != 0 {
+		t.Fatalf("%+v", invalid)
+	}
+}
+
+func TestPoseWorkspacePathResolution(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	script := `import ast,os
+source=ast.parse(open('smartcrop_pose_runtime.py').read())
+selected=[n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='resolve_workspace_paths']
+exec(compile(ast.Module(body=selected,type_ignores=[]),'embedded-runtime','exec'))
+r={'source':'source','model':'model.task','recovery_root':'.','ffmpeg':'/usr/bin/ffmpeg'}
+resolve_workspace_paths(r,'/actual/worker/jobs/pose/request.json','/actual/worker/runtime')
+assert r=={'source':'/actual/worker/jobs/pose/source','model':'/actual/worker/runtime/model.task','recovery_root':'/actual/worker/runtime','ffmpeg':'/usr/bin/ffmpeg'}
+for url in ['https://private.invalid/?token=secret','http://private.invalid/video','file:///private/video']:
+ r={'source':url,'model':'model.task','recovery_root':'.'}
+ resolve_workspace_paths(r,'/actual/job/request.json','/actual/runtime')
+ assert r['source']==url
+for field,value in [('model','../outside.task'),('recovery_root','/old/host/runtime'),('source','../outside.mp4')]:
+ r={'source':'source','model':'model.task','recovery_root':'.'};r[field]=value
+ try:resolve_workspace_paths(r,'/actual/job/request.json','/actual/runtime')
+ except RuntimeError as error:assert str(error)=='pose_workspace_path_invalid'
+ else:raise AssertionError('escaping workspace path accepted')
+`
+	if out, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
 	}
 }

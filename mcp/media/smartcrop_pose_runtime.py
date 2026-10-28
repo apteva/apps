@@ -10,6 +10,24 @@ import mediapipe as mp
 THRESHOLD=0.5
 RATIO=9/16
 req=json.load(open(sys.argv[1]))
+def resolve_workspace_paths(request,request_file,runtime_root):
+    # Remote requests contain relative paths, never host scratch locations
+    # hidden inside encoded JSON. Resolve only after the executor has placed
+    # the request and runtime in its own workspace. Local callers retain their
+    # existing absolute paths and do not pass a runtime-root argument.
+    def relative(root,value):
+        root=os.path.abspath(root)
+        if not isinstance(value,str) or not value or os.path.isabs(value):
+            raise RuntimeError('pose_workspace_path_invalid')
+        result=os.path.abspath(os.path.join(root,value))
+        if os.path.commonpath((root,result))!=root:
+            raise RuntimeError('pose_workspace_path_invalid')
+        return result
+    request['model']=relative(runtime_root,request['model'])
+    request['recovery_root']=relative(runtime_root,request['recovery_root'])
+    source=request['source']
+    if not source.startswith(('http://','https://','file://')) and not os.path.isabs(source):
+        request['source']=relative(os.path.dirname(os.path.abspath(request_file)),source)
 timings={'import_ms':(time.monotonic()-runtime_started)*1000,'model_setup_ms':0,'frame_extraction_ms':0,'pose_inference_ms':0,'recovery_ms':0,'total_ms':0,'budget_seconds':float(req['remaining_seconds']),'source_kind':'remote_url' if req['source'].startswith(('http://','https://')) else 'local_disk','failure_stage':'initialization'}
 report={'samples':[],'runtime':'mediapipe-'+mp.__version__,'model_sha256':'','timings':timings}
 def report_payload():
@@ -134,30 +152,51 @@ def hand_refresh(points,fresh):
     return merged,accepted,'same_frame_hand_recovered' if accepted else 'no_additional_hand_support'
 
 class PoseRuntimeFailure(Exception):
-    def __init__(self,code,at_ms=None,attempts=0):
-        self.code=code;self.at_ms=at_ms;self.attempts=attempts
+    def __init__(self,code,at_ms=None,attempts=0,ffmpeg=None):
+        self.code=code;self.at_ms=at_ms;self.attempts=attempts;self.ffmpeg=ffmpeg
+
+def ffmpeg_diagnostic(stderr=b'',exit_code=None,timed_out=False,empty_output=False,start_errno=None):
+    # Retain useful decoder failures without paths, URLs, query strings,
+    # filenames or arbitrary subprocess text. Go validates this allowlist too.
+    messages=('No such file or directory','Permission denied','Invalid data found when processing input',
+        'Error opening input files','Error while opening decoder','Decoder not found','Protocol not found',
+        'Connection refused','Connection timed out','Server returned 4XX','Server returned 5XX',
+        'Cannot allocate memory','Out of memory','No space left on device','Error while decoding stream',
+        'Invalid argument','Conversion failed')
+    text=(stderr or b'')[-16384:].decode('utf-8',errors='replace').lower()
+    out={'stderr':[message for message in messages if message.lower() in text][:4]}
+    if exit_code is not None:out['exit_code']=exit_code
+    if timed_out:out['timed_out']=True
+    if empty_output:out['empty_output']=True
+    if start_errno is not None:out['start_errno']=start_errno
+    return out
 
 def extract_frame(req,at,path,deadline):
     # A failed or empty seek must never reuse the preceding frame.
+    diagnostic=None
     for attempt in range(1,4):
         if time.monotonic()>=deadline:
-            raise PoseRuntimeFailure('pose_source_read_timeout',at,attempt-1)
+            raise PoseRuntimeFailure('pose_source_read_timeout',at,attempt-1,diagnostic)
         if os.path.exists(path):os.unlink(path)
         args=[req['ffmpeg'],'-nostdin','-y','-filter_threads','1','-filter_complex_threads','1','-loglevel','error','-threads','1','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','1','-compression_level','1',path]
         try:
             run=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=min(15,max(.01,deadline-time.monotonic())))
+            diagnostic=ffmpeg_diagnostic(run.stderr,run.returncode,empty_output=run.returncode==0 and not(os.path.isfile(path) and os.path.getsize(path)>0))
             if run.returncode in (-9,137) or any(x in (run.stderr or b'').lower() for x in (b'cannot allocate memory',b'out of memory')):
-                raise PoseRuntimeFailure('media_resource_exhausted',at,attempt)
+                raise PoseRuntimeFailure('media_resource_exhausted',at,attempt,diagnostic)
             if run.returncode==0 and os.path.isfile(path) and os.path.getsize(path)>0:
                 return attempt
-        except subprocess.TimeoutExpired:
-            pass
+        except subprocess.TimeoutExpired as error:
+            diagnostic=ffmpeg_diagnostic(error.stderr,timed_out=True)
+        except OSError as error:
+            diagnostic=ffmpeg_diagnostic(start_errno=error.errno)
         if attempt<3:
             time.sleep(min(.2*attempt,max(0,deadline-time.monotonic())))
     code='pose_source_read_timeout' if time.monotonic()>=deadline else 'pose_source_frame_unavailable'
-    raise PoseRuntimeFailure(code,at,3)
+    raise PoseRuntimeFailure(code,at,3,diagnostic)
 
 def main():
+    if len(sys.argv)>2:resolve_workspace_paths(req,sys.argv[1],sys.argv[2])
     if mp.__version__!='0.10.21':raise RuntimeError('pose_runtime_version_mismatch')
     report['model_sha256']=hashlib.sha256(open(req['model'],'rb').read()).hexdigest()
     if report['model_sha256']!=req['model_sha256']:raise RuntimeError('pose_model_hash_mismatch')
@@ -255,9 +294,10 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as error:
-        # Only stable, allowlisted codes and numeric context cross the boundary.
-        codes={'pose_runtime_version_mismatch','pose_model_hash_mismatch','pose_sample_budget_exceeded','pose_source_geometry_mismatch'}
+        # Only allowlisted messages and numeric subprocess context cross the boundary.
+        codes={'pose_runtime_version_mismatch','pose_model_hash_mismatch','pose_sample_budget_exceeded','pose_source_geometry_mismatch','pose_workspace_path_invalid'}
         failure={'code':error.code,'at_ms':error.at_ms,'attempts':error.attempts} if isinstance(error,PoseRuntimeFailure) else {'code':'media_resource_exhausted' if isinstance(error,MemoryError) else (str(error) if str(error) in codes else 'pose_inference_failed')}
+        if isinstance(error,PoseRuntimeFailure) and error.ffmpeg is not None:failure['ffmpeg']=error.ffmpeg
         failure['partial_result']=report_payload()
         print('APTEVA_POSE_ERROR:'+json.dumps(failure,default=lambda v:v.item() if isinstance(v,np.generic) else str(v)),flush=True)
         sys.exit(1)

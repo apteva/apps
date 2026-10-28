@@ -232,10 +232,50 @@ type poseRuntimeTimings struct {
 }
 
 type poseRuntimeFailure struct {
-	Code     string      `json:"code"`
-	AtMs     *int64      `json:"at_ms,omitempty"`
-	Attempts int         `json:"attempts,omitempty"`
-	Partial  *poseResult `json:"partial_result,omitempty"`
+	Code     string             `json:"code"`
+	AtMs     *int64             `json:"at_ms,omitempty"`
+	Attempts int                `json:"attempts,omitempty"`
+	Partial  *poseResult        `json:"partial_result,omitempty"`
+	FFmpeg   *poseFFmpegFailure `json:"ffmpeg,omitempty"`
+}
+
+type poseFFmpegFailure struct {
+	ExitCode    *int     `json:"exit_code,omitempty"`
+	StartErrno  *int     `json:"start_errno,omitempty"`
+	TimedOut    bool     `json:"timed_out,omitempty"`
+	EmptyOutput bool     `json:"empty_output,omitempty"`
+	Stderr      []string `json:"stderr,omitempty"`
+}
+
+// The runtime sends canonical FFmpeg phrases, not raw stderr. Validate them a
+// second time at the component boundary before saving or exposing diagnostics.
+func sanitizePoseFFmpegFailure(f *poseFFmpegFailure) *poseFFmpegFailure {
+	if f == nil {
+		return nil
+	}
+	if f.ExitCode != nil && (*f.ExitCode < -255 || *f.ExitCode > 255) {
+		f.ExitCode = nil
+	}
+	if f.StartErrno != nil && (*f.StartErrno <= 0 || *f.StartErrno > 255) {
+		f.StartErrno = nil
+	}
+	messages := []string{}
+	seen := map[string]bool{}
+	for _, message := range f.Stderr {
+		switch message {
+		case "No such file or directory", "Permission denied", "Invalid data found when processing input",
+			"Error opening input files", "Error while opening decoder", "Decoder not found", "Protocol not found",
+			"Connection refused", "Connection timed out", "Server returned 4XX", "Server returned 5XX",
+			"Cannot allocate memory", "Out of memory", "No space left on device", "Error while decoding stream",
+			"Invalid argument", "Conversion failed":
+			if !seen[message] && len(messages) < 4 {
+				messages = append(messages, message)
+				seen[message] = true
+			}
+		}
+	}
+	f.Stderr = messages
+	return f
 }
 
 func (e *poseRuntimeFailure) Error() string { return e.Code }
@@ -250,13 +290,14 @@ func parsePoseRuntimeFailure(output string) *poseRuntimeFailure {
 			continue
 		}
 		switch failure.Code {
-		case "media_resource_exhausted", "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_analysis_timeout", "pose_source_preparation_failed", "pose_runtime_unavailable", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
+		case "media_resource_exhausted", "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_analysis_timeout", "pose_source_preparation_failed", "pose_runtime_unavailable", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_workspace_path_invalid", "pose_inference_failed":
 		default:
 			continue
 		}
 		if failure.Attempts < 0 || failure.Attempts > 3 || (failure.AtMs != nil && *failure.AtMs < 0) {
 			continue
 		}
+		failure.FFmpeg = sanitizePoseFFmpegFailure(failure.FFmpeg)
 		return &failure
 	}
 	return nil

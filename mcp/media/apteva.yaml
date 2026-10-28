@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.4
+version: 0.15.5
 description: |
+  v0.15.5 resolves cached-video pose and model paths inside the executor workspace
+  after decoding. Sanitized FFmpeg failures retain exit, timeout and decoder details.
   v0.15.4 pins an executor with authenticated generation-scoped runtime status,
   allowing Server to confirm admission before routing remote jobs.
   v0.15.3 preserves original MOV/MP4 video presentation tables during audio
@@ -717,7 +719,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.4
+    ref: media/v0.15.5
     entry: mcp/media
   port: 8080
   health_check: /health

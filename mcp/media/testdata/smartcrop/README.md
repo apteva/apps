@@ -154,3 +154,20 @@ lower-body connectivity and genuinely wide actions remain conservative. Margins
 adapt to available crop space, and positioning precedes the strict policy check.
 These refinements apply to still outputs; whole-reel tracking/composition remains
 unchanged. Sampled coverage still requires visual review.
+
+The component path regression runs real FFmpeg frame extraction and verified
+source-cache reuse through the real executor process:
+
+```sh
+GOWORK=off go test -run '^TestComponentCachedVideoPoseSampling$' -count=1
+```
+
+An opt-in end-to-end check also provisions the pinned MediaPipe runtime inside
+the worker, turns the synthetic seated-person fixture into a video, and verifies
+pose landmarks at three timestamps on both cold and warm source-cache paths:
+
+```sh
+GOWORK=off MEDIA_POSE_COMPONENT_REAL_RUNTIME=1 go test -run '^TestComponentCachedVideoPoseInference$' -count=1 -v
+```
+
+This test downloads the pinned ML dependencies and uses no customer media.

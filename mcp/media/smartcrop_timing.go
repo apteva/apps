@@ -108,8 +108,13 @@ func poseSourcePreparation(req poseRequest, originalSource, work string) string 
 func buildPoseRemoteScript(req poseRequest, root, work, setupMode string) string {
 	source := req.Source
 	if req.SourceFile != nil {
-		req.Source = work + "/source"
+		req.Source = "source"
 	}
+	// Encoded payloads are opaque to executor path relocation. Only relative
+	// workspace paths go into JSON; runtime.py resolves them after decoding,
+	// against the actual request directory and the relocated runtime argument.
+	req.Model = "model.task"
+	req.RecoveryRoot = "."
 	raw, _ := json.Marshal(req)
 	script := "set -eu\numask 077\nWORK=" + shellQuote(work) + "\nmkdir -p \"$WORK\"\necho $$ > \"$WORK/pid\"\n[ ! -f \"$WORK/cancel.requested\" ] || exit 1\n"
 	cleanup := "rm -rf \"$WORK\""
@@ -134,7 +139,7 @@ func buildPoseRemoteScript(req poseRequest, root, work, setupMode string) string
 	}
 	script += "POSE_ROOT=" + shellQuote(root) + "\n"
 	script += stage("runtime_setup", "python3 \"$WORK/setup.py\" \"$POSE_ROOT\""+setupMode, "pose_runtime_unavailable")
-	script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\""
+	script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\" \"$POSE_ROOT\""
 	return script
 }
 
