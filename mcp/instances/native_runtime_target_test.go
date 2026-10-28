@@ -50,6 +50,19 @@ func TestNativeTargetProbeParsesEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeTargetProbeOmitsUnrepresentableDebianSONAMEs(t *testing.T) {
+	raw := "x86_64\n" + strings.Repeat("a", 32) + "\nssh-ed25519 identity\n2048\n4096\nABI=gnu\nLIB=libc.so.6\nLIB=libdns-9.20.30-1~deb13u1-Debian.so\nLIB=libdl.so.2\nSTATE_AVAILABLE=123456"
+	p, err := parseNativeTargetProbe(raw)
+	if err != nil || strings.Join(p.SystemLibraries, ",") != "libc.so.6,libdl.so.2" || p.StateAvailableBytes == nil || *p.StateAvailableBytes != 123456 {
+		t.Fatalf("Debian library prevented target inspection: %+v %v", p, err)
+	}
+	for _, lib := range []string{"../libfoo~1.so", "libfoo~1/secret.so", "~", ".libfoo~1.so", strings.Repeat("a", 240) + "~"} {
+		if _, err := parseNativeTargetProbe(raw + "\nLIB=" + lib); err == nil {
+			t.Fatalf("unsafe library inventory accepted: %q", lib)
+		}
+	}
+}
 func TestNativePackageReferenceCannotSubstituteExecutable(t *testing.T) {
 	b, _, req := newNativeTest(t)
 	a, err := b.artifact("fixture", true)

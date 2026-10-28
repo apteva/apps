@@ -97,6 +97,13 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 		}
 		lib := strings.TrimPrefix(line, "LIB=")
 		if !nativeLibraryName(lib) {
+			// Debian can include '~deb...' in SONAMEs. The runtime wire
+			// contract cannot express those optional inventory entries. Omit
+			// only bounded, otherwise-valid names; package requirements still
+			// have to match an advertised library, and malformed paths fail.
+			if len(lib) <= 240 && strings.Contains(lib, "~") && nativeLibraryName(strings.ReplaceAll(lib, "~", "")) {
+				continue
+			}
 			return nativeProbe{}, errors.New("invalid library inventory")
 		}
 		libraries = append(libraries, lib)
