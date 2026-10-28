@@ -202,3 +202,97 @@ func TestGoogleWorkerStopsAfterCompletionButExplicitSyncStillWorks(t *testing.T)
 		t.Fatalf("explicit refresh no longer available: %d", got)
 	}
 }
+
+func TestGoogleSavedCompletionReconcilesSyncErrorWithoutLosingWarnings(t *testing.T) {
+	for _, staleObservation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "stale_observation"}[staleObservation], func(t *testing.T) {
+			p, c, _ := setupQuotaPlatform(t)
+			rel := pollingRelease(t, c, "google_play", "live", "sync_error")
+			var meta mobileReleaseMeta
+			if err := json.Unmarshal([]byte(rel.ReleaseMetaJSON), &meta); err != nil {
+				t.Fatal(err)
+			}
+			meta.Availability = &availabilityObservation{
+				Publication: "completed", State: "unconfirmed", Audience: "internal",
+				CheckedAt: "2026-10-09T10:00:00Z", PublishedAt: "2026-10-09T10:00:00Z",
+			}
+			if staleObservation {
+				meta.Observation = &providerObservation{Stale: true, CheckedAt: meta.Availability.CheckedAt, NextRetryAt: "2026-10-28T15:37:00Z", Reason: "Daily edit creation quota exceeded."}
+			} else {
+				meta.Availability.Audience = "" // Older evidence may omit audience.
+			}
+			warning := "Google Play refresh paused: Daily edit creation quota exceeded."
+			savedMeta := mustJSON(meta)
+			if err := dbUpdateRelease(c.db, rel.ID, map[string]any{"release_meta_json": savedMeta, "error": warning}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.recordBackoff(88, 403, nil, json.RawMessage(dailyEditQuotaResponse)); err != nil {
+				t.Fatal(err)
+			}
+			var retryBefore string
+			if err := c.db.QueryRow(`SELECT next_retry_at FROM google_play_backoff WHERE connection_id=88`).Scan(&retryBefore); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				if err := (&App{}).syncPendingMobileReleases(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				googlePlayCoordinators.Delete(c.db)
+				c = googlePlayCoordinatorForContext()
+				// Repair must remain terminal after restart and cooldown expiry.
+				c.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
+			}
+			var phase string
+			if err := c.db.QueryRow(`SELECT json_extract(state_json,'$.phase') FROM release_workflows WHERE release_id=?`, rel.ID).Scan(&phase); err != nil || phase != "completed" {
+				t.Fatalf("saved completion did not close workflow: phase=%q, err=%v", phase, err)
+			}
+			fresh, err := dbGetRelease(c.db, rel.ID)
+			if err != nil || fresh.Status != "live" || fresh.ExternalStatus != "sync_error" || fresh.Error != warning || fresh.ReleaseMetaJSON != savedMeta {
+				t.Fatalf("repair rewrote stale-check warning or provider evidence: %+v, %v", fresh, err)
+			}
+			if len(p.calls) != 0 {
+				t.Fatalf("saved completion opened provider requests: %+v", p.calls)
+			}
+			var retryAfter string
+			if err := c.db.QueryRow(`SELECT next_retry_at FROM google_play_backoff WHERE connection_id=88`).Scan(&retryAfter); err != nil || retryAfter != retryBefore {
+				t.Fatalf("repair changed quota cooldown: %q, %v", retryAfter, err)
+			}
+		})
+	}
+}
+
+func TestGoogleSavedCompletionDoesNotFinishUncertainOrActiveReleases(t *testing.T) {
+	_, c, _ := setupQuotaPlatform(t)
+	for _, tt := range []struct {
+		name, status, external, meta string
+	}{
+		{"active_rollout", "live", "sync_error", `{"rollout_fraction":0.25,"availability":{"publication":"completed"}}`},
+		{"newer_rollout", "live", "inProgress", `{"availability":{"publication":"completed"}}`},
+		{"pending_upload", "starting", "sync_error", `{"availability":{"publication":"completed"}}`},
+		{"unconfirmed", "live", "sync_error", `{"availability":{"publication":"unconfirmed"}}`},
+		{"missing", "live", "sync_error", `{}`},
+		{"malformed", "live", "sync_error", `{broken`},
+		{"other_channel", "live", "sync_error", `{"availability":{"publication":"completed","audience":"production"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rel := pollingRelease(t, c, "google_play", tt.status, tt.external)
+			if err := dbUpdateRelease(c.db, rel.ID, map[string]any{"release_meta_json": tt.meta}); err != nil {
+				t.Fatal(err)
+			}
+			if err := dbReconcileFinishedMobileWorkflows(c.db, rel.ID); err != nil {
+				t.Fatal(err)
+			}
+			releases, err := dbListPendingMobileReleases(c.db, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, pending := range releases {
+				found = found || pending.ID == rel.ID
+			}
+			if !found {
+				t.Fatal("uncertain or active release was excluded from reconciliation")
+			}
+		})
+	}
+}
