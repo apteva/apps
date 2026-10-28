@@ -453,7 +453,7 @@ func completeIOSStoreDocument() StoreDocument {
 			FirstName: "Ada", LastName: "Lovelace", Email: "review@example.com", Phone: "+1 555 0100",
 		},
 		Classification: StoreClassification{
-			PrimaryCategory: "PRODUCTIVITY", AgeDeclaration: map[string]any{"gamblingAndContests": "NONE"},
+			PrimaryCategory: "PRODUCTIVITY", AgeDeclaration: map[string]any{"gambling": false, "contests": "NONE"},
 		},
 		Distribution: StoreDistribution{
 			Territories: []string{"US"}, PriceTier: "FREE",

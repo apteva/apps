@@ -1,0 +1,254 @@
+{
+  "source": "https://developer.apple.com/sample-code/app-store-connect/app-store-connect-openapi-specification.zip",
+  "version": "4.5.1",
+  "sha256": "7518d3a94a8bd701ac25c1c601b95b8f53aad92091affb15a2a9d331713dac1a",
+  "attributes": {
+    "type": "object",
+    "properties": {
+      "advertising": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "alcoholTobaccoOrDrugUseOrReferences": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "contests": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "gambling": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "gamblingSimulated": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "gunsOrOtherWeapons": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "healthOrWellnessTopics": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "kidsAgeBand": {
+        "nullable": true,
+        "$ref": "#/components/schemas/KidsAgeBand"
+      },
+      "lootBox": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "medicalOrTreatmentInformation": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "messagingAndChat": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "parentalControls": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "profanityOrCrudeHumor": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "ageAssurance": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "sexualContentGraphicAndNudity": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "sexualContentOrNudity": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "socialMedia": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "socialMediaAgeRestricted": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "horrorOrFearThemes": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "matureOrSuggestiveThemes": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "unrestrictedWebAccess": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "userGeneratedContent": {
+        "type": "boolean",
+        "nullable": true
+      },
+      "violenceCartoonOrFantasy": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "violenceRealisticProlongedGraphicOrSadistic": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "violenceRealistic": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "INFREQUENT_OR_MILD",
+          "FREQUENT_OR_INTENSE",
+          "INFREQUENT",
+          "FREQUENT"
+        ]
+      },
+      "ageRatingOverride": {
+        "type": "string",
+        "deprecated": true,
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "NINE_PLUS",
+          "THIRTEEN_PLUS",
+          "SIXTEEN_PLUS",
+          "SEVENTEEN_PLUS",
+          "UNRATED"
+        ]
+      },
+      "ageRatingOverrideV2": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "NINE_PLUS",
+          "THIRTEEN_PLUS",
+          "SIXTEEN_PLUS",
+          "EIGHTEEN_PLUS",
+          "UNRATED"
+        ]
+      },
+      "koreaAgeRatingOverride": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "NONE",
+          "ALL",
+          "TWELVE_PLUS",
+          "FIFTEEN_PLUS",
+          "NINETEEN_PLUS"
+        ]
+      },
+      "gracRatingClassificationNumber": {
+        "type": "string",
+        "nullable": true
+      },
+      "developerAgeRatingInfoUrl": {
+        "type": "string",
+        "format": "uri",
+        "nullable": true
+      }
+    }
+  },
+  "kidsAgeBand": {
+    "type": "string",
+    "enum": [
+      "FIVE_AND_UNDER",
+      "SIX_TO_EIGHT",
+      "NINE_TO_ELEVEN"
+    ]
+  }
+}

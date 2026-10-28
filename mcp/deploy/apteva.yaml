@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.30.5
+version: 0.30.6
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,8 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.6 validates every Apple age-rating attribute against the audited
+  schema and verifies each requested answer against provider readback.
   v0.30.5 keeps Apple violence and graphic-content answers independent,
   sends health/wellness as a boolean and preserves exact Apple overrides.
   v0.30.4 recovers saved Play completion hidden by sync errors while retaining
@@ -210,7 +212,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.30.5
+    ref: deploy/v0.30.6
     entry: mcp/deploy
   port: 8080
   health_check: /health

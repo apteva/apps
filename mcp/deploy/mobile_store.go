@@ -744,6 +744,9 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			if !storeContentRatingComplete(doc.Classification.ContentRating) && len(doc.Classification.AgeDeclaration) == 0 {
 				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are incomplete or contain older combined answers.", "Answer each violence and graphic-content question separately, or supply exact Apple declaration answers.", true)
 			}
+			if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+				add("age_rating.invalid", "error", "classification", "", "age_declaration", err.Error(), "Correct the Apple age-rating field names, types and allowed values.", true)
+			}
 			if !doc.Privacy.ManualAttestations["apple_privacy_published"] && !providerCommitValidated(cfg, "app_privacy", doc.VersionName) {
 				findings = append(findings, StoreFinding{
 					Code: "privacy.apple_provider_validation", Severity: "warning", Scope: "compliance",
@@ -1104,7 +1107,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		if err == nil {
 			value := decodeJSONValue(age)
 			observed["age_rating"] = value
-			readiness["classification"] = readinessCheck(classificationInfoReady && jsonValueHasData(value), "provider", "Category and age-rating declarations were compared with Apple.")
+			readiness["classification"] = readinessCheck(classificationInfoReady && appleAgeDeclarationMatches(age, doc.Classification), "provider", "Category and each requested age-rating answer were compared with Apple.")
 		} else {
 			observed["age_rating_error"] = storeObservationError(err, false, "retry_sync")
 			readiness["classification"] = readinessCheck(false, "provider", "Age-rating declarations could not be read from Apple.")
@@ -1810,6 +1813,11 @@ func (a *App) applyAppleStoreConfigScopes(d *Deployment, doc StoreDocument, scop
 }
 
 func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
+	if scopes.has("classification") {
+		if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+			return nil, err
+		}
+	}
 	bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -2107,6 +2115,11 @@ func (a *App) applyAppleReviewDetail(bound *sdk.BoundIntegration, versionID stri
 }
 
 func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc StoreDocument, scopes storeScopeSet) error {
+	if scopes.has("classification") {
+		if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+			return err
+		}
+	}
 	if !scopes.any("localizations", "classification", "privacy", "distribution", "compliance") {
 		return nil
 	}
