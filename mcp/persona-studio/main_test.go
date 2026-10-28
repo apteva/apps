@@ -569,3 +569,20 @@ func mustPersona(t *testing.T, app *App, ctx *sdk.AppCtx) *Persona {
 	}
 	return out.(map[string]any)["persona"].(*Persona)
 }
+
+func TestBrandGenerationForwardsPolicyAndRevalidatesCache(t *testing.T) {
+	platform := &personaMediaPlatform{generateOut: map[string]any{"status": "ready", "storage_id": 700, "generation_id": 800}}
+	ctx := newPersonaCtxWithPlatform(t, platform)
+	app := &App{}
+	p := mustPersona(t, app, ctx)
+	args := map[string]any{"persona_id": p.ID, "asset_type": "image", "prompt": "a reference", "brand_id": "test-brand", "production_profile": "pin"}
+	for i := 0; i < 2; i++ {
+		platform.generateCall = nil
+		if _, err := app.toolGenerateAsset(ctx, args); err != nil {
+			t.Fatal(err)
+		}
+		if platform.generateCall["brand_id"] != "test-brand" || platform.generateCall["production_profile"] != "pin" {
+			t.Fatalf("current policy was bypassed: %#v", platform.generateCall)
+		}
+	}
+}

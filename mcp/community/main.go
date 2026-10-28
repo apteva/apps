@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.14.4
+version: 0.15.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -292,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.14.4
+    ref: community/v0.15.0
     entry: mcp/community
   port: 8080
   health_check: /health
