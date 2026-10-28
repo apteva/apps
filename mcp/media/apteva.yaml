@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.3
+version: 0.15.4
 description: |
+  v0.15.4 pins an executor with authenticated generation-scoped runtime status,
+  allowing Server to confirm admission before routing remote jobs.
   v0.15.3 preserves original MOV/MP4 video presentation tables during audio
   normalization, after verifying copied packets. Hidden HEVC dependencies remain
   hidden; every-picture, timestamp, loudness and peak checks remain enforced.
@@ -715,7 +717,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.3
+    ref: media/v0.15.4
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -988,7 +990,7 @@ components:
       schema: apteva-app/v1
       name: media-executor
       display_name: Media Executor
-      version: 0.15.0
+      version: 0.15.1
       description: Private, bounded Media processing worker. Placement is managed by Server owned components.
       scopes: [project, global]
       requires:
@@ -1011,7 +1013,7 @@ components:
         kind: source
         source:
           repo: github.com/apteva/apps
-          ref: 3d8510d126f3896c2b8201debcfc468cc65b2f33
+          ref: 6b563e28573665d8f29eb59788163f7f706e183a
           entry: mcp/media/executor
         port: 8080
         health_check: /health

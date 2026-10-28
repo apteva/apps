@@ -101,8 +101,8 @@ func componentFixture(t *testing.T) (*sdk.AppCtx, *workerPlatform) {
 	if testing.Short() {
 		t.Skip("real executor subprocess integration")
 	}
-	worker := tk.SpawnSidecar(t, "executor", tk.WithProjectID(testProj), tk.WithEnv("APTEVA_DATA_DIR", t.TempDir()))
-	req, _ := http.NewRequest("POST", worker.URL()+"/_apteva/runtime/app/activate", strings.NewReader(`{}`))
+	worker := tk.SpawnSidecar(t, "executor", tk.WithProjectID(testProj), tk.WithEnv("APTEVA_DATA_DIR", t.TempDir()), tk.WithEnv("APTEVA_DEPLOYMENT_ID", "fixture-executor"), tk.WithEnv("APTEVA_DEPLOYMENT_GENERATION", "1"))
+	req, _ := http.NewRequest("POST", worker.URL()+"/_apteva/runtime/app/activate", strings.NewReader(`{"deployment_id":"fixture-executor","generation":1}`))
 	req.Header.Set("Authorization", "Bearer "+worker.Token())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -111,6 +111,31 @@ func componentFixture(t *testing.T) (*sdk.AppCtx, *workerPlatform) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("activate=%d", resp.StatusCode)
+	}
+	statusReq, _ := http.NewRequest("GET", worker.URL()+"/_apteva/runtime/app/status", nil)
+	unauthorized, err := http.DefaultClient.Do(statusReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d", unauthorized.StatusCode)
+	}
+	statusReq.Header.Set("Authorization", "Bearer "+worker.Token())
+	statusResp, err := http.DefaultClient.Do(statusReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		DeploymentID string `json:"deployment_id"`
+		Generation   int64  `json:"generation"`
+		State        string `json:"state"`
+		Admitting    bool   `json:"admitting"`
+	}
+	err = json.NewDecoder(statusResp.Body).Decode(&status)
+	statusResp.Body.Close()
+	if err != nil || statusResp.StatusCode != 200 || status.DeploymentID != "fixture-executor" || status.Generation != 1 || status.State != "active" || !status.Admitting {
+		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	p := &workerPlatform{worker: worker}
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p), tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"execution_mode": "component", "render_max_output_size_mb": "32"}))
