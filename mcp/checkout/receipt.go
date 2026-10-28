@@ -68,13 +68,13 @@ func readCheckoutReceipt(ctx *sdk.AppCtx, pid string, id int64) (*CheckoutReceip
 	var baseTotal int64
 	for _, it := range cart.Items {
 		if int64Arg(mapFromAny(it.Metadata), "order_bump_id") == 0 {
-			baseTotal += int64(float64(it.UnitAmountCents) * it.Quantity)
+			baseTotal += roundCents(float64(it.UnitAmountCents) * it.Quantity)
 		}
 	}
 	remainingBase := baseTotal
 	remainingDiscount := s.DiscountCents
 	for _, it := range cart.Items {
-		amount := int64(float64(it.UnitAmountCents) * it.Quantity)
+		amount := roundCents(float64(it.UnitAmountCents) * it.Quantity)
 		if int64Arg(mapFromAny(it.Metadata), "order_bump_id") == 0 && baseTotal > 0 {
 			d := s.DiscountCents * amount / baseTotal
 			if amount == remainingBase {

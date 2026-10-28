@@ -358,7 +358,7 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := validatePreparedCheckout(communityID, target, restored.Session, restored.Cart); err != nil {
 		return nil, err
 	}
-	if err := validateStorefrontCartBumps(ctx, communityID, target, restored.Session, restored.Cart); err != nil {
+	if err := validateStorefrontCartBumps(ctx, communityID, target, restored.Session, restored.Cart); err != nil && restored.Session.Status == "started" {
 		return nil, err
 	}
 	restored.Session.BumpCents = storefrontBumpTotal(restored.Cart, target.Price)
@@ -396,6 +396,9 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	for _, it := range restored.Cart.Items {
+		if restored.Session.Status != "started" {
+			break
+		}
 		if it.PriceID == target.Price || metadataString(it.Metadata, "fulfillment_app") != "community" {
 			continue
 		}

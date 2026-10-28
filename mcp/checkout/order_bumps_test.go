@@ -232,3 +232,26 @@ func TestCheckoutRejectsStalePageBeforeCreatingPayment(t *testing.T) {
 		t.Fatal("stale item list created an invoice")
 	}
 }
+
+func TestInvoicedBumpSnapshotSurvivesRuleChanges(t *testing.T) {
+	ctx, _, s, bid := bumpFixture(t)
+	if _, err := setCheckoutBump(ctx, bumpArgs(s.ID, bid, true)); err != nil {
+		t.Fatal(err)
+	}
+	dbCheckoutUpdate(ctx.AppDB(), testPID, s.ID, map[string]any{"email": "buyer@example.com"})
+	args := map[string]any{"provider": "stripe", "presentation": "deferred"}
+	if _, _, _, _, err := dbCheckoutPay(ctx, testPID, s.ID, args); err != nil {
+		t.Fatal(err)
+	}
+	ctx.AppDB().Exec(`UPDATE order_bumps SET active=0,title='Changed',price_id=999 WHERE id=?`, bid)
+	offers, err := sessionBumps(ctx, testPID, s.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) != 1 || !offers[0].Selected || !offers[0].Available || offers[0].PriceID != 101 || offers[0].AmountCents != 1900 {
+		t.Fatalf("frozen offer changed: %+v", offers)
+	}
+	if _, _, _, _, err = dbCheckoutPay(ctx, testPID, s.ID, args); err != nil {
+		t.Fatal("existing payment could not resume", err)
+	}
+}

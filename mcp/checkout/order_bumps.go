@@ -228,6 +228,18 @@ func sessionBumps(ctx *sdk.AppCtx, pid string, id int64, impression bool) ([]Ord
 	if e != nil || cart == nil {
 		return nil, firstCheckoutErr(e, errors.New("cart not found"))
 	}
+	if s.Status != "started" {
+		frozen := []OrderBump{}
+		for _, it := range cart.Items {
+			meta := mapFromAny(it.Metadata)
+			bid := int64Arg(meta, "order_bump_id")
+			if bid == 0 {
+				continue
+			}
+			frozen = append(frozen, OrderBump{ID: bid, PriceID: it.PriceID, ProductID: it.ProductID, Title: it.Description, AmountCents: it.UnitAmountCents, Currency: it.Currency, Selected: true, Available: true, FulfillmentApp: strArg(meta, "fulfillment_app"), FulfillmentRef: strArg(meta, "fulfillment_ref")})
+		}
+		return frozen, nil
+	}
 	bs, e := listOrderBumps(ctx, pid)
 	if e != nil {
 		return nil, e
