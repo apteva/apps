@@ -92,6 +92,9 @@ backoff uses a one-minute base, a one-hour base for daily-limit failures, a
 six-hour exponential cap and connection jitter. Provider-requested deadlines
 can exceed that cap. Authentication and ordinary permission errors do not
 activate quota backoff. Deadlines and observations survive sidecar restarts.
+The specific `Daily edit creation quota exceeded` message is recognized even
+when Google labels the response HTTP 403 `PERMISSION_DENIED` or `forbidden`.
+This receives the daily-limit cooldown; unrelated permission errors do not.
 
 All Deploy-managed Play edits are serialized per connection/package across
 processes sharing the install's data directory, from creation through upload
