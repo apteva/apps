@@ -5504,6 +5504,17 @@ function EditPostDialog({
                         </div>
                         <OptionFieldInput
                           field={{
+                            name: "contains_synthetic_media",
+                            label: "AI-generated or altered content",
+                            type: "boolean",
+                            help: "Discloses realistic altered or synthetic content to YouTube.",
+                          }}
+                          value={targetOptions[t.social_account_id]?.contains_synthetic_media ?? t.options?.contains_synthetic_media}
+                          projectId={projectId}
+                          onChange={(v) => setOpt(t.social_account_id, "contains_synthetic_media", v)}
+                        />
+                        <OptionFieldInput
+                          field={{
                             name: "thumbnail_storage_id",
                             label: "Thumbnail",
                             type: "media",
