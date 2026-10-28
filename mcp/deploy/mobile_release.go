@@ -441,10 +441,15 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 			}
 			externalStatus = defaultStr(externalStatus, "uploaded_processing")
 		}
-		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 			"status": releaseStatus, "external_id": externalID, "external_status": externalStatus,
 			"release_meta_json": mustJSON(meta),
-		})
+		}); err != nil {
+			return nil, err
+		}
+		if err := dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), rel.ID); err != nil {
+			return nil, err
+		}
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "upload_adopted", mustJSON(map[string]any{
 			"provider": provider, "build_backend": b.BuildBackend, "external_job_id": b.ExternalJobID,
 		}))
@@ -575,12 +580,14 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 	} else {
 		setReleaseTesterAccess(meta, verified)
 	}
-	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
+	if err := dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status": "live", "external_id": meta.VersionCode, "external_status": status,
 		"release_meta_json": mustJSON(meta),
-	})
+	}); err != nil {
+		return err
+	}
 	fmt.Fprintf(logW, "Google Play track %s committed (%s)\n", channel, status)
-	return nil
+	return dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), releaseID)
 }
 
 func uploadGooglePlayBundle(bound *sdk.BoundIntegration, packageName, editID, bundlePath string, logW io.Writer) (json.RawMessage, error) {
@@ -720,6 +727,12 @@ func (a *App) publishIOSRelease(releaseID int64, b *Build, manifest artifactMani
 func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), 0); err != nil {
+		return err
 	}
 	releases, err := dbListPendingMobileReleases(globalCtx.AppDB(), 100)
 	if err != nil {
@@ -881,9 +894,12 @@ func iosBuildHasBetaGroup(bound *sdk.BoundIntegration, buildID, groupID string) 
 
 func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
 	meta.BetaGroupID = groupID
-	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+	if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
-	})
+	}); err != nil {
+		return err
+	}
+	return dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), rel.ID)
 }
 
 func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Release, buildID string, meta *mobileReleaseMeta) error {
@@ -1472,11 +1488,13 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, chann
 	} else {
 		setReleaseTesterAccess(meta, verified)
 	}
-	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
+	if err := dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status": "live", "external_id": meta.VersionCode, "external_status": status, "release_meta_json": mustJSON(meta),
-	})
+	}); err != nil {
+		return err
+	}
 	fmt.Fprintf(logW, "Google Play versionCode=%s promoted to %s (%s)\n", meta.VersionCode, channel, status)
-	return nil
+	return dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), releaseID)
 }
 
 func googleTrackRelease(channel string, meta *mobileReleaseMeta) map[string]any {

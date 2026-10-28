@@ -292,7 +292,10 @@ func (a *App) syncMobileReleaseState(rel *Release) error {
 		}
 	}
 	meta.Availability = obs
-	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"release_meta_json": mustJSON(meta)})
+	if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"release_meta_json": mustJSON(meta)}); err != nil {
+		return err
+	}
+	return dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), rel.ID)
 }
 
 func (a *App) syncGooglePlayReleaseState(rel *Release) error {

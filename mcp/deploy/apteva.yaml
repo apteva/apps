@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.30.2
+version: 0.30.3
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,8 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.3 reconciles finished mobile workflows locally and stops background
+  polling of completed Play releases and available TestFlight builds.
   v0.30.2 recognizes Google's daily edit quota when returned as 403
   PERMISSION_DENIED, preserving the daily cooldown across restarts.
   v0.30.1 caches Google Play observations, persists quota backoff and
@@ -204,7 +206,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.30.2
+    ref: deploy/v0.30.3
     entry: mcp/deploy
   port: 8080
   health_check: /health

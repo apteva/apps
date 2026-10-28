@@ -23,5 +23,5 @@ jobs:
           go-version: "1.25.1"
           cache-dependency-path: mcp/deploy/go.sum
       - run: go test ./... -count=1
-      - run: go test -race -run TestGoogle -count=1 .
+      - run: go test -race -run 'TestGoogle|TestFinishedMobile|TestMobileWorker|TestPendingMobileSelection|TestTestFlightCompletion' -count=1 .
       - run: go vet ./...

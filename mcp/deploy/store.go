@@ -926,11 +926,45 @@ func dbListLiveReleases(db *sql.DB) ([]Release, error) {
 	return out, nil
 }
 
+// Completion is based on a successful provider result, not the presence of a
+// workflow row. Keep the latter as an audit record without polling it forever.
+const finishedMobileReleaseSQL = `(status='live' AND (
+	(provider='google_play' AND lower(external_status)='completed') OR
+	(provider='app_store_connect' AND lower(external_status) IN (
+		'testflight_available','in_beta_testing','available','ready_for_sale',
+		'ready_for_distribution','pre_order_ready_for_sale','preorder_ready_for_distribution'))
+))`
+
+// Repair workflows left in publishing by older versions using only persisted
+// release evidence. Never contact a provider or rewrite its observed status.
+func dbReconcileFinishedMobileWorkflows(db *sql.DB, releaseID int64) error {
+	scope := ""
+	args := []any{nowUTC()}
+	if releaseID > 0 {
+		scope = " AND release_id=?"
+		args = append(args, releaseID)
+	}
+	_, err := db.Exec(`UPDATE release_workflows
+		SET state_json=json_set(state_json,'$.phase',
+			(SELECT CASE WHEN status='live' THEN 'completed' ELSE status END FROM releases WHERE id=release_id)),
+			updated_at=?
+		WHERE json_valid(state_json) AND release_id IN (
+			SELECT id FROM releases WHERE provider IN ('google_play','app_store_connect')
+			AND (`+finishedMobileReleaseSQL+` OR status IN ('failed','stopped'))
+		) AND COALESCE(json_extract(state_json,'$.phase'),'') !=
+			(SELECT CASE WHEN status='live' THEN 'completed' ELSE status END FROM releases WHERE id=release_id)`+scope, args...)
+	return err
+}
+
 func dbListPendingMobileReleases(db *sql.DB, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider NOT IN ('','pending_mobile','pending_external') AND (status = 'starting' OR (status='live' AND (external_status IN ('inProgress','in_progress','waiting_for_review','in_review') OR id IN (SELECT release_id FROM release_workflows)))) ORDER BY id LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases
+		WHERE provider NOT IN ('','pending_mobile','pending_external')
+		AND NOT `+finishedMobileReleaseSQL+`
+		AND (status = 'starting' OR (status='live' AND (external_status IN ('inProgress','in_progress','waiting_for_review','in_review') OR id IN (SELECT release_id FROM release_workflows))))
+		ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
