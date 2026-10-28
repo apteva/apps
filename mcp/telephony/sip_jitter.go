@@ -188,6 +188,11 @@ type rtpJitterBuffer struct {
 	sourceGapTarget                                                     uint32
 	sourceGapDeclaredSamples, sourceGapSkippedSamples                   int
 	sourceGapFilledSamples                                              atomic.Int64
+	reanchors, sequenceRebases, delayOutOfRange                         int
+	rebaseSeq                                                           uint16
+	rebaseTS                                                            uint32
+	rebaseAt                                                            time.Time
+	rebaseCount                                                         int
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer { return newRTPJitterBufferWithPolicy(sipPlaybackPolicy{}) }
@@ -249,34 +254,7 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 	}
 	if b.sourceSSRC.Load() != ssrc {
 		b.mu.Lock()
-		n := b.buffered + int(b.pendingPCMSamples.Load())
-		b.droppedSamples += n
-		b.resetDroppedSamples += n
-		b.event(now, "source_changed", seq, ts, n, 0)
-		clear(b.packets)
-		clear(b.arrivals)
-		clear(b.timestamps)
-		clear(b.controls)
-		b.seenValid = [64]bool{}
-		b.decodeSkips = [4]sipDecodeSkip{}
-		b.decodeSkipCount = 0
-		b.decodeSkipUnknown = false
-		b.decodeSkipPending.Store(false)
-		b.buffered = 0
-		b.pendingPCMSamples.Store(0)
-		b.started = false
-		b.primed = false
-		b.missing = 0
-		b.primeTicks = 0
-		b.haveArrival = false
-		b.haveTimestamp = false
-		b.haveSourceAnchor = false
-		b.recovery.resetCandidate()
-		b.driftPPM = 0
-		b.clock = sipSourceClock{}
-		b.clockResets++
-		b.decoderGeneration.Add(1)
-		b.generation.Add(1)
+		b.resetStreamLocked(now, "source_changed", seq, ts)
 		b.sourceSSRC.Store(ssrc)
 		b.mu.Unlock()
 	}
@@ -285,6 +263,64 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 		clock = liveClock[0]
 	}
 	b.pushRTPAtClock(seq, payload, ts, now, processed, clock)
+}
+
+// Caller holds mu. A new SSRC or a proven same-SSRC rebase starts a new clock
+// domain; retained queues and the delivery baseline belong to the old one.
+func (b *rtpJitterBuffer) resetStreamLocked(now time.Time, reason string, seq uint16, ts uint32) {
+	n := b.buffered + int(b.pendingPCMSamples.Load())
+	b.droppedSamples += n
+	b.resetDroppedSamples += n
+	b.event(now, reason, seq, ts, n, 0)
+	clear(b.packets)
+	clear(b.arrivals)
+	clear(b.timestamps)
+	clear(b.controls)
+	b.seenValid = [64]bool{}
+	b.decodeSkips = [4]sipDecodeSkip{}
+	b.decodeSkipCount = 0
+	b.decodeSkipUnknown = false
+	b.decodeSkipPending.Store(false)
+	b.buffered = 0
+	b.pendingPCMSamples.Store(0)
+	b.started = false
+	b.primed = false
+	b.missing = 0
+	b.primeTicks = 0
+	b.haveArrival = false
+	b.haveTimestamp = false
+	b.haveSourceAnchor = false
+	b.recovery.resetCandidate()
+	b.driftPPM = 0
+	b.clock = sipSourceClock{}
+	b.clockResets++
+	b.rebaseCount = 0
+	b.decoderGeneration.Add(1)
+	b.generation.Add(1)
+}
+
+// Caller holds mu. Same-SSRC senders may rebase sequence numbers (and RTP
+// timestamps) far behind the current cursor, e.g. after a media server
+// transfer. Every later packet would otherwise be a "late" arrival until the
+// sequence caught up. Only a paced run of mutually consecutive packets far
+// behind the cursor qualifies; one reordered or duplicated packet cannot.
+func (b *rtpJitterBuffer) considerSequenceRebase(seq uint16, ts uint32, now time.Time) bool {
+	if !b.haveArrival || int16(seq-b.lastSequence) >= -32 {
+		b.rebaseCount = 0
+		return false
+	}
+	if b.rebaseCount > 0 && seq == b.rebaseSeq+1 && int32(ts-b.rebaseTS) > 0 && int32(ts-b.rebaseTS) <= 8000 {
+		b.rebaseCount++
+	} else {
+		b.rebaseCount, b.rebaseAt = 1, now
+	}
+	b.rebaseSeq, b.rebaseTS = seq, ts
+	if b.rebaseCount < 4 || now.Sub(b.rebaseAt) < 3*sipRTPPacketTime/2 {
+		return false
+	}
+	b.sequenceRebases++
+	b.resetStreamLocked(now, "sequence_rebased", seq, ts)
+	return true
 }
 
 func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
@@ -437,6 +473,11 @@ func (b *rtpJitterBuffer) playbackTargetMS() int {
 	return min(b.targetMS, max(20, b.policy.MaxAgeMS-int(math.Ceil(deliveryMS))-20))
 }
 
+// Caller holds mu. The EWMA estimator's jitter-derived reserve.
+func (b *rtpJitterBuffer) ewmaDesiredTargetMS() int {
+	return min(b.policy.MaxTargetMS, b.policy.TargetMS+int(math.Ceil(max(0, b.jitterMS-2)/10))*10)
+}
+
 func (b *rtpJitterBuffer) pushRTP(seq uint16, payload []byte, ts uint32, now time.Time) {
 	b.pushRTPAt(seq, payload, ts, now, now)
 }
@@ -474,6 +515,10 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 	b.seenSequences[slot] = seq
 	if _, ok := b.packets[seq]; ok {
 		return
+	}
+	if b.considerSequenceRebase(seq, ts, now) {
+		b.seenValid[slot] = true
+		b.seenSequences[slot] = seq
 	}
 	if !b.haveSourceAnchor || b.haveArrival && int16(seq-b.lastSequence) > 0 && int32(ts-b.lastTimestamp) <= 0 {
 		if b.haveSourceAnchor {
@@ -515,13 +560,20 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 		}
 		if !b.haveArrival || int16(seq-b.lastSequence) >= -32 {
 			relative := float64(now.Sub(b.sourceTime(ts))) / float64(time.Millisecond)
-			if relative >= -320 && relative <= 320 {
+			if floor, ok := b.delayDistribution.floorAt(now); !ok || math.Abs(relative-floor) <= 320 {
 				desired := b.delayDistribution.observe(now, relative, b.policy.TargetMS, b.policy.MaxTargetMS)
 				if desired != b.targetMS {
 					b.targetMS = desired
 					b.stableAt = now
 					b.event(now, "target_distribution", seq, ts, 0, 0)
 				}
+			} else {
+				// Not a silent no-op: delivery jumped beyond the window's range
+				// (a stall or rebase). Playout recovery qualifies a re-anchor from
+				// these same packets and resets the window; until then (or until
+				// the window expires) the target holds.
+				b.delayOutOfRange++
+				b.event(now, "distribution_out_of_range", seq, ts, 0, 0)
 			}
 		}
 	}
@@ -536,12 +588,14 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 
 			if b.policy.DelayEstimator == "distribution" && b.policy.Receiver == "adaptive" {
 				// Distribution updates above include bounded reordered arrivals.
-			} else if desired := min(b.policy.MaxTargetMS, b.policy.TargetMS+int(math.Ceil(max(0, b.jitterMS-2)/10))*10); desired > b.targetMS {
+			} else if desired := b.ewmaDesiredTargetMS(); desired > b.targetMS {
 				b.targetMS = desired
 				b.stableAt = now
 				b.event(now, "target_increased", seq, ts, 0, 0)
-			} else if b.jitterMS < 2 && b.targetMS > b.policy.TargetMS && now.Sub(b.stableAt) > 10*time.Second {
-				b.targetMS = max(b.policy.TargetMS, b.targetMS-10)
+			} else if b.targetMS > desired && now.Sub(b.stableAt) > 10*time.Second {
+				// Decay toward what current jitter needs, also under ordinary
+				// 2–5 ms jitter; late-arrival bumps are not permanent.
+				b.targetMS = max(desired, b.targetMS-10)
 				b.stableAt = now
 				b.event(now, "target_decreased", seq, ts, 0, 0)
 			}
@@ -628,6 +682,16 @@ func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, 
 		} else {
 			b.lateDroppedSamples += len(payload)
 			b.event(now, "late_arrival", seq, ts, len(payload), time.Duration(max(0, int32(b.expectedTimestamp-ts)))*time.Second/8000)
+			// A packet arriving after its slot was rendered is direct evidence
+			// the reserve is too small (random loss is not). The bump is bounded
+			// above the jitter-derived need and decays after 10 stable seconds.
+			if b.policy.DelayEstimator != "distribution" && int16(b.expected-seq) <= 32 {
+				if bound := min(b.policy.MaxTargetMS, b.ewmaDesiredTargetMS()+20); b.targetMS < bound {
+					b.targetMS = min(bound, b.targetMS+10)
+					b.event(now, "target_increased", seq, ts, 0, 0)
+				}
+				b.stableAt = now
+			}
 			return
 		}
 	}
@@ -766,10 +830,6 @@ func (b *rtpJitterBuffer) popForPCMAt(now time.Time, needed int) ([]byte, bool) 
 		b.missing++
 		if b.haveTimestamp {
 			b.expectedTimestamp += uint32(b.packetSamples)
-		}
-		if b.targetMS < b.policy.MaxTargetMS && len(b.packets) > 0 {
-			b.targetMS = min(b.policy.MaxTargetMS, b.targetMS+10)
-			b.stableAt = now
 		}
 	}
 	// Empty playback cannot establish whether the next sequence was lost or
@@ -916,6 +976,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	if policyEnabled(f.jitter.policy.ClockDrift) {
 		ppm = f.jitter.driftPPM
 	}
+	tracked := ppm
 	queueMS := float64(f.jitter.buffered)/8 + float64(len(f.pendingPCM))*1000/float64(m.sampleRate())
 	// A delivery offset already spends part of the bounded latency budget.
 	// Building the nominal reserve on top of it can expire otherwise fresh
@@ -929,7 +990,13 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	// Keep the same 125 microsecond adjustment bound per frame for all
 	// decoded rates. One sample at 16 kHz rebuilt G.722 reserve half as fast
 	// as one sample at 8 kHz, despite its unchanged 8 kHz RTP clock.
+	// Only a TRACKED sender skew beyond one sample per frame (±6250 ppm at
+	// 8 kHz, e.g. ±1%) may use two, so queue correction on top of it cannot
+	// be outrun into periodic overflow. Ordinary drift and bursts never do.
 	limit := max(1, m.sampleRate()/8000)
+	if math.Abs(tracked)*float64(samples)/1e6 > float64(limit)/2 {
+		limit *= 2
+	}
 	f.correction = max(float64(-2*limit), min(float64(2*limit), f.correction+float64(samples)*ppm/1e6))
 	adjust := max(-limit, min(limit, int(f.correction)))
 	take := samples + adjust

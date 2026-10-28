@@ -7,6 +7,21 @@ import "time"
 // initial cushion again. This is a local transport heuristic, not provider VAD.
 const sipAgentRecoveryIdle = time.Second
 
+// sipRTPCatchUpFrames bounds how many ticks a late ticker may make up at once.
+const sipRTPCatchUpFrames = 3
+
+// Mid-reply recovery re-primes at most this much of the learned reserve. A gap
+// already exists when starved audio resumes; waiting slightly longer there
+// keeps a cushion against the next upstream hold instead of cascading into
+// repeated underruns. The wait is timed from the resuming arrival even when it
+// is a burst: releasing a burst at once leaves no cushion. Replayed staging
+// holds (80..380 ms): 60 ms cut exhaustions 15->11 and padding 293->233 ms for
+// +60 ms total gap; 80..200 ms added more gap than it removed.
+const sipAgentRecoveryCushion = 60 * time.Millisecond
+
+// Edge fades for underrun boundaries only; contiguous packets are untouched.
+const sipAgentEdgeFadeMS = 3
+
 // Protected by queueMu. A single bounded cushion belongs to the continuous
 // stream, not each provider chunk or playback ID. Human pacing is unchanged.
 type sipAgentPlayout struct {
@@ -15,6 +30,7 @@ type sipAgentPlayout struct {
 	readyAt       time.Time
 	lastInputAt   time.Time
 	exhaustedAt   time.Time
+	resumeFade    bool // next speech follows an underrun edge
 	starts        int
 	recoveries    int
 	exhaustions   int
@@ -46,8 +62,8 @@ func (p *sipRTPPacer) agentPlayoutSnapshot() *sipAgentPlayoutDiagnostics {
 
 // Wait from first arrival, rather than only testing queued duration: a 100 ms
 // burst drained immediately has no cushion against a late next 100 ms burst.
-// Short queue starvation resumes on the next tick. Reapplying the full reserve
-// there extends an upstream delivery gap despite fresh samples being available.
+// Short queue starvation re-primes only a bounded cushion (recoveryCushion);
+// reapplying the full reserve would extend every upstream delivery gap.
 func (p *sipRTPPacer) prepareAgentTick(now time.Time) bool {
 	p.queueMu.Lock()
 	defer p.queueMu.Unlock()
@@ -59,6 +75,7 @@ func (p *sipRTPPacer) prepareAgentTick(now time.Time) bool {
 			// Includes natural ends/silence; not a measured speech-loss counter.
 			p.agentPlayout.exhaustions++
 			p.agentPlayout.exhaustedAt = now
+			p.agentPlayout.resumeFade = true
 		}
 		return true
 	}
@@ -82,9 +99,78 @@ func (p *sipRTPPacer) prepareAgentTick(now time.Time) bool {
 	return true
 }
 
+// Scaled by the starvation: a 20 ms late write re-primes 20 ms, a 300 ms
+// upstream hold gets min(learned reserve, sipAgentRecoveryCushion).
+func (p *sipAgentPlayout) recoveryCushion(starved time.Duration) time.Duration {
+	return max(sipRTPPacketTime, min(p.reserve, sipAgentRecoveryCushion, starved))
+}
+
+// The transmitted 20 ms frame. Only underrun edges are shaped: the real tail of
+// a padded partial fades out before its zeros, and the first speech after an
+// exhaustion, gap or padded partial fades in. RTP cadence is unchanged.
+func (p *sipRTPPacer) shapeAgentPCM(packet sipRTPOutboundPacket, now time.Time) []int16 {
+	rate := p.media.sampleRate()
+	pcm := packet.pcm
+	speech := !packet.silence && !pcmAllZero(pcm)
+	p.queueMu.Lock()
+	resume := false
+	if p.packetizer != nil && speech {
+		resume, p.agentPlayout.resumeFade = p.agentPlayout.resumeFade, false
+	}
+	if p.packetizer != nil && speech && len(pcm) >= rate/50 && len(p.queue) == 0 && p.packetizer.queuedSamples == 0 && now.Sub(p.agentPlayout.lastInputAt) >= sipRTPPacketTime {
+		// The last buffered speech with nothing arriving: the next tick is
+		// silence, so end on a fade rather than a hard cut.
+		pcm = append([]int16(nil), pcm...)
+		applyAgentEndFade(pcm, rate)
+		p.agentPlayout.resumeFade = true
+	}
+	if len(pcm) < rate/50 {
+		p.agentPlayout.paddedSamples += rate/50 - len(pcm)
+		padded := make([]int16, rate/50)
+		copy(padded, pcm)
+		if p.packetizer != nil && speech {
+			applyAgentEndFade(padded[:len(pcm)], rate)
+			p.agentPlayout.resumeFade = true
+		}
+		pcm = padded
+	}
+	p.queueMu.Unlock()
+	if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+		applyPCMOverlapCrossfade(p.lastSentPCM, pcm, rate/200)
+	}
+	// A clear fade is spent only on audible audio, never on leading zeros.
+	if speech && p.fadeAfterClear.Swap(false) || resume {
+		applyAgentStartFade(pcm, rate)
+	}
+	return pcm
+}
+
+func applyAgentEndFade(pcm []int16, rate int) {
+	n := min(len(pcm), max(1, rate*sipAgentEdgeFadeMS/1000))
+	tail := pcm[len(pcm)-n:]
+	for i := range tail {
+		tail[i] = int16(int64(tail[i]) * int64(n-1-i) / int64(n))
+	}
+}
+
+func pcmAllZero(pcm []int16) bool {
+	for _, v := range pcm {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *sipAgentPlayout) recoveryIdleMS() int {
 	if p.tuning.cfg.RecoveryIdleMS > 0 {
 		return p.tuning.cfg.RecoveryIdleMS
 	}
 	return 1000
+}
+
+func (p *sipRTPPacer) hasQueuedAgentAudio() bool {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+	return len(p.queue) > 0
 }

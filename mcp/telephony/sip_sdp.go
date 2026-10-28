@@ -28,6 +28,10 @@ type sipMediaOffer struct {
 	RemoteKey         []byte
 	DTMFPayloadType   int
 	CryptoTag         string
+	// Every offered m-line in order; the answer mirrors them (RFC 3264 §6),
+	// rejecting all but MediaIndex with port 0.
+	MediaLines []sdp.MediaName
+	MediaIndex int
 }
 
 type sipMediaSecurity struct {
@@ -52,95 +56,124 @@ func parseSIPMediaOfferOptions(body []byte, cfg sipGatewayConfig, codecs []strin
 	if err := description.Unmarshal(body); err != nil {
 		return sipMediaOffer{}, fmt.Errorf("parse SDP offer: %w", err)
 	}
-	for _, media := range description.MediaDescriptions {
+	var firstErr error
+	for index, media := range description.MediaDescriptions {
 		if !strings.EqualFold(media.MediaName.Media, "audio") || media.MediaName.Port.Value == 0 {
 			continue
 		}
-		if media.MediaName.Port.Value < 1 || media.MediaName.Port.Value > 65535 {
-			return sipMediaOffer{}, errors.New("SDP audio port is invalid")
-		}
-		protocol := strings.ToUpper(strings.Join(media.MediaName.Protos, "/"))
-		secure := protocol == "RTP/SAVP" || protocol == "RTP/SAVPF"
-		if !secure && protocol != "RTP/AVP" && protocol != "RTP/AVPF" {
-			return sipMediaOffer{}, fmt.Errorf("unsupported SDP media protocol %s", protocol)
-		}
-		if cfg.SRTPMode == sipSRTPRequired && !secure {
-			return sipMediaOffer{}, errors.New("SRTP is required but the carrier offered plain RTP")
-		}
-		if cfg.SRTPMode == sipSRTPDisabled && secure {
-			return sipMediaOffer{}, errors.New("carrier offered SRTP but direct SIP SRTP is disabled")
-		}
-		direction := "sendrecv"
-		for _, attributes := range [][]sdp.Attribute{description.Attributes, media.Attributes} {
-			for _, attribute := range attributes {
-				switch strings.ToLower(attribute.Key) {
-				case "sendrecv", "sendonly", "recvonly", "inactive":
-					direction = strings.ToLower(attribute.Key)
-				}
-			}
-		}
-		if direction != "sendrecv" && !allowHold {
-			return sipMediaOffer{}, errors.New("SDP offer does not allow bidirectional audio")
-		}
-
-		address := mediaConnectionAddress(media, &description)
-		remoteIP, err := netip.ParseAddr(address)
-		if err != nil || !remoteIP.Is4() || remoteIP.IsMulticast() || remoteIP.IsUnspecified() {
-			return sipMediaOffer{}, errors.New("SDP media address must be an explicit unicast IPv4 address")
-		}
-		if !cfg.sourceAllowed(remoteIP.String()) {
-			return sipMediaOffer{}, errors.New("SDP media address is outside TELEPHONY_SIP_ALLOWED_CIDRS")
-		}
-		payloadType, codec, err := negotiateSIPCodec(media, codecs)
+		// An unsupported audio stream is rejected individually; a later
+		// supported one can still be accepted.
+		offer, err := parseSIPAudioMedia(media, &description, cfg, codecs, allowHold)
 		if err != nil {
-			return sipMediaOffer{}, err
-		}
-		packetTimeMS, err := sipPacketTimeMS(media.Attributes)
-		if err != nil {
-			return sipMediaOffer{}, err
-		}
-		offer := sipMediaOffer{
-			RemoteAddress:   remoteIP,
-			RemotePort:      media.MediaName.Port.Value,
-			PayloadType:     payloadType,
-			Codec:           codec,
-			Direction:       direction,
-			PacketSamples:   packetTimeMS * 8,
-			DTMFPayloadType: negotiatedSIPTelephoneEvent(media),
-			Secure:          secure,
-		}
-		for _, attribute := range media.Attributes {
-			if attribute.Key == "rtcp-mux-only" {
-				return sipMediaOffer{}, errors.New("SIP RTCP mux-only is not supported; offer RTP+1")
+			if firstErr == nil {
+				firstErr = err
 			}
-			if attribute.Key == "rtcp" {
-				fields := strings.Fields(attribute.Value)
-				if len(fields) != 1 && len(fields) != 4 {
-					return sipMediaOffer{}, errors.New("invalid SDP RTCP address")
-				}
-				port, e := strconv.Atoi(fields[0])
-				if e != nil || port < 1 || port > 65535 {
-					return sipMediaOffer{}, errors.New("invalid SDP RTCP port")
-				}
-				offer.RemoteRTCPPort = port
-				if len(fields) == 4 {
-					ip, e := netip.ParseAddr(fields[3])
-					if e != nil || fields[1] != "IN" || fields[2] != "IP4" || !ip.Is4() || ip.IsMulticast() || ip.IsUnspecified() || !cfg.sourceAllowed(ip.String()) {
-						return sipMediaOffer{}, errors.New("SDP RTCP address is not allowed")
-					}
-					offer.RemoteRTCPAddress = ip
-				}
-			}
+			continue
 		}
-		if secure {
-			offer.CryptoTag, offer.RemoteKey, err = parseSDESCrypto(media.Attributes)
-			if err != nil {
-				return sipMediaOffer{}, err
-			}
+		offer.MediaIndex = index
+		for _, line := range description.MediaDescriptions {
+			offer.MediaLines = append(offer.MediaLines, line.MediaName)
 		}
 		return offer, nil
 	}
+	if firstErr != nil {
+		return sipMediaOffer{}, firstErr
+	}
 	return sipMediaOffer{}, errors.New("SDP offer has no active audio media")
+}
+
+func parseSIPAudioMedia(media *sdp.MediaDescription, description *sdp.SessionDescription, cfg sipGatewayConfig, codecs []string, allowHold bool) (sipMediaOffer, error) {
+	if media.MediaName.Port.Value < 1 || media.MediaName.Port.Value > 65535 {
+		return sipMediaOffer{}, errors.New("SDP audio port is invalid")
+	}
+	protocol := strings.ToUpper(strings.Join(media.MediaName.Protos, "/"))
+	secure := protocol == "RTP/SAVP" || protocol == "RTP/SAVPF"
+	if !secure && protocol != "RTP/AVP" && protocol != "RTP/AVPF" {
+		return sipMediaOffer{}, fmt.Errorf("unsupported SDP media protocol %s", protocol)
+	}
+	if cfg.SRTPMode == sipSRTPRequired && !secure {
+		return sipMediaOffer{}, errors.New("SRTP is required but the carrier offered plain RTP")
+	}
+	if cfg.SRTPMode == sipSRTPDisabled && secure {
+		return sipMediaOffer{}, errors.New("carrier offered SRTP but direct SIP SRTP is disabled")
+	}
+	direction := "sendrecv"
+	for _, attributes := range [][]sdp.Attribute{description.Attributes, media.Attributes} {
+		for _, attribute := range attributes {
+			switch strings.ToLower(attribute.Key) {
+			case "sendrecv", "sendonly", "recvonly", "inactive":
+				direction = strings.ToLower(attribute.Key)
+			}
+		}
+	}
+	if direction != "sendrecv" && !allowHold {
+		return sipMediaOffer{}, errors.New("SDP offer does not allow bidirectional audio")
+	}
+
+	address := mediaConnectionAddress(media, description)
+	remoteIP, err := netip.ParseAddr(address)
+	// RFC 2543 hold (c=0.0.0.0) in a re-offer: the peer cannot receive, so it
+	// is at most sending. RFC 3264 §8.4 asks answerers to accept it as hold.
+	if err == nil && allowHold && remoteIP.Is4() && remoteIP.IsUnspecified() {
+		switch direction {
+		case "sendrecv", "sendonly":
+			direction = "sendonly"
+		default:
+			direction = "inactive"
+		}
+	} else if err != nil || !remoteIP.Is4() || remoteIP.IsMulticast() || remoteIP.IsUnspecified() {
+		return sipMediaOffer{}, errors.New("SDP media address must be an explicit unicast IPv4 address")
+	} else if !cfg.sourceAllowed(remoteIP.String()) {
+		return sipMediaOffer{}, errors.New("SDP media address is outside TELEPHONY_SIP_ALLOWED_CIDRS")
+	}
+	payloadType, codec, err := negotiateSIPCodec(media, codecs)
+	if err != nil {
+		return sipMediaOffer{}, err
+	}
+	packetTimeMS, err := sipPacketTimeMS(media.Attributes)
+	if err != nil {
+		return sipMediaOffer{}, err
+	}
+	offer := sipMediaOffer{
+		RemoteAddress:   remoteIP,
+		RemotePort:      media.MediaName.Port.Value,
+		PayloadType:     payloadType,
+		Codec:           codec,
+		Direction:       direction,
+		PacketSamples:   packetTimeMS * 8,
+		DTMFPayloadType: negotiatedSIPTelephoneEvent(media),
+		Secure:          secure,
+	}
+	for _, attribute := range media.Attributes {
+		if attribute.Key == "rtcp-mux-only" {
+			return sipMediaOffer{}, errors.New("SIP RTCP mux-only is not supported; offer RTP+1")
+		}
+		if attribute.Key == "rtcp" {
+			fields := strings.Fields(attribute.Value)
+			if len(fields) != 1 && len(fields) != 4 {
+				return sipMediaOffer{}, errors.New("invalid SDP RTCP address")
+			}
+			port, e := strconv.Atoi(fields[0])
+			if e != nil || port < 1 || port > 65535 {
+				return sipMediaOffer{}, errors.New("invalid SDP RTCP port")
+			}
+			offer.RemoteRTCPPort = port
+			if len(fields) == 4 {
+				ip, e := netip.ParseAddr(fields[3])
+				if e != nil || fields[1] != "IN" || fields[2] != "IP4" || !ip.Is4() || ip.IsMulticast() || ip.IsUnspecified() || !cfg.sourceAllowed(ip.String()) {
+					return sipMediaOffer{}, errors.New("SDP RTCP address is not allowed")
+				}
+				offer.RemoteRTCPAddress = ip
+			}
+		}
+	}
+	if secure {
+		offer.CryptoTag, offer.RemoteKey, err = parseSDESCrypto(media.Attributes)
+		if err != nil {
+			return sipMediaOffer{}, err
+		}
+	}
+	return offer, nil
 }
 
 func sipPacketTimeMS(attributes []sdp.Attribute) (int, error) {
@@ -310,15 +343,101 @@ func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort in
 			NetworkType: "IN", AddressType: "IP4", Address: &sdp.Address{Address: publicIP},
 		},
 		TimeDescriptions: []sdp.TimeDescription{{Timing: sdp.Timing{StartTime: 0, StopTime: 0}}},
-		MediaDescriptions: []*sdp.MediaDescription{{
-			MediaName: sdp.MediaName{
-				Media: "audio", Port: sdp.RangedPort{Value: localPort},
-				Protos: protocol, Formats: sipAnswerFormats(offer),
-			},
-			Attributes: attributes,
-		}},
+	}
+	accepted := &sdp.MediaDescription{
+		MediaName: sdp.MediaName{
+			Media: "audio", Port: sdp.RangedPort{Value: localPort},
+			Protos: protocol, Formats: sipAnswerFormats(offer),
+		},
+		Attributes: attributes,
+	}
+	if offer.MediaIndex < 0 || offer.MediaIndex >= len(offer.MediaLines) {
+		description.MediaDescriptions = []*sdp.MediaDescription{accepted}
+		return description.Marshal()
+	}
+	// RFC 3264 §6: one answer m-line per offered m-line, in order; streams
+	// not accepted keep their media and transport with port zero.
+	for index, line := range offer.MediaLines {
+		if index == offer.MediaIndex {
+			description.MediaDescriptions = append(description.MediaDescriptions, accepted)
+			continue
+		}
+		formats := line.Formats
+		if len(formats) > 1 {
+			formats = formats[:1]
+		}
+		if len(formats) == 0 {
+			formats = []string{"0"}
+		}
+		description.MediaDescriptions = append(description.MediaDescriptions, &sdp.MediaDescription{
+			MediaName: sdp.MediaName{Media: line.Media, Port: sdp.RangedPort{Value: 0}, Protos: line.Protos, Formats: formats},
+		})
 	}
 	return description.Marshal()
+}
+
+// sipSDPWithDirection replaces the media direction attribute of a local SDP.
+func sipSDPWithDirection(body []byte, direction string) []byte {
+	lines := strings.Split(string(body), "\r\n")
+	for i, line := range lines {
+		switch line {
+		case "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive":
+			lines[i] = "a=" + direction
+			return []byte(strings.Join(lines, "\r\n"))
+		}
+	}
+	return body
+}
+
+// sipSDPWithCryptoTag echoes the offer's SDES tag in a local answer (RFC 4568 §5.1.2).
+func sipSDPWithCryptoTag(body []byte, tag string) []byte {
+	lines := strings.Split(string(body), "\r\n")
+	for i, line := range lines {
+		if value, ok := strings.CutPrefix(line, "a=crypto:"); ok {
+			if _, rest, found := strings.Cut(value, " "); found && tag != "" {
+				lines[i] = "a=crypto:" + tag + " " + rest
+				return []byte(strings.Join(lines, "\r\n"))
+			}
+		}
+	}
+	return body
+}
+
+// nextSIPLocalSDP keeps one SDP session across a dialog (RFC 3264 §8): the
+// candidate reuses the previous o= session-id, and the version increments only
+// when anything other than the o= line changed.
+func nextSIPLocalSDP(previous, candidate []byte) []byte {
+	previousOrigin, previousRest := splitSIPSDPOrigin(previous)
+	candidateOrigin, candidateRest := splitSIPSDPOrigin(candidate)
+	if len(previousOrigin) != 6 || len(candidateOrigin) != 6 {
+		return candidate
+	}
+	version, err := strconv.ParseUint(previousOrigin[2], 10, 64)
+	if err != nil {
+		return candidate
+	}
+	if candidateRest != previousRest {
+		version++
+	}
+	candidateOrigin[1], candidateOrigin[2] = previousOrigin[1], strconv.FormatUint(version, 10)
+	return []byte(strings.Replace(string(candidate), sipSDPOriginLine(candidate), "o="+strings.Join(candidateOrigin, " "), 1))
+}
+
+func sipSDPOriginLine(body []byte) string {
+	for _, line := range strings.Split(string(body), "\r\n") {
+		if strings.HasPrefix(line, "o=") {
+			return line
+		}
+	}
+	return ""
+}
+
+func splitSIPSDPOrigin(body []byte) ([]string, string) {
+	origin := sipSDPOriginLine(body)
+	if origin == "" {
+		return nil, string(body)
+	}
+	return strings.Fields(strings.TrimPrefix(origin, "o=")), strings.Replace(string(body), origin, "", 1)
 }
 
 // RFC 4733 telephone events are negotiated independently of the speech codec.

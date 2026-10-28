@@ -274,7 +274,12 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 }
 
 func (c *callsDB) releaseRealtimePreparation(id, token string) error {
-	res, err := c.db.Exec(`UPDATE calls SET status='pending',audio_bridge_url='pending',thread_id=CASE WHEN thread_id LIKE 'pending-%' THEN thread_id ELSE 'pending-'||thread_id END WHERE id=? AND status='answering' AND thread_id=? AND media_active=0`, id, token)
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE calls SET status='pending',audio_bridge_url='pending',thread_id=CASE WHEN thread_id LIKE 'pending-%' THEN thread_id ELSE 'pending-'||thread_id END WHERE id=? AND status='answering' AND thread_id=? AND media_active=0`, id, token)
 	if err != nil {
 		return err
 	}
@@ -282,7 +287,11 @@ func (c *callsDB) releaseRealtimePreparation(id, token string) error {
 	if err != nil || n == 0 {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	// Same transaction as the status flip: see releaseRingClaimTx.
+	if err = releaseRingClaimTx(tx, id); err != nil {
+		return err
+	}
+	return c.commitCall(tx, id)
 }
 
 // Retrying XML must not speak an error or hang up a legitimate winning answer.

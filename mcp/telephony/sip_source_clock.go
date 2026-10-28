@@ -32,6 +32,24 @@ type sipSourceClock struct {
 	recentRecoveries  int
 	fits              [16]sipClockFit
 	fitHead, fitCount int
+	last              sipClockObservation // previous closed window's fastest point
+	haveLast          bool
+	lastCandidatePPM  float64
+	haveCandidate     bool
+}
+
+// Sender clocks up to ±1.2% are tracked (cheap telephony gateways and
+// resampling softphones exceed ±0.1%). Larger corrections need confirmation.
+const sipClockMaxPPM = 12000
+
+// A re-anchored delivery timeline invalidates every retained receipt
+// observation, including the original reference. Keep counters, evidence and
+// the calibrated rate; observations restart on the next packet.
+func (c *sipSourceClock) rebase() {
+	c.windowAt = time.Time{}
+	c.best, c.origin, c.last = sipClockObservation{}, sipClockObservation{}, sipClockObservation{}
+	c.haveLast, c.haveCandidate = false, false
+	c.head, c.count, c.historyHead, c.historyCount = 0, 0, 0, 0
 }
 
 func (c *sipSourceClock) observe(b *rtpJitterBuffer, ts uint32, now time.Time) {
@@ -52,22 +70,27 @@ func (c *sipSourceClock) observe(b *rtpJitterBuffer, ts uint32, now time.Time) {
 	// A delivery step is not oscillator frequency. Do not mix observations
 	// across it into long-spaced slopes: that would interpret a permanent
 	// backlog as clock drift. Keep the original reference and calibrated rate,
-	// and rebuild frequency observations on the new side of the step.
-	step := now.Sub(c.best.at) - time.Duration(int32(ts-c.best.ts))*time.Second/8000
-	stepLimit := time.Duration(min(160, b.policy.MaxAgeMS*4/5)) * time.Millisecond
-	if step.Abs() > stepLimit {
-		c.record(sipClockFit{At: now.UTC(), Method: "delivery_step", Reason: "reference_retained", AppliedPPM: b.driftPPM, PhaseMS: float64(step) / float64(time.Millisecond)})
-		c.windowAt, c.best = now, q
-		c.head, c.count, c.historyHead, c.historyCount = 0, 0, 0, 0
-		return
+	// and rebuild frequency observations on the new side of the step. Compare
+	// the closed window's FASTEST point with the previous window's: one late
+	// packet opening a window must not erase the whole history.
+	closed := c.best
+	c.windowAt, c.best = now, q
+	if c.haveLast {
+		step := closed.at.Sub(c.last.at) - time.Duration(float64(int32(closed.ts-c.last.ts))/8000/(1+b.driftPPM/1e6)*float64(time.Second))
+		stepLimit := time.Duration(min(160, b.policy.MaxAgeMS*4/5)) * time.Millisecond
+		if step.Abs() > stepLimit {
+			c.record(sipClockFit{At: now.UTC(), Method: "delivery_step", Reason: "reference_retained", AppliedPPM: b.driftPPM, PhaseMS: float64(step) / float64(time.Millisecond)})
+			c.head, c.count, c.historyHead, c.historyCount = 0, 0, 0, 0
+			c.haveCandidate = false
+		}
 	}
-	c.points[c.head] = c.best
+	c.last, c.haveLast = closed, true
+	c.points[c.head] = closed
 	c.head = (c.head + 1) % len(c.points)
 	c.count = min(c.count+1, len(c.points))
-	c.history[c.historyHead] = c.best
+	c.history[c.historyHead] = closed
 	c.historyHead = (c.historyHead + 1) % len(c.history)
 	c.historyCount = min(c.historyCount+1, len(c.history))
-	c.windowAt, c.best = now, q
 	if c.count < 6 {
 		return
 	}
@@ -112,7 +135,14 @@ func (c *sipSourceClock) observe(b *rtpJitterBuffer, ts uint32, now time.Time) {
 	c.updates++
 	// A withheld offset cannot freeze a valid rate. Pivot at current mapped
 	// source time; a new rate never retroactively erases genuine delayed audio.
-	b.driftPPM += max(-200, min(200, f.CandidatePPM-b.driftPPM)) / 2
+	// Small corrections stay rate limited. A large skew converges quickly only
+	// when two consecutive accepted fits agree, so one noisy fit cannot jump it.
+	delta, limit := f.CandidatePPM-b.driftPPM, 200.0
+	if math.Abs(delta) > 1000 && c.haveCandidate && math.Abs(f.CandidatePPM-c.lastCandidatePPM) <= max(500, math.Abs(f.CandidatePPM)/4) {
+		limit = math.Abs(delta)
+	}
+	c.lastCandidatePPM, c.haveCandidate = f.CandidatePPM, true
+	b.driftPPM += max(-limit, min(limit, delta)) / 2
 	phase := predicted.Sub(previous)
 	if f.Method == "long_reference_rate" {
 		// Correct accumulated RATE error against real receipt observations,
@@ -188,7 +218,7 @@ func (c *sipSourceClock) fitLongRate(ts uint32, previous, now time.Time) (sipClo
 	slices.Sort(rates[:n])
 	f.CandidatePPM = rates[n/2]
 	f.RateSpreadPPM = rates[n*3/4] - rates[n/4]
-	if math.Abs(f.CandidatePPM) > 1000 {
+	if math.Abs(f.CandidatePPM) > sipClockMaxPPM {
 		f.Reason = "rate_out_of_range"
 		return f, time.Time{}
 	}
@@ -309,7 +339,11 @@ func fitSIPClock(points []sipClockObservation, ts uint32, previous, now time.Tim
 	f.ResidualMS = (maxResidual - minResidual) * 1000
 	f.PhaseMS = float64(predicted.Sub(previous)) / float64(time.Millisecond)
 	switch {
-	case math.Abs(ppm) > 1000:
+	case math.Abs(ppm) > sipClockMaxPPM:
+		f.Reason = "rate_out_of_range"
+	case math.Abs(ppm) > 1000 && count < 16:
+		// Slowly varying delay looks like a large rate over a few windows. A
+		// real sender skew stays linear over at least 32 seconds.
 		f.Reason = "rate_out_of_range"
 	case f.ResidualMS > 40:
 		f.Reason = "unstable_arrivals"

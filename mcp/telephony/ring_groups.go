@@ -333,8 +333,19 @@ func (c *callsDB) releaseRingClaim(callID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err = releaseRingClaimTx(tx, callID); err != nil {
+		return err
+	}
+	return c.commitCall(tx, callID)
+}
+
+// releaseRingClaimTx reopens a claimed ring run inside the caller's
+// transaction, so returning the call to 'pending' and re-ringing the remaining
+// members commit together. A separate transaction could leave the call pending
+// with its run stuck in 'claimed', and nobody else would ever ring.
+func releaseRingClaimTx(tx *sql.Tx, callID string) error {
 	var runID string
-	err = tx.QueryRow(`SELECT id FROM call_ring_runs WHERE call_id=? AND status='claimed'`, callID).Scan(&runID)
+	err := tx.QueryRow(`SELECT id FROM call_ring_runs WHERE call_id=? AND status='claimed'`, callID).Scan(&runID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -360,10 +371,7 @@ func (c *callsDB) releaseRingClaim(callID string) error {
 	if _, err = tx.Exec(`UPDATE call_route_executions SET status='ringing',selected_destination_id='' WHERE call_id=?`, callID); err != nil {
 		return err
 	}
-	if err = advanceRingRunTx(tx, runID, time.Now()); err != nil {
-		return err
-	}
-	return c.commitCall(tx, callID)
+	return advanceRingRunTx(tx, runID, time.Now())
 }
 
 func (a *App) runRingGroupTick(_ context.Context, ctx *sdk.AppCtx) error {
@@ -537,12 +545,26 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 		_, err = ctx.AppDB().Exec(`UPDATE call_ring_runs SET status='canceled' WHERE id=? AND status='exhausted'`, runID)
 		return err
 	}
-	if overflow == "" {
-		if err = a.expireCall(ctx, row); err != nil {
+	// failThrough ends the run on the flow's failure path. Used when there is
+	// no overflow, and when the overflow cannot make progress (see below), so
+	// the caller is not left holding until the run deadline.
+	failThrough := func() error {
+		if err := a.expireCall(ctx, row); err != nil {
 			return err
 		}
-		_, err = ctx.AppDB().Exec(`UPDATE call_ring_runs SET status='finished' WHERE id=?`, runID)
+		_, err := ctx.AppDB().Exec(`UPDATE call_ring_runs SET status='finished' WHERE id=?`, runID)
 		return err
+	}
+	if overflow == "" {
+		return failThrough()
+	}
+	// failLoop: the overflow can never offer anyone (it loops back into a ring
+	// node that already ran). End the call now rather than at its state expiry.
+	failLoop := func() error {
+		if _, err := ctx.AppDB().Exec(`UPDATE calls SET state_expires_at=? WHERE id=? AND status='pending'`, time.Now().UTC().Format(time.RFC3339Nano), callID); err != nil {
+			return err
+		}
+		return failThrough()
 	}
 	var raw string
 	if err = ctx.AppDB().QueryRow(`SELECT context_json FROM call_route_executions WHERE call_id=?`, callID).Scan(&raw); err != nil {
@@ -560,6 +582,11 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 	if overflow == current {
 		var d decisionRecord
 		d, err = scanDecision(ctx.AppDB().QueryRow(`SELECT `+decisionColumns+` FROM routing_decisions WHERE call_id=? AND node_id=? AND status='accepted'`, callID, current))
+		if errors.Is(err, sql.ErrNoRows) {
+			// A flow ring node whose overflow points at itself: there is no
+			// decision to retry, and retrying the lookup each tick never succeeds.
+			return failLoop()
+		}
 		if err != nil {
 			return err
 		}
@@ -569,6 +596,17 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 	}
 	if err != nil {
 		return err
+	}
+	if plan != nil && plan.Group != nil {
+		// Overflow back into a ring node that already ran: initRingRunTx keys
+		// runs by call+node, so it would insert nothing and offer nobody.
+		var existing int
+		if err = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE id=?`, "ring_"+callID+"_"+plan.NodeID).Scan(&existing); err != nil {
+			return err
+		}
+		if existing > 0 {
+			return failLoop()
+		}
 	}
 	if err = a.persistRoutingProgress(callID, row.ProjectID, plan, runID); err != nil {
 		return err

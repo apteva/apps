@@ -16,6 +16,45 @@ var mediaClockOrigin = time.Now()
 
 func mediaClockMS() float64 { return float64(time.Since(mediaClockOrigin)) / float64(time.Millisecond) }
 
+// captureTransitClockMS is replaceable so tests can simulate hours of skew.
+var captureTransitClockMS = mediaClockMS
+
+const (
+	transitFloorBucketMS = 5000
+	transitFloorBuckets  = 12
+)
+
+// transitFloor is the minimum transit delta over the last minute, kept in 5s
+// buckets. Browser send times and mediaClockMS are different clocks, so a
+// lifetime minimum turns ~100ppm skew into ever-growing "excess" and, after
+// tens of minutes, drops every microphone frame. A windowed floor follows the
+// skew (6ms per window at 100ppm) while a sudden sustained delay still
+// registers for a full window.
+type transitFloor struct {
+	buckets [transitFloorBuckets]struct {
+		index int64
+		min   float64
+		set   bool
+	}
+}
+
+func (f *transitFloor) observe(delta, now float64) float64 {
+	index := int64(math.Floor(now / transitFloorBucketMS))
+	b := &f.buckets[((index%transitFloorBuckets)+transitFloorBuckets)%transitFloorBuckets]
+	if !b.set || b.index != index {
+		b.index, b.min, b.set = index, delta, true
+	} else if delta < b.min {
+		b.min = delta
+	}
+	floor := delta
+	for _, other := range f.buckets {
+		if other.set && other.index > index-transitFloorBuckets && other.index <= index && other.min < floor {
+			floor = other.min
+		}
+	}
+	return floor
+}
+
 const softphoneAudioFrameV2 uint32 = 0x32545041
 
 func encodePlaybackFrame(data []byte, sequence uint32) []byte {
@@ -242,19 +281,21 @@ func (h *softphoneHub) observeCaptureTiming(data []byte, connectionIDs ...string
 	if magic == softphoneAudioFrameV2 && len(data) >= 32 {
 		sent := math.Float64frombits(binary.LittleEndian.Uint64(data[16:]))
 		if !math.IsNaN(sent) && !math.IsInf(sent, 0) && sent > 0 {
-			delta := mediaClockMS() - sent
-			if !h.captureTransitSet || delta < h.captureTransitBase {
-				h.captureTransitBase = delta
+			now := captureTransitClockMS()
+			delta := now - sent
+			if !h.captureTransitSet {
+				h.captureTransitFloor = transitFloor{}
 				h.captureTransitSet = true
 			}
-			h.captureTransitExcessMS = max(h.captureTransitExcessMS, delta-h.captureTransitBase)
-			// This is EXCESS over the fastest observed transit, not absolute
-			// one-way latency. No wall-clock synchronization is assumed.
-			if delta-h.captureTransitBase > float64(liveAudioMaxAge/time.Millisecond) {
+			excess := delta - h.captureTransitFloor.observe(delta, now)
+			h.captureTransitExcessMS = max(h.captureTransitExcessMS, excess)
+			// This is EXCESS over the fastest recently observed transit, not
+			// absolute one-way latency. No wall-clock synchronization is assumed.
+			if excess > float64(liveAudioMaxAge/time.Millisecond) {
 				h.captureStaleBytes += int64(len(data) - 32)
 				h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
 					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "capture_transit_age", ConnectionID: connectionID,
-					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, delta-h.captureTransitBase)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
+					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, excess)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
 				})
 				if len(h.captureDropEvents) > 100 {
 					h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]

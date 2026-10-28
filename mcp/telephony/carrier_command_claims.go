@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -87,6 +88,13 @@ func (a *App) activateHumanCarrier(request context.Context, ctx *sdk.AppCtx, exp
 		}
 		unlock()
 		commandErr := a.answerInboundCarrierCall(ctx, row, work)
+		ambiguous := commandErr != nil && ambiguousCarrierCommandError(commandErr, work)
+		if ambiguous {
+			// The carrier may have accepted the command before our deadline. Keep
+			// the claim (and the reservation, so a reattach cannot re-answer)
+			// until media or a callback confirms it, then fail clearly.
+			a.awaitCarrierAnswerEvidence(request, row, token)
+		}
 		unlock = a.softphones.lockClaim(row.ID)
 		current, err := a.db().findCall(row.ID)
 		owns, ownErr := a.ownsCarrierCommand(row.ID, token)
@@ -105,7 +113,7 @@ func (a *App) activateHumanCarrier(request context.Context, ctx *sdk.AppCtx, exp
 		}
 		// Positive carrier/media evidence can arrive before the command response.
 		// Never reset a successfully connected call merely because its HTTP reply failed.
-		if commandErr != nil && (current.MediaConnectedAt == "" || current.MediaStatus != "connected") {
+		if commandErr != nil && !carrierAnswerEvidence(row, current, ambiguous) {
 			_ = a.db().resetAnswerClaim(row.ID, row.PeerToken)
 			unlock()
 			return nil, commandErr
@@ -115,6 +123,57 @@ func (a *App) activateHumanCarrier(request context.Context, ctx *sdk.AppCtx, exp
 		}
 		unlock()
 		return current, err
+	}
+}
+
+// carrierAnswerConfirmWait bounds how long an ambiguous (timed-out) answer
+// keeps its claim. Carriers that accepted the command open media or post an
+// answered callback within a few seconds; after this the claim is reset.
+var carrierAnswerConfirmWait = 10 * time.Second
+
+// A deadline/timeout says nothing about whether the carrier acted; an HTTP
+// response from the carrier is a definitive outcome.
+func ambiguousCarrierCommandError(err error, work context.Context) bool {
+	var httpErr *carrierHTTPError
+	if errors.As(err, &httpErr) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(work.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// Connected media always confirms. After an ambiguous command, an answer the
+// carrier reported only after dispatch confirms it too (an IVR leg answered
+// before the claim is not evidence for this command).
+func carrierAnswerEvidence(before, current *callRow, ambiguous bool) bool {
+	if current.MediaConnectedAt != "" && current.MediaStatus == "connected" {
+		return true
+	}
+	return ambiguous && before.CarrierAnsweredAt == "" && current.CarrierAnsweredAt != ""
+}
+
+// Polls without the claim lock (media needs it) while extending the command
+// reservation. Returns when evidence arrives, the call ends, or the wait expires.
+func (a *App) awaitCarrierAnswerEvidence(request context.Context, before *callRow, token string) {
+	id := before.ID
+	work, cancel := context.WithTimeout(context.WithoutCancel(request), carrierAnswerConfirmWait)
+	defer cancel()
+	for {
+		_, _ = a.db().db.Exec(`UPDATE call_carrier_commands SET lease_until=? WHERE call_id=? AND token=?`, ringTime(time.Now().Add(2*time.Second)), id, token)
+		row, err := a.db().findCall(id)
+		if err != nil || row == nil || isTerminalStatus(row.Status) || carrierAnswerEvidence(before, row, true) {
+			return
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-work.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 

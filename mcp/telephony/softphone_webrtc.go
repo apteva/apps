@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"math/rand/v2"
 	"net"
@@ -65,7 +66,9 @@ func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, erro
 	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000}
 	c.ReceiveEstimator = values["softphone_webrtc_receive_estimator"]
 	if c.ReceiveEstimator == "" {
-		c.ReceiveEstimator = "fixed"
+		// Measured equal or better on loss and concealment in every replay
+		// scenario (TestReviewFRTCReceiveEstimatorScenarios).
+		c.ReceiveEstimator = "distribution"
 	}
 	if c.ReceiveEstimator != "fixed" && c.ReceiveEstimator != "distribution" {
 		return c, errors.New("invalid WebRTC receive estimator")
@@ -226,6 +229,14 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	v.Ingress = s.ingress.snapshot()
 	v.Events = append([]audioDropEvent(nil), v.Events...)
 	return v
+}
+
+// Listener and coaching streams share the browser sender with their own label.
+func (s *rtcMediaStats) mediaDirection() string {
+	if s.direction == "" {
+		return "carrier_to_operator"
+	}
+	return s.direction
 }
 func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration int) {
 	s.mu.Lock()
@@ -854,10 +865,7 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 }
 
 func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, maxAge time.Duration, sourceMaxMS float64, whispers <-chan rtcWhisperFrame, inputRates ...int) {
-	direction := stats.direction
-	if direction == "" {
-		direction = "carrier_to_operator"
-	}
+	direction := stats.mediaDirection()
 	requestedRate := 48000
 	if len(inputRates) > 0 && inputRates[0] != 0 {
 		requestedRate = inputRates[0]
@@ -956,6 +964,7 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 	defer tick.Stop()
 	var pending rtcPCMFramer
 	var lastChunkAt time.Time
+	var writeFailures rtcWriteFailures
 	for {
 		select {
 		case <-done:
@@ -1005,22 +1014,14 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 				continue
 			}
 			voice := nextRTCWhisper(whispers, now)
-			mixed := voice != nil
-			encodeSamples := samples[:frameSamples]
 			if voice != nil {
 				if voice.epoch != whisperEpoch {
 					whisperResampler = newPCMResampler(8000, inputRate)
 					whisperEpoch = voice.epoch
 				}
 				overlay = whisperResampler.ProcessInto(voice.pcm, overlay)
-				encodeSamples = mixRTCWhisperInto(encodeSamples, overlay, mixedSamples)
 			}
-			n, err := encoder.EncodeFloat32(encodeSamples, out)
-			// A stop/replacement during encoding invalidates the private overlay.
-			if voice != nil && (!voice.valid() || time.Since(voice.at) > coachAudioMaxAge) {
-				mixed = false
-				n, err = encoder.EncodeFloat32(samples[:frameSamples], out)
-			}
+			n, mixed, err := encodeRTCSlot(encoder, samples[:frameSamples], voice, overlay, mixedSamples, out)
 			samples = samples[:copy(samples, samples[frameSamples:])]
 			if err != nil {
 				stop()
@@ -1036,9 +1037,14 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 				stats.drop("webrtc_pacing_gap", direction, 0, skipped)
 			}
 			if err := writeObservedRTP(track.WriteRTP, &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}, &stats.rtp); err != nil {
-				stop()
-				return
+				if writeFailures.fatal(err) {
+					stop()
+					return
+				}
+				stats.drop("webrtc_rtp_write_error", direction, 0, 20)
+				continue
 			}
+			writeFailures.fatal(nil)
 			if mixed {
 				stats.mu.Lock()
 				stats.value.CoachingMixedMS += int64(len(voice.pcm) * 1000 / 8000)
@@ -1046,6 +1052,34 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			}
 		}
 	}
+}
+
+// Each 20 ms slot is encoded exactly once, so the encoder history is always
+// the audio the browser receives. The private overlay's lease is checked
+// immediately before encoding; a stop during the encode ends it from the next
+// slot, rather than re-encoding the same slot over a state already advanced.
+func encodeRTCSlot(encoder rtcOpusEncoder, main []float32, voice *rtcWhisperFrame, overlay []int16, mixed []float32, out []byte) (int, bool, error) {
+	if voice == nil || !voice.valid() || time.Since(voice.at) > coachAudioMaxAge {
+		n, err := encoder.EncodeFloat32(main, out)
+		return n, false, err
+	}
+	n, err := encoder.EncodeFloat32(mixRTCWhisperInto(main, overlay, mixed), out)
+	return n, true, err
+}
+
+// A rejected RTP write is one lost packet; the call's media continues. Only
+// a closed transport or a sustained run of failures ends the session.
+const rtcMaxConsecutiveWriteErrors = 25 // 500 ms of packets
+
+type rtcWriteFailures struct{ consecutive int }
+
+func (f *rtcWriteFailures) fatal(err error) bool {
+	if err == nil {
+		f.consecutive = 0
+		return false
+	}
+	f.consecutive++
+	return f.consecutive >= rtcMaxConsecutiveWriteErrors || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || errors.Is(err, webrtc.ErrConnectionClosed)
 }
 
 type rtcPCMFrame struct {
@@ -1062,7 +1096,7 @@ func nextRTCFrame(frames <-chan rtcPCMFrame, now time.Time, stats *rtcMediaStats
 				return rtcPCMFrame{}, false
 			}
 			if !frame.expires.After(now) {
-				stats.drop("webrtc_playback_queue_age", "carrier_to_operator", 0, len(frame.pcm)*1000/24000)
+				stats.drop("webrtc_playback_queue_age", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
 				continue
 			}
 			return frame, true

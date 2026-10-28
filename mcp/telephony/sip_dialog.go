@@ -154,8 +154,10 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 		})
 	}
 }
+
+// a is the new offer; its c=0.0.0.0 hold keeps the established address.
 func sameSIPMedia(a, b sipMediaOffer) bool {
-	return a.RemoteAddress == b.RemoteAddress && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.DTMFPayloadType == b.DTMFPayloadType && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
+	return (a.RemoteAddress == b.RemoteAddress || a.RemoteAddress.IsUnspecified()) && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.DTMFPayloadType == b.DTMFPayloadType && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
 }
 func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	var observed *sipLiveDiagnostics
@@ -211,6 +213,7 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	direction := "sendrecv"
+	previousSDP := answer
 	if len(req.Body()) > 0 {
 		offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
 		if err != nil || !sameSIPMedia(offer, s.offer) {
@@ -218,12 +221,13 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 			return
 		}
 		direction = offer.Direction
-		answer = bytes.Replace(answer, []byte("a=sendrecv"), []byte("a="+sipAnswerDirection(direction)), 1)
 		// Echo the current offer's crypto tag even when keys/media are unchanged.
 		if offer.Secure {
-			answer = bytes.Replace(answer, []byte("a=crypto:"+s.offer.CryptoTag+" "), []byte("a=crypto:"+offer.CryptoTag+" "), 1)
+			answer = sipSDPWithCryptoTag(answer, offer.CryptoTag)
 		}
 	}
+	// Same o= session; its version increments only when the SDP changed.
+	answer = nextSIPLocalSDP(previousSDP, sipSDPWithDirection(answer, sipAnswerDirection(direction)))
 	var response *sip.Response
 	if req.Method == sip.INVITE || len(req.Body()) > 0 {
 		response = sip.NewSDPResponseFromRequest(req, answer)
@@ -255,6 +259,9 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	if req.Method == sip.INVITE || len(req.Body()) > 0 {
+		s.localSDP = answer
+	}
 	signalSIPTimer(s.timerWake)
 	if contact := req.Contact(); contact != nil {
 		s.remoteTarget = contact.Address

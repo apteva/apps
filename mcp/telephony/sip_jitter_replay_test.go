@@ -391,6 +391,7 @@ type sipReplayResult struct {
 
 func replaySIP(t *testing.T, profile, codec string, target, capacity int, seconds int, drift float64, speech []int16) sipReplayResult {
 	t.Helper()
+	seconds = raceScaled(seconds, 120)
 	m := &sipRTPMedia{offer: sipMediaOffer{Codec: codec, PacketSamples: 160}}
 	enc := &sipRTPMedia{offer: m.offer}
 	rate := m.sampleRate()

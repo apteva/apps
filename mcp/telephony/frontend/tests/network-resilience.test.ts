@@ -106,7 +106,10 @@ test("new network profiles validate safe limits without widening queues", () => 
   });
   expect(q.bitrate).toBe(24000);
   for (let i = 0; i < 10; i++)
-    q.observe({ remote_receiver_fractionLost: 0.2 }, i * 2000);
+    q.observe(
+      { remote_receiver_fractionLost: 0.2, remote_receiver_report_updated: 1 },
+      i * 2000,
+    );
   expect(q.bitrate).toBe(20000);
 });
 test("quality notices require sustained evidence, respects cooldown, and stops after two attempts", () => {
@@ -196,6 +199,7 @@ function simulate(
         {
           pair_currentRoundTripTime: 0.04 + (age / 1000) * 2,
           remote_receiver_fractionLost: loss,
+          remote_receiver_report_updated: 1,
         },
         now,
       );
@@ -227,7 +231,10 @@ test("before/after: busy upload, narrow link and healthy voice acceptance", asyn
       expect(after.addedDelayP95Ms).toBe(before.addedDelayP95Ms);
       expect(after.finalBitrate).toBe(32000);
     } else {
-      expect(after).toEqual(before);
+      // The standard controller no longer saw-tooths on alternating loss
+      // reports, so it may only be better than the frozen release.
+      expect(after.lostPackets).toBeLessThanOrEqual(before.lostPackets);
+      expect(after.addedDelayP95Ms).toBeLessThanOrEqual(before.addedDelayP95Ms);
       expect(afterResilientPreset.lostPackets).toBeLessThan(before.lostPackets);
       expect(afterResilientPreset.addedDelayP95Ms).toBeLessThan(
         before.addedDelayP95Ms,
@@ -264,20 +271,33 @@ test("network playback profile overrides inherited legacy defaults and retains e
   expect(DEFAULT_NETWORK_POLICY.background_check).toBe(false);
 });
 
-test("default balanced settings retain released bitrate behavior under varied feedback", () => {
+// Upload bitrate intentionally differs from the frozen release: it ignores
+// cached receiver reports and recovers only after a 10 s clean window.
+test("default balanced settings keep released playback target with a steadier, bounded bitrate", () => {
   const before = new LegacyRTCQualityPolicy(),
     after = rtcQualityPolicy();
+  let beforeChanges = 0,
+    afterChanges = 0,
+    beforeRate = before.bitrate,
+    afterRate = after.bitrate;
   for (let i = 0; i < 200; i++) {
     const metrics = {
       remote_receiver_fractionLost: i % 9 === 0 ? 0.1 : 0,
+      remote_receiver_report_updated: 1,
       pair_availableOutgoingBitrate: i % 8 === 0 ? 48000 : 96000,
       pair_currentRoundTripTime: 0.04 + (i % 20) * 0.04,
     };
     before.observe(metrics, i * 2000);
     after.observe(metrics, i * 2000);
-    expect(after.bitrate).toBe(before.bitrate);
+    if (before.bitrate !== beforeRate) beforeChanges++;
+    if (after.bitrate !== afterRate) afterChanges++;
+    beforeRate = before.bitrate;
+    afterRate = after.bitrate;
+    expect(after.bitrate).toBeGreaterThanOrEqual(16000);
+    expect(after.bitrate).toBeLessThanOrEqual(32000);
     expect(after.target).toBe(before.target);
   }
+  expect(afterChanges).toBeLessThan(beforeChanges);
 });
 
 test("quality notices can remain local without adding traffic on an impaired link", () => {

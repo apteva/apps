@@ -37,6 +37,13 @@ func (a *App) applyRouteTransport(ctx *sdk.AppCtx, id, transport string, agentID
 		}
 	}
 	if desired == before.InboundTransport && (desired != inboundTransportSIPDirect || before.TransportConfig != "") {
+		// Re-applying sip_direct migrates a route configured before route
+		// secrets existed; it is a no-op once the route has one.
+		if desired == inboundTransportSIPDirect {
+			if err = a.upgradeDirectSIPRouteSecret(ctx, before); err != nil {
+				return nil, fmt.Errorf("provision direct SIP route secret: %w", err)
+			}
+		}
 		return before, nil
 	}
 	a.inventoryReads.invalidate()

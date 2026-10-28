@@ -637,6 +637,17 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 	var lastEvent uint32
 	var haveEvent bool
 	resampler := newPCMResampler(m.sampleRate(), 24000)
+	var order sipLocalRTPOrder
+	emit := func(payload []byte, silence int) {
+		pcm := make([]int16, silence*m.sampleRate()/8000)
+		if payload != nil {
+			pcm = m.decodeAudio(payload)
+		}
+		if r := s.recorder.Load(); r != nil {
+			r.Record(0, resampler.Process(pcm))
+		}
+	}
+	defer order.flush(emit)
 	for ctx.Err() == nil {
 		_ = m.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, source, err := m.readPacket(buffer)
@@ -649,6 +660,9 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 			if !errors.As(err, &networkError) || !networkError.Timeout() {
 				return
 			}
+			// A quiet socket ends any reorder window; record held audio now
+			// rather than only at exit, after completion has been judged.
+			order.flush(emit)
 			continue
 		}
 		if source.IP.String() != m.remote.IP.String() || source.Port != m.remote.Port {
@@ -676,13 +690,96 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 		if packet.PayloadType != m.offer.PayloadType {
 			continue
 		}
-		pcm := m.decodeAudio(packet.Payload)
-		if record {
-			if r := s.recorder.Load(); r != nil {
-				r.Record(0, resampler.Process(pcm))
+		if !record {
+			continue
+		}
+		// Recording is not real time: reorder, deduplicate and fill losses so
+		// the timeline keeps its length and stateful G.722 decodes in order.
+		order.push(packet.SequenceNumber, packet.Timestamp, packet.Payload, emit)
+	}
+}
+
+// Bounded reorder/dedup stage for local voicemail recording. Packets are
+// released in sequence order once more than depth are held; a hole is filled
+// with silence for its RTP timestamp span (at most one second), never with
+// fabricated encoded data.
+type sipLocalRTPOrder struct {
+	depth    int
+	held     map[uint16]sipLocalRTPPacket
+	next     uint16
+	nextTS   uint32
+	started  bool
+	released [64]uint16
+	valid    [64]bool
+}
+type sipLocalRTPPacket struct {
+	ts      uint32
+	payload []byte
+}
+
+// emit receives either an in-order payload or, for a gap, nil and the number
+// of 8 kHz RTP samples of silence.
+func (o *sipLocalRTPOrder) push(seq uint16, ts uint32, payload []byte, emit func([]byte, int)) {
+	if o.held == nil {
+		o.held = make(map[uint16]sipLocalRTPPacket)
+	}
+	if o.depth <= 0 {
+		o.depth = 4
+	}
+	slot := int(seq) % len(o.released)
+	if _, ok := o.held[seq]; ok || o.valid[slot] && o.released[slot] == seq {
+		return
+	}
+	if o.started && rtpSequenceBefore(seq, o.next) {
+		if int16(o.next-seq) <= 64 {
+			return // Already released or filled; recording it now reorders time.
+		}
+		o.flush(emit) // Far behind: a sender rebase, start a new run.
+		o.started = false
+	}
+	o.held[seq] = sipLocalRTPPacket{ts, append([]byte(nil), payload...)}
+	if !o.started {
+		o.started, o.next, o.nextTS = true, seq, ts
+		for s := range o.held {
+			if rtpSequenceBefore(s, o.next) {
+				o.next, o.nextTS = s, o.held[s].ts
 			}
 		}
 	}
+	for len(o.held) > o.depth {
+		o.release(emit)
+	}
+}
+
+func (o *sipLocalRTPOrder) flush(emit func([]byte, int)) {
+	for len(o.held) > 0 {
+		o.release(emit)
+	}
+}
+
+func (o *sipLocalRTPOrder) release(emit func([]byte, int)) {
+	p, ok := o.held[o.next]
+	if !ok {
+		// The oldest held packet proves this hole; skip to it with silence.
+		oldest := o.next
+		first := true
+		for s := range o.held {
+			if first || rtpSequenceBefore(s, oldest) {
+				oldest, first = s, false
+			}
+		}
+		if gap := int32(o.held[oldest].ts - o.nextTS); gap > 0 {
+			emit(nil, int(min(gap, 8000)))
+		}
+		o.next, o.nextTS = oldest, o.held[oldest].ts
+		p = o.held[oldest]
+	}
+	delete(o.held, o.next)
+	emit(p.payload, 0)
+	slot := int(o.next) % len(o.released)
+	o.released[slot], o.valid[slot] = o.next, true
+	o.next++
+	o.nextTS = p.ts + uint32(len(p.payload))
 }
 
 func (a *App) toolLocalMediaSettings(caller context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

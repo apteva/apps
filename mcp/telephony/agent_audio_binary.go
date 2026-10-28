@@ -51,6 +51,7 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 		return
 	}
 	agentOutput := newAgentMediaConverter(session, 16000, false)
+	var outputKey agentPlaybackKey
 	var frame realtimeBridgeControl
 	for {
 		raw, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
@@ -92,6 +93,10 @@ func (a *App) bridgeContinuousBinaryAgent(row *callRow, bridge *carrierBridgeLea
 		if !session.accept(frame) {
 			frame = realtimeBridgeControl{}
 			continue
+		}
+		if key := (agentPlaybackKey{frame.Generation, frame.ItemID}); key.Item != "" && key != outputKey {
+			agentOutput.reset()
+			outputKey = key
 		}
 		pcm := agentOutput.output(raw)
 		packets := newCarrierAudioPacketizer(16000).add(pcm, session.pcm24Samples(len(raw)), frame)

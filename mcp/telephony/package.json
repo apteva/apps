@@ -20,7 +20,8 @@
     "test:call-statistics": "bun test ui/call-statistics.test.ts && bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts",
     "test:auto-answer": "bun test frontend/tests/auto-answer.test.ts && env GOWORK=off go test -run \"^TestAutoAnswer\" -count=1 .",
     "test:auto-answer:browser": "env GOWORK=off go test -tags integration -run \"^TestAutoAnswerRealBrowserPickup$\" -count=1 -timeout 90s -v .",
-    "test:managed-media": "env GOWORK=off go test -tags integration -run \"^TestManagedRuntimeAutomaticBrowserAnswerAndRenewal$\" -count=1 -timeout 2m -v ."
+    "test:managed-media": "env GOWORK=off go test -tags integration -run \"^TestManagedRuntimeAutomaticBrowserAnswerAndRenewal$\" -count=1 -timeout 2m -v .",
+    "test:race": "bun scripts/test-race.ts"
   },
   "devDependencies": {
     "@apteva/web-sdk": "0.7.0",

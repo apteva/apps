@@ -1,5 +1,6 @@
 const FRAME_SAMPLES = Math.round(sampleRate / 50);
 const CROSSFADE_MS = 5;
+const LATENESS_WINDOW_MS = 30_000;
 
 class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -158,6 +159,10 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     this.maxQueuedSamples = 0;
     this.processedSinceStats = 0;
     this.stableSamples = 0;
+    // Recent lateness the target must keep covering, on the render clock.
+    // The target decays toward its max, so one stall does not pin latency.
+    this.latenessEvents = [];
+    this.decaySamples = 0;
     this.dropEvents = [];
     this.sequenceGaps = 0;
     this.lastArrivalMS = null;
@@ -205,7 +210,8 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       this.queue = []; this.queued = 0; this.offset = 0; this.playing = false;
       this.underrunPending = false;
       this.resetReserveAdjustment();
-      this.startupWaitSamples = this.stableSamples = 0;
+      this.startupWaitSamples = this.stableSamples = this.decaySamples = 0;
+      this.latenessEvents = [];
       this.shortTailStartup = false;this.shortTailRemaining=null;
       this.expectedSequence = null; this.lastArrivalMS = null;
       this.targetMs = this.initialTargetMs;
@@ -226,9 +232,12 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       const excess = now - this.lastArrivalMS - this.lastFrameMS;
       if (excess > 20) {
         const prior = this.targetMs;
-        this.targetMs = Math.min(this.maxTargetMs, Math.max(this.targetMs, Math.ceil((excess + this.minTargetMs) / 10) * 10));
+        const needed = Math.min(this.maxTargetMs, Math.ceil((excess + this.minTargetMs) / 10) * 10);
+        this.rememberLateness(now, needed);
+        this.targetMs = Math.max(this.targetMs, needed);
         if (prior !== this.targetMs) this.playbackEvent("target_changed", "arrival_jitter");
-        this.stableSamples = 0;
+        // Lateness the current cushion already absorbs is not instability.
+        if (needed > prior) this.stableSamples = 0;
       }
     }
     this.lastArrivalMS = now;
@@ -244,6 +253,18 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
   }
 
   msToSamples(ms) { return Math.round(sampleRate * ms / 1000); }
+
+  rememberLateness(now, needed) {
+    this.latenessEvents.push({at: now, needed});
+    while (this.latenessEvents.length && (this.latenessEvents[0].at < now - LATENESS_WINDOW_MS || this.latenessEvents.length > 64)) this.latenessEvents.shift();
+  }
+
+  // Lowest target that still covers every lateness seen in the window.
+  latenessFloorMs(now) {
+    let floor = this.minTargetMs;
+    for (const event of this.latenessEvents) if (event.at >= now - LATENESS_WINDOW_MS) floor = Math.max(floor, event.needed);
+    return Math.min(this.maxTargetMs, floor);
+  }
 
   playbackEvent(kind, reason, extra = {}) {
     this.playbackEvents.push({id:`${this.underrunEpoch}:playback:${++this.playbackEventSerial}`,
@@ -525,6 +546,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       } else if (written < out.length || this.shortTailRemaining===0) {
         this.shortTailRemaining=null;
         this.underruns += 1; this.targetMs = Math.min(this.maxTargetMs, this.targetMs + 20);
+        this.rememberLateness(currentTime * 1000, this.targetMs);
         this.playbackEvent("rebuffer", "underrun");
         this.playing = false; this.stableSamples = 0;
         this.resetReserveAdjustment();
@@ -532,8 +554,12 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
         this.beginUnderrun(currentTime * 1000 + written * 1000 / sampleRate);
       } else {
         this.stableSamples += out.length;
-        if (this.stableSamples >= sampleRate * 30 && this.targetMs > this.minTargetMs) {
-          this.targetMs = Math.max(this.minTargetMs, this.targetMs - 10); this.stableSamples = 0;
+        this.decaySamples += out.length;
+        // Step a quarter of the way toward the recent-lateness floor every
+        // 2s of stable playback; stableSamples keeps counting for compression.
+        const floor = this.latenessFloorMs(currentTime * 1000);
+        if (this.stableSamples >= sampleRate * 2 && this.decaySamples >= sampleRate * 2 && this.targetMs > floor) {
+          this.targetMs = Math.max(floor, this.targetMs - Math.max(10, Math.round((this.targetMs - floor) / 40) * 10)); this.decaySamples = 0;
           this.playbackEvent("target_changed", "stable_playback", {phase:"playing"});
         }
       }

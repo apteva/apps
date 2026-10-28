@@ -218,6 +218,9 @@ func TestAgentAudioSIPWireChunkContinuity(t *testing.T) {
 				t.Fatal(err)
 			}
 			reference := newAgentMediaConverter(s, 8000, false).output(pcm16ToBytes(input))
+			// The reply's final partial packet is zero-padded; its real tail
+			// fades out over 3 ms first so the padding is not a hard cut.
+			applyAgentEndFade(reference[len(reference)/160*160:], 8000)
 			reference = append(reference, make([]int16, 8000-len(reference))...)
 			if !slices.Equal(received, encodeSIPG711(reference, codec)) {
 				t.Fatal("wire speech changed or padded between chunks")

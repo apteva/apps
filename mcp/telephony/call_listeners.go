@@ -439,10 +439,13 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			return
 		}
 		grant.PeerHash, grant.OwnerHash = phoneHash(row.PeerToken), phoneHash(owner)
-		h := a.softphones.lookup(id)
-		h.mu.Lock()
-		grant.BrowserEpoch = h.browserEpoch
-		h.mu.Unlock()
+		epoch, ok := a.coachingBrowserEpoch(id)
+		if !ok {
+			// The adviser hub can be released between the capability check and here.
+			writeJSONStatus(w, 409, map[string]any{"code": "adviser_not_connected"})
+			return
+		}
+		grant.BrowserEpoch = epoch
 	}
 	principal, providerJSON := "", ""
 	if p != nil {
@@ -644,6 +647,26 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	finishSpurt := func(reason string) { finishSpurtFor(0, reason) }
 	defer func() { finishSpurt(l.closeReason()) }()
+	// Coaching target checks are serialized with answer/attach/takeover and
+	// refresh the cached authorization the coach media path relies on.
+	targetCheck := func() (*callRow, string, int64, error) {
+		if l.coaching.grant.Enabled {
+			unlock := a.softphones.lockClaim(id)
+			defer unlock()
+		}
+		current, e := a.db().findCall(id)
+		if e != nil || current == nil || isTerminalStatus(current.Status) {
+			l.coaching.clearTargetVerified()
+			return current, "", 0, e
+		}
+		reason, expiry := a.listenerSessionCheck(current, token)
+		if reason == "" {
+			l.coaching.markTargetVerified()
+		} else {
+			l.coaching.clearTargetVerified()
+		}
+		return current, reason, expiry, e
+	}
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() { close(done); <-watcherDone }()
@@ -674,7 +697,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				event, _ := json.Marshal(map[string]any{"type": "coach.stopped", "generation": stopped.generation, "reason": stopped.reason})
 				writer.queueControl(event)
 			case <-ticker.C:
-				current, e := a.db().findCall(id)
+				current, reason, expiry, e := targetCheck()
 				if e != nil && verifiedExpiry > time.Now().Unix() {
 					if h := a.softphones.lookup(id); h != nil {
 						h.stopCoach(l, "policy_unavailable")
@@ -696,7 +719,6 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 					finishSpurt("talk_timeout")
 
 				}
-				reason, expiry := a.listenerSessionCheck(current, token)
 				if reason == "" {
 					verifiedExpiry = expiry
 					continue
@@ -776,6 +798,11 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 							reason = "media_session_lookup_failed"
 						} else if current != nil {
 							reason, _ = a.listenerSessionCheck(current, token)
+						}
+						if reason == "" {
+							l.coaching.markTargetVerified()
+						} else {
+							l.coaching.clearTargetVerified()
 						}
 						if temporaryMediaFailure(reason) {
 							if h := a.softphones.lookup(id); h != nil {

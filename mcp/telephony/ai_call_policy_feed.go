@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -59,18 +60,33 @@ func (a *App) ensureAIPhaseFeed(ctx *sdk.AppCtx, agent int64) {
 		return
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
-	a.aiPolicies.feeds[agent] = &aiPhaseFeed{cancel: cancel}
+	feed := &aiPhaseFeed{cancel: cancel}
+	a.aiPolicies.feeds[agent] = feed
 	a.aiPolicies.mu.Unlock()
 	go func() {
+		// On any exit, drop this feed's entry (if it is still ours) so the next
+		// call for the agent can start a fresh feed instead of finding a dead one.
+		defer a.forgetAIPhaseFeed(agent, feed)
 		query := url.Values{"agent_id": {strconv.FormatInt(agent, 10)}, "thread_prefix": {"tel-"}, "events": {"realtime.state,realtime.user"}}
 		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second}
 		defer transport.CloseIdleConnections()
 		client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		var missingSince time.Time
 		for attempt := 0; feedCtx.Err() == nil; attempt++ {
 			permanent, err := a.readAIPhaseFeed(feedCtx, client, gateway+"/api/apps/callback/telemetry?"+query.Encode(), token, agent)
 			a.setAIPhaseFeed(agent, false)
 			if feedCtx.Err() != nil {
 				return
+			}
+			// 404/405 can be transient while the platform deploys. Keep retrying
+			// with backoff for a bounded window before giving up.
+			if errors.Is(err, errAIPhaseFeedMissing) {
+				if missingSince.IsZero() {
+					missingSince = time.Now()
+				}
+				permanent = time.Since(missingSince) >= aiPhaseFeedMissingWindow
+			} else {
+				missingSince = time.Time{}
 			}
 			// Never log HTTP bodies, tokens, or request URLs. This degrades only silence
 			// handling; the independent persisted AI duration limit remains enforced.
@@ -100,8 +116,11 @@ func (a *App) readAIPhaseFeed(ctx context.Context, client *http.Client, endpoint
 		return false, fmt.Errorf("phase transport unavailable")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 404 || resp.StatusCode == 405 {
+		return false, fmt.Errorf("phase endpoint HTTP %d: %w", resp.StatusCode, errAIPhaseFeedMissing)
+	}
 	if resp.StatusCode != 200 {
-		return resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 405, fmt.Errorf("phase endpoint HTTP %d", resp.StatusCode)
+		return resp.StatusCode == 401 || resp.StatusCode == 403, fmt.Errorf("phase endpoint HTTP %d", resp.StatusCode)
 	}
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return true, fmt.Errorf("phase endpoint did not return SSE")
@@ -129,6 +148,20 @@ func (a *App) readAIPhaseFeed(ctx context.Context, client *http.Client, endpoint
 	}
 	return false, fmt.Errorf("phase stream ended")
 }
+
+var errAIPhaseFeedMissing = errors.New("phase endpoint missing")
+
+// aiPhaseFeedMissingWindow bounds retries of a 404/405 endpoint.
+var aiPhaseFeedMissingWindow = 5 * time.Minute
+
+func (a *App) forgetAIPhaseFeed(agent int64, feed *aiPhaseFeed) {
+	a.aiPolicies.mu.Lock()
+	defer a.aiPolicies.mu.Unlock()
+	if a.aiPolicies.feeds[agent] == feed {
+		delete(a.aiPolicies.feeds, agent)
+	}
+}
+
 func (a *App) pruneAIPhaseFeeds() {
 	a.aiPolicies.mu.Lock()
 	defer a.aiPolicies.mu.Unlock()

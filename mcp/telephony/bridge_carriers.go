@@ -244,6 +244,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	inputResampler := carrierInputResampler(cfg.InputCodec)
 	agentInput := newAgentMediaConverter(agentSession, carrierCodecSampleRate(cfg.InputCodec), true)
 	agentOutput := newAgentMediaConverter(agentSession, carrierCodecSampleRate(cfg.OutputCodec), false)
+	var outputKey agentPlaybackKey
 	playback := newTwilioPlaybackTracker()
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
@@ -466,6 +467,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
+	// Outside continuous mode the packetizer keeps a sub-packet remainder for
+	// the next frame; share it so the pacer commits it once input goes idle.
+	var packetTail *carrierPacketizerTail
+	if !agentSession.continuous() {
+		packetTail = &carrierPacketizerTail{packetizer: packetizer}
+		pacerPolicy.tail = packetTail
+	}
 	observeSent := tap.jsonOutputObserver(cfg.OutputCodec)
 	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
 		playback, pacerPolicy,
@@ -569,7 +577,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				}
 				interruptSource := audioFrontend.markInterrupt(control.Source)
 				agentSession.cancel(control.ItemID, control.Generation)
+				if packetTail != nil {
+					packetTail.mu.Lock()
+				}
 				packetizer.cancelPlayback(control)
+				if packetTail != nil {
+					packetTail.mu.Unlock()
+				}
 				receipt, err := pacer.cancelPlayback(ctx, control)
 				clearedMS := receipt.LocalMS
 				if err == nil {
@@ -591,6 +605,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			nextFrame = realtimeBridgeControl{}
 			continue
 		}
+		if key := (agentPlaybackKey{nextFrame.Generation, nextFrame.ItemID}); key.Item != "" && key != outputKey {
+			agentOutput.reset()
+			outputKey = key
+		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
 		if agentSession.continuous() && sourceAt.IsZero() {
 			sourceAt = time.Now()
@@ -598,6 +616,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		pcmCarrier := agentOutput.output(data)
 		if len(pcmCarrier) == 0 {
 			continue
+		}
+		if packetTail != nil {
+			packetTail.mu.Lock()
+			packetTail.lastInputAt = time.Now()
 		}
 		packets := packetizer.addAt(pcmCarrier, agentSession.pcm24Samples(len(data)), nextFrame, sourceAt)
 		if agentSession.continuous() {
@@ -610,6 +632,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		nextFrame = realtimeBridgeControl{}
 		var queuedMS, droppedMS int
 		err = agentSession.withPlaybackPressure(ctx, frame, func() error { var e error; queuedMS, droppedMS, e = pacer.enqueue(ctx, packets); return e })
+		if packetTail != nil {
+			packetTail.mu.Unlock()
+		}
 		if errors.Is(err, errCarrierPacerOverflow) {
 			err = agentSession.overflow(coreWriter, frame.ItemID, frame.Generation, "carrier_queue_overflow")
 			if err != nil {
@@ -952,6 +977,32 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	a.bindAIPlayback(row, bridge.generation, func() bool { return false })
 	agentOutput := newAgentMediaConverter(agentSession, 16000, false)
 	listenResampler := newPCMResampler(16000, 24000)
+	// Vonage has no clear command, so core audio must not run ahead of real
+	// time on the carrier: a bounded local queue lets barge-in drop it.
+	var vonagePacer *jsonCarrierAudioPacer
+	if provider == "vonage" {
+		vonagePacer = newJSONCarrierAudioPacer(ctx, 16000, carrierCodecL16_16, "vonage_binary", "", false, playback, bufferedCarrierPacerPolicy(), func(raw []byte) error {
+			var frame struct {
+				Media struct {
+					Payload string `json:"payload"`
+				} `json:"media"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				return err
+			}
+			pcm, err := base64.StdEncoding.DecodeString(frame.Media.Payload)
+			if err != nil {
+				return err
+			}
+			if err = vonageWriter.Write(ws.OpBinary, pcm); err == nil {
+				a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
+				if tap.hasListeners() {
+					tap.publish(1, pcm16ToBytes(listenResampler.Process(bytesToPCM16(pcm))))
+				}
+			}
+			return err
+		}, nil, func(err error) { bridge.socketError(mediaCloseLegCarrier, "write", err); bridge.cancel() })
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -974,6 +1025,14 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			if ok && control.Type == "interrupt" {
 				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				audioFrontend.markInterrupt(control.Source)
+				// No item identity on this path: an interrupt is the reply boundary.
+				agentOutput.reset()
+				if vonagePacer != nil {
+					if _, err := vonagePacer.clear(ctx); err != nil {
+						closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear Vonage playback")
+						return
+					}
+				}
 				if provider == "sinch" {
 					if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"clear"}`)); err != nil {
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "clear Sinch playback")
@@ -991,6 +1050,17 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			continue
 		}
 		pcm16 := agentOutput.output(data)
+		if vonagePacer != nil {
+			packets := make([]carrierPacedPacket, 0, len(pcm16)/320+1)
+			for start := 0; start < len(pcm16); start += 320 {
+				packets = append(packets, carrierPacedPacket{PCM: pcm16[start:min(len(pcm16), start+320)], EnqueuedAt: sourceAt})
+			}
+			if _, _, err = vonagePacer.enqueue(ctx, packets); err != nil && !errors.Is(err, errCarrierPacerOverflow) {
+				closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "queue realtime audio for Vonage")
+				return
+			}
+			continue
+		}
 		err = writeVonageFramesObserved(vonageWriter, pcm16ToBytes(pcm16), func(frame []byte) {
 			a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
 			if tap.hasListeners() {
@@ -1174,7 +1244,12 @@ func buildCarrierClear(shape, streamSID string) any {
 	case "signalwire":
 		return map[string]string{"event": "clear", "streamSid": streamSID}
 	case "plivo":
-		return map[string]string{"event": "clearAudio"}
+		// Plivo's bidirectional stream reference addresses clearAudio (like
+		// checkpoint) to the stream it was started on.
+		if streamSID == "" {
+			return map[string]string{"event": "clearAudio"}
+		}
+		return map[string]string{"event": "clearAudio", "streamId": streamSID}
 	case "telnyx":
 		return map[string]string{"event": "clear"}
 	default:

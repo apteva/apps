@@ -58,7 +58,7 @@ type softphoneHub struct {
 	captureStaleBytes                                        int64
 	carrierForward                                           *websocketWriterPump
 	completedCarrierForward                                  liveAudioQueueSnapshot
-	captureTransitBase                                       float64
+	captureTransitFloor                                      transitFloor
 	captureTransitSet                                        bool
 	captureTransitExcessMS                                   float64
 	callID                                                   string
@@ -438,6 +438,26 @@ func (r *softphoneRegistry) hubFor(callID string) *softphoneHub {
 	return hub
 }
 
+// attach get-or-creates the live hub and runs fn (which attaches a socket)
+// under the registry lock. dropIfEmpty takes the same lock, so a reconnecting
+// socket can never attach to a hub that was concurrently closed and removed
+// after hubFor returned it. fn must only use hub methods: lock order is
+// registry, then hub.
+func (r *softphoneRegistry) attach(callID string, fn func(*softphoneHub)) *softphoneHub {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hubs == nil {
+		r.hubs = map[string]*softphoneHub{}
+	}
+	hub, ok := r.hubs[callID]
+	if !ok {
+		hub = &softphoneHub{callID: callID}
+		r.hubs[callID] = hub
+	}
+	fn(hub)
+	return hub
+}
+
 func (r *softphoneRegistry) lookup(callID string) *softphoneHub {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -537,12 +557,15 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
-	hub := a.softphones.hubFor(callID)
-	hub.setCallState(row.Direction, row.Status)
-	hub.setHeld(row.HoldState != "active")
 	// A fresh carrier bridge owns the peer side immediately. Stop a superseded
 	// socket so it cannot keep delivering stale audio after a fast reconnect.
-	if previous := hub.setPeer(writer); previous != nil {
+	var previous *websocketWriterPump
+	hub := a.softphones.attach(callID, func(hub *softphoneHub) {
+		hub.setCallState(row.Direction, row.Status)
+		hub.setHeld(row.HoldState != "active")
+		previous = hub.setPeer(writer)
+	})
+	if previous != nil {
 		previous.Stop()
 		_ = previous.conn.Close()
 	}
@@ -724,7 +747,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
-	hub := a.softphones.hubFor(callID)
+	var previous *websocketWriterPump
+	hub := a.softphones.attach(callID, func(hub *softphoneHub) {
+		hub.setCallState(row.Direction, row.Status)
+		hub.setHeld(row.HoldState != "active")
+		previous = hub.setBrowser(writer)
+	})
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
 	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
 	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, networkContext, a.audioNetworks.enqueue)
@@ -739,11 +767,9 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
 	}()
-	hub.setCallState(row.Direction, row.Status)
-	hub.setHeld(row.HoldState != "active")
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
-	if previous := hub.setBrowser(writer); previous != nil {
+	if previous != nil {
 		hub.telemetry.closed(previous, "session_replaced", nil)
 		_ = previous.Write(ws.OpText, softphoneEvent("session.replaced", ""))
 		previous.Stop()
@@ -1453,7 +1479,9 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	if err := a.db().settleHumanOffers(callID, project); err != nil {
-		_ = a.db().releaseAnswerClaim(callID)
+		if releaseErr := a.db().releaseAnswerClaim(callID); releaseErr != nil {
+			logSoftphone("softphone answer claim release failed", "call", callID, "error", releaseErr)
+		}
 		http.Error(w, "claim ring-group offer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1465,7 +1493,9 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	peerToken := newSecret()
 	row.PeerToken = peerToken
 	if err := a.db().attachHumanCall(callID, a.peerLoopbackURL(row), peerToken); err != nil {
-		_ = a.db().releaseAnswerClaim(callID)
+		if releaseErr := a.db().releaseAnswerClaim(callID); releaseErr != nil {
+			logSoftphone("softphone answer claim release failed", "call", callID, "error", releaseErr)
+		}
 		http.Error(w, "persist call answer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -108,6 +108,16 @@ func (c *agentMediaConverter) output(data []byte) []int16 {
 	return pcm
 }
 
+// reset drops resampler history at a playback boundary (reply end, interrupt,
+// clear, item/generation change) so the filter tail of one reply never leaks
+// into the next. Owned by the converting goroutine, like output/input.
+func (c *agentMediaConverter) reset() {
+	if c == nil || c.resampler == nil {
+		return
+	}
+	c.resampler = newPCMResampler(int(c.resampler.inRate), int(c.resampler.outRate))
+}
+
 func (c *agentMediaConverter) inputWithPCM24(pcm, pcm24 []int16, encoded []byte, format string) []byte {
 	if c.session.mediaFormat() == "pcm16" {
 		return pcm16ToBytes(pcm24)

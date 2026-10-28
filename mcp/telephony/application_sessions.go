@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -25,7 +27,65 @@ type phoneAuthProvider struct {
 
 func validPhoneProvider(p phoneAuthProvider) bool {
 	u, e := url.Parse(p.URL)
-	return e == nil && u.Host != "" && u.User == nil && u.Fragment == "" && (u.Scheme == "https" || (u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"))) && p.ID != "" && p.IssuerApp != "" && p.IssuerInstallID != "" && (p.Format == "apteva-auth" || p.Format == "userinfo")
+	return e == nil && u.Host != "" && u.User == nil && u.Fragment == "" && phoneProviderURLAllowed(u) && p.ID != "" && p.IssuerApp != "" && p.IssuerInstallID != "" && (p.Format == "apteva-auth" || p.Format == "userinfo")
+}
+
+// phoneProviderOnGateway reports whether u has exactly the scheme and host of
+// the platform gateway. The Auth app is reached through the gateway
+// (/api/apps/auth/_install/N/me), which is plain-HTTP loopback on local
+// installs, so the gateway origin is the only non-public target allowed.
+func phoneProviderOnGateway(u *url.URL) bool {
+	g, e := url.Parse(strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/"))
+	return e == nil && g.Host != "" && (g.Scheme == "http" || g.Scheme == "https") &&
+		strings.EqualFold(g.Scheme, u.Scheme) && strings.EqualFold(g.Host, u.Host)
+}
+
+func phoneProviderIPDisallowed(ip net.IP) bool {
+	return !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+// phoneProviderURLAllowed: the gateway origin, or public HTTPS. Hostnames are
+// re-checked at dial time (phoneProviderTransport) so DNS cannot point a
+// public-looking name at an internal address.
+func phoneProviderURLAllowed(u *url.URL) bool {
+	if phoneProviderOnGateway(u) {
+		return true
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && phoneProviderIPDisallowed(ip) {
+		return false
+	}
+	return true
+}
+
+// Shared so connections to the provider are reused; the dialer refuses
+// loopback/private/link-local targets after resolution.
+var phoneProviderTransport = providerMediaTransport()
+
+func phoneProviderClient(u *url.URL) *http.Client {
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if !phoneProviderOnGateway(u) {
+		client.Transport = phoneProviderTransport
+	}
+	return client
+}
+
+// phoneProviderIssuerShared reports whether another provider in the policy
+// claims the same issuer, which would let one endpoint vouch for identities
+// another provider owns.
+func phoneProviderIssuerShared(policy phonePolicy, selected phoneAuthProvider) bool {
+	for _, other := range policy.Providers {
+		if other.ID != selected.ID && other.IssuerApp == selected.IssuerApp && other.IssuerInstallID == selected.IssuerInstallID {
+			return true
+		}
+	}
+	return false
 }
 func phoneProviderStillAllows(policy phonePolicy, selected phoneAuthProvider, action string) bool {
 	for _, current := range policy.Providers {
@@ -89,7 +149,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 			break
 		}
 	}
-	if provider == nil || !validPhoneProvider(*provider) {
+	if provider == nil || !validPhoneProvider(*provider) || phoneProviderIssuerShared(*policy, *provider) {
 		return nil, 401, errors.New("unknown authentication provider")
 	}
 	bearer := r.Header.Get("Authorization")
@@ -125,8 +185,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if origin := r.Header.Get("Origin"); origin != "" {
 		req.Header.Set("Origin", origin)
 	}
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, e := client.Do(req)
+	resp, e := phoneProviderClient(req.URL).Do(req)
 	if e != nil {
 		return nil, 503, errors.New("identity provider unavailable")
 	}

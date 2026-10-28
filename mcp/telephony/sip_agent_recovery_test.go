@@ -94,12 +94,16 @@ func TestAgentSIPRecoverySpeechTimeline(t *testing.T) {
 					gaps[mode] = maxGap
 					t.Logf("legacy=%v max_gap_ms=%d excess_timeline_ms=%d immediate_recoveries=%d samples_preserved=%d", mode == 0, maxGap, (last-first+20*time.Millisecond).Milliseconds()-5000, p.agentPlayout.recoveries, len(got))
 				}
-				limits := map[string]int{"regular": 20, "jitter": 20, "burst240": 200, "burst320": 280, "slow110": 40, "repeated": 280}
+				// Mid-reply recovery re-primes min(reserve, 60 ms, starvation): a
+				// long hold costs at most the 60 ms cushion beyond the hold itself
+				// (here the full reserve, so bursts match the baseline), and short
+				// starvation re-primes only as long as it starved.
+				limits := map[string]int{"regular": 20, "jitter": 20, "burst240": 260, "burst320": 340, "slow110": 60, "repeated": 340}
 				if gaps[1] > limits[pattern] || gaps[1] > gaps[0] {
 					t.Fatalf("recovery worsened: baseline=%d new=%d limit=%d", gaps[0], gaps[1], limits[pattern])
 				}
-				if pattern == "burst320" && gaps[0]-gaps[1] != 60 {
-					t.Fatal("full restart wait was not removed", gaps)
+				if pattern == "slow110" && gaps[0]-gaps[1] != 40 {
+					t.Fatal("short starvation re-primed the full reserve", gaps)
 				}
 			})
 		}
@@ -129,7 +133,13 @@ func TestAgentSIPRecoveryIdleBoundaryAndExplicitClear(t *testing.T) {
 			}
 			at := empty.Add(gap)
 			put(at)
-			if p.prepareAgentTick(at) != (gap < sipAgentRecoveryIdle) {
+			// Recovery re-primes min(reserve, 60 ms, starvation); a genuinely
+			// idle stream restarts with its full reserve as a new start.
+			wait := max(sipRTPPacketTime, min(60*time.Millisecond, gap))
+			if p.prepareAgentTick(at.Add(wait-time.Nanosecond)) || !p.prepareAgentTick(at.Add(wait)) {
+				t.Fatal("recovery cushion not applied", wait)
+			}
+			if (p.agentPlayout.starts == 2) != (gap >= sipAgentRecoveryIdle) {
 				t.Fatal("wrong idle boundary")
 			}
 			p.drain()

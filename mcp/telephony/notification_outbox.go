@@ -21,6 +21,8 @@ type callNotificationQueue struct {
 
 // Audio observers append only bounded memory. Durable persistence and HTTP
 // retries run in the existing background worker, never on an RTP/socket loop.
+// Observers never block: on lock contention or a full queue the event is
+// counted as dropped.
 func (a *App) observeCallNotification(project, call, topic string, payload map[string]any) {
 	q := &a.notifications
 	if !q.mu.TryLock() {
@@ -28,28 +30,79 @@ func (a *App) observeCallNotification(project, call, topic string, payload map[s
 		return
 	}
 	defer q.mu.Unlock()
-	if len(q.pending) >= 512 {
+	if len(q.pending) >= callNotificationObserverLimit {
 		q.dropped.Add(1)
 		return
 	}
-	q.pending = append(q.pending, callNotification{id: "notification_" + newCallID(), project: project, call: call, topic: topic, at: ringTime(time.Now()), payload: payload})
+	q.pending = append(q.pending, newCallNotification(project, call, topic, payload))
 }
+
+const (
+	callNotificationObserverLimit = 512
+	// Durable events (routing, recording.ready) are low-rate and promised to
+	// persist, so they get headroom past the observer limit before dropping.
+	callNotificationDurableLimit = 4096
+)
+
+func newCallNotification(project, call, topic string, payload map[string]any) callNotification {
+	return callNotification{id: "notification_" + newCallID(), project: project, call: call, topic: topic, at: ringTime(time.Now()), payload: payload}
+}
+
+// saveCallNotification is the durable path. Routing and recording callbacks
+// are not media loops, so it takes the locks (blocking) and flushes until the
+// event is committed, so a restart cannot lose an acknowledged update.
 func (a *App) saveCallNotification(project, call, topic string, payload map[string]any) {
-	a.observeCallNotification(project, call, topic, payload)
-	// Routing and recording callbacks are not media loops. Persist immediately so
-	// process restart cannot silently lose acknowledged routing/recording updates.
+	q := &a.notifications
+	v := newCallNotification(project, call, topic, payload)
+	q.mu.Lock()
+	if len(q.pending) >= callNotificationDurableLimit {
+		q.mu.Unlock()
+		q.dropped.Add(1)
+		if globalCtx != nil {
+			globalCtx.Logger().Warn("call notification queue full; durable event dropped", "call", call, "topic", topic)
+		}
+		return
+	}
+	q.pending = append(q.pending, v)
+	q.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := a.flushCallNotifications(ctx); err != nil && globalCtx != nil {
-		globalCtx.Logger().Warn("persist call notifications", "err", err)
+	q.flushMu.Lock()
+	defer q.flushMu.Unlock()
+	for ctx.Err() == nil && q.isPending(v.id) {
+		if err := a.flushCallNotificationsLocked(ctx); err != nil {
+			if globalCtx != nil {
+				globalCtx.Logger().Warn("persist call notifications", "err", err)
+			}
+			return
+		}
 	}
 }
+
+func (q *callNotificationQueue) isPending(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, v := range q.pending {
+		if v.id == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) flushCallNotifications(ctx context.Context) error {
 	q := &a.notifications
 	if !q.flushMu.TryLock() {
 		return nil
 	}
 	defer q.flushMu.Unlock()
+	return a.flushCallNotificationsLocked(ctx)
+}
+
+// flushCallNotificationsLocked persists up to 100 pending events. The caller
+// holds q.flushMu.
+func (a *App) flushCallNotificationsLocked(ctx context.Context) error {
+	q := &a.notifications
 	q.mu.Lock()
 	n := min(100, len(q.pending))
 	batch := append([]callNotification(nil), q.pending[:n]...)

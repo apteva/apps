@@ -79,20 +79,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 	input := newWebSocketWriterPump(bridge, ws.StateClientSide)
 	done := make(chan struct{})
 	var once sync.Once
-	var coachMu sync.Mutex
-	var coachPC *webrtc.PeerConnection
-	var coachDone chan struct{}
-	var coachGeneration uint32
-	closeCoachLocked := func() {
-		if coachDone != nil {
-			close(coachDone)
-			coachDone = nil
-		}
-		if coachPC != nil {
-			coachPC.Close()
-			coachPC = nil
-		}
-	}
+	var coach listenerCoachSlot
 	stop := func() {
 		once.Do(func() {
 			close(done)
@@ -102,9 +89,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 			writer.Stop()
 			input.Stop()
 			pc.Close()
-			coachMu.Lock()
-			closeCoachLocked()
-			coachMu.Unlock()
+			coach.closeIf(nil)
 		})
 	}
 	result := &listenerRTCConn{Conn: hub, coachStats: &rtcMediaStats{direction: "coach_to_adviser"}}
@@ -288,10 +273,10 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				if !listenerRTCCoachValid(l, event.Generation) || !listenerRTCSDPDirection(event.SDP, "sendonly", 1) {
 					continue
 				}
-				coachMu.Lock()
-				capture := coachPC
-				generation := coachGeneration
-				coachMu.Unlock()
+				coach.mu.Lock()
+				capture := coach.pc
+				generation := coach.generation
+				coach.mu.Unlock()
 				if capture == nil || generation != event.Generation {
 					continue
 				}
@@ -306,22 +291,24 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				if !l.coaching.talking.Load() || event.Generation != l.coaching.generation.Load() || time.Now().UnixMilli() >= l.coaching.deadline.Load() {
 					continue
 				}
-				coachMu.Lock()
-				if coachGeneration >= event.Generation {
-					coachMu.Unlock()
+				coach.mu.Lock()
+				if coach.generation >= event.Generation {
+					coach.mu.Unlock()
 					continue
 				}
-				closeCoachLocked()
-				coachGeneration = event.Generation
+				previous := coach.detachLocked()
+				coach.generation = event.Generation
 				capture, e := api.NewPeerConnection(webrtc.Configuration{ICEServers: c.ICEServers})
 				if e != nil {
-					coachMu.Unlock()
+					coach.mu.Unlock()
+					coach.close(previous)
 					return
 				}
 				captureDone := make(chan struct{})
-				coachPC = capture
-				coachDone = captureDone
-				coachMu.Unlock()
+				coach.pc = capture
+				coach.done = captureDone
+				coach.mu.Unlock()
+				coach.close(previous)
 				generation := event.Generation
 				var trackOnce sync.Once
 				capture.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
@@ -354,11 +341,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				go func() {
 					answer, e := answerListenerRTC(capture, event.SDP, c.fecEnabled(), captureDone)
 					if e != nil || !listenerRTCCoachValid(l, generation) {
-						coachMu.Lock()
-						if coachPC == capture {
-							closeCoachLocked()
-						}
-						coachMu.Unlock()
+						coach.closeIf(func(current *webrtc.PeerConnection, _ uint32) bool { return current == capture })
 						return
 					}
 					if !listenerRTCSDPDirection(event.SDP, "sendonly", 1) {
@@ -371,11 +354,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				continue
 			}
 			if event.Type == "coach.stop" {
-				coachMu.Lock()
-				if event.Generation >= coachGeneration {
-					closeCoachLocked()
-				}
-				coachMu.Unlock()
+				coach.closeIf(func(_ *webrtc.PeerConnection, generation uint32) bool { return event.Generation >= generation })
 			}
 			if !input.queueControl(data) {
 				return
@@ -400,11 +379,9 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 				}
 				_ = json.Unmarshal(data, &event)
 				if event.Type == "coach.stopped" {
-					coachMu.Lock()
-					if event.Generation == 0 || event.Generation >= coachGeneration {
-						closeCoachLocked()
-					}
-					coachMu.Unlock()
+					coach.closeIf(func(_ *webrtc.PeerConnection, generation uint32) bool {
+						return event.Generation == 0 || event.Generation >= generation
+					})
 				}
 				if err = writer.Write(op, data); err != nil {
 					return
@@ -443,20 +420,59 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 			case <-done:
 				return
 			case <-l.done:
-				coachMu.Lock()
-				closeCoachLocked()
-				coachMu.Unlock()
+				coach.closeIf(nil)
 				return
 			case <-ticker.C:
-				coachMu.Lock()
-				if coachPC != nil && !listenerRTCCoachValid(l, coachGeneration) {
-					closeCoachLocked()
-				}
-				coachMu.Unlock()
+				coach.closeIf(func(current *webrtc.PeerConnection, generation uint32) bool {
+					return current != nil && !listenerRTCCoachValid(l, generation)
+				})
 			}
 		}
 	}()
 	return result, cleanup, nil
+}
+
+// The current coaching capture PC. It is detached under mu and closed after
+// the lock is released: PeerConnection.Close waits for ICE/DTLS teardown, and
+// the signaling reader, bridge reader and expiry ticker all take mu.
+type listenerCoachSlot struct {
+	mu         sync.Mutex
+	pc         *webrtc.PeerConnection
+	done       chan struct{}
+	generation uint32
+	closePeer  func(*webrtc.PeerConnection) // nil: PeerConnection.Close
+}
+
+func (s *listenerCoachSlot) detachLocked() *webrtc.PeerConnection {
+	if s.done != nil {
+		close(s.done)
+		s.done = nil
+	}
+	pc := s.pc
+	s.pc = nil
+	return pc
+}
+
+// A nil match detaches unconditionally.
+func (s *listenerCoachSlot) closeIf(match func(pc *webrtc.PeerConnection, generation uint32) bool) {
+	s.mu.Lock()
+	var pc *webrtc.PeerConnection
+	if match == nil || match(s.pc, s.generation) {
+		pc = s.detachLocked()
+	}
+	s.mu.Unlock()
+	s.close(pc)
+}
+
+func (s *listenerCoachSlot) close(pc *webrtc.PeerConnection) {
+	if pc == nil {
+		return
+	}
+	if s.closePeer != nil {
+		s.closePeer(pc)
+		return
+	}
+	pc.Close()
 }
 
 func listenerRTCCoachValid(l *callListener, generation uint32) bool {

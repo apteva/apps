@@ -61,17 +61,36 @@ func agentFixtureJSON(t *testing.T, method, target string, body, out any) {
 }
 
 type agentCarrierProbe struct {
-	mu           sync.Mutex
-	received     []int16
-	arrivals     []map[string]any
-	lastArrival  time.Time
-	sequenceLoss int
-	frames       atomic.Int64
-	clears       atomic.Int64
-	stop         func()
-	send         func([]int16) error
-	sampleRate   int
-	audible      chan time.Time
+	mu            sync.Mutex
+	received      []int16
+	gaps          []agentPlayoutGap // audible underruns by received-sample index
+	playedThrough time.Time         // simulated carrier playout clock (WebSocket carriers)
+	arrivals      []map[string]any
+	lastArrival   time.Time
+	sequenceLoss  int
+	frames        atomic.Int64
+	clears        atomic.Int64
+	stop          func()
+	send          func([]int16) error
+	sampleRate    int
+	audible       chan time.Time
+}
+
+// recordArrival appends carrier audio and simulates real-time carrier playout:
+// a frame that arrives after everything earlier finished playing leaves the
+// caller hearing silence for that long.
+func (p *agentCarrierProbe) recordArrival(pcm []int16, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Carrier jitter buffers absorb up to a packet of lateness.
+	if !p.playedThrough.IsZero() && at.Sub(p.playedThrough) > 20*time.Millisecond {
+		p.gaps = append(p.gaps, agentPlayoutGap{At: len(p.received), MS: float64(at.Sub(p.playedThrough)) / float64(time.Millisecond)})
+	}
+	if p.playedThrough.Before(at) {
+		p.playedThrough = at
+	}
+	p.playedThrough = p.playedThrough.Add(time.Duration(len(pcm)) * time.Second / time.Duration(p.sampleRate))
+	p.received = append(p.received, pcm...)
 }
 
 func (p *agentCarrierProbe) observePCM(pcm []int16) {
@@ -239,6 +258,11 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 					}
 					previous = packet.SequenceNumber
 					probe.lastArrival = now
+					if len(probe.arrivals) > 0 {
+						if last, ok := probe.arrivals[len(probe.arrivals)-1]["rtp_timestamp"].(uint32); ok && packet.Timestamp-last > 160 && packet.Timestamp-last < 1<<31 {
+							probe.gaps = append(probe.gaps, agentPlayoutGap{At: len(probe.received), MS: float64(packet.Timestamp-last-160) / 8})
+						}
+					}
 					probe.received = append(probe.received, pcm...)
 					probe.arrivals = append(probe.arrivals, map[string]any{"at_unix_ns": now.UnixNano(), "sequence": packet.SequenceNumber, "rtp_timestamp": packet.Timestamp, "gap_ms": gap})
 					probe.mu.Unlock()
@@ -316,6 +340,7 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 					return
 				}
 				if op == ws.OpBinary {
+					probe.recordArrival(bytesToPCM16(raw), time.Now())
 					probe.frames.Add(1)
 					continue
 				}
@@ -352,16 +377,7 @@ func newAgentPipeline(t *testing.T, provider, direction string, live bool) (*App
 						bufferedThrough = time.Now()
 					}
 					bufferedThrough = bufferedThrough.Add(time.Duration(count) * time.Second / time.Duration(probe.sampleRate))
-					if live {
-						raw, _ := base64.StdEncoding.DecodeString(frame.Media.Payload)
-						pcm := bytesToPCM16(raw)
-						if provider == "twilio" {
-							pcm = ulawToPCM16(raw)
-						}
-						probe.mu.Lock()
-						probe.received = append(probe.received, pcm...)
-						probe.mu.Unlock()
-					}
+					probe.recordArrival(observedPCM, time.Now())
 					probe.frames.Add(1)
 				case "clear":
 					bufferedThrough = time.Now()
@@ -474,6 +490,53 @@ func TestAgentAudioActualCoreServerCarrierPath(t *testing.T) {
 				burst := a.liveAgentAudio(row.ID)
 				if len(burst.Clears) != 0 || burst.PlaybackPressure.Exhausted != 0 || burst.CoreLink.OutputOmittedMS != 0 || burst.CoreLink.Reconnects != 0 {
 					t.Fatal("large provider burst overflowed or reset the bridge", burst)
+				}
+				// What the caller hears must be a seamless tone: real-time
+				// delivery, then one 300 ms upstream stall mid-reply. 100 ms
+				// chunks keep the 500 Hz phase continuous across emits.
+				for _, stall := range []time.Duration{0, 300 * time.Millisecond} {
+					item := fmt.Sprintf("continuity-%d", stall/time.Millisecond)
+					probe.mu.Lock()
+					from := len(probe.received)
+					probe.mu.Unlock()
+					// Provider pace: exactly real time on an absolute schedule.
+					start := time.Now()
+					for i := 0; i < 30; i++ {
+						due := start.Add(time.Duration(i) * 100 * time.Millisecond)
+						if i >= 15 {
+							due = due.Add(stall)
+						}
+						time.Sleep(time.Until(due))
+						agentFixtureJSON(t, "POST", core.url+"/emit", map[string]any{"item": item, "ms": 100}, nil)
+					}
+					waitAgentPipeline(t, 6*time.Second, func() bool {
+						var stats agentPipelineStats
+						agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
+						return stats.Pending == 0 && stats.Awaiting == 0
+					})
+					time.Sleep(200 * time.Millisecond)
+					probe.mu.Lock()
+					heard := append([]int16(nil), probe.received[from:]...)
+					var gaps []agentPlayoutGap
+					for _, g := range probe.gaps {
+						if g.At > from {
+							gaps = append(gaps, agentPlayoutGap{At: g.At - from, MS: g.MS})
+						}
+					}
+					probe.mu.Unlock()
+					c := agentToneContinuity(heard, probe.sampleRate, 500, gaps)
+					t.Logf("%s continuity: %+v", item, c)
+					if c.Samples < probe.sampleRate*25/10 {
+						t.Fatalf("%s: tone truncated: %+v", item, c)
+					}
+					if c.Clicks != 0 || c.HardEdges != 0 {
+						t.Fatalf("%s: audible discontinuities in caller audio: %+v", item, c)
+					}
+					// Every interruption must be soft (checked above). Real-time
+					// loopback delivery on a busy host may still starve once.
+					if allowed := map[bool]int{true: 1, false: 2}[stall == 0]; c.Holes > allowed || c.Gaps > allowed {
+						t.Fatalf("%s: interruptions inside one reply (allowed %d): %+v", item, allowed, c)
+					}
 				}
 				// Reproduce the reviewed call's risk: an actual caller speaks
 				// while the renderer has only continuous silence outstanding.
@@ -618,8 +681,21 @@ func TestAgentAudioActualLiveCarrierPath(t *testing.T) {
 	before := probe.frames.Load()
 	onset := time.Now()
 	close(startCaller)
-	waitAgentPipeline(t, 15*time.Second, func() bool { s := a.liveAgentAudio(row.ID); return s != nil && len(s.Clears) > 0 })
-	clearDelay := time.Since(onset)
+	// A barge-in clear happens only if the caller overlaps assistant speech;
+	// with provider interruption a short greeting may already have ended.
+	// Measure it when it occurs; the reply below is the required outcome.
+	clearDelay := time.Duration(-1)
+	for limit := time.Now().Add(15 * time.Second); time.Now().Before(limit); time.Sleep(20 * time.Millisecond) {
+		if s := a.liveAgentAudio(row.ID); s != nil && len(s.Clears) > 0 {
+			clearDelay = time.Since(onset)
+			break
+		}
+		var stats agentPipelineStats
+		agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
+		if strings.Contains(strings.ToLower(string(stats.Transcripts)), "mardi") {
+			break
+		}
+	}
 	waitAgentPipeline(t, 35*time.Second, func() bool {
 		var stats agentPipelineStats
 		agentFixtureJSON(t, "GET", core.url+"/stats", nil, &stats)
@@ -665,5 +741,133 @@ func TestAgentAudioActualLiveCarrierPath(t *testing.T) {
 	if loss != 0 {
 		t.Fatalf("RTP sequence loss=%d", loss)
 	}
-	t.Logf("Live media resumed; caller speech recognized; clip-start to Telephony clear command %.1f ms", float64(clearDelay)/float64(time.Millisecond))
+	probe.mu.Lock()
+	gaps := append([]agentPlayoutGap(nil), probe.gaps...)
+	probe.mu.Unlock()
+	edges := agentSpeechEdges(received, probe.sampleRate, gaps)
+	t.Logf("live caller audio: %+v", edges)
+	for _, g := range gaps {
+		t.Logf("live playout gap at %.3fs: %.0f ms", float64(g.At)/float64(probe.sampleRate), g.MS)
+	}
+	if edges.HardEdges != 0 {
+		t.Fatalf("live reply audio has hard edges at playout gaps: %+v", edges)
+	}
+	if clearDelay >= 0 {
+		t.Logf("Live media resumed; caller speech recognized; clip-start to Telephony clear command %.1f ms", float64(clearDelay)/float64(time.Millisecond))
+	} else {
+		t.Log("Live media resumed; caller speech recognized and answered; no overlap needed a clear")
+	}
+}
+
+type agentPlayoutGap struct {
+	At int     `json:"at"`
+	MS float64 `json:"ms"`
+}
+
+type agentToneEvidence struct {
+	Samples       int     `json:"samples"`
+	Amplitude     float64 `json:"amplitude"`
+	MaxStep       float64 `json:"max_step"`
+	AllowedStep   float64 `json:"allowed_step"`
+	Clicks        int     `json:"clicks"`
+	ClickAt       []int   `json:"click_at,omitempty"`
+	Holes         int     `json:"holes"`
+	LongestHoleMS float64 `json:"longest_hole_ms"`
+	Gaps          int     `json:"gaps"`
+	GapMS         float64 `json:"gap_ms"`
+	HardEdges     int     `json:"hard_edges"`
+}
+
+// agentToneContinuity scores decoded caller audio of a steady tone against
+// real playout timing. A click is a step the tone cannot produce (plus codec
+// noise) where playout was continuous. At a real gap the caller hears silence,
+// so the audio must fade into and out of it: an edge above 30% of the tone's
+// amplitude is a hard edge. A hole is ≥2 ms of near-silence inside the reply.
+func agentToneContinuity(pcm []int16, rate int, hz float64, gaps []agentPlayoutGap) agentToneEvidence {
+	var e agentToneEvidence
+	first, last := -1, -1
+	for i, v := range pcm {
+		if v > 2000 || v < -2000 {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+		e.Amplitude = math.Max(e.Amplitude, math.Abs(float64(v)))
+	}
+	if first < 0 {
+		return e
+	}
+	pcm = pcm[first : last+1]
+	gapAt := map[int]bool{}
+	for _, g := range gaps {
+		at := g.At - first
+		if at <= 0 || at >= len(pcm) {
+			continue
+		}
+		gapAt[at] = true
+		e.Gaps++
+		e.GapMS += g.MS
+		if math.Abs(float64(pcm[at-1])) > e.Amplitude*0.3 || math.Abs(float64(pcm[at])) > e.Amplitude*0.3 {
+			e.HardEdges++
+		}
+	}
+	e.Samples = len(pcm)
+	e.AllowedStep = e.Amplitude*2*math.Pi*hz/float64(rate)*1.15 + 600
+	quiet, minHole := 0, rate/500
+	for i := range pcm {
+		if i > 0 && !gapAt[i] {
+			step := math.Abs(float64(pcm[i]) - float64(pcm[i-1]))
+			e.MaxStep = math.Max(e.MaxStep, step)
+			if step > e.AllowedStep {
+				e.Clicks++
+				if len(e.ClickAt) < 8 {
+					e.ClickAt = append(e.ClickAt, i)
+				}
+			}
+		}
+		if pcm[i] > -300 && pcm[i] < 300 {
+			quiet++
+			continue
+		}
+		if quiet >= minHole {
+			e.Holes++
+			e.LongestHoleMS = math.Max(e.LongestHoleMS, float64(quiet)*1000/float64(rate))
+		}
+		quiet = 0
+	}
+	return e
+}
+
+type agentSpeechEdgeEvidence struct {
+	Seconds   float64 `json:"seconds"`
+	Gaps      int     `json:"gaps"`
+	GapMS     float64 `json:"gap_ms"`
+	HardEdges int     `json:"hard_edges"`
+}
+
+// agentSpeechEdges checks real speech at audible playout gaps: the sample on
+// either side of a gap must be faded relative to the 20 ms of speech around it.
+func agentSpeechEdges(pcm []int16, rate int, gaps []agentPlayoutGap) agentSpeechEdgeEvidence {
+	e := agentSpeechEdgeEvidence{Seconds: float64(len(pcm)) / float64(rate)}
+	window := rate / 50
+	level := func(from, to int) float64 {
+		peak := 0.0
+		for i := max(0, from); i < min(len(pcm), to); i++ {
+			peak = math.Max(peak, math.Abs(float64(pcm[i])))
+		}
+		return peak
+	}
+	for _, g := range gaps {
+		if g.At <= 0 || g.At >= len(pcm) {
+			continue
+		}
+		e.Gaps++
+		e.GapMS += g.MS
+		before, after := level(g.At-window, g.At), level(g.At, g.At+window)
+		if before > 1500 && math.Abs(float64(pcm[g.At-1])) > before*0.3 || after > 1500 && math.Abs(float64(pcm[g.At])) > after*0.3 {
+			e.HardEdges++
+		}
+	}
+	return e
 }

@@ -35,6 +35,8 @@ type twilioPacedPacket struct {
 	PCM        []int16
 	ItemID     string
 	AudioEndMS int
+	tailFade   bool
+	queuedAt   time.Time
 }
 
 type twilioPacerResult struct {
@@ -223,6 +225,8 @@ func (p *twilioAudioPacer) run() {
 		lastSentTail           []int16
 		needsCrossfade         bool
 		fadeAfterClear         bool
+		resumeFade             bool // the previous speech packet faded out to silence
+		lastInputAt            time.Time
 	)
 	bufferWindow := time.Duration(p.targetBufferedSamples) * time.Second / twilioMediaSampleRate
 	stopTimer := func() {
@@ -281,11 +285,19 @@ func (p *twilioAudioPacer) run() {
 		}
 		pcm := packet.PCM
 		encoded := packet.Encoded
-		if fadeAfterClear {
+		// Underrun: the carrier lead ran out before this packet even arrived.
+		underrun := p.agentSession != nil && !packet.Silence && !bufferedThrough.IsZero() && bufferedThrough.Add(carrierUnderrunFadeGap).Before(packet.queuedAt)
+		if fadeAfterClear || underrun || resumeFade && !packet.Silence {
 			encoded = nil
 			pcm = append([]int16(nil), pcm...)
 			applyAgentStartFade(pcm, twilioMediaSampleRate)
-			fadeAfterClear = false
+			fadeAfterClear, resumeFade = false, false
+		}
+		if packet.tailFade && !packet.Silence {
+			encoded = nil
+			pcm = append([]int16(nil), pcm...)
+			applyCarrierTailFade(pcm, twilioMediaSampleRate)
+			resumeFade = true
 		}
 		if needsCrossfade && len(lastSentTail) > 0 {
 			encoded = nil
@@ -334,6 +346,15 @@ func (p *twilioAudioPacer) run() {
 		stopTimer()
 		target := time.Now().Add(bufferWindow)
 		for len(queue) > 0 && (bufferedThrough.IsZero() || bufferedThrough.Before(target)) {
+			if p.agentSession != nil && len(queue) == 1 && !queue[0].Silence {
+				// A short trailing packet is held for its continuation; once
+				// released without one, an underrun gap follows it.
+				if release := carrierTailRelease(lastInputAt, bufferedThrough, bufferWindow); time.Now().Before(release) {
+					scheduleAt(release)
+					return nil
+				}
+				queue[0].tailFade = true
+			}
 			_, err := sendNext()
 			if err != nil {
 				return err
@@ -457,13 +478,16 @@ func (p *twilioAudioPacer) run() {
 			activeMaxQueuedSamples = p.maxQueuedSamples
 			adaptiveUntil = time.Time{}
 		}
-		for _, packet := range command.packets {
+		queuedAt := time.Now()
+		for i, packet := range command.packets {
 			if !packet.Silence {
 				p.pendingSpeechSamples.Add(int64(len(packet.PCM)))
 			}
+			command.packets[i].queuedAt = queuedAt
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
+		lastInputAt = time.Now()
 		p.pendingSamples.Store(int64(queuedSamples))
 		p.diagnostics.queued(samplesToMS(queuedSamples))
 		leadFilled := false

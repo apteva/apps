@@ -9,6 +9,26 @@ const SAMPLE_RATE = 24_000;
 const MAX_RECONNECT_MS = 30_000;
 const MAX_RECONNECT_DELAY_MS = 4_000;
 const MAX_CAPTURE_BUFFERED_BYTES = SAMPLE_RATE * 2 * 0.12;
+const MAX_CLOCK_PROBE_RTT_MS = 1000;
+const AUDIO_CLOCK_FRESH_MS = 5000;
+// Past freshness, a held render-clock offset loses 2ms of certainty per second
+// (2000ppm, well beyond audio-device versus system oscillator skew).
+const AUDIO_CLOCK_STALE_DRIFT = 0.002;
+// Delivery floors compare two free-running clocks, so they are the minimum
+// over the last minute (5s buckets), not over the socket's whole life. Skew of
+// 100ppm moves a floor only 6ms per window instead of accumulating into
+// "excess", while a sudden sustained delay still registers for a full window.
+const DELIVERY_FLOOR_BUCKET_MS = 5000;
+const DELIVERY_FLOOR_BUCKETS = 12;
+function deliveryFloor(buckets, delta, now) {
+  const bucket=Math.floor(now/DELIVERY_FLOOR_BUCKET_MS), last=buckets.at(-1);
+  if(last && last.bucket===bucket) last.min=Math.min(last.min,delta); else buckets.push({bucket,min:delta});
+  while(buckets[0].bucket<=bucket-DELIVERY_FLOOR_BUCKETS) buckets.shift();
+  return buckets.reduce((floor,entry)=>Math.min(floor,entry.min),Infinity);
+}
+function audioClockUncertaintyAt(now) {
+  return audioClockSampleUncertainty+Math.max(0,now-audioClockSampleAt-AUDIO_CLOCK_FRESH_MS)*AUDIO_CLOCK_STALE_DRIFT;
+}
 
 let queueEvents = [], queueEventSerial = 0, queueBuilding = false, queueStartedMS = 0, queueLastEventMS = -Infinity;
 let lastCaptureAge = null;
@@ -45,6 +65,8 @@ let framedV2 = false;
 let audioClockOffset = null;
 let audioClockUncertainty = 0;
 let audioClockSampleAt = 0;
+let audioClockSampleUncertainty = 0;
+let audioClockStale = false;
 let capturePaused = false;
 let refreshCredentials = false;
 let refreshID = 0;
@@ -58,11 +80,11 @@ let serverClockUncertainty = null;
 let serverClockSampleAt = 0;
 let captureGateOpenedAt = 0;
 let playbackExpected = null;
-let playbackDeliveryBase = null;
+let playbackDeliveryFloor = [];
 let pendingMutedCapture = null;
 let whisperEpoch = null;
-let whisperDeliveryBase = null;
-const timing = { capture_frames:0, capture_muted_frames:0, capture_muted_ms:0, capture_sent_ms:0, capture_dropped_ms:0, capture_max_age_ms:0, playback_received_ms:0, playback_ingress_ms:0, playback_sequence_gaps:0, playback_max_transit_ms:0, playback_max_server_queue_ms:0, playback_transport_dropped_ms:0, playback_source_dropped_ms:0, playback_max_source_age_ms:0, playback_max_delivery_excess_ms:0, playback_source_timestamp_ms:0, playback_source_sequence:0, playback_source_epoch:0, worker_max_tick_gap_ms:0, worker_pause_count:0, reconnect_attempts:0, reconnect_successes:0, rtt_ms:null, rtt_max_ms:0, rtt_samples:[], websocket_max_buffered_bytes:0, drop_totals_ms:{} };
+let whisperDeliveryFloor = [];
+const timing = { capture_frames:0, capture_muted_frames:0, capture_muted_ms:0, capture_sent_ms:0, capture_dropped_ms:0, capture_clock_stale_ms:0, capture_max_age_ms:0, playback_received_ms:0, playback_ingress_ms:0, playback_sequence_gaps:0, playback_max_transit_ms:0, playback_max_server_queue_ms:0, playback_transport_dropped_ms:0, playback_source_dropped_ms:0, playback_max_source_age_ms:0, playback_max_delivery_excess_ms:0, playback_source_timestamp_ms:0, playback_source_sequence:0, playback_source_epoch:0, worker_max_tick_gap_ms:0, worker_pause_count:0, reconnect_attempts:0, reconnect_successes:0, rtt_ms:null, rtt_max_ms:0, rtt_samples:[], websocket_max_buffered_bytes:0, drop_totals_ms:{} };
 function runtimeEvent(action,outcome,duration_ms) {
   let session_id;
   try { const value=new URL(mediaURL).searchParams.get("session_generation");if(value && /^session-[a-f0-9-]{1,64}$/.test(value))session_id=value; } catch {/* legacy URLs have no generation */}
@@ -182,10 +204,15 @@ function decodePlayback(buffer) {
 function capture(message) {
   if (message?.type === "clock.reply") {
     const now = monotonicEpochMS(), rtt = now-message.nonce;
-    if (rtt>=0 && rtt<=50 && Number.isFinite(message.audio_ms)) {
+    const uncertainty = rtt/2 + 10; // Audio render quantum and timestamp sampling.
+    // A slow reply still bounds the offset by its own round trip. Prefer it
+    // only when nothing better is known, so a busy render thread cannot
+    // starve the microphone of a clock.
+    if (rtt>=0 && rtt<=MAX_CLOCK_PROBE_RTT_MS && Number.isFinite(message.audio_ms) && (rtt<=50 || audioClockOffset===null || uncertainty<=audioClockUncertaintyAt(now))) {
       audioClockOffset = (now+message.nonce)/2-message.audio_ms;
       audioClockSampleAt = now;
-      audioClockUncertainty = rtt/2 + 10; // Audio render quantum and timestamp sampling.
+      audioClockSampleUncertainty = audioClockUncertainty = uncertainty;
+      audioClockStale = false;
     }
     return;
   }
@@ -194,9 +221,16 @@ function capture(message) {
   if(!microphoneReady || !socket || socket.readyState !== WebSocket.OPEN) return;
   const now = monotonicEpochMS();
   lastCaptureAge=null;
-  if(capturePaused || audioClockOffset===null || now-audioClockSampleAt>5000) {
+  if(capturePaused || audioClockOffset===null) {
     capturePort?.postMessage({type:"clock.probe",nonce:now});
     dropCapture(message,"capture_clock_unavailable"); return;
+  }
+  if(now-audioClockSampleAt>AUDIO_CLOCK_FRESH_MS) {
+    // Keep the last offset with widening uncertainty instead of muting.
+    capturePort?.postMessage({type:"clock.probe",nonce:now});
+    audioClockUncertainty=audioClockUncertaintyAt(now);
+    timing.capture_clock_stale_ms+=message.frame.length*1000/(message.sample_rate||SAMPLE_RATE);
+    if(!audioClockStale) { audioClockStale=true; runtimeEvent("audio_clock","stale",now-audioClockSampleAt); }
   }
   const mapped = Number.isFinite(message.timestamp_ms) && audioClockOffset!==null ? message.timestamp_ms+audioClockOffset : null;
   const age = mapped===null ? 0 : Math.max(0,now-mapped);
@@ -261,7 +295,7 @@ function connect() {
     openedAt = Date.now();
     lastReceivedAt = openedAt;
     queueBuilding=false;queueStartedMS=0;lastCaptureAge=null;
-    framedV2=false; serverClockOffset=null; serverClockUncertainty=null; serverClockSampleAt=0; playbackExpected=null; playbackDeliveryBase=null; whisperEpoch=null; whisperDeliveryBase=null; playbackPort?.postMessage({type:"whisper.clear"});
+    framedV2=false; serverClockOffset=null; serverClockUncertainty=null; serverClockSampleAt=0; playbackExpected=null; playbackDeliveryFloor=[]; whisperEpoch=null; whisperDeliveryFloor=[]; playbackPort?.postMessage({type:"whisper.clear"});
     capturePort?.postMessage({type:"clock.probe",nonce:monotonicEpochMS()});
     ws.send(JSON.stringify({type:"media.capabilities",version:2,versions:[3,2],whisper:true}));
     ws.send(JSON.stringify({type:"media.clock",nonce:monotonicEpochMS()}));
@@ -287,7 +321,7 @@ function connect() {
         }
         if(control.type==="coach.state") {
           whisperEpoch=control.talking && Number.isInteger(control.epoch) ? control.epoch : null;
-          whisperDeliveryBase=null;
+          whisperDeliveryFloor=[];
           resamplers.delete(`whisper:8000:${contextRate}`);
           playbackPort?.postMessage({type:"whisper.clear"});
         }
@@ -310,8 +344,8 @@ function connect() {
       if(buffer.byteLength<17 || buffer.byteLength>176 || whisperEpoch===null) return;
       const view=new DataView(buffer),epoch=view.getUint32(4,true),source=view.getFloat64(8,true);
       if(epoch!==whisperEpoch || !Number.isFinite(source)) return;
-      const delta=monotonicEpochMS()-source;
-      whisperDeliveryBase=whisperDeliveryBase===null ? delta : Math.min(whisperDeliveryBase,delta);
+      const now=monotonicEpochMS(), delta=now-source;
+      const whisperDeliveryBase=deliveryFloor(whisperDeliveryFloor,delta,now);
       const excess=Math.max(0,delta-whisperDeliveryBase);
       if(excess>200) return;
       const pcm=new Float32Array(buffer.byteLength-16);
@@ -342,12 +376,13 @@ function connect() {
       // Relative clocks need no synchronized offset to detect GROWING delay.
       // When clock probes cannot cross an undersized link, still reject audio
       // over 320ms behind its fastest delivery in this socket epoch. This does
-      // not estimate the unknown fixed latency of its very first packet.
+      // not estimate the unknown fixed latency of its very first packet. The
+      // windowed floor keeps server/browser clock skew from accumulating.
       const ageClock=source!==null && Number.isFinite(source) ? source : sent;
       let deliveryExcess=0;
       if(Number.isFinite(ageClock) && ageClock>0) {
-        const delta=monotonicEpochMS()-ageClock;
-        playbackDeliveryBase=playbackDeliveryBase===null ? delta : Math.min(playbackDeliveryBase,delta);
+        const now=monotonicEpochMS(), delta=now-ageClock;
+        const playbackDeliveryBase=deliveryFloor(playbackDeliveryFloor,delta,now);
         deliveryExcess=Math.max(0,delta-playbackDeliveryBase);
         deliveryExcessMax=Math.max(deliveryExcessMax,deliveryExcess);
         timing.playback_max_delivery_excess_ms=Math.max(timing.playback_max_delivery_excess_ms,deliveryExcess);
@@ -425,7 +460,7 @@ self.onmessage = (event) => {
       mediaURL = message.mediaURL;
       refreshCredentials = Boolean(message.refreshCredentials);
       contextRate = message.contextRate || SAMPLE_RATE;
-      if(Number.isFinite(message.audioClockMS)&&Number.isFinite(message.monotonicEpochMS)) { audioClockOffset=message.monotonicEpochMS-message.audioClockMS; audioClockUncertainty=20; audioClockSampleAt=monotonicEpochMS(); }
+      if(Number.isFinite(message.audioClockMS)&&Number.isFinite(message.monotonicEpochMS)) { audioClockOffset=message.monotonicEpochMS-message.audioClockMS; audioClockSampleUncertainty=audioClockUncertainty=20; audioClockSampleAt=monotonicEpochMS(); }
       capturePort = message.capturePort;
       playbackPort = message.playbackPort;
       capturePort.onmessage = (captureEvent) => capture(captureEvent.data);

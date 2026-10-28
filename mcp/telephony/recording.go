@@ -278,6 +278,32 @@ func (c *callsDB) listRecordings(projectID, callID string, limit int) ([]recordi
 	return out, rows.Err()
 }
 
+// listAgentRecordings filters by the owning call's agent in SQL, before the
+// LIMIT, so an agent's older recordings are not hidden by newer ones that
+// belong to other agents.
+func (c *callsDB) listAgentRecordings(projectID, callID string, agentID int64, limit int) ([]recordingRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := c.db.Query(`SELECT `+recordingSelectColumns+` FROM recordings
+        WHERE project_id = ? AND deleted_at = '' AND (? = '' OR call_id = ?)
+          AND EXISTS (SELECT 1 FROM calls WHERE calls.id = recordings.call_id AND calls.agent_id = ?)
+        ORDER BY created_at DESC LIMIT ?`, projectID, callID, callID, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []recordingRow
+	for rows.Next() {
+		row, err := scanRecording(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *row)
+	}
+	return out, rows.Err()
+}
+
 func (c *callsDB) attachRecordingSummaries(projectID string, calls []callRow) error {
 	ids, args := callReadIDs(projectID, calls)
 	if len(ids) == 0 {
@@ -761,16 +787,12 @@ func recordingPublic(recording recordingRow) map[string]any {
 }
 
 func (a *App) toolRecordingsList(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := a.db().listRecordings(currentProject(ctx), strings.TrimSpace(strArg(args, "call_id", "")), intArg(args, "limit", 50))
+	rows, err := a.db().listAgentRecordings(currentProject(ctx), strings.TrimSpace(strArg(args, "call_id", "")), callerAgentID(callerCtx), intArg(args, "limit", 50))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		call, callErr := a.db().findCall(row.CallID)
-		if callErr != nil || call == nil || call.AgentID != callerAgentID(callerCtx) {
-			continue
-		}
 		out = append(out, recordingPublic(row))
 	}
 	return map[string]any{"recordings": out}, nil

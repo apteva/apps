@@ -122,41 +122,108 @@ func (r *localCallRecorder) Close() {
 	r.once.Do(func() { r.producer.Lock(); close(r.stop); r.producer.Unlock() })
 	<-r.done
 }
+
+// Each direction is laid out by media time: frames continue back-to-back from
+// the previous one, and wall time (Record arrival) only re-anchors a track after
+// a real gap. Frames arriving later than their contiguous slot are held until a
+// later frame shows whether they were a delayed burst (still contiguous) or the
+// start of audio after a silence (placed where they arrived on time).
+const (
+	localRecordingJitterSamples  = 24000 * 60 / 1000 // arrival slack still treated as contiguous
+	localRecordingResyncWindow   = time.Second       // wall time a late run waits for a catch-up frame
+	localRecordingPendingSamples = 2 * 24000         // bound on held late audio per direction
+)
+
+type localRecordingTrack struct {
+	started        bool
+	next           int64
+	pending        []localRecordingFrame
+	pendingSamples int64
+}
+
 func (r *localCallRecorder) run() {
 	defer r.app.recordingWriters.Add(-1)
 	defer close(r.done)
 	defer r.file.Close()
-	var last [2]int64
+	var tracks [2]localRecordingTrack
 	var length int64
 	var cause error
-	write := func(frame localRecordingFrame) {
+	place := func(direction int, sample int64, pcm []int16) {
 		if cause != nil {
 			return
 		}
-		sample := max(last[frame.direction], frame.at.Sub(r.started).Nanoseconds()*24000/int64(time.Second))
 		sample = max(sample, 0)
-		end := sample + int64(len(frame.pcm))
+		end := sample + int64(len(pcm))
 		if end*4 > 3<<30 {
 			cause = errors.New("local recording exceeds size limit")
 			return
 		}
 		// Disk work is isolated to this worker. Preserve the opposite channel,
 		// and leave sparse silence for real gaps instead of compressing the timeline.
-		raw := make([]byte, len(frame.pcm)*4)
+		raw := make([]byte, len(pcm)*4)
 		_, err := r.file.ReadAt(raw, 44+sample*4)
 		if err != nil && !errors.Is(err, io.EOF) {
 			cause = err
 			return
 		}
-		for i, p := range frame.pcm {
-			binary.LittleEndian.PutUint16(raw[i*4+frame.direction*2:], uint16(p))
+		for i, p := range pcm {
+			binary.LittleEndian.PutUint16(raw[i*4+direction*2:], uint16(p))
 		}
 		if _, err = r.file.WriteAt(raw, 44+sample*4); err != nil {
 			cause = err
 			return
 		}
-		last[frame.direction] = end
+		tracks[direction].next = end
 		length = max(length, end*4)
+	}
+	wallSample := func(at time.Time) int64 {
+		return max(at.Sub(r.started).Nanoseconds()*24000/int64(time.Second), 0)
+	}
+	resolve := func(direction int) {
+		t := &tracks[direction]
+		frames := t.pending
+		t.pending, t.pendingSamples = nil, 0
+		// starts[k]: where the held run would begin if frame k arrived on time.
+		// Delivery delay only makes a frame later, so the minimum over frame k and
+		// everything after it is the earliest position consistent with that frame.
+		starts := make([]int64, len(frames))
+		var offset int64
+		for k, f := range frames {
+			starts[k] = wallSample(f.at) - offset
+			offset += int64(len(f.pcm))
+		}
+		for k := len(starts) - 2; k >= 0; k-- {
+			starts[k] = min(starts[k], starts[k+1])
+		}
+		anchor := t.next
+		offset = 0
+		for k, f := range frames {
+			if starts[k]-anchor > localRecordingJitterSamples {
+				anchor = starts[k] // no later frame catches up: a real gap precedes frame k
+			}
+			place(direction, anchor+offset, f.pcm)
+			offset += int64(len(f.pcm))
+		}
+	}
+	write := func(frame localRecordingFrame) {
+		if cause != nil {
+			return
+		}
+		t := &tracks[frame.direction]
+		if !t.started {
+			t.started = true
+			place(frame.direction, wallSample(frame.at), frame.pcm)
+			return
+		}
+		t.pending = append(t.pending, frame)
+		if wallSample(frame.at)-(t.next+t.pendingSamples) <= localRecordingJitterSamples {
+			resolve(frame.direction)
+			return
+		}
+		t.pendingSamples += int64(len(frame.pcm))
+		if frame.at.Sub(t.pending[0].at) >= localRecordingResyncWindow || t.pendingSamples >= localRecordingPendingSamples {
+			resolve(frame.direction)
+		}
 	}
 	for {
 		select {
@@ -176,6 +243,9 @@ drain:
 		}
 	}
 finish:
+	for direction := range tracks {
+		resolve(direction)
+	}
 	if cause == nil {
 		_, cause = r.file.Seek(0, io.SeekStart)
 		if cause == nil {
@@ -210,7 +280,13 @@ finish:
 		_ = os.Remove(r.file.Name())
 	}
 	if dropped := r.dropped.Load(); dropped > 0 {
-		message = fmt.Sprintf("recording incomplete: %d ms omitted by bounded recorder", dropped)
+		omitted := fmt.Sprintf("recording incomplete: %d ms omitted by bounded recorder", dropped)
+		if message != "" {
+			// The write failure stays the primary reason; omission is secondary detail.
+			message += "; " + omitted
+		} else {
+			message = omitted
+		}
 	}
 	_, _ = r.app.db().db.Exec(`UPDATE recordings SET provider_status=?,storage_status=?,duration_ms=?,size_bytes=?,source_size_bytes=?,channels=?,last_error=?,completed_at=?,next_attempt_at=? WHERE id=? AND deleted_at=''`, status, storage, length*1000/int64(24000*2*channels), length+44, length+44, channels, message, ringTime(time.Now()), ringTime(time.Now()), r.row.ID)
 	_, _ = r.app.db().db.Exec(`UPDATE local_recording_files SET dropped_ms=? WHERE recording_id=?`, r.dropped.Load(), r.row.ID)

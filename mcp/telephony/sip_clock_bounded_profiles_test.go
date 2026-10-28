@@ -14,6 +14,9 @@ type probePacket struct {
 }
 
 func TestSIPClockBoundedVariableProfiles(t *testing.T) {
+	if raceEnabled {
+		t.Skip("race build: deterministic single-goroutine replay; runs in normal builds")
+	}
 	for _, ppm := range []float64{-500, 0, 250, 500} {
 		for _, period := range []int{50, 100, 300, 600, 1500, 3000} {
 			for _, pattern := range []string{"triangle", "sine", "missed_fast_window"} {
@@ -122,6 +125,9 @@ func BenchmarkSIPClockObservation(b *testing.B) {
 }
 
 func TestSIPClockTwoHourVariableDelivery(t *testing.T) {
+	if raceEnabled {
+		t.Skip("race build: deterministic single-goroutine replay; runs in normal builds")
+	}
 	for _, ppm := range []float64{-500, -250, 250, 500} {
 		for _, period := range []int{1500, 3000} {
 			b := newRTPJitterBuffer()

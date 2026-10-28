@@ -65,3 +65,18 @@ func (d *audioDelayDistribution) observe(now time.Time, relativeMS float64, floo
 	}
 	return d.target
 }
+
+// The lowest relative delay retained in the current window, if any. Admission
+// is judged against this floor, not an absolute range: a constant delivery
+// offset (e.g. while a large sender skew is still being calibrated) is not
+// arrival variation and must not freeze the estimator.
+func (d *audioDelayDistribution) floorAt(now time.Time) (float64, bool) {
+	bucket := now.UnixNano() / int64(100*time.Millisecond)
+	low, ok := 0.0, false
+	for _, v := range d.slots {
+		if v.valid && bucket-v.at >= 0 && bucket-v.at < 100 && (!ok || v.low < low) {
+			low, ok = v.low, true
+		}
+	}
+	return low, ok
+}

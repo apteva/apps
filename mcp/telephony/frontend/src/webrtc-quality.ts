@@ -9,13 +9,14 @@ export class RTCQualityPolicy {
   get uploadControl(){return "standard";}
   get uploadReason(){return "standard";}
   private stable?:number; private last=-Infinity;
+  private uploadStable?:number; private uploadChanged=-Infinity;
   private readonly initial:number; private readonly maximum:number;
   constructor(private options:Partial<SoftphoneAudioOptions>={}) {
     this.initial=options.playbackTargetMs??60;this.target=this.initial;
     this.maximum=Math.max(this.initial,options.playbackMaxMs??160);
   }
   observe(metrics:Record<string,number>,now=performance.now()) {
-    if(now<this.last){this.last=-Infinity;this.stable=undefined;}
+    if(now<this.last){this.last=-Infinity;this.stable=undefined;this.uploadStable=undefined;this.uploadChanged=-Infinity;}
     if(now-this.last<2000)return;
     this.last=now;
     const jitter=metrics.receiver_jitter===undefined?undefined:metrics.receiver_jitter*1000;
@@ -32,9 +33,18 @@ export class RTCQualityPolicy {
     // measurement of the office's bandwidth or a substitute for native BWE.
     const available=metrics.pair_availableOutgoingBitrate;
     const loss=metrics.remote_receiver_fractionLost;
-    if(available!==undefined&&available>0&&available<64000)this.bitrate=Math.max(16000,Math.min(32000,Math.floor((available-32000)*.8/1000)*1000));
-    else if(loss!==undefined&&loss>=.03)this.bitrate=Math.max(16000,this.bitrate-4000);
-    else if(loss!==undefined&&loss<.01)this.bitrate=Math.min(32000,this.bitrate+2000);
+    if(available!==undefined&&available>0&&available<64000){
+      this.bitrate=Math.max(16000,Math.min(32000,Math.floor((available-32000)*.8/1000)*1000));this.uploadStable=undefined;this.uploadChanged=now;
+      return;
+    }
+    // Re-reading a cached RTCP report is not another loss observation. Like
+    // the guarded policy, recovery needs 10 s of clean reports since a change.
+    if(loss===undefined||metrics.remote_receiver_report_updated!==1)return;
+    if(loss>=.03){this.uploadStable=undefined;this.bitrate=Math.max(16000,this.bitrate-4000);this.uploadChanged=now;}
+    else if(loss<.01){
+      this.uploadStable??=now;
+      if(now-this.uploadStable>=10000&&now-this.uploadChanged>=10000){this.bitrate=Math.min(32000,this.bitrate+2000);this.uploadStable=this.uploadChanged=now;}
+    }else this.uploadStable=undefined;
   }
 }
 

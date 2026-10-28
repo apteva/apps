@@ -880,6 +880,11 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 				return numberPurchaseResult(intent, true), nil
 			}
 		}
+		if abandoned, err := dbNumberPurchaseIntentAbandonStaleUnknown(ctx.AppDB(), token); err != nil {
+			return nil, err
+		} else if abandoned {
+			return nil, errors.New("purchase outcome stayed unknown past the reconciliation window and the carrier never listed the number; search for the number again")
+		}
 		return nil, errors.New("purchase outcome remains unknown; the carrier has not listed the number yet. Retry this same confirmation token to reconcile without buying again")
 	}
 	if intent.Status != "quoted" {
@@ -946,6 +951,21 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		return nil, err
 	}
 	if !claimed {
+		// An older succeeded intent for a number that has since been released
+		// must not block buying it again. Retire it only after the carrier
+		// inventory confirms the number is no longer owned.
+		retired, retireErr := a.retireReleasedNumberIntents(ctx, provider, intent)
+		if retireErr != nil {
+			return nil, retireErr
+		}
+		if retired {
+			claimed, err = dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token, addressID, complianceID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !claimed {
 		return nil, errors.New("number purchase is already in progress; do not retry automatically")
 	}
 	intent.SelectedAddressSID = addressID
@@ -983,6 +1003,12 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		err = fmt.Errorf("number purchase is unsupported for provider %s", intent.Provider)
 	}
 	if err != nil {
+		if numberPurchaseDefinitivelyRejected(err) {
+			// The carrier refused the order outright; nothing was bought, so the
+			// intent must not keep blocking this number.
+			_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "failed", nil, err.Error())
+			return nil, fmt.Errorf("provider rejected the purchase: %w", err)
+		}
 		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "unknown", nil, err.Error())
 		return nil, fmt.Errorf("provider purchase failed; do not retry automatically: %w", err)
 	}
@@ -1402,12 +1428,74 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token, addressSID, bundleSID string) (bool, error) {
 	result, err := db.Exec(`UPDATE number_purchase_intents
         SET status = 'purchasing', selected_address_sid = ?, selected_bundle_sid = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND ((number_purchase_intents.phone_number<>'' AND other.phone_number=number_purchase_intents.phone_number) OR (number_purchase_intents.provider_resource_id<>'' AND other.provider_resource_id=number_purchase_intents.provider_resource_id)) AND other.token<>number_purchase_intents.token AND other.status IN ('purchasing','pending','unknown','succeeded'))`, addressSID, bundleSID, projectID, token)
+        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND ((number_purchase_intents.phone_number<>'' AND other.phone_number=number_purchase_intents.phone_number) OR (number_purchase_intents.provider_resource_id<>'' AND other.provider_resource_id=number_purchase_intents.provider_resource_id)) AND other.token<>number_purchase_intents.token AND (other.status IN ('purchasing','pending','succeeded') OR (other.status='unknown' AND other.updated_at > datetime('now', ?))))`, addressSID, bundleSID, projectID, token, numberPurchaseUnknownWindow)
 	if err != nil {
 		return false, err
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// numberPurchaseUnknownWindow bounds how long an ambiguous purchase blocks the
+// number. After it, the carrier inventory has had ample time to list a real
+// purchase, and the intent can be abandoned.
+const numberPurchaseUnknownWindow = "-24 hours"
+
+// numberPurchaseDefinitivelyRejected: a carrier 4xx means the order was
+// refused. 408/409/425/429 are excluded: a timeout, conflict (possibly an
+// already-placed order) or rate limit does not prove nothing was bought.
+func numberPurchaseDefinitivelyRejected(err error) bool {
+	var carrier *carrierHTTPError
+	if !errors.As(err, &carrier) || carrier.status < 400 || carrier.status > 499 {
+		return false
+	}
+	switch carrier.status {
+	case 408, 409, 425, 429:
+		return false
+	}
+	return true
+}
+
+func dbNumberPurchaseIntentAbandonStaleUnknown(db *sql.DB, token string) (bool, error) {
+	result, err := db.Exec(`UPDATE number_purchase_intents SET status='abandoned', updated_at=CURRENT_TIMESTAMP
+        WHERE token=? AND status='unknown' AND updated_at <= datetime('now', ?)`, token, numberPurchaseUnknownWindow)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+// dbNumberPurchaseIntentRetireSucceeded marks other tokens' succeeded intents
+// for the same number on the same carrier connection as released.
+func dbNumberPurchaseIntentRetireSucceeded(db *sql.DB, intent *numberPurchaseIntent) (bool, error) {
+	if intent.PhoneNumber == "" {
+		return false, nil
+	}
+	result, err := db.Exec(`UPDATE number_purchase_intents SET status='released', updated_at=CURRENT_TIMESTAMP
+        WHERE carrier_connection_id=? AND phone_number=? AND token<>? AND status='succeeded'`, intent.CarrierConnectionID, intent.PhoneNumber, intent.Token)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+func (a *App) retireReleasedNumberIntents(ctx *sdk.AppCtx, provider *numberProvider, intent *numberPurchaseIntent) (bool, error) {
+	var blocking int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM number_purchase_intents WHERE carrier_connection_id=? AND phone_number=? AND phone_number<>'' AND token<>? AND status='succeeded'`, intent.CarrierConnectionID, intent.PhoneNumber, intent.Token).Scan(&blocking); err != nil || blocking == 0 {
+		return false, err
+	}
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	if err != nil {
+		return false, fmt.Errorf("could not confirm the number was released: %w", err)
+	}
+	for _, number := range owned {
+		if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(intent.PhoneNumber) {
+			return false, nil
+		}
+	}
+	return dbNumberPurchaseIntentRetireSucceeded(ctx.AppDB(), intent)
 }
 
 func dbNumberPurchaseIntentStatus(db *sql.DB, token, status string, response json.RawMessage, errorMessage string) error {

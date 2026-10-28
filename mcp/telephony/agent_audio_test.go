@@ -282,6 +282,12 @@ func TestAgentAudioScopedTwilioClearPreservesNextReply(t *testing.T) {
 	clearAt := -1
 	after := 0
 	want, _ := base64.StdEncoding.DecodeString(encodeCarrierPacket(b[0].PCM, carrierCodecPCMU8))
+	lastMedia := -1
+	for i, v := range observed {
+		if v.Event == "media" {
+			lastMedia = i
+		}
+	}
 	for i, v := range observed {
 		if v.Event == "clear" {
 			if clearAt >= 0 {
@@ -292,11 +298,17 @@ func TestAgentAudioScopedTwilioClearPreservesNextReply(t *testing.T) {
 		if v.Event == "media" && clearAt >= 0 {
 			got, e := base64.StdEncoding.DecodeString(v.Media.Payload)
 			expected := want
-			if after == 0 {
-				// Only the first 3 ms after an explicit clear has a start ramp.
+			if after == 0 || i == lastMedia {
+				// Only the first 3 ms after an explicit clear has a start ramp, and
+				// the final speech before silence has a 3 ms tail fade.
 				pcm := append([]int16(nil), b[0].PCM...)
-				for j := 0; j < 24; j++ {
-					pcm[j] = int16(int64(pcm[j]) * int64(j+1) / 24)
+				if after == 0 {
+					for j := 0; j < 24; j++ {
+						pcm[j] = int16(int64(pcm[j]) * int64(j+1) / 24)
+					}
+				}
+				if i == lastMedia {
+					applyCarrierTailFade(pcm, twilioMediaSampleRate)
 				}
 				expected, _ = base64.StdEncoding.DecodeString(encodeCarrierPacket(pcm, carrierCodecPCMU8))
 			}

@@ -32,7 +32,14 @@ const (
 	defaultSIPRTPPortMin    = 20000
 	defaultSIPRTPPortMax    = 20199
 	defaultSIPMaxSessions   = 100
+
+	defaultDIDWWTLSPeerName = "sip.didww.com"
 )
+
+type sipCarrierPrefix struct {
+	Carrier string
+	Prefix  netip.Prefix
+}
 
 type sipRuntimeHolder struct {
 	startMu sync.Mutex
@@ -52,12 +59,15 @@ type sipGatewayConfig struct {
 	TLSCertFile   string
 	TLSKeyFile    string
 	AllowedCIDRs  []netip.Prefix
-	RTPBindIP     netip.Addr
-	RTPPortMin    int
-	RTPPortMax    int
-	SRTPMode      string
-	MaxSessions   int
-	certificate   *sipTLSCertificate
+	// Operator ranges labelled carrier=cidr in sip_allowed_cidrs. They are
+	// attributed before the built-in carrier ranges.
+	CarrierCIDRs []sipCarrierPrefix
+	RTPBindIP    netip.Addr
+	RTPPortMin   int
+	RTPPortMax   int
+	SRTPMode     string
+	MaxSessions  int
+	certificate  *sipTLSCertificate
 }
 
 type sipConfigOptions struct {
@@ -73,7 +83,16 @@ var defaultSIPCertificateRoots = []string{
 	"/etc/apteva/certs",
 }
 
-var defaultSIPCarrierCIDRs = []string{
+// Default carrier networks, grouped by the carrier that owns them. The groups
+// attribute an INVITE's source to one carrier so a route can only be reached
+// from its own carrier's network (these ranges are shared by every customer
+// of that carrier, so attribution is necessary but not sufficient).
+var defaultSIPCarrierCIDRs = append(append(append([]string(nil),
+	twilioSIPCarrierCIDRs...), telnyxSIPCarrierCIDRs...), didwwSIPCarrierCIDRs...)
+
+var defaultSIPCarrierPrefixes = mustParseDefaultSIPCarrierPrefixes()
+
+var twilioSIPCarrierCIDRs = []string{
 	// Twilio Elastic SIP Trunking signaling and global media networks.
 	"54.172.60.0/30",
 	"54.244.51.0/30",
@@ -84,7 +103,9 @@ var defaultSIPCarrierCIDRs = []string{
 	"54.252.254.64/30",
 	"177.71.206.192/30",
 	"168.86.128.0/18",
+}
 
+var telnyxSIPCarrierCIDRs = []string{
 	// Telnyx SIP signaling pools and media networks.
 	"192.76.120.0/22",
 	"64.16.250.10/32",
@@ -102,7 +123,9 @@ var defaultSIPCarrierCIDRs = []string{
 	"64.16.248.0/23",
 	"103.115.244.128/25",
 	"185.246.41.128/25",
+}
 
+var didwwSIPCarrierCIDRs = []string{
 	// DIDWW outbound SIP signaling and RTP networks, published in its
 	// outbound SIP information. Keep restrictive even for outbound answers.
 	"46.19.208.0/21",
@@ -206,7 +229,9 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 	// certificate. Keep dialog routing intact and verify against its carrier
 	// identity when reconnecting, just as for Telnyx. Operator overrides below
 	// remain authoritative; never derive a trusted identity from the Contact.
-	cfg.TLSPeerNames = map[string]string{"telnyx": "sip.telnyx.com", "twilio": "sip.twilio.com"}
+	// DIDWW delivers inbound calls from its sip.didww.com signaling pool; without
+	// an identity a BYE after a dropped TLS connection could not reconnect.
+	cfg.TLSPeerNames = map[string]string{"telnyx": "sip.telnyx.com", "twilio": "sip.twilio.com", "didww": defaultDIDWWTLSPeerName}
 	if raw := strings.TrimSpace(config["sip_tls_peer_names"]); raw != "" {
 		if len(raw) > 4096 || json.Unmarshal([]byte(raw), &cfg.TLSPeerNames) != nil {
 			return cfg, errors.New("invalid SIP TLS peer names")
@@ -217,7 +242,7 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 			return cfg, errors.New("SIP TLS peer names must map carriers to certificate hostnames")
 		}
 	}
-	cfg.AllowedCIDRs, err = parseSIPAllowedCIDRs(allowedCIDRs)
+	cfg.AllowedCIDRs, cfg.CarrierCIDRs, err = parseSIPCarrierCIDRs(allowedCIDRs)
 	if err != nil {
 		return cfg, err
 	}
@@ -238,22 +263,60 @@ func (c sipGatewayConfig) tlsConfig() (*tls.Config, error) {
 	return &tls.Config{RootCAs: c.clientRoots, GetCertificate: loader.getCertificate, MinVersion: tls.VersionTLS12}, nil
 }
 
-func (c sipGatewayConfig) sourceAllowed(address string) bool {
+func sipSourceAddr(address string) (netip.Addr, bool) {
 	host := address
 	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
 		host = parsedHost
 	}
 	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
 	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ip.Unmap(), true
+}
+
+func (c sipGatewayConfig) sourceAllowed(address string) bool {
+	ip, ok := sipSourceAddr(address)
+	if !ok {
 		return false
 	}
-	ip = ip.Unmap()
 	for _, prefix := range c.AllowedCIDRs {
 		if prefix.Contains(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+// sourceCarrier attributes an allowed signaling source to the carrier owning
+// its network: operator-labelled ranges first, then the published defaults.
+// "" means the source is allowed (an unlabelled operator range) but cannot be
+// attributed to one carrier.
+func (c sipGatewayConfig) sourceCarrier(address string) string {
+	ip, ok := sipSourceAddr(address)
+	if !ok {
+		return ""
+	}
+	for _, ranges := range [][]sipCarrierPrefix{c.CarrierCIDRs, defaultSIPCarrierPrefixes} {
+		for _, item := range ranges {
+			if item.Prefix.Contains(ip) {
+				return item.Carrier
+			}
+		}
+	}
+	return ""
+}
+
+func mustParseDefaultSIPCarrierPrefixes() []sipCarrierPrefix {
+	var out []sipCarrierPrefix
+	for carrier, ranges := range map[string][]string{
+		"twilio": twilioSIPCarrierCIDRs, "telnyx": telnyxSIPCarrierCIDRs, "didww": didwwSIPCarrierCIDRs,
+	} {
+		for _, value := range ranges {
+			out = append(out, sipCarrierPrefix{Carrier: carrier, Prefix: netip.MustParsePrefix(value).Masked()})
+		}
+	}
+	return out
 }
 
 func (c sipGatewayConfig) endpointURI() string {
@@ -360,25 +423,47 @@ func regularFile(path string) bool {
 }
 
 func parseSIPAllowedCIDRs(raw string) ([]netip.Prefix, error) {
+	out, _, err := parseSIPCarrierCIDRs(raw)
+	return out, err
+}
+
+var sipCarrierLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
+// Entries are cidr or carrier=cidr (for example twilio=203.0.113.0/24). A
+// label binds the range to that carrier's routes; unlabelled operator ranges
+// stay allowed but are not attributed to a carrier.
+func parseSIPCarrierCIDRs(raw string) ([]netip.Prefix, []sipCarrierPrefix, error) {
 	var out []netip.Prefix
+	var labelled []sipCarrierPrefix
 	for _, value := range strings.Split(raw, ",") {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
+		}
+		carrier := ""
+		if label, cidr, ok := strings.Cut(value, "="); ok {
+			carrier = strings.ToLower(strings.TrimSpace(label))
+			value = strings.TrimSpace(cidr)
+			if !sipCarrierLabelPattern.MatchString(carrier) {
+				return nil, nil, fmt.Errorf("invalid SIP carrier label %q", label)
+			}
 		}
 		if !strings.Contains(value, "/") {
 			value += "/32"
 		}
 		prefix, err := netip.ParsePrefix(value)
 		if err != nil || !prefix.Addr().Is4() {
-			return nil, fmt.Errorf("invalid IPv4 carrier CIDR %q", value)
+			return nil, nil, fmt.Errorf("invalid IPv4 carrier CIDR %q", value)
 		}
 		if prefix.Bits() == 0 {
-			return nil, errors.New("SIP allowed CIDRs cannot allow the entire internet")
+			return nil, nil, errors.New("SIP allowed CIDRs cannot allow the entire internet")
 		}
 		out = append(out, prefix.Masked())
+		if carrier != "" {
+			labelled = append(labelled, sipCarrierPrefix{Carrier: carrier, Prefix: prefix.Masked()})
+		}
 	}
-	return out, nil
+	return out, labelled, nil
 }
 
 func configValue(config sdk.Config, key, envName, fallback string) string {

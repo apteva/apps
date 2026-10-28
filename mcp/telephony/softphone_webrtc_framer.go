@@ -9,7 +9,25 @@ import (
 type rtcPCMFramer struct {
 	pending  []int16
 	segments []rtcPCMSegment
+	// Samples in the latest source chunk: its successor is expected one chunk
+	// duration after arrival.
+	lastChunk int
+	// Consecutive playback ticks with the queue above its latency target.
+	backlogTicks int
 }
+
+const (
+	// Frames still queued after this tick's frame which are not excess latency.
+	// ±1 ms arrival jitter alone holds two for runs of up to ~100 ms.
+	rtcPlaybackTargetFrames = 1
+	// A backlog persisting this long is trimmed at a silent frame (200 ms) or,
+	// failing that, by crossfading speech (400 ms, then at most every 100 ms).
+	rtcBacklogSilenceTicks = 10
+	rtcBacklogSpeechTicks  = 20
+	rtcBacklogSpeechEvery  = 5
+	rtcSilencePeak         = 64 // about -54 dBFS
+	rtcTrimCrossfade       = 120
+)
 
 type rtcPCMSegment struct {
 	samples int
@@ -66,6 +84,7 @@ func (f *rtcPCMFramer) push(data []byte, expires time.Time, emit func(rtcPCMFram
 	if f.pending == nil {
 		f.pending = make([]int16, 0, 480)
 	}
+	f.lastChunk = len(data) / 2
 	for len(data) >= 2 {
 		take := min(480-len(f.pending), len(data)/2)
 		for k := 0; k < take*2; k += 2 {
@@ -106,7 +125,7 @@ func queueRTCFrame(frames chan rtcPCMFrame, frame rtcPCMFrame, done <-chan struc
 	default:
 		select {
 		case <-frames:
-			stats.drop("webrtc_playback_overflow", "carrier_to_operator", 0, 20)
+			stats.drop("webrtc_playback_overflow", stats.mediaDirection(), 0, 20)
 		default:
 		}
 		select {
@@ -125,18 +144,24 @@ func queueRTCFrame(frames chan rtcPCMFrame, frame rtcPCMFrame, done <-chan struc
 // Preserve the partial to join the next chunk; never enqueue padded extra audio.
 func nextRTCPlaybackFrame(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, lastChunkAt, now time.Time, stats *rtcMediaStats) (rtcPCMFrame, bool) {
 	frame, open := nextRTCFrame(frames, now, stats)
-	if !open || lastChunkAt.IsZero() || now.Sub(lastChunkAt) < 20*time.Millisecond {
+	if !open {
 		return frame, open
+	}
+	frame = pending.trimBacklog(frames, frame, now, stats)
+	if lastChunkAt.IsZero() || now.Sub(lastChunkAt) < 20*time.Millisecond {
+		return frame, true
 	}
 	// Age protection applies even when this tick already has a complete frame.
 	if dropped := pending.discardExpired(now); dropped > 0 {
-		direction := stats.direction
-		if direction == "" {
-			direction = "carrier_to_operator"
-		}
-		stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
+		stats.drop("webrtc_playback_partial_age", stats.mediaDirection(), 0, dropped*1000/24000)
 	}
 	if frame.pcm != nil {
+		return frame, true
+	}
+	// A slightly late continuation is not an utterance tail. Like the SIP pacer,
+	// wait one packet interval past the chunk expected after the last one.
+	expected := max(20*time.Millisecond, time.Duration(pending.lastChunk)*time.Second/24000)
+	if now.Sub(lastChunkAt) < expected+20*time.Millisecond {
 		return frame, true
 	}
 	if tail, padding := pending.flushPartial(now); tail.pcm != nil {
@@ -147,4 +172,52 @@ func nextRTCPlaybackFrame(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, last
 		frame = tail
 	}
 	return frame, true
+}
+
+// A stall delivers its backlog at once and the paced consumer cannot catch up,
+// so without trimming the added latency lasts for the rest of the call. Once a
+// backlog persists, drop silent frames first; continuous speech is shortened
+// by one frame with a short crossfade into its successor, never with a jump.
+func (f *rtcPCMFramer) trimBacklog(frames <-chan rtcPCMFrame, frame rtcPCMFrame, now time.Time, stats *rtcMediaStats) rtcPCMFrame {
+	if frame.pcm == nil || len(frames) <= rtcPlaybackTargetFrames {
+		f.backlogTicks = 0
+		return frame
+	}
+	f.backlogTicks++
+	silent := rtcPCMSilent(frame.pcm)
+	if f.backlogTicks < rtcBacklogSilenceTicks || !silent && f.backlogTicks < rtcBacklogSpeechTicks {
+		return frame
+	}
+	next, _ := nextRTCFrame(frames, now, stats)
+	if next.pcm == nil {
+		return frame
+	}
+	if silent {
+		stats.drop("webrtc_playback_backlog_silence", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
+		return next
+	}
+	stats.drop("webrtc_playback_backlog_speech", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
+	f.backlogTicks = rtcBacklogSpeechTicks - rtcBacklogSpeechEvery
+	return rtcPCMFrame{pcm: rtcCrossfadeFrames(frame.pcm, next.pcm), expires: frame.expires}
+}
+
+func rtcPCMSilent(pcm []int16) bool {
+	for _, v := range pcm {
+		if v > rtcSilencePeak || v < -rtcSilencePeak {
+			return false
+		}
+	}
+	return true
+}
+
+// Starts as the dropped frame, so it continues the previous output, and ends
+// as its successor, so the following frame continues it.
+func rtcCrossfadeFrames(dropped, next []int16) []int16 {
+	out := append([]int16(nil), next...)
+	n := min(rtcTrimCrossfade, len(dropped), len(next))
+	for i := 0; i < n; i++ {
+		t := float64(i+1) / float64(n+1)
+		out[i] = int16(float64(dropped[i])*(1-t) + float64(next[i])*t)
+	}
+	return out
 }

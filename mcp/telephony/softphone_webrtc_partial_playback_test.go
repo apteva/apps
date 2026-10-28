@@ -204,11 +204,15 @@ func TestRTCPlaybackTickTailAndPauseAgeProtection(t *testing.T) {
 		pcm[i] = int16(i + 100)
 	}
 	f.push(pcm16ToBytes(pcm), now.Add(250*time.Millisecond), func(rtcPCMFrame) bool { t.Fatal("partial emitted"); return false })
-	tail, _ := nextRTCPlaybackFrame(frames, &f, now, now.Add(20*time.Millisecond), stats)
+	// The continuation is due at 20 ms; the partial is a tail one packet later.
+	if early, _ := nextRTCPlaybackFrame(frames, &f, now, now.Add(20*time.Millisecond), stats); early.pcm != nil || len(f.pending) != 432 {
+		t.Fatal("partial padded before its continuation was late")
+	}
+	tail, _ := nextRTCPlaybackFrame(frames, &f, now, now.Add(40*time.Millisecond), stats)
 	if !slices.Equal(tail.pcm[:432], pcm) || tail.pcm[479] != 0 || !tail.expires.Equal(now.Add(250*time.Millisecond)) || stats.snapshot().PartialPaddedMS != 2 {
 		t.Fatal("final-word tail or lifetime changed")
 	}
-	if repeat, _ := nextRTCPlaybackFrame(frames, &f, now, now.Add(40*time.Millisecond), stats); repeat.pcm != nil {
+	if repeat, _ := nextRTCPlaybackFrame(frames, &f, now, now.Add(60*time.Millisecond), stats); repeat.pcm != nil {
 		t.Fatal("tail repeated")
 	}
 	frames <- rtcPCMFrame{pcm: make([]int16, 480), expires: now.Add(250 * time.Millisecond)}

@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -536,6 +538,15 @@ func (a *App) publishLifecycleEventsContext(workerCtx context.Context, ctx *sdk.
 	if gateway == "" || token == "" {
 		return nil
 	} // Preserve pending events until a gateway is available.
+	// The background worker (no callID) backs off after transient failures;
+	// explicit per-call publishes always try immediately.
+	backoffKey := ""
+	if callID == "" {
+		backoffKey = ctx.CurrentProject()
+		if lifecyclePublishBackoff.blocked(backoffKey, time.Now()) {
+			return nil
+		}
+	}
 	batch, cancel := context.WithTimeout(workerCtx, 2*time.Second)
 	defer cancel()
 	client := &http.Client{Timeout: 500 * time.Millisecond}
@@ -555,11 +566,29 @@ func (a *App) publishLifecycleEventsContext(workerCtx context.Context, ctx *sdk.
 		request.Header.Set("Content-Type", "application/json")
 		response, err := client.Do(request)
 		if err != nil {
+			if callID == "" {
+				lifecyclePublishBackoff.fail(backoffKey, time.Now())
+			}
 			return err
 		}
+		reason, _ := io.ReadAll(io.LimitReader(response.Body, 512))
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if lifecycleEventRejectedPermanently(response.StatusCode) {
+				// Park it so one bad event cannot block every later event in the
+				// project's oldest-first queue.
+				message := fmt.Sprintf("rejected %d: %s", response.StatusCode, strings.TrimSpace(string(reason)))
+				if _, err := ctx.AppDB().Exec(`UPDATE call_events SET published_at = ?, publish_error = ?
+            WHERE event_id = ? AND published_at = ''`, time.Now().UTC().Format(time.RFC3339Nano), message, event.EventID); err != nil {
+					return err
+				}
+				ctx.Logger().Warn("lifecycle event parked", "event", event.EventID, "topic", event.Topic, "status", response.StatusCode)
+				continue
+			}
+			if callID == "" {
+				lifecyclePublishBackoff.fail(backoffKey, time.Now())
+			}
 			return fmt.Errorf("lifecycle event publish returned %d", response.StatusCode)
 		}
 		if _, err := ctx.AppDB().Exec(`UPDATE call_events SET published_at = ?
@@ -567,7 +596,48 @@ func (a *App) publishLifecycleEventsContext(workerCtx context.Context, ctx *sdk.
 			return err
 		}
 	}
+	if callID == "" {
+		lifecyclePublishBackoff.reset(backoffKey)
+	}
 	return nil
+}
+
+// 408 and 429 are retryable; any other 4xx will not succeed on retry.
+func lifecycleEventRejectedPermanently(status int) bool {
+	return status >= 400 && status < 500 && status != 408 && status != 429
+}
+
+// lifecyclePublishBackoff spaces worker retries per project after transient
+// failures (network, 5xx, 408, 429): 1s doubling to 60s, reset on success.
+var lifecyclePublishBackoff = &publishBackoff{state: map[string]publishBackoffState{}}
+
+type publishBackoffState struct {
+	failures int
+	until    time.Time
+}
+type publishBackoff struct {
+	mu    sync.Mutex
+	state map[string]publishBackoffState
+}
+
+func (b *publishBackoff) blocked(key string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return now.Before(b.state[key].until)
+}
+func (b *publishBackoff) fail(key string, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.state[key]
+	s.failures++
+	delay := time.Duration(math.Min(60, math.Pow(2, float64(min(s.failures-1, 6))))) * time.Second
+	s.until = now.Add(delay)
+	b.state[key] = s
+}
+func (b *publishBackoff) reset(key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.state, key)
 }
 
 func (c *callsDB) listLifecycleEvents(callID string, afterRevision int64, limit int) ([]lifecycleEventRow, error) {

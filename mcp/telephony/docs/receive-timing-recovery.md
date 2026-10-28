@@ -8,15 +8,26 @@ perceptual quality.
 
 ## Configuration
 
-Existing defaults remain SIP `ewma` and WebRTC `fixed`. Guarded WebRTC timeline
-recovery applies automatically in either mode. No ICE restart is required.
+Defaults are SIP `ewma` and WebRTC `distribution`. WebRTC moved to
+`distribution` after a same-input comparison: it matched `fixed` on clean,
+jitter, loss, stall and burst inputs and cut 95 ms spike concealment from
+3000 ms to 260 ms, for at most 20 ms more p95 delay. SIP stays `ewma`: both
+estimators tie on loss and concealment, but `distribution` added up to 4.5 ms of
+residence under bursty speech. Installations that saved `fixed` keep it. Guarded
+WebRTC timeline recovery applies automatically in either mode. No ICE restart is
+required.
+
+The SIP receiver re-anchors a sustained, consistent late offset instead of
+dropping it indefinitely, treats a consistent same-SSRC sequence/timestamp jump
+as a stream reset, and tracks sender clock skew up to ±1%. Diagnostics report
+`source_reanchors`, `sequence_rebases` and `delay_distribution_out_of_range`.
 
 - SIP audio profile: set `rtp_playback.delay_estimator` to `distribution`.
   `ewma` restores the existing target estimator. Distribution estimation is used
   by the `adaptive` receiver; it does not change reference-receiver behavior.
   Existing project/number/adviser profile resolution and revision pinning apply.
-- Telephony settings: set `softphone_webrtc_receive_estimator` to `distribution`.
-  `fixed` restores the existing 60 ms reserve. This applies to new browser and
+- Telephony settings: `softphone_webrtc_receive_estimator` defaults to
+  `distribution`. `fixed` restores the previous 60 ms reserve. This applies to new browser and
   coaching receive sessions. It is an installation setting, not an adviser
   override.
 

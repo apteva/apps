@@ -14,16 +14,23 @@ import (
 // This relay already has one producer per media direction. A serialized message
 // writer avoids adding another writer goroutine/request allocation per frame.
 // Control replies share its lock, keeping headers and payloads atomic.
+const agentRelayWriteTimeout = 250 * time.Millisecond
+
 type agentRelayWriter struct {
-	conn  net.Conn
-	state ws.State
-	mu    sync.Mutex
+	conn    net.Conn
+	state   ws.State
+	timeout time.Duration // zero keeps agentRelayWriteTimeout
+	mu      sync.Mutex
 }
 
 func (w *agentRelayWriter) Write(op ws.OpCode, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+	timeout := w.timeout
+	if timeout <= 0 {
+		timeout = agentRelayWriteTimeout
+	}
+	if err := w.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 		return err
 	}
 	if w.state == ws.StateClientSide {

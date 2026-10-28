@@ -335,14 +335,17 @@ func (a *App) handleRingPeerSocket(w http.ResponseWriter, r *http.Request, row *
 		if parent.PeerKind != peerKindExternal || (parent.Status != "answered" && parent.Status != "in-progress") {
 			return false
 		}
-		hub = a.softphones.hubFor(parentID)
-		hub.setCallState(parent.Direction, parent.Status)
+		// Attach under the registry lock so a concurrent dropIfEmpty cannot
+		// orphan the hub between lookup and attachment.
 		var old *websocketWriterPump
-		if childSide {
-			old = hub.setBrowser(writer)
-		} else {
-			old = hub.setPeer(writer)
-		}
+		hub = a.softphones.attach(parentID, func(h *softphoneHub) {
+			h.setCallState(parent.Direction, parent.Status)
+			if childSide {
+				old = h.setBrowser(writer)
+			} else {
+				old = h.setPeer(writer)
+			}
+		})
 		if old != nil {
 			old.Stop()
 			_ = old.conn.Close()

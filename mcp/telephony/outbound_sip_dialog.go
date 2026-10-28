@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -112,6 +111,8 @@ func (s *outboundSIPSession) sendSessionRefresh(timer sipSessionTimer) (result e
 	if err != nil {
 		return err
 	}
+	// RFC 3264 §8: the same o= session, version bumped only on change.
+	body = nextSIPLocalSDP(s.localSDP, body)
 	req := sip.NewRequest(sip.INVITE, target.Address)
 	req.SetBody(body)
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
@@ -134,6 +135,7 @@ func (s *outboundSIPSession) sendSessionRefresh(timer sipSessionTimer) (result e
 	if err = s.dialog.WriteRequest(ack); err != nil {
 		return err
 	}
+	s.localSDP = body
 	offer, err := parseSIPMediaOfferOptions(response.Body(), s.gateway.cfg, []string{s.media.offer.Codec}, true)
 	if err != nil || !sameSIPMedia(offer, s.media.offer) {
 		return errors.New("outbound SIP refresh changed unsupported media")
@@ -154,6 +156,10 @@ func (s *outboundSIPSession) handleRefresh(req *sip.Request, tx sip.ServerTransa
 	reply := func(code int, reason string) {
 		s.diagnostics.event("sip_refresh_result", "carrier", reason, code)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, code, reason, nil))
+	}
+	if !s.mediaReady.Load() && !s.ended.Load() && s.matchesEarlyDialog(req) {
+		s.handleEarlyRefresh(req, tx)
+		return
 	}
 	dialog, err := s.gateway.outboundDialogs.MatchRequestDialog(req)
 	if err != nil || dialog != s.dialog || s.ended.Load() || !s.mediaReady.Load() {
@@ -196,8 +202,12 @@ func (s *outboundSIPSession) handleRefresh(req *sip.Request, tx sip.ServerTransa
 			return
 		}
 		direction = offer.Direction
-		answer = bytes.Replace(answer, []byte("a=sendrecv"), []byte("a="+sipAnswerDirection(direction)), 1)
+		// Echo the carrier's current crypto tag, as the inbound refresh does.
+		if offer.Secure {
+			answer = sipSDPWithCryptoTag(answer, offer.CryptoTag)
+		}
 	}
+	answer = nextSIPLocalSDP(s.localSDP, sipSDPWithDirection(answer, sipAnswerDirection(direction)))
 	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 	if req.Method == sip.INVITE || len(req.Body()) > 0 {
 		res = sip.NewSDPResponseFromRequest(req, answer)
@@ -223,6 +233,9 @@ func (s *outboundSIPSession) handleRefresh(req *sip.Request, tx sip.ServerTransa
 	} else if err = tx.Respond(res); err != nil {
 		return
 	}
+	if req.Method == sip.INVITE || len(req.Body()) > 0 {
+		s.localSDP = answer
+	}
 	s.timerMu.Lock()
 	s.timer = timer
 	s.timerUpdated = time.Now()
@@ -231,6 +244,65 @@ func (s *outboundSIPSession) handleRefresh(req *sip.Request, tx sip.ServerTransa
 	s.media.remoteMode.Store(sipRemoteMediaMode(direction))
 	s.diagnostics.event("sip_refresh_result", "carrier", "", 200)
 }
+
+// matchesEarlyDialog accepts an in-dialog request before the 2xx is ACKed.
+// sipgo only indexes a client dialog after its 2xx, so match the Call-ID (the
+// caller's lookup key) and our From tag carried as the request's To tag.
+func (s *outboundSIPSession) matchesEarlyDialog(req *sip.Request) bool {
+	if s.dialog == nil || s.dialog.InviteRequest == nil || req.To() == nil || s.dialog.InviteRequest.From() == nil {
+		return false
+	}
+	ours, ok := s.dialog.InviteRequest.From().Params.Get("tag")
+	theirs, present := req.To().Params.Get("tag")
+	return ok && present && ours != "" && ours == theirs && sipCallID(req) == s.providerCallID
+}
+
+// RFC 5057 treats 481 as dialog-terminating, so an early-dialog refresh must
+// not get one. Our INVITE offer is still unanswered: a session-timer UPDATE
+// without SDP succeeds, an UPDATE offer gets 500 with Retry-After (RFC 3311
+// §5.2), and a re-INVITE gets 491 (RFC 3261 §14.2).
+func (s *outboundSIPSession) handleEarlyRefresh(req *sip.Request, tx sip.ServerTransaction) {
+	reply := func(code int, reason string, headers ...sip.Header) {
+		s.diagnostics.event("sip_refresh_result", "carrier", reason, code)
+		res := sip.NewResponseFromRequest(req, code, reason, nil)
+		for _, header := range headers {
+			res.AppendHeader(header)
+		}
+		_ = tx.Respond(res)
+	}
+	if req.CSeq() == nil || req.CSeq().SeqNo <= s.remoteSeq.Load() {
+		reply(500, "Invalid CSeq")
+		return
+	}
+	s.diagnostics.event("sip_refresh_attempt", "carrier", "early_"+string(req.Method), 0)
+	switch {
+	case req.Method == sip.INVITE:
+		reply(491, "Request Pending")
+		return
+	case len(req.Body()) > 0:
+		reply(500, "Offer Pending", sip.NewHeader("Retry-After", "1"))
+		return
+	}
+	timer, code, err := parseSIPSessionTimer(req, sipSessionTimer{})
+	if err != nil {
+		if code == 422 {
+			reply(code, "Session Interval Too Small", sip.NewHeader("Min-SE", "90"))
+		} else {
+			reply(code, "Invalid Session Timer")
+		}
+		return
+	}
+	s.remoteSeq.Store(req.CSeq().SeqNo)
+	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+	if contact := s.dialog.InviteRequest.Contact(); contact != nil {
+		res.AppendHeader(sip.HeaderClone(contact))
+	}
+	addSIPTimerHeaders(res, timer)
+	if tx.Respond(res) == nil {
+		s.diagnostics.event("sip_refresh_result", "carrier", "early_dialog", 200)
+	}
+}
+
 func (s *outboundSIPSession) handleACK(req *sip.Request) {
 	if req.CSeq() == nil {
 		return

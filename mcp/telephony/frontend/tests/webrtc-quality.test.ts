@@ -24,9 +24,9 @@ test("RTC monitoring has a byte budget and cannot grow a large socket write",()=
 test("upload rate has a floor and cap, ignores missing bandwidth and recovers",()=>{
  const q=new RTCQualityPolicy();q.observe({},0);expect(q.bitrate).toBe(32000);
  q.observe({pair_availableOutgoingBitrate:40000},2000);expect(q.bitrate).toBe(16000);
- for(let t=4000;t<=30000;t+=2000)q.observe({remote_receiver_fractionLost:0},t);
+ for(let t=4000;t<=100000;t+=2000)q.observe({remote_receiver_fractionLost:0,remote_receiver_report_updated:1},t);
  expect(q.bitrate).toBe(32000);
- q.observe({pair_availableOutgoingBitrate:1},32000);expect(q.bitrate).toBe(16000);
+ q.observe({pair_availableOutgoingBitrate:1},102000);expect(q.bitrate).toBe(16000);
 });
 test("concealment observations are sampled deltas and survive absent packet-loss counters",()=>{
  const report=(time:number,count?:number,ssrc=42,id="in")=>new Map([[id,{type:"inbound-rtp",kind:"audio",timestamp:time,ssrc,concealedSamples:count,silentConcealedSamples:count===undefined?undefined:count/2}]]) as any;

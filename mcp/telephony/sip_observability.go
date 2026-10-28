@@ -93,11 +93,15 @@ func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Tim
 		return
 	}
 	defer o.timingMu.Unlock()
-	// Packets observed during contention are not carrier loss. Restart this
-	// best-effort timing window and retain explicit skipped-count confidence.
+	// Packets observed during contention are not carrier loss. Restart only the
+	// best-effort arrival-timing window; cumulative per-stream sequence state
+	// (first, highest, loss base) must never move backwards, or RTCP TotalLost
+	// would decrease. Skipped packets are credited against the next gap.
+	skippedCredit := int64(0)
 	if skipped := o.skipped.Load(); skipped != o.observedSkipped {
-		o.have = false
+		skippedCredit = skipped - o.observedSkipped
 		o.observedSkipped = skipped
+		o.lastArrival = time.Time{}
 	}
 	if !o.have || o.stream != packet.SSRC {
 		o.have = true
@@ -120,7 +124,7 @@ func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Tim
 	}
 	o.seen[slot] = extended
 	if extended > o.highest {
-		if missing := extended - o.highest - 1; missing > 0 {
+		if missing := extended - o.highest - 1 - skippedCredit; missing > 0 {
 			o.loss.Add(missing)
 			o.sequenceGaps.Add(missing)
 		}
@@ -291,6 +295,9 @@ type sipJitterSnapshot struct {
 	ClockResets            int              `json:"clock_resets"`
 	DTXResumes             int              `json:"dtx_resumes"`
 	FreshDeliveryResumes   int              `json:"fresh_delivery_rebuffers"`
+	SourceReanchors        int              `json:"source_reanchors"`
+	SequenceRebases        int              `json:"sequence_rebases"`
+	DelayOutOfRange        int              `json:"delay_distribution_out_of_range"`
 	Events                 []sipJitterEvent `json:"events,omitempty"`
 	Available              bool             `json:"available"`
 	QueueMS                float64          `json:"queue_ms"`
@@ -547,6 +554,7 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		fits, fitHead, fitCount := j.clock.fits, j.clock.fitHead, j.clock.fitCount
 		s.Jitter.ClockResets, s.Jitter.DTXResumes = j.clockResets, j.dtxResumes
 		s.Jitter.FreshDeliveryResumes = j.freshResumes
+		s.Jitter.SourceReanchors, s.Jitter.SequenceRebases, s.Jitter.DelayOutOfRange = j.reanchors, j.sequenceRebases, j.delayOutOfRange
 		events := j.events
 		eventHead, eventCount := j.eventHead, j.eventCount
 

@@ -363,6 +363,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	inputResampler := newPCMResampler(8000, 24000)
 	agentInput := newAgentMediaConverter(agentSession, 8000, true)
 	agentOutput := newAgentMediaConverter(agentSession, 8000, false)
+	var outputKey agentPlaybackKey
 	playback := newTwilioPlaybackTracker()
 	tap := a.listeners.openBridge(callID)
 	defer a.listeners.closeBridge(callID, tap)
@@ -664,6 +665,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		if !agentSession.accept(nextFrame) {
 			nextFrame = realtimeBridgeControl{}
 			continue
+		}
+		if key := (agentPlaybackKey{nextFrame.Generation, nextFrame.ItemID}); key.Item != "" && key != outputKey {
+			agentOutput.reset()
+			outputKey = key
 		}
 		data, sourceAt := carrierMicrophoneSource(row, data)
 		if agentSession.continuous() && sourceAt.IsZero() {

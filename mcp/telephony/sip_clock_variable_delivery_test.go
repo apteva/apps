@@ -20,6 +20,7 @@ func TestSIPClockVariableDeliveryRegression(t *testing.T) {
 	for _, codec := range []string{"PCMU", "PCMA", "G722"} {
 		for _, condition := range []string{"normal", "drift_only", "jitter_only", "drift_and_jitter"} {
 			t.Run(codec+"/"+condition, func(t *testing.T) {
+				skipReplayUnderRace(t, codec == "PCMU" && condition == "drift_and_jitter")
 				b := newRTPJitterBuffer()
 				old := &v21SIPClockBuffer{rtpJitterBuffer: newRTPJitterBuffer()}
 				m := &sipRTPMedia{offer: sipMediaOffer{Codec: codec, PacketSamples: 160}}

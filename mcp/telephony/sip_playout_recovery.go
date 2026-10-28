@@ -104,7 +104,9 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 		if !prev.at.IsZero() {
 			step := time.Duration(int32(q.ts-prev.ts)) * time.Second / 8000
 			if step > 0 && step <= 60*time.Millisecond {
-				rates[nr] = (float64(q.at.Sub(prev.at))/float64(step) - 1) * 1e6
+				// Relative to the calibrated source clock: a tracked ±1% sender
+				// skew is not a backlog draining or an uncertain delivery rate.
+				rates[nr] = (float64(q.at.Sub(prev.at))*(1+b.driftPPM/1e6)/float64(step) - 1) * 1e6
 				nr++
 			}
 		}
@@ -155,10 +157,11 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 		r.state, r.reason = "waiting", "no_persistent_phase_shift"
 		return false
 	}
-	if next > time.Duration(b.policy.MaxRelativeMS)*time.Millisecond {
-		r.state, r.reason = "waiting", "offset_exceeds_recovery_budget"
-		return false
-	}
+	// An offset this large cannot be absorbed: relative-lateness admission would
+	// drop every later packet forever (the anchor only ever moves earlier).
+	// The same guarded qualification (consistent, paced, low-variation, cooled
+	// down) instead proves a new delivery timeline: re-anchor the source clock.
+	reanchor := next+time.Duration(b.policy.CapacityMS)*time.Millisecond > time.Duration(b.policy.MaxRelativeMS)*time.Millisecond
 	// Invalidate retained raw/decoded/PLC reserve once, then rebuild a small
 	// reserve from current packets. Original physical arrival/source evidence and
 	// calibrated source clock are preserved. Never renew a retained packet's age.
@@ -186,6 +189,15 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 	r.lastOffsetMS = float64(next) / float64(time.Millisecond)
 	r.recoveries++
 	r.state, r.reason = "recovering", "persistent_delivery_shift"
+	if reanchor {
+		b.sourceAnchorAt = b.sourceAnchorAt.Add(next)
+		b.clock.rebase()
+		b.delayDistribution = audioDelayDistribution{}
+		b.reanchors++
+		b.event(processed, "source_reanchored", seq, ts, 0, age)
+		r.offset = 0
+		r.reason = "persistent_delivery_shift_reanchored"
+	}
 	r.startedRecoveryAt = processed
 	r.recoveryMS = 0
 	r.pending.Store(true)

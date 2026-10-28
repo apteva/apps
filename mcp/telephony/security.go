@@ -142,9 +142,15 @@ func (a *App) authorizeCallRequest(r *http.Request, row *callRow) error {
 			return errors.New("Telnyx callback exceeds 1 MB")
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		if globalCtx == nil || globalCtx.PlatformAPI() == nil {
+			return errors.New("Telnyx credential service is unavailable")
+		}
 		creds, err := globalCtx.PlatformAPI().GetConnectionCredentials(row.CarrierConnectionID)
 		if err != nil {
 			return fmt.Errorf("load Telnyx signing credential: %w", err)
+		}
+		if creds == nil {
+			return errors.New("load Telnyx signing credential")
 		}
 		publicKey := strings.TrimSpace(creds.Fields["public_key"])
 		if publicKey == "" {
@@ -301,9 +307,7 @@ func (a *App) verifyTwilioRequest(r *http.Request, connectionID int64) error {
 func (a *App) publicRequestURL(r *http.Request) string {
 	baseURL := a.publicAppURL()
 	if strings.HasPrefix(r.URL.Path, "/media/") {
-		baseURL = a.publicInstalledAppURL()
-		baseURL = strings.Replace(baseURL, "https://", "wss://", 1)
-		baseURL = strings.Replace(baseURL, "http://", "ws://", 1)
+		baseURL = a.publicWSMediaBase()
 	}
 	return baseURL + r.URL.RequestURI()
 }
@@ -335,7 +339,9 @@ func redactURL(raw string) string {
 	}
 	u.RawQuery = query.Encode()
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) >= 4 && parts[len(parts)-4] == "media" {
+	// Carrier streams end /media/<provider>/<call>/<secret>; the browser
+	// softphone leg ends /softphone/media/<call>/<token>.
+	if len(parts) >= 4 && (parts[len(parts)-4] == "media" || parts[len(parts)-4] == "softphone" && parts[len(parts)-3] == "media") {
 		parts[len(parts)-1] = "REDACTED"
 		u.Path = "/" + strings.Join(parts, "/")
 	}

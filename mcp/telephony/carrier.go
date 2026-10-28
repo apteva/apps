@@ -645,6 +645,11 @@ func (a *App) handlePlivoXML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if callUUID := firstNonEmpty(r.FormValue("CallUUID"), r.URL.Query().Get("CallUUID")); callUUID != "" {
+		// A signed request for another leg must not rebind this call's identity.
+		if row.CarrierSID != "" && callUUID != row.CarrierSID {
+			http.Error(w, "carrier call ID mismatch", http.StatusForbidden)
+			return
+		}
 		if err := a.db().updateCarrierIdentity(callID, callUUID, row.CarrierRequestID); err != nil {
 			http.Error(w, "persist Plivo call id", http.StatusInternalServerError)
 			return

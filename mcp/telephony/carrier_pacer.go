@@ -25,6 +25,58 @@ type carrierPacedPacket struct {
 	PCM        []int16
 	ItemID     string
 	AudioEndMS int
+	tailFade   bool
+	queuedAt   time.Time
+}
+
+// Estimated (mark-less) playback acks are due this long after the local lead
+// runs out. bufferedThrough only covers local send time plus lead; carriers
+// still add network transit (~20-100 ms) and a jitter buffer (~60-120 ms).
+// Acking early drops the entry before it plays, so an interrupt in that window
+// would skip the remote clear. 250 ms covers both with a small margin.
+const carrierEstimatedPlaybackMargin = 250 * time.Millisecond
+
+// Shapes without a remote clear command (Vonage binary) cannot recall audio
+// already sent; their carrier lead is capped so a barge-in plays out at most
+// this much stale audio.
+const carrierNoClearMaxLead = 60 * time.Millisecond
+
+// carrierUnderrunFadeGap is how far the carrier lead must have run dry before
+// the next packet is treated as following silence. Carrier jitter buffers
+// absorb shorter lateness and keep playing; fading in there would carve an
+// audible dip into continuous speech.
+const carrierUnderrunFadeGap = 20 * time.Millisecond
+
+// carrierPacketizerTail shares a bridge's packetizer with its pacer so the
+// pacer can commit a sub-packet remainder once input goes idle, as the SIP
+// pacer does. The bridge holds mu across add+enqueue; the pacer only TryLocks,
+// so an idle flush can never overtake full packets still on their way in.
+type carrierPacketizerTail struct {
+	mu          sync.Mutex
+	packetizer  *carrierAudioPacketizer
+	lastInputAt time.Time
+}
+
+// carrierTailRelease is when a short trailing agent packet may be committed.
+// It waits one packet for a continuation and otherwise until the carrier lead
+// drops to the guard, so the tail still plays contiguously at a natural end.
+func carrierTailRelease(lastInputAt, bufferedThrough time.Time, bufferWindow time.Duration) time.Time {
+	guard := max(20*time.Millisecond, bufferWindow/2)
+	release := lastInputAt.Add(20 * time.Millisecond)
+	if lead := bufferedThrough.Add(-guard); lead.After(release) {
+		release = lead
+	}
+	return release
+}
+
+// applyCarrierTailFade ramps the last 3 ms of a tail that is followed by an
+// underrun gap. Ordinary contiguous packet boundaries are never faded.
+func applyCarrierTailFade(pcm []int16, rate int) {
+	n := min(len(pcm), max(1, rate*3/1000))
+	for i := 0; i < n; i++ {
+		j := len(pcm) - 1 - i
+		pcm[j] = int16(int64(pcm[j]) * int64(i) / int64(n))
+	}
 }
 
 type carrierPacerResult struct {
@@ -43,6 +95,7 @@ type carrierPacerPolicy struct {
 	adaptiveMaxQueueMS int
 	trimToMS           int
 	dropStale          bool
+	tail               *carrierPacketizerTail
 }
 
 func bufferedCarrierPacerPolicy() carrierPacerPolicy {
@@ -255,7 +308,9 @@ func newJSONCarrierAudioPacer(ctx context.Context, sampleRate int, codec, shape,
 }
 
 func (p *jsonCarrierAudioPacer) enqueue(ctx context.Context, packets []carrierPacedPacket) (int, int, error) {
-	if len(packets) == 0 {
+	// With a shared packetizer an empty enqueue still marks input activity, so
+	// the pacer can commit a remainder held there once input goes idle.
+	if len(packets) == 0 && p.policy.tail == nil {
 		return 0, 0, nil
 	}
 	now := time.Now()
@@ -338,12 +393,23 @@ func (p *jsonCarrierAudioPacer) run() {
 		adaptiveMaxQueuedSamples = maxQueuedSamples
 	}
 	bufferWindow := time.Duration(bufferSamples) * time.Second / time.Duration(p.sampleRate)
+	clearFrame, _ := json.Marshal(buildCarrierClear(p.shape, p.streamID))
+	noRemoteClear := string(clearFrame) == "null"
+	capLead := func() {
+		if noRemoteClear && bufferWindow > carrierNoClearMaxLead {
+			bufferWindow = carrierNoClearMaxLead
+		}
+	}
+	capLead()
+	packetDuration := 20 * time.Millisecond
+	var lastInputAt, tailDue, heldUntil time.Time
 	droppedSamples := 0
 	activeMaxQueuedSamples := maxQueuedSamples
 	var adaptiveUntil time.Time
 	var lastSentTail []int16
 	needsCrossfade := false
 	fadeAfterClear := false
+	resumeFade := false // the previous speech packet faded out to silence
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -376,6 +442,12 @@ func (p *jsonCarrierAudioPacer) run() {
 		var deadline time.Time
 		if next := nextSendDeadline(); !next.IsZero() {
 			deadline = next
+		}
+		if !heldUntil.IsZero() {
+			deadline = heldUntil
+		}
+		if !tailDue.IsZero() && (deadline.IsZero() || tailDue.Before(deadline)) {
+			deadline = tailDue
 		}
 		if len(estimated) > 0 && (deadline.IsZero() || estimated[0].due.Before(deadline)) {
 			deadline = estimated[0].due
@@ -421,10 +493,17 @@ func (p *jsonCarrierAudioPacer) run() {
 			return nil
 		}
 		pcm := packet.PCM
-		if fadeAfterClear {
+		// Underrun: the carrier lead ran out before this packet even arrived.
+		underrun := p.policy.agentSession != nil && !packet.Silence && !bufferedThrough.IsZero() && bufferedThrough.Add(carrierUnderrunFadeGap).Before(packet.queuedAt)
+		if fadeAfterClear || underrun || resumeFade && !packet.Silence {
 			pcm = append([]int16(nil), pcm...)
 			applyAgentStartFade(pcm, p.sampleRate)
-			fadeAfterClear = false
+			fadeAfterClear, resumeFade = false, false
+		}
+		if packet.tailFade && !packet.Silence {
+			pcm = append([]int16(nil), pcm...)
+			applyCarrierTailFade(pcm, p.sampleRate)
+			resumeFade = true
 		}
 		if needsCrossfade && len(lastSentTail) > 0 {
 			pcm = append([]int16(nil), pcm...)
@@ -461,20 +540,63 @@ func (p *jsonCarrierAudioPacer) run() {
 					return err
 				}
 			} else {
-				estimated = append(estimated, estimatedPlaybackAck{name: markName, due: bufferedThrough})
+				estimated = append(estimated, estimatedPlaybackAck{name: markName, due: bufferedThrough.Add(carrierEstimatedPlaybackMargin)})
 			}
 		}
 		return nil
 	}
 	fillLead := func() error {
 		target := time.Now().Add(bufferWindow)
+		heldUntil = time.Time{}
 		for len(queue) > 0 && (bufferedThrough.IsZero() || bufferedThrough.Before(target)) {
+			if p.policy.agentSession != nil && len(queue) == 1 && !queue[0].Silence {
+				// The last queued speech is held for its continuation while the
+				// carrier still has lead. Released without one, it fades out:
+				// an underrun gap follows, and a hard cut there would click.
+				if release := carrierTailRelease(lastInputAt, bufferedThrough, bufferWindow); time.Now().Before(release) {
+					heldUntil = release
+					break
+				}
+				queue[0].tailFade = true
+			}
 			if err := sendNext(); err != nil {
 				return err
 			}
 		}
 		reschedule()
 		return nil
+	}
+	flushIdleTail := func() {
+		if tailDue.IsZero() || time.Now().Before(tailDue) {
+			return
+		}
+		tailDue = time.Time{}
+		t := p.policy.tail
+		if !t.mu.TryLock() {
+			// The bridge is mid add+enqueue; its command re-arms the check.
+			tailDue = time.Now().Add(packetDuration)
+			return
+		}
+		var packets []carrierPacedPacket
+		if time.Since(t.lastInputAt) >= packetDuration {
+			packets = t.packetizer.flushPartial()
+		} else if t.packetizer.queuedSamples > 0 {
+			tailDue = t.lastInputAt.Add(packetDuration)
+		}
+		t.mu.Unlock()
+		now := time.Now()
+		for _, packet := range packets {
+			if packet.EnqueuedAt.IsZero() {
+				packet.EnqueuedAt = now
+			}
+			if !packet.Silence {
+				p.pendingSpeechSamples.Add(int64(len(packet.PCM)))
+			}
+			queuedSamples += len(packet.PCM)
+			packet.queuedAt = now
+			queue = append(queue, packet)
+		}
+		p.pendingSamples.Store(int64(queuedSamples))
 	}
 	clearPlayback := func() (int, error) {
 		cleared := queuedSamples
@@ -616,17 +738,24 @@ func (p *jsonCarrierAudioPacer) run() {
 			}
 			incoming = total
 			bufferWindow = time.Duration(tuning.stats.TargetMS) * time.Millisecond
+			capLead()
 			p.policy.agentSession.publishPlayout(tuning)
+		}
+		lastInputAt = time.Now()
+		if p.policy.tail != nil && !p.policy.agentSession.continuous() {
+			tailDue = lastInputAt.Add(packetDuration)
 		}
 
 		if !adaptiveUntil.IsZero() && time.Now().After(adaptiveUntil) {
 			activeMaxQueuedSamples = maxQueuedSamples
 			adaptiveUntil = time.Time{}
 		}
-		for _, packet := range command.packets {
+		queuedAt := time.Now()
+		for i, packet := range command.packets {
 			if !packet.Silence {
 				p.pendingSpeechSamples.Add(int64(len(packet.PCM)))
 			}
+			command.packets[i].queuedAt = queuedAt
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming
@@ -694,6 +823,7 @@ func (p *jsonCarrierAudioPacer) run() {
 				p.finish(err)
 				return
 			}
+			flushIdleTail()
 			if err := fillLead(); err != nil {
 				p.finish(err)
 				return

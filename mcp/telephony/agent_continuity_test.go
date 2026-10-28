@@ -262,7 +262,11 @@ func TestAgentPlaybackPressurePreservesNaturalSpeechAndQuietPCM(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if clearCount != 0 || !bytes.Equal(pcm16ToBytes(delivered), pcm16ToBytes(speech)) {
+	// The reply's final speech ends on a 3 ms fade-out into silence; every
+	// other sample is delivered unchanged.
+	want := append([]int16(nil), speech...)
+	applyCarrierTailFade(want[len(want)-320:], 16000)
+	if clearCount != 0 || !bytes.Equal(pcm16ToBytes(delivered), pcm16ToBytes(want)) {
 		t.Fatalf("audio changed: sent %d/%d samples, clears %d", len(delivered), len(speech), clearCount)
 	}
 	if s.snapshot().PlaybackPressure.Recovered != 1 {

@@ -107,6 +107,15 @@ func (a *App) resolvedTURNPolicy(project string, identity phoneIdentity, q url.V
 	if err = p.validate(); err != nil {
 		return p, err
 	}
+	// Whoever asks (user, operator, API key or leased session), a session
+	// option may narrow the project default but never weaken it: relay stays
+	// relay and a pinned TURN transport stays pinned.
+	if base.ICEPolicy == "relay" && p.ICEPolicy != "relay" {
+		return p, errors.New("TURN session override cannot weaken the relay policy")
+	}
+	if base.Transport != "all" && q.Has("turn_transport") && p.Transport != base.Transport {
+		return p, errors.New("TURN session override cannot change the required transport")
+	}
 	return p, nil
 }
 func (a *App) turnPolicies(ctx *sdk.AppCtx, args map[string]any, self *phonePrincipal) (map[string]any, error) {

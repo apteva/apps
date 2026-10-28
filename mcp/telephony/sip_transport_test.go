@@ -699,12 +699,14 @@ func TestTwilioDirectSIPCarrierConfigurationAndRestore(t *testing.T) {
 	}
 	if len(platform.integrationCalls) != 4 ||
 		platform.integrationCalls[1].Input["Secure"] != true ||
-		platform.integrationCalls[2].Input["SipUrl"] != "sip:sip.example.test;transport=tls" {
+		!strings.HasPrefix(fmt.Sprint(platform.integrationCalls[2].Input["SipUrl"]), "sip:sip.example.test;transport=tls;x-apteva-token=") {
 		t.Fatalf("unexpected Twilio SIP calls: %#v", platform.integrationCalls)
 	}
 	stored, _ = app.db().findRoute(route.ID)
 	var state directSIPProviderConfig
-	if json.Unmarshal([]byte(stored.TransportConfig), &state) != nil || state.TrunkID != "TK1" || state.OriginationURLID != "OU1" {
+	if json.Unmarshal([]byte(stored.TransportConfig), &state) != nil || state.TrunkID != "TK1" || state.OriginationURLID != "OU1" ||
+		state.InboundToken == "" || state.InboundTokenVerified ||
+		platform.integrationCalls[2].Input["SipUrl"] != "sip:sip.example.test;transport=tls;x-apteva-token="+state.InboundToken {
 		t.Fatalf("unexpected saved Twilio SIP state: %+v", state)
 	}
 	platform.integrationCalls = nil

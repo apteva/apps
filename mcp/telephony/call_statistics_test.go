@@ -158,6 +158,9 @@ func TestCallStatisticsDSTAndIndexWithLargeHistory(t *testing.T) {
 	if buckets[2].end-buckets[2].start != 25*3600 {
 		t.Fatal("DST day was not 25 hours", buckets[2])
 	}
+	if raceEnabled {
+		t.Skip("race build: production query deadline over 20,000 rows; runs in normal builds")
+	}
 	softphoneTestCtx(t)
 	a := &App{installID: 42}
 	// Use compact historical inserts; this checks the actual production query plan.

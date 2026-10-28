@@ -7,6 +7,7 @@ import (
 )
 
 const agentPlaybackPressureGrace = 200 * time.Millisecond
+const agentPlaybackPressureRetry = 20 * time.Millisecond
 
 type agentPlaybackPressureSnapshot struct {
 	Events    int64   `json:"events"`
@@ -31,7 +32,7 @@ func (s *agentAudioSession) withPlaybackPressure(ctx context.Context, frame real
 	s.mu.Lock()
 	s.pressure.Events++
 	s.mu.Unlock()
-	timer := time.NewTimer(20 * time.Millisecond)
+	timer := time.NewTimer(agentPlaybackPressureRetry)
 	defer timer.Stop()
 	deadline := time.NewTimer(agentPlaybackPressureGrace)
 	defer deadline.Stop()
@@ -40,8 +41,11 @@ func (s *agentAudioSession) withPlaybackPressure(ctx context.Context, frame real
 		s.pressure.MaxWaitMS = max(s.pressure.MaxWaitMS, float64(time.Since(started))/float64(time.Millisecond))
 		s.mu.Unlock()
 	}()
+	// A batch fenced by a cancellation while it waits is discarded audio; the
+	// playback's cleared receipt must account for it like any other local drop.
 	for {
 		if s.rejects(frame.ItemID, frame.Generation) {
+			s.discardFrame(frame)
 			return nil
 		}
 		select {
@@ -54,6 +58,7 @@ func (s *agentAudioSession) withPlaybackPressure(ctx context.Context, frame real
 			return err
 		case <-timer.C:
 			if s.rejects(frame.ItemID, frame.Generation) {
+				s.discardFrame(frame)
 				return nil
 			}
 			err = enqueue()
@@ -65,7 +70,7 @@ func (s *agentAudioSession) withPlaybackPressure(ctx context.Context, frame real
 				}
 				return err
 			}
-			timer.Reset(20 * time.Millisecond)
+			timer.Reset(agentPlaybackPressureRetry)
 		}
 	}
 }

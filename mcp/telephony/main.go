@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.61
+version: 0.13.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -407,7 +407,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.61
+    ref: telephony/v0.13.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -421,7 +421,7 @@ config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
   - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. The built-in panel prefers WebRTC when available; embedded clients choose their transport. Requires reachable ICE/UDP or configured TURN." }
-  - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "fixed", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
+  - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "distribution", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
   - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
   - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
@@ -1827,10 +1827,17 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectI
 		}
 		return ""
 	}
-	if row.CarrierSID == "" {
+	if row.CarrierSID == "" && !a.callUsesDirectSIP(row) {
+		// Plivo can be cancelled by request UUID before its call UUID arrives.
+		if err := a.terminateUnidentifiedCarrierCall(ctx, row); err != nil {
+			if errors.Is(err, errCarrierCallIDUnavailable) {
+				return "carrier call id is not available yet"
+			}
+			return "carrier cancel failed: " + err.Error()
+		}
+	} else if row.CarrierSID == "" {
 		return "carrier call id is not available yet"
-	}
-	if a.callUsesDirectSIP(row) {
+	} else if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {
 			return "direct SIP gateway is not running"
@@ -2812,7 +2819,7 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Sinch callback", http.StatusBadRequest)
 		return
 	}
-	if (row.CarrierSlug == "bandwidth" || row.CarrierSlug == "sinch") && update.CarrierSID != "" && row.CarrierSID != "" && update.CarrierSID != row.CarrierSID {
+	if (row.CarrierSlug == "bandwidth" || row.CarrierSlug == "sinch" || row.CarrierSlug == "vonage") && update.CarrierSID != "" && row.CarrierSID != "" && update.CarrierSID != row.CarrierSID {
 		http.Error(w, "carrier call ID mismatch", http.StatusForbidden)
 		return
 	}
@@ -3887,15 +3894,21 @@ func (a *App) publicInstalledAppURL() string {
 // Streams. Real carriers require wss (TLS); a public_url over plain
 // http is only useful for local mock testing.
 func (a *App) publicWSStreamURL(provider, callID, secret string) string {
-	if endpoint := a.runtimeEndpoint("carrier_media", "/media/"+url.PathEscape(provider)+"/"+url.PathEscape(callID)+"/"+url.PathEscape(secret)); endpoint != "" {
+	return a.publicWSMediaBase() + "/media/" + url.PathEscape(provider) + "/" + url.PathEscape(callID) + "/" + url.PathEscape(secret)
+}
+
+// publicWSMediaBase is the origin carriers dial for /media/ streams. Request
+// signature checks must rebuild against this same base, because a split
+// ingress may serve carrier_media on a different prefix than callbacks.
+func (a *App) publicWSMediaBase() string {
+	if endpoint := a.runtimeEndpoint("carrier_media", ""); endpoint != "" {
 		return websocketURL(endpoint)
 	}
 	base := a.publicInstalledAppURL()
-	path := "/media/" + url.PathEscape(provider) + "/" + url.PathEscape(callID) + "/" + url.PathEscape(secret)
 	if strings.HasPrefix(base, "https://") {
-		return "wss://" + strings.TrimPrefix(base, "https://") + path
+		return "wss://" + strings.TrimPrefix(base, "https://")
 	}
-	return "ws://" + strings.TrimPrefix(base, "http://") + path
+	return "ws://" + strings.TrimPrefix(base, "http://")
 }
 
 func (a *App) statusCallbackURL(callID, secret, projectID string) string {
@@ -4044,6 +4057,7 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"flow_id":                   r.FlowID,
 		"published_flow_version_id": r.PublishedFlowVersionID,
 		"routing_variables":         routingVariablesPublic(r.RoutingVariablesJSON),
+		"inbound_sip_auth":          directSIPRouteAuthStatus(r),
 		"created_at":                r.CreatedAt,
 		"updated_at":                r.UpdatedAt,
 	}
@@ -4810,12 +4824,19 @@ func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
 }
 
 func (c *callsDB) releaseAnswerClaim(id string) error {
-	_, err := c.db.Exec(`UPDATE calls SET status = 'pending'
-        WHERE id = ? AND status = 'answering' AND thread_id LIKE 'pending-%'`, id)
+	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE calls SET status = 'pending'
+        WHERE id = ? AND status = 'answering' AND thread_id LIKE 'pending-%'`, id); err != nil {
+		return err
+	}
+	if err = releaseRingClaimTx(tx, id); err != nil {
+		return err
+	}
+	return c.commitCall(tx, id)
 }
 
 func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
@@ -4849,10 +4870,10 @@ func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
 			return err
 		}
 	}
-	if err = c.commitCall(tx, id); err != nil {
+	if err = releaseRingClaimTx(tx, id); err != nil {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	return c.commitCall(tx, id)
 }
 
 func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice string) error {

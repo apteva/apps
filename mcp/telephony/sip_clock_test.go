@@ -69,14 +69,17 @@ func TestSIPPlaybackClockDoesNotAbsorbDeliveryStall(t *testing.T) {
 				b.pushRTP(uint16(i), payload, uint32(i*160), now)
 				b.popAt(now)
 			}
-			if b.clock.rejected == 0 || math.Abs(b.driftPPM) > 1 || b.maxDeliveryAgeMS < float64(delay/time.Millisecond)-1 {
+			if delay <= time.Second && b.clock.rejected == 0 || math.Abs(b.driftPPM) > 1 || b.maxDeliveryAgeMS < float64(delay/time.Millisecond)-1 {
 				t.Fatal("source-clock evidence was erased by recovery", b.driftPPM, b.maxDeliveryAgeMS)
 			}
 			if delay <= time.Second && (b.recovery.recoveries != 1 || b.lateDroppedSamples-before > 160*50) {
 				t.Fatal("bounded phase failed to recover")
 			}
-			if delay > time.Second && (b.lateDroppedSamples-before != 9000*160 || b.recovery.recoveries != 0) {
-				t.Fatal("genuine stale delivery absorbed into clock", b.lateDroppedSamples-before, b.driftPPM)
+			// Review A: an offset beyond the relative-lateness budget used to drop
+			// every later packet forever. A consistent, paced stream now re-anchors
+			// once after the guarded qualification window instead.
+			if delay > time.Second && (b.lateDroppedSamples-before > 160*50 || b.recovery.recoveries != 1 || b.reanchors != 1) {
+				t.Fatal("sustained stale delivery not re-anchored", b.lateDroppedSamples-before, b.recovery.recoveries, b.reanchors)
 			}
 			// Fresh packets resume immediately; rejected packets did not freeze
 			// observation ownership. No old queued audio survives the recovery.
@@ -123,7 +126,7 @@ func TestSIPPlaybackClockTimestampAndSequenceWrap(t *testing.T) {
 
 func TestSIPPlaybackClockConcurrentLongCalls(t *testing.T) {
 	var wg sync.WaitGroup
-	for call := 0; call < 32; call++ {
+	for call := 0; call < raceScaled(32, 8); call++ {
 		wg.Add(1)
 		go func(call int) {
 			defer wg.Done()
@@ -268,6 +271,9 @@ func TestSIPPlaybackClockReportedReproduction(t *testing.T) {
 }
 
 func TestSIPPlaybackClockMultiCallComparison(t *testing.T) {
+	if raceEnabled {
+		t.Skip("race build: deterministic single-goroutine replay comparison; runs in normal builds")
+	}
 	type result struct {
 		Profile           string  `json:"profile"`
 		Released          bool    `json:"released_ingress"`

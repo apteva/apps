@@ -19,6 +19,7 @@ func TestAuditPlivoAnswerMustOpenMicrophoneGate(t *testing.T) {
 	app, _ := withTelephonyTestContext(t, &answerPlatform{credentials: &sdk.ConnectionCredentials{Slug: "plivo", Fields: map[string]string{"password": "audit-token"}}})
 	row := testCall("audit-plivo", "ringing")
 	row.CarrierSlug = "plivo"
+	row.CarrierSID = "" // outbound Plivo learns CallUUID from the answer callback
 	row.PeerKind = peerKindHuman
 	if err := app.db().insertCall(row); err != nil {
 		t.Fatal(err)

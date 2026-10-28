@@ -168,6 +168,7 @@ func TestProductionAudioScenarioMatrix(t *testing.T) {
 	for _, codec := range []string{"G722", "PCMA", "PCMU"} {
 		for _, p := range profiles {
 			t.Run(codec+"/"+p.name, func(t *testing.T) {
+				skipReplayUnderRace(t, codec == "PCMU" && p.seconds <= 60)
 				before := runProductionAudioProfile(t, p, codec, "0.12.21_timing_reference")
 				off := runProductionAudioProfile(t, p, codec, "automatic_legacy_flag_false")
 				on := runProductionAudioProfile(t, p, codec, "automatic_legacy_flag_true")

@@ -75,13 +75,17 @@ type agentPlayoutStats struct {
 // Owned by one pacer; copied before admission so a rejected/retried batch cannot
 // advance estimator or correction debt. Contains no shared slices or pointers.
 type agentPlayoutTuning struct {
-	cfg                                             agentPlayoutConfig
-	stats                                           agentPlayoutStats
-	burstStart, lastArrival, lastDeficit, lastDecay time.Time
-	burstAudio                                      time.Duration
-	debt                                            float64
-	item                                            string
-	generation                                      int64
+	cfg                      agentPlayoutConfig
+	stats                    agentPlayoutStats
+	anchor, lastArrival      time.Time
+	windowStart              time.Time
+	scheduled                time.Duration
+	windowPeak, previousPeak time.Duration
+	debt                     float64
+	item                     string
+	generation               int64
+	observedItem             string
+	observedGeneration       int64
 }
 
 func newAgentPlayoutTuning(s *agentAudioSession, initial int) agentPlayoutTuning {
@@ -92,14 +96,23 @@ func newAgentPlayoutTuning(s *agentAudioSession, initial int) agentPlayoutTuning
 	c, _ = resolveAgentPlayoutConfig(c, initial, max(initial, 2000))
 	return agentPlayoutTuning{cfg: c, stats: agentPlayoutStats{TargetMS: initial, MaxTargetMS: initial}}
 }
+
+// Learned lateness survives a stream reset; only the delivery schedule restarts.
 func (t *agentPlayoutTuning) resetStream() {
-	t.burstStart = time.Time{}
+	t.anchor = time.Time{}
 	t.lastArrival = time.Time{}
-	t.burstAudio = 0
+	t.scheduled = 0
 	t.debt = 0
 	t.item = ""
 	t.generation = 0
 }
+
+// Lateness is measured against a running real-time delivery schedule: the
+// audio delivered so far should have been due at anchor+scheduled. Early
+// arrivals are credit (they are queued; the pacer's backlog bound and Core's
+// playback credit already cap how far ahead delivery can run), so 20 ms writes at 0, 14 and 40 ms are on time. The target is the worst
+// lateness within a rolling window of two stable_ms halves, so it decays after
+// stable_ms of healthy delivery instead of 20 ms per stable_ms.
 func (t *agentPlayoutTuning) observe(now time.Time, duration time.Duration) {
 	if duration <= 0 {
 		return
@@ -107,34 +120,56 @@ func (t *agentPlayoutTuning) observe(now time.Time, duration time.Duration) {
 	if t.cfg.Mode != "adaptive" {
 		return
 	}
-	// Core splits bursts into 20 ms writes. Treat neighbouring writes as one
-	// delivery burst instead of interpreting each as a fresh network shortage.
+	half := time.Duration(t.cfg.StableMS) * time.Millisecond / 2
+	if t.windowStart.IsZero() {
+		t.windowStart = now
+	}
+	// An idle pause is not evidence of healthy delivery; only rotate the
+	// window while audio is actually arriving.
 	if t.lastArrival.IsZero() || now.Sub(t.lastArrival) >= time.Duration(t.cfg.RecoveryIdleMS)*time.Millisecond {
-		t.burstStart = now
-		t.burstAudio = duration
+		t.anchor = now
+		t.scheduled = duration
 		t.lastArrival = now
-		t.lastDecay = now
 		return
 	}
-	if now.Sub(t.lastArrival) > 5*time.Millisecond {
-		deficit := now.Sub(t.burstStart) - t.burstAudio
-		if deficit > 5*time.Millisecond {
-			t.stats.MaxDeficitMS = max(t.stats.MaxDeficitMS, float64(deficit)/float64(time.Millisecond))
-			desired := t.cfg.MinReserveMS + int((deficit+19*time.Millisecond)/(20*time.Millisecond))*20
-			t.stats.TargetMS = min(t.cfg.MaxReserveMS, max(t.stats.TargetMS, desired))
-			t.lastDeficit = now
-			t.lastDecay = now
-		} else if now.Sub(t.lastDecay) >= time.Duration(t.cfg.StableMS)*time.Millisecond {
-			t.stats.TargetMS = max(t.cfg.MinReserveMS, t.stats.TargetMS-20)
-			t.lastDecay = now
-		}
-		t.burstStart = now
-		t.burstAudio = 0
+	if elapsed := now.Sub(t.windowStart); elapsed >= 2*half {
+		t.previousPeak, t.windowPeak, t.windowStart = 0, 0, now
+	} else if elapsed >= half {
+		t.previousPeak, t.windowPeak, t.windowStart = t.windowPeak, 0, t.windowStart.Add(half)
 	}
-	t.burstAudio += duration
+	lateness := now.Sub(t.anchor.Add(t.scheduled))
+	if lateness > 0 {
+		// The queue ran dry; playback restarts on the new schedule.
+		t.windowPeak = max(t.windowPeak, lateness)
+		t.stats.MaxDeficitMS = max(t.stats.MaxDeficitMS, float64(lateness)/float64(time.Millisecond))
+		t.anchor = now.Add(-t.scheduled)
+	}
+	t.scheduled += duration
 	t.lastArrival = now
+	t.updateTarget()
+}
+
+// A new reply keeps half of the learned lateness: one bad turn should not pin
+// every later turn at max_reserve_ms, and one good turn should not forget it.
+func (t *agentPlayoutTuning) observeItem(item string, generation int64) {
+	if t.cfg.Mode != "adaptive" || item == "" || item == t.observedItem && generation == t.observedGeneration {
+		return
+	}
+	if t.observedItem != "" {
+		t.windowPeak /= 2
+		t.previousPeak /= 2
+		t.updateTarget()
+	}
+	t.observedItem, t.observedGeneration = item, generation
+}
+
+func (t *agentPlayoutTuning) updateTarget() {
+	peak := max(t.windowPeak, t.previousPeak)
+	desired := int((peak + 19*time.Millisecond) / (20 * time.Millisecond) * 20)
+	t.stats.TargetMS = min(t.cfg.MaxReserveMS, max(t.cfg.MinReserveMS, desired))
 	t.stats.MaxTargetMS = max(t.stats.MaxTargetMS, t.stats.TargetMS)
 }
+
 func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtimeBridgeControl, now time.Time) []int16 {
 	// Explicit silence is not evidence of speech starvation. Do not learn a
 	// larger target from pauses in quiet provider output.
@@ -142,6 +177,7 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		t.resetStream()
 		return pcm
 	}
+	t.observeItem(f.ItemID, f.Generation)
 	t.observe(now, time.Duration(len(pcm))*time.Second/time.Duration(rate))
 	if t.cfg.SpeedPercent == 0 || len(pcm) == 0 {
 		return pcm

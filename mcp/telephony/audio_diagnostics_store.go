@@ -66,6 +66,7 @@ type browserAudioTiming struct {
 		CaptureMutedMS              float64            `json:"capture_muted_ms"`
 		CaptureSentMS               float64            `json:"capture_sent_ms"`
 		CaptureDroppedMS            float64            `json:"capture_dropped_ms"`
+		CaptureClockStaleMS         float64            `json:"capture_clock_stale_ms"`
 		CaptureMaxAgeMS             float64            `json:"capture_max_age_ms"`
 		PlaybackTransportDroppedMS  float64            `json:"playback_transport_dropped_ms"`
 		PlaybackSourceDroppedMS     float64            `json:"playback_source_dropped_ms"`

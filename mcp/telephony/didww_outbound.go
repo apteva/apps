@@ -371,6 +371,17 @@ func (s *outboundSIPSession) waitAnswer() {
 		},
 	})
 	if err != nil {
+		// A 2xx that crossed our CANCEL (hangup or dial timeout while ringing)
+		// is stored by sipgo while WaitAnswer still returns the context error.
+		// RFC 3261 §9.1: ACK it, then the deferred BYE ends the answered dialog.
+		if response := s.dialog.InviteResponse; response != nil && response.IsSuccess() {
+			s.diagnostics.event("sip_cancel_crossed_answer", "carrier", "", response.StatusCode)
+			ackCtx, stopAck := context.WithTimeout(context.Background(), 3*time.Second)
+			if ackErr := s.dialog.Ack(ackCtx); ackErr == nil {
+				s.diagnostics.event("sip_ack", "local", "", 0)
+			}
+			stopAck()
+		}
 		status := "failed"
 		if errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
 			status = "no-answer"
@@ -382,7 +393,7 @@ func (s *outboundSIPSession) waitAnswer() {
 				status = "no-answer"
 			}
 		}
-		if response := s.dialog.InviteResponse; response != nil {
+		if response := s.dialog.InviteResponse; response != nil && !response.IsSuccess() {
 			s.gateway.app.db().observeAccountSIP(s.callID, response.StatusCode, response.Reason)
 		}
 		s.finishWithStatus("carrier", status, err)

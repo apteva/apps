@@ -774,11 +774,14 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 		return nil
 	}
 	providers := map[string]bool{}
+	issuers := map[string]bool{}
 	for _, provider := range p.Providers {
-		if !validPhoneProvider(provider) || providers[provider.ID] {
+		issuer := provider.IssuerApp + "\x00" + provider.IssuerInstallID
+		if !validPhoneProvider(provider) || providers[provider.ID] || issuers[issuer] {
 			return errors.New("invalid or duplicate online identity provider")
 		}
 		providers[provider.ID] = true
+		issuers[issuer] = true
 	}
 	groups := map[string]bool{}
 	users := map[string]bool{}

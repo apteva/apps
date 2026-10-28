@@ -95,33 +95,57 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	return stored, true, nil
 }
 
+// outboxLease bounds how long a claimed-but-unfinished send (e.g. the process
+// died mid-send) blocks a retry.
+const outboxLease = 60 * time.Second
+
 func (a *App) deliverOutboxCall(ctx *sdk.AppCtx, callID string) error {
-	var event outboxRow
-	err := ctx.AppDB().QueryRow(`SELECT call_id, agent_id, message, attempts
-        FROM inbound_event_outbox WHERE call_id = ? AND delivered_at = ''`, callID).
-		Scan(&event.CallID, &event.AgentID, &event.Message, &event.Attempts)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return a.deliverOutboxEvent(ctx, event)
+	return a.deliverOutboxEvent(ctx, outboxRow{CallID: callID})
 }
 
-func (a *App) deliverOutboxEvent(ctx *sdk.AppCtx, event outboxRow) error {
-	err := ctx.PlatformAPI().SendEvent(event.AgentID, event.Message)
+// claimOutboxEvent leases a due, undelivered row with a fresh token and
+// returns the row as claimed. ok=false means another sender holds it, it is
+// not yet due, or it was already delivered.
+func claimOutboxEvent(ctx *sdk.AppCtx, callID string, now time.Time) (event outboxRow, token string, ok bool, err error) {
+	token = newCallID()
+	res, err := ctx.AppDB().Exec(`UPDATE inbound_event_outbox SET lease_token = ?, next_attempt_at = ?
+        WHERE call_id = ? AND delivered_at = '' AND next_attempt_at <= ?`,
+		token, now.Add(outboxLease).Format(time.RFC3339), callID, now.Format(time.RFC3339))
+	if err != nil {
+		return event, "", false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return event, "", false, err
+	}
+	err = ctx.AppDB().QueryRow(`SELECT call_id, agent_id, message, attempts
+        FROM inbound_event_outbox WHERE call_id = ? AND lease_token = ?`, callID, token).
+		Scan(&event.CallID, &event.AgentID, &event.Message, &event.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return event, "", false, nil
+	}
+	return event, token, err == nil, err
+}
+
+func (a *App) deliverOutboxEvent(ctx *sdk.AppCtx, due outboxRow) error {
+	now := time.Now().UTC()
+	event, token, ok, err := claimOutboxEvent(ctx, due.CallID, now)
+	if err != nil || !ok {
+		return err
+	}
+	err = ctx.PlatformAPI().SendEvent(event.AgentID, event.Message)
 	if err == nil {
+		// Conditional on the lease: a re-arm for a new agent clears the token,
+		// so this send cannot mark the new message delivered.
 		_, markErr := ctx.AppDB().Exec(`UPDATE inbound_event_outbox
-            SET delivered_at = ?, last_error = '' WHERE call_id = ? AND delivered_at = ''`,
-			time.Now().UTC().Format(time.RFC3339), event.CallID)
+            SET delivered_at = ?, last_error = '', lease_token = '' WHERE call_id = ? AND delivered_at = '' AND lease_token = ?`,
+			time.Now().UTC().Format(time.RFC3339), event.CallID, token)
 		return markErr
 	}
 	delaySeconds := math.Min(300, math.Pow(2, float64(min(event.Attempts, 8))))
 	_, _ = ctx.AppDB().Exec(`UPDATE inbound_event_outbox
-        SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?
-        WHERE call_id = ? AND delivered_at = ''`,
-		err.Error(), time.Now().UTC().Add(time.Duration(delaySeconds)*time.Second).Format(time.RFC3339), event.CallID)
+        SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, lease_token = ''
+        WHERE call_id = ? AND delivered_at = '' AND lease_token = ?`,
+		err.Error(), time.Now().UTC().Add(time.Duration(delaySeconds)*time.Second).Format(time.RFC3339), event.CallID, token)
 	return err
 }
 

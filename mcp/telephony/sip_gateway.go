@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -48,6 +50,7 @@ type sipGateway struct {
 	stopping               bool
 	stopDeadline           time.Time
 	listenerDone           chan struct{}
+	routeAuthWarned        sync.Map
 }
 
 type sipSession struct {
@@ -66,6 +69,7 @@ type sipSession struct {
 	answerMu       sync.Mutex
 	peerEnded      atomic.Bool // Set only after a validated in-dialog carrier BYE.
 	ended          atomic.Bool
+	finalSent      atomic.Bool // a non-2xx final INVITE response was sent
 	mediaOnce      sync.Once
 	bridgeStarted  atomic.Bool
 	preparedMu     sync.Mutex
@@ -443,6 +447,11 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		return
 	}
 	route, calledNumber, err := g.findRouteForInvite(request)
+	if errors.Is(err, errSIPRouteForbidden) {
+		g.appCtx.Logger().Warn("direct SIP INVITE rejected by route authentication", "source", request.Source(), "err", err)
+		respond(sip.StatusForbidden, "Forbidden")
+		return
+	}
 	if err != nil {
 		g.appCtx.Logger().Warn("direct SIP route lookup failed", "source", request.Source(), "err", err)
 		respond(sip.StatusInternalServerError, "Route Lookup Failed")
@@ -554,17 +563,88 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 }
 
+var errSIPRouteForbidden = errors.New("direct SIP route authentication failed")
+
+// Carrier networks are shared by all of a carrier's customers, so a source
+// allowlist alone lets any customer reach any number. A route is only reachable
+// from its own carrier's network and, once its secret is enforced, only with it.
+// Forwarding headers are a fallback limited to the attributed carrier's routes.
 func (g *sipGateway) findRouteForInvite(request *sip.Request) (*routeRow, string, error) {
-	for _, phone := range sipCalledNumberCandidates(request) {
+	sourceCarrier := g.cfg.sourceCarrier(request.Source())
+	primary, forwarded := sipCalledNumberCandidateSets(request)
+	for _, phone := range primary {
 		route, err := g.app.db().findDirectSIPRouteByNumber(phone)
 		if err != nil {
 			return nil, "", err
 		}
 		if route != nil {
+			if err := g.authorizeInboundRoute(request, route, sourceCarrier); err != nil {
+				return nil, "", err
+			}
+			return route, route.PhoneNumber, nil
+		}
+	}
+	if sourceCarrier == "" {
+		return nil, "", nil
+	}
+	for _, phone := range forwarded {
+		route, err := g.app.db().findDirectSIPRouteByNumber(phone)
+		if err != nil {
+			return nil, "", err
+		}
+		if route != nil && route.CarrierSlug == sourceCarrier {
+			if err := g.authorizeInboundRoute(request, route, sourceCarrier); err != nil {
+				return nil, "", err
+			}
 			return route, route.PhoneNumber, nil
 		}
 	}
 	return nil, "", nil
+}
+
+func (g *sipGateway) authorizeInboundRoute(request *sip.Request, route *routeRow, sourceCarrier string) error {
+	if sourceCarrier != "" && sourceCarrier != route.CarrierSlug {
+		return fmt.Errorf("%w: %s source for %s route", errSIPRouteForbidden, sourceCarrier, route.CarrierSlug)
+	}
+	if sourceCarrier == "" {
+		g.warnRouteAuthOnce("unattributed:"+route.ID, "direct SIP INVITE from an unlabelled sip_allowed_cidrs range; label it carrier=cidr to bind it to a carrier",
+			"route", route.ID, "source", request.Source())
+	}
+	state, ok := directSIPRouteSecret(route)
+	if !ok {
+		if route.CarrierSlug != "telnyx" {
+			g.warnRouteAuthOnce("secret:"+route.ID, "direct SIP route has no route secret; re-apply inbound_transport=sip_direct to provision one",
+				"route", route.ID)
+		}
+		return nil
+	}
+	presented := sipRequestRouteTokens(request)
+	for _, token := range presented {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(state.InboundToken)) == 1 {
+			if !state.InboundTokenVerified {
+				previous := route.TransportConfig
+				state.InboundTokenVerified = true
+				encoded, _ := json.Marshal(state)
+				if err := g.app.db().markDirectSIPRouteSecretVerified(route.ID, previous, string(encoded)); err != nil {
+					g.appCtx.Logger().Warn("enforce direct SIP route secret", "route", route.ID, "err", err)
+				}
+			}
+			return nil
+		}
+	}
+	// A present but wrong secret is rejected even before enforcement.
+	if state.InboundTokenVerified || len(presented) > 0 {
+		return fmt.Errorf("%w: route secret missing or invalid", errSIPRouteForbidden)
+	}
+	g.warnRouteAuthOnce("pending:"+route.ID, "direct SIP route secret not yet delivered by the carrier; it is enforced after the first call that carries it",
+		"route", route.ID)
+	return nil
+}
+
+func (g *sipGateway) warnRouteAuthOnce(key, message string, args ...any) {
+	if _, seen := g.routeAuthWarned.LoadOrStore(key, true); !seen && g.appCtx != nil {
+		g.appCtx.Logger().Warn(message, args...)
+	}
 }
 
 func (g *sipGateway) Answer(row *callRow) error {
@@ -611,6 +691,7 @@ func (g *sipGateway) Reject(row *callRow) error {
 	if answered {
 		return errors.New("direct SIP call has already been answered")
 	}
+	session.finalSent.Store(true)
 	if err := session.dialog.Respond(sipStatusDecline, "Decline", nil); err != nil {
 		return err
 	}
@@ -721,6 +802,14 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 		return nil
 	}
 	s.diagnostics.end(leg, cause)
+	var signalingErr error
+	// A ringing call's final response precedes s.cancel(): cancel lets
+	// handleInvite return, after which sipgo may end the dialog first and a
+	// dialog-state guard would skip the 487 entirely.
+	if leg != "carrier" && s.dialog != nil && s.inviteTx != nil &&
+		s.dialog.LoadState() < sip.DialogStateEstablished && s.finalSent.CompareAndSwap(false, true) {
+		signalingErr = s.inviteTx.Respond(sip.NewResponseFromRequest(s.dialog.InviteRequest, 487, "Request Terminated", nil))
+	}
 	s.answerMu.Lock()
 	refreshCancel := s.refreshCancel
 	s.answerMu.Unlock()
@@ -732,7 +821,6 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if leg == "carrier" {
 		_ = s.stopLocalMedia()
 	}
-	var signalingErr error
 	if leg != "carrier" && s.dialog != nil {
 		if s.dialog.LoadState() >= sip.DialogStateEstablished && s.dialog.LoadState() != sip.DialogStateEnded {
 			s.signalMu.Lock()
@@ -753,8 +841,6 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded)
 			cancel()
 			s.signalMu.Unlock()
-		} else if s.inviteTx != nil && s.dialog.LoadState() != sip.DialogStateEnded {
-			signalingErr = s.inviteTx.Respond(sip.NewResponseFromRequest(s.dialog.InviteRequest, 487, "Request Terminated", nil))
 		}
 	}
 	func() {
@@ -850,18 +936,37 @@ func sipCallID(request *sip.Request) string {
 }
 
 func sipCalledNumberCandidates(request *sip.Request) []string {
-	var values []string
+	primary, forwarded := sipCalledNumberCandidateSets(request)
+	seen := make(map[string]bool)
+	var out []string
+	for _, value := range append(primary, forwarded...) {
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// sipCalledNumberCandidateSets separates the Request-URI/To identity from the
+// forwarding headers, which are only trusted as a fallback.
+func sipCalledNumberCandidateSets(request *sip.Request) (primary, forwarded []string) {
+	var direct, forwarding []string
 	if request != nil {
-		values = append(values, request.Recipient.User)
+		direct = append(direct, request.Recipient.User)
 		if header := request.To(); header != nil {
-			values = append(values, header.Address.User)
+			direct = append(direct, header.Address.User)
 		}
 		for _, name := range []string{"Diversion", "P-Called-Party-ID", "X-Original-To"} {
 			for _, header := range request.GetHeaders(name) {
-				values = append(values, header.Value())
+				forwarding = append(forwarding, header.Value())
 			}
 		}
 	}
+	return sipE164Candidates(direct), sipE164Candidates(forwarding)
+}
+
+func sipE164Candidates(values []string) []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, value := range values {

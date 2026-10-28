@@ -23,6 +23,14 @@ const agentCoreRecoveryExhausted = "Core connection recovery exhausted"
 const agentCoreStableWindow = 30 * time.Second
 const agentCoreInputMaxAge = 250 * time.Millisecond
 
+// Receipts bound for Core share one ordered queue. Progress for a playback is
+// coalesced in place (a later audio_end_ms supersedes an earlier one), so carrier
+// mark bursts cannot fill it. Ready, cleared, overflow and speech events are never
+// dropped; the link fails only when they cannot be queued within the wait bound.
+const agentCoreControlLimit = 16
+const agentCoreProgressLimit = 16
+const agentCoreControlWait = time.Second
+
 type agentCoreLinkSnapshot struct {
 	Reconnects         int                  `json:"reconnects"`
 	AmbiguousInputMS   int64                `json:"ambiguous_input_ms"`
@@ -55,13 +63,17 @@ func (l *agentCoreLink) event(kind string, code int, reasons ...string) {
 }
 
 type agentLinkMessage struct {
-	op   ws.OpCode
-	data []byte
-	at   time.Time
+	op          ws.OpCode
+	data        []byte
+	at          time.Time
+	coalesce    bool
+	progress    agentPlaybackKey
+	progressEnd int
 }
 type agentCoreLinkOptions struct {
 	byteRate      int
 	rejects       func(realtimeBridgeControl) bool
+	discarded     func(realtimeBridgeControl, int) []byte
 	maxBatchBytes int64
 }
 type agentCoreLink struct {
@@ -78,7 +90,9 @@ type agentCoreLink struct {
 	speechKnown    bool
 	speech         bool
 	audio          chan agentLinkMessage
-	control        chan agentLinkMessage
+	controlMu      sync.Mutex
+	controlQueue   []agentLinkMessage
+	controlReady   chan struct{}
 	interrupt      func(realtimeBridgeControl)
 	recovering     atomic.Bool
 	connected      atomic.Bool
@@ -89,6 +103,7 @@ type agentCoreLink struct {
 	outputControl  chan agentRelayOutput
 	outputProgress chan struct{}
 	rejects        func(realtimeBridgeControl) bool
+	discarded      func(realtimeBridgeControl, int) []byte
 }
 
 func (l *agentCoreLink) snapshot() agentCoreLinkSnapshot {
@@ -106,6 +121,103 @@ func (l *agentCoreLink) discard(m agentLinkMessage) {
 		l.stats.InputDiscardedMS += int64(len(m.data)) * 1000 / int64(l.mediaRate())
 		l.mu.Unlock()
 	}
+}
+
+// queueControl never blocks. It reports false only when non-coalescible receipts
+// already fill the queue.
+func (l *agentCoreLink) queueControl(m agentLinkMessage) bool {
+	l.controlMu.Lock()
+	queued := true
+	if m.coalesce {
+		progress, oldest := 0, -1
+		for i := range l.controlQueue {
+			q := &l.controlQueue[i]
+			if !q.coalesce {
+				continue
+			}
+			if q.progress == m.progress {
+				// Keep the earlier queue position so ordering versus clears holds.
+				if m.progressEnd >= q.progressEnd {
+					q.data, q.at, q.progressEnd = m.data, m.at, m.progressEnd
+				}
+				l.controlMu.Unlock()
+				return true
+			}
+			if oldest < 0 {
+				oldest = i
+			}
+			progress++
+		}
+		if progress >= agentCoreProgressLimit {
+			l.controlQueue = append(l.controlQueue[:oldest], l.controlQueue[oldest+1:]...)
+		}
+		l.controlQueue = append(l.controlQueue, m)
+	} else {
+		pending := 0
+		for i := range l.controlQueue {
+			if !l.controlQueue[i].coalesce {
+				pending++
+			}
+		}
+		if queued = pending < agentCoreControlLimit; queued {
+			l.controlQueue = append(l.controlQueue, m)
+		}
+	}
+	l.controlMu.Unlock()
+	if queued {
+		select {
+		case l.controlReady <- struct{}{}:
+		default:
+		}
+	}
+	return queued
+}
+
+// sendControl waits a bounded time for queue space; it never drops the message.
+func (l *agentCoreLink) sendControl(m agentLinkMessage) error {
+	if l.queueControl(m) {
+		return nil
+	}
+	timer := time.NewTimer(agentCoreControlWait)
+	defer timer.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-l.ctx.Done():
+			return l.ctx.Err()
+		case <-timer.C:
+			return errors.New("Core control queue exhausted")
+		case <-tick.C:
+			if l.queueControl(m) {
+				return nil
+			}
+		}
+	}
+}
+
+// sendReceipt queues a locally generated receipt for Core.
+func (l *agentCoreLink) sendReceipt(raw []byte) {
+	if l == nil || len(raw) == 0 {
+		return
+	}
+	if err := l.sendControl(agentLinkMessage{op: ws.OpText, data: raw, at: time.Now()}); err != nil && l.ctx.Err() == nil {
+		l.event("core_control_exhausted", 0)
+		l.cancel()
+	}
+}
+
+func (l *agentCoreLink) popControl() (agentLinkMessage, bool) {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	if len(l.controlQueue) == 0 {
+		return agentLinkMessage{}, false
+	}
+	m := l.controlQueue[0]
+	n := copy(l.controlQueue, l.controlQueue[1:])
+	l.controlQueue[n] = agentLinkMessage{}
+	l.controlQueue = l.controlQueue[:n]
+	return m, true
 }
 
 type agentLocalRelayError struct{ error }
@@ -185,7 +297,13 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 		}
 		return next, nil
 	}
-	l := newAgentCoreLink(ctx, conn, dial, func(c realtimeBridgeControl) { session.cancel(c.ItemID, c.Generation) }, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) }, byteRate: session.byteRate(), maxBatchBytes: int64(session.profile.BacklogMS) * int64(session.byteRate()) / 1000})
+	interrupt := func(c realtimeBridgeControl) {
+		if c.Type == "interrupt" {
+			session.expectClear(c)
+		}
+		session.cancel(c.ItemID, c.Generation)
+	}
+	l := newAgentCoreLink(ctx, conn, dial, interrupt, agentCoreLinkOptions{rejects: func(c realtimeBridgeControl) bool { return session.rejects(c.ItemID, c.Generation) }, discarded: session.linkDiscarded, byteRate: session.byteRate(), maxBatchBytes: int64(session.profile.BacklogMS) * int64(session.byteRate()) / 1000})
 	session.mu.Lock()
 	session.link = l
 	session.mu.Unlock()
@@ -195,7 +313,7 @@ func (a *App) resilientAgentBridge(ctx context.Context, row *callRow, conn net.C
 func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(context.Context) (net.Conn, error), interrupt func(realtimeBridgeControl), options ...agentCoreLinkOptions) *agentCoreLink {
 	client, peer := net.Pipe()
 	ctx, cancel := context.WithCancel(parent)
-	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), control: make(chan agentLinkMessage, 16), interrupt: interrupt}
+	l := &agentCoreLink{Conn: client, peer: peer, ctx: ctx, cancel: cancel, audio: make(chan agentLinkMessage, 12), controlReady: make(chan struct{}, 1), interrupt: interrupt}
 	l.output = make(chan agentRelayOutput, 64)
 	l.outputControl = make(chan agentRelayOutput, 16)
 	l.outputProgress = make(chan struct{}, 1)
@@ -203,6 +321,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 	if len(options) > 0 {
 		l.byteRate = options[0].byteRate
 		l.rejects = options[0].rejects
+		l.discarded = options[0].discarded
 		if options[0].maxBatchBytes > 0 {
 			l.maxBatchBytes = options[0].maxBatchBytes
 		}
@@ -210,7 +329,7 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 	l.maxOutputBytes = int64(l.mediaRate()/2) + l.maxBatchBytes
 	l.epoch.Store(1)
 	l.connected.Store(true)
-	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide}
+	local := &agentRelayWriter{conn: peer, state: ws.StateServerSide, timeout: agentOutputDeliveryTimeout}
 	go l.deliverOutput(local)
 	go func() { <-ctx.Done(); _ = peer.Close(); _ = initial.Close() }()
 	go func() {
@@ -238,11 +357,13 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 				if !l.connected.Load() && ok && c.Type != "playback.overflow" {
 					continue
 				}
-				select {
-				case l.control <- m:
-				case <-ctx.Done():
-					return
-				default:
+				if ok && c.Type == "playback.progress" && c.ItemID != "" {
+					m.coalesce, m.progress, m.progressEnd = true, agentPlaybackKey{c.Generation, c.ItemID}, c.AudioEndMS
+				}
+				if err := l.sendControl(m); err != nil {
+					if ctx.Err() == nil {
+						l.event("core_control_exhausted", 0)
+					}
 					cancel()
 					return
 				}
@@ -345,19 +466,17 @@ func newAgentCoreLink(parent context.Context, initial net.Conn, dial func(contex
 		audioDrained:
 
 			var pendingOverflow []agentLinkMessage
-			for {
-				select {
-				case m := <-l.control:
-					c, ok := parseRealtimeBridgeControl(m.data)
-					if ok && c.Type == "playback.overflow" {
-						pendingOverflow = append(pendingOverflow, m)
-					}
-				default:
-					goto controlsDrained
+			l.controlMu.Lock()
+			for _, m := range l.controlQueue {
+				c, ok := parseRealtimeBridgeControl(m.data)
+				if ok && c.Type == "playback.overflow" {
+					pendingOverflow = append(pendingOverflow, m)
 				}
 			}
+			clear(l.controlQueue)
+			l.controlQueue = l.controlQueue[:0]
+			l.controlMu.Unlock()
 
-		controlsDrained:
 			l.mu.Lock()
 			ready := append([]byte(nil), l.ready...)
 			speechKnown, speech := l.speechKnown, l.speech
@@ -435,20 +554,22 @@ func (l *agentCoreLink) relay(remote net.Conn, local *agentRelayWriter) error {
 	}()
 	defer func() { _ = remote.Close(); <-readerDone }()
 	for {
-		var m agentLinkMessage
 		select {
 		case <-l.ctx.Done():
 			return l.ctx.Err()
 		case err := <-ended:
 			return err
-		case m = <-l.control:
 		default:
+		}
+		m, ok := l.popControl()
+		if !ok {
 			select {
 			case <-l.ctx.Done():
 				return l.ctx.Err()
 			case err := <-ended:
 				return err
-			case m = <-l.control:
+			case <-l.controlReady:
+				continue
 			case m = <-l.audio:
 			}
 		}

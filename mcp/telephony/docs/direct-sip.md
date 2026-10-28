@@ -117,6 +117,20 @@ another account is healthy.
 - Ambiguous enabled routes are rejected instead of being routed to the wrong
   project or agent.
 - Carrier signaling and SDP media addresses must match the configured CIDRs.
+- Carrier CIDRs are shared by every customer of that carrier, so an address
+  match alone does not authenticate a call. The source carrier must also match
+  the route's carrier, and Diversion / P-Called-Party-ID / X-Original-To are
+  only used when the Request-URI identifies no route.
+- Each direct SIP route can carry an inbound secret (`x-apteva-token` Request-URI
+  parameter, `<number>-<token>` user part, or `X-Apteva-Route-Token` header).
+  Twilio and DIDWW provisioning add it automatically. A new secret starts as
+  `pending_first_call` and is enforced once a call carrying it arrives, so a
+  carrier that strips it cannot break a working trunk. Re-apply
+  `inbound_transport=sip_direct` to existing routes to add one; route listings
+  show `inbound_sip_auth`. Telnyx FQDN connections cannot carry a secret and
+  rely on carrier matching only.
+- Custom `sip_allowed_cidrs` entries may be labelled `carrier=cidr`; unlabelled
+  entries are accepted for any carrier, with a warning.
 - Calls receive SIP `100 Trying` and `180 Ringing` before agent or immediate
   realtime answer.
 - Audio uses a 60 ms startup jitter buffer, 20 ms RTP pacing, packet-level

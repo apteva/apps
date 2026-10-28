@@ -305,11 +305,14 @@ test('AudioContext pause/resume refreshes capture clock without mistaking fresh 
  w.frame(1000,4);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(2);
 });
 
-test('expired render-clock estimates require recalibration and retain the capture age cap',()=>{
+test('expired render-clock estimates keep capture flowing with widened uncertainty and retain the capture age cap',()=>{
+ // Previously an expired estimate dropped every frame as capture_clock_unavailable.
  const w=worker();w.setNow(16000);w.frame(6000);
- expect(w.messages.at(-1).event.reason).toBe('capture_clock_unavailable');
+ expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
+ expect(w.messages.some((m:any)=>m.type==='runtime.event'&&m.event.action==='audio_clock'&&m.event.outcome==='stale')).toBe(true);
+ w.frame(0,2);expect(w.messages.at(-1).event.reason).toBe('capture_age_limit');
  vm.runInContext('capturePort.onmessage({data:{type:"clock.reply",nonce:16000,audio_ms:6000}})',w.context);
- w.frame(6000,2);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
+ w.frame(6000,3);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(2);
 });
 
 test('rejected playback retains worst-case ages, source metadata and exact timestamped accounting',()=>{

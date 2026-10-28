@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,9 @@ import (
 // This contract describes media behavior, independently of tool grants and
 // model/provider names. Older Core/Server pairs omit it and retain legacy audio.
 const agentAudioHeader = "X-Apteva-Audio-Session"
+
+// Continuous sessions bound each receipt write to Core by this budget.
+const agentCoreWriteBudget = 250 * time.Millisecond
 
 type agentAudioCapabilities struct {
 	Format               string `json:"audio_format,omitempty"`
@@ -49,11 +53,15 @@ type agentClearReceipt struct {
 	RemoteConfirmed     bool                      `json:"remote_confirmed"`
 	Collateral          []string                  `json:"collateral_item_ids,omitempty"`
 	RequestedAtMS       int64                     `json:"requested_at_ms,omitempty"`
+	Reason              string                    `json:"reason,omitempty"`
+	// Diagnostics only: audio of this playback discarded after the receipt was sent.
+	LateDiscardedMS int `json:"late_discarded_ms,omitempty"`
 }
 
 type agentAudioSnapshot struct {
 	TimingTrace        []agentAudioTraceEvent        `json:"timing_trace,omitempty"`
 	TraceOmitted       uint64                        `json:"trace_omitted"`
+	TraceHeadFrames    int                           `json:"trace_head_frames,omitempty"`
 	Playout            agentPlayoutStats             `json:"playout"`
 	CoreLink           *agentCoreLinkSnapshot        `json:"core_link,omitempty"`
 	PlaybackPressure   agentPlaybackPressureSnapshot `json:"playback_pressure"`
@@ -70,6 +78,7 @@ type agentAudioSnapshot struct {
 type agentAudioSession struct {
 	trace                    []agentAudioTraceEvent
 	traceOmitted             uint64
+	traceNext                int
 	playout                  agentPlayoutStats
 	link                     *agentCoreLink
 	pressure                 agentPlaybackPressureSnapshot
@@ -83,6 +92,14 @@ type agentAudioSession struct {
 	clears                   []agentClearReceipt
 	timing                   agentReplyTimingState
 	waitingDispatch          atomic.Bool
+	// Discard accounting for cleared receipts; see noteDiscardLocked.
+	discardPending map[agentPlaybackKey]int
+	discardReceipt map[agentPlaybackKey]bool
+	discardOrder   []agentPlaybackKey
+	clearDue       []realtimeBridgeControl
+	frameKey       agentPlaybackKey
+	frameEndMS     int
+	frameMS        int
 }
 
 func agentBridgeURL(raw string, row *callRow) string {
@@ -184,10 +201,15 @@ func (s *agentAudioSession) acceptAt(f realtimeBridgeControl, at time.Time) bool
 	if s == nil {
 		return true
 	}
+	var link *agentCoreLink
+	var receipt []byte
+	defer func() { link.sendReceipt(receipt) }() // after unlocking
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.observeFrameLocked(f)
 	if s.cancelled[agentPlaybackKey{f.Generation, f.ItemID}] || s.cancelled[agentPlaybackKey{0, f.ItemID}] {
 		s.lateFrames++
+		link, receipt = s.link, s.noteDiscardLocked(f.ItemID, f.Generation, s.frameMS)
 		return false
 	}
 	if f.Silence {
@@ -242,10 +264,8 @@ func (s *agentAudioSession) cleared(w *websocketWriterPump, control realtimeBrid
 	}
 	result.ItemID, result.Generation, result.RequestedAtMS = control.ItemID, control.Generation, control.RequestedAtMS
 	s.mu.Lock()
-	s.clears = append(s.clears, result)
-	if len(s.clears) > 32 {
-		s.clears = s.clears[len(s.clears)-32:]
-	}
+	result.LocalMS += s.takeDiscardsLocked(control)
+	s.appendClearLocked(result)
 	s.mu.Unlock()
 	for _, ref := range result.collateralRefs(control.Generation) {
 		s.cancel(ref.ItemID, ref.Generation)
@@ -267,6 +287,158 @@ func (s *agentAudioSession) cleared(w *websocketWriterPump, control realtimeBrid
 	}
 	return nil
 }
+func (s *agentAudioSession) appendClearLocked(r agentClearReceipt) {
+	s.clears = append(s.clears, r)
+	if len(s.clears) > 32 {
+		s.clears = s.clears[len(s.clears)-32:]
+	}
+}
+
+// A Core interrupt fences its playback before the renderer sees it; audio the
+// link or pressure loop discards meanwhile belongs to the coming cleared receipt.
+func (s *agentAudioSession) expectClear(c realtimeBridgeControl) {
+	if s == nil || c.ItemID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clearDue = append(s.clearDue, realtimeBridgeControl{ItemID: c.ItemID, Generation: c.Generation})
+	if len(s.clearDue) > 32 {
+		s.clearDue = s.clearDue[len(s.clearDue)-32:]
+	}
+}
+
+// Frame duration for discard accounting: Core's per-frame duration when traced,
+// otherwise the audio_end_ms advance within the playback (bounded by the backlog).
+func (s *agentAudioSession) observeFrameLocked(f realtimeBridgeControl) {
+	k := agentPlaybackKey{f.Generation, f.ItemID}
+	ms := 0
+	if f.Timing != nil && f.Timing.DurationMS > 0 {
+		ms = f.Timing.DurationMS
+	} else if k != s.frameKey {
+		ms = f.AudioEndMS
+	} else if f.AudioEndMS > s.frameEndMS {
+		ms = f.AudioEndMS - s.frameEndMS
+	}
+	if s.profile.BacklogMS > 0 {
+		ms = min(ms, s.profile.BacklogMS)
+	}
+	s.frameKey, s.frameMS = k, max(ms, 0)
+	if f.AudioEndMS > 0 {
+		s.frameEndMS = f.AudioEndMS
+	}
+}
+
+// discardFrame accounts for the last accepted frame when the renderer drops it.
+func (s *agentAudioSession) discardFrame(f realtimeBridgeControl) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	ms := 0
+	if s.frameKey == (agentPlaybackKey{f.Generation, f.ItemID}) {
+		ms, s.frameMS = s.frameMS, 0
+	}
+	raw := s.noteDiscardLocked(f.ItemID, f.Generation, ms)
+	link := s.link
+	s.mu.Unlock()
+	link.sendReceipt(raw)
+}
+
+// linkDiscarded is the Core link's staging-drop hook; the link sends any receipt.
+func (s *agentAudioSession) linkDiscarded(c realtimeBridgeControl, ms int) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.noteDiscardLocked(c.ItemID, c.Generation, ms)
+}
+
+// Discarded audio is reported in the playback's cleared receipt: held until the
+// receipt for a fenced interrupt is sent, recorded as late diagnostics after it,
+// or sent as its own local receipt when none is due (an overflow cancelled it),
+// so Core can release that playback's credit.
+func (s *agentAudioSession) noteDiscardLocked(item string, generation int64, ms int) []byte {
+	if item == "" || ms <= 0 {
+		return nil
+	}
+	k := agentPlaybackKey{generation, item}
+	if s.discardReceipt[k] || s.discardReceipt[agentPlaybackKey{0, item}] {
+		for i := len(s.clears) - 1; i >= 0; i-- {
+			if c := &s.clears[i]; c.ItemID == item && (c.Generation == generation || c.Generation == 0) {
+				c.LateDiscardedMS += ms
+				break
+			}
+		}
+		return nil
+	}
+	for _, c := range s.clearDue {
+		if matchesAgentPlayback(item, generation, c) {
+			if s.discardPending == nil {
+				s.discardPending = make(map[agentPlaybackKey]int)
+			}
+			if _, ok := s.discardPending[k]; !ok {
+				s.trackDiscardLocked(k)
+			}
+			s.discardPending[k] += ms
+			return nil
+		}
+	}
+	s.markReceiptLocked(k)
+	r := agentClearReceipt{ItemID: item, Generation: generation, Scope: "local", LocalMS: ms, Reason: "discarded_after_cancel"}
+	s.appendClearLocked(r)
+	if !s.capabilities.ReceiptEvidence {
+		return nil
+	}
+	raw, _ := json.Marshal(struct {
+		Type string `json:"type"`
+		agentClearReceipt
+	}{"playback.cleared", r})
+	return raw
+}
+
+func (s *agentAudioSession) takeDiscardsLocked(control realtimeBridgeControl) int {
+	total := 0
+	for k, ms := range s.discardPending {
+		if matchesAgentPlayback(k.Item, k.Generation, control) {
+			total += ms
+			delete(s.discardPending, k)
+			s.markReceiptLocked(k)
+		}
+	}
+	due := s.clearDue[:0]
+	for _, c := range s.clearDue {
+		if !matchesAgentPlayback(c.ItemID, c.Generation, control) {
+			due = append(due, c)
+		}
+	}
+	s.clearDue = due
+	if control.ItemID != "" {
+		s.markReceiptLocked(agentPlaybackKey{control.Generation, control.ItemID})
+	}
+	return total
+}
+
+func (s *agentAudioSession) markReceiptLocked(k agentPlaybackKey) {
+	if s.discardReceipt == nil {
+		s.discardReceipt = make(map[agentPlaybackKey]bool)
+	}
+	if !s.discardReceipt[k] {
+		s.discardReceipt[k] = true
+		s.trackDiscardLocked(k)
+	}
+}
+
+func (s *agentAudioSession) trackDiscardLocked(k agentPlaybackKey) {
+	s.discardOrder = append(s.discardOrder, k)
+	if len(s.discardOrder) > 256 {
+		old := s.discardOrder[0]
+		s.discardOrder = s.discardOrder[1:]
+		if !slices.Contains(s.discardOrder, old) {
+			delete(s.discardPending, old)
+			delete(s.discardReceipt, old)
+		}
+	}
+}
+
 func (s *agentAudioSession) overflow(w *websocketWriterPump, item string, generation int64, reason string) error {
 	s.cancel(item, generation)
 	raw, _ := json.Marshal(map[string]any{"type": "playback.overflow", "item_id": item, "session_generation": generation, "reason": reason})
@@ -283,7 +455,7 @@ func (s *agentAudioSession) snapshot() *agentAudioSnapshot {
 		v := s.link.snapshot()
 		link = &v
 	}
-	return &agentAudioSnapshot{TimingTrace: append([]agentAudioTraceEvent(nil), s.trace...), TraceOmitted: s.traceOmitted, Playout: s.playout, CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, PlaybackCapacityMS: s.playbackCapacityMS(), Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
+	return &agentAudioSnapshot{TimingTrace: s.traceSnapshotLocked(), TraceOmitted: s.traceOmitted, TraceHeadFrames: s.traceHeadLocked(), Playout: s.playout, CoreLink: link, PlaybackPressure: s.pressure, Capabilities: s.capabilities, PlaybackCapacityMS: s.playbackCapacityMS(), Profile: s.profile, Evidence: s.evidence, LateFrames: s.lateFrames, SilentFrames: s.silentFrames, Clears: append([]agentClearReceipt(nil), s.clears...), ReplyTiming: s.replyTimingSnapshotLocked()}
 }
 
 type agentBridgeConn struct {
@@ -337,7 +509,7 @@ func (a *App) liveAgentAudio(call string) *agentAudioSnapshot {
 
 func (s *agentAudioSession) configureWriter(w *websocketWriterPump) {
 	if s.continuous() {
-		w.maxWriteBudget.Store(int64(250 * time.Millisecond))
+		w.maxWriteBudget.Store(int64(agentCoreWriteBudget))
 	}
 }
 
