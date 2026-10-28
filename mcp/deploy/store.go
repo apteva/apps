@@ -927,9 +927,17 @@ func dbListLiveReleases(db *sql.DB) ([]Release, error) {
 }
 
 // Completion is based on a successful provider result, not the presence of a
-// workflow row. Keep the latter as an audit record without polling it forever.
+// workflow row. A failed check may have overwritten external_status; retain
+// saved completion without erasing that warning or claiming a fresh check.
+// Older completion must not hide an active partial rollout or another channel.
 const finishedMobileReleaseSQL = `(status='live' AND (
-	(provider='google_play' AND lower(external_status)='completed') OR
+	(provider='google_play' AND (lower(external_status)='completed' OR (
+		lower(external_status)='sync_error' AND CASE WHEN json_valid(release_meta_json) THEN
+			lower(COALESCE(json_extract(release_meta_json,'$.availability.publication'),''))='completed'
+			AND COALESCE(json_extract(release_meta_json,'$.rollout_fraction'),0) IN (0,1)
+			AND COALESCE(NULLIF(json_extract(release_meta_json,'$.availability.audience'),''),channel)=channel
+		ELSE 0 END
+	))) OR
 	(provider='app_store_connect' AND lower(external_status) IN (
 		'testflight_available','in_beta_testing','available','ready_for_sale',
 		'ready_for_distribution','pre_order_ready_for_sale','preorder_ready_for_distribution'))

@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/andybalholm/brotli v1.1.1
-	github.com/apteva/app-sdk v0.110.0
+	github.com/apteva/app-sdk v0.111.0
 	github.com/ggpslop/go-pkcs12 v0.3.0
 	go.mozilla.org/pkcs7 v0.10.0
 	golang.org/x/crypto v0.54.0

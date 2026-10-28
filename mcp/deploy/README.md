@@ -92,6 +92,13 @@ results, preserving their configuration and evidence without opening an edit.
 Failed and stopped mobile workflows are reconciled locally as well. Pending
 uploads, staged rollouts and reviews continue to sync. Explicit release sync
 remains available and still honors the observation cache and account cooldown.
+For older Play releases whose `external_status` was overwritten by `sync_error`,
+saved `availability.publication: completed` can close the workflow locally.
+The release must remain live, the saved audience must match its channel when
+present, and no partial rollout may be configured. The sync error, stale-check
+warning, observation timestamps and cooldown remain unchanged; this is not a
+new provider verification. Missing, malformed or mismatched evidence leaves
+the release pending.
 
 Google Play quota failures (HTTP 429 and quota-specific 403 responses) and HTTP
 503 responses persist an account-level retry deadline. `Retry-After` seconds
