@@ -1059,6 +1059,9 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	if _, err := destinationAICallPolicy(kind, string(raw), projectAICallPolicy(nil)); err != nil {
 		return nil, err
 	}
+	if _, err := destinationAIContext(kind, string(raw)); err != nil {
+		return nil, err
+	}
 	switch kind {
 	case "agent", "ai":
 		if routingConfigInt(decoded, "agent_id", 0) <= 0 {

@@ -269,9 +269,23 @@ func TestAgentAudioScopedTwilioClearPreservesNextReply(t *testing.T) {
 	if _, err = p.enqueue(ctx, a, realtimeBridgeControl{ItemID: "A", Generation: 7}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	// The pacer dequeues before it writes: wait for the final packet on the
+	// wire, not only for an empty queue.
+	writtenAfterClear := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n, cleared := 0, false
+		for _, v := range writes {
+			cleared = cleared || v.Event == "clear"
+			if cleared && v.Event == "media" {
+				n++
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.pendingSamples.Load() == 0 {
+		if p.pendingSamples.Load() == 0 && writtenAfterClear() >= 10 {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -365,13 +379,16 @@ func TestAgentAudioScopedSIPClearPreservesNextReply(t *testing.T) {
 			if err != nil || r.Scope != "local" || r.RemoteCommandSent || r.RemoteConfirmed {
 				t.Fatal(r, err)
 			}
-			for i := 0; i < 4; i++ {
+			// Receipts coalesce to the latest position per playback, so wait for
+			// B's final position rather than an exact receipt count.
+			for done := false; !done; {
 				select {
 				case got := <-progress:
 					if got.ItemID != "B" || got.Generation != 3 {
 						t.Fatal("old speech sent", got)
 					}
-				case <-time.After(time.Second):
+					done = got.AudioEndMS == 80
+				case <-time.After(2 * time.Second):
 					t.Fatal("next reply stalled")
 				}
 			}

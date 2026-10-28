@@ -144,6 +144,8 @@ capacity are recorded as errors. A configured loop may request another
 decision; otherwise it follows the saved fallback. The decoded response is
 limited to 16 KiB.
 Only explicitly configured `variables` are sent; no CRM data is fetched implicitly.
+To load business facts for an AI destination before the agent speaks, see
+[AI context lookup](ai-context-lookup.md).
 
 Use `decision_id` as the business reservation idempotency key. Respect
 `deadline_at` and give reservations an expiry. The deadline includes scheduling

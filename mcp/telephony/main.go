@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.13.0
+version: 0.14.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -243,6 +243,8 @@ provides:
     - { name: telephony.routing.call.busy, description: "Durable correlated routing outcome: call.busy.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.no-answer, description: "Durable correlated routing outcome: call.no-answer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.canceled, description: "Durable correlated routing outcome: call.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.ai_context.succeeded, description: "An AI destination context lookup returned validated business facts before the agent started.", payload: { event_id: string, revision: integer, call_id: string, context_id: string, destination_id: string, function_id: integer, status: string, duration_ms: integer, occurred_at: string } }
+    - { name: telephony.ai_context.failed, description: "An AI destination context lookup timed out, failed or returned an invalid response; the call continued or took its fallback.", payload: { event_id: string, revision: integer, call_id: string, context_id: string, destination_id: string, function_id: integer, status: string, reason: string, duration_ms: integer, occurred_at: string } }
     - { name: call.routing.started, description: "A call pinned and began executing a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, destination_id: string, ring_group_id: string, occurred_at: string } }
     - { name: call.routing.node_entered, description: "A call entered a routing-flow node.", payload: { call_id: string, flow_id: string, flow_version_id: string, node_id: string, node_type: string, outcome: string, occurred_at: string } }
     - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
@@ -407,7 +409,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.13.0
+    ref: telephony/v0.14.0
     entry: mcp/telephony
   port: 8080
   health_check: /health

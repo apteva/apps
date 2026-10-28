@@ -239,6 +239,25 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 			return fail(err)
 		}
 		effectiveDirective := aiPolicyDirective(directive, aiPolicy)
+		// Business facts for the selected AI destination load while the call
+		// rings; a failed lookup continues or takes the destination's fallback.
+		contextOutcome, err := a.resolveAIContext(ctx, row)
+		if err != nil {
+			return fail(fmt.Errorf("AI context lookup: %w", err))
+		}
+		if contextOutcome.Fallback {
+			// No thread exists yet, so there is nothing to clean up in Core.
+			if err := a.failAIHandoff(row, token, "context_unavailable", false); err != nil {
+				return err
+			}
+			_ = a.db().releaseRealtimePreparation(row.ID, token)
+			a.wakeRouting(row.ProjectID)
+			return errAIHandoffPending
+		}
+		effectiveDirective += contextOutcome.Block
+		if contextOutcome.Greeting != "" {
+			greeting = contextOutcome.Greeting
+		}
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 			RealtimeMedia: mediaProfile.mediaRequest(),
 			AgentID:       row.AgentID, ThreadID: threadID, Directive: effectiveDirective, Voice: voice,

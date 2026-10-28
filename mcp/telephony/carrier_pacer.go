@@ -41,6 +41,18 @@ const carrierEstimatedPlaybackMargin = 250 * time.Millisecond
 // this much stale audio.
 const carrierNoClearMaxLead = 60 * time.Millisecond
 
+// onlyRejectedAfter reports whether every queued packet after the first belongs
+// to a cancelled playback. Those are dropped at send time, so the first packet
+// is the last audio the caller hears and must end on a fade.
+func onlyRejectedAfter(n int, rejected func(int) bool) bool {
+	for i := 1; i < n; i++ {
+		if !rejected(i) {
+			return false
+		}
+	}
+	return true
+}
+
 // carrierUnderrunFadeGap is how far the carrier lead must have run dry before
 // the next packet is treated as following silence. Carrier jitter buffers
 // absorb shorter lateness and keep playing; fading in there would carve an
@@ -549,7 +561,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		target := time.Now().Add(bufferWindow)
 		heldUntil = time.Time{}
 		for len(queue) > 0 && (bufferedThrough.IsZero() || bufferedThrough.Before(target)) {
-			if p.policy.agentSession != nil && len(queue) == 1 && !queue[0].Silence {
+			if p.policy.agentSession != nil && !queue[0].Silence && onlyRejectedAfter(len(queue), func(i int) bool { return p.policy.agentSession.rejects(queue[i].ItemID, queue[i].Generation) }) {
 				// The last queued speech is held for its continuation while the
 				// carrier still has lead. Released without one, it fades out:
 				// an underrun gap follows, and a hard cut there would click.

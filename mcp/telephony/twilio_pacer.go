@@ -346,9 +346,9 @@ func (p *twilioAudioPacer) run() {
 		stopTimer()
 		target := time.Now().Add(bufferWindow)
 		for len(queue) > 0 && (bufferedThrough.IsZero() || bufferedThrough.Before(target)) {
-			if p.agentSession != nil && len(queue) == 1 && !queue[0].Silence {
-				// A short trailing packet is held for its continuation; once
-				// released without one, an underrun gap follows it.
+			if p.agentSession != nil && !queue[0].Silence && onlyRejectedAfter(len(queue), func(i int) bool { return p.agentSession.rejects(queue[i].ItemID, queue[i].Generation) }) {
+				// The last playable speech is held for its continuation while the
+				// carrier still has lead. Released without one, it fades out.
 				if release := carrierTailRelease(lastInputAt, bufferedThrough, bufferWindow); time.Now().Before(release) {
 					scheduleAt(release)
 					return nil

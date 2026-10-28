@@ -891,11 +891,20 @@ func (a *App) handleDecisionList(w http.ResponseWriter, r *http.Request, project
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	writeJSON(w, map[string]any{"decisions": ds})
+	lookups, e := a.listAIContextLookups(project, r.URL.Query().Get("call_id"))
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{"decisions": ds, "context_lookups": lookups})
 }
 func (a *App) toolDecisionsList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ds, e := a.listDecisions(currentProject(ctx), strArg(args, "call_id", ""))
-	return map[string]any{"decisions": ds}, e
+	if e != nil {
+		return nil, e
+	}
+	lookups, e := a.listAIContextLookups(currentProject(ctx), strArg(args, "call_id", ""))
+	return map[string]any{"decisions": ds, "context_lookups": lookups}, e
 }
 
 // Unique by milestone and offer, rather than call/topic: repeat decisions must
