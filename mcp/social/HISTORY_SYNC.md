@@ -26,11 +26,17 @@ Integration connection IDs remain inside Social's provider adapters.
    supported page size (for example YouTube 50 → 49), with a fresh provider cursor.
    Both sizes, cursor and accumulated IDs persist across bounded calls and retries;
    provider tokens are never reused across sizes. Provider limits are respected,
-   including TikTok's 20-item maximum and X's 5-item minimum. Request/page budgets
-   are unchanged. This is best-effort provider pagination, not an atomic provider
+   including TikTok's 20-item maximum and X's 5-item minimum. Each call retains its existing step/time budget. This is best-effort provider pagination, not an atomic provider
    snapshot or a guarantee that deleted/inaccessible lifetime history
    exists. Failed, repeated-cursor/page, suppressed or omitted records cannot
-   establish complete stored coverage. No automatic sync setting is changed.
+   establish complete stored coverage. YouTube IDs omitted from successful metadata batches enter a persisted,
+   account-bound readback queue. After listing reconciliation, Social retries only
+   unresolved IDs individually using basic video parts. Each readback consumes one
+   bounded call step, with at most two attempts per ID and 100 readbacks per run;
+   ownership is checked again. Resume using the same continuation cursor. Optional
+   owner-only fields can stay unknown without blocking otherwise verified history.
+   A later batch omission cannot overwrite a verified observation from this run.
+   No automatic sync setting is changed.
 5. Search `post_list` with `social_account_id`, `query` and/or exact
    `native_post_id`; use `compact: true` for summaries. Search covers stored
    title/body/original filenames before pagination. Existing profile, status,
@@ -47,11 +53,17 @@ Receipts include status, observation/completion time, imported/updated/unchanged
 counts, distinct native IDs observed, pagination/coverage and an opaque Social
 continuation cursor. Coverage separates first-traversal identities, reconciliation
 identities and their union, duplicate entries, comparable provider totals, changing
-totals, reconciliation page budget/exhaustion and any unexplained count gap. A
+totals, reconciliation page budget/exhaustion and any unexplained count gap.
+`coverage.metadata` separately reports unresolved records, a sample of up to ten
+native IDs, retryable records and consumed readback budgets. Matching listing counts
+do not resolve missing metadata. Permanent omissions/budget exhaustion stay limited;
+authentication/ownership/read failures remain failed and resumable. A transient
+omission stops limiting completeness once a verified read resolves it in this run. A
 remaining mismatch, changing total or exhausted reconciliation budget is incomplete.
 When no comparable total is exposed, count verification is unknown/false and an
-explicit pagination-only limitation is returned. Pre-0.20.3 coverage cursors/receipts must
-be refreshed rather than reused as complete evidence. Provider cursors, signed
+explicit pagination-only limitation is returned. Coverage version 3 requires a fresh sync after upgrading from older page-boundary-
+only coverage. Old cursors/receipts must be refreshed rather than reused as complete
+metadata evidence. Provider cursors, signed
 pagination URLs and credentials are
 not returned. Counts reconcile through a transactionally stored per-run identity
 ledger; repeated observations may put an ID in more than one activity category.
@@ -105,7 +117,12 @@ accepted operations, without uploads, retries or publishing jobs. Negative
 fixtures cover identical omissions at both sizes, changing totals and exhausted
 reconciliation budgets. Other fixtures retain the 299-video/28-managed-record
 case, account/project/owner isolation, search beyond page one, unknown/zero
-metadata, private/unlisted handling and protected HTTP paths.
+metadata, private/unlisted handling and protected HTTP paths. A 127-video fixture
+omits metadata for two listed IDs from every full-parts batch. One logical sync
+resolves them with basic single-ID reads, across cursor replay and a database
+restart; optional fields stay unknown and managed deliveries stay unchanged.
+Negative cases cover permanently missing/ID-only responses, auth/owner failures,
+readback-budget exhaustion and later batch omissions of already verified records.
 
 Opt-in live tests run provider reads through an existing connection into a
 local temporary test database; no workers start and no OAuth credentials are

@@ -218,13 +218,21 @@ func (a *App) youtubeHistoryIdentity(ctx *sdk.AppCtx, b historyAccount, run *his
 	return nil
 }
 func (a *App) youtubeNativePosts(ctx *sdk.AppCtx, b historyAccount, run *historyRun, ids []string) ([]nativePost, error) {
+	return a.youtubeNativePostsWithParts(ctx, b, run, ids, false)
+}
+
+func (a *App) youtubeNativePostsWithParts(ctx *sdk.AppCtx, b historyAccount, run *historyRun, ids []string, basic bool) ([]nativePost, error) {
 	if len(ids) == 0 {
 		return []nativePost{}, nil
 	}
-	raw, err := historyExecute(ctx, b, "get_video", map[string]any{"id": strings.Join(ids, ","), "part": "snippet,status,contentDetails,fileDetails,processingDetails"})
+	part := "snippet,status,contentDetails,fileDetails,processingDetails"
+	if basic {
+		part = "snippet,status,contentDetails"
+	}
+	raw, err := historyExecute(ctx, b, "get_video", map[string]any{"id": strings.Join(ids, ","), "part": part})
 	if err != nil {
 		var providerErr *historyReadError
-		if !errors.As(err, &providerErr) || providerErr.status != 400 && providerErr.status != 403 {
+		if basic || !errors.As(err, &providerErr) || providerErr.status != 400 && providerErr.status != 403 {
 			return nil, err
 		}
 		// Optional owner-only metadata may be denied while normal metadata remains
@@ -250,11 +258,15 @@ func (a *App) youtubeNativePosts(ctx *sdk.AppCtx, b historyAccount, run *history
 		if !wanted[id] || seen[id] {
 			continue
 		}
-		seen[id] = true
 		snippet := historyMap(item, "snippet")
-		if historyString(snippet, "channelId") != run.Owner {
+		owner := historyString(snippet, "channelId")
+		if owner == "" {
+			continue // ID-only/incomplete responses still need an account-bound read.
+		}
+		if owner != run.Owner {
 			return nil, errors.New("YouTube returned a video outside the selected Social channel")
 		}
+		seen[id] = true
 		status := historyMap(item, "status")
 		details := historyMap(item, "contentDetails")
 		file := historyMap(item, "fileDetails")
@@ -262,11 +274,9 @@ func (a *App) youtubeNativePosts(ctx *sdk.AppCtx, b historyAccount, run *history
 		out = append(out, nativePost{ID: id, URL: optionalText(historyString(item, "share_url", "permalink_url")), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
 	}
 	if len(seen) != len(wanted) {
-		run.Incomplete = true
-		addHistoryLimitation(run, "YouTube omitted some listed video IDs; inaccessible/deleted status and metadata remain unknown.")
 		for _, id := range ids {
 			if !seen[id] {
-				out = append(out, nativePost{ID: id})
+				out = append(out, nativePost{ID: id, MetadataUnavailable: true})
 			}
 		}
 	}
