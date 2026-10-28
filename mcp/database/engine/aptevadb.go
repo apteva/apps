@@ -66,6 +66,8 @@ func nativeAptevaOptions(options AptevaOptions) native.Options {
 	case "os":
 		durable.SyncMode = native.SyncOS
 	}
+	durable.MappedCacheBytes = options.MappedCacheBytes
+	durable.ManagedMemoryBytes = options.ManagedMemoryBytes
 	durable.CacheBytes = options.CacheBytes
 	durable.MemtableBytes = options.MemtableBytes
 	if durable.MemtableBytes == 0 {
@@ -122,7 +124,7 @@ func nativeError(e error) error {
 	switch {
 	case errors.Is(e, native.ErrKeyExists), errors.Is(e, native.ErrDuplicateKey):
 		return fail("unique_conflict", "primary or unique index constraint violated")
-	case errors.Is(e, native.ErrKeySize), errors.Is(e, native.ErrValueSize), errors.Is(e, native.ErrTransactionTooLarge), errors.Is(e, native.ErrLimit):
+	case errors.Is(e, native.ErrKeySize), errors.Is(e, native.ErrValueSize), errors.Is(e, native.ErrTransactionTooLarge), errors.Is(e, native.ErrLimit), errors.Is(e, native.ErrDiskLimit), errors.Is(e, native.ErrMemoryPressure):
 		return fail("resource_limit", "native database resource limit: %v", e)
 	case errors.Is(e, native.ErrNoSuchCollection), errors.Is(e, native.ErrNotFound):
 		return fail("not_found", "native database object does not exist")

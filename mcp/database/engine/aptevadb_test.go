@@ -141,8 +141,10 @@ func TestAptevaProjectedSortAndAggregateBound(t *testing.T) {
 	if len(page) != 40 || page[0]["n"] != 39. {
 		t.Fatal("projected top page failed")
 	}
-	_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", GroupBy: []string{"id", "pad"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{Limit: 1}})
-	expectCode(t, e, "resource_limit")
+	v := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", GroupBy: []string{"id", "pad"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{Limit: 1}}).(map[string]any)
+	if !v["truncated"].(bool) || v["rows"].([]Record)[0]["count"] != "1" || len(v["rows"].([]Record)[0]["pad"].(string)) != 512<<10 {
+		t.Fatal("bounded spill page", v)
+	}
 }
 
 func TestBatchRejectsTemporaryUniqueConflicts(t *testing.T) {

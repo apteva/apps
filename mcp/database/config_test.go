@@ -4,7 +4,7 @@ import "testing"
 
 func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	defaults, err := managerOptions(nil, func(string) string { return "" })
-	if err != nil || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 64<<20 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 || defaults.Apteva.MemtableBytes != 0 || defaults.AptevaCacheBudgetBytes != 256<<20 || defaults.MaxConcurrentAptevaQueries != 2 {
+	if err != nil || defaults.Apteva.MappedCacheBytes != 64<<20 || defaults.Apteva.ManagedMemoryBytes != 0 || defaults.Apteva.AggregateDiskBytes != 1<<30 || defaults.Apteva.AggregateMaxGroups != 1<<20 || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 64<<20 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 || defaults.Apteva.MemtableBytes != 0 || defaults.AptevaCacheBudgetBytes != 256<<20 || defaults.MaxConcurrentAptevaQueries != 2 {
 		t.Fatal(defaults, err)
 	}
 	getenv := func(name string) string {
@@ -14,7 +14,7 @@ func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	if e != nil || o.Apteva.SyncMode != "os" || o.Apteva.CacheBytes != 0 || o.Apteva.AggregateWorkers != 4 || o.Apteva.QueryWorkBytes != 32<<20 {
 		t.Fatal(o, e)
 	}
-	for _, config := range []map[string]string{{"aptevadb_total_cache_mib": "32"}, {"aptevadb_memtable_mib": "-1"}, {"aptevadb_memtable_mib": "257"}, {"aptevadb_total_cache_mib": "8193"}, {"aptevadb_max_concurrent_queries": "0"}, {"aptevadb_max_concurrent_queries": "65"}, {"aptevadb_sync_mode": "async"}, {"aptevadb_sync_mode": "typo"}, {"aptevadb_cache_mib": "-1"}, {"aptevadb_cache_mib": "1025"}, {"aptevadb_aggregate_workers": "0"}, {"aptevadb_aggregate_workers": "65"}, {"aptevadb_query_memory_mib": "257"}, {"aptevadb_query_memory_mib": "NaN"}} {
+	for _, config := range []map[string]string{{"aptevadb_mapped_cache_mib": "-1"}, {"aptevadb_managed_memory_mib": "8193"}, {"aptevadb_aggregate_disk_mib": "-1"}, {"aptevadb_max_groups": "0"}, {"aptevadb_max_groups": "16777217"}, {"aptevadb_total_cache_mib": "32"}, {"aptevadb_memtable_mib": "-1"}, {"aptevadb_memtable_mib": "257"}, {"aptevadb_total_cache_mib": "8193"}, {"aptevadb_max_concurrent_queries": "0"}, {"aptevadb_max_concurrent_queries": "65"}, {"aptevadb_sync_mode": "async"}, {"aptevadb_sync_mode": "typo"}, {"aptevadb_cache_mib": "-1"}, {"aptevadb_cache_mib": "1025"}, {"aptevadb_aggregate_workers": "0"}, {"aptevadb_aggregate_workers": "65"}, {"aptevadb_query_memory_mib": "257"}, {"aptevadb_query_memory_mib": "NaN"}} {
 		if _, e := managerOptions(config, func(string) string { return "" }); e == nil {
 			t.Fatal("invalid configuration accepted", config)
 		}
@@ -31,5 +31,17 @@ func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	}
 	if _, e := managerOptions(nil, func(string) string { return "invalid" }); e == nil {
 		t.Fatal("invalid environment sync mode accepted")
+	}
+}
+
+func TestAlpha8ConfigurationOverrides(t *testing.T) {
+	o, e := managerOptions(map[string]string{"aptevadb_mapped_cache_mib": "0", "aptevadb_managed_memory_mib": "128", "aptevadb_aggregate_disk_mib": "0", "aptevadb_max_groups": "4194304"}, func(name string) string {
+		if name == "DATABASE_APTEVADB_MAPPED_CACHE_MIB" || name == "DATABASE_APTEVADB_AGGREGATE_DISK_MIB" {
+			return "64"
+		}
+		return ""
+	})
+	if e != nil || o.Apteva.MappedCacheBytes != 0 || o.Apteva.ManagedMemoryBytes != 128<<20 || o.Apteva.AggregateDiskBytes != 0 || o.Apteva.AggregateMaxGroups != 4194304 {
+		t.Fatal(o, e)
 	}
 }

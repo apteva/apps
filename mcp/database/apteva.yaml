@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.5.1
+version: 0.5.2
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -59,7 +59,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.5.1, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.5.2, entry: mcp/database}
   port: 8080
   health_check: /health
 db:
@@ -85,6 +85,30 @@ config_schema:
     default: "64"
     label: AptevaDB cache target (MiB)
     description: Per-database logical cache target. Zero explicitly opts out of cache-target admission. This is not a process memory cap.
+  - name: aptevadb_mapped_cache_mib
+    type: select
+    options: ["0", "32", "64", "128", "256", "512"]
+    default: "64"
+    label: AptevaDB cold mapped cache target (MiB)
+    description: Periodically reclaim cold file translations. Zero disables reclamation. Hot pages, private buffers and runtime memory may exceed this soft target.
+  - name: aptevadb_managed_memory_mib
+    type: select
+    options: ["0", "64", "128", "256", "512", "1024"]
+    default: "0"
+    label: AptevaDB managed buffer target (MiB)
+    description: Optional per-database soft admission for native owned buffers and query reservations. Zero disables it. Pinned storage can cause resource_limit; this is not a process RSS cap.
+  - name: aptevadb_aggregate_disk_mib
+    type: select
+    options: ["0", "64", "256", "1024", "4096", "8192"]
+    default: "1024"
+    label: AptevaDB aggregate scratch quota (MiB)
+    description: Per-query temporary disk allowance for budget-limited aggregates. Zero disables spilling. Files stay in the owned database directory and are cleaned on completion or cancellation.
+  - name: aptevadb_max_groups
+    type: select
+    options: ["65536", "1048576", "4194304", "16777216"]
+    default: "1048576"
+    label: AptevaDB aggregate group guard
+    description: Maximum groups visited by native aggregate execution, including groups discarded from the result. Increasing this keeps memory, scratch, response and deadline limits in force.
   - name: aptevadb_total_cache_mib
     type: select
     options: ["0", "128", "256", "512", "1024", "2048"]
@@ -114,5 +138,5 @@ config_schema:
     options: ["8", "16", "32", "64", "128", "256"]
     default: "16"
     label: AptevaDB query memory budget (MiB)
-    description: Per-query retained work budget. Larger group counts may need more memory. Result and deadline limits still apply.
+    description: Per-query retained work budget. Budget-limited aggregates retry through bounded streaming and optional disk spill. Result and deadline limits still apply.
 upgrade_policy: auto-patch

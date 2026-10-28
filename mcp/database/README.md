@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.5.1. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.5.2. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.5.1.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.5.2.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -22,7 +22,7 @@ Independent Apteva sidecar app, version 0.5.1. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.7` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.8` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -34,6 +34,10 @@ AptevaDB tuning is available through app configuration or environment variables 
 |---|---|---:|---|
 | `aptevadb_sync_mode` | `DATABASE_APTEVADB_SYNC_MODE` | full | full, barrier, os |
 | `aptevadb_cache_mib` | `DATABASE_APTEVADB_CACHE_MIB` | 64 | 0 (explicit uncapped opt-out) or 1–1024 MiB |
+| `aptevadb_mapped_cache_mib` | `DATABASE_APTEVADB_MAPPED_CACHE_MIB` | 64 | 0 (disabled), or 1–8192 MiB |
+| `aptevadb_managed_memory_mib` | `DATABASE_APTEVADB_MANAGED_MEMORY_MIB` | 0 (disabled) | 0, or 1–8192 MiB |
+| `aptevadb_aggregate_disk_mib` | `DATABASE_APTEVADB_AGGREGATE_DISK_MIB` | 1024 | 0 (spill disabled), or 1–8192 MiB |
+| `aptevadb_max_groups` | `DATABASE_APTEVADB_MAX_GROUPS` | 1,048,576 | 1–16,777,216 |
 | `aptevadb_total_cache_mib` | `DATABASE_APTEVADB_TOTAL_CACHE_MIB` | max(256 MiB, one cache) | 0 (auto), or 1–8192 MiB; must cover one cache |
 | `aptevadb_memtable_mib` | `DATABASE_APTEVADB_MEMTABLE_MIB` | 0 (disabled) | 0–256 MiB |
 | `aptevadb_max_concurrent_queries` | `DATABASE_APTEVADB_MAX_CONCURRENT_QUERIES` | 2 | 1–64 |
@@ -44,7 +48,7 @@ The total cache setting bounds the sum of configured native cache targets across
 
 Write buffering is separately opt-in: setting a finite cache no longer implicitly enables the engine's default half-cache memtable. Query slots are shared across native databases and acquired before creating read snapshots; queue time counts toward the query deadline. At most 64 additional queries may wait; excess requests return `resource_limit`. Point reads and watch polling without initial snapshots bypass this queue. The per-query 16 MiB work budget is unchanged.
 
-Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. Arbitrary high-cardinality grouping still needs native ordered aggregation or disk spilling.
+Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. When native working state or materialized results exceed their budget, the adapter retries on the same snapshot through alpha.8's owned-result stream, with optional disk spill. It validates every completed group and retains only the best limit+1 rows. The stream reserves three quarters of the work budget for the native executor and one quarter for retained adapter results. The existing parallel path remains in place for aggregates that fit; staged writes and uncertain integer reductions retain their checked portable fallback. Disk and group guards return resource_limit, with no partial response.
 
 Flush modes apply when the app mounts; restart/remount it to apply a changed setting to all owned native databases. `full` requests a drive-cache flush on macOS. `os` requests ordinary `fsync`, like SQLite WAL/FULL with `fullfsync=OFF`; `barrier` orders writes without forcing the drive cache to stable media. OS and barrier provide weaker power-loss protection on macOS. On other supported systems the modes use `fsync`. Every exposed mode keeps native `Sync: true`; there is no async option. `explain` and startup logs report the effective mode. For a SQLite-comparable ordinary-flush test, select `aptevadb_sync_mode: os` or set:
 
@@ -54,11 +58,15 @@ DATABASE_APTEVADB_SYNC_MODE=os
 
 See [matched flush-profile measurements](benchmarks/FLUSH-PROFILES.md). Choosing the same requested flush primitive does not establish identical crash behavior across different engine/WAL implementations.
 
-Cache targets apply per owned database; query budgets apply per operation. Neither bounds process RSS. Positive cache targets also enable the library's heap WAL/memtable path. In the million-record check, a 64 MiB cache target raised peak RSS from approximately 491 to 862 MiB, so the default remains uncapped. See [alpha.4 adapter/direct-driver comparisons](benchmarks/APTEVADB-ALPHA4.md) and the [earlier cache experiment](benchmarks/ADAPTER-AGGREGATE-OPTIMIZATION.md). SQLite and Pebble settings are unchanged.
+Cold mapped translations are reclaimed periodically toward a 64 MiB per-database soft target by default; zero disables this policy. Recently used mappings survive a sweep. An optional managed-buffer target adds native admission/backpressure for owned buffers and query reservations; it defaults to disabled. Neither target caps process RSS. `database_describe` returns on-demand native `memory` diagnostics: current process RSS, mapped residency estimates, file-page-cache residency, private managed buffers, pinned storage, query reservations, targets and reclaimed translations. These categories overlap and must not be summed.
+
+Aggregate scratch stays below the owned native database directory in `aggregate-tmp`. The default 1 GiB quota is per active query and includes simultaneous merge inputs/output; app-wide query admission therefore also bounds the number of concurrent scratch users. Scratch is removed on success, cancellation and errors; opening the database cleans abandoned native execution leases after a crash. Zero scratch quota disables disk use but still permits an ordered stream that fits. The group guard remains explicit and configurable; increasing it does not increase memory, scratch, response or deadline allowances.
+
+See [alpha.4 adapter/direct-driver comparisons](benchmarks/APTEVADB-ALPHA4.md) and the [earlier cache experiment](benchmarks/ADAPTER-AGGREGATE-OPTIMIZATION.md) for historical configurations. Current write buffering is separately opt-in; finite cache targets no longer implicitly enable memtables. SQLite and Pebble settings are unchanged.
 
 ## Build and run
 
-Use Go 1.25.1 or newer. This module pins app-sdk v0.109.0, the latest published tag by commit topology at release preparation.
+Use Go 1.25.1 or newer. This module pins app-sdk v0.110.0, the latest published tag by commit topology at release preparation.
 
 ```sh
 cd apps/mcp/database
@@ -70,7 +78,7 @@ APTEVA_APP_PORT=8098 \
 /tmp/apteva-database
 ```
 
-In this workspace, use `GOTOOLCHAIN=local GOWORK=off` to use the installed Go 1.25.1 toolchain; the root workspace currently requests a different, unavailable toolchain. The new module is also listed in the root `go.work` for normal workspace development once that toolchain is available.
+Use `GOWORK=off` for release validation so the published SDK pin is tested rather than a local workspace overlay.
 
 The SDK starts `/health` and `/mcp`, authenticates app routes, and serves `ui/`. The manager stores its registry and managed databases below `ctx.DataDir()/database/`. Do not share this directory between multiple running app processes.
 

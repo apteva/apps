@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -115,7 +116,7 @@ func hugeNativeAggregate(t *testing.T, m *Manager, r Request) func(context.Conte
 		}
 		p, e := native.ParsePipeline(marshal([]any{map[string]any{"$group": group}}))
 		checkErr(t, e)
-		p.SetLimits(native.Limits{MaxBytes: int64(b.options.QueryWorkBytes)})
+		p.SetLimits(native.Limits{MaxBytes: int64(b.options.QueryWorkBytes), MaxGroups: b.options.AggregateMaxGroups})
 		filter := marshal(nativeFilter(c, r.Where))
 		opts := nativeQueryOptions(c, Query{Where: r.Where}, 0)
 		opts.MaxMemoryBytes = int64(b.options.QueryWorkBytes)
@@ -135,16 +136,15 @@ func hugeNativeAggregate(t *testing.T, m *Manager, r Request) func(context.Conte
 			} else {
 				values, e = p.Run(ctx, func(yield func([]byte, []byte) bool) error { return h.Query(ctx, filter, opts, yield) })
 			}
-			if e != nil {
+			if e != nil && !errors.Is(e, native.ErrLimit) {
 				return nil, nativeError(e)
 			}
-			result := make([]Record, 0, len(values))
-			retained := 0
-			for _, v := range values {
+			normalize := func(v map[string]any) (Record, error) {
 				id, _ := v["_id"].(map[string]any)
-				row := Record{}
+				row := Record(v)
+				delete(row, "_id")
 				for _, f := range out.Fields {
-					val := v[f.Name]
+					val := row[f.Name]
 					if containsName(r.GroupBy, f.Name) {
 						val = id[f.Name]
 					}
@@ -165,11 +165,58 @@ func hugeNativeAggregate(t *testing.T, m *Manager, r Request) func(context.Conte
 					}
 					row[f.Name] = val
 				}
-				retained += retainedBytes(row)
-				if retained > b.options.QueryWorkBytes {
-					return nil, fail("resource_limit", "aggregate result memory")
+				return row, nil
+			}
+			result := make([]Record, 0, len(values))
+			retained := 0
+			bounded := e != nil
+			if !bounded {
+				for _, v := range values {
+					row, err := normalize(v)
+					if err != nil {
+						return nil, err
+					}
+					retained += retainedBytes(row)
+					if retained > b.options.QueryWorkBytes {
+						bounded = true
+						break
+					}
+					result = append(result, row)
 				}
-				result = append(result, row)
+			}
+			if bounded {
+				result = nil
+				values = nil
+				stages := []any{}
+				if r.Where != nil {
+					stages = append(stages, map[string]any{"$match": nativeFilter(c, r.Where)})
+				}
+				stages = append(stages, map[string]any{"$group": group})
+				stream, err := native.ParsePipeline(marshal(stages))
+				if err != nil {
+					return nil, err
+				}
+				reserve := b.options.QueryWorkBytes / 4
+				stream.SetLimits(native.Limits{MaxBytes: int64(b.options.QueryWorkBytes - reserve), MaxGroups: b.options.AggregateMaxGroups})
+				top := &topRecords{collection: out, query: r.Query, limit: r.Limit + 1, workLimit: reserve}
+				var rowErr error
+				err = h.RunEach(ctx, stream, native.AggregateOptions{MaxMemoryBytes: int64(b.options.QueryWorkBytes - reserve), AllowDiskUse: b.options.AggregateDiskBytes > 0, MaxDiskBytes: b.options.AggregateDiskBytes}, func(v map[string]any) bool {
+					var row Record
+					row, rowErr = normalize(v)
+					if rowErr == nil {
+						rowErr = top.offer(row)
+					}
+					return rowErr == nil
+				})
+				if err != nil {
+					return nil, nativeError(err)
+				}
+				if rowErr != nil {
+					return nil, rowErr
+				}
+				for _, row := range top.rows {
+					result = append(result, row.row)
+				}
 			}
 			sorted(out, result, r.OrderBy)
 			if len(result) > r.Limit+1 {
@@ -177,6 +224,7 @@ func hugeNativeAggregate(t *testing.T, m *Manager, r Request) func(context.Conte
 			}
 			return finish(result, ctx.Err())
 		}
+
 	case *pebbleBackend:
 		// The harness supports a broad scan or the exact indexed tenant filter.
 		recordPrefix := []byte("r/" + c.Name + "/")
