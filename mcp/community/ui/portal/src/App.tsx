@@ -1,3 +1,4 @@
+import { formatPublicOffer, formatCheckoutOffer } from "./offerPricing";
 import {
   ArrowRight,
   BadgeCheck,
@@ -185,19 +186,6 @@ function formatMembershipPrice(plan: MembershipPlan): string {
   return `${amount} / ${count}${plan.interval}${plan.interval_count > 1 ? "s" : ""}`;
 }
 
-function formatPublicOffer(offer: PublicOffer): string {
-  const amount = (() => {
-    try {
-      return new Intl.NumberFormat(undefined, { style: "currency", currency: offer.currency })
-        .format(offer.unit_amount_cents / 100);
-    } catch {
-      return `${offer.currency} ${(offer.unit_amount_cents / 100).toFixed(2)}`;
-    }
-  })();
-  if (!offer.interval) return amount;
-  const count = (offer.interval_count || 1) > 1 ? `${offer.interval_count} ` : "";
-  return `${amount} / ${count}${offer.interval}${(offer.interval_count || 1) > 1 ? "s" : ""}`;
-}
 
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
@@ -277,6 +265,7 @@ export default function App() {
   const selectedCourse = courses.find((item) => item.id === courseId);
   const selectedLesson = lessons.find((item) => item.id === lessonId);
   const selectedStorefrontOffer = publicProduct?.offers.find((offer) => offer.catalog_price_id === storefrontPriceId);
+  const storefrontCheckoutRequested = wantsCourseCheckout();
   const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
   const brandName = portal?.brand.name || "your community";
 
@@ -702,7 +691,7 @@ export default function App() {
   }, [auth, communityId, portal, selectedStorefrontOffer, storefrontCheckout?.recovery_token]);
 
   useEffect(() => {
-    if (!portal || !selectedStorefrontOffer || !wantsCourseCheckout()) return;
+    if (!portal || !selectedStorefrontOffer || !storefrontCheckoutRequested) return;
     const storageKey = `community-checkout:${portal.community.id}:${selectedStorefrontOffer.catalog_price_id}`;
     let cancelled = false;
     setStorefrontPreparing(true);
@@ -742,7 +731,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [portal, selectedStorefrontOffer]);
+  }, [portal, selectedStorefrontOffer, storefrontCheckoutRequested]);
 
   useEffect(() => {
     if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
@@ -1744,7 +1733,7 @@ function PublicStorefront({ product, portal, checkout, checkoutAmount, checkoutC
         <aside className="storefront-checkout" aria-label="Checkout">
           <div className="checkout-heading">
             <p>{checkout ? "Complete your enrollment" : "Choose your access"}</p>
-            {activeOffer && <strong>{checkout && checkoutAmount && checkoutCurrency ? new Intl.NumberFormat("en-US",{style:"currency",currency:checkoutCurrency}).format(checkoutAmount/100)+" one-time" : formatPublicOffer(activeOffer)}</strong>}
+            {activeOffer && <strong>{checkout && checkoutAmount && checkoutCurrency ? formatCheckoutOffer(activeOffer, checkoutAmount, checkoutCurrency, true) : formatPublicOffer(activeOffer)}</strong>}
           </div>
           <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
             {offers.map((offer) => {
@@ -1753,7 +1742,7 @@ function PublicStorefront({ product, portal, checkout, checkoutAmount, checkoutC
               return <button type="button" role={offers.length > 1 ? "radio" : undefined} aria-checked={offers.length > 1 ? selected : undefined} className={`offer-option ${selected ? "selected" : ""}`} key={offer.catalog_price_id} onClick={() => onSelect(offer)}>
                 {offers.length > 1 && <span className="offer-radio" aria-hidden="true" />}
                 <span className="offer-copy"><strong>{offerLabel(offer)}</strong><small>{offerNote(offer)}</small></span>
-                <span className="offer-price"><strong>{checkout && selected && checkoutAmount && checkoutCurrency ? new Intl.NumberFormat("en-US",{style:"currency",currency:checkoutCurrency}).format(checkoutAmount/100) : formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
+                <span className="offer-price"><strong>{checkout && selected && checkoutAmount && checkoutCurrency ? formatCheckoutOffer(offer, checkoutAmount, checkoutCurrency) : formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
               </button>;
             })}
             {offers.length === 0 && <div className="checkout-unavailable">This product is not currently available for purchase.</div>}
