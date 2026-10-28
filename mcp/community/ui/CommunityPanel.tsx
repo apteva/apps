@@ -207,6 +207,7 @@ interface InstructorLink {
 }
 
 interface InstructorProfile {
+  persona_id?: number;
   id: string;
   community_id: string;
   member_id?: string;
@@ -1423,6 +1424,7 @@ function CommunityDialog({
   const [authUserId, setAuthUserId] = useState("");
   const [linkedMemberId, setLinkedMemberId] = useState(instructor?.member_id || "");
   const [avatarStorageFileId, setAvatarStorageFileId] = useState(instructor?.avatar_storage_file_id || "");
+  const [personaId, setPersonaId] = useState(String(instructor?.persona_id || ""));
   const [professionalTitle, setProfessionalTitle] = useState(instructor?.professional_title || "");
   const [credentialsText, setCredentialsText] = useState((instructor?.credentials || []).join("\n"));
   const [accomplishmentsText, setAccomplishmentsText] = useState((instructor?.accomplishments || []).join("\n"));
@@ -1660,6 +1662,7 @@ function CommunityDialog({
           });
         const profileArgs = {
           display_name: name.trim(),
+          persona_id: Number(personaId) || 0,
           member_id: linkedMemberId,
           avatar_storage_file_id: avatarStorageFileId.trim(),
           professional_title: professionalTitle.trim(),
@@ -1875,6 +1878,10 @@ function CommunityDialog({
 
         {kind === "instructor" || kind === "edit_instructor" ? (
           <>
+            <Field label="Persona Studio identity (optional)">
+              <input className={inputClass} type="number" min="0" step="1" value={personaId} onChange={e => setPersonaId(e.target.value)} placeholder="Persona ID" />
+              <p className="text-xs text-text-muted">Links this instructor to the approved voice, avatar and production profiles. Leave empty for instructors without a persona.</p>
+            </Field>
             <Field label="Professional title">
               <input className={inputClass} value={professionalTitle} onChange={(e) => setProfessionalTitle(e.target.value)} placeholder="Embedded systems educator" />
             </Field>

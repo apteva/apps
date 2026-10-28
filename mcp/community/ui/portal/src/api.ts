@@ -94,6 +94,9 @@ export interface MemberSession {
 }
 
 export interface StorefrontCheckoutSession {
+ order_bumps?: import("../../../../checkout/ui/OrderBumps").CheckoutOrderBump[];
+ selections_locked?: boolean;
+ claimed?: boolean;
   offer_kind: "one_time" | "recurring";
   checkout_session_id?: number;
   recovery_token?: string;
@@ -159,8 +162,11 @@ export const api = {
       apteva.get<{ product: PublicProduct }>(projectScopedPath(`${communityPublicPath(`/portal/products/${encodeURIComponent(slug)}`)}?community=${encodeURIComponent(community)}`)),
     preview: (community: string, lessonId: string) =>
       apteva.get<{ preview: PublicLessonPreview }>(projectScopedPath(`${communityPublicPath(`/portal/previews/${encodeURIComponent(lessonId)}`)}?community=${encodeURIComponent(community)}`)),
+    setBump: (communitySlug: string, body: {catalog_price_id: number; recovery_token: string; bump_id: number; selected: boolean}) => apteva.post<StorefrontCheckoutSession>(projectScopedPath(`${communityPublicPath("/portal/checkout/bumps")}?community=${encodeURIComponent(communitySlug)}`), body),
     prepareCheckout: (communitySlug: string, body: {
       catalog_price_id: number;
+      promotion_code?: string;
+      attribution?: Record<string,string>;
       email?: string;
       customer_name?: string;
       recovery_token?: string;
@@ -314,9 +320,9 @@ export const api = {
         community_id, catalog_price_id, member_id: self, success_url, cancel_url,
         return_url, presentation: "elements",
       }),
-    claim: (community_id: string, catalog_price_id: number, recovery_token: string) =>
+    claim: (community_id: string, catalog_price_id: number, recovery_token: string, prepare_only = true) =>
       community.tool<StorefrontCheckoutSession>("storefront_checkout_claim", {
-        community_id, catalog_price_id, member_id: self, recovery_token,
+        community_id, catalog_price_id, member_id: self, recovery_token, prepare_only,
       }),
   },
   dms: {

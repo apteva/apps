@@ -1,4 +1,29 @@
-# Community v0.14.0
+# Community v0.16.0
+
+Checkout v0.4.0 supplies reusable order bumps on the product checkout page.
+Configure them in **Checkout → Order bumps**, restricting the source to
+`community` and the context to the Community ID. For an additional course,
+select its Catalog price, set the delivery app to `community`, and set its
+delivery reference to the course space ID. The course must have an active paid offer for the same Catalog product; a
+separate bump price can provide a discount. Products from another app retain that app's delivery owner.
+
+Buyers can opt in before or after sign-in and recover the same selection after
+email verification or reload. Sign-in only binds verified identity; Billing
+records are created when the buyer clicks Pay. One payment covers the primary
+offer and selected extras. Community grants extra courses from paid Checkout
+item receipts and revokes only the refunded item's grant. Independent manual
+access survives refunds. Main-course purchase/refund accounting uses its own
+line balance, preserving the existing promotion and acquisition snapshots.
+
+One-time extras can accompany a membership's first invoice. Recurring prices
+and renewal cycles contain only the membership price; the page shows the
+amount due today separately from the renewal price. Courses already included
+in the selected membership are not offered as extras. Unsupported recurring
+bump prices are rejected by Checkout.
+
+Refund add-ons from **Checkout → Sessions → Purchased items**. Use item refunds
+for reliable access attribution; an external partial invoice refund is flagged
+for accounting review instead of guessing which course to revoke.
 
 Community provides a branded member portal, discussions, direct messages, courses, a public storefront, and one-time or recurring course access. The native dashboard panel manages communities, members, content, offers, instructors, and branding.
 
@@ -44,3 +69,7 @@ bun run test:browser
 ```
 
 Browser tests use deterministic API fixtures and cover desktop/mobile layout, empty states, safe Markdown, profile editing, saved learning results, service failures, and pagination. Backend regression tests cover delegated authorization, enrollment gates, migrations, file permissions, read cursors, content limits, and progress identity.
+
+## Brand production profiles
+
+Instructor profiles support an optional `persona_id` (zero clears it). This private production reference links the instructor to Persona Studio voice/avatar assets while course and learner records remain in Community. Public instructor payloads do not expose the production reference.
