@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -244,5 +245,67 @@ func TestAcknowledgementCompactsWithoutReplaying(t *testing.T) {
 	}
 	if r := waitJob(t, a, app, "acked"); r.Output != "" {
 		t.Fatal("acknowledged output was not compacted")
+	}
+}
+
+func TestManagedLifecycleIdentityAndStatus(t *testing.T) {
+	t.Setenv("APTEVA_DEPLOYMENT_ID", "deployment-test")
+	t.Setenv("APTEVA_DEPLOYMENT_GENERATION", "7")
+	a, _ := testExecutor(t)
+	check := func(state string, admitting bool) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.status(w, httptest.NewRequest("GET", "/_apteva/runtime/app/status", nil))
+		var got struct {
+			DeploymentID string `json:"deployment_id"`
+			Generation   int64  `json:"generation"`
+			State        string `json:"state"`
+			Admitting    bool   `json:"admitting"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.DeploymentID != "deployment-test" || got.Generation != 7 || got.State != state || got.Admitting != admitting {
+			t.Fatalf("status=%+v", got)
+		}
+	}
+	check("standby", false)
+	var activateHandler func(http.ResponseWriter, *http.Request)
+	for _, route := range a.HTTPRoutes() {
+		if route.Pattern == "/_apteva/runtime/app/activate" {
+			activateHandler = route.Handler
+		}
+	}
+	call := func(handler func(http.ResponseWriter, *http.Request), body string, want int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		handler(w, httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		if w.Code != want {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body)
+		}
+	}
+	for _, handler := range []func(http.ResponseWriter, *http.Request){activateHandler, a.drain} {
+		call(handler, `{}`, 409)
+		call(handler, `{"deployment_id":"deployment-test","generation":6}`, 409)
+		call(handler, `{"deployment_id":"other","generation":7}`, 409)
+		call(handler, `{"deployment_id":"deployment-test","generation":7} {}`, 400)
+	}
+	check("standby", false)
+	identity := `{"deployment_id":"deployment-test","generation":7}`
+	call(activateHandler, identity, 200)
+	check("active", true)
+	call(a.drain, identity, 200)
+	check("inactive", false)
+}
+func TestInvalidManagedLifecycleIdentityFailsMount(t *testing.T) {
+	for _, raw := range []string{"", "0", "-1", "invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("APTEVA_DEPLOYMENT_ID", "deployment-test")
+			t.Setenv("APTEVA_DEPLOYMENT_GENERATION", raw)
+			app := tk.NewAppCtx(t, "apteva.yaml", tk.WithEnv("APTEVA_DATA_DIR", t.TempDir()))
+			if err := new(ExecutorApp).OnMount(app); err == nil {
+				t.Fatal("invalid identity accepted")
+			}
+		})
 	}
 }

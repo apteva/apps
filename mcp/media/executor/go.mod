@@ -2,7 +2,7 @@ module github.com/apteva/apps/mcp/media/executor
 
 go 1.26.6
 
-require github.com/apteva/app-sdk v0.109.0
+require github.com/apteva/app-sdk v0.110.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

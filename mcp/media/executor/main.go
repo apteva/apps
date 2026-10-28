@@ -59,20 +59,23 @@ type job struct {
 	done   chan struct{}
 }
 type ExecutorApp struct {
-	mu       sync.Mutex
-	root     string
-	active   bool
-	jobs     map[string]*job
-	capacity int
-	used     int
-	waiters  []*struct{ marker byte }
-	control  chan struct{}
-	slots    chan struct{}
-	changed  chan struct{}
-	life     context.Context
-	stop     context.CancelFunc
-	ffmpeg   string
-	ffprobe  string
+	mu             sync.Mutex
+	root           string
+	active         bool
+	jobs           map[string]*job
+	capacity       int
+	used           int
+	waiters        []*struct{ marker byte }
+	control        chan struct{}
+	slots          chan struct{}
+	changed        chan struct{}
+	life           context.Context
+	stop           context.CancelFunc
+	ffmpeg         string
+	ffprobe        string
+	deploymentID   string
+	generation     int64
+	lifecycleState string
 }
 
 func (*ExecutorApp) Manifest() sdk.Manifest {
@@ -87,6 +90,15 @@ func (*ExecutorApp) Channels() []sdk.ChannelFactory    { return nil }
 func (*ExecutorApp) Workers() []sdk.Worker             { return nil }
 func (*ExecutorApp) EventHandlers() []sdk.EventHandler { return nil }
 func (a *ExecutorApp) OnMount(app *sdk.AppCtx) error {
+	a.deploymentID = os.Getenv("APTEVA_DEPLOYMENT_ID")
+	if raw := os.Getenv("APTEVA_DEPLOYMENT_GENERATION"); a.deploymentID != "" || raw != "" {
+		var err error
+		a.generation, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || a.generation <= 0 || a.deploymentID == "" {
+			return errors.New("invalid managed deployment identity")
+		}
+	}
+	a.lifecycleState = "standby"
 	a.root = filepath.Join(app.DataDir(), "executor")
 	a.capacity = positive(app.Config().Get("work_capacity"), 2)
 	if a.capacity > 16 {
@@ -495,25 +507,64 @@ func workerEnv(root, ffmpeg string) []string {
 }
 func (a *ExecutorApp) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: "GET", Pattern: "/_apteva/runtime/app/status", Handler: a.status},
 		{Method: "GET", Pattern: "/_apteva/runtime/app/describe", Handler: func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"passive_start": true, "drain": true, "replica_safe": false, "worker_coordination": false, "routing": "key"})
 		}},
 		{Method: "POST", Pattern: "/_apteva/runtime/app/activate", Handler: func(w http.ResponseWriter, r *http.Request) {
+			if !a.lifecycleIdentity(w, r) {
+				return
+			}
 			a.mu.Lock()
+			if a.lifecycleState == "draining" {
+				a.mu.Unlock()
+				http.Error(w, "executor is draining", http.StatusConflict)
+				return
+			}
 			a.active = true
+			a.lifecycleState = "active"
 			a.mu.Unlock()
 			writeJSON(w, map[string]any{"active": true})
 		}},
 		{Method: "POST", Pattern: "/_apteva/runtime/app/drain", Handler: a.drain},
 	}
 }
+func (a *ExecutorApp) lifecycleIdentity(w http.ResponseWriter, r *http.Request) bool {
+	if a.deploymentID == "" {
+		return true // Standalone SDK development; no managed identity to claim.
+	}
+	var identity struct {
+		DeploymentID string `json:"deployment_id"`
+		Generation   int64  `json:"generation"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if decoder.Decode(&identity) != nil || decoder.Decode(new(any)) != io.EOF {
+		http.Error(w, "deployment identity required", http.StatusBadRequest)
+		return false
+	}
+	if identity.DeploymentID != a.deploymentID || identity.Generation != a.generation {
+		http.Error(w, "deployment identity mismatch", http.StatusConflict)
+		return false
+	}
+	return true
+}
+func (a *ExecutorApp) status(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	writeJSON(w, map[string]any{"deployment_id": a.deploymentID, "generation": a.generation,
+		"state": a.lifecycleState, "admitting": a.active})
+}
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 func (a *ExecutorApp) drain(w http.ResponseWriter, r *http.Request) {
+	if !a.lifecycleIdentity(w, r) {
+		return
+	}
 	a.mu.Lock()
 	a.active = false
+	a.lifecycleState = "draining"
 	running := []chan struct{}{}
 	for _, j := range a.jobs {
 		if !terminal(j.Status) {
@@ -537,6 +588,7 @@ func (a *ExecutorApp) drain(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.lifecycleState = "inactive"
 	writeJSON(w, map[string]any{"drained": true})
 }
 func (a *ExecutorApp) OnUnmount(app *sdk.AppCtx) error {

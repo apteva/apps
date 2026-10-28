@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: media-executor
 display_name: Media Executor
-version: 0.15.0
+version: 0.15.1
 description: Private, bounded Media processing worker. Placement is managed by Server owned components.
 scopes: [project, global]
 requires:
@@ -24,7 +24,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-executor/v0.15.0
+    ref: media-executor/v0.15.1
     entry: mcp/media/executor
   port: 8080
   health_check: /health
