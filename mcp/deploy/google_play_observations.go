@@ -148,7 +148,12 @@ func googlePlayBackoffRequired(status int, body json.RawMessage) bool {
 	if status != http.StatusForbidden {
 		return false
 	}
-	// Permission-denied 403s must never be treated as quota errors.
+	// Google also reports the daily edit limit as PERMISSION_DENIED with
+	// reason=forbidden (or no reason). Match its specific message, while
+	// ordinary permission-denied 403s remain outside quota handling.
+	if googlePlayDailyQuota(body) {
+		return true
+	}
 	var value any
 	if json.Unmarshal(body, &value) != nil {
 		return false
@@ -171,6 +176,43 @@ func googlePlayBackoffRequired(status int, body json.RawMessage) bool {
 		case []any:
 			for _, v := range x {
 				if walk(v) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(value)
+}
+
+func googlePlayDailyQuota(body json.RawMessage) bool {
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(v any) bool {
+		switch x := v.(type) {
+		case map[string]any:
+			for key, child := range x {
+				if message, ok := child.(string); ok && key == "message" {
+					normalized := strings.TrimRight(strings.ToLower(strings.Join(strings.Fields(message), " ")), ". ")
+					if normalized == "daily edit creation quota exceeded" {
+						return true
+					}
+				}
+				if key == "reason" || key == "status" {
+					if strings.ReplaceAll(strings.ToLower(fmt.Sprint(child)), "_", "") == "dailylimitexceeded" {
+						return true
+					}
+				}
+				if walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range x {
+				if walk(child) {
 					return true
 				}
 			}
@@ -235,7 +277,7 @@ func (c *googlePlayCoordinator) recordBackoff(connection int64, status int, head
 		return err
 	}
 	base := time.Minute
-	if strings.Contains(strings.ToLower(string(body)), "dailylimitexceeded") {
+	if googlePlayDailyQuota(body) {
 		base = time.Hour
 	}
 	for i := 1; i < attempts && base < 6*time.Hour; i++ {

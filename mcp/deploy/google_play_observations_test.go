@@ -84,7 +84,18 @@ func TestGoogleObservationsCoalescePollingAndScope(t *testing.T) {
 	}
 }
 
+const dailyEditQuotaResponse = `{"error":{"code":403,"message":"Daily edit creation quota exceeded.","status":"PERMISSION_DENIED"}}`
+
 func TestGoogleQuotaBackoffPersistsAcrossDatabaseReopen(t *testing.T) {
+	t.Run("429-retry-after", func(t *testing.T) {
+		testGoogleQuotaDatabaseReopen(t, 429, map[string]string{"retry-after": "3600"}, nil)
+	})
+	t.Run("403-daily-edit", func(t *testing.T) {
+		testGoogleQuotaDatabaseReopen(t, 403, nil, json.RawMessage(dailyEditQuotaResponse))
+	})
+}
+
+func testGoogleQuotaDatabaseReopen(t *testing.T, status int, headers map[string]string, body json.RawMessage) {
 	path := filepath.Join(t.TempDir(), "deploy.db")
 	open := func() *sql.DB {
 		db, err := sql.Open("sqlite", path)
@@ -110,7 +121,7 @@ func TestGoogleQuotaBackoffPersistsAcrossDatabaseReopen(t *testing.T) {
 	if _, _, err := c.observe(bound, "com.example.app", "track", func() (json.RawMessage, error) { return json.RawMessage(`{"old":true}`), nil }); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.recordBackoff(88, 429, map[string]string{"retry-after": "3600"}, nil); err != nil {
+	if err := c.recordBackoff(88, status, headers, body); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -158,6 +169,14 @@ func TestGoogleRetryAfterAndQuotaClassification(t *testing.T) {
 		{"http-date", 429, map[string]string{"Retry-After": now.Add(2 * time.Hour).Format(http.TimeFormat)}, `{}`, 2 * time.Hour, true},
 		{"retry-info", 429, nil, `{"error":{"details":[{"retryDelay":"7200s"}]}}`, 2 * time.Hour, true},
 		{"daily", 403, nil, `{"error":{"errors":[{"reason":"dailyLimitExceeded"}]}}`, time.Hour, true},
+		{"daily-edit-permission-denied", 403, nil, dailyEditQuotaResponse, time.Hour, true},
+		{"daily-edit-retry-after", 403, map[string]string{"Retry-After": "7200"}, dailyEditQuotaResponse, 2 * time.Hour, true},
+		{"daily-edit-normalized-wrapper", 403, nil, `{"error":"permission_denied","provider_error":{"message":"Daily edit creation quota exceeded.","status":"PERMISSION_DENIED"}}`, time.Hour, true},
+		{"daily-edit-legacy-forbidden", 403, nil, `{"error":{"errors":[{"reason":"forbidden","message":"Daily edit creation quota exceeded."}]}}`, time.Hour, true},
+		{"daily-edit-whitespace", 403, nil, `{"error":{"message":"  DAILY  EDIT CREATION QUOTA EXCEEDED.  ","status":"PERMISSION_DENIED"}}`, time.Hour, true},
+		{"daily-reason-snake-case", 403, nil, `{"error":{"details":[{"reason":"DAILY_LIMIT_EXCEEDED"}]}}`, time.Hour, true},
+		{"permission-mentions-quota", 403, nil, `{"error":{"status":"PERMISSION_DENIED","message":"User does not have permission to access the quota project."}}`, 0, false},
+		{"unrelated-diagnostic", 403, nil, `{"error":{"status":"PERMISSION_DENIED","message":"Missing permission"},"description":"Daily edit creation quota exceeded."}`, 0, false},
 		{"rate-limit", 403, nil, `{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}`, time.Minute, true},
 		{"unavailable", 503, map[string]string{"Retry-After": "600"}, `{}`, 10 * time.Minute, true},
 		{"permission", 403, nil, `{"error":{"status":"PERMISSION_DENIED"}}`, 0, false},
@@ -244,9 +263,10 @@ func TestGoogleEditTransactionsProtectCachedObservationsAndInvalidateOnCommit(t 
 
 type quotaPlayPlatform struct {
 	tk.BasePlatformClient
-	mu     sync.Mutex
-	calls  []integrationCall
-	status int
+	mu           sync.Mutex
+	calls        []integrationCall
+	status       int
+	failureReply *sdk.ExecuteResult
 }
 
 func (p *quotaPlayPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -261,6 +281,9 @@ func (p *quotaPlayPlatform) ExecuteIntegrationTool(_ int64, tool string, input m
 	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
 	if _, leaked := input["_deploy_observation"]; leaked {
 		return nil, errors.New("internal marker leaked to provider")
+	}
+	if p.failureReply != nil {
+		return p.failureReply, nil
 	}
 	if p.status != 0 {
 		return &sdk.ExecuteResult{Status: p.status, Headers: map[string]string{"Retry-After": "600"}, Data: json.RawMessage(`{"error":{"status":"RESOURCE_EXHAUSTED"}}`)}, nil
@@ -451,5 +474,32 @@ func TestGoogleStreamingUploadPreservesRetryAfter(t *testing.T) {
 	paused, ok := c.before(88).(*googlePlayPausedError)
 	if !ok || paused.Until.Before(before.Add(time.Hour)) {
 		t.Fatal("stream upload ignored Retry-After")
+	}
+}
+
+func TestGoogleDailyEditQuotaStopsIntegrationCallsAcrossCoordinatorRestart(t *testing.T) {
+	p, c, bound := setupQuotaPlatform(t)
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	p.failureReply = &sdk.ExecuteResult{Status: 403, Data: json.RawMessage(dailyEditQuotaResponse)}
+	_, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": "com.example.app"})
+	if err == nil {
+		t.Fatal("lost the provider failure")
+	}
+	var paused *googlePlayPausedError
+	if !errors.As(c.before(bound.ConnectionID), &paused) || paused.Until.Before(now.Add(time.Hour)) {
+		t.Fatal("daily-edit response did not save a daily cooldown")
+	}
+	googlePlayCoordinators.Delete(c.db)
+	restarted := googlePlayCoordinatorForContext()
+	restarted.now = c.now
+	for i := 0; i < 8; i++ {
+		_, err = executeIntegration(bound, "create_edit", map[string]any{"packageName": "com.example.another"})
+		if !errors.As(err, &paused) {
+			t.Fatal("restart did not retain account backoff", err)
+		}
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("cooldown allowed %d upstream calls", len(p.calls))
 	}
 }
