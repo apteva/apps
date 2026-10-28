@@ -21,6 +21,7 @@ import {DestinationPicker,type DestinationCapabilities} from "./destinations";
 import {TargetDelivery,type DeliveryDiagnostics} from "./TargetDelivery";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
+import { nativeReleaseLabel, postReleaseLabel, type NativeRelease } from "./nativeRelease";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
@@ -147,6 +148,7 @@ interface PostTarget {
   upstream_status?: number;
   existing_post_id?: string;
   native_metadata?: NativePostMetadata;
+  native_release?: NativeRelease | null;
  publication_facts?: PublicationFactsData;
   provider_sync_status?: string;
   audience_capabilities?: AudienceCapabilities;
@@ -3065,6 +3067,24 @@ function OptionFieldInput({
     );
   }
 
+  if (field.type === "datetime") {
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <input
+          type="datetime-local"
+          disabled={disabled}
+          value={typeof value === "string" ? localScheduleInput(value) : ""}
+          onChange={(e) => {
+            if (!e.target.value) return onChange("");
+            try { onChange(scheduleInstant(e.target.value)); } catch { /* incomplete or nonexistent local time */ }
+          }}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        />
+      </div>
+    );
+  }
+
   if (field.type === "boolean") {
     return (
       <label className="flex items-start gap-2 border border-border rounded px-2 py-2 bg-bg-input/50">
@@ -4676,7 +4696,7 @@ function PostListRow({
           </div>
         </button>
         <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill />}
           {(post.status === "failed" || post.status === "partial") && (
             <button
@@ -4881,7 +4901,7 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill compact />}
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
@@ -5029,7 +5049,7 @@ function PostDetailPanel({
             <div className="text-text font-medium">Post #{post.id}</div>
             <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
           </div>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill />}
           <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
         </div>
@@ -5083,8 +5103,9 @@ function PostDetailPanel({
                   <div className="flex items-center gap-2 text-sm">
                     <span className="text-text">{target.display_name}</span>
                     <span className="text-text-dim">{target.platform}</span>
-                    <span className="ml-auto"><StatusPill status={target.status} /></span>
+                    <span className="ml-auto"><TargetStatusPill target={target} /></span>
                   </div>
+                  {target.platform === "youtube" && target.status === "published" && target.platform_post_id && <NativeRefreshButton postId={post.id} targetId={target.id} projectId={projectId} onRefreshed={onAudienceConfirmed} />}
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
                   {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
                   <PublicationFacts facts={target.publication_facts}/><NativePostObservation metadata={target.native_metadata}/>
@@ -5502,6 +5523,17 @@ function EditPostDialog({
                             <option value="private">private</option>
                           </select>
                         </div>
+                        <OptionFieldInput
+                          field={{
+                            name: "release_at",
+                            label: "YouTube release time",
+                            type: "datetime",
+                            help: "Keeps the video private until YouTube releases it. Clear to remove the schedule.",
+                          }}
+                          value={targetOptions[t.social_account_id] && "release_at" in targetOptions[t.social_account_id] ? targetOptions[t.social_account_id].release_at : t.options?.release_at}
+                          projectId={projectId}
+                          onChange={(v) => setOpt(t.social_account_id, "release_at", v === "" ? null : v)}
+                        />
                         <OptionFieldInput
                           field={{
                             name: "contains_synthetic_media",
@@ -6592,6 +6624,46 @@ function ExternalMediaThumb({ url }: { url: string }) {
         imported
       </div>
     </a>
+  );
+}
+
+function PostStatusPill({ post }: { post: Post }) {
+  const release = postReleaseLabel(post);
+  if (!release) return <StatusPill status={post.status} />;
+  return <span className={"text-xs " + release.tone} title={release.title}>{release.label}</span>;
+}
+
+function TargetStatusPill({ target }: { target: PostTarget }) {
+  const release = target.status === "published" ? nativeReleaseLabel(target.native_release) : null;
+  if (!release) return <StatusPill status={target.status} />;
+  return <span className={"text-xs " + release.tone} title={release.title}>{release.label}</span>;
+}
+
+function NativeRefreshButton({ postId, targetId, projectId, onRefreshed }: { postId: number; targetId: number; projectId?: string | null; onRefreshed: () => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(appURL(`/posts/${postId}/delivery/${targetId}/native-refresh`, projectId), { method: "POST", credentials: "same-origin" });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || out?.isError || (out?.status && out.status !== "ok")) {
+        setError(mcpEnvelopeError(out) || out?.error || out?.limitation || `Refresh failed (${res.status})`);
+      } else {
+        await onRefreshed();
+      }
+    } catch (e: any) {
+      setError(e?.message || "Refresh failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-1 text-xs">
+      <button type="button" onClick={refresh} disabled={busy} className="text-accent hover:underline disabled:opacity-50">{busy ? "Refreshing…" : "Refresh from YouTube"}</button>
+      {error && <span className="text-error ml-2">{error}</span>}
+    </div>
   );
 }
 

@@ -367,6 +367,12 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		handler = a.toolPostDeliveryInspect
+	case "native-refresh":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", 405)
+			return
+		}
+		handler = a.toolPostTargetNativeRefresh
 	case "revalidate", "recover":
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", 405)

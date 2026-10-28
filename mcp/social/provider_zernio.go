@@ -986,6 +986,9 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	if title := strings.TrimSpace(toString(j.options["title"])); title != "" {
 		input["title"] = title
 	}
+	if strOption(j.options, "release_at") != "" {
+		return "", "", errors.New("YouTube release time needs a direct YouTube connection; schedule the Zernio post instead")
+	}
 	if visibility := strings.TrimSpace(toString(j.options["visibility"])); visibility != "" {
 		input["visibility"] = visibility
 	}
@@ -2166,7 +2169,7 @@ func zernioPlatformSpecificData(opts map[string]any) map[string]any {
 			if synthetic, ok := boolOption(opts, k); ok {
 				out["containsSyntheticMedia"] = synthetic
 			}
-		case "body", "title", "visibility", "thumbnail_storage_id", "thumbnail_project_id", "thumbnail_frame_ms", "tags":
+		case "body", "title", "visibility", "release_at", "thumbnail_storage_id", "thumbnail_project_id", "thumbnail_frame_ms", "tags":
 			continue
 		default:
 			out[k] = v

@@ -271,7 +271,7 @@ func (a *App) youtubeNativePostsWithParts(ctx *sdk.AppCtx, b historyAccount, run
 		details := historyMap(item, "contentDetails")
 		file := historyMap(item, "fileDetails")
 		processing := historyMap(item, "processingDetails")
-		out = append(out, nativePost{ID: id, URL: optionalText(historyString(item, "share_url", "permalink_url")), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
+		out = append(out, nativePost{ID: id, URL: optionalText(historyString(item, "share_url", "permalink_url")), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ScheduledPublishAt: nativeTimestamp(historyString(status, "publishAt")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
 	}
 	if len(seen) != len(wanted) {
 		for _, id := range ids {

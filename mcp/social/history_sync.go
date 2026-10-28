@@ -28,6 +28,7 @@ type nativePost struct {
 	ProviderPublishedAt   *string        `json:"provider_reported_published_at"`
 	PublicationTimeSource string         `json:"publication_time_source"`
 	PublishedAt           *string        `json:"published_at"`
+	ScheduledPublishAt    *string        `json:"scheduled_publish_at,omitempty"`
 	Visibility            *string        `json:"visibility"`
 	Audience              *string        `json:"audience"`
 	ProcessingState       *string        `json:"processing_state"`

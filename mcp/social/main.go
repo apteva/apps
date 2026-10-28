@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.7
+version: 0.20.8
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -227,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.7
+    ref: social/v0.20.8
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -399,7 +399,7 @@ type inboxCaps struct {
 type optionField struct {
 	Name    string   `json:"name"`
 	Label   string   `json:"label"`
-	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean"
+	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean" | "datetime"
 	Options []string `json:"options,omitempty"`
 	Help    string   `json:"help,omitempty"`
 }
@@ -676,6 +676,8 @@ var platforms = map[string]platformDef{
 			{Name: "visibility", Type: "select", Label: "Visibility",
 				Options: []string{"public", "unlisted", "private"},
 				Help:    "Defaults to public when blank."},
+			{Name: "release_at", Type: "datetime", Label: "YouTube release time",
+				Help: "Optional. Uploads the video privately and YouTube makes it public at this time (status.publishAt)."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
 			{Name: "contains_synthetic_media", Type: "boolean", Label: "AI-generated or altered content",
@@ -4060,6 +4062,8 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	//                 is visible without a second manual YouTube step.
 	//   category    — snippet.categoryId (numeric string).
 	//   tags        — snippet.tags (array of strings).
+	//   release_at  — status.publishAt; uploads privately and YouTube
+	//                 releases it at that time. Overrides visibility.
 	//   contains_synthetic_media — status.containsSyntheticMedia; sent
 	//                 only when the creator set it, so unset stays unset.
 	title := strOption(j.options, "title")
@@ -4072,6 +4076,16 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	visibility := strOption(j.options, "visibility")
 	if visibility == "" {
 		visibility = "public"
+	}
+	releaseAt, err := youtubeReleaseAt(j.options)
+	if err != nil {
+		return "", "", err
+	}
+	if releaseAt != "" {
+		if at, _ := time.Parse(time.RFC3339, releaseAt); !at.After(time.Now()) {
+			return "", "", fmt.Errorf("YouTube release time %s has already passed; set a later release_at", releaseAt)
+		}
+		visibility = "private" // YouTube only schedules private videos.
 	}
 	snippet := map[string]any{
 		"title":       title,
@@ -4096,6 +4110,9 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	status := map[string]any{
 		"privacyStatus":           visibility,
 		"selfDeclaredMadeForKids": false,
+	}
+	if releaseAt != "" {
+		status["publishAt"] = releaseAt
 	}
 	if synthetic, ok := boolOption(j.options, "contains_synthetic_media"); ok {
 		status["containsSyntheticMedia"] = synthetic
@@ -5623,7 +5640,17 @@ func loadTargetsFrom(db interface {
 			}
 		}
 	}
-	return out, metadata.Err()
+	if err := metadata.Err(); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for _, target := range out {
+		if target["platform"] == "youtube" && target["provider"] == "native" && target["status"] == "published" {
+			options, _ := target["options"].(map[string]any)
+			target["native_release"] = youtubeReleaseState(options, target["native_metadata"], toString(target["native_observed_at"]), now)
+		}
+	}
+	return out, nil
 }
 
 // ─── post_retry ───────────────────────────────────────────────────
@@ -9246,6 +9273,9 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 			out.Status, out.Error = "failed", upstreamError(res).Error()
 			return out
 		}
+		// Re-read the video so the displayed visibility/release reflects
+		// what YouTube now holds. Best effort: the edit already succeeded.
+		_, _ = a.toolPostNativeInspect(ctx, map[string]any{"social_account_id": out.SocialAccountID, "native_post_id": out.PlatformPostID})
 	}
 	if thumbnail != nil {
 		if err := a.setBinaryThumbnail(ctx, def, connID, out.PlatformPostID, *thumbnail); err != nil {
@@ -9259,7 +9289,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 
 // youtubeMetadataOptions are the per-target keys that require an
 // update_video call when edited.
-var youtubeMetadataOptions = []string{"title", "body", "category", "visibility", "tags", "contains_synthetic_media"}
+var youtubeMetadataOptions = []string{"title", "body", "category", "visibility", "tags", "release_at", "contains_synthetic_media"}
 
 func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID string, eff, requested map[string]any) (map[string]any, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_video", map[string]any{
@@ -9326,6 +9356,20 @@ func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID st
 		status["privacyStatus"] = strOption(eff, "visibility")
 		if status["privacyStatus"] != "private" {
 			delete(status, "publishAt")
+		}
+	}
+	if _, ok := requested["release_at"]; ok {
+		releaseAt, err := youtubeReleaseAt(eff)
+		if err != nil {
+			return nil, err
+		}
+		if releaseAt == "" {
+			delete(status, "publishAt")
+		} else {
+			if at, _ := time.Parse(time.RFC3339, releaseAt); !at.After(time.Now()) {
+				return nil, errors.New("YouTube release time must be in the future")
+			}
+			status["privacyStatus"], status["publishAt"] = "private", releaseAt
 		}
 	}
 	// videos.update replaces the status part, and get_video readback can
