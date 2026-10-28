@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.63
+version: 0.11.0
 description: |
   v0.10.63 aligns the Codex image catalog and default requests with
   gpt-6.1-sol, preserving explicitly selected models.
@@ -132,6 +132,16 @@ requires:
     - platform.connections.execute
     - platform.apps.call
   integrations:
+    - role: editorial
+      kind: app
+      compatible_app_names: [editorial]
+      required: false
+      label: Brand production requirements
+    - role: persona-studio
+      kind: app
+      compatible_app_names: [persona-studio]
+      required: false
+      label: Approved identity and voice
     - role: image_provider
       kind: integration
       mode: multiple
@@ -221,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.10.63
+    ref: media-studio/v0.11.0
     entry: mcp/media-studio
   port: 8080
   health_check: /health
@@ -330,7 +340,9 @@ func (a *App) MCPTools() []sdk.Tool {
 					"description": "Discriminates which provider to invoke.",
 					"enum":        []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"},
 				},
-				"provider": map[string]any{"type": "string", "description": "Optional provider slug when multiple compatible providers are bound, for example elevenlabs, fish-audio, cartesia, or minimax-audio. Provider-prefixed model and voice ids are also accepted."},
+				"provider":           map[string]any{"type": "string", "description": "Optional provider slug when multiple compatible providers are bound, for example elevenlabs, fish-audio, cartesia, or minimax-audio. Provider-prefixed model and voice ids are also accepted."},
+				"brand_id":           map[string]any{"type": "string", "description": "Editorial brand ID; supply with production_profile to enforce its production method and approved identity."},
+				"production_profile": map[string]any{"type": "string", "description": "Named Editorial brand production profile. Wrong kinds/providers/avatars are rejected before generation."},
 				"prompt": map[string]any{
 					"type":        "string",
 					"description": "Text prompt (or text-to-speak when kind=audio_tts; the spoken script when kind=avatar).",

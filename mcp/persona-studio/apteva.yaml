@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.2.0
+version: 0.3.0
 description: |
   v0.2.0 adds Song, Image video, and Full clip exports on each canonical
   Composer composition, sharing audio and keeping independent previews.

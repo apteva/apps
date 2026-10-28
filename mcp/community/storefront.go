@@ -185,7 +185,7 @@ func (a *App) httpStorefrontRoute(w http.ResponseWriter, r *http.Request) {
 	if parts[1] == "checkout" {
 		query.Set("intent", "buy")
 	}
-	for _, key := range []string{"offer", "project_id"} {
+	for _, key := range []string{"offer", "project_id", "promotion", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "campaign_id", "adset_id", "ad_id", "fbclid", "captured_at"} {
 		if value := strings.TrimSpace(r.URL.Query().Get(key)); value != "" {
 			query.Set(key, value)
 		}
@@ -433,30 +433,31 @@ func appendPublicCourse(product *PublicProduct, course PublicCourse) {
 }
 
 func storefrontTools() []sdk.Tool {
-	return []sdk.Tool{{
-		Name:        "storefront_checkout_start",
-		Description: "Start checkout for a verified member using a public Catalog price bound to this community.",
-		InputSchema: schemaObject(map[string]any{
-			"community_id":     map[string]any{"type": "string"},
-			"catalog_price_id": map[string]any{"type": "integer"},
-			"member_id":        map[string]any{"type": "string"},
-			"success_url":      map[string]any{"type": "string"},
-			"cancel_url":       map[string]any{"type": "string"},
-			"return_url":       map[string]any{"type": "string"},
-			"presentation":     map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
-		}, []string{"community_id", "catalog_price_id", "member_id"}),
-		Handler: toolStorefrontCheckoutStart,
-	}, {
-		Name:        "storefront_checkout_claim",
-		Description: "Claim a Checkout app guest session for the verified member before confirming payment.",
-		InputSchema: schemaObject(map[string]any{
-			"community_id":     map[string]any{"type": "string"},
-			"catalog_price_id": map[string]any{"type": "integer"},
-			"member_id":        map[string]any{"type": "string"},
-			"recovery_token":   map[string]any{"type": "string"},
-		}, []string{"community_id", "catalog_price_id", "member_id", "recovery_token"}),
-		Handler: toolStorefrontCheckoutClaim,
-	}}
+	return []sdk.Tool{
+		{Name: "storefront_acquisition_report", Description: "Confirmed first course purchases by attribution cohort. Counts unique customers across lifetime before filtering dates. Read-only; excludes browser-only events.", InputSchema: schemaObject(map[string]any{"community_id": map[string]any{"type": "string"}, "since": map[string]any{"type": "string"}, "until": map[string]any{"type": "string"}, "timezone": map[string]any{"type": "string"}}, []string{"community_id", "since", "until"}), Handler: toolStorefrontAcquisitionReport}, {
+			Name:        "storefront_checkout_start",
+			Description: "Start checkout for a verified member using a public Catalog price bound to this community.",
+			InputSchema: schemaObject(map[string]any{
+				"community_id":     map[string]any{"type": "string"},
+				"catalog_price_id": map[string]any{"type": "integer"},
+				"member_id":        map[string]any{"type": "string"},
+				"success_url":      map[string]any{"type": "string"},
+				"cancel_url":       map[string]any{"type": "string"},
+				"return_url":       map[string]any{"type": "string"},
+				"presentation":     map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
+			}, []string{"community_id", "catalog_price_id", "member_id"}),
+			Handler: toolStorefrontCheckoutStart,
+		}, {
+			Name:        "storefront_checkout_claim",
+			Description: "Claim a Checkout app guest session for the verified member before confirming payment.",
+			InputSchema: schemaObject(map[string]any{
+				"community_id":     map[string]any{"type": "string"},
+				"catalog_price_id": map[string]any{"type": "integer"},
+				"member_id":        map[string]any{"type": "string"},
+				"recovery_token":   map[string]any{"type": "string"},
+			}, []string{"community_id", "catalog_price_id", "member_id", "recovery_token"}),
+			Handler: toolStorefrontCheckoutClaim,
+		}}
 }
 
 func toolStorefrontCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {

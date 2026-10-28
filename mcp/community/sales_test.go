@@ -13,6 +13,7 @@ import (
 )
 
 type salesPlatformStub struct {
+	discountAccountingFailure bool
 	tk.BasePlatformClient
 	mu                sync.Mutex
 	price             catalogPrice
@@ -120,14 +121,14 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 		s.checkoutPrepares++
 		value = map[string]any{"session": s.checkoutSession, "payment": map[string]any{
 			"provider": "stripe", "presentation": "deferred", "mode": "payment",
-			"amount_cents": s.price.UnitAmountCents, "currency": strings.ToLower(s.price.Currency),
+			"amount_cents": s.checkoutSession.TotalCents, "currency": strings.ToLower(s.price.Currency),
 			"payment_method_types": []string{"card"}, "publishable_key": "pk_test_public",
 		}}
 	case "checkout:checkout_bootstrap":
 		value = map[string]any{"session": s.checkoutSession, "cart": s.checkoutCart}
 	case "checkout:checkout_pay":
 		s.checkoutPayments++
-		s.invoice = billingInvoice{ID: 701, CustomerID: 501, Status: "open", TotalCents: s.price.UnitAmountCents, Currency: s.price.Currency}
+		s.invoice = billingInvoice{ID: 701, CustomerID: 501, Status: "open", TotalCents: s.checkoutSession.TotalCents, Currency: s.price.Currency}
 		invoiceID := s.invoice.ID
 		s.checkoutSession.Status = "awaiting_payment"
 		s.checkoutSession.InvoiceID = &invoiceID
@@ -136,6 +137,24 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 			"provider": "stripe", "presentation": "deferred", "payment_intent_id": "pi_test_course",
 			"client_secret": "pi_test_course_secret", "publishable_key": "pk_test_public",
 		}}
+	case "billing:invoices_update":
+		patch, _ := input["patch"].(map[string]any)
+		if metadata, ok := patch["metadata"]; ok {
+			s.invoice.Metadata, _ = json.Marshal(metadata)
+		}
+		value = map[string]any{"invoice": s.invoice}
+	case "catalog:catalog_discounts_quote":
+		value = map[string]any{"quote": map[string]any{"eligible": true, "discount_id": int64(1), "discount_cents": int64(1000), "total_cents": s.price.UnitAmountCents - 1000, "currency": s.price.Currency, "application": map[string]any{"metadata": map[string]any{"first_purchase_only": true}}}}
+	case "catalog:catalog_discounts_reserve":
+		value = map[string]any{"reservation": map[string]any{"reservation_id": "reservation-first-course", "discount_cents": int64(1000), "total_cents": s.price.UnitAmountCents - 1000, "status": "reserved"}}
+	case "catalog:catalog_discounts_redeem", "catalog:catalog_discounts_release":
+		if s.discountAccountingFailure {
+			return errors.New("isolated provider accounting outage")
+		}
+		value = map[string]any{"ok": true}
+	case "checkout:checkout_set_adjustments":
+		s.checkoutSession.TotalCents = s.price.UnitAmountCents - numberFromAny(input["discount_cents"])
+		value = map[string]any{"session": s.checkoutSession}
 	case "billing:invoices_get":
 		if s.invoice.ID == 0 {
 			return errors.New("invoice not found")

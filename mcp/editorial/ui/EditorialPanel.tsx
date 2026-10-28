@@ -17,6 +17,8 @@ type Brand = {
   logo_url: string;
   social_account_ids: number[];
   campaign_ids: number[];
+  persona_id?: number;
+  operating_profile?: Record<string, any>;
 };
 type Settings = {
   brands: Brand[];
@@ -1810,6 +1812,7 @@ function SettingsView({
                 setMessage("");
                 setBrands((bs) => bs.map((v, i) => (i === n ? next : v)));
               }}
+              onError={setError}
               onRemove={() => {
                 setMessage("");
                 setBrands((bs) => bs.filter((v) => v.id !== b.id));
@@ -1948,11 +1951,20 @@ function BrandForm({
   brand: b,
   onChange,
   onRemove,
+  onError,
 }: {
   brand: Brand;
   onChange: (b: Brand) => void;
   onRemove: () => void;
+  onError: (message: string) => void;
 }) {
+  const [profileText, setProfileText] = useState(JSON.stringify(b.operating_profile || {}, null, 2));
+  const [profileError, setProfileError] = useState("");
+  const setProfile = (key: string, value: unknown) => {
+    const profile = { ...(b.operating_profile || {}), [key]: value };
+    onChange({ ...b, operating_profile: profile });
+    setProfileText(JSON.stringify(profile, null, 2));
+  };
   const ids = (text: string) =>
     text
       .split(/[,\s]+/)
@@ -1992,6 +2004,31 @@ function BrandForm({
           />
         </Field>
       </div>
+      <details style={{ marginTop: 12 }}>
+        <summary>Brand operating profile</summary>
+        <p className="small muted">Editorial owns the brand's guidelines and destinations. A Persona Studio identity is optional. Schedules, budgets and execution permissions stay in Processes.</p>
+        <div className="fields">
+          <Field name="Persona Studio ID (optional)">
+            <input aria-label="Persona Studio ID" type="number" min="0" value={b.persona_id || ""} onChange={e => onChange({ ...b, persona_id: Number(e.target.value) || 0 })} />
+          </Field>
+          {[['audience', 'Audience'], ['positioning', 'Positioning'], ['voice', 'Writing voice'], ['visual_style', 'Visual guidelines']].map(([key, title]) => <Field key={key} name={title}>
+            <textarea aria-label={title} value={String(b.operating_profile?.[key] || '')} onChange={e => setProfile(key, e.target.value)} />
+          </Field>)}
+        </div>
+        <details style={{ marginTop: 12 }}>
+          <summary>Destinations and production requirements</summary>
+          <p className="small muted">Configure website, course and channel references, enabled formats, production_profiles and approval policy. Identity-specific voices and avatars are linked through Persona Studio.</p>
+          <textarea aria-label="Brand operating profile JSON" rows={16} style={{width:'100%', fontFamily:'monospace'}} value={profileText} onChange={e => setProfileText(e.target.value)} />
+          {profileError && <p role="alert" className="error">{profileError}</p>}
+          <Button quiet onClick={() => {
+            try {
+              const value = JSON.parse(profileText);
+              if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('The operating profile must be an object.');
+              onChange({ ...b, operating_profile: value }); setProfileError(''); onError('');
+            } catch (error) { const message = (error as Error).message; setProfileError(message); onError(message); }
+          }}>Apply profile changes</Button>
+        </details>
+      </details>
       <details style={{ marginTop: 12 }}>
         <summary className="small muted">
           Optional Social and Campaigns mappings

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.14.4
+version: 0.15.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -269,6 +269,7 @@ provides:
     - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
     - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
+    - { name: storefront_acquisition_report, description: "Read confirmed first course purchases by campaign with lifetime customer deduplication." }
     - { name: storefront_checkout_claim, description: "Claim a prepared Checkout session for the verified member before payment confirmation." }
     - { name: community_domain_options, description: "List available Domains-managed apex domains and the suggested DNS target." }
     - { name: community_domain_attach, description: "Attach one custom hostname using Domains DNS plus native ingress and TLS." }
@@ -292,7 +293,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.14.4
+    ref: community/v0.15.2
     entry: mcp/community
   port: 8080
   health_check: /health
