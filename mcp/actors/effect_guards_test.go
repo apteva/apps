@@ -89,3 +89,45 @@ func TestOnceScopeSharesGuardAcrossOperations(t *testing.T) {
 		t.Fatalf("dispatched %d sends", clicks)
 	}
 }
+
+func TestOnceNavigationHasNoIrreversibleAcknowledgement(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	step := map[string]any{"action": "click", "locator": map[string]any{"selector": "button.upload"}, "once_key": "upload-1", "expected_effect": "navigation_only"}
+	rec := saveFixtureActor(t, ctx, app, map[string]any{"schema_version": 1, "allowed_hosts": []any{"example.com"}, "steps": []any{map[string]any{"action": "goto", "url": "https://example.com"}, step}})
+	for i := 0; i < 2; i++ {
+		if _, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID}); err != nil {
+			t.Fatal(err)
+		}
+		run, err := claimActorRun(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app.executeActorRun(context.Background(), ctx, run)
+		result, _ := getActorRun(ctx, run.ID)
+		if i == 0 && result["status"] != "completed" {
+			t.Fatal(result["error"])
+		}
+		if i == 1 && !strings.Contains(result["error"].(string), "once_key already reserved") {
+			t.Fatal(result)
+		}
+	}
+	clicks := 0
+	for _, call := range plat.callsSnapshot() {
+		if call.args["action"] == "click" {
+			clicks++
+			if call.args["confirm_consequence"] != "" && call.args["confirm_consequence"] != nil {
+				t.Fatal(call.args)
+			}
+		}
+	}
+	if clicks != 1 {
+		t.Fatal(clicks)
+	}
+	for _, effect := range []string{"navigation_only", "message_send"} {
+		d := actorDefinition{SchemaVersion: 1, AllowedHosts: []string{"example.com"}, Steps: []actorStep{{Action: "click", Locator: actorLocator{Selector: "button"}, OnceKey: "key", ExpectedEffect: effect, ConfirmConsequence: "navigation_only"}}}
+		if validateActorDefinition(d) == nil {
+			t.Fatal("accepted invalid acknowledgement", effect)
+		}
+	}
+}

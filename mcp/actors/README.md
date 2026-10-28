@@ -406,3 +406,34 @@ Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,
 A reviewed `goto` step can opt into `read_only: true, read_retries: 1` (maximum2). This overrides the legacy operation-wide retry limit only for that navigation. Transport timeouts may reopen the same saved browser context and repeat that read, within the original run deadline. It never replays earlier fills/uploads or subsequent clicks, and non-transient errors still stop. The field is rejected on writes, secret operations and consequential/effect-bearing steps. Existing definitions and global retry defaults are unchanged.
 
 The optional `examples/flights/` definitions and transaction fixtures document local checkout preparation and synthetic payment guards. They do not enable live ticket purchasing or install any site-specific actor automatically.
+## Native navigation and Clips4Sale example
+
+Read views may use `navigation` with one to five exact SOM-only native tab/button
+locators, mutually exclusive with `link_selector` and `use_entry_page`. Each hop
+requires a fresh control whose effect is `navigation_only`. `read_navigation`
+provides the same check for non-optional read-only steps.
+
+`assert_no_record` rejects an exact field/value duplicate only after complete
+collection coverage with no remaining results. `assert_inputs` checks execution
+variables before writes while preserving the previous extraction evidence.
+For searchable or controlled dropdowns, use the observed native control and
+an exact SOM option, then verify the saved label. `select_option` uses internal
+`value`/`values`.
+
+The [Clips4Sale Creator example](examples/clips4sale-control.md) covers account,
+current-month statistics, catalog coverage, draft preparation, read-only preflight
+and guarded submission for review. It is caller-configured and currently gates
+publication to explicitly declared no-real-person footage.
+
+A `navigation_only` opener can reserve a `once_key` without
+`confirm_consequence`. Navigation is not an irreversible acknowledgement class;
+consequential clicks continue to require a matching acknowledgement.
+
+`goto_record` follows an absolute HTTP URL selected from a complete verified
+collection. It requires a unique collected record, read-only non-optional
+navigation and the usual host checks. This supports reopening a persisted draft
+whose ID was assigned by the site during upload.
+
+Record selection and duplicate assertions use only the latest verified
+collection. Prior composer extractions and older catalog snapshots remain in
+the audit dataset but cannot satisfy those checks.

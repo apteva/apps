@@ -24,6 +24,7 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	actionErrors             map[string][]error
 	readViewsResponse        func(string, map[string]any) map[string]any
 	crawlHTMLMinimumLimit    int
 	crawlHTMLAlwaysTruncated bool
@@ -93,6 +94,15 @@ var _ sdk.AppContextClient = (*fakePlatform)(nil)
 func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out any) error {
 	p.mu.Lock()
 	p.calls = append(p.calls, fakeCall{app: app, tool: tool, args: copyArgs(in)})
+	if tool == "computer_use" {
+		action := stringFromAny(in["action"])
+		if pending := p.actionErrors[action]; len(pending) > 0 {
+			p.actionErrors[action] = pending[1:]
+			err := pending[0]
+			p.mu.Unlock()
+			return err
+		}
+	}
 	if app == "computer" && tool == "browser_open" && p.failNavigationURL != "" && in["url"] == p.failNavigationURL && p.failNavigateRemaining > 0 {
 		p.failNavigateRemaining--
 		p.mu.Unlock()

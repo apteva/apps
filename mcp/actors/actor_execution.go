@@ -55,6 +55,7 @@ type actorExecution struct {
 	maxItems             int
 	retries              int
 	session              *browserSession
+	collectionItems      []map[string]any
 	items                []map[string]any
 	pageCount            int
 	trace                []map[string]any
@@ -702,6 +703,10 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.revealControl(step)
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
+	case "goto_record":
+		return e.gotoRecord(step)
+	case "read_navigation":
+		return e.clickReadNavigation(step.Locator)
 	case "inspect_control":
 		return e.inspectControl(step)
 	case "dismiss_inspection":
@@ -785,7 +790,14 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.extractPage(step)
 	case "select_record":
 		return e.selectRecord(step)
+	case "assert_no_record":
+		return e.assertNoRecord(step)
 	case "assert_values":
+		return e.assertValues(step)
+	case "assert_inputs":
+		previous := e.lastValues
+		e.lastValues = e.variables
+		defer func() { e.lastValues = previous }()
 		return e.assertValues(step)
 	case "paginate":
 		return e.paginate(step)

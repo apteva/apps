@@ -466,7 +466,18 @@ func validateActorDefinition(def actorDefinition) error {
 		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" {
 			return fmt.Errorf("steps[%d].secret_ref requires fill_secret or goto_secret", i)
 		}
+		if step.ConfirmConsequence == "navigation_only" {
+			return errors.New("navigation_only is not an irreversible consequence acknowledgement")
+		}
 		switch step.Action {
+		case "goto_record":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || step.VerifiedField == "" {
+				return errors.New("goto_record requires a read-only non-optional step and verified_field")
+			}
+		case "read_navigation":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" {
+				return errors.New("read_navigation requires a read-only, non-optional exact som_only name")
+			}
 		case "goto_secret":
 			if strings.TrimSpace(step.SecretRef) == "" || step.URL != "" || step.Text != "" || step.Optional {
 				return fmt.Errorf("steps[%d]: goto_secret requires secret_ref without literal URL, text or optional", i)
@@ -610,7 +621,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
-			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect && !(step.ExpectedEffect == "navigation_only" && step.ConfirmConsequence == ""))) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
 		case "observe_page", "extract":
@@ -628,11 +639,11 @@ func validateActorDefinition(def actorDefinition) error {
 					return fmt.Errorf("steps[%d].fields[%q]: %w", i, name, err)
 				}
 			}
-		case "select_record":
+		case "select_record", "assert_no_record":
 			if step.VerifiedField == "" || step.Value == "" {
-				return errors.New("select_record requires verified_field and value")
+				return errors.New("record checks require verified_field and value")
 			}
-		case "assert_values":
+		case "assert_values", "assert_inputs":
 			if len(step.Assertions) == 0 {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}

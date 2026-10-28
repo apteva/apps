@@ -342,12 +342,12 @@ func TestReadScrollThenNextCoverage(t *testing.T) {
 func TestSelectRecordRequiresCompleteUniqueCoverage(t *testing.T) {
 	for _, mode := range []string{"complete", "incomplete", "missing", "ambiguous"} {
 		t.Run(mode, func(t *testing.T) {
-			e := &actorExecution{coverage: &actorReadCoverage{Complete: mode != "incomplete", ReadOnly: true, MoreRemaining: mode == "incomplete"}, lastValues: map[string]any{}, items: []map[string]any{{"id": "1", "status": "draft", "edit_url": "https://example.com/1/edit"}, {"id": "2", "status": "draft", "edit_url": "https://example.com/2/edit"}}}
+			e := &actorExecution{coverage: &actorReadCoverage{Complete: mode != "incomplete", ReadOnly: true, MoreRemaining: mode == "incomplete"}, lastValues: map[string]any{}, items: []map[string]any{{"id": "2", "status": "stale"}}, collectionItems: []map[string]any{{"id": "1", "status": "draft", "edit_url": "https://example.com/1/edit"}, {"id": "2", "status": "draft", "edit_url": "https://example.com/2/edit"}}}
 			if mode == "missing" {
-				e.items = e.items[:1]
+				e.collectionItems = e.collectionItems[:1]
 			}
 			if mode == "ambiguous" {
-				e.items = append(e.items, e.items[1])
+				e.collectionItems = append(e.collectionItems, e.collectionItems[1])
 			}
 			err := e.selectRecord(actorStep{VerifiedField: "id", Value: "2"})
 			if (err == nil) != (mode == "complete") {

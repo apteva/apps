@@ -1,8 +1,12 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.0
+version: 0.3.1
 description: |
+  v0.3.1 restores guarded input assertions, complete-collection duplicate checks,
+  verified saved-record navigation and native read-only tabs used by the
+  Clips4Sale Actor. Keeps bounded discovery, same-resource recovery, readiness
+  diagnostics and durable once guards from v0.3.0.
   v0.3.0 makes MCP discovery bounded by default: metadata and paginated operation
   names, complete exact-operation contracts, and explicit hash-verifiable JSON
   exports for editing/debugging. The editor explicitly downloads its pinned
@@ -135,7 +139,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.0
+    ref: actors/v0.3.1
     entry: mcp/actors
   port: 8080
   health_check: /health
