@@ -30,6 +30,10 @@ func managerOptions(config map[string]string, getenv func(string) string) (engin
 		min, max  int64
 		set       func(int64)
 	}{
+		{"aptevadb_mapped_cache_mib", "DATABASE_APTEVADB_MAPPED_CACHE_MIB", 0, 8192, func(n int64) { native.MappedCacheBytes = n << 20 }},
+		{"aptevadb_managed_memory_mib", "DATABASE_APTEVADB_MANAGED_MEMORY_MIB", 0, 8192, func(n int64) { native.ManagedMemoryBytes = n << 20 }},
+		{"aptevadb_aggregate_disk_mib", "DATABASE_APTEVADB_AGGREGATE_DISK_MIB", 0, 8192, func(n int64) { native.AggregateDiskBytes = n << 20 }},
+		{"aptevadb_max_groups", "DATABASE_APTEVADB_MAX_GROUPS", 1, 16777216, func(n int64) { native.AggregateMaxGroups = int(n) }},
 		{"aptevadb_total_cache_mib", "DATABASE_APTEVADB_TOTAL_CACHE_MIB", 0, 8192, func(n int64) { options.AptevaCacheBudgetBytes = n << 20 }},
 		{"aptevadb_max_concurrent_queries", "DATABASE_APTEVADB_MAX_CONCURRENT_QUERIES", 1, 64, func(n int64) { options.MaxConcurrentAptevaQueries = int(n) }},
 		{"aptevadb_memtable_mib", "DATABASE_APTEVADB_MEMTABLE_MIB", 0, 256, func(n int64) { native.MemtableBytes = n << 20 }},

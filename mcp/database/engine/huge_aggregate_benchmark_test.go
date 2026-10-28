@@ -42,6 +42,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 	var results []map[string]any
 	var loadSeconds float64
 	var databaseBytes int64
+	var memoryDiagnostics map[string]any
 	options := DefaultAptevaOptions()
 	if os.Getenv("DB_HUGE_AGG_CAPTURE") == "1" {
 		options.Realtime = &RealtimeOptions{Enabled: true, RetentionBytes: 128 << 20, RetentionSeconds: 3600}
@@ -53,6 +54,8 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		name string
 		set  func(int)
 	}{
+		{"DB_HUGE_AGG_MAPPED_MIB", func(v int) { options.MappedCacheBytes = int64(v) << 20 }},
+		{"DB_HUGE_AGG_DISK_MIB", func(v int) { options.AggregateDiskBytes = int64(v) << 20 }},
 		{"DB_HUGE_AGG_MEMTABLE_MIB", func(v int) { options.MemtableBytes = int64(v) << 20 }},
 		{"DB_HUGE_AGG_CACHE_MIB", func(v int) { options.CacheBytes = int64(v) << 20 }},
 		{"DB_HUGE_AGG_WORKERS", func(v int) { options.AggregateWorkers = v }},
@@ -65,7 +68,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		}
 	}
 	defer func() {
-		b, e := json.MarshalIndent(map[string]any{"adapter": adapter, "rows": n, "go_version": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "passed": !t.Failed(), "load_seconds": loadSeconds, "live_database_bytes": databaseBytes, "peak_rss_mib": hugeRSS(), "aptevadb_options": options, "paired_native": paired, "watchers": os.Getenv("DB_HUGE_AGG_WATCHERS"), "aptevadb_version": native.Version, "results": results}, "", "  ")
+		b, e := json.MarshalIndent(map[string]any{"adapter": adapter, "rows": n, "go_version": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "passed": !t.Failed(), "load_seconds": loadSeconds, "live_database_bytes": databaseBytes, "peak_rss_mib": hugeRSS(), "aptevadb_options": options, "native_memory": memoryDiagnostics, "paired_native": paired, "watchers": os.Getenv("DB_HUGE_AGG_WATCHERS"), "aptevadb_version": native.Version, "results": results}, "", "  ")
 		checkErr(t, e)
 		checkErr(t, os.MkdirAll(filepath.Dir(path), 0755))
 		checkErr(t, os.WriteFile(path, append(b, '\n'), 0644))
@@ -169,9 +172,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		}
 		direct := hugeNativeAggregate(t, m, r)
 		nativeExpectedError := expectedError
-		if adapter == "aptevadb" && name == "one_group_per_record_top1" {
-			nativeExpectedError = "resource_limit"
-		}
+
 		if calls%2 == 0 {
 			measureOne("app_engine", app, name, r, verify, expectedError)
 			measureOne("native_driver", direct, name, r, verify, nativeExpectedError)
@@ -264,7 +265,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 	// Uniqueness of input values alone is insufficient for the PK rewrite.
 	// This column has one distinct value per row but no uniqueness constraint.
 	nonPrimaryError := "resource_limit"
-	if adapter == "sqlite" {
+	if adapter == "sqlite" || adapter == "aptevadb" {
 		nonPrimaryError = ""
 	}
 	for repeat := 0; repeat < 3; repeat++ {
@@ -274,6 +275,32 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 				t.Fatal(rows)
 			}
 		}, nonPrimaryError)
+	}
+	if adapter == "sqlite" || adapter == "aptevadb" {
+		for repeat := 0; repeat < 3; repeat++ {
+			measure("non_primary_numeric_million_groups_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", ""}, {"sum_i", "sum", "i"}, {"min_i", "min", "i"}, {"max_i", "max", "i"}, {"avg_n", "avg", "n"}}, Query: Query{OrderBy: []Order{{"sum_i", "desc"}}, Limit: 1}}, func(v any) {
+				rows := v.(map[string]any)["rows"].([]Record)
+				last := strconv.Itoa(n - 1)
+				if len(rows) != 1 || rows[0]["i"] != last || rows[0]["sum_i"] != last || rows[0]["min_i"] != last || rows[0]["max_i"] != last || rows[0]["count"] != "1" || number(rows[0]["avg_n"]) != float64(n-1) {
+					t.Fatal(rows)
+				}
+			}, "")
+		}
+	}
+	if adapter == "aptevadb" {
+		d, e := m.resolve(context.Background(), "p", "huge", "", false)
+		checkErr(t, e)
+		db := d.backend.(*aptevaBackend).db
+		before, e := db.MemoryStats(context.Background())
+		checkErr(t, e)
+		time.Sleep(3200 * time.Millisecond)
+		after, e := db.MemoryStats(context.Background())
+		checkErr(t, e)
+		memoryDiagnostics = map[string]any{"before_idle": before, "after_idle": after, "idle_seconds": 3.2, "explicit_trim": false}
+		row := call(t, m, "p", "get", Request{Database: "huge", Collection: "items", Key: Record{"id": fmt.Sprintf("r%09d", n-1)}}).(map[string]any)["record"].(Record)
+		if row["i"] != strconv.Itoa(n-1) {
+			t.Fatal("read after idle reclamation", row)
+		}
 	}
 	checkErr(t, m.Close())
 }

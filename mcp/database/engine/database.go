@@ -37,9 +37,10 @@ type transaction interface {
 }
 
 type DatabaseInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Adapter string `json:"adapter"`
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Adapter string            `json:"adapter"`
+	Memory  *NativeMemoryInfo `json:"memory,omitempty"`
 }
 type database struct {
 	watchesMu sync.Mutex
@@ -222,7 +223,7 @@ func (m *Manager) resolveLocked(ctx context.Context, scope, name, adapter string
 		if n >= 128 {
 			return nil, fail("resource_limit", "at most 128 databases per scope")
 		}
-		info = DatabaseInfo{uuid.NewString(), name, adapter}
+		info = DatabaseInfo{ID: uuid.NewString(), Name: name, Adapter: adapter}
 	} else if create && adapter != "" && adapter != info.Adapter {
 		return nil, fail("schema_conflict", "database already uses %s", info.Adapter)
 	}
@@ -324,7 +325,20 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		defer done()
 	}
 	if op == "database_create" || op == "database_describe" {
-		return d.info, nil
+		info := d.info
+		if op == "database_describe" && info.Adapter == "aptevadb" {
+			d.mu.RLock()
+			defer d.mu.RUnlock()
+			if d.closed {
+				return nil, fail("not_found", "database is closed")
+			}
+			stats, err := d.backend.(*aptevaBackend).db.MemoryStats(ctx)
+			if err != nil {
+				return nil, nativeError(err)
+			}
+			info.Memory = nativeMemoryInfo(stats)
+		}
+		return info, nil
 	}
 	if op == "database_drop" {
 		if !r.Confirm {
