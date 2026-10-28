@@ -2162,6 +2162,10 @@ func zernioPlatformSpecificData(opts map[string]any) map[string]any {
 			out["boardId"] = v
 		case "board_section_id":
 			out["boardSectionId"] = v
+		case "contains_synthetic_media":
+			if synthetic, ok := boolOption(opts, k); ok {
+				out["containsSyntheticMedia"] = synthetic
+			}
 		case "body", "title", "visibility", "thumbnail_storage_id", "thumbnail_project_id", "thumbnail_frame_ms", "tags":
 			continue
 		default:

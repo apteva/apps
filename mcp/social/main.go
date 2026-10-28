@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.6
+version: 0.20.7
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -227,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.6
+    ref: social/v0.20.7
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -678,6 +678,8 @@ var platforms = map[string]platformDef{
 				Help:    "Defaults to public when blank."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
+			{Name: "contains_synthetic_media", Type: "boolean", Label: "AI-generated or altered content",
+				Help: "Discloses that the video contains realistic altered or synthetic content (status.containsSyntheticMedia). Kept on later edits."},
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Thumbnail",
 				Help: "Optional image from Storage. YouTube applies it after the video upload returns a video id."},
 		},
@@ -4058,6 +4060,8 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	//                 is visible without a second manual YouTube step.
 	//   category    — snippet.categoryId (numeric string).
 	//   tags        — snippet.tags (array of strings).
+	//   contains_synthetic_media — status.containsSyntheticMedia; sent
+	//                 only when the creator set it, so unset stays unset.
 	title := strOption(j.options, "title")
 	if title == "" {
 		title = firstChars(strings.TrimSpace(j.body), 80)
@@ -4089,12 +4093,16 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 			snippet["tags"] = out
 		}
 	}
+	status := map[string]any{
+		"privacyStatus":           visibility,
+		"selfDeclaredMadeForKids": false,
+	}
+	if synthetic, ok := boolOption(j.options, "contains_synthetic_media"); ok {
+		status["containsSyntheticMedia"] = synthetic
+	}
 	initInput := map[string]any{
 		"snippet": snippet,
-		"status": map[string]any{
-			"privacyStatus":           visibility,
-			"selfDeclaredMadeForKids": false,
-		},
+		"status":  status,
 	}
 	prepared, err := a.prepareVideoSource(ctx, j, first, "FILE_UPLOAD")
 	if err != nil {
@@ -9197,7 +9205,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		return out
 	}
 	if audience, err := parseAudience(eff); err == nil && audience.Type == "members" {
-		for _, key := range []string{"body", "title", "visibility", "category", "tags"} {
+		for _, key := range youtubeMetadataOptions {
 			if _, present := requested[key]; present {
 				out.Status = "failed"
 				out.Error = "Edit membership video metadata and access in YouTube Studio; Social cannot verify these settings."
@@ -9212,7 +9220,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		return out
 	}
 	metadataRequested := false
-	for _, key := range []string{"title", "body", "category", "visibility", "tags"} {
+	for _, key := range youtubeMetadataOptions {
 		if _, ok := requested[key]; ok {
 			metadataRequested = true
 			break
@@ -9248,6 +9256,10 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 	out.Status = "ok"
 	return out
 }
+
+// youtubeMetadataOptions are the per-target keys that require an
+// update_video call when edited.
+var youtubeMetadataOptions = []string{"title", "body", "category", "visibility", "tags", "contains_synthetic_media"}
 
 func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID string, eff, requested map[string]any) (map[string]any, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_video", map[string]any{
@@ -9315,6 +9327,13 @@ func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID st
 		if status["privacyStatus"] != "private" {
 			delete(status, "publishAt")
 		}
+	}
+	// videos.update replaces the status part, and get_video readback can
+	// omit containsSyntheticMedia even after YouTube accepted it. The
+	// stored disclosure is the source of truth, so an unrelated edit
+	// re-sends it instead of letting the omission clear it.
+	if synthetic, ok := boolOption(eff, "contains_synthetic_media"); ok {
+		status["containsSyntheticMedia"] = synthetic
 	}
 	input["status"] = status
 	return input, nil
