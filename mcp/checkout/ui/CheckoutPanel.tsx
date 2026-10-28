@@ -1,3 +1,4 @@
+import { CheckoutReceipt } from "./CheckoutReceipt";
 // CheckoutPanel — admin view for carts + checkout sessions.
 //
 // v0.1.0 is admin-only (no buyer-facing UI). The customer-facing
@@ -6,6 +7,7 @@
 // debug abandoned carts, cancel stale sessions, follow up on
 // awaiting-payment invoices.
 
+import { OrderBumpsAdmin } from "./OrderBumpsAdmin";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // ─── Inline app-events SSE hook ─────────────────────────────────────
@@ -202,7 +204,7 @@ const API = "/api/apps/checkout";
 // ─── Panel root ─────────────────────────────────────────────────────
 
 export default function CheckoutPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<"carts" | "sessions">("carts");
+  const [tab, setTab] = useState<"carts" | "sessions" | "bumps">("carts");
 
   const queryString = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -255,10 +257,11 @@ export default function CheckoutPanel({ projectId, installId }: NativePanelProps
         >
           Sessions
         </button>
+        <button type="button" onClick={() => setTab("bumps")} className={`px-3 py-1 rounded ${tab === "bumps" ? "bg-accent text-bg" : "hover:bg-bg-input/50"}`}>Order bumps</button>
       </nav>
 
       <div className="flex-1 overflow-hidden">
-        {tab === "carts" ? (
+        {tab === "bumps" ? <OrderBumpsAdmin apiCall={apiCall} /> : tab === "carts" ? (
           <CartsTab projectId={projectId} apiCall={apiCall} />
         ) : (
           <SessionsTab projectId={projectId} apiCall={apiCall} />
@@ -425,14 +428,8 @@ function CartDetail({ cart }: { cart: Cart }) {
         </p>
       </header>
 
-      <section className="border-y border-border py-3">
-        <div className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-1 text-sm">
-          <div className="text-text-muted">Subtotal</div><div className="text-right tabular-nums">{fmtMoney(session.subtotal_cents, session.currency)}</div>
-          {session.shipping_cents > 0 && <><div className="text-text-muted">Shipping</div><div className="text-right tabular-nums">{fmtMoney(session.shipping_cents, session.currency)}</div></>}
-          {session.tax_cents > 0 && <><div className="text-text-muted">Tax</div><div className="text-right tabular-nums">{fmtMoney(session.tax_cents, session.currency)}</div></>}
-          {session.discount_cents > 0 && <><div className="text-text-muted">Discount</div><div className="text-right tabular-nums">-{fmtMoney(session.discount_cents, session.currency)}</div></>}
-          <div className="font-medium pt-1 border-t border-border">Total</div><div className="text-right font-medium tabular-nums pt-1 border-t border-border">{fmtMoney(session.total_cents, session.currency)}</div>
-        </div>
+      <section className="border-y border-border py-3 flex justify-between text-sm">
+        <strong>Subtotal</strong><span>{fmtMoney(cart.subtotal_cents, cart.currency)}</span>
       </section>
 
       <section>
@@ -634,11 +631,14 @@ function SessionsTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
             {selectedId ? "Loading…" : "Select a session to see details."}
           </div>
         ) : (
+          <>
           <SessionDetail
             session={detail}
             cart={linkedCart}
             onCancel={cancel}
           />
+          {detail.invoice_id && <CheckoutReceipt sessionId={detail.id} apiCall={apiCall} />}
+          </>
         )}
       </main>
     </div>

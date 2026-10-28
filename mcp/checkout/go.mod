@@ -1,9 +1,9 @@
 module github.com/apteva/apps/mcp/checkout
 
-go 1.25.0
+go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.44.0
+	github.com/apteva/app-sdk v0.110.0
 	modernc.org/sqlite v1.50.0
 )
 

@@ -94,6 +94,7 @@ type catalogProduct struct {
 }
 
 type billingInvoice struct {
+	PaidAt          string           `json:"paid_at"`
 	ID              int64            `json:"id"`
 	CustomerID      int64            `json:"customer_id"`
 	Status          string           `json:"status"`
@@ -571,6 +572,31 @@ func toolCoursePurchaseRefund(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if purchase.BillingInvoiceID == nil || (purchase.Status != "fulfilled" && purchase.Status != "partially_refunded") {
 		return nil, errors.New("only a fulfilled course purchase can be refunded")
 	}
+	var checkoutSessionID, primaryPriceID int64
+	if err = ctx.AppDB().QueryRow(`SELECT session_id,primary_price_id FROM community_checkout_orders WHERE invoice_id=? AND project_id=?`, *purchase.BillingInvoiceID, scopeProject(ctx)).Scan(&checkoutSessionID, &primaryPriceID); err == nil {
+		receipt, e := readStorefrontReceipt(ctx, checkoutSessionID)
+		if e != nil {
+			return nil, e
+		}
+		for _, it := range receipt.Items {
+			if it.PriceID != primaryPriceID {
+				continue
+			}
+			var out any
+			refundArgs := map[string]any{"session_id": checkoutSessionID, "item_id": it.ID, "idempotency_key": fmt.Sprintf("course:%s:%d", purchase.ID, purchase.RefundedCents)}
+			if amount, ok := intArg(args, "amount_cents"); ok {
+				refundArgs["amount_cents"] = amount
+			}
+			if e = callAppResult(ctx, "checkout", "checkout_item_refund", refundArgs, &out); e != nil {
+				return nil, e
+			}
+			updated, e := reconcileCoursePurchase(ctx, purchase, "invoice.refunded", "billing", out)
+			return map[string]any{"purchase": updated, "billing": out}, e
+		}
+		return nil, errors.New("primary checkout item missing")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	input := map[string]any{
 		"_project_id":     scopeProject(ctx),
 		"invoice_id":      *purchase.BillingInvoiceID,
@@ -819,7 +845,10 @@ func reconcileCoursePurchase(ctx *sdk.AppCtx, purchase *CoursePurchase, eventNam
 	}, &out); err != nil {
 		return nil, fmt.Errorf("get Billing invoice: %w", err)
 	}
-	invoice := out.Invoice
+	invoice, err := projectStorefrontInvoice(ctx, out.Invoice)
+	if err != nil {
+		return nil, err
+	}
 	if invoice.ID == 0 {
 		return nil, errors.New("Billing returned no invoice")
 	}
@@ -830,8 +859,11 @@ func reconcileCoursePurchase(ctx *sdk.AppCtx, purchase *CoursePurchase, eventNam
 		return nil, errors.New("Billing invoice belongs to a different Community purchase")
 	}
 
+	if invoice.TotalCents != purchase.UnitAmountCents || !strings.EqualFold(invoice.Currency, purchase.Currency) {
+		return nil, errors.New("Billing invoice total does not match the purchase snapshot")
+	}
 	switch {
-	case eventName == "invoice.payment_failed":
+	case eventName == "invoice.payment_failed" && invoice.Status != "paid":
 		if _, err := ctx.AppDB().Exec(
 			`UPDATE course_purchases SET status='payment_failed', last_error='payment failed',
 			 updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('creating','awaiting_payment','payment_failed')`,
@@ -843,6 +875,15 @@ func reconcileCoursePurchase(ctx *sdk.AppCtx, purchase *CoursePurchase, eventNam
 		if err := fulfillCoursePurchase(ctx, purchase, invoice); err != nil {
 			return nil, err
 		}
+		if err := emitStorefrontAcquisition(ctx, purchase); err != nil {
+			return nil, err
+		}
+		// A captured payment always grants access. Accounting retry cannot strand a paid buyer.
+		if err := settleStorefrontPromotion(ctx, purchase.ID, true); err != nil {
+			if _, dbErr := ctx.AppDB().Exec(`UPDATE course_purchases SET last_error=? WHERE id=?`, "Course access active; promotion accounting requires reconciliation", purchase.ID); dbErr != nil {
+				return nil, dbErr
+			}
+		}
 	case (eventName == "invoice.refunded" || invoiceHasRefund(invoice) || purchase.Status == "refund_pending" ||
 		purchase.Status == "partially_refunded" || purchase.Status == "fulfilled") &&
 		invoice.AmountPaidCents < invoice.TotalCents:
@@ -850,6 +891,9 @@ func reconcileCoursePurchase(ctx *sdk.AppCtx, purchase *CoursePurchase, eventNam
 			return nil, err
 		}
 	case invoice.Status == "void":
+		if err := settleStorefrontPromotion(ctx, purchase.ID, false); err != nil {
+			return nil, err
+		}
 		if _, err := ctx.AppDB().Exec(
 			`UPDATE course_purchases
 			    SET status='cancelled', cancelled_at=COALESCE(cancelled_at,CURRENT_TIMESTAMP),
@@ -874,12 +918,12 @@ func fulfillCoursePurchase(ctx *sdk.AppCtx, purchase *CoursePurchase, invoice bi
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`UPDATE course_purchases
-		    SET status='fulfilled', paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),
+		    SET status='fulfilled', paid_at=COALESCE(paid_at,?),
 		        fulfilled_at=COALESCE(fulfilled_at,CURRENT_TIMESTAMP),
 		        refunded_cents=0, refunded_at=NULL, checkout_url=NULL,
 		        last_error='', updated_at=CURRENT_TIMESTAMP
 		  WHERE id=?`,
-		purchase.ID,
+		firstNonEmptyString(invoice.PaidAt, time.Now().UTC().Format(time.RFC3339)), purchase.ID,
 	); err != nil {
 		return err
 	}

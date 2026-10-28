@@ -106,7 +106,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatalf("enable foreign_keys: %v", err)
 	}
-	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql", "004_durable_lifecycle.sql"} {
+	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql", "004_durable_lifecycle.sql", "005_order_bumps.sql"} {
 		mig, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -516,7 +516,7 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
 		"checkout_start", "checkout_update", "checkout_prepare", "checkout_bootstrap", "checkout_advance",
 		"checkout_restart", "checkout_set_adjustments", "checkout_pay", "checkout_get",
-		"checkout_cancel",
+		"checkout_cancel", "order_bumps_list", "order_bumps_upsert", "checkout_bumps_get", "checkout_bump_set", "checkout_receipt", "checkout_item_refund",
 	}
 	if len(tools) != len(want) {
 		t.Errorf("MCPTools count = %d, want %d", len(tools), len(want))
@@ -574,6 +574,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if m.Version == "" {
 		t.Error("manifest.Version empty")
+	}
+	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "checkout/v"+m.Version {
+		t.Fatal("release source ref must match the manifest version")
 	}
 	scopes := map[string]bool{}
 	for _, s := range m.Scopes {

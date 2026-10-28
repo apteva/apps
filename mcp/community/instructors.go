@@ -24,6 +24,7 @@ type InstructorStatistics struct {
 }
 
 type InstructorProfile struct {
+	PersonaID           int64                 `json:"persona_id,omitempty"`
 	ID                  string                `json:"id"`
 	CommunityID         string                `json:"community_id"`
 	MemberID            *string               `json:"member_id,omitempty"`
@@ -64,6 +65,7 @@ func instructorTools() []sdk.Tool {
 	profileFields := map[string]any{
 		"community_id":           map[string]any{"type": "string"},
 		"member_id":              map[string]any{"type": "string"},
+		"persona_id":             map[string]any{"type": "integer", "minimum": 0, "description": "Optional Persona Studio identity in this project; zero clears the link."},
 		"display_name":           map[string]any{"type": "string"},
 		"avatar_storage_file_id": map[string]any{"type": "string"},
 		"professional_title":     map[string]any{"type": "string"},
@@ -114,10 +116,10 @@ func toolInstructorProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	accomplishments, _ := json.Marshal(profile.Accomplishments)
 	_, err = ctx.AppDB().Exec(`INSERT INTO instructor_profiles
 		(id,community_id,member_id,display_name,avatar_storage_file_id,professional_title,sales_bio,
-		 credentials_json,links_json,accomplishments_json,public_visible)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, profile.ID, profile.CommunityID, profile.MemberID, profile.DisplayName,
+		 credentials_json,links_json,accomplishments_json,public_visible,persona_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, profile.ID, profile.CommunityID, profile.MemberID, profile.DisplayName,
 		profile.AvatarStorageFileID, profile.ProfessionalTitle, profile.SalesBio, string(credentials), string(links),
-		string(accomplishments), boolInt(profile.PublicVisible))
+		string(accomplishments), boolInt(profile.PublicVisible), profile.PersonaID)
 	if err != nil {
 		return nil, err
 	}
@@ -152,9 +154,9 @@ func toolInstructorProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	links, _ := json.Marshal(profile.Links)
 	accomplishments, _ := json.Marshal(profile.Accomplishments)
 	_, err = ctx.AppDB().Exec(`UPDATE instructor_profiles SET member_id=?,display_name=?,avatar_storage_file_id=?,
-		professional_title=?,sales_bio=?,credentials_json=?,links_json=?,accomplishments_json=?,public_visible=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		professional_title=?,sales_bio=?,credentials_json=?,links_json=?,accomplishments_json=?,public_visible=?,persona_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		profile.MemberID, profile.DisplayName, profile.AvatarStorageFileID, profile.ProfessionalTitle, profile.SalesBio,
-		string(credentials), string(links), string(accomplishments), boolInt(profile.PublicVisible), profile.ID)
+		string(credentials), string(links), string(accomplishments), boolInt(profile.PublicVisible), profile.PersonaID, profile.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +378,14 @@ func courseInstructorsResult(db *sql.DB, spaceID string) (map[string]any, error)
 }
 
 func applyInstructorArgs(ctx *sdk.AppCtx, profile *InstructorProfile, args map[string]any, creating bool) error {
+	if raw, present := args["persona_id"]; present {
+		encoded, err := json.Marshal(raw)
+		var id int64
+		if err != nil || json.Unmarshal(encoded, &id) != nil || id < 0 {
+			return errors.New("persona_id must be zero or a positive integer")
+		}
+		profile.PersonaID = id
+	}
 	if value, ok := args["display_name"].(string); ok {
 		profile.DisplayName = strings.TrimSpace(value)
 	}
@@ -466,7 +476,7 @@ func cleanStringList(values []string) []string {
 
 const instructorProfileCols = `i.id,i.community_id,i.member_id,i.display_name,i.avatar_storage_file_id,
 	i.professional_title,i.sales_bio,i.credentials_json,i.links_json,i.accomplishments_json,
-	i.public_visible,i.archived_at,i.created_at,i.updated_at`
+	i.public_visible,i.archived_at,i.created_at,i.updated_at,i.persona_id`
 
 func loadInstructorProfile(db *sql.DB, id string) (InstructorProfile, error) {
 	profile, err := scanInstructorProfile(db.QueryRow(`SELECT `+instructorProfileCols+` FROM instructor_profiles i WHERE i.id=?`, id).Scan)
@@ -483,7 +493,7 @@ func scanInstructorProfile(scan func(...any) error) (InstructorProfile, error) {
 	var publicVisible int
 	if err := scan(&profile.ID, &profile.CommunityID, &memberID, &profile.DisplayName, &avatar,
 		&profile.ProfessionalTitle, &profile.SalesBio, &credentialsJSON, &linksJSON, &accomplishmentsJSON,
-		&publicVisible, &archived, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+		&publicVisible, &archived, &profile.CreatedAt, &profile.UpdatedAt, &profile.PersonaID); err != nil {
 		return profile, err
 	}
 	if memberID.Valid {

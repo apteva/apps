@@ -62,3 +62,19 @@ No data migration needed when v0.2.0 lands.
 ## Triggering this skill
 
 This skill loads when the agent touches: tools matching `cart_*` or `checkout_*`, the Checkout panel, or chat mentions of "cart", "checkout", "order", "buy", "convert (a cart)".
+# Order bumps (v0.4.0)
+
+Operators configure `order_bumps_upsert` with a trigger product/price, add-on
+Catalog price, title, optional source/context restrictions and a fulfillment
+app/reference. `order_bumps_list` includes conversion reporting. Buyer adapters
+use `checkout_bumps_get` and idempotent `checkout_bump_set` before payment, then
+refresh `checkout_prepare`. Prices are one-time, quantity one, same currency,
+and server-resolved. Offer selections are never prechecked.
+
+Keep identity binding separate from `checkout_pay`; only pay freezes the cart.
+Supply `expected_total_cents` and `expected_price_ids` to reject stale pages.
+`checkout_receipt` returns each paid/refunded item's delivery owner and balance.
+Consumers react to `checkout.paid`/`checkout.refunded`, retrieve the receipt,
+and deduplicate fulfillment by session/item. `checkout_item_refund` requires a
+stable idempotency key and refunds just that item's balance. External partial
+refunds without item attribution require accounting review.

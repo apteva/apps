@@ -1,11 +1,11 @@
 name: Community validation
 on:
   pull_request:
-    paths: ['mcp/community/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
+    paths: ['mcp/community/**', 'mcp/checkout/ui/OrderBumps.tsx', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
   push:
     branches: [main]
     tags: ['community/v*']
-    paths: ['mcp/community/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
+    paths: ['mcp/community/**', 'mcp/checkout/ui/OrderBumps.tsx', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
 permissions:
   contents: read
 jobs:

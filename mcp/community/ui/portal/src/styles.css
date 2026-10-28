@@ -546,3 +546,19 @@ legend { padding: 0 .3rem; font-weight: 600; }
   .certificate { margin: 1cm; padding: 1cm; break-inside: avoid; }
   .certificate button { display: none; }
 }
+
+.order-bumps { border: 0; padding: 0; margin: 20px 0; min-width: 0; }
+.order-bumps legend { font-weight: 700; margin-bottom: 10px; }
+.order-bumps > small { color: var(--muted, #64748b); font-size: 12px; }
+.order-bump { display: flex; align-items: flex-start; gap: 10px; padding: 14px; margin-bottom: 10px; border: 1px solid #cbd5e1; border-radius: 12px; cursor: pointer; }
+.order-bump.selected { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 5%, white); }
+.order-bump input { flex: 0 0 18px; width: 18px; height: 18px; padding: 0; margin: 3px 0 0; accent-color: var(--brand); }
+.order-bump img { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; }
+.order-bump span { flex: 1; min-width: 0; }
+.order-bump strong, .order-bump small { display: block; overflow-wrap: anywhere; }
+.order-bump small { color: #64748b; margin-top: 4px; }
+.order-bump b { white-space: nowrap; font-size: 14px; }
+.order-bumps:disabled .order-bump { cursor: default; opacity: .7; }
+
+.offer-options.single .offer-option { grid-template-columns: minmax(0, 1fr) auto; }
+@media (max-width: 600px) { .order-bump { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; padding: 12px; } .order-bump img { display: none; } .order-bump b { font-size: 12px; } .offer-options.single .offer-price { grid-column: auto; text-align: right; } }
