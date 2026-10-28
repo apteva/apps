@@ -6,8 +6,8 @@ connections and durable render outcomes. Local processing remains the default.
 ## Executor component (v0.15.0)
 
 Offloaded processing uses the private `executor` component and
-`apteva.media-executor/v1`. Media and its worker use App SDK v0.109.0. A Server
-supporting owned components and managed runtime backends is required; older
+`apteva.media-executor/v1`. Media uses App SDK v0.110.0; the pinned worker uses
+v0.109.0. A Server supporting owned components and managed runtime backends is required; older
 strict manifest parsers cannot install this release.
 
 The worker runs the existing trusted Media processing plans: FFmpeg rendering,
@@ -112,3 +112,11 @@ FFmpeg rendering, thumbnail derivation and guarded audio against disposable
 Storage fixtures. Server's `TestAppComponent*` suite separately covers backend
 placement, ownership, permission approval, protocol validation and rollback.
 Real provider/backend deployment remains an operator-specific integration check.
+
+## Audio-only changes to MOV/MP4 video
+
+Guarded normalization verifies copied compressed packets before restoring the
+original video presentation tables. This retains hidden HEVC dependencies and
+source timestamps while keeping fast-start layout and encoded audio. Full
+picture, timeline, audio and upload validation still runs before completion.
+Unsupported restoration layouts fail explicitly; source files are never modified.

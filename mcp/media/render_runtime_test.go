@@ -361,6 +361,144 @@ func TestNormalizationRetainsLastPictureAtMediaDuration(t *testing.T) {
 	}
 }
 
+// Android HEVC files can have a positive edit media_time smaller than the
+// initial composition offset. MOV's timestamp correction then hides tail
+// dependencies that a normal stream-copy remux makes visible again.
+func normalizationShiftedEditFixture(t *testing.T) string {
+	t.Helper()
+	source := guardedFixture(t, true)
+	dir := filepath.Dir(source)
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte(renderRuntimePython), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `import sys,struct
+sys.path.insert(0,sys.argv[1])
+from helper import movie_metadata,movie_boxes,patch_presentation_end
+patch_presentation_end(sys.argv[2],5,{"vide":4.84})
+with open(sys.argv[2],'r+b') as f:
+ offset,header,data=movie_metadata(f)
+ assert offset+header+len(data)==f.seek(0,2)
+ rebuilt=bytearray()
+ for a,b,k in movie_boxes(data,0,len(data)):
+  if k!=b'trak':
+   rebuilt+=data[a-8:b];continue
+  children=list(movie_boxes(data,a,b))
+  if not any(t==b'mdia' and any(k==b'hdlr' and data[s+8:s+12]==b'vide' for s,e,k in movie_boxes(data,x,y)) for x,y,t in children):
+   rebuilt+=data[a-8:b];continue
+  for x,y,t in children:
+   if t!=b'edts':continue
+   for s,e,k in movie_boxes(data,x,y):
+    if k==b'elst':
+     assert data[s]==0
+     old=struct.unpack_from('>i',data,s+12)[0]
+     assert old>0
+     struct.pack_into('>i',data,s+12,old//3)
+  # Force metadata growth in the fast-start destination. Both video and
+  # audio chunk offsets must be rebased, rather than leaving stale pointers.
+  padding=b'presentation-size-regression'
+  track=data[a:b]+struct.pack('>I4s',8+len(padding),b'free')+padding
+  rebuilt+=struct.pack('>I4s',8+len(track),b'trak')+track
+ f.seek(offset);f.write(struct.pack('>I4s',8+len(rebuilt),b'moov')+rebuilt);f.truncate()
+`
+	if out, err := exec.Command("python3", "-c", script, dir, source).CombinedOutput(); err != nil {
+		t.Fatalf("shifted edit fixture: %v %s", err, out)
+	}
+	return source
+}
+
+func TestNormalizationPreservesHEVCDiscardedDependencies(t *testing.T) {
+	source := normalizationShiftedEditFixture(t)
+	before, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remote := range []bool{false, true} {
+		output, result, err := runGuardedFixture(t, source, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -1.5}, remote, "normalized.mp4")
+		if err != nil {
+			t.Fatalf("remote=%v: %v %v", remote, err, result)
+		}
+		d := result["audio_normalization"].(map[string]any)
+		if d["video_presentation_restored"] != true || d["video_pictures_match"] != true || d["validated"] != true || d["video_frames_expected"] != d["video_frames_checked"] || d["video_frames_checked"].(float64) >= 150 {
+			t.Fatalf("hidden dependency became visible: %v", d)
+		}
+		script := `import sys,json,struct
+sys.path.insert(0,sys.argv[1])
+from helper import frame_hashes,packet_signature,movie_metadata
+assert frame_hashes('ffmpeg',sys.argv[2])==frame_hashes('ffmpeg',sys.argv[3])
+assert packet_signature('ffprobe',sys.argv[2])==packet_signature('ffprobe',sys.argv[3])
+with open(sys.argv[3],'rb') as f:
+ offset,_,_=movie_metadata(f)
+ f.seek(0)
+ while True:
+  pos=f.tell();n,k=struct.unpack('>I4s',f.read(8))
+  if k==b'mdat':assert offset<pos;break
+  f.seek(pos+n)
+`
+		if out, err := exec.Command("python3", "-c", script, filepath.Dir(source), source, output).CombinedOutput(); err != nil {
+			t.Fatalf("remote=%v: exact presentation/fast-start proof: %v %s", remote, err, out)
+		}
+	}
+	after, err := os.ReadFile(source)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("normalization modified the source")
+	}
+}
+
+func TestVideoPacketSignatureIncludesDiscardFlags(t *testing.T) {
+	source := normalizationShiftedEditFixture(t)
+	script := `import sys,shutil
+sys.path.insert(0,sys.argv[1])
+from helper import packet_signature,probe,patch_presentation_end
+other=sys.argv[2]+'.different-edit.mov'
+shutil.copyfile(sys.argv[2],other)
+patch_presentation_end(other,5,{'vide':4.94})
+def packets(path):
+ return probe('ffprobe',path,['-select_streams','v:0','-show_packets','-show_data_hash','sha256','-show_entries','packet=pts_time,dts_time,duration_time,flags,data_hash'])['packets']
+a,b=packets(sys.argv[2]),packets(other)
+assert [x['flags'] for x in a]!=[x['flags'] for x in b]
+assert [{k:v for k,v in x.items() if k!='flags'} for x in a]==[{k:v for k,v in x.items() if k!='flags'} for x in b]
+assert packet_signature('ffprobe',sys.argv[2])!=packet_signature('ffprobe',other)
+`
+	if out, err := exec.Command("python3", "-c", script, filepath.Dir(source), source).CombinedOutput(); err != nil {
+		t.Fatalf("discard-only edit reused validation evidence: %v %s", err, out)
+	}
+}
+
+func TestCopiedMovieChunkOffsetsAndBounds(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python 3 unavailable")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte(renderRuntimePython), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `import sys,struct
+sys.path.insert(0,sys.argv[1])
+from helper import rebase_movie_chunks
+def table(kind,values):
+ fmt='>I' if kind==b'stco' else '>Q'
+ payload=b'\0'*4+struct.pack('>I',len(values))+b''.join(struct.pack(fmt,v) for v in values)
+ return bytearray(struct.pack('>I4s',len(payload)+8,kind)+payload)
+for kind,values,size in [(b'stco',[100,300],1000),(b'co64',[100,2**32+300],2**32+1000)]:
+ for delta in [-20,40]:
+  data=table(kind,values);rebase_movie_chunks(data,0,len(data),200,250,size,delta)
+  fmt='>I' if kind==b'stco' else '>Q';width=4 if kind==b'stco' else 8
+  assert [struct.unpack_from(fmt,data,16+i*width)[0] for i in range(len(values))]==[100,values[1]+delta]
+for kind,values,size,delta in [(b'stco',[220],1000,40),(b'stco',[1001],1000,40),(b'stco',[2**32-10],2**32+1000,40)]:
+ data=table(kind,values)
+ try:rebase_movie_chunks(data,0,len(data),200,250,size,delta)
+ except ValueError:pass
+ else:raise AssertionError('unsafe chunk relocation accepted')
+data=table(b'stco',[300]);data[12:16]=struct.pack('>I',2)
+try:rebase_movie_chunks(data,0,len(data),200,250,1000,40)
+except ValueError:pass
+else:raise AssertionError('malformed table accepted')
+`
+	if out, err := exec.Command("python3", "-c", script, dir).CombinedOutput(); err != nil {
+		t.Fatalf("chunk relocation guard: %v %s", err, out)
+	}
+}
+
 func TestSource90825NormalizationRetainsAll150Pictures(t *testing.T) {
 	root := os.Getenv("MEDIA_TRIM_FIXTURE_DIR")
 	if root == "" {

@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.2
+version: 0.15.3
 description: |
+  v0.15.3 preserves original MOV/MP4 video presentation tables during audio
+  normalization, after verifying copied packets. Hidden HEVC dependencies remain
+  hidden; every-picture, timestamp, loudness and peak checks remain enforced.
   v0.15.2 relies on verified component job cancellation without racing a second
   legacy work-directory cleanup. Confirmed stops retain their durable receipts.
   v0.15.1 base64-encodes scoped component upload chunks so public gateways
@@ -712,7 +715,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.2
+    ref: media/v0.15.3
     entry: mcp/media
   port: 8080
   health_check: /health

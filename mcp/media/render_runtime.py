@@ -12,6 +12,7 @@ import struct
 import subprocess
 import threading
 import sys
+import tempfile
 from fractions import Fraction
 
 
@@ -221,6 +222,172 @@ def packets(binary, source, start, end):
         "-show_entries", "packet=pts_time,dts_time,duration_time,flags"]).get("packets", [])
 
 
+def movie_child(data, kind):
+    found = [(a, b) for a, b, t in movie_boxes(data, 0, len(data)) if t == kind]
+    if len(found) != 1:
+        raise ValueError("ambiguous movie child " + repr(kind))
+    a, b = found[0]
+    return data[a:b]
+
+
+def movie_replace(data, path, replacements):
+    """Rebuild bounded metadata boxes without touching compressed samples."""
+    result, seen = bytearray(), set()
+    for a, b, kind in movie_boxes(data, 0, len(data)):
+        payload = data[a:b]
+        if path and kind == path[0]:
+            if kind in seen:
+                raise ValueError("ambiguous movie path")
+            payload = movie_replace(payload, path[1:], replacements)
+            seen.add(kind)
+        elif not path and kind in replacements:
+            payload = replacements[kind]
+            seen.add(kind)
+        if payload is not None:
+            result += struct.pack(">I4s", len(payload) + 8, kind) + payload
+    if path and path[0] not in seen:
+        raise ValueError("missing movie path")
+    if not path:
+        for kind, payload in replacements.items():
+            if kind not in seen and payload is not None:
+                result += struct.pack(">I4s", len(payload) + 8, kind) + payload
+    return result
+
+
+def rebase_movie_chunks(data, start, end, offset, old_end, size, delta):
+    for a, b, kind in movie_boxes(data, start, end):
+        if kind in (b"trak", b"mdia", b"minf", b"stbl"):
+            rebase_movie_chunks(data, a, b, offset, old_end, size, delta)
+        if kind not in (b"stco", b"co64"):
+            continue
+        width, fmt = (4, ">I") if kind == b"stco" else (8, ">Q")
+        count = struct.unpack_from(">I", data, a + 4)[0]
+        if b - a != 8 + count * width:
+            raise ValueError("invalid copied chunk offsets")
+        for i in range(count):
+            pos = a + 8 + i * width
+            value = struct.unpack_from(fmt, data, pos)[0]
+            if value < 8 or value >= size or offset <= value < old_end:
+                raise ValueError("copied chunk offset outside media")
+            if value >= old_end:
+                if not 0 <= value + delta < 1 << (8 * width):
+                    raise ValueError("copied chunk offset exceeds table width")
+                struct.pack_into(fmt, data, pos, value + delta)
+
+
+def restore_copied_video_presentation(req):
+    """Retain the source's edit/timing/dependency tables after stream copy.
+
+    MOV demuxers mark samples outside an edit as discard-only dependencies.
+    Remuxing their payloads does not retain that presentation distinction, even
+    with copyts. Reuse the original track only after every compressed sample
+    matches, replacing just the remuxed chunk layout. Full decoded-picture and
+    timestamp validation still follows; this is never a validation shortcut.
+    """
+    with open(req["source"], "rb") as source:
+        _, _, original = movie_metadata(source)
+    with open(req["output"], "rb") as output:
+        offset, header, current = movie_metadata(output)
+        size = os.fstat(output.fileno()).st_size
+
+    def video_track(data):
+        tracks = [data[a:b] for a, b, kind in movie_boxes(data, 0, len(data))
+                  if kind == b"trak" and movie_child(movie_child(data[a:b], b"mdia"), b"hdlr")[8:12] == b"vide"]
+        if len(tracks) != 1:
+            raise ValueError("source presentation requires one video track")
+        return tracks[0]
+
+    original_video, current_video = video_track(original), video_track(current)
+    # Track references, external data and encryption need their own relocation
+    # contracts. Refuse them rather than copying potentially stale offsets.
+    if any(k == b"tref" for _, _, k in movie_boxes(original_video, 0, len(original_video))):
+        raise ValueError("referenced video presentation is unsupported")
+    original_minf = movie_child(movie_child(original_video, b"mdia"), b"minf")
+    dref = movie_child(movie_child(original_minf, b"dinf"), b"dref")
+    entries = list(movie_boxes(dref, 8, len(dref)))
+    if struct.unpack_from(">I", dref, 4)[0] != 1 or len(entries) != 1 or entries[0][2] != b"url " or dref[entries[0][0]:entries[0][1]] != b"\0\0\0\1":
+        raise ValueError("external video samples are unsupported")
+    original_stbl = movie_child(original_minf, b"stbl")
+    if struct.unpack_from(">I", movie_child(original_stbl, b"stsd"), 4)[0] != 1 or any(k in (b"saio", b"saiz", b"senc") for _, _, k in movie_boxes(original_stbl, 0, len(original_stbl))):
+        raise ValueError("complex video sample descriptions are unsupported")
+
+    def copied_packets(filename):
+        data = probe(req["ffprobe"], filename, ["-select_streams", "v:0", "-show_packets", "-show_data_hash", "sha256",
+            "-show_entries", "packet=pts_time,dts_time,duration_time,flags,size,data_hash"]).get("packets", [])
+        if not data or any(not p.get("data_hash") or int(p.get("size", 0)) <= 0 for p in data):
+            raise ValueError("missing copied video sample proof")
+        return data
+
+    original_packets, current_packets = copied_packets(req["source"]), copied_packets(req["output"])
+    if original_packets == current_packets:
+        return False  # No presentation change; avoid rewriting large files.
+    if [(p["size"], p["data_hash"]) for p in original_packets] != [(p["size"], p["data_hash"]) for p in current_packets]:
+        # Do not apply source tables to different sample data. The existing
+        # every-picture validator reports any loss/corruption with its counts.
+        return False
+    layout = movie_child(movie_child(movie_child(current_video, b"mdia"), b"minf"), b"stbl")
+    chunk_offsets = [(kind, layout[a:b]) for a, b, kind in movie_boxes(layout, 0, len(layout)) if kind in (b"stco", b"co64")]
+    if len(chunk_offsets) != 1:
+        raise ValueError("ambiguous copied video chunk layout")
+    replacements = {b"stsc": movie_child(layout, b"stsc"), b"stco": None, b"co64": None}
+    replacements[chunk_offsets[0][0]] = chunk_offsets[0][1]
+    restored = movie_replace(original_video, [b"mdia", b"minf", b"stbl"], replacements)
+    tkhd = bytearray(movie_child(restored, b"tkhd"))
+    current_tkhd = movie_child(current_video, b"tkhd")
+    if tkhd[0] not in (0, 1) or current_tkhd[0] not in (0, 1):
+        raise ValueError("unsupported copied track header")
+    track_id_offset, current_id_offset = (12 if tkhd[0] == 0 else 20), (12 if current_tkhd[0] == 0 else 20)
+    tkhd[track_id_offset:track_id_offset + 4] = current_tkhd[current_id_offset:current_id_offset + 4]
+    restored = movie_replace(restored, [], {b"tkhd": tkhd})
+    rebuilt = bytearray()
+    for a, b, kind in movie_boxes(current, 0, len(current)):
+        payload = restored if kind == b"trak" and current[a:b] == current_video else current[a:b]
+        rebuilt += struct.pack(">I4s", len(payload) + 8, kind) + payload
+
+    # Both the copied video edit and the audio edit use the movie clock. Keep
+    # the original movie duration as well, including a longer audio tail.
+    original_clock = movie_child(original, b"mvhd")
+    for a, b, kind in movie_boxes(rebuilt, 0, len(rebuilt)):
+        if kind != b"mvhd":
+            continue
+        v, ov = rebuilt[a], original_clock[0]
+        if v not in (0, 1) or ov not in (0, 1):
+            raise ValueError("unsupported copied movie clock")
+        s, oscale = a + (12 if v == 0 else 20), 12 if ov == 0 else 20
+        if struct.unpack_from(">I", rebuilt, s)[0] != struct.unpack_from(">I", original_clock, oscale)[0]:
+            raise ValueError("copied movie timescale changed")
+        duration = struct.unpack_from(">I" if ov == 0 else ">Q", original_clock, oscale + 4)[0]
+        struct.pack_into(">I" if v == 0 else ">Q", rebuilt, s + 4, duration)
+
+    if len(rebuilt) > 32 * 1024 * 1024:
+        raise ValueError("copied movie metadata exceeds limit")
+    delta = len(rebuilt) + 8 - (len(current) + header)
+    # Preserve fast-start placement. Rebase all output tracks' absolute chunk
+    # offsets if the replacement moov changes size, without moving sample order.
+    rebase_movie_chunks(rebuilt, 0, len(rebuilt), offset, offset + header + len(current), size, delta)
+    temporary = None
+    try:
+        with open(req["output"], "rb") as old, tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(req["output"])), prefix=".presentation-", delete=False) as new:
+            temporary = new.name
+            def copy(count):
+                while count:
+                    block = old.read(min(count, 1024 * 1024))
+                    if not block:
+                        raise ValueError("incomplete copied movie")
+                    new.write(block)
+                    count -= len(block)
+            copy(offset)
+            new.write(struct.pack(">I4s", len(rebuilt) + 8, b"moov") + rebuilt)
+            old.seek(offset + header + len(current))
+            copy(size - old.tell())
+        os.replace(temporary, req["output"])
+        temporary = None
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+    return True
+
+
 def runtime_event(req, stage, diagnostics=None):
     if req.get("progress") and req["progress"] != "pipe:1":
         with open(req["progress"], "w"):
@@ -238,7 +405,7 @@ def runtime_event(req, stage, diagnostics=None):
 
 def packet_signature(binary, source):
     info = probe(binary, source, ["-select_streams", "v:0", "-show_packets", "-show_data_hash", "sha256",
-        "-show_entries", "packet=pts_time,dts_time,duration_time,data_hash"])
+        "-show_entries", "packet=pts_time,dts_time,duration_time,flags,data_hash"])
     data = info.get("packets", [])
     if not data or any(not p.get("data_hash") for p in data):
         raise ValueError("missing video packet signature")
@@ -510,7 +677,7 @@ def normalized_audio(req, info, diagnostics):
             chain += ",atrim=duration=" + seconds(extent)
         for flag, value in (("-af", chain), ("-ar", str(rate))):
             args[args.index(flag) + 1] = value
-        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-6", "passes": 2,
+        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-7", "passes": 2,
             "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
             "effective_target_lufs": target + correction_gain, "measurement_target_lufs": target,
             "measurement_peak_dbtp": loudnorm_peak, "loudnorm_peak_dbtp": loudnorm_peak,
@@ -554,6 +721,13 @@ def normalized_audio(req, info, diagnostics):
     # Validate the accepted output once. Video proof reuse and the final
     # every-picture fallback stay authoritative, independent of audio retries.
     runtime_event(req, "validation", {"audio_normalization": diagnostics["audio_normalization"]})
+    if durations:
+        try:
+            restored = restore_copied_video_presentation(req)
+        except (ValueError, OSError, struct.error) as error:
+            raise ValueError("audio_normalization_failed: cannot preserve source video presentation: " + str(error)) from error
+        diagnostics["audio_normalization"]["video_presentation_restored"] = restored
+        runtime_event(req, "validation", {"audio_normalization": diagnostics["audio_normalization"]})
     output_info = probe(req["ffprobe"], req["output"])
     output_audio = next((s for s in output_info["streams"] if s.get("codec_type") == "audio"), {})
     if source_video and "-vn" not in args:

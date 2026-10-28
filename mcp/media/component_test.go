@@ -254,6 +254,14 @@ func TestExecutorTransferGrantScope(t *testing.T) {
 }
 
 func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
+	for _, editedHEVC := range []bool{false, true} {
+		t.Run(fmt.Sprintf("editedHEVC=%v", editedHEVC), func(t *testing.T) {
+			testComponentRenderAndIndexUseScopedTransfers(t, editedHEVC)
+		})
+	}
+}
+
+func testComponentRenderAndIndexUseScopedTransfers(t *testing.T, editedHEVC bool) {
 	app, p := componentFixture(t)
 	binary, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -263,6 +271,9 @@ func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
 	cmd := exec.Command(binary, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourcePath)
 	if raw, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, raw)
+	}
+	if editedHEVC {
+		sourcePath = normalizationShiftedEditFixture(t)
 	}
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -423,7 +434,11 @@ func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
 	}
 	// Exercise the Python guarded-audio path through the same real component.
 	if _, err := exec.LookPath("python3"); err == nil {
-		id, err := insertRender(app.AppDB(), testProj, "audio_filter", []string{"1"}, map[string]any{"mode": "normalize", "target_lufs": -20, "target_peak_dbtp": -1.5}, "normalized.wav", "/renders/", "test")
+		name := "normalized.wav"
+		if editedHEVC {
+			name = "normalized.mp4"
+		}
+		id, err := insertRender(app.AppDB(), testProj, "audio_filter", []string{"1"}, map[string]any{"mode": "normalize", "target_lufs": -20, "target_peak_dbtp": -1.5}, name, "/renders/", "test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -434,6 +449,12 @@ func TestComponentRenderAndIndexUseScopedTransfers(t *testing.T) {
 		runOneRender(app, row, remote.fallback, remote, 30)
 		if err = app.AppDB().QueryRow(`SELECT status,COALESCE(error,'') FROM renders WHERE id=?`, id).Scan(&status, &failure); err != nil || status != "ok" {
 			t.Fatalf("guarded component audio: %s %s %v", status, failure, err)
+		}
+		if editedHEVC {
+			var params string
+			if err := app.AppDB().QueryRow(`SELECT resolved_params FROM renders WHERE id=?`, id).Scan(&params); err != nil || !strings.Contains(params, `"video_presentation_restored":true`) || !strings.Contains(params, `"video_pictures_match":true`) {
+				t.Fatalf("component lost HEVC presentation: %s %v", params, err)
+			}
 		}
 	}
 	if p.submits.Load() < 2 {
