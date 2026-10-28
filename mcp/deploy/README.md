@@ -85,6 +85,14 @@ Concurrent refreshes share the same observation. Cached responses preserve
 their original check time; they do not manufacture new publication evidence.
 The API and panel expose observation age, stale status and the next retry time.
 
+Completed Google Play releases and available TestFlight builds are excluded
+from background polling, even when an older workflow still says `publishing`.
+The worker reconciles those workflows to `completed` using persisted provider
+results, preserving their configuration and evidence without opening an edit.
+Failed and stopped mobile workflows are reconciled locally as well. Pending
+uploads, staged rollouts and reviews continue to sync. Explicit release sync
+remains available and still honors the observation cache and account cooldown.
+
 Google Play quota failures (HTTP 429 and quota-specific 403 responses) and HTTP
 503 responses persist an account-level retry deadline. `Retry-After` seconds
 and HTTP dates, plus Google `RetryInfo.retryDelay`, are honored. Exponential
