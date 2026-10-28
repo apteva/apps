@@ -66,6 +66,7 @@ type mobileReviewOutcome struct {
 }
 
 type mobileReleaseMeta struct {
+	Observation         *providerObservation                  `json:"observation,omitempty"`
 	Availability        *availabilityObservation              `json:"availability,omitempty"`
 	Connections         map[string]int64                      `json:"connections,omitempty"`
 	Platform            string                                `json:"platform"`
@@ -387,6 +388,15 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	fmt.Fprintf(logFile, "=== publish build %d to %s/%s ===\n", b.ID, provider, channel)
 
 	if manifest.ExternalProvider != "" {
+		if manifest.ExternalProvider == "google_play" {
+			// A provider-owned upload may not expose its Play connection locally.
+			// Invalidate every account's observation of this package conservatively.
+			if c := googlePlayCoordinatorForContext(); c != nil {
+				if err := c.invalidate(0, meta.PackageName); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if manifest.ExternalProvider != provider {
 			err := fmt.Errorf("cloud artifact provider %q does not match release provider %q", manifest.ExternalProvider, provider)
 			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
@@ -581,6 +591,11 @@ func uploadGooglePlayBundle(bound *sdk.BoundIntegration, packageName, editID, bu
 	endpoint := strings.TrimRight(googlePlayUploadBaseURL, "/") +
 		"/applications/" + url.PathEscape(packageName) +
 		"/edits/" + url.PathEscape(editID) + "/bundles?uploadType=media"
+	if c := googlePlayCoordinatorForContext(); c != nil {
+		if err := c.before(bound.ConnectionID); err != nil {
+			return nil, err
+		}
+	}
 	client := &http.Client{Timeout: 30 * time.Minute}
 	for attempt := 0; attempt < 2; attempt++ {
 		creds, err := globalCtx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
@@ -621,7 +636,7 @@ func uploadGooglePlayBundle(bound *sdk.BoundIntegration, packageName, editID, bu
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("Google Play upload returned HTTP %d: %s", resp.StatusCode, truncateString(string(responseBody), 800))
+			return nil, googlePlayHTTPError(bound, "upload_bundle", resp.StatusCode, resp.Header, json.RawMessage(responseBody))
 		}
 		return json.RawMessage(responseBody), nil
 	}
@@ -1592,6 +1607,15 @@ func executeIntegration(bound *sdk.BoundIntegration, tool string, input map[stri
 	if bound == nil || globalCtx == nil || globalCtx.PlatformAPI() == nil {
 		return nil, errors.New("integration platform unavailable")
 	}
+	if isGooglePlayIntegration(bound) {
+		if c := googlePlayCoordinatorForContext(); c != nil {
+			return c.execute(bound, tool, input, func(clean map[string]any) (json.RawMessage, error) { return executeIntegrationRaw(bound, tool, clean) })
+		}
+	}
+	return executeIntegrationRaw(bound, tool, input)
+}
+
+func executeIntegrationRaw(bound *sdk.BoundIntegration, tool string, input map[string]any) (json.RawMessage, error) {
 	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, input)
 	if err != nil {
 		return nil, fmt.Errorf("%s.%s: %w", bound.AppSlug, tool, err)
@@ -1599,21 +1623,24 @@ func executeIntegration(bound *sdk.BoundIntegration, tool string, input map[stri
 	if res == nil || !res.Success || res.Status >= 400 {
 		status := 0
 		var data []byte
+		var headers map[string]string
 		if res != nil {
+			headers = res.Headers
 			status, data = res.Status, res.Data
 		}
 		return nil, &integrationToolError{
-			Slug: bound.AppSlug, Tool: tool, Status: status, Data: append(json.RawMessage(nil), data...),
+			Slug: bound.AppSlug, Tool: tool, Status: status, Data: append(json.RawMessage(nil), data...), Headers: headers,
 		}
 	}
 	return res.Data, nil
 }
 
 type integrationToolError struct {
-	Slug   string
-	Tool   string
-	Status int
-	Data   json.RawMessage
+	Headers map[string]string
+	Slug    string
+	Tool    string
+	Status  int
+	Data    json.RawMessage
 }
 
 func (e *integrationToolError) Error() string {

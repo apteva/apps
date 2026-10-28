@@ -516,6 +516,7 @@ var testMigrationFiles = []string{
 	"migrations/012_mobile_signing_identities.sql",
 	"migrations/013_operation_safety.sql",
 	"migrations/014_macos_platform.sql",
+	"migrations/015_google_play_observations.sql",
 }
 
 // openSchemaDB opens an in-memory SQLite and applies every app migration.

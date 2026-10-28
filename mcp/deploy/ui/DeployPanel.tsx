@@ -249,7 +249,30 @@ interface DistributionAudienceMember {
   state?: string;
 }
 
+interface ProviderObservation {
+  checked_at: string;
+  cached: boolean;
+  stale: boolean;
+  next_retry_at?: string;
+  reason?: string;
+}
+
+function ProviderObservationStatus({ value }: { value?: ProviderObservation | null }) {
+  if (!value) return null;
+  return <span className={value.stale ? "text-yellow/80" : "text-text-dim"}>
+    Last checked {new Date(value.checked_at).toLocaleString()}{value.cached ? " · cached" : ""}
+    {value.stale && ` · ${value.reason || "refresh paused"}`}
+    {value.next_retry_at && ` · retry after ${new Date(value.next_retry_at).toLocaleString()}`}
+  </span>;
+}
+
+function releaseObservation(release: Release): ProviderObservation | null {
+  try { return JSON.parse(release.release_meta_json || "{}").observation || null; }
+  catch { return null; }
+}
+
 interface MobileDistributionState {
+  observation?: ProviderObservation;
   platform: "android" | "ios" | "macos";
   provider: string;
   channel: string;
@@ -1636,6 +1659,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 {distribution?.group_name && (
                   <span className="text-text-dim truncate">{distribution.group_name}</span>
                 )}
+                <ProviderObservationStatus value={distribution?.observation} />
 				<div className="flex items-center gap-2 ml-auto min-w-0">
                   <input
                     type="email"
@@ -1741,6 +1765,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         </span>
                       )}
                     </div>
+                    {mobile && <ProviderObservationStatus value={releaseObservation(latestMobileRelease!)} />}
                     {(mobile ? latestMobileRelease! : detail.current_release!).error && (
                       <div className="text-red truncate" title={(mobile ? latestMobileRelease! : detail.current_release!).error}>
                         {(mobile ? latestMobileRelease! : detail.current_release!).error}

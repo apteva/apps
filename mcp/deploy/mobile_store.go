@@ -870,19 +870,22 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 		err = fmt.Errorf("unsupported store platform %q", d.TargetKind)
 	}
 	if err != nil {
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", err.Error())
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, googleObservationErrorStatus(cfg.Status, err), "", "", "", err.Error())
 		return nil, nil, err
 	}
 	if len(doc.Testing.Channels) > 0 {
 		testing, testingErr := a.observeDesiredTesting(d, doc)
 		if testingErr != nil {
-			_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", testingErr.Error())
+			_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, googleObservationErrorStatus(cfg.Status, testingErr), "", "", "", testingErr.Error())
 			return nil, nil, testingErr
 		}
 		observed["testing"] = testing
 	}
 	preserveStoreObservationState(observed, cfg.ObservedJSON)
 	observed["observed_at"] = nowUTC()
+	if observation, ok := observed["observation"].(*providerObservation); ok {
+		observed["observed_at"] = observation.CheckedAt
+	}
 	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), "", "", cfg.LastError); err != nil {
 		return nil, nil, err
 	}
@@ -1086,7 +1089,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	return observed, nil
 }
 
-func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
+func (a *App) observeGoogleStoreConfigUncached(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
 	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -1095,7 +1098,7 @@ func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *Mo
 	if err != nil {
 		return nil, err
 	}
-	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName})
+	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName, "_deploy_observation": true})
 	if err != nil {
 		return nil, err
 	}
@@ -2471,6 +2474,11 @@ func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deplo
 }
 
 func uploadGooglePlayImage(bound *sdk.BoundIntegration, packageName, editID, locale, imageType, path string) (json.RawMessage, error) {
+	if c := googlePlayCoordinatorForContext(); c != nil {
+		if err := c.before(bound.ConnectionID); err != nil {
+			return nil, err
+		}
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -2508,7 +2516,7 @@ func uploadGooglePlayImage(bound *sdk.BoundIntegration, packageName, editID, loc
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("Google Play image upload returned HTTP %d: %s", resp.StatusCode, truncateString(string(raw), 800))
+			return nil, googlePlayHTTPError(bound, "upload_listing_image", resp.StatusCode, resp.Header, json.RawMessage(raw))
 		}
 		return raw, nil
 	}
