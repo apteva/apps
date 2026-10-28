@@ -986,25 +986,9 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			if clock.sent && clock.slot(now) <= clock.lastSlot {
 				continue
 			}
-			frame, open := nextRTCFrame(frames, now, stats)
+			frame, open := nextRTCPlaybackFrame(frames, &pending, lastChunkAt, now, stats)
 			if !open {
 				return
-			}
-			if !lastChunkAt.IsZero() && now.Sub(lastChunkAt) >= 20*time.Millisecond {
-				if dropped := pending.discardExpired(now); dropped > 0 {
-					stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
-				}
-				if tail, padding := pending.flushPartial(now); tail.pcm != nil {
-					stats.mu.Lock()
-					stats.value.PartialFlushedFrames++
-					stats.value.PartialPaddedMS += float64(padding) / 24
-					stats.mu.Unlock()
-					if frame.pcm == nil {
-						frame = tail
-					} else {
-						queueRTCFrame(frames, tail, done, stats)
-					}
-				}
 			}
 			if frame.pcm == nil {
 				frame = rtcPCMFrame{pcm: silence, expires: now.Add(maxAge)}

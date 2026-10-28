@@ -119,3 +119,32 @@ func queueRTCFrame(frames chan rtcPCMFrame, frame rtcPCMFrame, done <-chan struc
 	stats.mu.Unlock()
 	return true
 }
+
+// A complete frame already owns this tick. An idle chunk arrival does not prove
+// the remaining samples are an utterance tail while full frames remain queued.
+// Preserve the partial to join the next chunk; never enqueue padded extra audio.
+func nextRTCPlaybackFrame(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, lastChunkAt, now time.Time, stats *rtcMediaStats) (rtcPCMFrame, bool) {
+	frame, open := nextRTCFrame(frames, now, stats)
+	if !open || lastChunkAt.IsZero() || now.Sub(lastChunkAt) < 20*time.Millisecond {
+		return frame, open
+	}
+	// Age protection applies even when this tick already has a complete frame.
+	if dropped := pending.discardExpired(now); dropped > 0 {
+		direction := stats.direction
+		if direction == "" {
+			direction = "carrier_to_operator"
+		}
+		stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
+	}
+	if frame.pcm != nil {
+		return frame, true
+	}
+	if tail, padding := pending.flushPartial(now); tail.pcm != nil {
+		stats.mu.Lock()
+		stats.value.PartialFlushedFrames++
+		stats.value.PartialPaddedMS += float64(padding) / 24
+		stats.mu.Unlock()
+		frame = tail
+	}
+	return frame, true
+}
