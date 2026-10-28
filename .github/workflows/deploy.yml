@@ -1,0 +1,27 @@
+name: Deploy checks
+on:
+  pull_request:
+    paths: ["mcp/deploy/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["mcp/deploy/**", ".github/workflows/deploy.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp/deploy
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.1"
+          cache-dependency-path: mcp/deploy/go.sum
+      - run: go test ./... -count=1
+      - run: go test -race -run TestGoogle -count=1 .
+      - run: go vet ./...

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestAppleBuildNumbersAreReservedPerPlatform(t *testing.T) {
 }
 
 func TestMacMigrationPreservesSigningRevisions(t *testing.T) {
-	db := openSchemaDBThrough(t, len(testMigrationFiles)-1)
+	db := openSchemaDBThrough(t, slices.Index(testMigrationFiles, "migrations/014_macos_platform.sql"))
 	defer db.Close()
 	_, err := db.Exec(`INSERT INTO mobile_signing_identities
 		(project_id,platform,application_identifier,format,encrypted_payload,source,created_at,updated_at)

@@ -79,6 +79,30 @@ runner and Deploy tracks the `MAC_OS` build in App Store Connect. An explicit
 `artifact_mode: file` requires a macOS Deploy host to inspect the downloaded
 package with `pkgutil` before it can be used for a local upload.
 
+Google Play release, listing and tester observations are cached in SQLite for
+five minutes, scoped by connection, package and observation configuration.
+Concurrent refreshes share the same observation. Cached responses preserve
+their original check time; they do not manufacture new publication evidence.
+The API and panel expose observation age, stale status and the next retry time.
+
+Google Play quota failures (HTTP 429 and quota-specific 403 responses) and HTTP
+503 responses persist an account-level retry deadline. `Retry-After` seconds
+and HTTP dates, plus Google `RetryInfo.retryDelay`, are honored. Exponential
+backoff uses a one-minute base, a one-hour base for daily-limit failures, a
+six-hour exponential cap and connection jitter. Provider-requested deadlines
+can exceed that cap. Authentication and ordinary permission errors do not
+activate quota backoff. Deadlines and observations survive sidecar restarts.
+
+All Deploy-managed Play edits are serialized per connection/package across
+processes sharing the install's data directory, from creation through upload
+and commit/cleanup. Read observations defer while cloud-managed store uploads
+are active. Successful commits and adopted cloud uploads invalidate cached
+observations; observations cannot repopulate an older snapshot after a commit.
+Mutations and ambiguous commits are never automatically replayed. While a
+refresh is paused, last-known data is explicitly stale and does not count as
+new provider verification. Changes made externally through Play Console remain
+subject to Google's edit invalidation rules and the observation cache window.
+
 Android `target_config_json` supports:
 
 ```json

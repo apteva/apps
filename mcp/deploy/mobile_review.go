@@ -276,6 +276,9 @@ func (a *App) syncMobileReleaseState(rel *Release) error {
 		return err
 	}
 	obs := &availabilityObservation{State: "unconfirmed", Publication: fresh.ExternalStatus, Audience: fresh.Channel, CheckedAt: nowUTC()}
+	if fresh.Provider == "google_play" && meta.Observation != nil {
+		obs.CheckedAt = meta.Observation.CheckedAt
+	}
 	if fresh.Status == "live" {
 		obs.PublishedAt = nowUTC()
 		if meta.Availability != nil && meta.Availability.PublishedAt != "" {
@@ -304,28 +307,30 @@ func (a *App) syncGooglePlayReleaseState(rel *Release) error {
 	if err != nil {
 		return err
 	}
-	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": meta.PackageName})
-	if err != nil {
-		return err
-	}
-	editID := jsonStringAt(created, "id")
-	if editID == "" {
-		return errors.New("Google Play create_edit response missing id")
-	}
-	defer func() {
-		_, _ = executeIntegration(bound, "delete_edit", map[string]any{"packageName": meta.PackageName, "editId": editID})
-	}()
-	track, err := executeIntegration(bound, "get_track", map[string]any{
-		"packageName": meta.PackageName, "editId": editID, "track": rel.Channel,
+	track, observation, err := googlePlayCoordinatorForContext().observe(bound, meta.PackageName, "track/"+jsonDigest([]string{rel.Channel, meta.VersionCode}), func() (json.RawMessage, error) {
+		created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": meta.PackageName, "_deploy_observation": true})
+		if err != nil {
+			return nil, err
+		}
+		editID := jsonStringAt(created, "id")
+		defer func() {
+			_, _ = executeIntegration(bound, "delete_edit", map[string]any{"packageName": meta.PackageName, "editId": editID})
+		}()
+		return executeIntegration(bound, "get_track", map[string]any{"packageName": meta.PackageName, "editId": editID, "track": rel.Channel})
 	})
 	if err != nil {
 		return err
 	}
+	meta.Observation = observation
+	if observation.Stale {
+		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"release_meta_json": mustJSON(meta)})
+	}
+
 	status := googleTrackVersionStatus(track, meta.VersionCode)
 	if status == "" {
 		return fmt.Errorf("Google Play track %q does not contain version code %s", rel.Channel, meta.VersionCode)
 	}
-	fields := map[string]any{"external_status": status, "error": ""}
+	fields := map[string]any{"external_status": status, "error": "", "release_meta_json": mustJSON(meta)}
 	switch strings.ToLower(status) {
 	case "completed", "inprogress":
 		fields["status"] = "live"

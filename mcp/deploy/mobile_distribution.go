@@ -22,6 +22,7 @@ type distributionAudienceMember struct {
 }
 
 type mobileDistributionState struct {
+	Observation       *providerObservation         `json:"observation,omitempty"`
 	Platform          string                       `json:"platform"`
 	Provider          string                       `json:"provider"`
 	Channel           string                       `json:"channel"`
@@ -874,8 +875,8 @@ func (a *App) androidDistributionStatus(target distributionTarget) (*mobileDistr
 	return readAndroidDistribution(bound, target)
 }
 
-func readAndroidDistribution(bound *sdk.BoundIntegration, target distributionTarget) (*mobileDistributionState, error) {
-	edit, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName})
+func readAndroidDistributionUncached(bound *sdk.BoundIntegration, target distributionTarget) (*mobileDistributionState, error) {
+	edit, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName, "_deploy_observation": true})
 	if err != nil {
 		return nil, fmt.Errorf("open Google Play edit for %s: %w", target.PackageName, err)
 	}
