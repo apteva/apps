@@ -261,9 +261,9 @@ func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
 
 func TestGenericContentRatingTranslatesToAppleAttributes(t *testing.T) {
 	rating := StoreContentRating{
-		Violence: "NONE", SexualContent: "INFREQUENT_OR_MILD", Profanity: "NONE", Drugs: "NONE",
+		Violence: "NONE", SexualContent: "INFREQUENT_OR_MILD", SexualContentGraphic: "NONE", Profanity: "NONE", Drugs: "NONE",
 		GamblingSimulation: "NONE", Contests: "NONE", Weapons: "NONE", HorrorFear: "NONE",
-		MedicalInformation: "NONE", HealthWellness: "NONE", MatureThemes: "NONE",
+		MedicalInformation: "NONE", HealthWellness: false, MatureThemes: "NONE",
 		UnrestrictedWebAccess: true, LootBoxes: true,
 	}
 	if !storeContentRatingComplete(rating) {
