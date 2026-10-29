@@ -215,3 +215,107 @@ func TestAgentPlayoutDriftLeavesHealthyDeliveryUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// Underrun partials are completed with a pitch continuation only when it is
+// safe: periodic or quiet audio, no sharper step than the source, drift on.
+func TestAgentPlayoutUnderrunContinuationIsSafe(t *testing.T) {
+	input := crackleInput(t)
+	rate := 8000
+	speech := newPCMResampler(24000, rate).Process(input)
+	tuning := agentPlayoutTuning{cfg: agentPlayoutConfig{MatchCorrelation: .97}, driftAllowed: true}
+	filled, refused := 0, 0
+	for start := 0; start+160 <= len(speech); start += 160 {
+		tuning.remember(speech[start:start+160], rate)
+		h := tuning.history[:tuning.historyLen]
+		maxStep := 0.0
+		for i := 1; i < len(h); i++ {
+			maxStep = math.Max(maxStep, math.Abs(float64(h[i])-float64(h[i-1])))
+		}
+		fill := tuning.continuePitch(rate, 120)
+		if fill == nil {
+			refused++
+			continue
+		}
+		filled++
+		previous := float64(h[len(h)-1])
+		for _, v := range fill {
+			if math.Abs(float64(v)-previous) > maxStep+2 {
+				t.Fatalf("frame %d: continuation step exceeds source", start/160)
+			}
+			previous = float64(v)
+		}
+	}
+	if filled < 100 || refused == 0 {
+		t.Fatalf("continuation filled %d, refused %d", filled, refused)
+	}
+	t.Logf("real speech: %d frames continuable, %d refused", filled, refused)
+	noise := agentPlayoutTuning{cfg: agentPlayoutConfig{MatchCorrelation: .97}, driftAllowed: true}
+	r := uint32(7)
+	x := make([]int16, 240)
+	for i := range x {
+		r = r*1664525 + 1013904223
+		x[i] = int16(int32(r>>16)%8000 - 4000)
+	}
+	noise.remember(x, rate)
+	if noise.continuePitch(rate, 120) != nil {
+		t.Fatal("loud noise was continued")
+	}
+	off := tuning
+	off.cfg.Drift = "off"
+	if off.continuePitch(rate, 120) != nil {
+		t.Fatal("continuation ran with drift compensation off")
+	}
+	carrier := tuning
+	carrier.driftAllowed = false
+	if carrier.continuePitch(rate, 120) != nil {
+		t.Fatal("continuation ran outside direct SIP")
+	}
+}
+
+// With drift compensation a partial packet at an underrun is completed with
+// continued audio and fades out at the packet's end: no zeros inside it and no
+// hard cut.
+func TestAgentPlayoutUnderrunPartialFilledAndFaded(t *testing.T) {
+	p := manualAgentPacer("PCMU", 20*time.Millisecond)
+	base := time.Unix(100, 0)
+	tone := make([]int16, 200)
+	for i := range tone {
+		tone[i] = int16(8000 * math.Sin(2*math.Pi*200*float64(i)/8000))
+	}
+	if _, err := p.enqueueAt([]sipRTPOutboundPacket{{pcm: tone, itemID: "a", generation: 1, audioEndMS: 25}}, base); err != nil {
+		t.Fatal(err)
+	}
+	var sent [][]int16
+	for at := 20 * time.Millisecond; at <= 200*time.Millisecond && len(sent) < 2; at += 20 * time.Millisecond {
+		if !p.prepareAgentTick(base.Add(at)) {
+			continue
+		}
+		if packet, ok := p.dequeueLivePacket(base.Add(at)); ok {
+			sent = append(sent, p.shapeAgentPCM(packet, base.Add(at)))
+			p.playback.adjust(packet, -1)
+		}
+	}
+	if len(sent) != 2 || len(sent[1]) != 160 {
+		t.Fatalf("packets %d", len(sent))
+	}
+	last := sent[1]
+	// Padding is a run of zeros; single zero samples are ordinary crossings.
+	run, longest := 0, 0
+	for _, v := range last[:150] {
+		if v == 0 {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	if longest > 3 || p.agentPlayout.filledSamples == 0 {
+		t.Fatalf("partial padded with zeros instead of continued (zero run %d, filled %d)", longest, p.agentPlayout.filledSamples)
+	}
+	if math.Abs(float64(last[159])) > 300 {
+		t.Fatalf("filled packet ends on a hard cut: %v", last[150:])
+	}
+	if !p.agentPlayout.resumeFade {
+		t.Fatal("next speech after the filled underrun does not fade in")
+	}
+}

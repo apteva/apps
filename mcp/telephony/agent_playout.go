@@ -319,6 +319,55 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 	return out
 }
 
+// continuePitch returns n samples that continue the most recent input by
+// repeating its last pitch period, so a partial packet at an underrun can be
+// completed with audio rather than zeros. It refuses (nil) unless the recent
+// audio is clearly periodic or quiet and the join adds no sharper step than
+// the audio already has.
+func (t *agentPlayoutTuning) continuePitch(rate, n int) []int16 {
+	if n <= 0 || !t.driftAllowed || t.cfg.driftPercent() == 0 {
+		return nil
+	}
+	h := t.history[:t.historyLen]
+	lo, hi := max(1, rate/400), rate*125/10000
+	if len(h) < 2*lo {
+		return nil
+	}
+	var energy, maxStep float64
+	for i, v := range h {
+		energy += float64(v) * float64(v)
+		if i > 0 {
+			maxStep = math.Max(maxStep, math.Abs(float64(v)-float64(h[i-1])))
+		}
+	}
+	quiet := energy/float64(len(h)) < 300*300
+	best, period := -2.0, 0
+	for d := lo; d <= hi && 2*d <= len(h); d++ {
+		var aa, bb, ab float64
+		for j := 0; j < d; j++ {
+			u, v := float64(h[len(h)-d+j]), float64(h[len(h)-2*d+j])
+			aa, bb, ab = aa+u*u, bb+v*v, ab+u*v
+		}
+		if aa > 0 && bb > 0 && ab/math.Sqrt(aa*bb) > best {
+			best, period = ab/math.Sqrt(aa*bb), d
+		}
+	}
+	if period == 0 || !quiet && best < t.cfg.MatchCorrelation-.07 {
+		return nil
+	}
+	out := make([]int16, n)
+	cycle := h[len(h)-period:]
+	previous := float64(h[len(h)-1])
+	for j := range out {
+		out[j] = cycle[j%period]
+		if math.Abs(float64(out[j])-previous) > maxStep+2 {
+			return nil
+		}
+		previous = float64(out[j])
+	}
+	return out
+}
+
 // agentPlayoutSpliceHook observes splices in tests; nil in production.
 var agentPlayoutSpliceHook func(frame, history, at, other, period, sign int, correlation float64, voiced bool)
 

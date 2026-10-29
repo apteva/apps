@@ -46,6 +46,8 @@ func reviewBRunningPacer(t *testing.T, ctx context.Context, s *agentAudioSession
 // speech after the exhaustion fades in, contiguous packets are untouched.
 func TestReviewBUnderrunEdgeFades(t *testing.T) {
 	p := manualAgentPacer("PCMU", 20*time.Millisecond)
+	// The zero-padding path; pitch continuation of partials is tested with drift.
+	p.agentSession.profile.Playout.Drift = "off"
 	base := time.Unix(100, 0)
 	speech := reviewBSpeech(400)
 	if _, err := p.enqueueAt([]sipRTPOutboundPacket{{pcm: speech[:200], itemID: "a", generation: 1, audioEndMS: 25}}, base); err != nil {

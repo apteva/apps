@@ -175,6 +175,9 @@ func TestAgentAudioSIPWireChunkContinuity(t *testing.T) {
 			defer receiver.Close()
 			media := &sipRTPMedia{conn: sender, remote: receiver.LocalAddr().(*net.UDPAddr), offer: sipMediaOffer{Codec: codec, PacketSamples: 160}}
 			s := continuousAgentFixture()
+			// Exact wire bytes and padded-tail fades; drift compensation (which may
+			// complete a partial with pitch continuation) has its own tests.
+			s.profile.Playout.Drift = "off"
 			p := newSIPRTPPacerWithPolicy(ctx, media, &sipPlaybackState{}, s.policy(), nil)
 			defer func() { cancel(); <-p.done }()
 			input := loadSIPSpeech(t, sipSpeechFixtures[0].id, sipSpeechFixtures[0].hash, 24000)[:24000]

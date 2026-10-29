@@ -30,6 +30,7 @@ type sipAgentPlayout struct {
 	readyAt       time.Time
 	endFades      int  // last-buffered-speech fades; a following non-gap is a soft dip
 	silenceTail   bool // a sub-fade remainder follows an already faded packet
+	filledSamples int  // underrun partials completed with pitch continuation, not zeros
 	lastInputAt   time.Time
 	exhaustedAt   time.Time
 	resumeFade    bool // next speech follows an underrun edge
@@ -44,6 +45,7 @@ type sipAgentPlayoutDiagnostics struct {
 	Starts              int     `json:"starts"`
 	QueueExhaustions    int     `json:"queue_exhaustions"`
 	PaddingMS           float64 `json:"padding_ms"`
+	FilledMS            float64 `json:"filled_ms,omitempty"` // underrun partials completed with pitch continuation
 	ImmediateRecoveries int     `json:"immediate_recoveries"`
 	RecoveryIdleMS      int     `json:"recovery_idle_ms"`
 }
@@ -58,6 +60,7 @@ func (p *sipRTPPacer) agentPlayoutSnapshot() *sipAgentPlayoutDiagnostics {
 		ReserveMS: int(p.agentPlayout.reserve / time.Millisecond),
 		Starts:    p.agentPlayout.starts, QueueExhaustions: p.agentPlayout.exhaustions,
 		PaddingMS:           float64(p.agentPlayout.paddedSamples) * 1000 / float64(p.media.sampleRate()),
+		FilledMS:            float64(p.agentPlayout.filledSamples) * 1000 / float64(p.media.sampleRate()),
 		ImmediateRecoveries: p.agentPlayout.recoveries, RecoveryIdleMS: p.agentPlayout.recoveryIdleMS(),
 	}
 }
@@ -123,7 +126,10 @@ func (p *sipRTPPacer) shapeAgentPCM(packet sipRTPOutboundPacket, now time.Time) 
 	if len(pcm) >= rate/50 {
 		p.agentPlayout.silenceTail = false
 	}
-	if p.packetizer != nil && speech && len(pcm) >= rate/50 && len(p.queue) == 0 && p.packetizer.queuedSamples < fade {
+	// A sub-fade remainder that pitch continuation can complete fades at the
+	// end of its own filled packet instead; this packet then plays intact.
+	fillable := p.packetizer != nil && p.packetizer.queuedSamples > 0 && p.agentPlayout.tuning.continuePitch(rate, rate/50-p.packetizer.queuedSamples) != nil
+	if p.packetizer != nil && speech && len(pcm) >= rate/50 && len(p.queue) == 0 && p.packetizer.queuedSamples < fade && !fillable {
 		// The last buffered speech: unless audio arrives within the next
 		// packet interval the next tick is silence. A late arrival then costs a
 		// soft 3 ms dip, never a hard cut. A remainder shorter than the fade
@@ -137,13 +143,22 @@ func (p *sipRTPPacer) shapeAgentPCM(packet sipRTPOutboundPacket, now time.Time) 
 	if len(pcm) < rate/50 {
 		p.agentPlayout.paddedSamples += rate/50 - len(pcm)
 		padded := make([]int16, rate/50)
+		real := len(pcm)
 		if !p.agentPlayout.silenceTail {
 			// Its receipt is still sent; only already-faded audio is silenced.
 			copy(padded, pcm)
+			// With drift compensation, complete the packet with a pitch
+			// continuation instead of zeros: concealment before the loss.
+			if fill := p.agentPlayout.tuning.continuePitch(rate, rate/50-len(pcm)); speech && fill != nil {
+				copy(padded[len(pcm):], fill)
+				p.agentPlayout.paddedSamples -= len(fill)
+				p.agentPlayout.filledSamples += len(fill)
+				real = len(padded)
+			}
 		}
 		p.agentPlayout.silenceTail = false
 		if p.packetizer != nil && speech {
-			applyAgentEndFade(padded[:len(pcm)], rate)
+			applyAgentEndFade(padded[:real], rate)
 			p.agentPlayout.resumeFade = true
 		}
 		pcm = padded

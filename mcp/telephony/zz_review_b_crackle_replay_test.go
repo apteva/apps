@@ -29,11 +29,12 @@ type crackleMetrics struct {
 	firstMS, endLagMS               float64
 	gapEvents                       int
 	endFades                        int
+	fillMS                          float64
 }
 
 func (m crackleMetrics) String() string {
-	return fmt.Sprintf("packets=%d padded=%d pad_ms=%.1f gap_ms=%.0f exhaustions=%d recoveries=%d starts=%d target_ms=%d gap_events=%d click_edges=%d restarts=%d loud_restarts=%d first_ms=%.0f end_lag_ms=%.0f end_fades=%d",
-		m.packets, m.paddedPackets, m.padMS, m.gapMS, m.exhaustions, m.recoveries, m.starts, m.targetMS, m.gapEvents, m.clickEdges, m.restarts, m.loudRestarts, m.firstMS, m.endLagMS, m.endFades)
+	return fmt.Sprintf("packets=%d padded=%d pad_ms=%.1f gap_ms=%.0f exhaustions=%d recoveries=%d starts=%d target_ms=%d gap_events=%d click_edges=%d restarts=%d loud_restarts=%d first_ms=%.0f end_lag_ms=%.0f end_fades=%d fill_ms=%.1f",
+		m.packets, m.paddedPackets, m.padMS, m.gapMS, m.exhaustions, m.recoveries, m.starts, m.targetMS, m.gapEvents, m.clickEdges, m.restarts, m.loudRestarts, m.firstMS, m.endLagMS, m.endFades, m.fillMS)
 }
 
 func crackleInput(t *testing.T) []int16 {
@@ -220,6 +221,7 @@ func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode str
 	m.padMS = float64(st.paddedSamples) / 8
 	m.exhaustions, m.recoveries, m.starts, m.targetMS = st.exhaustions, st.recoveries, st.starts, st.tuning.stats.TargetMS
 	m.endFades = st.endFades
+	m.fillMS = float64(st.filledSamples) / 8
 	m.firstMS = float64(first-arrivals[0].at) / float64(time.Millisecond)
 	audio := time.Duration(len(input)) * time.Second / 24000
 	m.endLagMS = float64(lastSpeech+20*time.Millisecond-arrivals[0].at-audio) / float64(time.Millisecond)
