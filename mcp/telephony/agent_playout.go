@@ -49,6 +49,13 @@ const (
 // While above the lead, one in this many silence frames gives up a packet.
 const agentPlayoutSilenceTrimEvery = 5
 
+// After this much continuous silence the agent is listening or between
+// sentences: the queue drains back to the initial reserve, so the next reply
+// starts as fast as the model sends it rather than behind the drift lead. The
+// lead is rebuilt in the reply's own short pauses. On the captured replies 300
+// ms kept every speech hole closed; 200 ms let one through.
+const agentPlayoutListeningMS = 300
+
 // Expansion repeats one pitch period found in up to 30 ms of recent input, so
 // a 20 ms frame can be stretched without waiting for more audio.
 const agentPlayoutHistoryMS = 30
@@ -156,6 +163,7 @@ type agentPlayoutTuning struct {
 	dryAt                    time.Time // last near-dry trough
 	silenceAt                time.Time // last explicit silence frame
 	silenceFrames            int       // silence frames seen while above the lead
+	silenceRunMS             int       // continuous explicit silence so far
 	burstShiftMS             int       // silence added (+) or trimmed (-) in the current burst
 	item                     string
 	generation               int64
@@ -304,8 +312,17 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		// A burst's frames share one trough: count what this burst already
 		// changed so the lead is reached, not overshot.
 		packet, trough := rate/50, t.troughMS+t.burstShiftMS
+		listening := t.silenceRunMS >= agentPlayoutListeningMS
+		t.silenceRunMS += len(pcm) * 1000 / rate
 		switch {
 		case len(pcm) == 0:
+		case listening:
+			if trough-20 >= t.stats.TargetMS {
+				cut := min(len(pcm), packet)
+				t.burstShiftMS -= cut * 1000 / rate
+				t.stats.SilenceTrimMS += float64(cut) * 1000 / float64(rate)
+				return pcm[:len(pcm)-cut]
+			}
 		case below && trough < lead-20 || !t.leadArmed && below:
 			t.silenceFrames = 0
 			t.burstShiftMS += 20
@@ -322,6 +339,7 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		}
 		return pcm
 	}
+	t.silenceRunMS = 0
 	t.observeItem(f.ItemID, f.Generation)
 	t.observe(now, time.Duration(len(pcm))*time.Second/time.Duration(rate))
 	defer t.remember(pcm, rate)

@@ -80,6 +80,9 @@ therefore lets pauses absorb lost time:
   40 ms, capped at 180 ms. After 10 s without one it shrinks 20 ms every 5 s.
   Above the lead by 40 ms, one silence frame in five gives up a packet; above
   the cap, every silence frame does. Speech is never shortened for this.
+- Replies start as fast as the model: after 300 ms of continuous silence (the
+  agent listening, or between sentences) queued silence drains back to the
+  initial reserve, so a reply's first word never waits behind the drift lead.
 - Silence keeps the input history and stream, so concealment and stretching
   continue across pauses and speech after a pause is not a new stream's startup.
 - Speech is stretched only as a fallback, when the queue is ≤ 40 ms or speech
@@ -98,8 +101,10 @@ underrun gaps from 31 (2.2 s) to 5 (0.3 s), with no click edges or loud
 restarts and no pitch change on voiced splices. On ten real reply streams with
 their silence markers (`testdata/agent-audio/openai-live-frames-20261029.json`,
 54 s of speech) speech holes went from 5 (280 ms) without compensation to 0;
-the 5 remaining underruns only lengthen a pause; padding is 0 and the delay
-before each delivery stays ≤ 200 ms. Carrier media streams (Twilio,
+remaining underruns only lengthen a pause; padding is at most one partial
+packet, the delay before each delivery stays ≤ 200 ms, and a reply after
+listening starts behind 43 ms on average (60 ms max; 37 / 60 ms without
+compensation). Carrier media streams (Twilio,
 Telnyx and others) are unchanged.
 
 Unknown fields and invalid values fail validation. Removing an override restores

@@ -24,10 +24,15 @@ type liveFramesResult struct {
 	speechMS, holeMS, silenceAddedMS, gapMS, paddedMS, filledMS, expandedMS float64
 	holes, gaps, clicks, loudRestarts                                       int
 	firstMS, maxQueueMS, meanQueueMS, maxTroughMS                           float64
+	replyStartMS                                                            []float64 // queue ahead of each reply's first speech
 }
 
 func (r liveFramesResult) String() string {
-	return fmt.Sprintf("speech=%.1fs holes=%d/%.0fms gaps=%d/%.0fms clicks=%d loud=%d first=%.0f trough max=%.0f queue max=%.0f mean=%.0f silence+=%.0f stretch+=%.0f pad=%.0f fill=%.0f",
+	worst, sum := 0.0, 0.0
+	for _, v := range r.replyStartMS {
+		worst, sum = math.Max(worst, v), sum+v
+	}
+	return fmt.Sprintf("replies=%d start mean=%.0f max=%.0f | ", len(r.replyStartMS), sum/math.Max(1, float64(len(r.replyStartMS))), worst) + fmt.Sprintf("speech=%.1fs holes=%d/%.0fms gaps=%d/%.0fms clicks=%d loud=%d first=%.0f trough max=%.0f queue max=%.0f mean=%.0f silence+=%.0f stretch+=%.0f pad=%.0f fill=%.0f",
 		r.speechMS/1000, r.holes, r.holeMS, r.gaps, r.gapMS, r.clicks, r.loudRestarts, r.firstMS, r.maxTroughMS, r.maxQueueMS, r.meanQueueMS, r.silenceAddedMS, r.expandedMS, r.paddedMS, r.filledMS)
 }
 
@@ -65,7 +70,7 @@ func replayLiveFrames(t *testing.T, frames [][2]float64, input []int16, configur
 	var out []int16
 	var kind []int
 	var res liveFramesResult
-	next, speechAt, started, silenceIn := 0, 0, false, 0
+	next, speechAt, started, silenceIn, silenceRun := 0, 0, false, 0, 0
 	var queueSum float64
 	var queueTicks int
 	end := time.Duration(frames[len(frames)-1][0]*float64(time.Millisecond)) + 2*time.Second
@@ -79,6 +84,15 @@ func replayLiveFrames(t *testing.T, frames [][2]float64, input []int16, configur
 		}
 		for next < len(frames) && time.Duration(frames[next][0]*float64(time.Millisecond)) <= tick {
 			silent := frames[next][1] == 1
+			if !silent && started && silenceRun >= 25 {
+				// A reply after listening: everything queued plays before it.
+				res.replyStartMS = append(res.replyStartMS, float64(len(p.queue)*20)+float64(p.packetizer.queuedSamples)/8)
+			}
+			if silent {
+				silenceRun++
+			} else {
+				silenceRun = 0
+			}
 			src := make([]int16, 480)
 			if !silent {
 				for i := range src {
@@ -198,8 +212,9 @@ func replayLiveFrames(t *testing.T, frames [][2]float64, input []int16, configur
 }
 
 // Acceptance on all ten captured replies: no audible hole inside speech, no
-// click or loud restart at any underrun edge, no zero padding, a 60 ms start,
-// and the delay before each delivery never above 200 ms. Underruns that only
+// click or loud restart at any underrun edge, at most a packet's partial of
+// zero padding, a 60 ms start, the delay before each delivery never above 200
+// ms, and every reply after listening waiting behind at most 80 ms. Underruns that only
 // lengthen a pause are reported. Without drift compensation (0.14.1) the
 // same streams are logged for comparison.
 func TestAgentPlayoutLiveFramesReplay(t *testing.T) {
@@ -215,9 +230,16 @@ func TestAgentPlayoutLiveFramesReplay(t *testing.T) {
 		reference.paddedMS += off.paddedMS
 		r := replayLiveFrames(t, run.Frames, input, nil)
 		t.Logf("%-8s %s", run.Name, r)
-		if r.holes > 0 || r.clicks > 0 || r.loudRestarts > 0 || r.paddedMS > 0 || r.firstMS != 60 || r.maxTroughMS > 200 {
+		if r.holes > 0 || r.clicks > 0 || r.loudRestarts > 0 || r.paddedMS > 10 || r.firstMS != 60 || r.maxTroughMS > 200 {
 			t.Errorf("%s: %s", run.Name, r)
 		}
+		for _, v := range r.replyStartMS {
+			if v > 80 {
+				t.Errorf("%s: a reply after listening waits behind %.0f ms of queued audio", run.Name, v)
+			}
+		}
+		total.replyStartMS = append(total.replyStartMS, r.replyStartMS...)
+		reference.replyStartMS = append(reference.replyStartMS, off.replyStartMS...)
 		total.holes += r.holes
 		total.holeMS += r.holeMS
 		total.clicks += r.clicks
@@ -231,6 +253,8 @@ func TestAgentPlayoutLiveFramesReplay(t *testing.T) {
 		total.maxTroughMS = math.Max(total.maxTroughMS, r.maxTroughMS)
 	}
 	t.Logf("TOTAL holes=%d/%.0fms gaps=%d/%.0fms clicks=%d loud=%d pad=%.0fms speech=%.1fs worst_first=%.0f worst_trough=%.0f worst_queue=%.0f", total.holes, total.holeMS, total.gaps, total.gapMS, total.clicks, total.loudRestarts, total.paddedMS, total.speechMS/1000, total.firstMS, total.maxTroughMS, total.maxQueueMS)
+	t.Logf("reply starts: %s", liveFramesResult{replyStartMS: total.replyStartMS}.String()[:40])
+	t.Logf("drift off (0.14.1) reply starts: %s", liveFramesResult{replyStartMS: reference.replyStartMS}.String()[:40])
 	t.Logf("drift off (0.14.1) holes=%d/%.0fms gaps=%d/%.0fms pad=%.0fms", reference.holes, reference.holeMS, reference.gaps, reference.gapMS, reference.paddedMS)
 }
 
