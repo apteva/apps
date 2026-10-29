@@ -457,6 +457,8 @@ func TestAgentAudioSIPPartialChunksAndSilentActivity(t *testing.T) {
 	for _, codec := range []string{"PCMA", "G722"} {
 		t.Run(codec, func(t *testing.T) {
 			s := continuousAgentFixture()
+			// Exact packetization of partial chunks; drift has its own tests.
+			s.profile.Playout.Drift = "off"
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

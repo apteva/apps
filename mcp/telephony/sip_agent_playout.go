@@ -28,6 +28,8 @@ type sipAgentPlayout struct {
 	tuning        agentPlayoutTuning
 	reserve       time.Duration
 	readyAt       time.Time
+	endFades      int  // last-buffered-speech fades; a following non-gap is a soft dip
+	silenceTail   bool // a sub-fade remainder follows an already faded packet
 	lastInputAt   time.Time
 	exhaustedAt   time.Time
 	resumeFade    bool // next speech follows an underrun edge
@@ -117,17 +119,29 @@ func (p *sipRTPPacer) shapeAgentPCM(packet sipRTPOutboundPacket, now time.Time) 
 	if p.packetizer != nil && speech {
 		resume, p.agentPlayout.resumeFade = p.agentPlayout.resumeFade, false
 	}
-	if p.packetizer != nil && speech && len(pcm) >= rate/50 && len(p.queue) == 0 && p.packetizer.queuedSamples == 0 && now.Sub(p.agentPlayout.lastInputAt) >= sipRTPPacketTime {
-		// The last buffered speech with nothing arriving: the next tick is
-		// silence, so end on a fade rather than a hard cut.
+	fade := max(1, rate*sipAgentEdgeFadeMS/1000)
+	if len(pcm) >= rate/50 {
+		p.agentPlayout.silenceTail = false
+	}
+	if p.packetizer != nil && speech && len(pcm) >= rate/50 && len(p.queue) == 0 && p.packetizer.queuedSamples < fade {
+		// The last buffered speech: unless audio arrives within the next
+		// packet interval the next tick is silence. A late arrival then costs a
+		// soft 3 ms dip, never a hard cut. A remainder shorter than the fade
+		// cannot fade itself, so this packet fades and that tail goes silent.
 		pcm = append([]int16(nil), pcm...)
 		applyAgentEndFade(pcm, rate)
 		p.agentPlayout.resumeFade = true
+		p.agentPlayout.silenceTail = p.packetizer.queuedSamples > 0
+		p.agentPlayout.endFades++
 	}
 	if len(pcm) < rate/50 {
 		p.agentPlayout.paddedSamples += rate/50 - len(pcm)
 		padded := make([]int16, rate/50)
-		copy(padded, pcm)
+		if !p.agentPlayout.silenceTail {
+			// Its receipt is still sent; only already-faded audio is silenced.
+			copy(padded, pcm)
+		}
+		p.agentPlayout.silenceTail = false
 		if p.packetizer != nil && speech {
 			applyAgentEndFade(padded[:len(pcm)], rate)
 			p.agentPlayout.resumeFade = true

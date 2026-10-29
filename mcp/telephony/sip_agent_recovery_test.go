@@ -22,6 +22,8 @@ func TestAgentSIPRecoverySpeechTimeline(t *testing.T) {
 					}
 					input = input[:120000]
 					p := manualAgentPacer(codec, 60*time.Millisecond)
+					// Exact speech preservation through recovery; drift compensation has its own tests.
+					p.agentSession.profile.Playout.Drift = "off"
 					converter := newAgentMediaConverter(p.agentSession, p.media.sampleRate(), false)
 					base := time.Unix(100, 0)
 					var arrivals []time.Duration
@@ -114,6 +116,8 @@ func TestAgentSIPRecoveryIdleBoundaryAndExplicitClear(t *testing.T) {
 	for _, gap := range []time.Duration{20 * time.Millisecond, 999 * time.Millisecond, time.Second, 2 * time.Second} {
 		t.Run(gap.String(), func(t *testing.T) {
 			p := manualAgentPacer("G722", 60*time.Millisecond)
+			// Exact speech preservation through recovery; drift compensation has its own tests.
+			p.agentSession.profile.Playout.Drift = "off"
 			base := time.Unix(100, 0)
 			put := func(at time.Time) {
 				_, err := p.enqueueAt([]sipRTPOutboundPacket{{pcm: make([]int16, 320), itemID: "reply", generation: 1}}, at)
@@ -156,6 +160,8 @@ func TestAgentSIPRecoveryIdleBoundaryAndExplicitClear(t *testing.T) {
 // additional startup reserve at every recovery. No wall-clock sleeps required.
 func TestAgentSIPRecoveryLongRepeatedBursts(t *testing.T) {
 	p := manualAgentPacer("G722", 60*time.Millisecond)
+	// Exact speech preservation through recovery; drift compensation has its own tests.
+	p.agentSession.profile.Playout.Drift = "off"
 	base := time.Unix(100, 0)
 	const chunks = 6000
 	next, samples, maxQueued := 0, 0, 0

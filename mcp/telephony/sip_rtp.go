@@ -325,6 +325,8 @@ func newSIPRTPPacerWithPolicy(
 	if policy.agentSession.continuous() {
 		pacer.packetizer = newCarrierAudioPacketizer(media.sampleRate())
 		pacer.agentPlayout.tuning = newAgentPlayoutTuning(policy.agentSession, policy.bufferMS)
+		// Drift compensation is measured and enabled for direct SIP only.
+		pacer.agentPlayout.tuning.driftAllowed = true
 		pacer.agentPlayout.reserve = time.Duration(min(max(20, policy.bufferMS), min(200, policy.maxQueueMS))) * time.Millisecond
 	}
 	if len(observers) > 0 {
@@ -665,6 +667,7 @@ func (p *sipRTPPacer) enqueueAt(packets []sipRTPOutboundPacket, receivedAt time.
 		state := p.agentPlayout
 		if state.tuning.cfg.Mode == "" {
 			state.tuning = newAgentPlayoutTuning(p.agentSession, int(state.reserve/time.Millisecond))
+			state.tuning.driftAllowed = true
 		}
 		packetizer := *p.packetizer
 		packetizer.segments = append([]carrierAudioSegment(nil), p.packetizer.segments...)

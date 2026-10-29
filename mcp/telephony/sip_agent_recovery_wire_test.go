@@ -35,6 +35,8 @@ func TestAgentSIPRecoveryWire(t *testing.T) {
 				}
 				media := &sipRTPMedia{conn: sender, remote: receiver.LocalAddr().(*net.UDPAddr), offer: sipMediaOffer{Codec: codec, PayloadType: payloadType, PacketSamples: 160}}
 				session := continuousAgentFixture()
+				// Exact wire bytes through recovery; drift compensation has its own tests.
+				session.profile.Playout.Drift = "off"
 				p := newSIPRTPPacerWithPolicy(ctx, media, &sipPlaybackState{}, session.policy(), nil)
 				defer func() { cancel(); <-p.done }()
 				// Keepalive silence fills gaps of 200 ms or more; it is not speech.

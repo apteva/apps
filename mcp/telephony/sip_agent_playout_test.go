@@ -24,6 +24,9 @@ func TestAgentAudioSIPSpeechChunkContinuity(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%d/%s", codec, chunk, fixture.id), func(t *testing.T) {
 					input := loadSIPSpeech(t, fixture.id, fixture.hash, 24000)
 					p := manualAgentPacer(codec, 60*time.Millisecond)
+					// Exact samples under 30 ms jitter: a near-underrun that drift
+					// compensation would rightly stretch; it has its own tests.
+					p.agentSession.profile.Playout.Drift = "off"
 					converter := newAgentMediaConverter(p.agentSession, p.media.sampleRate(), false)
 					type arrival struct {
 						at         time.Duration

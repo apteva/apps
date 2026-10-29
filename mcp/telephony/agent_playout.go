@@ -9,14 +9,52 @@ import (
 // Experimental opt-in controls. Zero values retain the established fixed path.
 // The reserve is a target, not an instruction to pause a running stream.
 type agentPlayoutConfig struct {
-	Mode             string  `json:"mode"`
-	MinReserveMS     int     `json:"min_reserve_ms"`
-	MaxReserveMS     int     `json:"max_reserve_ms"`
-	RecoveryIdleMS   int     `json:"recovery_idle_ms"`
-	StableMS         int     `json:"stable_ms"`
-	SpeedPercent     int     `json:"speed_percent"`
+	Mode           string `json:"mode"`
+	MinReserveMS   int    `json:"min_reserve_ms"`
+	MaxReserveMS   int    `json:"max_reserve_ms"`
+	RecoveryIdleMS int    `json:"recovery_idle_ms"`
+	StableMS       int    `json:"stable_ms"`
+	SpeedPercent   int    `json:"speed_percent"`
+	// Drift compensation is expansion-only: when the source runs slower than
+	// real time and the queue falls below the lead, speech is lengthened by up
+	// to DriftPercent (silence by more) instead of running dry. Playback still
+	// starts after the initial reserve; stretching then grows the buffer to
+	// DriftLeadMS so later provider stalls do not empty it. "off" disables it;
+	// zero values mean the defaults. Plain values keep profiles comparable.
+	Drift            string  `json:"drift,omitempty"`
+	DriftPercent     int     `json:"drift_percent,omitempty"`
+	DriftLeadMS      int     `json:"drift_lead_ms,omitempty"`
 	MatchCorrelation float64 `json:"match_correlation"`
 	TraceFrames      int     `json:"trace_frames"`
+}
+
+// Live providers stream at about real time and drifted up to 3.5% slow on
+// 2026-10-29 (testdata/agent-audio/openai-live-pacing-20261029.json).
+const agentPlayoutDefaultDriftPercent = 6
+
+// Same capture: single stalls reached 236 ms. Grown during a reply, not
+// waited for at its start.
+const agentPlayoutDefaultDriftLeadMS = 160
+
+// Expansion repeats one pitch period found in up to 30 ms of recent input, so
+// a 20 ms frame can be stretched without waiting for more audio.
+const agentPlayoutHistoryMS = 30
+
+func (c agentPlayoutConfig) driftPercent() int {
+	if c.Drift == "off" {
+		return 0
+	}
+	if c.DriftPercent > 0 {
+		return c.DriftPercent
+	}
+	return agentPlayoutDefaultDriftPercent
+}
+
+func (c agentPlayoutConfig) driftLeadMS() int {
+	if c.DriftLeadMS > 0 {
+		return c.DriftLeadMS
+	}
+	return agentPlayoutDefaultDriftLeadMS
 }
 
 func resolveAgentPlayoutConfig(c agentPlayoutConfig, initial, backlog int) (agentPlayoutConfig, error) {
@@ -53,6 +91,15 @@ func resolveAgentPlayoutConfig(c agentPlayoutConfig, initial, backlog int) (agen
 	if c.SpeedPercent < 0 || c.SpeedPercent > 3 {
 		return c, errors.New("playout.speed_percent must be 0..3")
 	}
+	if c.Drift != "" && c.Drift != "off" {
+		return c, errors.New(`playout.drift must be "off" or omitted`)
+	}
+	if c.DriftPercent < 0 || c.DriftPercent > 6 {
+		return c, errors.New("playout.drift_percent must be 0..6 (0 uses the default)")
+	}
+	if c.DriftLeadMS < 0 || c.DriftLeadMS > 400 || c.DriftLeadMS%20 != 0 {
+		return c, errors.New("playout.drift_lead_ms must be 0..400 in 20 ms steps (0 uses the default)")
+	}
 	if math.IsNaN(c.MatchCorrelation) || math.IsInf(c.MatchCorrelation, 0) || c.MatchCorrelation < .95 || c.MatchCorrelation > 1 {
 		return c, errors.New("playout.match_correlation must be .95..1")
 	}
@@ -82,6 +129,13 @@ type agentPlayoutTuning struct {
 	scheduled                time.Duration
 	windowPeak, previousPeak time.Duration
 	debt                     float64
+	history                  [agentPlayoutHistoryMS * 48]int16 // recent input, newest last
+	historyLen               int
+	driftAllowed             bool      // set by the direct SIP pacer; carrier streams are unchanged
+	leadArmed                bool      // this call nearly ran dry; build the drift lead from now on
+	streamAt                 time.Time // first burst of the current stream: filled by the initial reserve
+	burstAt                  time.Time // arrival time of the current burst of frames
+	troughMS                 int       // queue depth just before that burst arrived
 	item                     string
 	generation               int64
 	observedItem             string
@@ -103,6 +157,8 @@ func (t *agentPlayoutTuning) resetStream() {
 	t.lastArrival = time.Time{}
 	t.scheduled = 0
 	t.debt = 0
+	t.historyLen = 0
+	t.streamAt = time.Time{}
 	t.item = ""
 	t.generation = 0
 }
@@ -171,39 +227,84 @@ func (t *agentPlayoutTuning) updateTarget() {
 }
 
 func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtimeBridgeControl, now time.Time) []int16 {
+	drift := 0
+	if t.driftAllowed {
+		drift = t.cfg.driftPercent()
+	}
+	// A provider delta arrives as several 20 ms frames at once. Judge the
+	// whole burst by the queue just before it arrived (its trough): that is
+	// what playback actually had left, not the depth the burst itself adds.
+	if t.burstAt.IsZero() || now.Sub(t.burstAt) > 5*time.Millisecond {
+		t.burstAt, t.troughMS = now, queuedMS
+	}
+	if t.streamAt.IsZero() {
+		t.streamAt = t.burstAt
+	}
+	// A low queue while a stream's initial reserve fills is normal, not
+	// starvation: playback has not started draining it yet.
+	startup := t.burstAt.Sub(t.streamAt) < time.Duration(t.stats.TargetMS)*time.Millisecond
+	// Healthy delivery is never modified. Only after this call's queue nearly
+	// ran dry does compensation grow the buffer to the drift lead; a provider
+	// that stalled once in a call tends to stall again.
+	if drift > 0 && t.troughMS <= 20 && !startup {
+		t.leadArmed = true
+	}
+	lead := t.stats.TargetMS
+	if drift > 0 && t.leadArmed {
+		lead = max(lead, t.cfg.driftLeadMS())
+	}
+	below := t.troughMS < lead-20 && !startup
+	if drift > 0 && !t.leadArmed && t.cfg.SpeedPercent == 0 {
+		// Unarmed, act only when nearly dry: normal 20 ms packet variation
+		// around the reserve is not starvation.
+		below = t.troughMS <= 20 && !startup
+	}
 	// Explicit silence is not evidence of speech starvation. Do not learn a
-	// larger target from pauses in quiet provider output.
+	// larger target from pauses in quiet provider output. Lengthening it is
+	// inaudible, so it absorbs drift first.
 	if f.Silence {
 		t.resetStream()
+		if drift > 0 && below && len(pcm) > 0 {
+			return append(append([]int16(nil), pcm...), make([]int16, len(pcm)/4)...)
+		}
 		return pcm
 	}
 	t.observeItem(f.ItemID, f.Generation)
 	t.observe(now, time.Duration(len(pcm))*time.Second/time.Duration(rate))
-	if t.cfg.SpeedPercent == 0 || len(pcm) == 0 {
+	defer t.remember(pcm, rate)
+	if (t.cfg.SpeedPercent == 0 && drift == 0) || len(pcm) == 0 {
 		return pcm
 	}
 	if t.item != f.ItemID || t.generation != f.Generation {
 		t.debt = 0
+		t.historyLen = 0
 		t.item = f.ItemID
 		t.generation = f.Generation
 	}
-	direction := 0
-	if queuedMS < t.stats.TargetMS-20 {
-		direction = 1
-	} else if queuedMS > t.stats.TargetMS+40 {
-		direction = -1
+	direction, percent := 0, 0
+	if below {
+		// Nearly dry: drift compensation rebuilds the reserve faster than the
+		// source drifts. The configured speed_percent budget is never exceeded.
+		boost := drift
+		if t.troughMS <= 20 {
+			boost *= 2
+		}
+		direction, percent = 1, max(t.cfg.SpeedPercent, boost)
+	} else if t.troughMS > t.stats.TargetMS+40 && t.cfg.SpeedPercent > 0 {
+		direction, percent = -1, t.cfg.SpeedPercent
 	}
-	if direction == 0 || f.Silence {
-		t.debt = 0
+	if direction == 0 {
+		// Keep bounded pending debt: the next trough continues it.
 		return pcm
 	}
 	if t.debt*float64(direction) < 0 {
 		t.debt = 0
 	}
-	// Never accumulate unbounded "catch-up" work across unsuitable speech.
-	t.debt += float64(direction*len(pcm)*t.cfg.SpeedPercent) / 100
-	t.debt = max(-float64(rate)/100, min(float64(rate)/100, t.debt))
-	out, delta := matchSpeechCycle(pcm, rate, int(t.debt), t.cfg.MatchCorrelation)
+	// Debt accrues until it covers a pitch period; never unbounded catch-up.
+	limit := float64(rate * 15 / 1000)
+	t.debt += float64(direction*len(pcm)*percent) / 100
+	t.debt = max(-limit, min(limit, t.debt))
+	out, delta := t.stretchSpeech(pcm, rate, int(t.debt))
 	if delta == 0 {
 		t.stats.UnmatchedFrames++
 		return pcm
@@ -218,11 +319,126 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 	return out
 }
 
-// Conservative pitch-synchronous overlap/add, not resampling: insert/remove a
-// matched cycle without changing sample rate or RTP cadence. No modification of
-// silence, unvoiced/noisy frames or short/transient chunks without a strong match.
-// Endpoints are retained. This is experimental and deliberately allowed to do
-// nothing; it must never synthesize missing words to conceal a long outage.
+// agentPlayoutSpliceHook observes splices in tests; nil in production.
+var agentPlayoutSpliceHook func(frame, history, at, other, period, sign int, correlation float64, voiced bool)
+
+// remember keeps the most recent unmodified input for period search.
+func (t *agentPlayoutTuning) remember(pcm []int16, rate int) {
+	keep := min(len(t.history), rate*agentPlayoutHistoryMS/1000)
+	joined := append(append(make([]int16, 0, t.historyLen+len(pcm)), t.history[:t.historyLen]...), pcm...)
+	if len(joined) > keep {
+		joined = joined[len(joined)-keep:]
+	}
+	t.historyLen = copy(t.history[:], joined)
+}
+
+// stretchSpeech lengthens (debt > 0) or shortens (debt < 0) one frame by a
+// single pitch period, WSOLA style: it finds the lag at which the signal best
+// repeats, using recent input as look-back, and overlap-adds across a full
+// period with a raised-cosine fade. The frame's first and last samples stay
+// where they were, so neighbouring frames join seamlessly. Quiet or unvoiced
+// audio has no audible period and is spliced at the best available lag.
+func (t *agentPlayoutTuning) stretchSpeech(x []int16, rate, debt int) ([]int16, int) {
+	sign := 1
+	if debt < 0 {
+		sign, debt = -1, -debt
+	}
+	lo, hi := max(1, rate/400), min(rate*125/10000, debt)
+	if debt < lo || hi < lo {
+		return x, 0
+	}
+	h := 0
+	if sign > 0 {
+		h = t.historyLen
+	}
+	y := append(append(make([]int16, 0, h+len(x)), t.history[t.historyLen-h:t.historyLen]...), x...)
+	var energy float64
+	for _, v := range x {
+		energy += float64(v) * float64(v)
+	}
+	voiced := energy/float64(len(x)) >= 300*300
+	threshold := t.cfg.MatchCorrelation - .07 // 0.90 at the default 0.97
+	maxStep := 0.0
+	for i := 1; i < len(y); i++ {
+		maxStep = math.Max(maxStep, math.Abs(float64(y[i])-float64(y[i-1])))
+	}
+	// A splice may not create a sharper edge than the audio already has.
+	safe := func(at, other, d int) bool {
+		previous := float64(y[0])
+		if at > 0 {
+			previous = float64(y[at-1])
+		}
+		for j := 0; j <= d; j++ {
+			v := float64(y[other+d])
+			if j < d {
+				w := .5 - .5*math.Cos(math.Pi*float64(j)/float64(d))
+				v = (1-w)*float64(y[at+j]) + w*float64(y[other+j])
+			}
+			if math.Abs(v-previous) > maxStep+2 {
+				return false
+			}
+			previous = v
+		}
+		return true
+	}
+	best, bestD, bestAt := -2.0, 0, 0
+	step := max(1, rate/2000)
+	for d := lo; d <= hi; d++ {
+		for at := h; ; at += step {
+			other := at - d // expansion repeats y[other:at]
+			if sign < 0 {
+				other = at + d // compression skips y[at:other]
+			}
+			// Keep the frame's final sample original so the next frame joins exactly.
+			if other < 0 || max(at, other)+d >= len(y) {
+				if sign < 0 || at+d >= len(y) {
+					break
+				}
+				continue
+			}
+			var aa, bb, ab float64
+			for j := 0; j < d; j++ {
+				u, v := float64(y[at+j]), float64(y[other+j])
+				aa += u * u
+				bb += v * v
+				ab += u * v
+			}
+			// Repeat or skip only audio at a compatible level: a quiet frame must
+			// not re-play the loud tail of the previous word from history.
+			if quiet := float64(d) * 50 * 50; (aa > quiet || bb > quiet) && (bb > 4*aa || aa > 4*bb) {
+				continue
+			}
+			corr := 1.0
+			if aa > 0 && bb > 0 {
+				corr = ab / math.Sqrt(aa*bb)
+			}
+			if corr > best && safe(at, other, d) {
+				best, bestD, bestAt = corr, d, at
+			}
+		}
+	}
+	if bestD == 0 || voiced && best < threshold {
+		return x, 0
+	}
+	d, at := bestD, bestAt
+	other := at - d
+	if sign < 0 {
+		other = at + d
+	}
+	if agentPlayoutSpliceHook != nil {
+		agentPlayoutSpliceHook(len(x), h, at, other, d, sign, best, voiced)
+	}
+	out := make([]int16, 0, len(x)+sign*d)
+	out = append(out, y[h:at]...)
+	for j := 0; j < d; j++ {
+		w := .5 - .5*math.Cos(math.Pi*float64(j)/float64(d)) // 0 -> 1
+		v := (1-w)*float64(y[at+j]) + w*float64(y[other+j])
+		out = append(out, int16(math.Round(max(-32768, min(32767, v)))))
+	}
+	out = append(out, y[other+d:]...)
+	return out, sign * d
+}
+
 func matchSpeechCycle(x []int16, rate, debt int, threshold float64) ([]int16, int) {
 	if debt == 0 {
 		return x, 0

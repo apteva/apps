@@ -182,8 +182,11 @@ func TestAgentPlayoutRecordedSpeechComparison(t *testing.T) {
 			for _, mode := range []string{"fixed", "adaptive", "adaptive_speed"} {
 				t.Run(codec+"/"+pattern+"/"+mode, func(t *testing.T) {
 					p := manualAgentPacer(codec, 60*time.Millisecond)
+					// Sample preservation is asserted without stretching; drift
+					// compensation has its own replay and quality tests.
+					p.agentSession.profile.Playout.Drift = "off"
 					if mode != "fixed" {
-						p.agentSession.profile.Playout = agentPlayoutConfig{Mode: "adaptive"}
+						p.agentSession.profile.Playout = agentPlayoutConfig{Mode: "adaptive", Drift: "off"}
 						if mode == "adaptive_speed" {
 							p.agentSession.profile.Playout.SpeedPercent = 3
 						}
@@ -341,12 +344,17 @@ func TestAgentPlayoutLongClockDrift(t *testing.T) {
 	// Two minutes, a source delivering 2% slower than the phone clock. An ideal
 	// periodic signal isolates rate correction; the recorded-speech test separately
 	// reports the fraction of real speech that passes the conservative matcher.
-	results := make([]int, 2)
-	for mode := 0; mode < 2; mode++ {
+	// Mode 0 is uncorrected (drift compensation off, no speed_percent); mode 1
+	// is speed_percent alone; mode 2 is the default drift compensation.
+	results := make([]int, 3)
+	for mode := 0; mode < 3; mode++ {
 		p := manualAgentPacer("G722", 60*time.Millisecond)
-		p.agentSession.profile.Playout = agentPlayoutConfig{Mode: "adaptive"}
+		p.agentSession.profile.Playout = agentPlayoutConfig{Mode: "adaptive", Drift: "off"}
 		if mode == 1 {
 			p.agentSession.profile.Playout.SpeedPercent = 3
+		}
+		if mode == 2 {
+			p.agentSession.profile.Playout.Drift = ""
 		}
 		base := time.Unix(100, 0)
 		next, last, empty, first := 0, 0, 0, -1
@@ -382,9 +390,9 @@ func TestAgentPlayoutLongClockDrift(t *testing.T) {
 			}
 		}
 		results[mode] = empty
-		t.Logf("speed=%v total_empty_ms=%d first_ms=%d final_packet_ms=%d stats=%+v", mode == 1, empty, first, last, p.agentPlayout.tuning.stats)
+		t.Logf("mode=%d total_empty_ms=%d first_ms=%d final_packet_ms=%d stats=%+v", mode, empty, first, last, p.agentPlayout.tuning.stats)
 	}
-	if results[1] >= results[0]/2 {
+	if results[0] == 0 || results[1] >= results[0]/2 || results[2] >= results[0]/2 {
 		t.Fatal("rate correction failed controlled drift", results)
 	}
 }

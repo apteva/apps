@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"testing"
 	"time"
 )
@@ -27,11 +28,12 @@ type crackleMetrics struct {
 	restarts                        int
 	firstMS, endLagMS               float64
 	gapEvents                       int
+	endFades                        int
 }
 
 func (m crackleMetrics) String() string {
-	return fmt.Sprintf("packets=%d padded=%d pad_ms=%.1f gap_ms=%.0f exhaustions=%d recoveries=%d starts=%d target_ms=%d gap_events=%d click_edges=%d restarts=%d loud_restarts=%d first_ms=%.0f end_lag_ms=%.0f",
-		m.packets, m.paddedPackets, m.padMS, m.gapMS, m.exhaustions, m.recoveries, m.starts, m.targetMS, m.gapEvents, m.clickEdges, m.restarts, m.loudRestarts, m.firstMS, m.endLagMS)
+	return fmt.Sprintf("packets=%d padded=%d pad_ms=%.1f gap_ms=%.0f exhaustions=%d recoveries=%d starts=%d target_ms=%d gap_events=%d click_edges=%d restarts=%d loud_restarts=%d first_ms=%.0f end_lag_ms=%.0f end_fades=%d",
+		m.packets, m.paddedPackets, m.padMS, m.gapMS, m.exhaustions, m.recoveries, m.starts, m.targetMS, m.gapEvents, m.clickEdges, m.restarts, m.loudRestarts, m.firstMS, m.endLagMS, m.endFades)
 }
 
 func crackleInput(t *testing.T) []int16 {
@@ -99,10 +101,17 @@ func crackleDeltas(input []int16, holds bool) []crackleArrival {
 	return out
 }
 
-func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode string, speed int) crackleMetrics {
+// crackleDrift overrides drift compensation for a replay ("off"); "" keeps the default.
+var crackleDrift string
+
+func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode string, speed int, reserveMS ...int) crackleMetrics {
 	t.Helper()
-	p := manualAgentPacer("PCMU", 60*time.Millisecond)
-	p.agentSession.profile.Playout = agentPlayoutConfig{Mode: mode, MinReserveMS: 60, MaxReserveMS: 200, RecoveryIdleMS: 1000, StableMS: 5000, SpeedPercent: speed, MatchCorrelation: 0.97}
+	reserve := 60
+	if len(reserveMS) > 0 {
+		reserve = reserveMS[0]
+	}
+	p := manualAgentPacer("PCMU", time.Duration(reserve)*time.Millisecond)
+	p.agentSession.profile.Playout = agentPlayoutConfig{Mode: mode, MinReserveMS: reserve, MaxReserveMS: max(200, reserve), RecoveryIdleMS: 1000, StableMS: 5000, SpeedPercent: speed, MatchCorrelation: 0.97, Drift: crackleDrift}
 	converter := newAgentMediaConverter(p.agentSession, p.media.sampleRate(), false)
 	base := time.Unix(100, 0)
 	var src, out []int16
@@ -110,7 +119,17 @@ func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode str
 	next, started, inGap := 0, false, false
 	var first, lastSpeech time.Duration
 	end := arrivals[len(arrivals)-1].at + 3*time.Second
+	var currentTick time.Duration
+	if os.Getenv("TELEPHONY_PLAYOUT_DEBUG") != "" {
+		agentPlayoutSpliceHook = func(frame, history, at, other, period, sign int, corr float64, voiced bool) {
+			if currentTick < 1500*time.Millisecond {
+				t.Logf("splice tick=%s frame=%d hist=%d at=%d other=%d d=%d sign=%d corr=%.2f voiced=%t", currentTick, frame, history, at, other, period, sign, corr, voiced)
+			}
+		}
+		defer func() { agentPlayoutSpliceHook = nil }()
+	}
 	for tick := time.Duration(0); tick <= end; tick += 20 * time.Millisecond {
+		currentTick = tick
 		for next < len(arrivals) && arrivals[next].at <= tick {
 			a := arrivals[next]
 			pcm := converter.output(pcm16ToBytes(input[a.start:a.end]))
@@ -164,15 +183,29 @@ func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode str
 		}
 		return true
 	}
+	if at := os.Getenv("TELEPHONY_PLAYOUT_DUMP"); at != "" {
+		var i int
+		fmt.Sscan(at, &i)
+		if i+10 <= len(out) {
+			t.Logf("dump[%d]: %v", i, out[i-30:i+10])
+		}
+	}
+	debugClick := func(kind string, i int) {
+		if os.Getenv("TELEPHONY_PLAYOUT_DEBUG") != "" {
+			t.Logf("%s at sample %d (packet %d, offset %d): %v | rms %.0f", kind, i, i/160, i%160, out[max(0, i-30):min(len(out), i+10)], rms)
+		}
+	}
 	for i := 1; i < len(out); i++ {
 		if out[i-1] != 0 && zeroRun(i, 1) && math.Abs(float64(out[i-1])) > rms/4 {
 			m.clickEdges++
+			debugClick("cut-to-zero", i)
 		}
 		if out[i] != 0 && zeroRun(i-1, -1) {
 			m.restarts++
 			level := math.Abs(float64(out[i]))
 			if level > rms/4 {
 				m.clickEdges++
+				debugClick("restart", i)
 			}
 			if level > rms {
 				m.loudRestarts++
@@ -180,8 +213,13 @@ func runCrackle(t *testing.T, input []int16, arrivals []crackleArrival, mode str
 		}
 	}
 	st := p.agentPlayout
+	if os.Getenv("TELEPHONY_PLAYOUT_DEBUG") != "" {
+		d := st.tuning.cfg.driftPercent()
+		t.Logf("tuning cfg mode=%s speed=%d drift=%d stats=%+v", st.tuning.cfg.Mode, st.tuning.cfg.SpeedPercent, d, st.tuning.stats)
+	}
 	m.padMS = float64(st.paddedSamples) / 8
 	m.exhaustions, m.recoveries, m.starts, m.targetMS = st.exhaustions, st.recoveries, st.starts, st.tuning.stats.TargetMS
+	m.endFades = st.endFades
 	m.firstMS = float64(first-arrivals[0].at) / float64(time.Millisecond)
 	audio := time.Duration(len(input)) * time.Second / 24000
 	m.endLagMS = float64(lastSpeech+20*time.Millisecond-arrivals[0].at-audio) / float64(time.Millisecond)
