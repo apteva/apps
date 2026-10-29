@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -126,6 +127,88 @@ func TestScopeAndPermissions(t *testing.T) {
 	if e == nil {
 		t.Fatal("schema operation accepted in batch")
 	}
+}
+
+// GraphQL-style sibling calls arrive with bound-caller identity. They keep a
+// private namespace by default and reach a project database only by explicit
+// scope plus an operator grant, never managing it themselves.
+func TestAppProjectDatabaseAccess(t *testing.T) {
+	a := testApp(t)
+	operator := &sdk.Caller{ProjectID: "p", AgentID: 1, DefaultEffect: "allow"}
+	graphql := &sdk.Caller{ProjectID: "p", AppInstallID: 7, AppName: "graphql", DefaultEffect: "allow"}
+	other := &sdk.Caller{ProjectID: "p", AppInstallID: 8, AppName: "crm", DefaultEffect: "allow"}
+	elsewhere := &sdk.Caller{ProjectID: "q", AppInstallID: 7, AppName: "graphql", DefaultEffect: "allow"}
+	must := func(v any, e error) any {
+		t.Helper()
+		if e != nil {
+			t.Fatal(e)
+		}
+		return v
+	}
+	denied := func(c *sdk.Caller, op string, args map[string]any) {
+		t.Helper()
+		var known *engine.Error
+		if _, e := invoke(a, c, op, args); !errors.As(e, &known) || known.Code != "permission_denied" {
+			t.Fatalf("%s by %s accepted or wrong error: %v", op, c.AppName, e)
+		}
+	}
+	must(invoke(a, operator, "database_create", map[string]any{"database": "prod"}))
+	must(invoke(a, operator, "collection_create", map[string]any{"database": "prod", "collection": "orders", "fields": []any{map[string]any{"name": "total", "type": "number"}}}))
+	must(invoke(a, operator, "insert", map[string]any{"database": "prod", "collection": "orders", "records": []any{map[string]any{"id": "o1", "total": 5}}}))
+	find := map[string]any{"scope": "project", "database": "prod", "collection": "orders"}
+	insert := map[string]any{"scope": "project", "database": "prod", "collection": "orders", "records": []any{map[string]any{"id": "o2", "total": 7}}}
+
+	// The default remains the private namespace: prod does not exist there.
+	if _, e := invoke(a, graphql, "find", map[string]any{"database": "prod", "collection": "orders"}); e == nil {
+		t.Fatal("private namespace resolved the project database")
+	}
+	denied(graphql, "find", find)
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 0 {
+		t.Fatal("ungranted project database listed", v)
+	}
+	denied(graphql, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "write"})
+	if _, e := invoke(a, operator, "find", map[string]any{"scope": "app", "database": "prod", "collection": "orders"}); e == nil {
+		t.Fatal("agent selected an app namespace")
+	}
+	if _, e := invoke(a, operator, "access_grant", map[string]any{"database": "missing", "app": "graphql", "access": "read"}); e == nil {
+		t.Fatal("grant created or named a missing database")
+	}
+
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "read"}))
+	got := must(invoke(a, graphql, "find", find)).(map[string]any)
+	if records := got["records"].([]engine.Record); len(records) != 1 || records[0]["id"] != "o1" {
+		t.Fatal("granted read did not reach project data", got)
+	}
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 1 {
+		t.Fatal("granted database not listed", v)
+	}
+	denied(graphql, "insert", insert)
+	denied(graphql, "collection_drop", map[string]any{"scope": "project", "database": "prod", "collection": "orders", "confirm": true})
+	denied(graphql, "realtime_configure", map[string]any{"scope": "project", "database": "prod", "enabled": true})
+	denied(other, "find", find)
+	denied(elsewhere, "find", find)
+
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "write"}))
+	must(invoke(a, graphql, "insert", insert))
+	if c := must(invoke(a, operator, "count", map[string]any{"database": "prod", "collection": "orders"})).(map[string]any); c["count"] != "2" {
+		t.Fatal("app write did not land in project database", c)
+	}
+	denied(graphql, "index_create", map[string]any{"scope": "project", "database": "prod", "collection": "orders", "index": map[string]any{"name": "by_total", "fields": []any{map[string]any{"field": "total"}}}})
+	list := must(invoke(a, operator, "access_list", map[string]any{"database": "prod"})).([]engine.AppAccess)
+	if len(list) != 1 || list[0].App != "graphql" || list[0].Access != "write" {
+		t.Fatal("access list", list)
+	}
+
+	must(invoke(a, operator, "access_revoke", map[string]any{"database": "prod", "app": "graphql"}))
+	denied(graphql, "find", find)
+	// Dropping and recreating a database must not revive earlier grants.
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "read"}))
+	must(invoke(a, operator, "database_drop", map[string]any{"database": "prod", "confirm": true}))
+	must(invoke(a, operator, "database_create", map[string]any{"database": "prod"}))
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 0 {
+		t.Fatal("dropped database grant revived", v)
+	}
+	denied(graphql, "database_describe", map[string]any{"scope": "project", "database": "prod"})
 }
 func TestHTTPGuardrails(t *testing.T) {
 	a := testApp(t)
@@ -315,5 +398,24 @@ func TestSidecar(t *testing.T) {
 	_, v = request("/operations/databases_list", map[string]any{}, true, nil)
 	if len(v.([]any)) != 3 {
 		t.Fatal("app-private database leaked into project list", v)
+	}
+	// Through the real bridge headers, a granted app reaches the project
+	// database the dashboard owns; an ungranted app gets a tool error.
+	projectCount := func(app string) string {
+		_, v := request("/mcp", map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "db_count", "arguments": map[string]any{"scope": "project", "database": "sqlite", "collection": "sales"}}}, true, map[string]string{sdk.HeaderBoundCallerInstallID: "42", sdk.HeaderBoundCallerAppName: app})
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	if out := projectCount("crm"); !strings.Contains(out, "no access to project database sqlite") {
+		t.Fatal("ungranted app reached project database", out)
+	}
+	if code, v := request("/operations/access_grant", map[string]any{"database": "sqlite", "app": "crm", "access": "read"}, true, nil); code != 200 {
+		t.Fatal(code, v)
+	}
+	if out := projectCount("crm"); strings.Contains(out, `"isError":true`) || !strings.Contains(out, `\"count\":\"2\"`) {
+		t.Fatal("granted app could not read project database", out)
+	}
+	if out := projectCount("tables"); !strings.Contains(out, "no access to project database sqlite") {
+		t.Fatal("grant leaked to another app", out)
 	}
 }

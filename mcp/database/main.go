@@ -90,6 +90,9 @@ var specs = []toolSpec{
 	{"aggregate", "Group matching records and compute count, sum, avg, min or max. Integers/counts are decimal strings; no groups means one summary row. Metrics use {name,op,field?}. Defaults to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs"}, []string{"collection", "metrics"}},
 	{"batch", "Atomically execute record writes across collections in ONE database. Operations are {op,args}; at most 100 operations and 1000 affected records.", []string{"operations"}, []string{"operations"}},
 	{"explain", "Inspect the adapter's query access path without executing it.", []string{"where", "orderBy", "requireIndex"}, []string{"collection"}},
+	{"access_grant", "Let a calling app use one existing project database with read or write access. Calling apps reach it with scope=\"project\". Repeating changes the access level.", []string{"app", "access"}, []string{"database", "app", "access"}},
+	{"access_revoke", "Remove a calling app's access to a project database.", []string{"app"}, []string{"database", "app"}},
+	{"access_list", "List calling apps allowed to use a project database.", nil, []string{"database"}},
 }
 
 func permission(op string) string {
@@ -126,11 +129,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				return nil, &engine.Error{Code: "permission_denied", Message: "delegated-user database access is not enabled"}
 			}
 			clean := map[string]any{}
+			namespace := "project"
+			if caller.AppInstallID > 0 {
+				namespace = "app"
+			}
 			for k, v := range args {
 				if k == "project_id" || k == "_project_id" {
 					if v != caller.ProjectID {
 						return nil, &engine.Error{Code: "permission_denied", Message: "project override is not allowed"}
 					}
+					continue
+				}
+				if k == "scope" {
+					if v != "app" && v != "project" {
+						return nil, engine.Invalid("scope must be app or project")
+					}
+					if v == "app" && caller.AppInstallID == 0 {
+						return nil, engine.Invalid("only calling apps have a private app scope")
+					}
+					namespace = v.(string)
 					continue
 				}
 				clean[k] = v
@@ -143,6 +160,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			if db == "" {
 				db = "default"
 			}
+			projectScope := scope(caller.ProjectID, nil)
+			var accessible map[string]string
+			if caller.AppInstallID > 0 {
+				if strings.HasPrefix(s.op, "access_") {
+					return nil, &engine.Error{Code: "permission_denied", Message: "calling apps cannot change database access"}
+				}
+				if namespace == "project" {
+					if accessible, e = a.appProjectAccess(ctx, caller, projectScope, s.op, db); e != nil {
+						return nil, e
+					}
+				}
+			}
 			if s.op != "databases_list" && !caller.Allows(permission(s.op), "database/"+db) {
 				return nil, &engine.Error{Code: "permission_denied", Message: "database operation is not granted"}
 			}
@@ -150,10 +179,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				return nil, &engine.Error{Code: "permission_denied", Message: "watch also requires database.read"}
 			}
 			r.WatchCaller = fmt.Sprintf("agent:%d/app:%d", caller.AgentID, caller.AppInstallID)
-			result, e := a.run(ctx, scope(caller.ProjectID, caller), s.op, r)
+			target := scope(caller.ProjectID, caller)
+			if namespace == "project" {
+				target = projectScope
+			}
+			result, e := a.run(ctx, target, s.op, r)
 			if e == nil && s.op == "databases_list" {
 				filtered := []engine.DatabaseInfo{}
 				for _, d := range result.([]engine.DatabaseInfo) {
+					if accessible != nil && accessible[d.Name] == "" {
+						continue
+					}
 					if caller.Allows("database.read", "database/"+d.Name) {
 						filtered = append(filtered, d)
 					}
@@ -164,6 +200,34 @@ func (a *App) MCPTools() []sdk.Tool {
 		}})
 	}
 	return out
+}
+
+// A calling app reaches a project-owned database only through an operator's
+// access grant. It can read, watch and (with write access) change records, but
+// never manage schema, realtime capture or the database itself.
+func (a *App) appProjectAccess(ctx context.Context, caller *sdk.Caller, projectScope, op, db string) (map[string]string, error) {
+	denied := &engine.Error{Code: "permission_denied", Message: fmt.Sprintf("app %s has no access to project database %s; a project operator can grant it with db_access_grant", caller.AppName, db)}
+	if a.manager == nil {
+		return nil, &engine.Error{Code: "storage_error", Message: "app is not mounted"}
+	}
+	if caller.AppName == "" {
+		return nil, denied
+	}
+	if op == "databases_list" {
+		return a.manager.AppAccessible(ctx, projectScope, caller.AppName)
+	}
+	need := permission(op)
+	if need == "database.manage" {
+		return nil, &engine.Error{Code: "permission_denied", Message: "calling apps cannot manage project databases"}
+	}
+	level, e := a.manager.AppAccessLevel(ctx, projectScope, db, caller.AppName)
+	if e != nil {
+		return nil, &engine.Error{Code: "storage_error", Message: "database access lookup failed"}
+	}
+	if level == "" || need == "database.write" && level != "write" {
+		return nil, denied
+	}
+	return nil, nil
 }
 func parseArgs(args map[string]any, s toolSpec) (engine.Request, error) {
 	var r engine.Request
@@ -312,8 +376,10 @@ func inputSchema(s toolSpec) map[string]any {
 	all["retentionBytes"] = map[string]any{"type": "integer", "minimum": 1048576, "maximum": 268435456}
 	all["retentionSeconds"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 86400}
 	all["waitMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 20000}
-	props := map[string]any{"database": all["database"]}
-	if s.op != "batch" && !strings.HasPrefix(s.op, "database") {
+	all["app"] = map[string]any{"type": "string", "description": "Installed app name, for example graphql."}
+	all["access"] = map[string]any{"type": "string", "enum": []string{"read", "write"}}
+	props := map[string]any{"database": all["database"], "scope": map[string]any{"type": "string", "enum": []string{"app", "project"}, "description": "Calling apps only: app (default) uses the app's private databases; project uses a project database an operator granted with db_access_grant."}}
+	if s.op != "batch" && !strings.HasPrefix(s.op, "database") && !strings.HasPrefix(s.op, "access_") {
 		props["collection"] = all["collection"]
 	}
 	for _, k := range s.args {

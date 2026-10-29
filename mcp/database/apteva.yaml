@@ -48,6 +48,9 @@ provides:
     - {name: db_aggregate, description: "Group records and compute count, sum, avg, min and max."}
     - {name: db_batch, description: Atomic writes across collections within one database.}
     - {name: db_explain, description: Inspect query index use and sorting.}
+    - {name: db_access_grant, description: Let a calling app use a project database.}
+    - {name: db_access_revoke, description: Remove a calling app's project database access.}
+    - {name: db_access_list, description: List apps allowed to use a project database.}
   ui_panels:
     - slot: project.page
       label: Database

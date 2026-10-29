@@ -62,7 +62,9 @@ func BenchmarkAptevaPaths(b *testing.B) {
 		{"count_unindexed", "count", func(int) Request {
 			return Request{Query: Query{Where: &Filter{Field: "bucket", Op: "eq", Value: "2"}}}
 		}},
-		{"agg_4_groups", "aggregate", func(int) Request { return Request{GroupBy: []string{"bucket"}, Metrics: stats, Query: Query{Limit: 100}} }},
+		{"agg_4_groups", "aggregate", func(int) Request {
+			return Request{GroupBy: []string{"bucket"}, Metrics: stats, Query: Query{Limit: 100}}
+		}},
 		{"agg_4_groups_int_sum", "aggregate", func(int) Request {
 			return Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "sum", "i"}}, Query: Query{Limit: 100}}
 		}},

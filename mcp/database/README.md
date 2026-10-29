@@ -212,7 +212,13 @@ err := ctx.PlatformAPI().CallAppResult("database", "db_find", map[string]any{
 }, &result)
 ```
 
-Each calling app install gets its own private namespace within the authenticated project. The dashboard currently operates on project-owned databases; shared bindings and administration of another app's private databases are future work.
+Each calling app gets its own private namespace within the authenticated project, so `"database": "prod"` from an app means that app's private `prod`, not the project's. To use a project-owned database, the app passes `"scope": "project"`, and a project operator must first grant that app access to that database:
+
+```json
+{"database": "prod", "app": "graphql", "access": "read"}
+```
+
+Grants are made with `db_access_grant` (agents need `database.manage` on the database) or `POST /operations/access_grant` from the dashboard surface, listed with `db_access_list` and removed with `db_access_revoke`. They are keyed by the caller's server-asserted app name, so they apply to that app's install in this project only. `read` allows describe, list, get, find, count, aggregate, explain and `db_changes`; `write` adds insert, update, delete, upsert and batch. Calling apps can never create, drop or alter project databases, collections or indexes, configure realtime capture, or change grants. Grants require an existing database, and dropping a database removes its grants. `db_databases_list` with `scope: "project"` lists only granted databases. Agent and grant-policy checks (`database.read`/`write`/`watch`) still apply on top. Administration of another app's private databases is future work.
 
 ## Initial limits and remaining work
 

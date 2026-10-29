@@ -127,7 +127,7 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
-	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS realtime (id TEXT PRIMARY KEY, policy TEXT NOT NULL)`)
+	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS realtime (id TEXT PRIMARY KEY, policy TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_access (scope TEXT NOT NULL, database TEXT NOT NULL, app TEXT NOT NULL, access TEXT NOT NULL, PRIMARY KEY(scope,database,app))`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -312,6 +312,9 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "databases_list" {
 		return m.list(ctx, scope)
 	}
+	if isAccessOp(op) {
+		return m.accessOperation(ctx, scope, op, r)
+	}
 	d, release, e := m.acquireDatabase(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default")
 	if e != nil {
 		return nil, e
@@ -357,6 +360,8 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		d.closed = true
 		d.closeWatches()
 		_, _ = m.registry.ExecContext(ctx, `DELETE FROM realtime WHERE id=?`, d.info.ID)
+		// A later database with the same name must not inherit app access.
+		_, _ = m.registry.ExecContext(ctx, `DELETE FROM app_access WHERE scope=? AND database=?`, scope, r.Database)
 		delete(m.databases, d.info.ID)
 		delete(m.names, databaseName{scope: scope, name: r.Database})
 		if e = d.backend.close(); e != nil {
