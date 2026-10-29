@@ -82,7 +82,7 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 	}
 
 	bridge := newDatabaseBridge(t, database, project)
-	graph := tk.SpawnSidecar(t, ".", tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", bridge.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "database-realtime-load"))
+	graph := spawnGraph(t, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", bridge.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "database-realtime-load"))
 	graph.MCP("graphql_source_add", map[string]any{"name": "small", "kind": "database", "config": map[string]any{"database": "small", "collection": "orders"}})
 	graph.MCP("graphql_source_add", map[string]any{"name": "big", "kind": "database", "config": map[string]any{"database": "big", "collection": "orders"}})
 	graph.MCP("graphql_resolver_set", map[string]any{"parent_type": "Subscription", "field_name": "smallCount", "source": "small", "operation": "count"})
@@ -96,24 +96,35 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 	type scenario struct {
 		database, field string
 		subscribers     int
-		rate            int // target commits per second
+		rate            int  // target commits per second
+		distinct        bool // each subscriber runs its own query (its own group)
+	}
+	label := func(s scenario) string {
+		if s.distinct {
+			return s.database + "-distinct"
+		}
+		return s.database
 	}
 	scenarios := []scenario{}
 	for _, subscribers := range []int{1, 10, 50} {
 		for _, rate := range []int{20, 100, 500} {
-			scenarios = append(scenarios, scenario{"small", "smallCount", subscribers, rate})
+			scenarios = append(scenarios, scenario{"small", "smallCount", subscribers, rate, false})
 		}
+	}
+	for _, rate := range []int{20, 100} {
+		scenarios = append(scenarios, scenario{"small", "smallCount", 50, rate, true})
 	}
 	for _, subscribers := range []int{1, 10} {
 		for _, rate := range []int{20, 100} {
-			scenarios = append(scenarios, scenario{"big", "bigStats", subscribers, rate})
+			scenarios = append(scenarios, scenario{"big", "bigStats", subscribers, rate, false})
 		}
 	}
 	// GRAPHQL_BENCH_REALTIME_ONLY filters scenarios, e.g. "small" or "small/50".
 	if value := os.Getenv("GRAPHQL_BENCH_REALTIME_ONLY"); value != "" {
 		kept := []scenario{}
 		for _, s := range scenarios {
-			if strings.Contains(value, s.database) && (!strings.Contains(value, "/") || strings.Contains(value, fmt.Sprintf("%s/%d", s.database, s.subscribers))) {
+			name := label(s)
+			if strings.Contains(value, name) && (!strings.Contains(value, "/") || strings.Contains(value, fmt.Sprintf("%s/%d", name, s.subscribers))) {
 				kept = append(kept, s)
 			}
 		}
@@ -122,18 +133,20 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 
 	var report strings.Builder
 	fmt.Fprintf(&report, "\n%s per scenario, big=%d records, single-record commits\n", duration, bigRows)
-	fmt.Fprintf(&report, "%-6s %4s %5s | %7s | %-26s | %7s %8s | %6s %8s | %s\n", "db", "subs", "rate", "commits", "lag p50 / p95 / max", "updates", "per-sub", "polls", "queries", "cpu db / graphql")
+	fmt.Fprintf(&report, "%-14s %4s %5s | %7s | %-26s | %7s %8s | %6s %8s %6s | %s\n", "db", "subs", "rate", "commits", "lag p50 / p95 / max", "updates", "per-sub", "polls", "queries", "conns", "cpu db / graphql")
 	total := map[string]int{"small": 0, "big": bigRows}
 	for _, s := range scenarios {
 		read := func(raw json.RawMessage) int {
 			if s.field == "smallCount" {
+				// Distinct subscribers alias the field, so read its only value.
 				var payload struct {
-					Data struct {
-						Count int `json:"smallCount"`
-					} `json:"data"`
+					Data map[string]int `json:"data"`
 				}
 				_ = json.Unmarshal(raw, &payload)
-				return payload.Data.Count
+				for _, count := range payload.Data {
+					return count
+				}
+				return 0
 			}
 			var payload struct {
 				Data struct {
@@ -162,6 +175,9 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 			conn := dialRealtime(t, graph, project)
 			conns[index] = conn
 			query := "subscription { smallCount }"
+			if s.distinct {
+				query = fmt.Sprintf("subscription { c%d: smallCount }", index)
+			}
 			if s.field == "bigStats" {
 				query = "subscription { bigStats { region count sum } }"
 			}
@@ -268,7 +284,7 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 			_ = conn.Close()
 		}
 		wg.Wait()
-		calls := bridge.takeCalls()
+		calls, newConns := bridge.takeCalls()
 		usedDatabase, usedGraph := cpuSeconds(t, databasePID)-cpuDatabase, cpuSeconds(t, graphPID)-cpuGraph
 
 		lags := []time.Duration{}
@@ -297,9 +313,9 @@ func TestRealDatabaseSubscriptionLoad(t *testing.T) {
 			return lags[min(int(float64(len(lags))*q), len(lags)-1)].Round(100 * time.Microsecond).String()
 		}
 		rate := float64(len(commits)) / writeElapsed.Seconds()
-		fmt.Fprintf(&report, "%-6s %4d %5d | %7s | %8s / %8s / %8s | %7d %8.1f | %6d %8d | %.2fs / %.2fs\n",
-			s.database, s.subscribers, s.rate, fmt.Sprintf("%d@%.0f/s", len(commits), rate), pick(0.5), pick(0.95), pick(1),
-			updates, float64(updates)/float64(s.subscribers), calls["db_changes"], calls["db_count"]+calls["db_aggregate"], usedDatabase, usedGraph)
+		fmt.Fprintf(&report, "%-14s %4d %5d | %7s | %8s / %8s / %8s | %7d %8.1f | %6d %8d %6d | %.2fs / %.2fs\n",
+			label(s), s.subscribers, s.rate, fmt.Sprintf("%d@%.0f/s", len(commits), rate), pick(0.5), pick(0.95), pick(1),
+			updates, float64(updates)/float64(s.subscribers), calls["db_changes"], calls["db_count"]+calls["db_aggregate"], newConns, usedDatabase, usedGraph)
 		if stale > 0 || len(errors) > 0 {
 			sample := errors[:min(len(errors), 2)]
 			for i, text := range sample {

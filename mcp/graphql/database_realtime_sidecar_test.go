@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +26,7 @@ type databaseBridge struct {
 	URL   string
 	mu    sync.Mutex
 	calls map[string]int
+	conns int // TCP connections accepted from the GraphQL sidecar
 }
 
 func newDatabaseBridge(t *testing.T, database *tk.Sidecar, project string) *databaseBridge {
@@ -66,6 +68,13 @@ func newDatabaseBridge(t *testing.T, database *tk.Sidecar, project string) *data
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			bridge.mu.Lock()
+			bridge.conns++
+			bridge.mu.Unlock()
+		}
+	}
 	t.Cleanup(server.Close)
 	bridge.URL = server.URL
 	return bridge
@@ -75,13 +84,32 @@ func newDatabaseBridge(t *testing.T, database *tk.Sidecar, project string) *data
 // churn ephemeral ports under load; app-side clients are left as shipped.
 var bridgeClient = &http.Client{Transport: &http.Transport{MaxIdleConns: 512, MaxIdleConnsPerHost: 256, IdleConnTimeout: 30 * time.Second}}
 
-// takeCalls returns and resets the per-tool call counts.
-func (b *databaseBridge) takeCalls() map[string]int {
+// takeCalls returns and resets the per-tool call counts and new connections.
+func (b *databaseBridge) takeCalls() (map[string]int, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	calls := b.calls
-	b.calls = map[string]int{}
-	return calls
+	calls, conns := b.calls, b.conns
+	b.calls, b.conns = map[string]int{}, 0
+	return calls, conns
+}
+
+// spawnGraph starts the GraphQL sidecar. GRAPHQL_BENCH_SIDECAR_GOFLAGS applies
+// only to its build (for example -modfile=... pointing at an SDK branch), so
+// the Database sidecar keeps its own pinned dependencies.
+func spawnGraph(t *testing.T, opts ...tk.Option) *tk.Sidecar {
+	t.Helper()
+	if flags := os.Getenv("GRAPHQL_BENCH_SIDECAR_GOFLAGS"); flags != "" {
+		previous, had := os.LookupEnv("GOFLAGS")
+		os.Setenv("GOFLAGS", flags)
+		defer func() {
+			if had {
+				os.Setenv("GOFLAGS", previous)
+			} else {
+				os.Unsetenv("GOFLAGS")
+			}
+		}()
+	}
+	return tk.SpawnSidecar(t, ".", opts...)
 }
 
 // dialRealtime opens an initialized graphql-transport-ws connection.
