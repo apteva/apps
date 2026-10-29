@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.5.2. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.5.2.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.5.3.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -22,7 +22,7 @@ Independent Apteva sidecar app, version 0.5.2. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.8` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.10` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -48,7 +48,7 @@ The total cache setting bounds the sum of configured native cache targets across
 
 Write buffering is separately opt-in: setting a finite cache no longer implicitly enables the engine's default half-cache memtable. Query slots are shared across native databases and acquired before creating read snapshots; queue time counts toward the query deadline. At most 64 additional queries may wait; excess requests return `resource_limit`. Point reads and watch polling without initial snapshots bypass this queue. The per-query 16 MiB work budget is unchanged.
 
-Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. When native working state or materialized results exceed their budget, the adapter retries on the same snapshot through alpha.8's owned-result stream, with optional disk spill. It validates every completed group and retains only the best limit+1 rows. The stream reserves three quarters of the work budget for the native executor and one quarter for retained adapter results. The existing parallel path remains in place for aggregates that fit; staged writes and uncertain integer reductions retain their checked portable fallback. Disk and group guards return resource_limit, with no partial response.
+Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. When native working state or materialized results exceed their budget, the adapter retries on the same snapshot through the native owned-result stream, with optional disk spill. It validates every completed group and retains only the best limit+1 rows. The stream reserves three quarters of the work budget for the native executor and one quarter for retained adapter results. The parallel executor remains in place for aggregates that fit, including filtered aggregates, whose filter is passed as a leading `$match` so the native planner can shard an index range or full scan; staged writes and uncertain integer reductions retain their checked portable fallback. Disk and group guards return resource_limit, with no partial response.
 
 Flush modes apply when the app mounts; restart/remount it to apply a changed setting to all owned native databases. `full` requests a drive-cache flush on macOS. `os` requests ordinary `fsync`, like SQLite WAL/FULL with `fullfsync=OFF`; `barrier` orders writes without forcing the drive cache to stable media. OS and barrier provide weaker power-loss protection on macOS. On other supported systems the modes use `fsync`. Every exposed mode keeps native `Sync: true`; there is no async option. `explain` and startup logs report the effective mode. For a SQLite-comparable ordinary-flush test, select `aptevadb_sync_mode: os` or set:
 
@@ -66,7 +66,7 @@ See [alpha.4 adapter/direct-driver comparisons](benchmarks/APTEVADB-ALPHA4.md) a
 
 ## Build and run
 
-Use Go 1.25.1 or newer. This module pins app-sdk v0.110.0, the latest published tag by commit topology at release preparation.
+Use Go 1.25.1 or newer. This module pins app-sdk v0.111.0, the latest published tag by commit topology at release preparation.
 
 ```sh
 cd apps/mcp/database

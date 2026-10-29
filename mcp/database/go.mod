@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/apteva/app-sdk v0.111.0
-	github.com/apteva/db v0.2.0-alpha.8
+	github.com/apteva/db v0.2.0-alpha.10
 	github.com/cockroachdb/pebble/v2 v2.1.7
 	github.com/google/uuid v1.6.0
 	github.com/valyala/fastjson v1.6.10

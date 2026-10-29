@@ -1,0 +1,96 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  155577	      7489 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    4946	    249508 ns/op	  176117 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	      10	 110225904 ns/op	58220648 B/op	 1402177 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      40	  28768064 ns/op	   73916 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     128	   9235692 ns/op	  112910 B/op	     493 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     128	   9914192 ns/op	  104928 B/op	     404 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	      91	  11910373 ns/op	 3845670 B/op	   28246 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    7429	    144264 ns/op	  103067 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     126	   9621562 ns/op	 1262284 B/op	   10237 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       4	 332429156 ns/op	321015972 B/op	 1634397 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	      56	  18404424 ns/op	 1703823 B/op	   20454 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  180745	      6256 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    5047	    239016 ns/op	  176132 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	      10	 106875600 ns/op	58220662 B/op	 1402178 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      42	  27739185 ns/op	   73903 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     138	   8469791 ns/op	  113162 B/op	     494 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     135	  12155752 ns/op	  104819 B/op	     405 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	     100	  11910305 ns/op	 3846383 B/op	   28247 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    7690	    144825 ns/op	  103074 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     124	   9725427 ns/op	 1263225 B/op	   10237 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       5	 240633833 ns/op	320881267 B/op	 1634330 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	     142	   8014852 ns/op	 1705091 B/op	   20453 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  181138	      6234 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    4971	    240128 ns/op	  176098 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	      10	 106169117 ns/op	58220715 B/op	 1402178 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      43	  28035842 ns/op	   73881 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     136	   9883773 ns/op	  112839 B/op	     492 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     134	   8937647 ns/op	  104858 B/op	     405 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	     100	  11447697 ns/op	 3851753 B/op	   28248 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    7620	    143098 ns/op	  103069 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     127	   9233851 ns/op	 1263455 B/op	   10237 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       4	 259011073 ns/op	320924704 B/op	 1634424 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	     171	   6969258 ns/op	 1705249 B/op	   20455 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  175096	      6282 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    4917	    239661 ns/op	  176027 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	      10	 107010729 ns/op	58221076 B/op	 1402179 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      38	  27898442 ns/op	   73933 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     134	   8640470 ns/op	  112930 B/op	     493 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     134	   9000633 ns/op	  104646 B/op	     404 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	     100	  11388705 ns/op	 3852847 B/op	   28248 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    7616	    143766 ns/op	  103063 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     127	   9235374 ns/op	 1259375 B/op	   10236 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       5	 211807967 ns/op	320870952 B/op	 1634175 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	     180	   6547781 ns/op	 1703266 B/op	   20453 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  157322	      6444 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    4890	    328076 ns/op	  176052 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	       7	 155611518 ns/op	58221177 B/op	 1402177 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      34	  34744461 ns/op	   73988 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     124	   9788934 ns/op	  113159 B/op	     493 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     122	   9762334 ns/op	  104837 B/op	     405 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	     100	  11394630 ns/op	 3842379 B/op	   28246 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    7911	    148166 ns/op	  103075 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     122	   9922690 ns/op	 1257694 B/op	   10235 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       4	 273363719 ns/op	320784728 B/op	 1634207 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	     108	   9272167 ns/op	 1703556 B/op	   20451 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+BenchmarkAptevaPaths/get-10         	  182277	      6348 ns/op	    6006 B/op	      87 allocs/op
+BenchmarkAptevaPaths/find_indexed_page-10         	    5053	    236809 ns/op	  176069 B/op	    3629 allocs/op
+BenchmarkAptevaPaths/find_unindexed_sorted-10     	      10	 104731879 ns/op	58220848 B/op	 1402178 allocs/op
+BenchmarkAptevaPaths/count_unindexed-10           	      43	  27801456 ns/op	   73880 B/op	     116 allocs/op
+BenchmarkAptevaPaths/agg_4_groups-10              	     122	   9156318 ns/op	  113040 B/op	     493 allocs/op
+BenchmarkAptevaPaths/agg_4_groups_int_sum-10      	     129	  11323583 ns/op	  104745 B/op	     404 allocs/op
+BenchmarkAptevaPaths/agg_1000_groups-10           	      96	  11856802 ns/op	 3836785 B/op	   28245 allocs/op
+BenchmarkAptevaPaths/agg_indexed_tenant-10        	    5814	    179913 ns/op	  103072 B/op	     582 allocs/op
+BenchmarkAptevaPaths/agg_filtered-10              	     124	   9517195 ns/op	 1266934 B/op	   10239 allocs/op
+BenchmarkAptevaPaths/agg_high_cardinality_spill-10         	       5	 229369500 ns/op	320969918 B/op	 1634516 allocs/op
+BenchmarkAptevaPaths/update_indexed_where-10               	     165	   7194480 ns/op	 1703634 B/op	   20454 allocs/op
+PASS

@@ -173,9 +173,18 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	out := []Record{}
 	retained := 0
 	var readErr error
+	// Decode only retained fields into scratch; retainSelected copies them out.
+	var names []string
+	if len(q.Select) > 0 {
+		names = append(names, q.Select...)
+		for _, o := range q.OrderBy {
+			names = append(names, o.Field)
+		}
+	}
+	decoder := newNativeScanDecoder(c, names, nil)
 	e = h.Query(t.ctx, marshal(nativeQueryFilter(c, q)), opts, func(_, data []byte) bool {
 		var r Record
-		r, readErr = decodeNativeRecord(c, data)
+		r, readErr = decoder.decode(data)
 		if readErr != nil {
 			return false
 		}
