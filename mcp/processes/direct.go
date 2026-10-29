@@ -144,10 +144,18 @@ func (a *App) directRunResponse(project, actor, process, id, action string, args
 			return nil, e
 		}
 		setRunControl(&r, steps)
-		if mcp {
-			return boundedRunRead(process, r, d, steps, args)
+		rating, e := a.runRatingSummary(r.ID)
+		if e != nil {
+			return nil, e
 		}
-		return map[string]any{"run": r, "definition": d, "steps": steps}, nil
+		if mcp {
+			out, e := boundedRunRead(process, r, d, steps, args)
+			if m, ok := out.(map[string]any); ok && rating != nil {
+				m["rating"] = rating
+			}
+			return out, e
+		}
+		return map[string]any{"run": r, "definition": d, "steps": steps, "rating": rating}, nil
 	}
 	if action == "run_update" {
 		if actor != "operator" && !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", d.OwnerAgentID)) {

@@ -53,6 +53,7 @@ type overviewCounts struct {
 	Scheduled int `json:"scheduled"`
 	Attention int `json:"attention"`
 	Recent    int `json:"recent"`
+	Review    int `json:"review"`
 }
 type processOverview struct {
 	Scope       string            `json:"scope,omitempty"`
@@ -86,6 +87,9 @@ func (a *App) overview(project string) (*processOverview, error) {
 		return nil, e
 	}
 	if e := a.db.QueryRow(`SELECT COUNT(*)`+base+` AND NOT (`+active+`)`, project).Scan(&out.Counts.Recent); e != nil {
+		return nil, e
+	}
+	if e := a.db.QueryRow(`SELECT COUNT(*) FROM process_review_items i JOIN processes p ON p.id=i.process_id WHERE p.project_id=? AND i.state IN ('open','claimed')`, project).Scan(&out.Counts.Review); e != nil {
 		return nil, e
 	}
 	for _, group := range []string{"active", "recent"} {
@@ -271,6 +275,7 @@ func (a *App) overviewGlobal(selector string) (*processOverview, error) {
 		out.Counts.Scheduled += part.Counts.Scheduled
 		out.Counts.Attention += part.Counts.Attention
 		out.Counts.Recent += part.Counts.Recent
+		out.Counts.Review += part.Counts.Review
 		out.Partial = out.Partial || part.Partial
 		out.Warnings = append(out.Warnings, part.Warnings...)
 		annotate := func(items []overviewItem) {

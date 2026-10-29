@@ -23,6 +23,7 @@ func textField(description string) map[string]any {
 func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
 		"summary_fields": map[string]any{"type": "array", "maxItems": 12, "items": object([]string{"key", "label"}, map[string]any{"key": textField("Generic summary metric or context field key"), "label": textField("Human-readable history label")})},
+		"quality":        qualitySchema(),
 		"steps":          map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
 		"parameters":     map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
 		"name":           textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval requirements the assigned agents must follow during execution"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
@@ -58,8 +59,13 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["summary_update"] = "Owner or assigned step executor: save a compact semantic checkpoint at meaningful milestones, blockers and completion. Include exact references. Does not change run/step/approval state. Use expected_revision (0 initially) and stable idempotency_key; retry identical arguments."
 	descriptions["memory_list"] = "Read scoped cross-run knowledge for one process, assignment and campaign/scope. Search/filter and page entries. Use before repeating discovery; evidence and source-app records remain authoritative."
 	descriptions["memory_upsert"] = "Run owner or assigned step executor: save one bounded ledger entry with stable key, kind, findings and exact source references. Scope is explicit and assignment comes from the frozen run. expected_revision=0 creates; identical retries are idempotent. Does not create leads or grant approval."
+	descriptions["run_rate"] = "Rate a finished run (omit step_id) or one step another agent executed: score 1–5 (thumbs procedures: 5 up, 1 down), reason tags from the frozen procedure quality tags (required for scores of 2 or lower), optional rubric criteria, comment and corrected output. One active rating per rater; rating again creates a new revision. Stable idempotency_key; low scores may open a review item. Never rate your own step."
+	descriptions["run_ratings"] = "Read active ratings for one run (run_id) with its summary, or page a procedure's ratings filtered by version, source, max_score or tag. include_history adds superseded revisions."
+	descriptions["quality_get"] = "Read procedure quality: per-version average score, rating coverage and score distribution, top reason tags, rubric criteria aggregates, step ratings per executor agent, lowest-rated runs and open review counts. Optional version narrows tags, criteria and executors."
+	descriptions["review_queue"] = "List review items (low scores, failed runs, sampled runs) for a procedure; default state active = open + claimed. Each item has the run state, rating summary and an exact run reread."
+	descriptions["review_update"] = "Claim, release (open), resolve or dismiss a review item with expected_revision. Resolving or dismissing needs a short resolution describing what was done."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "patch", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "run_evidence", "summary_get", "summary_update", "memory_list", "memory_upsert", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_read", "step_evidence_save", "step_claim", "step_update", "run_cancel", "run_advance"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "patch", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "run_evidence", "summary_get", "summary_update", "memory_list", "memory_upsert", "run_rate", "run_ratings", "quality_get", "review_queue", "review_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_read", "step_evidence_save", "step_claim", "step_update", "run_cancel", "run_advance"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -118,6 +124,37 @@ func (a *App) MCPTools() []sdk.Tool {
 				props["sha256"] = textField("Hash from first page or reference; detects changes between reads")
 				required = append(required, "section")
 			}
+		case "run_rate":
+			props["run_id"] = textField("Exact finished run ID")
+			props["step_id"] = textField("Exact step execution ID; omit to rate the whole run")
+			props["score"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 5}
+			props["tags"] = map[string]any{"type": "array", "maxItems": 12, "items": textField("Reason tag configured on the procedure")}
+			props["criteria"] = map[string]any{"type": "object", "description": "Rubric values keyed by criterion: score 1–5, pass_fail true/false, or a choice option"}
+			props["comment"] = textField("Short explanation, max 2000 characters")
+			props["corrected_output"] = textField("What the output should have been, max 8 KiB")
+			props["idempotency_key"] = textField("Stable key for this rating; reuse on retries")
+			required = append(required, "run_id", "score", "idempotency_key")
+		case "run_ratings":
+			props["run_id"] = textField("Exact run ID; omit to page the procedure's ratings")
+			props["version"] = map[string]any{"type": "integer", "minimum": 1}
+			props["source"] = map[string]any{"type": "string", "enum": []string{"operator", "reviewer", "agent"}}
+			props["max_score"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 5}
+			props["tag"] = textField("Exact reason tag")
+			props["include_history"] = map[string]any{"type": "boolean"}
+			props["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+			props["cursor"] = textField("Opaque next_cursor; keep filters unchanged")
+		case "quality_get":
+			props["version"] = map[string]any{"type": "integer", "minimum": 1}
+		case "review_queue":
+			props["state"] = map[string]any{"type": "string", "enum": []string{"active", "open", "claimed", "resolved", "dismissed", "all"}}
+			props["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+			props["cursor"] = textField("Opaque next_cursor; keep filters unchanged")
+		case "review_update":
+			props["review_id"] = textField("Exact review item ID")
+			props["state"] = map[string]any{"type": "string", "enum": []string{"open", "claimed", "resolved", "dismissed"}}
+			props["resolution"] = textField("What was done; required to resolve or dismiss, max 500 characters")
+			props["expected_revision"] = map[string]any{"type": "integer", "minimum": 1}
+			required = append(required, "review_id", "state", "expected_revision")
 		case "assignment_get", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive":
 			props["assignment_id"] = textField("Assignment ID")
 			required = append(required, "assignment_id")
@@ -428,6 +465,16 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.memoryList(project, id, args)
 	case "memory_upsert":
 		return a.memoryUpsert(project, actor, id, args)
+	case "run_rate":
+		return a.runRate(project, actor, id, args)
+	case "run_ratings":
+		return a.runRatings(project, id, args)
+	case "quality_get":
+		return a.qualityGet(project, id, args)
+	case "review_queue":
+		return a.reviewQueue(project, id, args)
+	case "review_update":
+		return a.reviewUpdate(project, actor, id, args)
 	case "run_evidence":
 		return a.runEvidence(project, id, args)
 	case "runs":
@@ -493,6 +540,8 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if path == "runs" && r.Method == "GET" {
 		action = "project_runs"
+	} else if path == "reviews" && r.Method == "GET" {
+		action = "review_queue"
 	} else if len(parts) == 1 {
 		args["process_id"] = parts[0]
 		if r.Method == "GET" {
@@ -605,6 +654,30 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if len(parts) == 4 && parts[1] == "runs" && parts[3] == "ratings" {
+		args["process_id"] = parts[0]
+		args["run_id"] = parts[2]
+		if r.Method == "GET" {
+			action = "run_ratings"
+		} else if r.Method == "POST" {
+			action = "run_rate"
+		}
+	}
+	if len(parts) == 2 && r.Method == "GET" {
+		switch parts[1] {
+		case "ratings":
+			args["process_id"], action = parts[0], "run_ratings"
+		case "quality":
+			args["process_id"], action = parts[0], "quality_get"
+		case "reviews":
+			args["process_id"], action = parts[0], "review_queue"
+		}
+	}
+	if len(parts) == 3 && parts[1] == "reviews" && r.Method == "POST" {
+		args["process_id"] = parts[0]
+		args["review_id"] = parts[2]
+		action = "review_update"
+	}
 	if len(parts) == 2 && parts[1] == "memory" && r.Method == "GET" {
 		args["process_id"] = parts[0]
 		action = "memory_list"
@@ -624,12 +697,15 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		action = "memory_upsert"
 	}
 	if r.Method == "GET" {
-		for _, key := range []string{"target", "field", "parameter_key", "dependency_key", "evidence_id", "artifact_id", "view", "cursor", "assignment_id", "status", "after", "before", "scope", "search", "key", "kind"} {
+		for _, key := range []string{"target", "field", "parameter_key", "dependency_key", "evidence_id", "artifact_id", "view", "cursor", "assignment_id", "status", "after", "before", "scope", "search", "key", "kind", "source", "tag", "state"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				args[key] = v
 			}
 		}
-		for _, key := range []string{"limit", "revision", "owner_agent_id"} {
+		if r.URL.Query().Get("include_history") == "true" {
+			args["include_history"] = true
+		}
+		for _, key := range []string{"limit", "revision", "owner_agent_id", "version", "max_score"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				n, e := strconv.Atoi(v)
 				if e != nil {
@@ -653,7 +729,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k == "step_id" && action == "run_advance" {
+			if k == "step_id" && (action == "run_advance" || action == "run_rate") {
 				args[k] = v
 				continue
 			}

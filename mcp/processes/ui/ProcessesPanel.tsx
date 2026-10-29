@@ -14,6 +14,7 @@ import Assignments, {
 } from "./Assignments";
 import Triggers from "./Triggers";
 import ExecutionTools, { type ToolSource } from "./ExecutionTools";
+import { QualityTab, RatingBadge, RunRating, qualityStyles, type RunRatingSummary } from "./Quality";
 type Props = {
   appName?: string;
   projectId?: string;
@@ -66,6 +67,7 @@ type Entry = {
   record: {
     id: string;
     metadata_only?: boolean;
+    rating?: RunRatingSummary;
     summary?: {revision: number; author: string; created_at: string; attempted?: string; completed?: string; findings?: string; outcome?: string; blocker?: string; next_actions?: string; references?: string[]; fields?: Record<string, unknown>};
     trigger_event_id?: string;
     executor_agent_ids?: number[];
@@ -449,6 +451,7 @@ function RunDetailCard({
       </details>
       <details className="block" onToggle={event=>setMemoryOpen(event.currentTarget.open)}><summary>Cross-run knowledge</summary>{memoryOpen&&<><div className="row"><input style={{flex:1,minWidth:160,maxWidth:360}} aria-label="Knowledge scope" placeholder="Campaign / scope" value={memoryScope} onChange={event=>{setMemoryScope(event.target.value);setMemoryEntries([]);setMemoryCursor("");}}/><button disabled={!memoryScope.trim()} onClick={()=>loadMemory()}>Search knowledge</button></div>{memoryEntries.map(item=><div className="block" key={item.key}><strong>{item.kind} · {item.key}</strong><ResultContent content={item.content}/><p className="small muted">Source run {item.run_id}{item.step_id?` · step ${item.step_id}`:""} · revision {item.revision}</p>{item.references?.map((ref:string)=><p className="small" key={ref}>{ref}</p>)}</div>)}{memoryCursor&&<button onClick={()=>loadMemory(true)}>Load more knowledge</button>}</>}</details>
       {run.error && <div className="notice"><ResultContent content={run.error} /></div>}
+      <RunRating api={api} runID={run.id} runState={run.state} steps={steps} agentName={ownerName} />
       {run.workflow ? <RunSteps
         steps={steps}
         runID={run.id}
@@ -520,6 +523,7 @@ function Panel(props: Props) {
     [assignmentFilter, setAssignmentFilter] = useState(""),
     [runStateFilter, setRunStateFilter] = useState(""),
     [runOwnerFilter, setRunOwnerFilter] = useState(0),
+    [runRatingFilter, setRunRatingFilter] = useState(""),
     [projectRunStateFilter, setProjectRunStateFilter] = useState("");
   useEffect(()=>{if(selected&&props.projectId){setRuns(previous=>previous.filter(run=>run.record.id===selectedRunID));setRunsCursor("",false,true);loadRuns(selected).catch(e=>setError(e.message));}},[assignmentFilter,runStateFilter,runOwnerFilter]);
   useEffect(()=>{if(props.projectId){setProjectRuns(previous=>previous.filter(run=>run.record.id===selectedProjectRunID));setProjectRunsCursor("",false,true);loadProjectRuns().catch(e=>setError(e.message));}},[projectRunStateFilter]);
@@ -780,6 +784,12 @@ function Panel(props: Props) {
     (r) =>
       (!assignmentFilter || r.assignment_id === assignmentFilter) &&
       (!runStateFilter || r.record.state === runStateFilter) &&
+      (!runRatingFilter ||
+        (runRatingFilter === "low"
+          ? !!r.record.rating?.count && r.record.rating.average <= 2
+          : runRatingFilter === "unrated"
+            ? terminalRunStates.has(r.record.state) && !r.record.rating?.count
+            : true)) &&
       (!runOwnerFilter ||
         r.assignment?.owner_agent_id === runOwnerFilter ||
         r.record.executor_agent_ids?.includes(runOwnerFilter) ||
@@ -835,6 +845,7 @@ function Panel(props: Props) {
   return (
     <LiveContext.Provider value={liveEvents}><div className="ap-processes">
       <style>{css}</style>
+      <style>{qualityStyles}</style>
       {(selected || creating) && (
         <button className="crumb" disabled={busy} onClick={back}>
           ← All processes
@@ -1348,7 +1359,7 @@ function Panel(props: Props) {
             </div>
           )}
           <nav className="tabs" aria-label="Process detail">
-            {["overview", "procedure", "assignments", "triggers", "runs"].map((t) => (
+            {["overview", "procedure", "assignments", "triggers", "quality", "runs"].map((t) => (
               <button
                 className={tab === t ? "on" : ""}
                 key={t}
@@ -1538,6 +1549,16 @@ function Panel(props: Props) {
                 </div>
               )}
             </section>
+          ) : tab === "quality" ? (
+            <QualityTab
+              api={(path, method, body) => api(`/${p.id}${path}`, method, body)}
+              agentName={ownerName}
+              currentVersion={p.version}
+              onOpenRun={(id) => {
+                setSelectedRunID(id);
+                setTab("runs");
+              }}
+            />
           ) : tab === "procedure" ? (
             <section className="card">
               <div className="row between head">
@@ -1654,6 +1675,15 @@ function Panel(props: Props) {
                     <option key={x}>{x}</option>
                   ))}
                 </select>
+                <select
+                  aria-label="Filter run rating"
+                  value={runRatingFilter}
+                  onChange={(e) => setRunRatingFilter(e.target.value)}
+                >
+                  <option value="">All ratings</option>
+                  <option value="low">Rated 2 or lower</option>
+                  <option value="unrated">Finished, unrated</option>
+                </select>
               </div>
               {runsCursor && !selectedExecution && <button disabled={busy} onClick={()=>work(()=>loadRuns(p.id,true))}>Load older runs</button>}
               {filteredExecutions.length || selectedExecution ? (
@@ -1689,6 +1719,7 @@ function Panel(props: Props) {
                         >
                           <span className="run-list-title">
                             <strong>{run.assignment?.name || run.record.title}</strong>
+                            <RatingBadge rating={run.record.rating} />
                             <Pill state={run.record.state} />
                           </span>
                           <span className="sub">

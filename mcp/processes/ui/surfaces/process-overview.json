@@ -40,6 +40,11 @@
           "label": "Attention",
           "value": "$.counts.attention",
           "format": "count"
+        },
+        {
+          "label": "Review",
+          "value": "$.counts.review",
+          "format": "count"
         }
       ]
     },

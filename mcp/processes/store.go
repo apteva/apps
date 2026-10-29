@@ -27,6 +27,7 @@ type SummaryField struct {
 }
 type Definition struct {
 	SummaryFields        []SummaryField `json:"summary_fields,omitempty"`
+	Quality              *QualityConfig `json:"quality,omitempty"`
 	Steps                []Step         `json:"steps,omitempty"`
 	Parameters           []Parameter    `json:"parameters,omitempty"`
 	ExecutionMode        string         `json:"-"`
@@ -127,6 +128,9 @@ func (d *Definition) validate() error {
 			return errors.New("summary fields need unique keys (64 bytes) and labels (80 bytes)")
 		}
 		seenSummary[f.Key] = true
+	}
+	if e := validateQuality(d.Quality); e != nil {
+		return e
 	}
 	if e := validateSteps(d.Steps); e != nil {
 		return e

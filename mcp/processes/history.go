@@ -8,28 +8,29 @@ import (
 )
 
 type HistoryRow struct {
-	ExecutorAgentIDs   []int64          `json:"executor_agent_ids"`
-	Error              string           `json:"error,omitempty"`
-	ErrorAvailable     bool             `json:"error_available"`
-	DeliveryWarning    string           `json:"delivery_warning,omitempty"`
-	DeliveryAttention  bool             `json:"delivery_attention"`
-	MetadataOnly       bool             `json:"metadata_only"`
-	ID                 string           `json:"id"`
-	ProcessID          string           `json:"process_id"`
-	ProcessName        string           `json:"process_name"`
-	Version            int              `json:"version"`
-	AssignmentID       string           `json:"assignment_id"`
-	AssignmentRevision int              `json:"assignment_revision"`
-	Assignment         WorkerAssignment `json:"assignment"`
-	CreatedAt          string           `json:"created_at"`
-	Kind               string           `json:"kind"`
-	Workflow           bool             `json:"workflow"`
-	State              string           `json:"state"`
-	Progress           int              `json:"progress"`
-	CurrentStep        string           `json:"current_step"`
-	SummaryAvailable   bool             `json:"summary_available"`
-	Summary            *SavedSummary    `json:"summary,omitempty"`
-	Reread             RereadReference  `json:"reread"`
+	ExecutorAgentIDs   []int64           `json:"executor_agent_ids"`
+	Error              string            `json:"error,omitempty"`
+	ErrorAvailable     bool              `json:"error_available"`
+	DeliveryWarning    string            `json:"delivery_warning,omitempty"`
+	DeliveryAttention  bool              `json:"delivery_attention"`
+	MetadataOnly       bool              `json:"metadata_only"`
+	ID                 string            `json:"id"`
+	ProcessID          string            `json:"process_id"`
+	ProcessName        string            `json:"process_name"`
+	Version            int               `json:"version"`
+	AssignmentID       string            `json:"assignment_id"`
+	AssignmentRevision int               `json:"assignment_revision"`
+	Assignment         WorkerAssignment  `json:"assignment"`
+	CreatedAt          string            `json:"created_at"`
+	Kind               string            `json:"kind"`
+	Workflow           bool              `json:"workflow"`
+	State              string            `json:"state"`
+	Progress           int               `json:"progress"`
+	CurrentStep        string            `json:"current_step"`
+	SummaryAvailable   bool              `json:"summary_available"`
+	Summary            *SavedSummary     `json:"summary,omitempty"`
+	Rating             *RunRatingSummary `json:"rating,omitempty"`
+	Reread             RereadReference   `json:"reread"`
 }
 
 func (a *App) historyPage(project, process string, args map[string]any) (any, error) {
@@ -161,7 +162,16 @@ func (a *App) historyPage(project, process string, args map[string]any) (any, er
 		size += len(b)
 		out = append(out, r)
 	}
-	return map[string]any{"runs": out, "has_more": next != "", "next_cursor": next, "detail_view": "run_get", "summary_notice": "Agent-authored checkpoints; missing summaries are unavailable. Use exact evidence before relying on findings."}, rows.Err()
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	rows.Close()
+	for i := range out {
+		if out[i].Rating, e = a.runRatingSummary(out[i].ID); e != nil {
+			return nil, e
+		}
+	}
+	return map[string]any{"runs": out, "has_more": next != "", "next_cursor": next, "detail_view": "run_get", "summary_notice": "Agent-authored checkpoints; missing summaries are unavailable. Use exact evidence before relying on findings."}, nil
 }
 
 // Explicit paged export is for HTTP/UI clients. Workers cannot request it via

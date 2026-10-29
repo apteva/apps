@@ -556,3 +556,28 @@ exact artifacts, validation, real HTTP human approval and publication:
 `/private/tmp/processes-worker-cleanup-continuity-verified-tier3/run-ew4Jbr`.
 Full Go race tests, 139 Bun verifier tests and scenario TypeScript checks passed.
 These are individual live correctness runs, not a production cost benchmark.
+
+## Run ratings
+
+```sh
+APTEVA_TEST_PROVIDER=openai-codex APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/18-run-ratings.yaml
+```
+
+The coordinator creates a procedure with a frozen quality policy (tags, a score and
+pass/fail rubric, `request_rating`, failed-run review), then starts one run that
+completes and one whose check step fails. Processes' terminal notices ask the
+coordinator for a rating. It reads each run and rates it as a whole, and is refused
+once when it tries to rate a step it executed. It then claims and resolves the
+failed-run and low-score review items and reads quality once. The verifier checks
+the saved policy, exact scores, tags and rubric values, the rater identity, no
+saved self-rating, rule-based review items only for the failed run, each resolved
+at revision 3, and the order of the calls.
+
+
+Recorded on 2026-10-29 with `openai-codex` / `gpt-6.1-sol`: the ratings scenario
+and its independent database verifier passed in 27 iterations (138 s). Both
+whole-run ratings were saved under the coordinator, the self-rating was refused
+with nothing persisted, both rule-based review items were resolved, and quality
+was read last. Report: `/private/tmp/processes-run-ratings-tier3/run-BmkQWA`.
+An earlier attempt saved every rating and review exactly but ended without the
+final quality read, so the directive now names that step explicitly.

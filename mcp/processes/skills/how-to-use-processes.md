@@ -210,3 +210,12 @@ Use `memory_list` before repeating discovery: specify the exact process, assignm
 Checkpoints and ledger entries are agent-authored memory, not approval decisions or replacements for receipts. They never advance/complete a step or bypass validation. Full HTTP run inspections retain their existing stored definitions and evidence; the UI uses compact history pages and loads selected detail on demand. Explicit bulk HTTP history remains for existing inspection/export clients; do not fetch it through a worker's default MCP history tool.
 
 HTTP history clients may explicitly request `view=export&limit=10` and follow `next_cursor` for full stored run inspection objects page by page. `view=compact` uses the same bounded history metadata as MCP. UI outcome filters also support `status=ongoing` and `status=attention` across pages, while retaining the run currently open for review.
+
+### Rating runs and the review queue
+
+Procedures may declare a `quality` block: `scale` (`stars` 1–5, or `thumbs` stored as 5 up and 1 down), reason `tags`, rubric `criteria` (`score`, `pass_fail` or `choice` with options), `request_rating`, and `review` rules (`low_score_threshold`, default 2 and 0 disables; `failed_runs`; `sample_percent`). It is frozen with each version, so a run is rated and reviewed under the policy it ran with.
+
+Rate only finished runs with `run_rate`: omit `step_id` for the whole run, or name a step another agent executed. Never rate a step you executed; save a run summary instead. Scores of 2 or lower need at least one configured reason tag. Criteria keys must exist in the frozen rubric. Use a stable `idempotency_key`; rating the same target again creates a new revision and supersedes your previous one. When `request_rating` is set, the coordinator's terminal-run notice asks for one rating: verify the outcome with `run_get` first.
+
+`run_ratings` reads a run's active ratings or pages a procedure's ratings. `quality_get` reports per-version averages, coverage, distributions, top tags, rubric results, step quality per executor and the lowest-rated runs. Low scores, failed runs and sampled runs open review items. List them with `review_queue`, then `review_update` with `expected_revision` to claim, release, resolve or dismiss them. Resolving or dismissing needs a short resolution. A rating is a judgement, not evidence or approval.
+

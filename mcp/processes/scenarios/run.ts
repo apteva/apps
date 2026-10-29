@@ -2,6 +2,7 @@ import { WORKER_CLEANUP, observeWorkerCleanup, verifyWorkerCleanup } from "./wor
 import { COMPACT_HANDOFFS, verifyCompactHandoffs } from "./compact-handoffs";
 import { PROCESS_PATCH, verifyProcessPatch } from "./process-patch";
 import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
+import { RUN_RATINGS, verifyRunRatings } from "./run-ratings";
 import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
 import { AI_PARALLEL, PARALLEL_APPROVAL, verifyAIParallel } from "./ai-parallel-steps";
@@ -299,6 +300,18 @@ for (const scenario of report.results) {
       verifyRunMemory(scenario.tool_calls,runs,summaries,entries,memoryConfirmed as ConfirmationReport[]);
       observed[scenario.scenario]=evidence;
       console.log(`PASS ${scenario.scenario}: two worker runs recovered checkpoint/ledger, distinct exact receipts, bounded reads and HTTP approval (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
+    if (scenario.scenario === RUN_RATINGS) {
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Ratings tier 3 must run on OpenAI Codex and observe the selected model");
+      const version = db.query("SELECT version,body_json FROM process_versions WHERE process_id=? ORDER BY version DESC LIMIT 1").get(processes[0].id) as any;
+      const ratings = db.query("SELECT * FROM process_run_ratings ORDER BY created_at").all() as any[];
+      const reviews = db.query("SELECT * FROM process_review_items ORDER BY reason").all() as any[];
+      const evidence = {...history, version, ratings, reviews};
+      await Bun.write(resolve(outputDir, "ratings-evidence.json"), JSON.stringify(evidence, null, 2));
+      verifyRunRatings(scenario.tool_calls, version, runs, ratings, reviews);
+      observed[scenario.scenario] = evidence;
+      console.log(`PASS ${scenario.scenario}: requested whole-run ratings, refused self-rating, rule-based review items resolved and quality aggregates verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     if (scenario.scenario === PROCESS_PATCH) {

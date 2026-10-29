@@ -54,6 +54,7 @@ export type Data = {
     scheduled: number;
     attention: number;
     recent: number;
+    review?: number;
   };
   active: Item[];
   upcoming: Item[];
