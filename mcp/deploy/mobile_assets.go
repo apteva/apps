@@ -153,9 +153,21 @@ func validateGoogleAssetDimensions(asset StoreAsset, metadata storeAssetMetadata
 	}
 }
 
+// appleScreenshotDisplayType maps a stored display target to the value
+// App Store Connect accepts. Its API has no 6.9-inch type: 6.9-inch
+// screenshots upload under APP_IPHONE_67, so older APP_IPHONE_69 targets
+// are rewritten rather than rejected.
+func appleScreenshotDisplayType(target string) string {
+	target = strings.ToUpper(strings.TrimSpace(target))
+	if target == "APP_IPHONE_69" {
+		return "APP_IPHONE_67"
+	}
+	return target
+}
+
 func appleScreenshotDisplayTarget(asset StoreAsset) string {
 	if strings.TrimSpace(asset.DisplayTarget) != "" {
-		return strings.ToUpper(strings.TrimSpace(asset.DisplayTarget))
+		return appleScreenshotDisplayType(asset.DisplayTarget)
 	}
 	if asset.Kind == "desktop_screenshot" {
 		return "APP_DESKTOP"
@@ -168,7 +180,7 @@ func appleScreenshotDisplayTarget(asset StoreAsset) string {
 
 func appleScreenshotDisplayTargetForSize(asset StoreAsset, width, height int) string {
 	if strings.TrimSpace(asset.DisplayTarget) != "" {
-		target := strings.ToUpper(strings.TrimSpace(asset.DisplayTarget))
+		target := appleScreenshotDisplayType(asset.DisplayTarget)
 		if width <= 0 || height <= 0 || appleScreenshotSizeAllowed(target, width, height) {
 			return target
 		}
@@ -182,12 +194,12 @@ func appleScreenshotDisplayTargetForSize(asset StoreAsset, width, height int) st
 	if width > height {
 		width, height = height, width
 	}
-	for _, target := range []string{"APP_IPHONE_69", "APP_IPHONE_67", "APP_IPHONE_65", "APP_IPHONE_63", "APP_IPHONE_61", "APP_IPHONE_55", "APP_IPHONE_47"} {
+	for _, target := range []string{"APP_IPHONE_67", "APP_IPHONE_65", "APP_IPHONE_63", "APP_IPHONE_61", "APP_IPHONE_55", "APP_IPHONE_47"} {
 		if appleScreenshotSizeAllowed(target, width, height) {
 			return target
 		}
 	}
-	return "APP_IPHONE_69"
+	return "APP_IPHONE_67"
 }
 
 func appleScreenshotSizeAllowed(target string, width, height int) bool {
@@ -202,10 +214,9 @@ func appleScreenshotSizeAllowed(target string, width, height int) bool {
 	if width > height {
 		width, height = height, width
 	}
-	target = strings.ToUpper(strings.TrimSpace(target))
+	target = appleScreenshotDisplayType(target)
 	allowed := map[string][][2]int{
-		"APP_IPHONE_69":         {{1260, 2736}, {1290, 2796}, {1320, 2868}},
-		"APP_IPHONE_67":         {{1290, 2796}, {1284, 2778}},
+		"APP_IPHONE_67":         {{1260, 2736}, {1290, 2796}, {1320, 2868}, {1284, 2778}},
 		"APP_IPHONE_65":         {{1242, 2688}, {1284, 2778}},
 		"APP_IPHONE_63":         {{1179, 2556}, {1206, 2622}},
 		"APP_IPHONE_61":         {{1080, 2340}, {1125, 2436}, {1170, 2532}},

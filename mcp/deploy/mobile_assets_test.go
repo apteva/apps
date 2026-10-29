@@ -33,18 +33,31 @@ func TestAppleStoreAssetsValidateDimensionsAndRequiredDeviceFamilies(t *testing.
 
 func TestAppleScreenshotTargetInfersCurrentIPhoneSizes(t *testing.T) {
 	asset := StoreAsset{Kind: "phone_screenshot"}
-	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_69" {
-		t.Fatalf("1320 x 2868 target=%q", got)
-	}
-	if got := appleScreenshotDisplayTargetForSize(asset, 1290, 2796); got != "APP_IPHONE_69" {
-		t.Fatalf("1290 x 2796 target=%q", got)
+	for _, size := range [][2]int{{1320, 2868}, {1290, 2796}, {1260, 2736}, {1284, 2778}, {100, 100}} {
+		if got := appleScreenshotDisplayTargetForSize(asset, size[0], size[1]); got != "APP_IPHONE_67" {
+			t.Fatalf("%d x %d target=%q", size[0], size[1], got)
+		}
 	}
 	asset.DisplayTarget = "APP_IPHONE_67"
-	if got := appleScreenshotDisplayTargetForSize(asset, 1290, 2796); got != "APP_IPHONE_67" {
+	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_67" {
 		t.Fatalf("explicit target=%q", got)
 	}
-	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_69" {
+	asset.DisplayTarget = "APP_IPHONE_65"
+	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_67" {
 		t.Fatalf("incompatible legacy target was not corrected: %q", got)
+	}
+}
+
+func TestAppleScreenshotTargetNeverSendsUnsupportedSixNineType(t *testing.T) {
+	asset := StoreAsset{Kind: "phone_screenshot", DisplayTarget: "app_iphone_69", Width: 1320, Height: 2868}
+	if got := appleScreenshotDisplayTarget(asset); got != "APP_IPHONE_67" {
+		t.Fatalf("stored 6.9-inch target=%q", got)
+	}
+	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_67" {
+		t.Fatalf("stored 6.9-inch target for size=%q", got)
+	}
+	if !appleScreenshotSizeAllowed("APP_IPHONE_69", 1320, 2868) {
+		t.Fatal("legacy 6.9-inch target rejected a 6.9-inch screenshot")
 	}
 }
 
