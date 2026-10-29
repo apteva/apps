@@ -42,10 +42,13 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 	}
 	const project = "graphql-database-aggregate-test"
 	database := tk.SpawnSidecar(t, databaseDir, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", ""), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", ""))
-	// The platform bridge marks every sibling-app call with the caller's
-	// install, and Database scopes those calls to that app's private
-	// namespace. Seed and read as the GraphQL install so all paths share data.
-	callDatabase := func(tool string, args map[string]any) map[string]any {
+	// An operator owns the project databases. GraphQL reaches them as a bound
+	// app caller with scope "project" once the operator grants it access, the
+	// same headers and result format the platform bridge uses.
+	operator := func(tool string, args map[string]any) map[string]any {
+		return database.MCPAs(tool, args, 1, "", project)
+	}
+	appCall := func(tool string, args map[string]any) map[string]any {
 		raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": args}})
 		req, _ := http.NewRequest(http.MethodPost, database.URL()+"/mcp", bytes.NewReader(raw))
 		req.Header.Set("Authorization", "Bearer "+database.Token())
@@ -70,8 +73,8 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 	categories, regions, customers := 12, 8, 5000
 	for _, adapter := range adapters {
 		name := "bench_" + adapter
-		callDatabase("db_database_create", map[string]any{"database": name, "adapter": adapter})
-		callDatabase("db_collection_create", map[string]any{"database": name, "collection": "orders", "fields": []any{
+		operator("db_database_create", map[string]any{"database": name, "adapter": adapter})
+		operator("db_collection_create", map[string]any{"database": name, "collection": "orders", "fields": []any{
 			map[string]any{"name": "customer", "type": "text"},
 			map[string]any{"name": "category", "type": "text"},
 			map[string]any{"name": "region", "type": "text"},
@@ -88,7 +91,7 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 					"amount":   float64(index%1000) / 10,
 				})
 			}
-			callDatabase("db_insert", map[string]any{"database": name, "collection": "orders", "records": records})
+			operator("db_insert", map[string]any{"database": name, "collection": "orders", "records": records})
 		}
 		t.Logf("%s: inserted %d records in %s", adapter, rows, time.Since(started).Round(time.Millisecond))
 	}
@@ -168,6 +171,16 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 	// 1000-group case needs more than the default 2000.
 	graph.MCP("graphql_release_publish", map[string]any{"environment": "development", "schema_version": schema["schema"].(map[string]any)["version"], "limits": map[string]any{"max_nested_resolvers": 20000}})
 
+	// Project databases stay closed to GraphQL until an operator grants them.
+	var denied map[string]any
+	graph.POST("/graphql", map[string]any{"query": "{ " + adapters[0] + "_summary { count } }"}, &denied)
+	if !strings.Contains(fmt.Sprint(denied["errors"]), "db_access_grant") {
+		t.Fatalf("ungranted project database was readable: %v", denied)
+	}
+	for _, adapter := range adapters {
+		operator("db_access_grant", map[string]any{"database": "bench_" + adapter, "app": "graphql", "access": "read"})
+	}
+
 	viaPlatform := func(input map[string]any) int {
 		raw, _ := json.Marshal(map[string]any{"tool": "db_aggregate", "input": input})
 		req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/api/apps/callback/apps/database/call", bytes.NewReader(raw))
@@ -195,12 +208,12 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 	for _, adapter := range adapters {
 		for _, c := range cases {
 			field := adapter + "_" + c.name
-			input := map[string]any{"database": "bench_" + adapter, "collection": "orders", "_project_id": project}
+			input := map[string]any{"database": "bench_" + adapter, "collection": "orders", "scope": "project", "_project_id": project}
 			for key, value := range c.config {
 				input[key] = value
 			}
 			native := func() ([]any, int) {
-				out := callDatabase("db_aggregate", input)
+				out := appCall("db_aggregate", input)
 				raw, _ := json.Marshal(out)
 				return out["rows"].([]any), len(raw)
 			}

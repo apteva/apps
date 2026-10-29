@@ -52,7 +52,7 @@ type Order { id: ID! amount: Int! }
 type OrderPage { rows: [Order!]! has_more: Boolean! next_cursor: String }
 type WriteResult { affected: Int! }
 type Query {
- orders(where: Filter, limit: Int, all: Boolean, requireIndex: Boolean): [Order!]!
+ orders(where: Filter, limit: Int, all: Boolean, requireIndex: Boolean, scope: String): [Order!]!
  orderPage(cursor: String): OrderPage!
 }
 type Mutation {
@@ -77,8 +77,13 @@ func databaseBindings() *executionBindings {
 
 func runDatabaseQuery(t *testing.T, query string) (*databasePlatform, map[string]any) {
 	t.Helper()
+	return runDatabaseQueryWith(t, databaseBindings(), query)
+}
+
+func runDatabaseQueryWith(t *testing.T, bindings *executionBindings, query string) (*databasePlatform, map[string]any) {
+	t.Helper()
 	p := &databasePlatform{calls: map[string]map[string]any{}}
-	_, schema, ctx := standardApp(t, databaseSDL, p, databaseBindings())
+	_, schema, ctx := standardApp(t, databaseSDL, p, bindings)
 	result := runStandard(schema, gql.Params{Context: ctx, RequestString: query})
 	if len(result.Errors) > 0 {
 		t.Fatal(result.Errors)
@@ -87,7 +92,7 @@ func runDatabaseQuery(t *testing.T, query string) (*databasePlatform, map[string
 }
 
 func TestDatabaseReadsKeepServerConstraints(t *testing.T) {
-	p, _ := runDatabaseQuery(t, `{ orders(where:{field:"status",op:"eq",value:"open"}, limit:500, all:true, requireIndex:false) { id } }`)
+	p, _ := runDatabaseQuery(t, `{ orders(where:{field:"status",op:"eq",value:"open"}, limit:500, all:true, requireIndex:false, scope:"app") { id } }`)
 	input := p.calls["db_find"]
 	want := map[string]any{"and": []any{
 		map[string]any{"field": "tenant", "op": "eq", "value": "t1"},
@@ -102,13 +107,24 @@ func TestDatabaseReadsKeepServerConstraints(t *testing.T) {
 	if _, ok := input["all"]; ok {
 		t.Fatalf("client set all: %v", input)
 	}
-	if input["database"] != "prod" || input["collection"] != "orders" {
+	if input["database"] != "prod" || input["collection"] != "orders" || input["scope"] != "project" {
 		t.Fatalf("source scope overridden: %v", input)
 	}
 
 	p, _ = runDatabaseQuery(t, `{ orders(limit:10) { id } }`)
 	if intValue(p.calls["db_find"]["limit"]) != 10 {
 		t.Fatalf("client could not lower limit: %v", p.calls["db_find"])
+	}
+}
+
+func TestDatabaseSourceScopeIsServerConfig(t *testing.T) {
+	bindings := databaseBindings()
+	source := bindings.sources[1]
+	source.Config = map[string]any{"database": "own", "collection": "orders", "scope": "app"}
+	bindings.sources[1] = source
+	p, _ := runDatabaseQueryWith(t, bindings, `{ orders(scope:"project") { id } }`)
+	if p.calls["db_find"]["scope"] != "app" {
+		t.Fatalf("source scope not applied: %v", p.calls["db_find"])
 	}
 }
 

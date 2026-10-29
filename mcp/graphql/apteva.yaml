@@ -31,8 +31,9 @@ requires:
       optional: true
       reason: Used to attach a GraphQL hostname when configured.
     - name: database
+      version: ">=0.5.3"
       optional: true
-      reason: Provides collection queries, writes and native aggregation.
+      reason: Provides collection queries, writes and native aggregation on project databases granted to graphql with db_access_grant.
     - name: tables
       version: ">=0.2.16"
       optional: true

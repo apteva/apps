@@ -931,6 +931,13 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 			input[name] = value
 		}
 	}
+	// GraphQL never creates databases, so its private Database namespace is
+	// empty. Sources address project databases that an operator granted to
+	// graphql with db_access_grant; scope "app" opts back into the private one.
+	input["scope"] = "project"
+	if value, ok := config["scope"].(string); ok && value != "" {
+		input["scope"] = value
+	}
 	if value, ok := config["database"].(string); ok {
 		input["database"] = value
 	}
