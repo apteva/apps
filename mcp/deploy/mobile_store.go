@@ -2070,8 +2070,11 @@ func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, loca
 func appleVersionLocalizationInput(loc StoreLocalization, includeWhatsNew bool) map[string]any {
 	input := map[string]any{
 		"description": loc.Description, "keywords": strings.Join(loc.Keywords, ","),
-		"marketingUrl": loc.MarketingURL, "promotionalText": loc.PromotionalText,
-		"supportUrl": loc.SupportURL,
+		"promotionalText": loc.PromotionalText, "supportUrl": loc.SupportURL,
+	}
+	// Apple rejects an empty marketingUrl as an invalid URL; omit it instead.
+	if strings.TrimSpace(loc.MarketingURL) != "" {
+		input["marketingUrl"] = strings.TrimSpace(loc.MarketingURL)
 	}
 	if includeWhatsNew && strings.TrimSpace(loc.WhatsNew) != "" {
 		input["whatsNew"] = loc.WhatsNew
