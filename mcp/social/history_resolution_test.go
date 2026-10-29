@@ -43,6 +43,11 @@ func (p *playlistEntryFixture) ExecuteIntegrationTool(conn int64, tool string, a
 		snippet["videoOwnerChannelId"] = "foreign-owner"
 	case "denied":
 		return &sdk.ExecuteResult{Success: false, Status: 403, Data: json.RawMessage(`{"error":"forbidden"}`)}, nil
+	case "video_not_found":
+		// Exact production response for MZff-_BMkvk.
+		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"error":"not_found","message":"Video not found.","provider_error":{"error":{"code":404,"errors":[{"domain":"youtube.playlistItem","location":"videoId","locationType":"parameter","message":"Video not found.","reason":"videoNotFound"}],"message":"Video not found."}},"retryable":false,"status":404}`)}, nil
+	case "other_404":
+		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"error":{"code":404,"errors":[{"reason":"playlistNotFound"}]}}`)}, nil
 	}
 	return historyFixtureResult(map[string]any{"items": []any{map[string]any{"snippet": snippet, "contentDetails": details, "status": status}}}), nil
 }
@@ -175,5 +180,51 @@ func TestHistoryMissingOptionalFileMetadataStaysReadable(t *testing.T) {
 	metadata := r.Coverage["metadata"].(map[string]any)
 	if r.Coverage["complete"] != true || metadata["unresolved_posts"] != 0 || metadata["readable_posts"] != 12 {
 		t.Fatalf("optional fields made identified videos unresolved: %+v", r.Coverage)
+	}
+}
+
+func TestHistoryProviderVideoNotFoundIsExplicitlyUnavailable(t *testing.T) {
+	pf := newPlaylistEntryFixture("video_not_found")
+	ctx := newSocialCtx(t, pf)
+	account := historyAccountFixture(t, ctx, pf.owner)
+	r := finishHistory(t, ctx, account)
+	metadata := r.Coverage["metadata"].(map[string]any)
+	if metadata["unavailable_posts"] != 1 || metadata["unresolved_posts"] != 0 || r.Coverage["complete"] != true {
+		t.Fatalf("videoNotFound should be explained unavailability: %+v", r.Coverage)
+	}
+	sample := metadata["resolution_sample"].([]historyResolution)
+	if len(sample) != 1 || sample[0].ID != "v-126" || sample[0].Resolution != "unavailable" || sample[0].Reason != "provider_video_not_found" || sample[0].ObservedAt == "" {
+		t.Fatalf("resolution sample = %+v", sample)
+	}
+	var kept int
+	ctx.AppDB().QueryRow(`SELECT count(*) FROM social_native_posts WHERE native_post_id='v-126'`).Scan(&kept)
+	if kept != 1 || pf.writes != 0 {
+		t.Fatalf("kept=%d writes=%d", kept, pf.writes)
+	}
+}
+
+func TestHistoryOtherPlaylist404StaysUnresolvedWithEvidence(t *testing.T) {
+	pf := newPlaylistEntryFixture("other_404")
+	ctx := newSocialCtx(t, pf)
+	account := historyAccountFixture(t, ctx, pf.owner)
+	r := finishHistory(t, ctx, account)
+	metadata := r.Coverage["metadata"].(map[string]any)
+	sample := metadata["resolution_sample"].([]historyResolution)
+	if r.Status != "limited" || metadata["unresolved_posts"] != 1 || len(sample) != 1 || sample[0].Resolution != "unresolved" || sample[0].Reason != "playlist_lookup_failed" {
+		t.Fatalf("status=%s metadata=%+v", r.Status, metadata)
+	}
+}
+
+func TestPostInspectNotFoundCarriesOmissionDiagnosis(t *testing.T) {
+	pf := newPlaylistEntryFixture("video_not_found")
+	ctx := newSocialCtx(t, pf)
+	account := historyAccountFixture(t, ctx, pf.owner)
+	out, err := (&App{}).toolPostNativeInspect(ctx, map[string]any{"social_account_id": account, "native_post_id": "v-126"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "not_found" || !strings.Contains(strings.Join(result["limitations"].([]string), " "), "provider_video_not_found") {
+		t.Fatalf("inspect = %+v", result)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -21,8 +22,46 @@ func refreshHistoryMetadataCounts(ctx *sdk.AppCtx, run *historyRun) error {
 	if run.MetadataUnresolvedIDs, err = historyMetadataSample(ctx, run.ID, `metadata_resolution!='unavailable'`); err != nil {
 		return err
 	}
-	run.MetadataUnavailableIDs, err = historyMetadataSample(ctx, run.ID, `metadata_resolution='unavailable'`)
+	if run.MetadataUnavailableIDs, err = historyMetadataSample(ctx, run.ID, `metadata_resolution='unavailable'`); err != nil {
+		return err
+	}
+	run.MetadataResolutions, err = historyResolutionSample(ctx, run.ID)
 	return err
+}
+
+// historyResolution is the per-item outcome for a listed ID without readable
+// metadata, with the provider evidence that produced it.
+type historyResolution struct {
+	ID         string         `json:"native_post_id"`
+	Resolution string         `json:"resolution"`
+	Reason     string         `json:"reason,omitempty"`
+	ObservedAt string         `json:"observed_at,omitempty"`
+	Evidence   map[string]any `json:"evidence,omitempty"`
+}
+
+func historyResolutionSample(ctx *sdk.AppCtx, runID string) ([]historyResolution, error) {
+	out := []historyResolution{}
+	rows, err := ctx.AppDB().Query(`SELECT native_post_id,metadata_resolution,metadata_evidence FROM social_history_seen WHERE run_id=? AND metadata_missing=1 ORDER BY native_post_id LIMIT 10`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r historyResolution
+		var raw string
+		if err = rows.Scan(&r.ID, &r.Resolution, &raw); err != nil {
+			return nil, err
+		}
+		if r.Resolution == "" {
+			r.Resolution = "pending"
+		}
+		var stored youtubeOmissionResolution
+		if json.Unmarshal([]byte(raw), &stored) == nil {
+			r.Reason, r.ObservedAt, r.Evidence = stored.Reason, stored.ObservedAt, stored.Evidence
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func historyMetadataSample(ctx *sdk.AppCtx, runID, condition string) ([]string, error) {

@@ -631,7 +631,7 @@ func (a *App) toolPostNativeInspect(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return map[string]any{"status": "failed", "social_account_id": b.ID, "error": redactDeliverySecrets(err.Error())}, nil
 	}
 	if len(posts) != 1 || run.Incomplete {
-		return map[string]any{"status": "not_found", "social_account_id": b.ID, "native_post_id": id, "limitation": "Provider did not return this ID under the connected account; existence/access remains unknown."}, nil
+		return map[string]any{"status": "not_found", "social_account_id": b.ID, "native_post_id": id, "limitation": "Provider did not return this ID under the connected account; existence/access remains unknown.", "limitations": run.Limitations}, nil
 	}
 	n := normalizeNativeObservation(b, posts[0])
 	n.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
