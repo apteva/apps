@@ -316,18 +316,28 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 			// runs triggers a re-run instead of being missed.
 			topic, watch := subscriptionTopic(a, project, api.Slug, req.Query, message.Payload)
 			var sub *subscription
+			var member *groupMember
 			cancelSubscription := func() {}
 			if topic != "" {
 				if watch != nil {
-					sub, cancelSubscription = a.hub.subscribeCoalescedForAPI(project, api.Slug, topic)
+					// Change-feed subscriptions re-run once per identical group.
+					key, keyErr := subscriptionGroupKey(ctx, project, api.Slug, environment, topic, req)
+					if keyErr != nil {
+						_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": keyErr.Error()}})})
+						continue
+					}
+					request := req
+					var leaveGroup func()
+					member, leaveGroup = a.joinSubscriptionGroup(ctx, key, project, api.Slug, topic, func(runCtx context.Context) (executeResult, error) {
+						return a.execute(runCtx, project, api.Slug, environment, request)
+					})
 					releaseWatch, watchErr := a.acquireDatabaseWatch(ctx, *watch)
 					if watchErr != nil {
-						cancelSubscription()
+						leaveGroup()
 						_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": watchErr.Error(), "extensions": map[string]any{"code": errorCode(watchErr)}}})})
 						continue
 					}
-					unsubscribe := cancelSubscription
-					cancelSubscription = func() { unsubscribe(); releaseWatch() }
+					cancelSubscription = func() { leaveGroup(); releaseWatch() }
 				} else {
 					sub, cancelSubscription = a.hub.subscribeForAPI(project, api.Slug, topic)
 				}
@@ -349,24 +359,28 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 			operationsMu.Lock()
 			operations[message.ID] = func() { opCancel(); cancelSubscription() }
 			operationsMu.Unlock()
+			if member != nil {
+				go func(id string, member *groupMember) {
+					defer func() { operationsMu.Lock(); delete(operations, id); operationsMu.Unlock(); cancelSubscription() }()
+					for {
+						select {
+						case <-opCtx.Done():
+							return
+						case delivery := <-member.mailbox:
+							if delivery.err != nil {
+								_ = write(wsMessage{ID: id, Type: "error", Payload: mustJSON([]map[string]any{{"message": delivery.err.Error()}})})
+								continue
+							}
+							if write(wsMessage{ID: id, Type: "next", Payload: mustJSON(map[string]any{"data": delivery.result.Data, "errors": delivery.result.Errors})}) != nil {
+								return
+							}
+						}
+					}
+				}(message.ID, member)
+				continue
+			}
 			go func(id, topic, environment string, sub *subscription, request graphqlRequest) {
 				defer func() { operationsMu.Lock(); delete(operations, id); operationsMu.Unlock(); cancelSubscription() }()
-				// A failed re-run of an invalidation-driven subscription would leave
-				// the subscriber stale until the next commit, so it is retried.
-				retry := time.Duration(0)
-				retryLater := func(failed bool) {
-					if !sub.coalesce || !failed {
-						retry = 0
-						return
-					}
-					retry = min(max(2*retry, 250*time.Millisecond), 5*time.Second)
-					time.AfterFunc(retry, func() {
-						select {
-						case sub.events <- nil:
-						default:
-						}
-					})
-				}
 				for {
 					select {
 					case <-sub.slow:
@@ -388,7 +402,6 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						next, err := a.execute(context.WithValue(opCtx, sharedAfterKey{}, received), project, api.Slug, environment, request)
-						retryLater(err != nil || len(next.Errors) > 0)
 						if err != nil {
 							_ = write(wsMessage{ID: id, Type: "error", Payload: mustJSON([]map[string]any{{"message": err.Error()}})})
 							continue

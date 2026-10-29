@@ -281,16 +281,20 @@ func canonicalDocument(doc *ast.QueryDocument) string {
 	formatter.NewFormatter(&out).FormatQueryDocument(doc)
 	return out.String()
 }
-func coalescingKey(ctx context.Context, project, api, environment string, release *apiRelease, document, operation string, variables map[string]any) (string, error) {
-	var identity any
+
+// executionIdentity is the authorization identity a shared result is scoped to.
+func executionIdentity(ctx context.Context, project string) any {
 	if i := securityIdentity(ctx); i != nil {
-		identity = []any{i.Issuer, i.Subject, i.Project, i.API, i.Tenant, i.Claims, i.Permissions, i.AuthorizationVersion, i.Expires}
-	} else if c := sdk.CallerFrom(ctx); c != nil {
-		identity = c
-	} else {
-		identity = []any{"platform", project}
+		return []any{i.Issuer, i.Subject, i.Project, i.API, i.Tenant, i.Claims, i.Permissions, i.AuthorizationVersion, i.Expires}
 	}
-	raw, err := json.Marshal([]any{project, api, normalizeEnvironment(environment), release.ID, release.Checksum, release.Security, release.Limits, document, operation, variables, identity})
+	if c := sdk.CallerFrom(ctx); c != nil {
+		return c
+	}
+	return []any{"platform", project}
+}
+
+func coalescingKey(ctx context.Context, project, api, environment string, release *apiRelease, document, operation string, variables map[string]any) (string, error) {
+	raw, err := json.Marshal([]any{project, api, normalizeEnvironment(environment), release.ID, release.Checksum, release.Security, release.Limits, document, operation, variables, executionIdentity(ctx, project)})
 	if err != nil {
 		return "", invalid("cannot form authorized execution identity")
 	}

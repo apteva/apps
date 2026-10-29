@@ -43,6 +43,8 @@ type App struct {
 	tablesFilterAST  bool
 	dbWatchMu        sync.Mutex
 	dbWatches        map[string]*databaseWatcher
+	groupMu          sync.Mutex
+	groups           map[string]*subscriptionGroup
 }
 
 func main() { sdk.Run(&App{}) }

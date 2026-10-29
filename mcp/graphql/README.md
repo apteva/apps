@@ -529,11 +529,13 @@ Otherwise the subscribe message fails with Database's reason.
 
 Change frames carry no row data, so updates are always a fresh read. GraphQL
 starts listening before the initial result, so a commit landing during that
-read still produces an update. Bursts collapse into one re-run per subscriber,
-and subscribers with the same document, variables and identity share one
-execution, but only one that started after their invalidation arrived, so no
-one receives a result read before the change. A re-run that fails is retried
-with backoff (250 ms up to 5 s) instead of waiting for the next commit.
+read still produces an update. Subscribers with the same document, operation,
+variables, environment and caller identity form one group: each change runs
+the query once, after the invalidation arrived, and every member receives that
+result. Different callers or variables never share a result. Bursts collapse
+into one re-run per group, and each member keeps only the newest pending
+result, so a slow connection delays only itself. A re-run that fails is
+retried with backoff (250 ms up to 5 s) instead of waiting for the next commit.
 One native watcher per database and collection set is shared by every
 subscriber, because Database admits at most 8 concurrent watches per calling
 app. When retained history expires the watcher reopens and every subscriber
