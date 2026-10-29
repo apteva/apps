@@ -181,10 +181,10 @@ func compileFastProjection(ctx context.Context, runtime *gql.Schema, state *stan
 				}
 				if resolver, exists := state.bindings.resolvers[t.Name()+"."+group.name]; exists {
 					source, exists := state.bindings.sources[resolver.SourceID]
-					if !exists || (source.Kind != "tables" && source.Kind != "module") {
+					if !exists || (source.Kind != "tables" && source.Kind != "database" && source.Kind != "module") {
 						return nil, false
 					}
-					if source.Kind == "tables" {
+					if source.Kind == "tables" || source.Kind == "database" {
 						switch resolver.Operation {
 						case "find", "list", "search", "get", "count", "aggregate":
 						default:

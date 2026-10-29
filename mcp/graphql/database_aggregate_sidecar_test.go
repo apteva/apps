@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -41,8 +42,29 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 	}
 	const project = "graphql-database-aggregate-test"
 	database := tk.SpawnSidecar(t, databaseDir, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", ""), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", ""))
+	// The platform bridge marks every sibling-app call with the caller's
+	// install, and Database scopes those calls to that app's private
+	// namespace. Seed and read as the GraphQL install so all paths share data.
 	callDatabase := func(tool string, args map[string]any) map[string]any {
-		return database.MCPAs(tool, args, 1, "", project)
+		raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": args}})
+		req, _ := http.NewRequest(http.MethodPost, database.URL()+"/mcp", bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+database.Token())
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Apteva-Project-ID", project)
+		req.Header.Set(sdk.HeaderBoundCallerInstallID, "1")
+		req.Header.Set(sdk.HeaderBoundCallerAppName, "graphql")
+		req.Header.Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var out map[string]any
+		if resp.Header.Get(sdk.HeaderAppResultFormat) != sdk.AppResultJSON || json.Unmarshal(body, &out) != nil {
+			t.Fatalf("database %s: %d %s", tool, resp.StatusCode, body)
+		}
+		return out
 	}
 
 	categories, regions, customers := 12, 8, 5000
@@ -85,13 +107,23 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+database.Token())
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Apteva-Project-ID", project)
-		req.Header.Set("X-Apteva-Caller-Agent", "1")
+		// Mirror apteva-server's callback bridge: it always binds the caller
+		// install, and forwards the direct JSON result format when negotiated.
+		req.Header.Set(sdk.HeaderBoundCallerInstallID, "1")
+		req.Header.Set(sdk.HeaderBoundCallerAppName, "graphql")
+		direct := r.Header.Get(sdk.HeaderAppResultFormat) == sdk.AppResultJSON
+		if direct {
+			req.Header.Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
+		if direct && resp.Header.Get(sdk.HeaderAppResultFormat) == sdk.AppResultJSON {
+			w.Header().Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
@@ -138,13 +170,16 @@ func TestRealDatabaseAggregationParityAndPerformance(t *testing.T) {
 
 	viaPlatform := func(input map[string]any) int {
 		raw, _ := json.Marshal(map[string]any{"tool": "db_aggregate", "input": input})
-		resp, err := http.Post(proxy.URL+"/api/apps/callback/apps/database/call", "application/json", bytes.NewReader(raw))
+		req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/api/apps/callback/apps/database/call", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusOK || bytes.Contains(body, []byte(`"isError":true`)) {
+		if resp.StatusCode != http.StatusOK || resp.Header.Get(sdk.HeaderAppResultFormat) != sdk.AppResultJSON {
 			t.Fatalf("via platform: %d %s", resp.StatusCode, body)
 		}
 		return len(body)

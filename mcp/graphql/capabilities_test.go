@@ -106,7 +106,7 @@ func TestAggregationAdaptersAndMixedSourcesRemainAvailable(t *testing.T) {
 				} else if string(body) != string(expected) {
 					t.Fatalf("aggregation changed: %s != %s", body, expected)
 				}
-				if ctx.Value(standardRequestKey{}).(*standardRequest).fastProjectionUsed != (kind == "tables" && !disabled) {
+				if ctx.Value(standardRequestKey{}).(*standardRequest).fastProjectionUsed != !disabled {
 					t.Fatal("unexpected fast-path eligibility")
 				}
 				tool, group, order := kind+".rows_aggregate", "group_by", "order_by"
