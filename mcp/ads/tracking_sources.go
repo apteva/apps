@@ -26,6 +26,10 @@ func trackingSourceCreateSchema() map[string]any {
 		"reuse_existing": map[string]any{
 			"type": "boolean", "default": true,
 		},
+		"owner": map[string]any{
+			"type": "string", "enum": []string{"auto", "business", "ad_account"}, "default": "auto",
+			"description": "Meta only. auto creates the Pixel under the ad account's Business and shares it with the account, falling back to the ad account when no Business is visible. Ad-account creation fails with Meta error 6200 for most business-managed accounts.",
+		},
 		"category": map[string]any{
 			"type": "string",
 			"enum": []string{
@@ -78,60 +82,14 @@ func (a *App) toolTrackingSourceCreate(ctx *sdk.AppCtx, args map[string]any) (an
 		if len(matches) > 1 {
 			return trackingSourceSelectionRequired(matches), nil
 		}
-		if len(matches) == 1 {
+		// A business Pixel whose share failed is known locally but not usable
+		// by the account; fall through so the business path shares it.
+		if len(matches) == 1 && matches[0].Metadata["ad_account_associated"] != false {
 			return a.trackingSourceResult(ctx, acct, &matches[0], false, true, false, setDefault)
 		}
 	}
 
-	parsed, createErr := a.execIntegrationTool(ctx, acct, "pixel_create", map[string]any{
-		"adAccountId": acct.NativeAccountID,
-		"name":        name,
-	})
-	if createErr != nil {
-		if shouldReconcileTrackingSourceCreate(createErr) {
-			matches, refreshErr := a.refreshAndMatchTrackingSources(ctx, acct, name)
-			matches = trackingSourcesNotPreviouslyPresent(matches, knownMatches)
-			if refreshErr == nil && len(matches) == 1 {
-				resource, err := a.markTrackingSourceManaged(ctx, acct, &matches[0])
-				if err != nil {
-					return nil, err
-				}
-				result, err := a.trackingSourceResult(ctx, acct, resource, false, false, true, setDefault)
-				if err == nil {
-					a.emitTrackingSourceCreated(ctx, acct, resource, setDefault)
-				}
-				return result, err
-			}
-			if refreshErr == nil && len(matches) > 1 {
-				return trackingSourceSelectionRequired(matches), nil
-			}
-			createErr["reconciliation_attempted"] = true
-		}
-		return createErr, nil
-	}
-
-	nativeID := trackingSourceNativeID(parsed)
-	if nativeID == "" {
-		out := mcpError("pixel_create returned no tracking source id")
-		out["code"] = "provider_response_invalid"
-		out["platform"] = acct.Platform
-		return out, nil
-	}
-	resource, err := a.upsertResource(ctx, acct, discoveredResource{
-		Kind: resourceTrackingSource, ProviderType: "meta_pixel", NativeID: nativeID,
-		DisplayName: name, Status: "active",
-		Capabilities: []string{"conversion_tracking", "server_events"},
-		Metadata:     map[string]any{"last_fired_time": nil},
-		ManagedByApp: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-	result, err := a.trackingSourceResult(ctx, acct, resource, true, false, false, setDefault)
-	if err == nil {
-		a.emitTrackingSourceCreated(ctx, acct, resource, setDefault)
-	}
-	return result, err
+	return a.createMetaPixel(ctx, acct, args, name, setDefault, reuseExisting, knownMatches)
 }
 
 func (a *App) toolTrackingSourceInstallationGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -169,8 +127,17 @@ func (a *App) toolTrackingSourceInstallationGet(ctx *sdk.AppCtx, args map[string
 			"script_origins":  []string{"https://connect.facebook.net"},
 			"connect_origins": []string{"https://connect.facebook.net", "https://www.facebook.com"},
 			"image_origins":   []string{"https://www.facebook.com"},
-			"event_names":     []string{"PageView", "ViewContent", "Search", "AddToCart", "InitiateCheckout", "AddPaymentInfo", "Purchase"},
+			"event_names": []string{
+				"PageView", "ViewContent", "Search", "Lead", "CompleteRegistration", "Contact",
+				"AddToCart", "InitiateCheckout", "AddPaymentInfo", "Purchase",
+			},
+			"funnel_events": map[string]any{
+				"signup":    []string{"PageView", "ViewContent", "Lead", "CompleteRegistration"},
+				"ecommerce": []string{"PageView", "ViewContent", "AddToCart", "InitiateCheckout", "AddPaymentInfo", "Purchase"},
+			},
 		},
+		"tracking_verified": false,
+		"verification":      "Installing this code does not prove Meta accepts the domain's events. Run tracking_source_readiness_get with the site's domains after deployment.",
 	}, nil
 }
 
@@ -282,6 +249,8 @@ func (a *App) trackingSourceResult(
 		"default_selected":        setDefault,
 		"resource":                resource.response(),
 		"site_tracking_installed": false,
+		"tracking_verified":       false,
+		"next_step":               "Install with tracking_source_installation_get, then verify with tracking_source_readiness_get.",
 	}, nil
 }
 

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +42,10 @@ type analyticsSyncState struct {
 
 type genericPerformanceRequest struct {
 	IncludeEvents bool
+
+	// ConversionEvents selects which Meta kinds or action types count as
+	// conversions; empty means metaDefaultConversionKinds.
+	ConversionEvents []string
 
 	Level     string
 	DateFrom  string
@@ -101,12 +104,17 @@ func validateGenericPerformanceRequest(args map[string]any) (*genericPerformance
 	if value, ok := args["refresh"].(bool); ok {
 		refresh = value
 	}
+	conversionEvents, err := parseConversionEvents(args["conversion_events"])
+	if err != nil {
+		return nil, err
+	}
 	return &genericPerformanceRequest{
-		Level:     level,
-		DateFrom:  validated.DateFrom,
-		DateTo:    validated.DateTo,
-		EntityIDs: validated.CampaignIDs,
-		Refresh:   refresh,
+		Level:            level,
+		DateFrom:         validated.DateFrom,
+		DateTo:           validated.DateTo,
+		EntityIDs:        validated.CampaignIDs,
+		Refresh:          refresh,
+		ConversionEvents: conversionEvents,
 	}, nil
 }
 
@@ -118,6 +126,9 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	request, err := validateGenericPerformanceRequest(args)
 	if err != nil {
 		return mcpError(err.Error()), nil
+	}
+	if len(request.ConversionEvents) > 0 && acct.Platform != "meta" {
+		return mcpError("conversion_events is supported for Meta; use conversion_performance_get for per-event reporting on " + acct.Platform), nil
 	}
 	empty, scopeErr, internalErr := a.scopePerformanceRequest(ctx, acct, def, request)
 	if internalErr != nil {
@@ -142,7 +153,7 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 		if err != nil {
 			return nil, err
 		}
-		return analyticsResponse(points, "cache"), nil
+		return definedPerformanceResponse(points, "cache", request), nil
 	}
 
 	points, providerErr, syncErr, live := a.syncAnalytics(ctx, pid, acct, request, "manual")
@@ -156,7 +167,20 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if live {
 		source = "live"
 	}
-	return analyticsResponse(points, source), nil
+	return definedPerformanceResponse(points, source, request), nil
+}
+
+// definedPerformanceResponse recounts Meta conversions against the requested
+// definition before summarizing, and states that definition in the result.
+func definedPerformanceResponse(points []analyticsPoint, source string, request *genericPerformanceRequest) map[string]any {
+	recounted := make([]analyticsPoint, len(points))
+	copy(recounted, points)
+	definition := recountMetaConversions(recounted, request.ConversionEvents)
+	out := analyticsResponse(recounted, source)
+	if definition != nil {
+		out["conversion_definition"] = definition
+	}
+	return out
 }
 
 func (a *App) scopePerformanceRequest(
@@ -312,7 +336,7 @@ func (a *App) fetchMetaAnalytics(ctx *sdk.AppCtx, acct *adAccount, request *gene
 	input := map[string]any{
 		"objectId":       acct.NativeAccountID,
 		"level":          providerLevel,
-		"fields":         identityFields + ",date_start,date_stop,spend,impressions,reach,frequency,clicks,inline_link_clicks,actions,action_values,video_play_actions",
+		"fields":         identityFields + ",date_start,date_stop,spend,impressions,reach,frequency,clicks,inline_link_clicks,outbound_clicks,actions,action_values,video_play_actions",
 		"time_range":     string(timeRange),
 		"time_increment": "1",
 		"limit":          500,
@@ -418,15 +442,13 @@ func normalizeMetaAnalyticsPoint(acct *adAccount, level string, row map[string]a
 	if err != nil {
 		return analyticsPoint{}, err
 	}
-	conversionValueMicros, err := decimalToMicros(metaConversionValueRaw(row))
-	if err != nil {
-		return analyticsPoint{}, err
-	}
+	conversions, conversionValueMicros := metaRowConversions(row)
 	entityID, entityName := metaAnalyticsIdentity(acct, level, row)
 	providerMetrics := map[string]any{
-		"frequency":     numericArgAny(row["frequency"]),
-		"actions":       actionValues(row["actions"]),
-		"action_values": actionValues(row["action_values"]),
+		"frequency":       numericArgAny(row["frequency"]),
+		"actions":         actionValues(row["actions"]),
+		"action_values":   actionValues(row["action_values"]),
+		"outbound_clicks": metaOutboundClicks(row),
 	}
 	return analyticsPoint{
 		Platform:              acct.Platform,
@@ -446,7 +468,7 @@ func normalizeMetaAnalyticsPoint(acct *adAccount, level string, row map[string]a
 		Reach:                 int64ArgAny(row["reach"]),
 		Clicks:                int64ArgAny(row["clicks"]),
 		LinkClicks:            int64ArgAny(row["inline_link_clicks"], row["inlineLinkClicks"]),
-		Conversions:           metaConversionValue(row),
+		Conversions:           conversions,
 		ConversionValueMicros: conversionValueMicros,
 		VideoViews:            metaVideoViews(row),
 		ProviderMetrics:       providerMetrics,
@@ -538,14 +560,9 @@ func mapAtEither(row map[string]any, keys ...string) map[string]any {
 	return map[string]any{}
 }
 
-func metaConversionValueRaw(row map[string]any) string {
-	values := actionValues(row["action_values"])
-	for _, candidate := range []string{"omni_purchase", "offsite_conversion.fb_pixel_purchase", "purchase", "offsite_conversion"} {
-		if value, ok := values[candidate]; ok {
-			return strconv.FormatFloat(value, 'f', -1, 64)
-		}
-	}
-	return "0"
+// outbound_clicks arrives as an action list keyed outbound_click.
+func metaOutboundClicks(row map[string]any) int64 {
+	return int64(math.Round(actionValues(row["outbound_clicks"])["outbound_click"]))
 }
 
 func metaVideoViews(row map[string]any) int64 {
@@ -695,15 +712,29 @@ func analyticsResponse(points []analyticsPoint, source string) map[string]any {
 		data = append(data, analyticsPointMap(point))
 	}
 	return map[string]any{
-		"data":      data,
-		"summary":   analyticsSummary(points),
-		"source":    source,
-		"freshness": analyticsFreshness(points),
-		"metric_notes": map[string]any{
-			"reach": "Reach is non-additive; use the daily rows rather than summing it across dates or entities.",
-		},
-		"next_cursor": nil,
+		"data":         data,
+		"summary":      analyticsSummary(points),
+		"source":       source,
+		"freshness":    analyticsFreshness(points),
+		"metric_notes": analyticsMetricNotes(points),
+		"next_cursor":  nil,
 	}
+}
+
+func analyticsMetricNotes(points []analyticsPoint) map[string]any {
+	notes := map[string]any{
+		"reach": "Reach is non-additive; use the daily rows rather than summing it across dates or entities.",
+	}
+	for _, point := range points {
+		if point.Platform == "meta" {
+			notes["clicks"] = "Meta clicks (all): every click on the ad, including likes, comments, profile and expand clicks, under the ad set's attribution setting."
+			notes["link_clicks"] = "Meta inline_link_clicks: clicks on links that lead to destinations or experiences, on or off Meta."
+			notes["outbound_clicks"] = "Meta outbound_clicks: clicks that take people off Meta technologies. Meta counts it independently of clicks (all), and clicks (all) lower than outbound_clicks has been observed for the same rows without a documented cause, so do not derive one metric from the other."
+			notes["conversions"] = "Meta conversions follow conversion_definition; engagement actions such as post_save are excluded."
+			break
+		}
+	}
+	return notes
 }
 
 func analyticsPointMap(point analyticsPoint) map[string]any {
@@ -729,10 +760,20 @@ func analyticsPointMap(point analyticsPoint) map[string]any {
 		"conversion_value_micros": point.ConversionValueMicros,
 		"video_views":             point.VideoViews,
 		"provider_metrics":        point.ProviderMetrics,
+		"outbound_clicks":         nullableOutboundClicks(point),
 		"fetched_at":              point.FetchedAt,
 	}
 	addDerivedAnalytics(result, point.SpendMicros, point.Impressions, point.Clicks, point.Conversions, point.ConversionValueMicros)
 	return result
+}
+
+// Only Meta reports outbound clicks; other platforms return null rather than
+// a misleading zero.
+func nullableOutboundClicks(point analyticsPoint) any {
+	if point.Platform != "meta" {
+		return nil
+	}
+	return int64(numericArgAny(point.ProviderMetrics["outbound_clicks"]))
 }
 
 func analyticsSummary(points []analyticsPoint) map[string]any {

@@ -194,7 +194,7 @@ func TestCampaignPerformanceMeta_UsesDailyInsightsAndExactSpend(t *testing.T) {
 						"spend":"124.500001",
 						"impressions":"18420",
 						"clicks":"391",
-						"actions":[{"action_type":"offsite_conversion","value":"28"}]
+						"actions":[{"action_type":"offsite_conversion","value":"40"},{"action_type":"offsite_conversion.fb_pixel_lead","value":"28"},{"action_type":"onsite_conversion.post_save","value":"5"}]
 					}],
 					"paging":{"cursors":{"after":"cursor-2"}}
 				}`),

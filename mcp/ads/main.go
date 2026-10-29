@@ -563,7 +563,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tracking_source_create",
-			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel; this does not install browser or server-side tracking on a website.",
+			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel under the ad account's Business and shares it with the account (owner=auto); this does not install browser or server-side tracking on a website.",
 			InputSchema: trackingSourceCreateSchema(),
 			Handler:     a.toolTrackingSourceCreate,
 		},
@@ -572,6 +572,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Return browser-public installation configuration for a normalized tracking source. Resolves the account default when tracking_source_resource_id is omitted.",
 			InputSchema: trackingSourceInstallationSchema(),
 			Handler:     a.toolTrackingSourceInstallationGet,
+		},
+		{
+			Name:        "tracking_source_readiness_get",
+			Description: "Verify a Meta Pixel actually works: provider availability, ad-account association, events Meta received (overall, per required event, per domain), the Pixel in each domain's homepage HTML, and Meta's diagnostics. Returns ready, not_ready or unverified with blocking reasons.",
+			InputSchema: trackingSourceReadinessSchema(),
+			Handler:     a.toolTrackingSourceReadinessGet,
+		},
+		{
+			Name:        "tracking_source_test_event_send",
+			Description: "Send one Conversions API test event with a test_event_code from Events Manager. Reports API acceptance separately from test-session match and visibility; test events never count toward reporting or ad eligibility.",
+			InputSchema: trackingSourceTestEventSchema(),
+			Handler:     a.toolTrackingSourceTestEventSend,
 		},
 		{
 			Name:        "lead_form_create",
@@ -769,7 +781,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Get normalized advertising performance for one project-owned account. " +
 				"Supports account, campaign, ad_group, and ad reporting with integer micros for money, " +
 				"derived CTR/CPC/CPM/CPA/ROAS, local caching, and bounded live refreshes. " +
-				"Args: ad_account_id, level?, date_from, date_to, granularity? (day), entity_ids?, refresh? (default true).",
+				"Args: ad_account_id, level?, date_from, date_to, granularity? (day), entity_ids?, refresh? (default true), conversion_events? (Meta). " +
+				"Meta responses include conversion_definition, naming the action types counted.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"level":         map[string]any{"type": "string", "enum": []string{"account", "campaign", "ad_group", "ad"}, "default": "campaign"},
@@ -782,6 +795,13 @@ func (a *App) MCPTools() []sdk.Tool {
 					"items":    map[string]any{"type": "string", "pattern": `^[A-Za-z0-9_~-]+$`},
 				},
 				"refresh": map[string]any{"type": "boolean", "default": true},
+				"conversion_events": map[string]any{
+					"type":     "array",
+					"maxItems": 20,
+					"items":    map[string]any{"type": "string"},
+					"description": "Meta only. Which events count as conversions: kinds (purchase, lead, complete_registration) or exact action types such as offsite_conversion.fb_pixel_lead. " +
+						"Defaults to purchase, lead and complete_registration, each counted once. Engagement such as onsite_conversion.post_save is never counted unless named.",
+				},
 			}, []string{"ad_account_id", "date_from", "date_to"}),
 			Handler: a.toolPerformanceGet,
 		},
@@ -5427,7 +5447,7 @@ func normalizeMetaPerformance(acct *adAccount, row map[string]any) (map[string]a
 		"spend_micros":  spendMicros,
 		"impressions":   int64ArgAny(row["impressions"]),
 		"clicks":        int64ArgAny(row["clicks"]),
-		"conversions":   metaConversionValue(row),
+		"conversions":   metaRowCount(row),
 	}, nil
 }
 
@@ -5453,35 +5473,9 @@ func decimalToMicros(value any) (int64, error) {
 	return micros.Int64(), nil
 }
 
-func metaConversionValue(row map[string]any) float64 {
-	if direct := numericArgAny(row["conversion"]); direct != 0 {
-		return direct
-	}
-	for _, key := range []string{"conversions", "actions"} {
-		values := actionValues(row[key])
-		if len(values) == 0 {
-			continue
-		}
-		for _, aggregate := range []string{"offsite_conversion", "onsite_conversion", "conversion"} {
-			if value, ok := values[aggregate]; ok {
-				return value
-			}
-		}
-		total := 0.0
-		for actionType, value := range values {
-			lower := strings.ToLower(actionType)
-			if strings.Contains(lower, "conversion") ||
-				strings.Contains(lower, "purchase") ||
-				strings.Contains(lower, "lead") ||
-				strings.Contains(lower, "complete_registration") {
-				total += value
-			}
-		}
-		if total != 0 {
-			return total
-		}
-	}
-	return 0
+func metaRowCount(row map[string]any) float64 {
+	count, _ := metaRowConversions(row)
+	return count
 }
 
 func actionValues(value any) map[string]float64 {
