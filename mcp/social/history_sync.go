@@ -78,6 +78,7 @@ type historyRun struct {
 	MetadataUnresolved      int                    `json:"metadata_unresolved"`
 	MetadataUnavailable     int                    `json:"metadata_unavailable"`
 	MetadataUnavailableIDs  []string               `json:"metadata_unavailable_sample"`
+	MetadataResolutions     []historyResolution    `json:"metadata_resolution_sample"`
 	MetadataRetryable       int                    `json:"metadata_retryable"`
 	MetadataReadbacks       int                    `json:"metadata_readbacks"`
 	CoverageVersion         int                    `json:"coverage_version"`

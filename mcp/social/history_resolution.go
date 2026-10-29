@@ -44,6 +44,14 @@ func (a *App) diagnoseOmittedYouTubeVideo(ctx *sdk.AppCtx, b historyAccount, run
 		if errors.As(err, &providerErr) && (providerErr.status == 401 || providerErr.status == 403) {
 			return out, err
 		}
+		// YouTube answers the videoId filter with 404 videoNotFound when the
+		// listed ID has no video resource: an explicit provider statement,
+		// distinct from a failed lookup. The ID is kept, not deleted.
+		if errors.As(err, &providerErr) && providerErr.status == 404 && strings.Contains(err.Error(), `"reason":"videoNotFound"`) {
+			out.Resolution, out.Reason = "unavailable", "provider_video_not_found"
+			out.Evidence["playlist_lookup"] = map[string]any{"status": 404, "provider_reason": "videoNotFound", "provider_domain": "youtube.playlistItem", "location": "videoId"}
+			return out, nil
+		}
 		out.Reason = "playlist_lookup_failed"
 		out.Evidence["playlist_lookup_error"] = redactDeliverySecrets(err.Error())
 		return out, nil
