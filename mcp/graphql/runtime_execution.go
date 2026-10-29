@@ -41,6 +41,7 @@ type admissionLane struct {
 	changed         chan struct{}
 }
 type sharedExecution struct {
+	started       time.Time
 	done          chan struct{}
 	cancel        context.CancelFunc
 	waiters, peak int
@@ -164,6 +165,11 @@ func (r *executionRuntime) admit(ctx context.Context, scope, operation string, l
 	}
 }
 
+// sharedAfterKey carries the earliest start time a caller accepts for a shared
+// execution. A subscription re-run sets it to when its invalidation arrived,
+// so it never adopts a result read before the change it is reacting to.
+type sharedAfterKey struct{}
+
 // Only in-flight work is retained. Completion removes the flight before waking
 // callers, including on partial GraphQL errors; no result cache exists here.
 func (r *executionRuntime) share(ctx context.Context, key string, limits releaseLimits, run func(context.Context) (executeResult, error)) (executeResult, error) {
@@ -179,6 +185,11 @@ func (r *executionRuntime) share(ctx context.Context, key string, limits release
 		r.flights = map[string]*sharedExecution{}
 	}
 	f, joined := r.flights[key]
+	if after, ok := ctx.Value(sharedAfterKey{}).(time.Time); joined && ok && f.started.Before(after) {
+		// Too old to reflect the change: start a fresh flight under the same
+		// key. The old flight only removes its own map entry on completion.
+		joined = false
+	}
 	if joined && f.waiters >= limits.MaxCoalescedWaiters {
 		r.mu.Unlock()
 		return executeResult{}, runtimeError("coalescing_limit", "GraphQL shared execution waiter limit exceeded")
@@ -195,7 +206,7 @@ func (r *executionRuntime) share(ctx context.Context, key string, limits release
 			deadline = identity.Expires
 		}
 		sharedCtx, cancel := context.WithDeadline(base, deadline)
-		f = &sharedExecution{done: make(chan struct{}), cancel: cancel, id: uuid.NewString()}
+		f = &sharedExecution{started: time.Now(), done: make(chan struct{}), cancel: cancel, id: uuid.NewString()}
 		if identity := securityIdentity(ctx); identity != nil {
 			copy := *identity
 			copy.RequestID = f.id
@@ -329,6 +340,48 @@ func pureReadOperation(p *preparedOperation, b *executionBindings, schema *ast.S
 	}
 	return true
 }
+
+// sharedSubscriptionRead reports whether a subscription re-run may share one
+// execution with identical re-runs (same document, variables and identity) that
+// react to the same invalidation. Only Database and Tables reads qualify; the
+// caller's sharedAfterKey keeps it from adopting a result read before the change.
+func sharedSubscriptionRead(p *preparedOperation, b *executionBindings) bool {
+	if p.op.Operation != ast.Subscription || b == nil || len(p.permissionFields) == 0 {
+		return false
+	}
+	for _, key := range p.permissionFields {
+		r, ok := b.resolvers[key]
+		if !ok {
+			continue
+		}
+		s, ok := b.sources[r.SourceID]
+		if !ok {
+			return false
+		}
+		switch s.Kind {
+		case "database":
+			if tool, err := databaseTool(r.Operation); err != nil || !databaseReadTool(tool) {
+				return false
+			}
+		case "tables":
+			if !tablesReadOperation(r.Operation) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func databaseReadTool(tool string) bool {
+	switch tool {
+	case "db_find", "db_get", "db_count", "db_aggregate":
+		return true
+	}
+	return false
+}
+
 func tablesReadOperation(op string) bool {
 	switch op {
 	case "find", "list", "search", "get", "count", "aggregate", aggregatePipelineOperation:

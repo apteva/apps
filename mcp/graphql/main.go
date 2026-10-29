@@ -41,6 +41,8 @@ type App struct {
 	tablesCapsMu     sync.Mutex
 	tablesCapsKnown  bool
 	tablesFilterAST  bool
+	dbWatchMu        sync.Mutex
+	dbWatches        map[string]*databaseWatcher
 }
 
 func main() { sdk.Run(&App{}) }
@@ -85,6 +87,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
 	a.runtime.stop()
+	a.stopDatabaseWatches()
 	if a.hub != nil {
 		a.hub.close()
 	}
@@ -108,6 +111,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/graphql/", Handler: a.handleGraphQL},
 		{Pattern: "/public/graphql/", Handler: a.handlePublicGraphQL, NoAuth: true},
 		{Pattern: "/realtime", Handler: a.handleRealtime},
+		{Pattern: "/realtime/", Handler: a.handleRealtime},
 		{Pattern: "/public/realtime/", Handler: a.handleRealtime, NoAuth: true},
 		{Pattern: "/admin/", Handler: a.handleAdminHTTP},
 	}

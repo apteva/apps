@@ -22,6 +22,10 @@ type subscription struct {
 	events  chan map[string]any
 	done    chan struct{}
 	slow    chan struct{}
+	// coalesce subscriptions treat events as invalidations: a full buffer
+	// already guarantees a pending re-run, so extra events are dropped instead
+	// of failing the subscriber as too slow.
+	coalesce bool
 }
 
 type subscriptionHub struct {
@@ -45,7 +49,15 @@ func (h *subscriptionHub) subscribe(project, topic string) (*subscription, func(
 }
 
 func (h *subscriptionHub) subscribeForAPI(project, api, topic string) (*subscription, func()) {
-	s := &subscription{project: project, api: normalizeAPISlug(api), topic: topic, events: make(chan map[string]any, 16), done: make(chan struct{}), slow: make(chan struct{})}
+	return h.add(&subscription{project: project, api: normalizeAPISlug(api), topic: topic, events: make(chan map[string]any, 16), done: make(chan struct{}), slow: make(chan struct{})})
+}
+
+func (h *subscriptionHub) subscribeCoalescedForAPI(project, api, topic string) (*subscription, func()) {
+	return h.add(&subscription{project: project, api: normalizeAPISlug(api), topic: topic, events: make(chan map[string]any, 1), done: make(chan struct{}), slow: make(chan struct{}), coalesce: true})
+}
+
+func (h *subscriptionHub) add(s *subscription) (*subscription, func()) {
+	project, api, topic := s.project, s.api, s.topic
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -94,6 +106,9 @@ func (h *subscriptionHub) publishForAPI(project, api, topic string, payload map[
 		case sub.events <- payload:
 			count++
 		default:
+			if sub.coalesce {
+				continue
+			}
 			select {
 			case <-sub.slow:
 			default:
@@ -122,6 +137,9 @@ func (h *subscriptionHub) publishAllAPIs(project, topic string, payload map[stri
 			case sub.events <- payload:
 				count++
 			default:
+				if sub.coalesce {
+					continue
+				}
 				select {
 				case <-sub.slow:
 				default:
@@ -294,26 +312,61 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 			if policy.Mode == "auth" {
 				environment = policy.Environment
 			}
+			// Listen before the initial execution so a change committed while it
+			// runs triggers a re-run instead of being missed.
+			topic, watch := subscriptionTopic(a, project, api.Slug, req.Query, message.Payload)
+			var sub *subscription
+			cancelSubscription := func() {}
+			if topic != "" {
+				if watch != nil {
+					sub, cancelSubscription = a.hub.subscribeCoalescedForAPI(project, api.Slug, topic)
+					releaseWatch, watchErr := a.acquireDatabaseWatch(ctx, *watch)
+					if watchErr != nil {
+						cancelSubscription()
+						_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": watchErr.Error(), "extensions": map[string]any{"code": errorCode(watchErr)}}})})
+						continue
+					}
+					unsubscribe := cancelSubscription
+					cancelSubscription = func() { unsubscribe(); releaseWatch() }
+				} else {
+					sub, cancelSubscription = a.hub.subscribeForAPI(project, api.Slug, topic)
+				}
+			}
 			opCtx, opCancel := context.WithCancel(ctx)
 			result, execErr := a.execute(opCtx, project, api.Slug, environment, req)
 			if execErr != nil {
 				opCancel()
+				cancelSubscription()
 				_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": execErr.Error()}})})
 				continue
 			}
 			_ = write(wsMessage{ID: message.ID, Type: "next", Payload: mustJSON(map[string]any{"data": result.Data, "errors": result.Errors})})
-			topic := subscriptionTopic(a, project, api.Slug, req.Query, message.Payload)
 			if topic == "" {
 				opCancel()
 				_ = write(wsMessage{ID: message.ID, Type: "complete"})
 				continue
 			}
-			sub, cancelSubscription := a.hub.subscribeForAPI(project, api.Slug, topic)
 			operationsMu.Lock()
 			operations[message.ID] = func() { opCancel(); cancelSubscription() }
 			operationsMu.Unlock()
 			go func(id, topic, environment string, sub *subscription, request graphqlRequest) {
 				defer func() { operationsMu.Lock(); delete(operations, id); operationsMu.Unlock(); cancelSubscription() }()
+				// A failed re-run of an invalidation-driven subscription would leave
+				// the subscriber stale until the next commit, so it is retried.
+				retry := time.Duration(0)
+				retryLater := func(failed bool) {
+					if !sub.coalesce || !failed {
+						retry = 0
+						return
+					}
+					retry = min(max(2*retry, 250*time.Millisecond), 5*time.Second)
+					time.AfterFunc(retry, func() {
+						select {
+						case sub.events <- nil:
+						default:
+						}
+					})
+				}
 				for {
 					select {
 					case <-sub.slow:
@@ -324,7 +377,18 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 					case <-opCtx.Done():
 						return
 					case <-sub.events:
-						next, err := a.execute(opCtx, project, api.Slug, environment, request)
+						// Events are invalidations: one re-run covers every queued one,
+						// and it may only share an execution that started afterwards.
+						received := time.Now()
+						for drained := false; !drained; {
+							select {
+							case <-sub.events:
+							default:
+								drained = true
+							}
+						}
+						next, err := a.execute(context.WithValue(opCtx, sharedAfterKey{}, received), project, api.Slug, environment, request)
+						retryLater(err != nil || len(next.Errors) > 0)
 						if err != nil {
 							_ = write(wsMessage{ID: id, Type: "error", Payload: mustJSON([]map[string]any{{"message": err.Error()}})})
 							continue
@@ -360,31 +424,41 @@ func (a *App) handleSourceEvent(_ *sdk.AppCtx, event sdk.Event) error {
 	return nil
 }
 
-func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawMessage) string {
+// subscriptionTopic returns the hub topic for a subscription, and the Database
+// change-feed watch that feeds it when the field reads a Database source.
+func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawMessage) (string, *databaseWatchSpec) {
 	// The protocol permits an explicit topic for source adapters and tests.
 	var envelope map[string]any
 	if json.Unmarshal(payload, &envelope) == nil {
 		if value, ok := envelope["topic"].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+			return strings.TrimSpace(value), nil
 		}
 	}
 	// Resolver configuration is the source of truth for normal subscriptions.
 	doc, err := parseQueryOnly(query)
 	if err != nil || len(doc.Operations) == 0 || len(doc.Operations[0].SelectionSet) == 0 {
-		return ""
+		return "", nil
 	}
 	field, ok := doc.Operations[0].SelectionSet[0].(*ast.Field)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	resolver, _ := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, "Subscription", field.Name)
 	if resolver == nil {
-		return ""
+		return "", nil
 	}
-	if topic, ok := resolver.Config["topic"].(string); ok {
-		return strings.TrimSpace(topic)
+	if topic, ok := resolver.Config["topic"].(string); ok && strings.TrimSpace(topic) != "" {
+		return strings.TrimSpace(topic), nil
 	}
-	return ""
+	source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
+	if source == nil || source.Kind != "database" {
+		return "", nil
+	}
+	spec, ok := databaseWatchFor(project, *source, *resolver)
+	if !ok {
+		return "", nil
+	}
+	return spec.topic(), &spec
 }
 
 func parseQueryOnly(query string) (*ast.QueryDocument, error) {

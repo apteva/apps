@@ -497,13 +497,47 @@ negotiated inner JSON results. Platform-only read optimizations are preserved.
 
 ## Realtime transport
 
-`/realtime` retains its existing platform-only event transport with
-`graphql-transport-ws`-style frames, not full protocol/spec compliance.
-Protected subscriptions remain disabled. A subscription resolver
-can set `config.topic`; Tables row events are bridged automatically and trusted
-source adapters or the `graphql_event_publish` tool can publish matching
-events. Database-native change-feed integration is the next step for full
-collection CDC delivery.
+`/realtime` (or `/realtime/<api_slug>`) retains its existing platform-only
+event transport with `graphql-transport-ws`-style frames, not full
+protocol/spec compliance. Protected subscriptions remain disabled. A
+subscription resolver can set `config.topic`; Tables row events are bridged
+automatically and trusted source adapters or the `graphql_event_publish` tool
+can publish matching events. Every event re-runs the subscription's query.
+
+### Database subscriptions
+
+A `Subscription` field bound to a Database read (`find`, `list`, `search`,
+`get`, `count` or `aggregate`) follows Database's native change feed. GraphQL
+long-polls `db_changes` with `scope: "project"` and re-runs the field whenever
+a commit touches the source collection; `watch_collections` in the resolver
+config watches other or additional collections instead:
+
+```json
+{
+  "parent_type": "Subscription",
+  "field_name": "orderStats",
+  "source": "orders",
+  "operation": "aggregate",
+  "config": {"groupBy": ["region"], "metrics": [{"name": "count", "op": "count"}], "watch_collections": ["orders", "refunds"]}
+}
+```
+
+Requirements, all set by a project operator in Database (0.5.3 or later): the
+database uses the `aptevadb` adapter, capture is enabled with
+`db_realtime_configure`, and `graphql` has read access via `db_access_grant`.
+Otherwise the subscribe message fails with Database's reason.
+
+Change frames carry no row data, so updates are always a fresh read. GraphQL
+starts listening before the initial result, so a commit landing during that
+read still produces an update. Bursts collapse into one re-run per subscriber,
+and subscribers with the same document, variables and identity share one
+execution, but only one that started after their invalidation arrived, so no
+one receives a result read before the change. A re-run that fails is retried
+with backoff (250 ms up to 5 s) instead of waiting for the next commit.
+One native watcher per database and collection set is shared by every
+subscriber, because Database admits at most 8 concurrent watches per calling
+app. When retained history expires the watcher reopens and every subscriber
+re-runs once.
 
 ## Request health and dashboard widget
 

@@ -271,7 +271,8 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 		return out, execErr
 	}
 	var result executeResult
-	if limits.CoalesceReads && release != nil && pureReadOperation(prepared, bindings, schema) {
+	_, reRun := ctx.Value(sharedAfterKey{}).(time.Time)
+	if release != nil && (limits.CoalesceReads && pureReadOperation(prepared, bindings, schema) || reRun && sharedSubscriptionRead(prepared, bindings)) {
 		key, keyErr := coalescingKey(ctx, project, apiSlug, environment, release, canonical, op.Name, req.Variables)
 		if keyErr != nil {
 			return resultBase, keyErr
