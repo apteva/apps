@@ -214,6 +214,12 @@ func TestRTCTimelineRecoveryReachesSIPWire(t *testing.T) {
 			media := &sipRTPMedia{conn: sender, remote: receiver.LocalAddr().(*net.UDPAddr), offer: sipMediaOffer{Codec: "PCMA", PayloadType: 8, PacketSamples: 160}}
 			pacer := newSIPRTPPacerWithPolicy(ctx, media, &sipPlaybackState{}, liveHumanCarrierPacerPolicy(), nil)
 			defer func() { cancel(); <-pacer.done }()
+			// A scheduler stall of 200 ms or more may legitimately send keepalive
+			// silence between frames; it is not part of the recovered speech.
+			var keepaliveMu sync.Mutex
+			keepalive := map[uint16]bool{}
+			observe := func(seq uint16) { keepaliveMu.Lock(); keepalive[seq] = true; keepaliveMu.Unlock() }
+			pacer.keepaliveObserver.Store(&observe)
 			resampler := newPCMResampler(24000, 8000)
 			var sequence uint16
 			var timestamp uint32
@@ -223,17 +229,29 @@ func TestRTCTimelineRecoveryReachesSIPWire(t *testing.T) {
 				if _, e = pacer.enqueue([]sipRTPOutboundPacket{{pcm: pcm, enqueuedAt: time.Now()}}); e != nil {
 					t.Fatal(e)
 				}
-				receiver.SetReadDeadline(time.Now().Add(time.Second))
-				buf := make([]byte, 2048)
-				n, _, e := receiver.ReadFromUDP(buf)
-				if e != nil {
-					t.Fatal(e)
-				}
 				var packet rtp.Packet
-				if e = packet.Unmarshal(buf[:n]); e != nil {
-					t.Fatal(e)
+				skipped := false
+				for {
+					receiver.SetReadDeadline(time.Now().Add(time.Second))
+					buf := make([]byte, 2048)
+					n, _, e := receiver.ReadFromUDP(buf)
+					if e != nil {
+						t.Fatal(e)
+					}
+					if e = packet.Unmarshal(buf[:n]); e != nil {
+						t.Fatal(e)
+					}
+					keepaliveMu.Lock()
+					isKeepalive := keepalive[packet.SequenceNumber]
+					keepaliveMu.Unlock()
+					if !isKeepalive {
+						break
+					}
+					sequence, timestamp, skipped = packet.SequenceNumber, packet.Timestamp, true
 				}
-				if i > 0 && (uint16(packet.SequenceNumber-sequence) != 1 || packet.Timestamp-timestamp != 160) {
+				// After keepalive the timeline resumes on the wall clock, still in
+				// whole 20 ms frames.
+				if step := packet.Timestamp - timestamp; i > 0 && (uint16(packet.SequenceNumber-sequence) != 1 || step != 160 && !(skipped && step%160 == 0)) {
 					t.Fatal("SIP continuity failed")
 				}
 				if len(packet.Payload) != 160 {

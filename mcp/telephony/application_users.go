@@ -773,15 +773,19 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 		}
 		return nil
 	}
+	// Provider IDs are unique. Several IDs may share one issuer only as aliases
+	// of the exact same identity endpoint (same URL and format), each with its
+	// own actions; a second endpoint for an issuer is a conflicting authority.
 	providers := map[string]bool{}
-	issuers := map[string]bool{}
+	issuers := map[string]string{}
 	for _, provider := range p.Providers {
 		issuer := provider.IssuerApp + "\x00" + provider.IssuerInstallID
-		if !validPhoneProvider(provider) || providers[provider.ID] || issuers[issuer] {
+		authority := provider.URL + "\x00" + provider.Format
+		if existing, seen := issuers[issuer]; !validPhoneProvider(provider) || providers[provider.ID] || seen && existing != authority {
 			return errors.New("invalid or duplicate online identity provider")
 		}
 		providers[provider.ID] = true
-		issuers[issuer] = true
+		issuers[issuer] = authority
 	}
 	groups := map[string]bool{}
 	users := map[string]bool{}

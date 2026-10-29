@@ -24,6 +24,12 @@ const (
 	sipRTPPrimeSamples  = 480
 	sipRTPQueuePackets  = 100
 	sipRTPInactivity    = 30 * time.Second
+	// While nothing is queued, encoded silence keeps the RTP stream alive.
+	// The far end's inactivity timer, NAT/firewall pinholes and carrier media
+	// relays all need packets even when our side has nothing to say; two
+	// Telephony legs bridged to each other would otherwise wait in silence
+	// until both time out. Shorter gaps between chunks keep their behavior.
+	sipRTPIdleSilenceAfter = 200 * time.Millisecond
 )
 
 var sipRTPPorts = struct {
@@ -248,36 +254,38 @@ type sipRTPOutboundPacket struct {
 }
 
 type sipRTPPacer struct {
-	queueMu         sync.Mutex
-	packetizer      *carrierAudioPacketizer
-	agentPlayout    sipAgentPlayout
-	observeActivity func(bool)
-	agentSession    *agentAudioSession
-	cancelCh        chan sipAgentCancel
-	dtmfCh          chan string
-	dtmf            sipDTMFState
-	observeSent     func([]byte)
-	diagnostics     livePacerStats
-	ctx             context.Context
-	media           *sipRTPMedia
-	playback        *sipPlaybackState
-	receipts        *sipReceiptPump
-	queue           chan sipRTPOutboundPacket
-	clearCh         chan chan int
-	errCh           chan error
-	done            chan struct{}
-	progress        chan struct{}
-	sequence        uint16
-	timestamp       uint32
-	ssrc            uint32
-	dropStale       bool
-	trimToPackets   int
-	droppedPackets  atomic.Int64
-	needsCrossfade  atomic.Bool
-	fadeAfterClear  atomic.Bool
-	lastSentPCM     []int16
-	dropMu          sync.Mutex
-	drops           []audioDropEvent
+	idleSilencePackets atomic.Int64 // keepalive silence sent while nothing was queued
+	keepaliveObserver  atomic.Pointer[func(sequence uint16)]
+	queueMu            sync.Mutex
+	packetizer         *carrierAudioPacketizer
+	agentPlayout       sipAgentPlayout
+	observeActivity    func(bool)
+	agentSession       *agentAudioSession
+	cancelCh           chan sipAgentCancel
+	dtmfCh             chan string
+	dtmf               sipDTMFState
+	observeSent        func([]byte)
+	diagnostics        livePacerStats
+	ctx                context.Context
+	media              *sipRTPMedia
+	playback           *sipPlaybackState
+	receipts           *sipReceiptPump
+	queue              chan sipRTPOutboundPacket
+	clearCh            chan chan int
+	errCh              chan error
+	done               chan struct{}
+	progress           chan struct{}
+	sequence           uint16
+	timestamp          uint32
+	ssrc               uint32
+	dropStale          bool
+	trimToPackets      int
+	droppedPackets     atomic.Int64
+	needsCrossfade     atomic.Bool
+	fadeAfterClear     atomic.Bool
+	lastSentPCM        []int16
+	dropMu             sync.Mutex
+	drops              []audioDropEvent
 }
 
 func newSIPRTPPacer(
@@ -327,11 +335,21 @@ func newSIPRTPPacerWithPolicy(
 	return pacer
 }
 
+func firstNonZeroTime(times ...time.Time) time.Time {
+	for _, t := range times {
+		if !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 func (p *sipRTPPacer) run() {
 	defer close(p.done)
 	clockStart := time.Now()
 	baseTimestamp := p.timestamp
 	var lastSent time.Time
+	var lastAudio time.Time // last DTMF, agent or hold packet; silence does not count
 	var lastFrame time.Duration
 	lastTickFrame := time.Duration(-1)
 	ticker := time.NewTicker(sipRTPPacketTime)
@@ -400,6 +418,7 @@ func (p *sipRTPPacer) run() {
 					return
 				}
 				lastSent = now
+				lastAudio = now
 				lastFrame = frame
 				continue
 			}
@@ -457,6 +476,7 @@ func (p *sipRTPPacer) run() {
 						}, Payload: packet.payload}
 						p.sequence++
 						lastSent = now
+						lastAudio = now
 						lastFrame = frame
 						writeStarted := time.Now()
 						if err := p.media.writePacket(wire); err != nil {
@@ -488,12 +508,25 @@ func (p *sipRTPPacer) run() {
 				} else if catchUp {
 					break
 				} else {
-					if hold := p.media.hold.Load(); hold != nil && p.media.remoteMode.Load() != 1 && p.media.remoteMode.Load() != 3 {
-						pcm := hold.frame(p.media.sampleRate() / 50)
+					var pcm []int16
+					keepalive := false
+					if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
+						// Remote sendonly/inactive: our side must stay silent.
+					} else if hold := p.media.hold.Load(); hold != nil {
+						pcm = hold.frame(p.media.sampleRate() / 50)
+						lastAudio = now
+					} else if idleSince := firstNonZeroTime(lastAudio, clockStart); now.Sub(idleSince) >= sipRTPIdleSilenceAfter {
+						pcm = make([]int16, p.media.sampleRate()/50)
+						keepalive = true
+					}
+					if pcm != nil {
 						wire := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: p.media.offer.PayloadType, SequenceNumber: p.sequence, Timestamp: baseTimestamp + uint32(frame)*sipRTPPacketSamples, SSRC: p.ssrc}, Payload: p.media.encodeAudio(pcm)}
 						p.sequence++
 						lastSent = now
 						lastFrame = frame
+						if observe := p.keepaliveObserver.Load(); keepalive && observe != nil {
+							(*observe)(wire.SequenceNumber)
+						}
 						writeStarted := time.Now()
 						if err := p.media.writePacket(wire); err != nil {
 							select {
@@ -505,7 +538,11 @@ func (p *sipRTPPacer) run() {
 						if p.observeSent != nil {
 							p.observeSent(wire.Payload)
 						}
-						p.diagnostics.sent(20, writeStarted)
+						if keepalive {
+							p.idleSilencePackets.Add(1)
+						} else {
+							p.diagnostics.sent(20, writeStarted)
+						}
 					}
 				}
 			}

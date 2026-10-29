@@ -76,12 +76,16 @@ func phoneProviderClient(u *url.URL) *http.Client {
 	return client
 }
 
-// phoneProviderIssuerShared reports whether another provider in the policy
-// claims the same issuer, which would let one endpoint vouch for identities
-// another provider owns.
-func phoneProviderIssuerShared(policy phonePolicy, selected phoneAuthProvider) bool {
+// phoneProviderIssuerConflict reports whether another provider claims the
+// same issuer through a different identity endpoint, which would let one
+// endpoint vouch for identities another owns. Aliases that use the exact same
+// URL and format are the same authority and stay valid; each keeps its own ID
+// and actions. URLs are compared exactly: paths and queries matter, and hosts
+// or resolved addresses are never treated as equivalent.
+func phoneProviderIssuerConflict(policy phonePolicy, selected phoneAuthProvider) bool {
 	for _, other := range policy.Providers {
-		if other.ID != selected.ID && other.IssuerApp == selected.IssuerApp && other.IssuerInstallID == selected.IssuerInstallID {
+		if other.ID != selected.ID && other.IssuerApp == selected.IssuerApp && other.IssuerInstallID == selected.IssuerInstallID &&
+			(other.URL != selected.URL || other.Format != selected.Format) {
 			return true
 		}
 	}
@@ -149,7 +153,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 			break
 		}
 	}
-	if provider == nil || !validPhoneProvider(*provider) || phoneProviderIssuerShared(*policy, *provider) {
+	if provider == nil || !validPhoneProvider(*provider) || phoneProviderIssuerConflict(*policy, *provider) {
 		return nil, 401, errors.New("unknown authentication provider")
 	}
 	bearer := r.Header.Get("Authorization")
@@ -221,7 +225,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if e != nil {
 		return nil, 503, errors.New("access unavailable")
 	}
-	if !phoneProviderStillAllows(*freshPolicy, *provider, action) {
+	if !phoneProviderStillAllows(*freshPolicy, *provider, action) || phoneProviderIssuerConflict(*freshPolicy, *provider) {
 		return nil, 403, errors.New("authentication provider access changed")
 	}
 	p, e := phonePrincipalFromPolicy(project, identity, *freshPolicy)

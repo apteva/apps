@@ -8,6 +8,7 @@ import (
 	"github.com/gotranspile/g722"
 	"github.com/pion/rtp"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,6 +37,11 @@ func TestAgentSIPRecoveryWire(t *testing.T) {
 				session := continuousAgentFixture()
 				p := newSIPRTPPacerWithPolicy(ctx, media, &sipPlaybackState{}, session.policy(), nil)
 				defer func() { cancel(); <-p.done }()
+				// Keepalive silence fills gaps of 200 ms or more; it is not speech.
+				var keepaliveMu sync.Mutex
+				keepaliveSeqs := map[uint16]bool{}
+				observe := func(seq uint16) { keepaliveMu.Lock(); keepaliveSeqs[seq] = true; keepaliveMu.Unlock() }
+				p.keepaliveObserver.Store(&observe)
 				const chunks = 20
 				rate := media.sampleRate()
 				size := rate / 10
@@ -72,7 +78,11 @@ func TestAgentSIPRecoveryWire(t *testing.T) {
 				var resumed []int
 				sequenceLoss := 0
 				var payload []byte
-				for i := 0; i < chunks*5; i++ {
+				// keepaliveBefore[i] counts keepalive packets sent just before speech
+				// packet i; the reference encoder must advance through them too.
+				keepaliveBefore := map[int]int{}
+				pendingKeepalive, received := 0, 0
+				for i := 0; i < chunks*5; {
 					receiver.SetReadDeadline(time.Now().Add(2 * time.Second))
 					buf := make([]byte, 2048)
 					n, _, e := receiver.ReadFromUDP(buf)
@@ -84,16 +94,35 @@ func TestAgentSIPRecoveryWire(t *testing.T) {
 					if e = packet.Unmarshal(buf[:n]); e != nil {
 						t.Fatal(e)
 					}
+					if received > 0 {
+						sequenceLoss += int(uint16(packet.SequenceNumber-prevSeq)) - 1
+					}
+					received++
+					prevSeq = packet.SequenceNumber
+					keepaliveMu.Lock()
+					keepalive := keepaliveSeqs[packet.SequenceNumber]
+					keepaliveMu.Unlock()
+					if keepalive {
+						if i == 0 {
+							continue // before the reply: not part of the replayed input
+						}
+						pendingKeepalive++
+						continue
+					}
 					if i > 0 {
-						if packet.Timestamp-prevTS > 160 {
+						if packet.Timestamp-prevTS > 160 || pendingKeepalive > 0 {
 							resumed = append(resumed, i)
 						}
 						maxGap = max(maxGap, now.Sub(previous))
 						maxTS = max(maxTS, packet.Timestamp-prevTS)
-						sequenceLoss += int(uint16(packet.SequenceNumber-prevSeq)) - 1
 					}
-					previous, prevSeq, prevTS = now, packet.SequenceNumber, packet.Timestamp
+					if pendingKeepalive > 0 {
+						keepaliveBefore[i] = pendingKeepalive
+						pendingKeepalive = 0
+					}
+					previous, prevTS = now, packet.Timestamp
 					payload = append(payload, packet.Payload...)
+					i++
 				}
 				if e := <-sent; e != nil {
 					t.Fatal(e)
@@ -117,6 +146,9 @@ func TestAgentSIPRecoveryWire(t *testing.T) {
 				for i := 0; preserved && i < chunks*5; i++ {
 					if endFaded {
 						resumedAt[i] = true
+					}
+					for range keepaliveBefore[i] {
+						ref.encodeAudio(make([]int16, samples))
 					}
 					want := payload[i*size : (i+1)*size]
 					var saved *g722.Encoder
