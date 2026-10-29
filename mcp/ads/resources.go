@@ -591,7 +591,13 @@ func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind strin
 				Kind: resourceTrackingSource, ProviderType: "meta_pixel", NativeID: id,
 				DisplayName: firstString(row, "name"), Status: status,
 				Capabilities: []string{"conversion_tracking", "server_events"},
-				Metadata:     map[string]any{"last_fired_time": row["last_fired_time"]},
+				// Provider availability only: a domain can still be blocked,
+				// so readiness comes from tracking_source_readiness_get.
+				Metadata: map[string]any{
+					"last_fired_time":    row["last_fired_time"],
+					"provider_available": status == "active",
+					"tracking_verified":  false,
+				},
 			})
 		}
 		return out, nil

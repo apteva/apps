@@ -2,8 +2,22 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.53
+version: 0.1.54
 description: |
+  v0.1.54 fixes Meta conversion totals, which summed every action whose name
+  contained "conversion" and so counted engagement such as post_save and
+  post_net_save as conversions. Totals now count purchase, lead and
+  complete_registration once each, cached rows are recounted on read, and
+  performance_get accepts conversion_events and reports conversion_definition.
+  Meta Pixels are created under the ad account's Business and shared with the
+  account, avoiding error 6200 on the ad-account edge. New
+  tracking_source_readiness_get checks association, events received overall,
+  per event and per domain, homepage installation and Meta diagnostics, and
+  states what the API cannot reveal about domain category restrictions.
+  tracking_source_test_event_send separates API acceptance from test-session
+  visibility. Installation configs list Lead and CompleteRegistration, and
+  Meta reports add outbound_clicks with click metric definitions. Business
+  Pixels, diagnostics and stats require integrations catalog v0.54.7 or newer.
   v0.1.53 remembers verified audience provenance independently of provider
   metadata across refreshes. Shared tools and UI record source identities,
   interaction, evidence and verification time for every provider. Google
@@ -126,6 +140,7 @@ description: |
   App campaigns and App ads, Meta/X/Reddit app wiring, source-separated
   conversion reports, CPI, and durable campaign creation request keys.
 
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
 icon: /ui/icon.svg
@@ -203,6 +218,8 @@ provides:
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
     - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source (Meta Pixel or Google conversion action) without installing website tracking code." }
     - { name: tracking_source_installation_get, description: "Return browser-public installation configuration for a normalized tracking source." }
+    - { name: tracking_source_readiness_get, description: "Verify a Meta Pixel receives events overall, per required event and per domain, is shared with the ad account, and passes Meta diagnostics." }
+    - { name: tracking_source_test_event_send, description: "Send a Conversions API test event and report API acceptance separately from test-session match and ad eligibility." }
     - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
     - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
     - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }
@@ -285,7 +302,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.53
+    ref: ads/v0.1.54
     entry: mcp/ads
   port: 8080
   health_check: /health
