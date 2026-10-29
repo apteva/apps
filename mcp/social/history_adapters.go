@@ -94,7 +94,10 @@ func historyMap(m map[string]any, key string) map[string]any {
 func nativeTimestamp(raw string) *string {
 	t, e := time.Parse(time.RFC3339Nano, raw)
 	if e != nil {
-		return nil
+		// Facebook Graph timestamps use a colonless offset (…T18:00:00+0000).
+		if t, e = time.Parse("2006-01-02T15:04:05-0700", raw); e != nil {
+			return nil
+		}
 	}
 	s := t.UTC().Format(time.RFC3339Nano)
 	return &s
@@ -271,7 +274,15 @@ func (a *App) youtubeNativePostsWithParts(ctx *sdk.AppCtx, b historyAccount, run
 		details := historyMap(item, "contentDetails")
 		file := historyMap(item, "fileDetails")
 		processing := historyMap(item, "processingDetails")
-		out = append(out, nativePost{ID: id, URL: optionalText(historyString(item, "share_url", "permalink_url")), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ScheduledPublishAt: nativeTimestamp(historyString(status, "publishAt")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
+		// The ID and owning channel are verified above; YouTube's video resource
+		// carries no permalink, so the canonical watch URL is derived from it.
+		link, source := historyString(item, "share_url", "permalink_url"), ""
+		if link == "" {
+			if link = youtubeWatchURL(id); link != "" {
+				source = youtubeDerivedURLSource
+			}
+		}
+		out = append(out, nativePost{ID: id, URL: optionalText(link), URLSource: optionalText(source), Title: nativeText(snippet, "title"), Body: nativeText(snippet, "description"), PublishedAt: nativeTimestamp(historyString(snippet, "publishedAt")), Visibility: optionalText(historyString(status, "privacyStatus")), ScheduledPublishAt: nativeTimestamp(historyString(status, "publishAt")), ProcessingState: optionalText(nonEmpty(historyString(processing, "processingStatus"), historyString(status, "uploadStatus"))), OriginalFilename: optionalText(historyString(file, "fileName")), Bytes: nativeBytes(file["fileSize"]), DurationSeconds: youtubeDuration(historyString(details, "duration")), MediaURLs: []string{nativeThumbnail(historyMap(snippet, "thumbnails"))}})
 	}
 	if len(seen) != len(wanted) {
 		for _, id := range ids {

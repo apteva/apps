@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -50,7 +49,15 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		}
 		if err == nil && len(posts) == 1 && posts[0].MetadataUnavailable {
 			run.Incomplete = true
-			addHistoryLimitation(run, "YouTube omitted this video after account-bound readback; metadata and inaccessible/deleted status remain unknown.")
+			r, derr := a.diagnoseOmittedYouTubeVideo(ctx, b, run, id)
+			if derr != nil {
+				return nil, derr
+			}
+			if r.Resolution == "unavailable" {
+				addHistoryLimitation(run, "YouTube omitted this video; its uploads-playlist entry has no video resource ("+r.Reason+"). It is unavailable, not confirmed deleted.")
+			} else {
+				addHistoryLimitation(run, "YouTube omitted this video after account-bound readback ("+r.Reason+"); metadata and inaccessible/deleted status remain unknown.")
+			}
 		}
 		return posts, err
 	case "pinterest":
@@ -85,21 +92,7 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 		if token == "" {
 			return nil, errors.New("Page access token unavailable")
 		}
-		raw, err := historyExecute(ctx, b, "facebook_get_post", map[string]any{"postId": id, "fields": "id,from,message,created_time,permalink_url,is_published", "access_token": token})
-		if err != nil {
-			return nil, err
-		}
-		if historyString(raw, "id") != id {
-			return nil, errors.New("Facebook native ID mismatch")
-		}
-		if owner := historyString(historyMap(raw, "from"), "id"); owner != b.ExternalID && !(owner == "" && strings.HasPrefix(id, b.ExternalID+"_")) {
-			return nil, errors.New("Facebook author mismatch")
-		}
-		at := nativeTimestamp(historyString(raw, "created_time"))
-		if published, ok := raw["is_published"].(bool); ok && !published {
-			at = nil
-		}
-		return []nativePost{{ID: id, Body: optionalText(historyString(raw, "message")), URL: optionalText(historyString(raw, "permalink_url")), PublishedAt: at}}, nil
+		return inspectFacebookNative(ctx, b, run, id, token)
 	case "instagram":
 		token := extractPageToken(b.PageCredentials)
 		if token == "" || b.ExternalID == "" {

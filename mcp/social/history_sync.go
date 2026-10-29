@@ -28,6 +28,7 @@ type nativePost struct {
 	ProviderPublishedAt   *string        `json:"provider_reported_published_at"`
 	PublicationTimeSource string         `json:"publication_time_source"`
 	PublishedAt           *string        `json:"published_at"`
+	URLSource             *string        `json:"url_source,omitempty"`
 	ScheduledPublishAt    *string        `json:"scheduled_publish_at,omitempty"`
 	Visibility            *string        `json:"visibility"`
 	Audience              *string        `json:"audience"`
@@ -75,6 +76,8 @@ func (b historyAccount) binding() string {
 type historyRun struct {
 	MetadataUnresolvedIDs   []string               `json:"metadata_unresolved_sample"`
 	MetadataUnresolved      int                    `json:"metadata_unresolved"`
+	MetadataUnavailable     int                    `json:"metadata_unavailable"`
+	MetadataUnavailableIDs  []string               `json:"metadata_unavailable_sample"`
 	MetadataRetryable       int                    `json:"metadata_retryable"`
 	MetadataReadbacks       int                    `json:"metadata_readbacks"`
 	CoverageVersion         int                    `json:"coverage_version"`
@@ -562,7 +565,11 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 		default:
 			unchanged = 1
 		}
-		_, err = tx.Exec(`INSERT INTO social_history_seen(run_id,native_post_id,imported,updated,unchanged,metadata_missing,metadata_observed_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,native_post_id) DO UPDATE SET imported=max(imported,excluded.imported),updated=max(updated,excluded.updated),unchanged=max(unchanged,excluded.unchanged),metadata_missing=excluded.metadata_missing,metadata_observed_at=excluded.metadata_observed_at,metadata_error=CASE WHEN excluded.metadata_missing=0 THEN '' ELSE metadata_error END`, runIDs[0], n.ID, imported, updated, unchanged, n.MetadataUnavailable, n.ObservedAt)
+		resolution := "readable"
+		if n.MetadataUnavailable {
+			resolution = ""
+		}
+		_, err = tx.Exec(`INSERT INTO social_history_seen(run_id,native_post_id,imported,updated,unchanged,metadata_missing,metadata_observed_at,metadata_resolution) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,native_post_id) DO UPDATE SET imported=max(imported,excluded.imported),updated=max(updated,excluded.updated),unchanged=max(unchanged,excluded.unchanged),metadata_missing=excluded.metadata_missing,metadata_observed_at=excluded.metadata_observed_at,metadata_error=CASE WHEN excluded.metadata_missing=0 THEN '' ELSE metadata_error END,metadata_resolution=CASE WHEN excluded.metadata_missing=0 THEN 'readable' ELSE metadata_resolution END,metadata_evidence=CASE WHEN excluded.metadata_missing=0 THEN '' ELSE metadata_evidence END`, runIDs[0], n.ID, imported, updated, unchanged, n.MetadataUnavailable, n.ObservedAt, resolution)
 		if err != nil {
 			return "", 0, 0, err
 		}

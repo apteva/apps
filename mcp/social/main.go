@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.8
+version: 0.20.9
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -227,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.8
+    ref: social/v0.20.9
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -4134,7 +4134,9 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 		return "", "", err
 	}
 	resource := struct{ ID string }{ID: videoID}
-	url := "" // A native ID is not a returned permalink.
+	// Canonical watch URL derived from the video ID YouTube returned for this
+	// channel's upload. It does not prove public or Members access.
+	url := youtubeWatchURL(videoID)
 	if thumbnail != nil {
 		if err := a.setBinaryThumbnail(ctx, def, j.connID, resource.ID, *thumbnail); err != nil {
 			// The video is already uploaded at this point. Do not return
