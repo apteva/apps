@@ -104,6 +104,25 @@ func (p *sipRTPPacer) prepareAgentTick(now time.Time) bool {
 	return true
 }
 
+// alignAgentSilence splits explicit silence into zeros that complete a
+// pending speech packet and a pause rounded to whole packets (to the nearest
+// packet; a sub-packet pause rounds up so it is never lost entirely).
+func alignAgentSilence(packetizer *carrierAudioPacketizer, pcm []int16) (head, rest []int16) {
+	size := packetizer.packetSamples
+	pending := packetizer.queuedSamples % size
+	if pending > 0 && !packetizer.segments[len(packetizer.segments)-1].silence {
+		head = make([]int16, size-pending)
+		pcm = pcm[min(len(pcm), len(head)):]
+		pending = 0
+	}
+	n := pending + len(pcm)
+	n = max(size, (n+size/2)/size*size) - pending
+	if len(pcm) == 0 {
+		n = 0
+	}
+	return head, make([]int16, n)
+}
+
 // Scaled by the starvation: a 20 ms late write re-primes 20 ms, a 300 ms
 // upstream hold gets min(learned reserve, sipAgentRecoveryCushion).
 func (p *sipAgentPlayout) recoveryCushion(starved time.Duration) time.Duration {

@@ -57,7 +57,7 @@ are independent: adaptive mode does not enable speed correction or tracing.
 | `speed_percent` | 0 | Integer 0–3; experimental bounded PCM duration correction; 0 leaves samples intact |
 | `drift` | (on) | `"off"` disables direct-SIP drift compensation; omit to keep it |
 | `drift_percent` | 6 | Integer 0–6 (0 = default); expansion rate when a provider streams slower than real time, doubled while the queue is nearly empty |
-| `drift_lead_ms` | 160 | 0–400, steps of 20 (0 = default); buffer the compensation grows to after a call first runs nearly dry |
+| `drift_lead_ms` | 160 | 0–400, steps of 20 (0 = default); buffer the compensation grows to after a call first runs nearly dry (later dry spells add 40 ms, capped at 180 ms) |
 | `match_correlation` | 0.97 | 0.95–1; conservative waveform matching threshold; additional energy/edge gates always apply |
 | `trace_frames` | 0 | 0–2000 combined receive/send records per call; 0 disables capture |
 
@@ -66,11 +66,24 @@ are independent: adaptive mode does not enable speed correction or tracing.
 Live realtime providers stream at about real time with no lead, and run slow
 over a reply: OpenAI `gpt-live-1` measured 0.965–0.994× with single stalls up to
 236 ms on 2026-10-29 (`testdata/agent-audio/openai-live-pacing-20261029.json`).
-A fixed reserve cannot absorb a steady drift. Direct SIP therefore lengthens
-the AI's audio slightly when its queue runs low:
+OpenAI also sends 49–93% of a reply as explicit silence and never catches up
+after a stall. A fixed reserve cannot absorb a steady drift. Direct SIP
+therefore lets pauses absorb lost time:
 
-- Explicit silence is lengthened first (up to 25%), which is inaudible.
-- Speech is lengthened WSOLA-style by repeating one pitch period with a
+- Explicit silence absorbs it first, in whole 20 ms packets, which is inaudible.
+  Below the lead a silence frame gains a packet (counting what the same delivery
+  already gained, so the lead is reached, not overshot). Pauses are rounded to
+  whole packets and their first zeros complete a pending speech packet, so speech
+  never ends or resumes in a zero-padded packet.
+- The lead adapts: playback starts after the normal initial reserve (60 ms);
+  the first near-dry trough (≤ 20 ms) arms `drift_lead_ms`; each later one adds
+  40 ms, capped at 180 ms. After 10 s without one it shrinks 20 ms every 5 s.
+  Above the lead by 40 ms, one silence frame in five gives up a packet; above
+  the cap, every silence frame does. Speech is never shortened for this.
+- Silence keeps the input history and stream, so concealment and stretching
+  continue across pauses and speech after a pause is not a new stream's startup.
+- Speech is stretched only as a fallback, when the queue is ≤ 40 ms or speech
+  has run for over a second without a pause. It is lengthened WSOLA-style by repeating one pitch period with a
   raised-cosine crossfade, using up to 30 ms of recent audio as look-back. A
   splice must match at correlation ≥ 0.90 (voiced audio), may not create a
   sharper sample step than the audio already has, may not repeat louder audio
@@ -82,7 +95,11 @@ the AI's audio slightly when its queue runs low:
 
 On the six captured runs (18 s of continuous speech each) this reduced queue
 underrun gaps from 31 (2.2 s) to 5 (0.3 s), with no click edges or loud
-restarts and no pitch change on voiced splices. Carrier media streams (Twilio,
+restarts and no pitch change on voiced splices. On ten real reply streams with
+their silence markers (`testdata/agent-audio/openai-live-frames-20261029.json`,
+54 s of speech) speech holes went from 5 (280 ms) without compensation to 0;
+the 5 remaining underruns only lengthen a pause; padding is 0 and the delay
+before each delivery stays ≤ 200 ms. Carrier media streams (Twilio,
 Telnyx and others) are unchanged.
 
 Unknown fields and invalid values fail validation. Removing an override restores

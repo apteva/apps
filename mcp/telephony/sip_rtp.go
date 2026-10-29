@@ -698,6 +698,20 @@ func (p *sipRTPPacer) enqueueAt(packets []sipRTPOutboundPacket, receivedAt time.
 			}
 			state.exhaustedAt = time.Time{}
 			state.lastInputAt = now
+			if frame.Silence && state.tuning.drifting() {
+				// Speech never ends or resumes in a padded packet: the pause's
+				// first zeros complete a pending speech packet, and the pause
+				// itself lasts whole packets.
+				var head []int16
+				head, pcm = alignAgentSilence(&packetizer, pcm)
+				if len(head) > 0 {
+					last := packetizer.segments[len(packetizer.segments)-1]
+					speech := realtimeBridgeControl{ItemID: last.itemID, Generation: last.generation, AudioEndMS: last.endMS}
+					for _, f := range packetizer.addAt(head, 0, speech, packet.enqueuedAt) {
+						ready = append(ready, sipRTPOutboundPacket{pcm: f.PCM, itemID: f.ItemID, generation: f.Generation, audioEndMS: f.AudioEndMS, silence: f.Silence, enqueuedAt: f.EnqueuedAt})
+					}
+				}
+			}
 			for _, f := range packetizer.addAt(pcm, sourceSamples, frame, packet.enqueuedAt) {
 				ready = append(ready, sipRTPOutboundPacket{pcm: f.PCM, itemID: f.ItemID, generation: f.Generation, audioEndMS: f.AudioEndMS, silence: f.Silence, enqueuedAt: f.EnqueuedAt})
 			}

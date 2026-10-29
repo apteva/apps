@@ -36,6 +36,19 @@ const agentPlayoutDefaultDriftPercent = 6
 // waited for at its start.
 const agentPlayoutDefaultDriftLeadMS = 160
 
+// The drift lead grows by this much at each later near-dry trough, never
+// past agentPlayoutDriftMaxMS, and after agentPlayoutDriftCalm without one it
+// shrinks by a packet every agentPlayoutDriftDecay, trimming only silence.
+const (
+	agentPlayoutDriftStepMS = 40
+	agentPlayoutDriftMaxMS  = 180
+	agentPlayoutDriftCalm   = 10 * time.Second
+	agentPlayoutDriftDecay  = 5 * time.Second
+)
+
+// While above the lead, one in this many silence frames gives up a packet.
+const agentPlayoutSilenceTrimEvery = 5
+
 // Expansion repeats one pitch period found in up to 30 ms of recent input, so
 // a 20 ms frame can be stretched without waiting for more audio.
 const agentPlayoutHistoryMS = 30
@@ -117,6 +130,9 @@ type agentPlayoutStats struct {
 	ExpandedMS      float64 `json:"expanded_ms"`
 	CompressedMS    float64 `json:"compressed_ms"`
 	MaxDeficitMS    float64 `json:"max_delivery_deficit_ms"`
+	SilenceAddedMS  float64 `json:"silence_added_ms,omitempty"`
+	SilenceTrimMS   float64 `json:"silence_trimmed_ms,omitempty"`
+	LeadMS          int     `json:"drift_lead_ms,omitempty"`
 }
 
 // Owned by one pacer; copied before admission so a rejected/retried batch cannot
@@ -136,6 +152,11 @@ type agentPlayoutTuning struct {
 	streamAt                 time.Time // first burst of the current stream: filled by the initial reserve
 	burstAt                  time.Time // arrival time of the current burst of frames
 	troughMS                 int       // queue depth just before that burst arrived
+	leadMS                   int       // armed drift lead; grows at each near-dry trough
+	dryAt                    time.Time // last near-dry trough
+	silenceAt                time.Time // last explicit silence frame
+	silenceFrames            int       // silence frames seen while above the lead
+	burstShiftMS             int       // silence added (+) or trimmed (-) in the current burst
 	item                     string
 	generation               int64
 	observedItem             string
@@ -235,7 +256,7 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 	// whole burst by the queue just before it arrived (its trough): that is
 	// what playback actually had left, not the depth the burst itself adds.
 	if t.burstAt.IsZero() || now.Sub(t.burstAt) > 5*time.Millisecond {
-		t.burstAt, t.troughMS = now, queuedMS
+		t.burstAt, t.troughMS, t.burstShiftMS = now, queuedMS, 0
 	}
 	if t.streamAt.IsZero() {
 		t.streamAt = t.burstAt
@@ -246,12 +267,19 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 	// Healthy delivery is never modified. Only after this call's queue nearly
 	// ran dry does compensation grow the buffer to the drift lead; a provider
 	// that stalled once in a call tends to stall again.
-	if drift > 0 && t.troughMS <= 20 && !startup {
-		t.leadArmed = true
+	if drift > 0 && t.troughMS <= 20 && !startup && t.dryAt != t.burstAt {
+		if !t.leadArmed {
+			t.leadMS = t.cfg.driftLeadMS()
+		} else {
+			t.leadMS = t.currentLead(now) + agentPlayoutDriftStepMS
+		}
+		t.leadMS = min(t.leadMS, agentPlayoutDriftMaxMS)
+		t.leadArmed, t.dryAt = true, t.burstAt
 	}
 	lead := t.stats.TargetMS
 	if drift > 0 && t.leadArmed {
-		lead = max(lead, t.cfg.driftLeadMS())
+		lead = max(lead, t.currentLead(now))
+		t.stats.LeadMS = lead
 	}
 	below := t.troughMS < lead-20 && !startup
 	if drift > 0 && !t.leadArmed && t.cfg.SpeedPercent == 0 {
@@ -260,12 +288,37 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		below = t.troughMS <= 20 && !startup
 	}
 	// Explicit silence is not evidence of speech starvation. Do not learn a
-	// larger target from pauses in quiet provider output. Lengthening it is
-	// inaudible, so it absorbs drift first.
+	// larger target from pauses in quiet provider output. Changing a pause's
+	// length is inaudible, so silence absorbs lost time first, in whole
+	// packets: below the lead it grows, well above it (or past the cap) it
+	// slowly gives time back. The input history and stream stay intact, so
+	// concealment and stretching continue across the pause.
 	if f.Silence {
-		t.resetStream()
-		if drift > 0 && below && len(pcm) > 0 {
-			return append(append([]int16(nil), pcm...), make([]int16, len(pcm)/4)...)
+		if drift == 0 {
+			t.resetStream()
+			return pcm
+		}
+		t.anchor, t.lastArrival, t.scheduled, t.debt = time.Time{}, time.Time{}, 0, 0
+		t.silenceAt = now
+		t.remember(pcm, rate)
+		// A burst's frames share one trough: count what this burst already
+		// changed so the lead is reached, not overshot.
+		packet, trough := rate/50, t.troughMS+t.burstShiftMS
+		switch {
+		case len(pcm) == 0:
+		case below && trough < lead-20 || !t.leadArmed && below:
+			t.silenceFrames = 0
+			t.burstShiftMS += 20
+			t.stats.SilenceAddedMS += 20
+			return append(append([]int16(nil), pcm...), make([]int16, packet)...)
+		case t.leadArmed && (trough > agentPlayoutDriftMaxMS || trough >= lead+40):
+			t.silenceFrames++
+			if trough > agentPlayoutDriftMaxMS || t.silenceFrames%agentPlayoutSilenceTrimEvery == 0 {
+				cut := min(len(pcm), packet)
+				t.burstShiftMS -= cut * 1000 / rate
+				t.stats.SilenceTrimMS += float64(cut) * 1000 / float64(rate)
+				return pcm[:len(pcm)-cut]
+			}
 		}
 		return pcm
 	}
@@ -282,6 +335,11 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		t.generation = f.Generation
 	}
 	direction, percent := 0, 0
+	// Speech is stretched only when silence cannot cover the loss in time:
+	// nearly dry, or a long run of continuous speech.
+	if below && drift > 0 && t.troughMS > 40 && now.Sub(t.silenceAt) < time.Second {
+		below = false
+	}
 	if below {
 		// Nearly dry: drift compensation rebuilds the reserve faster than the
 		// source drifts. The configured speed_percent budget is never exceeded.
@@ -317,6 +375,21 @@ func (t *agentPlayoutTuning) process(pcm []int16, rate, queuedMS int, f realtime
 		t.stats.CompressedMS += float64(-delta) * 1000 / float64(rate)
 	}
 	return out
+}
+
+// drifting reports whether drift compensation may change this stream.
+func (t *agentPlayoutTuning) drifting() bool {
+	return t.driftAllowed && t.cfg.driftPercent() > 0
+}
+
+// currentLead is the armed lead, shrinking a packet per decay interval once
+// no near-dry trough has been seen for the calm interval.
+func (t *agentPlayoutTuning) currentLead(now time.Time) int {
+	lead := t.leadMS
+	if calm := now.Sub(t.dryAt) - agentPlayoutDriftCalm; calm > 0 {
+		lead -= 20 * int(calm/agentPlayoutDriftDecay)
+	}
+	return max(lead, t.stats.TargetMS)
 }
 
 // continuePitch returns n samples that continue the most recent input by
