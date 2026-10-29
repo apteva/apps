@@ -46,6 +46,17 @@ See [Pebble write batching results and reproduction](GROUPED-WRITES.md). This se
 
 See [optimized scan measurements](OPTIMIZED-SCANS.md) for the follow-up to the million-record checks. The `largescan` harness accepts `DB_LARGE_SCAN_REPEATS=3` to repeat each read workload on the same loaded dataset. `DB_LARGE_SCAN_PROFILE_DIR` optionally writes a separate CPU profile for each measured query; leave it unset for ordinary timing runs. Profiling startup/stop is outside the timer, but sampling can affect timing, so profiled measurements are kept separate.
 
+## AptevaDB upgrade paths
+
+Before bumping the AptevaDB pin, build the engine test binary at the old and new pins and run them interleaved in fresh processes, then compare with `benchstat`:
+
+```sh
+GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 go test -c -o /tmp/db-new.test ./engine
+DB_APTEVA_BENCH_ROWS=200000 /tmp/db-new.test -test.run '^$' -test.bench BenchmarkAptevaPaths -test.benchmem
+```
+
+`BenchmarkAptevaPaths` loads one AptevaDB fixture per process and times projected scans, counts, native/indexed/filtered/spilled aggregates, filtered updates and point reads through `Manager.Execute`, including JSON encoding. See the [alpha.8 → alpha.10 evidence](results/aptevadb-alpha10-2026-10-29/) and [Database 0.5.3 notes](../docs/release-0.5.3.md).
+
 ## Direct native-driver comparison
 
 Run the isolated SQLite/Pebble/AptevaDB comparison against direct driver calls:

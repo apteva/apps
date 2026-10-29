@@ -84,6 +84,8 @@ type Request struct {
 	MaxAffected      int        `json:"maxAffected,omitempty"`
 	All              bool       `json:"all,omitempty"`
 	Confirm          bool       `json:"confirm,omitempty"`
+	App              string     `json:"app,omitempty"`
+	Access           string     `json:"access,omitempty"`
 	Query
 	GroupBy    []string    `json:"groupBy,omitempty"`
 	Metrics    []Metric    `json:"metrics,omitempty"`

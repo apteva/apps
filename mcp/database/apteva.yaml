@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.5.2
+version: 0.5.3
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -48,6 +48,9 @@ provides:
     - {name: db_aggregate, description: "Group records and compute count, sum, avg, min and max."}
     - {name: db_batch, description: Atomic writes across collections within one database.}
     - {name: db_explain, description: Inspect query index use and sorting.}
+    - {name: db_access_grant, description: Let a calling app use a project database.}
+    - {name: db_access_revoke, description: Remove a calling app's project database access.}
+    - {name: db_access_list, description: List apps allowed to use a project database.}
   ui_panels:
     - slot: project.page
       label: Database
@@ -59,7 +62,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.5.2, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.5.3, entry: mcp/database}
   port: 8080
   health_check: /health
 db:

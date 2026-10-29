@@ -69,11 +69,18 @@ func (d *nativeScanDecoder) decode(data []byte) (Record, error) {
 	return d.row, nil
 }
 
+// The storage library owns this binary representation. Re-audit this fast
+// path on a dependency upgrade; unlisted versions safely use the public
+// decoder, and TestNativeFlatDecoderCoversPinnedVersion fails until they are
+// audited. doc.go (DocBuilder/DecodeDocument) is byte-identical from alpha.5
+// through alpha.10; documents.go only gained a QueryStats counter.
+var nativeFlatCodecVersions = map[string]bool{
+	"0.2.0-alpha.5": true, "0.2.0-alpha.6": true, "0.2.0-alpha.7": true,
+	"0.2.0-alpha.8": true, "0.2.0-alpha.9": true, "0.2.0-alpha.10": true,
+}
+
 func (d *nativeScanDecoder) decodeFlat(data []byte) (bool, error) {
-	// The storage library owns this binary representation. Re-audit this fast
-	// path on a dependency upgrade; newer codecs safely use the public decoder.
-	// documents.go is byte-identical between alpha.4 and alpha.5.
-	if native.Version != "0.2.0-alpha.5" || native.FormatVersion != 10 {
+	if !nativeFlatCodecVersions[native.Version] || native.FormatVersion != 10 {
 		return false, nil
 	}
 	if len(data) == 0 || len(data) > native.MaxDocumentSize {

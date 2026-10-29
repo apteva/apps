@@ -87,7 +87,14 @@ func nativeSumBoundSafe(count, low, high int64) bool {
 func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	spec := nativeAggregatePlan(c, r)
 
-	p, e := native.ParsePipeline(nativeAggregatePipeline(r, spec))
+	pipeline := nativeAggregatePipeline(r, spec)
+	if r.Where != nil {
+		// A leading $match lets the native planner pick an index range and
+		// shard it, or shard the full scan, instead of one serial Query source.
+		match := `[{"$match":` + string(marshal(nativeFilter(c, r.Where))) + `},`
+		pipeline = append([]byte(match), pipeline[1:]...)
+	}
+	p, e := native.ParsePipeline(pipeline)
 	if e != nil {
 		return nil, nativeError(e)
 	}
@@ -100,18 +107,7 @@ func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection
 	if r.RequireIndex && !plan(c, r.Query).IndexedLookup {
 		return nil, fail("query_too_expensive", "query requires a selective index")
 	}
-	opts := nativeQueryOptions(c, Query{Where: r.Where}, 0)
-	opts.MaxMemoryBytes = int64(workLimit)
-	filter := marshal(nativeFilter(c, r.Where))
-	var values []map[string]any
-	if r.Where == nil {
-		// Use the native leaf-streaming executor directly for broad aggregates.
-		values, e = h.RunParallel(t.ctx, p, t.backend.options.AggregateWorkers)
-	} else {
-		values, e = p.Run(t.ctx, func(yield func([]byte, []byte) bool) error {
-			return h.Query(t.ctx, filter, opts, yield)
-		})
-	}
+	values, e := h.RunParallel(t.ctx, p, t.backend.options.AggregateWorkers)
 	if errors.Is(e, native.ErrLimit) {
 		return t.aggregateStream(c, r, outSchema, spec)
 	}

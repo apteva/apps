@@ -71,6 +71,17 @@ func TestNativeProjectedCodecAndOwnership(t *testing.T) {
 	}
 }
 
+// The fast path silently fell back to the public decoder from alpha.6 through
+// alpha.8 because its version guard was never widened. Fail loudly instead.
+func TestNativeFlatDecoderCoversPinnedVersion(t *testing.T) {
+	c, r := nativeCodecFixture(t)
+	data, e := encodeNativeRecord(c, r)
+	checkErr(t, e)
+	if ok, e := newNativeScanDecoder(c, nil, nil).decodeFlat(data); !ok || e != nil {
+		t.Fatalf("flat decoder disabled for AptevaDB %s (format %d): audit doc.go and extend nativeFlatCodecVersions", native.Version, native.FormatVersion)
+	}
+}
+
 func TestNativeProjectionCompatibilityAndCorruption(t *testing.T) {
 	c, e := newCollection(Request{Collection: "items", Fields: []Field{{"a", "text", false}, {"b", "text", false}, {"i", "integer", false}}})
 	checkErr(t, e)
