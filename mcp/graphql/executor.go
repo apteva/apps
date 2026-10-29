@@ -871,9 +871,66 @@ func resolverArgs(config map[string]any) map[string]any {
 	return map[string]any{}
 }
 
+// databaseTools maps resolver operations to Database app tools. Schema, index
+// and drop tools are deliberately absent: a GraphQL field may read or write
+// records but never reshape or delete a database.
+var databaseTools = map[string]string{
+	"find": "db_find", "list": "db_find", "search": "db_find",
+	"get": "db_get", "count": "db_count", "aggregate": "db_aggregate",
+	"insert": "db_insert", "update": "db_update", "delete": "db_delete", "upsert": "db_upsert",
+}
+
+func databaseTool(operation string) (string, error) {
+	tool, ok := databaseTools[strings.ToLower(strings.TrimSpace(operation))]
+	if !ok {
+		return "", invalid("database resolver operation %q is not supported; use find, list, search, get, count, aggregate, insert, update, delete or upsert", operation)
+	}
+	return tool, nil
+}
+
+// boundedArg lets a client lower a server-configured numeric bound such as
+// limit or maxAffected, never raise it.
+func boundedArg(server, client any) any {
+	if client == nil {
+		return server
+	}
+	if server == nil {
+		return client
+	}
+	if value := intValue(client); value > 0 && value < intValue(server) {
+		return client
+	}
+	return server
+}
+
 func (a *App) callDatabase(ctx context.Context, operation string, config map[string]any) (any, error) {
+	tool, err := databaseTool(operation)
+	if err != nil {
+		return nil, err
+	}
 	args := resolverArgs(config)
-	input := sourceInput(config, args, "database", "collection", "where", "select", "orderBy", "limit", "cursor", "key", "metrics", "groupBy", "order_by", "group_by", "timeoutMs")
+	input := sourceInput(config, args, "database", "collection", "select", "orderBy", "cursor", "key", "metrics", "groupBy", "order_by", "group_by", "timeoutMs", "records", "set", "increment", "ifVersion")
+	// A resolver's where is a server-side constraint: client filters narrow it.
+	switch server, client := config["where"], args["where"]; {
+	case server != nil && client != nil:
+		input["where"] = map[string]any{"and": []any{server, client}}
+	case server != nil:
+		input["where"] = server
+	case client != nil:
+		input["where"] = client
+	}
+	for _, name := range []string{"limit", "maxAffected"} {
+		if value := boundedArg(config[name], args[name]); value != nil {
+			input[name] = value
+		}
+	}
+	// Whole-collection writes, upsert conflict targets and index requirements
+	// are resolver policy, so clients cannot set them.
+	for _, name := range []string{"all", "conflictIndex", "requireIndex"} {
+		if value, ok := config[name]; ok {
+			input[name] = value
+		}
+	}
 	if value, ok := config["database"].(string); ok {
 		input["database"] = value
 	}
@@ -891,16 +948,17 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 		}
 	}
 	input["_project_id"] = config["_project_id"]
-	tool := "db_" + strings.ToLower(operation)
-	if operation == "find" || operation == "list" {
-		tool = "db_find"
-	}
-	if operation == "aggregate" {
-		tool = "db_aggregate"
-	}
 	var out any
 	if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "database", tool, input, &out); err != nil {
 		return nil, err
+	}
+	// search keeps the cursor, in the same page shape as Tables search.
+	if page, ok := out.(map[string]any); ok && strings.EqualFold(strings.TrimSpace(operation), "search") {
+		result := map[string]any{"rows": page["records"], "has_more": page["hasMore"] == true}
+		if cursor, ok := page["nextCursor"].(string); ok && cursor != "" {
+			result["next_cursor"] = cursor
+		}
+		return result, nil
 	}
 	return unwrapSourceResult(operation, out), nil
 }

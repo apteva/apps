@@ -361,6 +361,11 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 			return nil, err
 		}
 	}
+	if source.Kind == "database" {
+		if _, err := databaseTool(operation); err != nil {
+			return nil, err
+		}
+	}
 	if source.Kind == "module" {
 		if operation != "resolve" && operation != "computed" {
 			return nil, invalid("module resolver operation must be resolve")
