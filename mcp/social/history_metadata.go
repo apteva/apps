@@ -12,24 +12,34 @@ const historyMetadataReadbackLimit = 100
 const historyMetadataAttemptsPerPost = 2
 
 func refreshHistoryMetadataCounts(ctx *sdk.AppCtx, run *historyRun) error {
-	err := ctx.AppDB().QueryRow(`SELECT COALESCE(sum(metadata_missing),0),COALESCE(sum(metadata_missing=1 AND metadata_attempts<?),0),COALESCE(sum(metadata_attempts),0) FROM social_history_seen WHERE run_id=?`, historyMetadataAttemptsPerPost, run.ID).Scan(&run.MetadataUnresolved, &run.MetadataRetryable, &run.MetadataReadbacks)
+	// Explicitly unavailable IDs are explained omissions: they are neither
+	// unresolved nor retried, and they are never treated as deleted.
+	err := ctx.AppDB().QueryRow(`SELECT COALESCE(sum(metadata_missing=1 AND metadata_resolution!='unavailable'),0),COALESCE(sum(metadata_missing=1 AND metadata_resolution='unavailable'),0),COALESCE(sum(metadata_missing=1 AND metadata_resolution='' AND metadata_attempts<?),0),COALESCE(sum(metadata_attempts),0) FROM social_history_seen WHERE run_id=?`, historyMetadataAttemptsPerPost, run.ID).Scan(&run.MetadataUnresolved, &run.MetadataUnavailable, &run.MetadataRetryable, &run.MetadataReadbacks)
 	if err != nil {
 		return err
 	}
-	run.MetadataUnresolvedIDs = []string{}
-	rows, err := ctx.AppDB().Query(`SELECT native_post_id FROM social_history_seen WHERE run_id=? AND metadata_missing=1 ORDER BY native_post_id LIMIT 10`, run.ID)
-	if err != nil {
+	if run.MetadataUnresolvedIDs, err = historyMetadataSample(ctx, run.ID, `metadata_resolution!='unavailable'`); err != nil {
 		return err
+	}
+	run.MetadataUnavailableIDs, err = historyMetadataSample(ctx, run.ID, `metadata_resolution='unavailable'`)
+	return err
+}
+
+func historyMetadataSample(ctx *sdk.AppCtx, runID, condition string) ([]string, error) {
+	out := []string{}
+	rows, err := ctx.AppDB().Query(`SELECT native_post_id FROM social_history_seen WHERE run_id=? AND metadata_missing=1 AND `+condition+` ORDER BY native_post_id LIMIT 10`, runID)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id string
 		if err = rows.Scan(&id); err != nil {
-			return err
+			return nil, err
 		}
-		run.MetadataUnresolvedIDs = append(run.MetadataUnresolvedIDs, id)
+		out = append(out, id)
 	}
-	return rows.Err()
+	return out, rows.Err()
 }
 
 // A metadata step consumes the same per-call step/time budget as a listing page.
@@ -44,7 +54,7 @@ func (a *App) reconcileHistoryMetadata(ctx *sdk.AppCtx, b historyAccount, run *h
 		return nil
 	}
 	var id string
-	err := ctx.AppDB().QueryRow(`SELECT native_post_id FROM social_history_seen WHERE run_id=? AND metadata_missing=1 AND metadata_attempts<? ORDER BY metadata_attempts,native_post_id LIMIT 1`, run.ID, historyMetadataAttemptsPerPost).Scan(&id)
+	err := ctx.AppDB().QueryRow(`SELECT native_post_id FROM social_history_seen WHERE run_id=? AND metadata_missing=1 AND metadata_resolution='' AND metadata_attempts<? ORDER BY metadata_attempts,native_post_id LIMIT 1`, run.ID, historyMetadataAttemptsPerPost).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		finishHistoryCoverage(run)
 		return nil
@@ -53,7 +63,7 @@ func (a *App) reconcileHistoryMetadata(ctx *sdk.AppCtx, b historyAccount, run *h
 		return err
 	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := ctx.AppDB().Exec(`UPDATE social_history_seen SET metadata_attempts=metadata_attempts+1,metadata_observed_at=? WHERE run_id=? AND native_post_id=? AND metadata_missing=1 AND metadata_attempts<?`, at, run.ID, id, historyMetadataAttemptsPerPost)
+	res, err := ctx.AppDB().Exec(`UPDATE social_history_seen SET metadata_attempts=metadata_attempts+1,metadata_observed_at=? WHERE run_id=? AND native_post_id=? AND metadata_missing=1 AND metadata_resolution='' AND metadata_attempts<?`, at, run.ID, id, historyMetadataAttemptsPerPost)
 	if err != nil {
 		return err
 	}
@@ -93,6 +103,9 @@ func (a *App) reconcileHistoryMetadata(ctx *sdk.AppCtx, b historyAccount, run *h
 			}
 			run.Scanned++
 		}
+	}
+	if err == nil && (b.Provider == "native" || b.Provider == "") && b.Platform == "youtube" {
+		err = a.resolveOmittedYouTubeMetadata(ctx, b, run, id)
 	}
 	if err != nil {
 		_, saveErr := ctx.AppDB().Exec(`UPDATE social_history_seen SET metadata_error=? WHERE run_id=? AND native_post_id=?`, redactDeliverySecrets(err.Error()), run.ID, id)
