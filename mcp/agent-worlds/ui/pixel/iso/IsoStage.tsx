@@ -8,6 +8,7 @@ import { buildIsoLayout } from "./layout";
 import { isoTrack, type IsoPose } from "./motion";
 import { SEA, paintScene } from "./paint";
 import { drawIsoFrame, type IsoResident } from "./render";
+import { describeTool } from "./stations";
 
 type Props = {
   stageRef: React.MutableRefObject<HTMLCanvasElement | SVGSVGElement | null>;
@@ -50,7 +51,7 @@ export default function IsoStage(props: Props) {
   const residents = useMemo<IsoResident[]>(() => layout.regions.flatMap((region, index) => region.residents.map(id => {
     const agent = agentById.get(id);
     const track = isoTrack(id, events, layout, index);
-    return { id, name: agent?.name || id, status: agent?.status || "", region: index, look: lookFor(id, props.teams.get(id)), at: track.at };
+    return { id, name: agent?.name || id, status: agent?.status || "", region: index, look: lookFor(id, props.teams.get(id)), at: track.at, couriers: track.couriers };
   })), [layout, events, agentById, props.teams]);
   const world = useMemo(() => (scene ? makeWorldCanvas(scene.width, scene.height) : null), [scene]);
   const size = scene ? { width: scene.width, height: scene.height } : { width: 1280, height: 760 };
@@ -121,7 +122,7 @@ export default function IsoStage(props: Props) {
         const working = pose?.inside && !pose.walking;
         if (!focused && !(working && roomy)) continue;
         const resident = residents.find(item => item.id === hit.id);
-        const action = working ? lastAction(hit.id) : "";
+        const action = working ? lastAction(hit.id, layout.places.find(place => place.id === pose.inside)?.name) : "";
         const name = fit(ctx, hit.label, font(700, 10), 120 * u), text = fit(ctx, action, font(600, 10.5), 180 * u);
         ctx.font = font(700, 10); const nw = ctx.measureText(name).width;
         ctx.font = font(600, 10.5); const tw = text ? ctx.measureText(text).width + 5 * u : 0;
@@ -134,10 +135,11 @@ export default function IsoStage(props: Props) {
       }
     }
   };
-  const lastAction = (agentId: string) => {
+  // What a working agent is doing, in words: "searching contacts".
+  const lastAction = (agentId: string, appName = "") => {
     let best: Event | undefined;
-    for (const event of events) if (event.agent_id === agentId && Date.parse(event.time) <= props.now && event.label) best = event;
-    return best?.label || "";
+    for (const event of events) if (event.agent_id === agentId && event.kind === "tool" && event.target && Date.parse(event.time) <= props.now) best = event;
+    return best ? describeTool(best.target!, appName) : "";
   };
 
   useEffect(draw);

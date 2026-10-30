@@ -1,9 +1,9 @@
 // Building types. A place's category picks one; the type fixes the footprint,
 // wall material, furniture and the work spots agents stand at. Spots always
 // sit in front of their furniture so a working agent is never hidden.
-import type { Point } from "../core";
 import type { Category } from "../categories";
 import { Painter, hash, lighten, tone, type Fill, type Tones } from "./raster";
+import type { Spot } from "./stations";
 
 export type WallKind = "stone" | "brick" | "timber" | "planks" | "logs";
 export type FloorKind = "planks" | "tiles" | "flags";
@@ -14,7 +14,7 @@ export const FZ = 2, WALL = 24, GABLE = 14, T = 0.25;
 
 export const ARCHETYPES: Record<ArchetypeId, Archetype> = {
   hall: { id: "hall", w: 9, d: 6, walls: ["stone"], wallColors: ["#e3dccb", "#d9d4e4"], floor: "tiles", floorColor: "#eef1f8", rug: [2, 1.6, 4, 2.2] },
-  office: { id: "office", w: 7, d: 5, walls: ["timber", "brick"], wallColors: ["#fff1d6", "#ffe6e6"], floor: "planks", floorColor: "#f0c48d", rug: [1.3, 0.9, 2.4, 2] },
+  office: { id: "office", w: 8, d: 6, walls: ["timber", "brick"], wallColors: ["#fff1d6", "#ffe6e6"], floor: "planks", floorColor: "#f0c48d", rug: [2.3, 2.9, 2.8, 2.1] },
   archive: { id: "archive", w: 7, d: 6, walls: ["planks"], wallColors: ["#e0594a", "#d9734e"], floor: "planks", floorColor: "#e8b77c" },
   post: { id: "post", w: 7, d: 5, walls: ["planks", "timber"], wallColors: ["#7cc0ec", "#fff4dc"], floor: "planks", floorColor: "#f3d2a6" },
   workshop: { id: "workshop", w: 6, d: 5, walls: ["stone"], wallColors: ["#b4b8c2", "#c7bfb3"], floor: "flags", floorColor: "#d6d8de" },
@@ -42,7 +42,7 @@ export type Lot = { x: number; y: number; w: number; d: number; archetype: Arche
 export type Footprint = { x0: number; y0: number; x1: number; y1: number };
 export type Piece = { foot: Footprint; corners: [number, number, number][]; draw: (p: Painter) => void };
 // `used` marks back-wall stretches taken by decor or shelves, so windows go elsewhere.
-export type Interior = { pieces: Piece[]; decorX: ((p: Painter) => void)[]; decorY: ((p: Painter) => void)[]; spots: Point[]; used: { axis: "x" | "y"; a0: number; length: number }[] };
+export type Interior = { pieces: Piece[]; decorX: ((p: Painter) => void)[]; decorY: ((p: Painter) => void)[]; spots: Spot[]; used: { axis: "x" | "y"; a0: number; length: number }[] };
 
 const BOOKS = ["#ef476f", "#4361ee", "#06d6a0", "#ffd166", "#9b5de5", "#ff7b54", "#4cc9f0"];
 const LEAVES = ["#b8f27c", "#6fcf4a", "#3fa34d", "#2a7a3b"];
@@ -150,7 +150,7 @@ class Kit {
   }
   onX(a0: number, length: number, z: number, h: number, fill: Fill) { this.out.used.push({ axis: "x", a0, length }); this.out.decorX.push(p => p.wall("x", this.X + a0, this.Y + T, FZ + z, length, h, fill)); }
   onY(a0: number, length: number, z: number, h: number, fill: Fill) { this.out.used.push({ axis: "y", a0, length }); this.out.decorY.push(p => p.wall("y", this.X + T, this.Y + a0, FZ + z, length, h, fill)); }
-  spot(u: number, v: number) { this.out.spots.push({ x: this.X + u, y: this.Y + v }); }
+  spot(u: number, v: number, tags?: string[]) { this.out.spots.push({ x: this.X + u, y: this.Y + v, ...(tags ? { tags } : {}) }); }
 }
 
 export function crate(p: Painter, x: number, y: number, z: number, size: number) {
@@ -167,6 +167,13 @@ export function barrel(p: Painter, x: number, y: number, z: number) {
 const paper = (p: Painter, x: number, y: number, z: number, color = "#ffffff") => p.box(x, y, z, 0.28, 0.2, 1, { top: color, left: "#d8d2de", right: "#c4bccc" });
 const lampOn = (p: Painter, x: number, y: number, z: number) => { p.box(x + 0.08, y + 0.08, z, 0.12, 0.12, 6, tone(NAVY)); p.box(x, y, z + 6, 0.3, 0.3, 3, { top: "#ffe08a", left: "#ffd166", right: "#f4a100" }); };
 const coins = (p: Painter, x: number, y: number, z: number, n: number) => { for (let k = 0; k < n; k++) p.box(x + k * 0.5, y, z, 0.22, 0.22, 2 + (k % 3) * 2, tone("#ffd166")); };
+
+// Station tags: nouns from tool names plus verb classes (see stations.ts).
+const INBOX = ["conversation", "draft", "message", "messaging", "reply", "send", "inbox", "template", "sender", "whatsapp", "email"];
+const CATALOG = ["contact", "list", "segment", "attribute", "audience", "lead", "customer", "member", "read"];
+const PIPELINE = ["opportunity", "pipeline", "stage", "deal", "routing", "rule", "offer"];
+const SHELVES = ["read", "file", "folder", "download", "document", "asset"];
+const INTAKE = ["write", "upload", "save", "sign", "share"];
 
 export function interiorFor(lot: Lot): Interior {
   const k = new Kit(lot), accent = lot.roof;
@@ -192,21 +199,33 @@ export function interiorFor(lot: Lot): Interior {
       break;
     }
     case "office": {
-      k.onX(0.5, 2, 9, 11, framed((u, v) => {
-        const c = Math.floor(u * 4), cell = (u * 4) % 1;
-        if (v > 0.78) return ["#4cc9f0", "#9b5de5", "#ffd166", "#06d6a0"][c];
-        return cell > 0.15 && cell < 0.85 && (v * 4) % 1 > 0.3 && Math.floor(v * 4) < 3 - (c % 2) ? "#ffffff" : "#e9c995";
+      // A CRM front office: inbox desk, card catalog, pipeline board.
+      k.onX(0.5, 2.6, 6, 15, (u, v) => {
+        const a = (u * 7) % 1, b = (v * 5) % 1;
+        if (a < 0.1 || b < 0.12) return DARK;
+        return hash(Math.floor(u * 7), Math.floor(v * 5)) < 0.55 && b < 0.7 ? ["#ffffff", "#fff1c1", "#ffd6e0"][Math.floor(hash(Math.floor(v * 5), Math.floor(u * 7)) * 3)] : "#5c3a24";
+      });
+      k.block(0.5, 0.35, 2.6, 0.6, 9, tone(WOOD), (p, x, y) => { for (let i = 0; i < 5; i++) paper(p, x + 0.2 + i * 0.45, y + 0.15 + (i % 2) * 0.15, FZ + 9 + (i % 2), ["#ffffff", "#fff1c1", "#ffd6e0"][i % 3]); });
+      k.onX(4.2, 3.1, 6, 16, framed((u, v) => {
+        const column = Math.floor(u * 4), lane = (u * 4) % 1;
+        if (v > 0.82) return ["#4cc9f0", "#ffd166", "#f15bb5", "#06d6a0"][column];
+        if (lane < 0.08 || lane > 0.92) return "#2b2d42";
+        const row = Math.floor(v * 6);
+        return lane > 0.16 && lane < 0.84 && (v * 6) % 1 > 0.25 && row < [4, 3, 2, 1][column] ? (column === 3 ? "#b9f5c9" : "#ffffff") : NAVY;
       }));
-      k.onY(1.3, 0.5, 13, 7, framed("#ffe8ef"));
-      k.table(1, 1, 1.6, 0.8, 8, DESK, (p, x, y) => { p.box(x + 0.2, y + 0.15, FZ + 8, 0.5, 0.4, 2, tone(accent)); paper(p, x + 0.9, y + 0.3, FZ + 8); lampOn(p, x + 1.2, y + 0.05, FZ + 8); });
-      k.chair(1.6, 2.05, accent);
-      k.block(3.4, 0.35, 0.8, 0.6, 14, tone("#9aa5b1"), (p, x, y) => { for (let i = 0; i < 3; i++) p.wall("x", x + 0.1, y + 0.6, FZ + 2 + i * 4, 0.6, 3, (u, v) => (Math.abs(u - 0.5) < 0.12 && v > 0.5 ? NAVY : "#c3cbd5")); });
-      k.shelf("x", 4.9, 1.6, 18);
-      k.chair(3.4, 2.5, "#ffd166", "y");
-      k.block(3.9, 2.9, 0.6, 0.6, 5, tone(DESK), (p, x, y) => p.box(x + 0.15, y + 0.1, FZ + 5, 0.3, 0.25, 1, WHITE));
-      k.sofa(4.6, 3.9, accent);
-      k.plant(0.4, 4.1, 1.1); k.plant(6.4, 1.4, 1.2);
-      k.spot(1.8, 2.8); k.spot(3.8, 1.5); k.spot(5.4, 1.5);
+      k.block(0.3, 2.1, 0.75, 2.1, 15, tone("#b5793f"), (p, x, y) => {
+        for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+          p.wall("y", x + 0.75, y + 0.1 + c * 0.66, FZ + 1.5 + r * 4.4, 0.56, 3.6, (u, v) => (Math.abs(u - 0.5) < 0.12 && Math.abs(v - 0.55) < 0.18 ? "#ffd166" : v > 0.85 ? "#e3b27a" : "#c98f5b"));
+        }
+      });
+      k.table(2.8, 3.3, 1.5, 0.8, 8, DESK, (p, x, y) => { p.box(x + 0.15, y + 0.15, FZ + 8, 0.5, 0.4, 2, tone(accent)); paper(p, x + 0.85, y + 0.3, FZ + 8); lampOn(p, x + 1.15, y + 0.05, FZ + 8); });
+      k.chair(3.3, 4.3, accent);
+      k.block(4.6, 3.5, 0.6, 0.6, 5, tone(DESK), (p, x, y) => p.box(x + 0.15, y + 0.1, FZ + 5, 0.3, 0.25, 1, WHITE));
+      k.sofa(5.4, 3.4, accent, "y");
+      k.plant(7.3, 0.5, 1.2); k.plant(0.4, 5.1, 1, accent); k.plant(3.6, 0.5, 0.9, "#4361ee");
+      k.spot(1.2, 1.6, INBOX); k.spot(2.5, 1.6, INBOX); k.spot(3.6, 4.8, INBOX);
+      k.spot(1.7, 2.6, CATALOG); k.spot(1.7, 3.8, CATALOG);
+      k.spot(4.9, 1.5, PIPELINE); k.spot(6.3, 1.5, PIPELINE);
       break;
     }
     case "archive": {
@@ -216,7 +235,7 @@ export function interiorFor(lot: Lot): Interior {
       k.block(2.95, 0.95, 0.1, 0.5, 24, tone(WOOD));
       k.table(1.8, 3.6, 1.4, 0.8, 7, DESK, (p, x, y) => { p.box(x + 0.2, y + 0.15, FZ + 7, 0.5, 0.4, 3, tone("#e8b46a")); paper(p, x + 0.9, y + 0.2, FZ + 7); });
       k.crate(5.6, 4.6); k.crate(6.2, 4.7, 0.5); k.crate(5.65, 4.65, 0.5, 9); k.barrel(6.1, 2.6);
-      k.spot(1.6, 1.6); k.spot(4.0, 1.6); k.spot(2.5, 4.9); k.spot(5.8, 1.6);
+      k.spot(1.6, 1.6, SHELVES); k.spot(4.0, 1.6, SHELVES); k.spot(2.5, 4.9, INTAKE); k.spot(5.8, 1.6, SHELVES);
       break;
     }
     case "post": {
@@ -231,7 +250,7 @@ export function interiorFor(lot: Lot): Interior {
       k.shelf("x", 4.8, 1.8, 20, letters, 4);
       k.sofa(4.6, 3.9, "#4cc9f0");
       k.plant(3.8, 0.6, 1);
-      k.spot(2.0, 2.9); k.spot(1.1, 2.5); k.spot(5.6, 1.5);
+      k.spot(2.0, 2.9, ["send", "write", "reply", "draft", "message", "post"]); k.spot(1.1, 2.5, ["send", "write", "reply", "draft", "message", "post"]); k.spot(5.6, 1.5, ["read", "inbox", "thread", "channel", "history"]);
       break;
     }
     case "workshop": {
@@ -243,7 +262,7 @@ export function interiorFor(lot: Lot): Interior {
       k.table(2.6, 0.4, 1.8, 0.7, 8, "#a8693a", (p, x, y) => { p.box(x + 0.2, y + 0.15, FZ + 8, 0.5, 0.15, 2, tone("#adb5bd")); p.box(x + 1, y + 0.1, FZ + 8, 0.12, 0.4, 2, tone("#ef476f")); });
       k.block(4.6, 0.4, 0.9, 0.6, 12, tone("#5c6475"), (p, x, y) => p.wall("x", x + 0.15, y + 0.6, FZ + 4, 0.6, 5, (u, v) => ((Math.floor(u * 4) + Math.floor(v * 2)) % 2 ? "#06d6a0" : "#2b2d42")));
       k.barrel(0.4, 3.2); k.barrel(5.0, 4.1); k.barrel(5.3, 3.4); k.crate(1.6, 4.2);
-      k.spot(1.0, 1.8); k.spot(3.4, 1.5); k.spot(2.9, 2.8); k.spot(5.0, 1.5);
+      k.spot(1.0, 1.8, ["build", "deploy", "run", "release", "function", "job"]); k.spot(3.4, 1.5, ["write", "code", "file", "repo", "commit"]); k.spot(2.9, 2.8, ["build", "deploy", "run"]); k.spot(5.0, 1.5, ["read", "log", "status", "health", "metric"]);
       break;
     }
     case "bank": {
@@ -254,7 +273,7 @@ export function interiorFor(lot: Lot): Interior {
       k.table(4, 1, 1.2, 0.8, 7, DESK, (p, x, y) => { p.box(x + 0.15, y + 0.15, FZ + 7, 0.5, 0.4, 2, tone("#06d6a0")); paper(p, x + 0.75, y + 0.25, FZ + 7); });
       k.chair(4.2, 2, accent); k.sofa(3.6, 3.9, "#06d6a0");
       k.plant(5.4, 4.3, 1.1); k.plant(3.8, 0.5, 0.9, "#4361ee");
-      k.spot(1.8, 3.6); k.spot(0.8, 1.6); k.spot(4.6, 2.6);
+      k.spot(1.8, 3.6, ["payment", "charge", "invoice", "checkout", "order", "send", "write"]); k.spot(0.8, 1.6, ["balance", "refund", "payout", "account"]); k.spot(4.6, 2.6, ["read", "report", "customer", "subscription"]);
       break;
     }
     case "studio": {

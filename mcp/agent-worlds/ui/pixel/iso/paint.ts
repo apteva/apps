@@ -77,8 +77,9 @@ export function paintScene(layout: IsoLayout<any>): Scene {
 // Depth key for anything at tile (x, y): roughly x + y, pulled in front of
 // nothing but pushed behind the back walls of a house it stands behind.
 export function depthKey(layout: IsoLayout<any>, x: number, y: number, base: number) {
+  // Inside a building its own walls frame it; neighbours must not pull it behind them.
+  if (layout.places.some(r => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.d)) return base;
   for (const r of layout.places) {
-    if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.d) continue;
     if ((x < r.x + 0.2 && x > r.x - 5 && y > r.y - 5 && y < r.y + r.d + 0.3) || (y < r.y + 0.2 && y > r.y - 5 && x > r.x - 5 && x < r.x + r.w + 0.3)) base = Math.min(base, r.x + r.y - 0.2);
   }
   return base;

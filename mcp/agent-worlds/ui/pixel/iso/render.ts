@@ -7,11 +7,11 @@ import { drawEmote, type Emote, type Look } from "../characters";
 import type { Hit, SceneEvent } from "../render";
 import { FZ } from "./archetypes";
 import { G, groundAt, type IsoLayout } from "./layout";
-import type { IsoPose } from "./motion";
+import type { Courier, IsoPose } from "./motion";
 import { depthKey, type Scene } from "./paint";
 import { INK, TH, TW, hash, lighten, outline } from "./raster";
 
-export type IsoResident = { id: string; name: string; status: string; region: number; look: Look; at: (time: number) => IsoPose };
+export type IsoResident = { id: string; name: string; status: string; region: number; look: Look; at: (time: number) => IsoPose; couriers?: Courier[] };
 export type IsoFrameInput = {
   layout: IsoLayout<any>; scene: Scene; residents: IsoResident[]; events: SceneEvent[]; now: number;
   hover: string; selectedAgent: string; selectedPlace: string; reducedMotion: boolean;
@@ -48,14 +48,22 @@ export function drawIsoFrame(ctx: Ctx, input: IsoFrameInput) {
   dynamics.sort((a, b) => a.key - b.key);
   for (const item of dynamics) {
     item.draw();
+    // Redraw only inside the mover's box: a whole wall sprite redrawn
+    // unclipped would cover furniture standing in front of it.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(item.x, item.y, item.w, item.h);
+    ctx.clip();
     for (const front of scene.statics) {
       if (front.key <= item.key) continue;
       if (front.x < item.x + item.w && item.x < front.x + front.canvas.width && front.y < item.y + item.h && item.y < front.y + front.canvas.height) ctx.drawImage(front.canvas, front.x, front.y);
     }
+    ctx.restore();
   }
 
   drawSmoke(ctx, input, time);
   drawHandoffs(ctx, input, poses);
+  drawCouriers(ctx, input, poses);
   const recent = latestByAgent(input.events, now, 7000);
   for (const resident of input.residents) {
     const pose = poses.get(resident.id)!;
@@ -127,7 +135,8 @@ export function isoCharacter(look: Look, back: boolean, frame: number) {
 }
 
 function drawResident(ctx: Ctx, resident: IsoResident, pose: IsoPose, x: number, y: number, input: IsoFrameInput) {
-  const frame = pose.walking && !input.reducedMotion ? Math.floor(input.now / 125 + seedFor(resident.id)) % 4 : 0;
+  const step = pose.pace === "dash" ? 55 : pose.pace === "sprint" ? 80 : 125;
+  const frame = pose.walking && !input.reducedMotion ? Math.floor(input.now / step + seedFor(resident.id)) % 4 : 0;
   const selected = input.selectedAgent === resident.id, hovered = input.hover === resident.id;
   if (selected || hovered) {
     ctx.globalAlpha = 0.9;
@@ -138,6 +147,17 @@ function drawResident(ctx: Ctx, resident: IsoResident, pose: IsoPose, x: number,
     ctx.globalAlpha = 1;
   }
   shadow(ctx, x, y, 5, 0.22);
+  // Speed streaks trail an agent that is catching up.
+  if (pose.walking && pose.pace && pose.pace !== "walk" && !input.reducedMotion) {
+    const before = resident.at(input.now - 120), from = project(input.scene, before.x, before.y);
+    const to = project(input.scene, pose.x, pose.y), dx = to.x - from.x, dy = to.y - from.y, l = Math.hypot(dx, dy) || 1;
+    ctx.globalAlpha = 0.8;
+    for (let i = 0; i < (pose.pace === "dash" ? 3 : 2); i++) {
+      const length = pose.pace === "dash" ? 10 : 6, ox = x - (dx / l) * (7 + i * 2), oy = y - 8 - i * 4 - (dy / l) * (7 + i * 2);
+      for (let k = 0; k < length; k++) rect(ctx, ox - (dx / l) * k, oy - (dy / l) * k, 1, 1, "#ffffff");
+    }
+    ctx.globalAlpha = 1;
+  }
   const sprite = isoCharacter(resident.look, pose.back, frame);
   ctx.save();
   ctx.translate(x, y - 19);
@@ -187,6 +207,22 @@ function drawSmoke(ctx: Ctx, input: IsoFrameInput, time: number) {
     }
   }
   ctx.globalAlpha = 1;
+}
+
+// A short call elsewhere flies as an envelope from the agent to that building's door.
+function drawCouriers(ctx: Ctx, input: IsoFrameInput, poses: Map<string, IsoPose>) {
+  for (const resident of input.residents) {
+    for (const courier of resident.couriers || []) {
+      const age = input.now - courier.time;
+      if (age < 0 || age > 1400) continue;
+      const pose = poses.get(resident.id);
+      if (!pose) continue;
+      const a = project(input.scene, pose.x, pose.y, pose.inside ? FZ : 0), b = project(input.scene, courier.place.doorOut.x + 0.5, courier.place.doorOut.y + 0.5);
+      const t = age / 1400, x = Math.round(a.x + (b.x - a.x) * t), y = Math.round(a.y - 24 + (b.y - 10 - a.y + 24) * t - Math.sin(t * Math.PI) * 26);
+      rect(ctx, x - 4, y - 3, 9, 7, INK_HEX); rect(ctx, x - 3, y - 2, 7, 5, "#fff8e1");
+      rect(ctx, x - 2, y - 1, 1, 1, courier.place.roof); rect(ctx, x + 2, y - 1, 1, 1, courier.place.roof); rect(ctx, x - 1, y, 3, 1, courier.place.roof);
+    }
+  }
 }
 
 // A letter flies from sender to receiver for observed handoffs.

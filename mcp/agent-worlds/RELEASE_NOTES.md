@@ -1,3 +1,14 @@
+# Agent Worlds 0.6.1
+
+Agents now work at the part of a building that matches the tool they call.
+
+- Tool names pick the station: in the CRM, contact and list tools go to the card catalog, deal and pipeline tools to the pipeline board, and conversation, reply, and draft tools to the inbox desk. Unknown tools can use any spot.
+- CRM and other people apps get a larger front office with an inbox desk and mail rack, a contact card catalog, and a pipeline board.
+- Storage, mail and chat, build, and billing buildings also have stations (shelves vs. upload desk, sending vs. reading, forge vs. log monitor, counter vs. safe).
+- The label over a working agent now says what it is doing in words, such as "searching contacts" or "updating conversation status".
+- A director keeps busy agents readable and close to live: calls to one station less than 2.5 s apart are one visit; a one-off call to another building in the middle of an activity flies there as an envelope instead of a walk; an agent more than 2 s behind sprints, more than 6 s behind dashes with shorter stays, and skips visits whose successor has already started. Sprinting agents trail speed streaks.
+- Fixed: furniture briefly disappeared behind a building's back wall when an agent walked behind it, and furniture in a building just behind another building could be hidden by its own walls.
+
 # Agent Worlds 0.6.0
 
 Pixel Village is redrawn as a clean, bright isometric village.
