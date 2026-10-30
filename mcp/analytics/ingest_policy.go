@@ -76,6 +76,9 @@ func rollupTopic(spec *EventSpec) string {
 	return spec.Topic + "_rollup"
 }
 
+// errDeliveryReused reports a delivery_id that already recorded different data.
+var errDeliveryReused = errors.New("delivery_id already used with different event data")
+
 func insertEventWithPolicy(db sqlDatabase, original EventInsert) (int64, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -89,7 +92,7 @@ func insertEventWithPolicy(db sqlDatabase, original EventInsert) (int64, error) 
 		err = tx.QueryRow(`SELECT event_id,fingerprint FROM ingest_receipts WHERE project_id=? AND app=? AND topic=? AND delivery_id=?`, original.ProjectID, original.App, original.Topic, original.DeliveryID).Scan(&id, &previous)
 		if err == nil {
 			if previous != fingerprint {
-				return 0, errors.New("delivery_id already used with different event data")
+				return 0, errDeliveryReused
 			}
 			return id, nil
 		}

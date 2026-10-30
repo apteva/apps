@@ -9,12 +9,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func (a *App) handleTrackingTag(w http.ResponseWriter, _ *http.Request) {
@@ -112,6 +116,9 @@ func (rl *rateLimiter) allow(key string) bool {
 
 // originAllowed requires Origin/Referer evidence when an allowlist is set.
 // Public clients can spoof these headers; this is an abuse control, not identity.
+// The tag's no-cors GET never carries Origin, and pages with
+// Referrer-Policy: no-referrer send no Referer either, so the page URL the tag
+// reports is the last resort. It is no weaker than the headers it replaces.
 func originAllowed(wk *WriteKey, r *http.Request) bool {
 	if len(wk.AllowedOrigins) == 0 {
 		return true
@@ -119,6 +126,9 @@ func originAllowed(wk *WriteKey, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		origin = r.URL.Query().Get("url")
 	}
 	host := hostOf(origin)
 	if host == "" {
@@ -172,14 +182,60 @@ func collectProps(q url.Values) map[string]any {
 		}
 	}
 	// Standard location fields cannot retain secrets in URLs, including extra props overrides.
-	for _, key := range []string{"url", "path", "referrer"} {
+	for _, key := range []string{"url", "path", "referrer", "link_url", "touch_landing", "first_landing"} {
 		if value, ok := props[key].(string); ok {
 			if i := strings.IndexAny(value, "?#"); i >= 0 {
 				props[key] = value[:i]
 			}
 		}
 	}
+	// Acquisition touches come from page URLs anyone can craft; keep them short.
+	for key, value := range props {
+		if text, ok := value.(string); ok && isAttributionProp(key) && len(text) > maxAttributionValue {
+			props[key] = text[:maxAttributionValue]
+		}
+	}
 	return props
+}
+
+const maxAttributionValue = 200
+
+// maxRetryAge bounds how far back a queued tag delivery may be dated.
+const maxRetryAge = 24 * time.Hour
+
+func isAttributionProp(key string) bool {
+	key = strings.TrimPrefix(key, "first_")
+	return strings.HasPrefix(key, "utm_") || strings.HasPrefix(key, "touch_") || key == "referrer" || key == "landing"
+}
+
+// collectClientIP keys the per-IP admission limiter. The platform gateway signs
+// the client IP it resolved; that is the only source a visitor cannot forge.
+// Platforms that predate signing send no metadata, so the old heuristic (the
+// rightmost public X-Forwarded-For hop behind a loopback proxy) still applies
+// there. Metadata that fails verification falls back to the peer address and
+// never to forwarded headers.
+func collectClientIP(r *http.Request) string {
+	signed, err := sdk.ClientIPFromRequest(r)
+	if err == nil && signed != "" {
+		return signed
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	if err != nil {
+		return ip
+	}
+	if peer := net.ParseIP(ip); peer != nil && peer.IsLoopback() {
+		parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := net.ParseIP(strings.TrimSpace(parts[i]))
+			if candidate != nil && !candidate.IsLoopback() && !candidate.IsPrivate() {
+				return candidate.String()
+			}
+		}
+	}
+	return ip
 }
 
 // GET /collect — public tag ingest. See file header.
@@ -190,21 +246,7 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 		writePixel(w)
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
-	if peer := net.ParseIP(ip); peer != nil && peer.IsLoopback() {
-		parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			candidate := net.ParseIP(strings.TrimSpace(parts[i]))
-			if candidate != nil && !candidate.IsLoopback() && !candidate.IsPrivate() {
-				ip = candidate.String()
-				break
-			}
-		}
-	}
-	if !collectAdmissionLimiter.allow("ip:" + ip) {
+	if !collectAdmissionLimiter.allow("ip:" + collectClientIP(r)) {
 		w.Header().Set("X-Apa", "rate-limited")
 		writePixel(w)
 		return
@@ -220,17 +262,31 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 		if event == "" {
 			event = "page_view"
 		}
+		props := collectProps(q)
 		propsJSON := "{}"
-		if b, err := json.Marshal(collectProps(q)); err == nil {
+		if b, err := json.Marshal(props); err == nil {
 			propsJSON = string(b)
 		}
+		// A retried delivery reports how long it waited in the browser queue.
+		var ts int64
+		if age, err := strconv.ParseInt(q.Get("age"), 10, 64); err == nil && age > 0 && age <= maxRetryAge.Milliseconds() {
+			ts = time.Now().UnixMilli() - age
+		}
+		// A visitor linked server-side by analytics_identify carries its user
+		// from then on. uid stays accepted for pages that set it themselves.
+		userID := q.Get("uid")
+		if visitorID, _ := props["visitor_id"].(string); visitorID != "" {
+			if linked := linkedUserID(requestReadDB(r), wk.ProjectID, visitorID); linked != "" {
+				userID = linked
+			}
+		}
 		id, err := insertEvent(requestWriteDB(r), EventInsert{
-			TS:         0,
+			TS:         ts,
 			DeliveryID: q.Get("eid"),
 			App:        wk.Site,
 			Topic:      event,
 			ProjectID:  wk.ProjectID,
-			UserID:     q.Get("uid"),
+			UserID:     userID,
 			SessionID:  q.Get("sid"),
 			Source:     "web",
 			Props:      propsJSON,
@@ -243,6 +299,9 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 				"id": id, "app": wk.Site, "topic": event, "ts": time.Now().UnixMilli(),
 			})
 			w.Header().Set("X-Apa", "ok")
+		} else if errors.Is(err, errDeliveryReused) {
+			// A queued retry of an event that did arrive the first time.
+			w.Header().Set("X-Apa", "duplicate")
 		}
 	} else if wk == nil {
 		w.Header().Set("X-Apa", "invalid-key")

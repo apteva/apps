@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.17.10
+version: 0.18.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -82,6 +82,18 @@ description: |
   v0.17.10 adds GA-style automatic outbound-link measurement to the hosted
   tag.js. External anchor clicks emit outbound_click with destination and
   page context, so sites do not need a handler on every link.
+
+  v0.18.0 adds acquisition attribution and server-side identity. tag.js
+  captures the five UTM fields and external referrers as first and latest
+  touches (expiring, default 90 days) on every event, retries deliveries
+  that failed at the network level, honours data-consent="required", can
+  mirror the visitor into an apa_vid cookie, and hands visitors to approved
+  domains (data-linker). analytics_identify links a visitor and aliases to
+  an authenticated user from a backend and backfills its tag events;
+  analytics_user_attribution and analytics_attribution report acquisition
+  per user and per lifecycle event. Also: SPA page views carry the new
+  page title, outbound link_url drops query strings, origin allowlists work
+  on no-referrer sites, and the collector uses the platform-signed client IP.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [project, global]
@@ -116,6 +128,8 @@ provides:
       description: Query events.
     - name: references.manage
       description: Manage canonical Analytics reference sets and values.
+    - name: identity.manage
+      description: Link anonymous website visitors to authenticated users via analytics_identify.
   mcp_tools:
     - name: analytics_track
       description: Record one event in the current project. Project is assigned automatically from the calling agent; do not pass project_id.
@@ -152,6 +166,15 @@ provides:
       requires: references.manage
     - name: analytics_reference_values_list
       description: List canonical values in one current-project reference set.
+      requires: events.read
+    - name: analytics_identify
+      description: Link an anonymous website visitor (and optional aliases from other apps) to an authenticated user; call from a backend, never with browser-supplied identity. Backfills the visitor's tag events and returns the user's attribution.
+      requires: identity.manage
+    - name: analytics_user_attribution
+      description: First and latest acquisition touch (UTM fields, referrer, landing page) for a user or alias in the current project.
+      requires: events.read
+    - name: analytics_attribution
+      description: Break down events such as sign-ups or payments by the first or latest acquisition touch of the user behind them; actor_key joins events that carry a user ID or alias in a prop.
       requires: events.read
     - name: analytics_event_specs_list
       description: List current-project event specs.
@@ -398,7 +421,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.17.10
+    ref: analytics/v0.18.0
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -797,7 +820,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolEventViolations,
 		},
 	}
-	return withToolDeadlines(append(tools, a.objectiveTools()...))
+	tools = append(tools, a.objectiveTools()...)
+	return withToolDeadlines(append(tools, a.identityTools()...))
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

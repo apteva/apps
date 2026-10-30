@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	"net/http"
 	"net/http/httptest"
@@ -341,6 +342,53 @@ func TestCollectorRetryOriginAndURLPrivacy(t *testing.T) {
 		if originAllowed(wk, r) {
 			t.Errorf("accepted origin %q", origin)
 		}
+	}
+}
+func TestCollectOriginFallsBackToReportedPageURL(t *testing.T) {
+	wk := &WriteKey{AllowedOrigins: []string{"https://example.com"}}
+	for target, want := range map[string]bool{
+		"/collect?url=" + url.QueryEscape("https://example.com/pricing"):  true,
+		"/collect?url=" + url.QueryEscape("https://evil.example/pricing"): false,
+		"/collect?url=" + url.QueryEscape("/pricing"):                     false,
+		"/collect": false,
+	} {
+		if got := originAllowed(wk, httptest.NewRequest("GET", target, nil)); got != want {
+			t.Errorf("%s without Origin/Referer: allowed=%v, want %v", target, got, want)
+		}
+	}
+	// Headers still win over the reported URL when present.
+	r := httptest.NewRequest("GET", "/collect?url="+url.QueryEscape("https://example.com/"), nil)
+	r.Header.Set("Referer", "https://evil.example/")
+	if originAllowed(wk, r) {
+		t.Error("reported URL overrode a mismatched Referer")
+	}
+}
+func TestCollectStripsOutboundLinkQuery(t *testing.T) {
+	props := collectProps(url.Values{"p": {`{"link_url":"https://go.example.com/r?aff=secret#frag","link_domain":"go.example.com"}`}})
+	if props["link_url"] != "https://go.example.com/r" {
+		t.Fatalf("link_url = %v", props["link_url"])
+	}
+}
+func TestCollectClientIPPrefersSignedPlatformIP(t *testing.T) {
+	t.Setenv("APTEVA_APP_TOKEN", "app-token")
+	newReq := func() *http.Request {
+		r := httptest.NewRequest("GET", "/collect?k=x", nil)
+		r.RemoteAddr = "127.0.0.1:5000"
+		r.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.7")
+		return r
+	}
+	signed := newReq()
+	sdk.SetClientIPHeaders(signed, "192.0.2.44", "app-token")
+	if got := collectClientIP(signed); got != "192.0.2.44" {
+		t.Errorf("signed: got %q", got)
+	}
+	forged := newReq()
+	sdk.SetClientIPHeaders(forged, "192.0.2.44", "wrong-token")
+	if got := collectClientIP(forged); got != "127.0.0.1" {
+		t.Errorf("forged signature must not fall back to forwarded headers: got %q", got)
+	}
+	if got := collectClientIP(newReq()); got != "198.51.100.7" {
+		t.Errorf("unsigned legacy platform: got %q", got)
 	}
 }
 func TestReferencePaginationAndPatchMetadata(t *testing.T) {
