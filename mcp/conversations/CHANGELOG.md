@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.60 — 2026-10-30
+
+- Keep compact and single-line composers on one row in narrow docks such as the dashboard Helper: an empty draft stays one line tall even while a wrapped "Reconnecting…" placeholder is shown, and the microphone sits after the attachment menu as `[+] [mic] [input] [send]`.
+- Keep an active voice session's status and controls on the composer row in single-line layout.
+- Accept `single-line` in the `composer_layout` widget-settings type, and mirror the React entry's `composer.layout` into its widget settings.
+
 ## 0.24.59 — 2026-10-25
 
 - Keep each queued preview to one line with ellipsis and a compact attachment indicator; show the full text and filenames when editing.

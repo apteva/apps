@@ -389,6 +389,48 @@ for (const host of ["dashboard", "external", "package"]) {
  });
 }
 
+// Voice is offered on private direct chats only; the fixture is public.
+const withVoiceOffline=(page:import("@playwright/test").Page)=>page.route(url=>/\/(conversations|chats)/.test(url.pathname),async route=>{
+ // Holding back live events keeps the long "Reconnecting…" placeholder, which wraps in a narrow dock.
+ if((route.request().headers().accept||"").includes("event-stream"))return route.abort();
+ const response=await route.fetch();
+ if(!(response.headers()["content-type"]||"").includes("json"))return route.fulfill({response});
+ await route.fulfill({response,body:(await response.text()).replaceAll('"audience":"public"','"audience":"private"')});
+});
+for (const host of ["dashboard", "external"]) for (const layout of ["compact","single-line"]) {
+ test(`${host}: ${layout} keeps add, mic, input and send on one row in narrow docks`, async ({page,request}) => {
+  await request.post("/reset");await withVoiceOffline(page);
+  await page.addInitScript(layout=>{(window as any).COMPOSER_OPTIONS={layout};},layout);
+  const height=layout==="single-line"?24:36;
+  for(const width of [500,320]){
+   await page.setViewportSize({width,height:800});await page.goto(`/?host=${host}&theme=terminal`);
+   const input=page.getByRole("textbox");await expect(input).toHaveAttribute("placeholder","Reconnecting — messages still send");
+   const box=await page.locator(".chat-composer-box").evaluate(el=>{
+    const rect=(selector:string)=>el.querySelector(selector)!.getBoundingClientRect().toJSON();
+    return {add:rect(".chat-composer-add"),mic:rect(".chat-composer-voice"),input:rect("textarea"),send:rect(".chat-composer-send")};
+   });
+   // The monospace placeholder wraps here; an empty draft must still be one row.
+   expect(box.input.height).toBe(height);
+   expect(box.add.right).toBeLessThanOrEqual(box.mic.x);
+   expect(box.mic.right).toBeLessThanOrEqual(box.input.x);
+   expect(box.input.right).toBeLessThanOrEqual(box.send.x);
+   for(const item of [box.add,box.mic,box.send])expect(Math.abs(item.y+item.height/2-box.input.y-box.input.height/2)).toBeLessThan(2);
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+  await page.unrouteAll({behavior:"ignoreErrors"});
+ });
+}
+
+test("composer layout reaches the composer through widget settings and the React entry", async ({page,request}) => {
+ await request.post("/reset");
+ await page.addInitScript(()=>{(window as any).WIDGET_SETTINGS={composer_layout:"single-line"};});
+ await page.goto("/?host=dashboard");
+ await expect(page.locator(".chat-composer-box")).toHaveAttribute("data-layout","single-line");
+ await page.addInitScript(()=>{(window as any).COMPOSER_OPTIONS={layout:"single-line"};});
+ await page.goto("/?host=external");
+ await expect(page.locator(".chat-composer-box")).toHaveAttribute("data-layout","single-line");
+});
+
 for (const host of ["external","package"]) {
  test(`${host}: late progress frames do not move a transcript the user scrolled away from`, async ({page,request}) => {
   await request.post("/reset"); await request.post("/seed", {data:{}});

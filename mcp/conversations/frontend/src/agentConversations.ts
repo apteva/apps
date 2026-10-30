@@ -4,7 +4,7 @@ export type ConversationDisplayMode = "browser" | "single";
 export interface AgentConversationWidgetSettings {
   thread_context_menu?:boolean;
   agent_avatars?: import("./agentAppearance").AgentAvatarMode;
-  composer_layout?: "auto" | "compact" | "expanded";
+  composer_layout?: "auto" | "compact" | "expanded" | "single-line";
   display_mode?: ConversationDisplayMode;
   show_page_context?: boolean;
   show_new_conversation?: boolean;

@@ -135,7 +135,7 @@ export function VoiceControls({ client, chatId, disabled = false, onActiveChange
     } finally { if (mounted.current) setBusy(false); }
   };
 
-  return <div className="flex flex-wrap items-center gap-2">
+  return <div className="chat-composer-voice flex flex-wrap items-center gap-2">
     {state === "closed" ? <button type="button" onClick={() => void start()} disabled={busy || disabled}
       className="inline-flex h-9 w-9 items-center justify-center rounded-full text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
       aria-label={t(mode === "dictation" ? "voice.dictate" : "voice.start")} title={t(mode === "dictation" ? "voice.dictate" : "voice.start")}>

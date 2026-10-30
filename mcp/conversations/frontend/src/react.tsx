@@ -43,13 +43,13 @@ function Surface({ conversations, children, className, pageContext, ...localizat
 export const ConversationChat = forwardRef<ConversationComposerHandle, ChatProps>(function ConversationChat({ host, conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"single",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
+    instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"single",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel,composer_layout:localization.composer?.layout}}
   /></Surface>;
 });
 export const AgentConversations = forwardRef<ConversationComposerHandle, ChatProps>(function AgentConversations({ host, conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "hidden", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"browser",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
+    instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"browser",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel,composer_layout:localization.composer?.layout}}
   /></Surface>;
 });
 export const ConversationThread = forwardRef<ConversationComposerHandle, ChatConfiguration & {

@@ -351,20 +351,22 @@
 .apteva-conversations .chat-composer-safe {container-type:inline-size;container-name:apteva-composer}
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-toolbar {display:contents}
-.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) :is(.chat-composer-menu, .chat-composer-voice) {order:1;flex:0 0 auto}
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-send {order:3;margin-left:0}
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-attachment-tray,
 .apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
 /* Keep one visible text row; long drafts and Shift+Enter remain editable by scrolling. */
 .apteva-conversations .chat-composer-box[data-layout="single-line"] {align-items:center}
+/* An active voice session keeps its status and controls on the same row. */
+.apteva-conversations .chat-composer-box[data-layout="single-line"] .chat-composer-voice {flex-wrap:nowrap;min-width:0;overflow:hidden;white-space:nowrap}
 .apteva-conversations .chat-composer-box[data-layout="single-line"] .chat-composer-input {
  height:24px;min-height:24px;max-height:24px;padding:0 4px;field-sizing:fixed;overflow-y:auto;
 }
 @container apteva-composer (max-width:480px) {
 .apteva-conversations .chat-composer-box[data-layout="auto"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-toolbar {display:contents}
-.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box[data-layout="auto"] :is(.chat-composer-menu, .chat-composer-voice) {order:1;flex:0 0 auto}
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-send {order:3;margin-left:0}
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-tray,

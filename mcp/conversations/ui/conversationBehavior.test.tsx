@@ -77,6 +77,7 @@ test("unread conversations use the shared dot indicator without a numeric badge"
 
 test("composer autosize remeasures after a narrow wrapped draft is cleared", () => {
   const input = win.document.createElement("textarea");
+  input.value = "A draft that wraps in a narrow pane";
   let contentHeight = 48;
   Object.defineProperty(input, "scrollHeight", {
     configurable: true,
@@ -88,6 +89,11 @@ test("composer autosize remeasures after a narrow wrapped draft is cleared", () 
   input.style.height = "144px";
   resizeComposerInput(input);
   expect(input.style.height).toBe("48px");
+  // A wrapped placeholder inflates scrollHeight; an empty draft keeps its one-row CSS height.
+  input.value = "";
+  contentHeight = 60;
+  resizeComposerInput(input);
+  expect(input.style.height).toBe("");
 });
 
 test("voice mic appears only in active direct operator chats",async()=>{

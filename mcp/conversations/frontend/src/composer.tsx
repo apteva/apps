@@ -22,8 +22,11 @@ const randomID=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.to
  * the inline height first matters in embedded widgets: when a narrow pane
  * causes a draft to wrap, reading scrollHeight while the old height is still
  * applied can retain the previous tall value even after the draft is empty.
+ * An empty draft stays one row: Chrome's scrollHeight includes a wrapped
+ * placeholder, which kept narrow docks two rows tall after "Reconnecting…".
  */
 export function resizeComposerInput(input: HTMLTextAreaElement): void {
+ if(!input.value){input.style.height="";return;}
  input.style.height="0px";
  input.style.height=Math.min(input.scrollHeight,144)+"px";
 }
