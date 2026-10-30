@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.20.10
+version: 0.21.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -227,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.20.10
+    ref: social/v0.21.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -787,6 +787,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
 		{Pattern: "/destinations/accounts/", Handler: a.handleDestinationAccount},
 		{Pattern: "/audiences/accounts/", Handler: a.handleAudienceAccount},
+		{Pattern: "/supporters/accounts/", Handler: a.handleSupportersAccount},
 		{Pattern: "/audiences/confirm", Handler: a.handleAudienceConfirm},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
 		{Pattern: "/accounts/connections", Handler: a.handleAccountConnections},
@@ -1277,7 +1278,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolInboxSync,
 		},
 	}
-	tools = append(tools, append(a.historyTools(), publicationReconcileTool(a))...)
+	tools = append(tools, append(a.historyTools(), publicationReconcileTool(a), accountSupportersTool(a))...)
 	tools = append(tools, a.profileTools()...)
 	tools = append(tools, a.audienceTools()...)
 	tools = append(tools, destinationTools(a)...)
@@ -6706,27 +6707,30 @@ type accountMetricsResult struct {
 	Reason          string                     `json:"reason,omitempty"`
 	Error           string                     `json:"error,omitempty"`
 	Followers       int64                      `json:"followers,omitempty"`
-	Following       int64                      `json:"following,omitempty"`
-	TotalLikes      int64                      `json:"total_likes,omitempty"`
-	TotalVideos     int64                      `json:"total_videos,omitempty"`
-	Posts           int64                      `json:"posts,omitempty"`
-	Reach           int64                      `json:"reach,omitempty"`
-	Impressions     int64                      `json:"impressions,omitempty"`
-	Engagements     int64                      `json:"engagements,omitempty"`
-	Views           int64                      `json:"views,omitempty"`
-	Likes           int64                      `json:"likes,omitempty"`
-	Comments        int64                      `json:"comments,omitempty"`
-	Shares          int64                      `json:"shares,omitempty"`
-	Saves           int64                      `json:"saves,omitempty"`
-	Sends           int64                      `json:"sends,omitempty"`
-	Clicks          int64                      `json:"clicks,omitempty"`
-	EngagementRate  float64                    `json:"engagement_rate,omitempty"`
-	Insights        insightSeries              `json:"insights,omitempty"`
-	Breakdowns      []analyticsBreakdown       `json:"breakdowns,omitempty"`
-	Capabilities    analyticsCapabilities      `json:"capabilities"`
-	HistorySource   string                     `json:"history_source,omitempty"`
-	UpdatedAt       string                     `json:"updated_at,omitempty"`
-	Raw             json.RawMessage            `json:"raw,omitempty"`
+	Supporters      int64                      `json:"supporters,omitempty"`
+	SupportersState string                     `json:"supporters_state,omitempty"`
+	supporters      *supporterSnapshot
+	Following       int64                 `json:"following,omitempty"`
+	TotalLikes      int64                 `json:"total_likes,omitempty"`
+	TotalVideos     int64                 `json:"total_videos,omitempty"`
+	Posts           int64                 `json:"posts,omitempty"`
+	Reach           int64                 `json:"reach,omitempty"`
+	Impressions     int64                 `json:"impressions,omitempty"`
+	Engagements     int64                 `json:"engagements,omitempty"`
+	Views           int64                 `json:"views,omitempty"`
+	Likes           int64                 `json:"likes,omitempty"`
+	Comments        int64                 `json:"comments,omitempty"`
+	Shares          int64                 `json:"shares,omitempty"`
+	Saves           int64                 `json:"saves,omitempty"`
+	Sends           int64                 `json:"sends,omitempty"`
+	Clicks          int64                 `json:"clicks,omitempty"`
+	EngagementRate  float64               `json:"engagement_rate,omitempty"`
+	Insights        insightSeries         `json:"insights,omitempty"`
+	Breakdowns      []analyticsBreakdown  `json:"breakdowns,omitempty"`
+	Capabilities    analyticsCapabilities `json:"capabilities"`
+	HistorySource   string                `json:"history_source,omitempty"`
+	UpdatedAt       string                `json:"updated_at,omitempty"`
+	Raw             json.RawMessage       `json:"raw,omitempty"`
 }
 
 type insightPoint struct {
@@ -6790,6 +6794,7 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 			return out
 		}
 		result = a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform, query)
+		applySupporterMetrics(ctx, pid, &result, providerSlug)
 		a.addAccountBreakdowns(ctx, &result, connID, providerSlug, providerAccountID, extID, pageCreds, query)
 		decorateAccountReport(&result, connID, providerSlug, providerAccountID, extID, query)
 		a.addPeriodComparison(ctx, pid, &result, period, query)
@@ -6832,6 +6837,7 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		out.Reason = "account-level metrics not wired for this platform yet"
 		result = out
 	}
+	applySupporterMetrics(ctx, pid, &result, providerSlug)
 	a.addAccountBreakdowns(ctx, &result, connID, providerSlug, providerAccountID, extID, pageCreds, query)
 	decorateAccountReport(&result, connID, providerSlug, providerAccountID, extID, query)
 	a.addPeriodComparison(ctx, pid, &result, period, query)
@@ -7422,6 +7428,7 @@ func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppC
 		if runCtx.Err() != nil {
 			return runCtx.Err()
 		}
+		a.refreshSupportersIfDue(app, pid, id)
 		due, err := accountAnalyticsDue(app, pid, id, analyticsSnapshotMinInterval)
 		if err != nil {
 			app.Logger().Warn("analytics_collector: due check failed", "project", pid, "account", id, "err", err)
@@ -7633,7 +7640,7 @@ func accountBreakdownsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInter
 	err := ctx.AppDB().QueryRow(
 		`SELECT COALESCE(MAX(point_time),'')
 		   FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>''`,
+		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>'' AND metric<>'supporters'`,
 		pid, accountID,
 	).Scan(&latest)
 	if err != nil || strings.TrimSpace(latest) == "" {
@@ -7743,6 +7750,7 @@ func applyLatestAccountHistory(out *accountMetricsResult, history insightSeries)
 		return points[len(points)-1].Value
 	}
 	out.Followers = latest("followers")
+	out.Supporters = latest("supporters")
 	out.Following = latest("following")
 	out.TotalLikes = latest("total_likes")
 	out.TotalVideos = latest("total_videos")
@@ -7855,7 +7863,8 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		}
 	}
 	for _, breakdown := range res.Breakdowns {
-		if breakdown.Status != "ok" {
+		// supporter_level rows are already stored by the supporter snapshot.
+		if breakdown.Status != "ok" || breakdown.Dimension == "supporter_level" {
 			continue
 		}
 		for _, row := range breakdown.Rows {
@@ -8040,7 +8049,7 @@ func loadLatestAccountBreakdowns(ctx *sdk.AppCtx, pid string, accountID int64) [
 	var period string
 	err := ctx.AppDB().QueryRow(
 		`SELECT COALESCE(period,'') FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>''
+		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>'' AND metric<>'supporters'
 		  ORDER BY point_time DESC, id DESC LIMIT 1`,
 		pid, accountID,
 	).Scan(&period)

@@ -63,6 +63,7 @@ type analyticsBreakdown struct {
 var canonicalBreakdownOrder = []string{
 	"device", "os", "country", "region", "city", "age", "gender",
 	"traffic_source", "audience_type", "content_type", "sharing_service", "video",
+	"supporter_level",
 }
 
 func analyticsQueryFromArgs(args map[string]any) analyticsQuery {
@@ -171,6 +172,8 @@ func canonicalDimension(value string) string {
 		return "sharing_service"
 	case "social_account", "account", "channel":
 		return "social_account"
+	case "supporter_level", "membership_level", "member_level", "tier":
+		return "supporter_level"
 	default:
 		return ""
 	}
@@ -237,7 +240,8 @@ func enrichAnalyticsCapabilities(capabilities analyticsCapabilities, requested [
 		available[dimension] = true
 	}
 	for _, dimension := range requested {
-		if dimension == "social_account" || dimension == "post" || available[dimension] {
+		// supporter_level reports its own state on the breakdown itself.
+		if dimension == "social_account" || dimension == "post" || dimension == "supporter_level" || available[dimension] {
 			continue
 		}
 		capabilities.Unavailable = append(capabilities.Unavailable, analyticsCapabilityIssue{
@@ -278,6 +282,10 @@ func (a *App) addAccountBreakdowns(ctx *sdk.AppCtx, out *accountMetricsResult, c
 	}
 	for _, dimension := range requested {
 		if dimension == "post" {
+			continue
+		}
+		if dimension == "supporter_level" {
+			out.Breakdowns = append(out.Breakdowns, supporterBreakdown(out.supporters))
 			continue
 		}
 		if !available[dimension] {
@@ -625,6 +633,8 @@ func accountMetricValue(result accountMetricsResult, metric string) int64 {
 		return result.Views
 	case "followers":
 		return result.Followers
+	case "supporters":
+		return result.Supporters
 	case "reach":
 		return result.Reach
 	case "impressions":

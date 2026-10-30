@@ -70,7 +70,7 @@ type analyticsPeriodComparison struct {
 	Coverage      *analyticsCoverage  `json:"coverage,omitempty"`
 }
 
-var reportMetricNames = []string{"followers", "following", "posts", "total_likes", "total_videos", "views", "video_views", "reach", "impressions", "engagements", "likes", "comments", "shares", "saves", "sends", "clicks", "pin_clicks", "outbound_clicks"}
+var reportMetricNames = []string{"followers", "supporters", "following", "posts", "total_likes", "total_videos", "views", "video_views", "reach", "impressions", "engagements", "likes", "comments", "shares", "saves", "sends", "clicks", "pin_clicks", "outbound_clicks"}
 var additiveReportMetrics = map[string]bool{"views": true, "video_views": true, "impressions": true, "engagements": true, "likes": true, "comments": true, "shares": true, "saves": true, "sends": true, "pin_clicks": true, "outbound_clicks": true}
 
 func queryLimit(q analyticsQuery) int {
@@ -97,7 +97,7 @@ func newAnalyticsReport(scope, id, source string, q analyticsQuery, kind string)
 func setReportMetricInfo(r *analyticsReport, available []string) {
 	for _, name := range available {
 		kind := r.Window.Kind
-		if containsFold([]string{"followers", "following", "posts", "total_videos", "total_likes"}, name) {
+		if containsFold([]string{"followers", "supporters", "following", "posts", "total_videos", "total_likes"}, name) {
 			kind = "snapshot"
 		}
 		r.MetricInfo[name] = analyticsMetricInfo{Kind: kind, Additive: additiveReportMetrics[name], Freshness: r.MetricInfo[name].Freshness}
