@@ -249,19 +249,29 @@ func safeMembershipError(err error) string {
 	}
 }
 func discoverYouTubeLevels(ctx *sdk.AppCtx, account audienceAccount) ([]membershipLevel, error) {
-	conn, err := ctx.PlatformAPI().GetConnection(account.ConnectionID)
+	identity, err := youtubeChannelIdentity(ctx, account)
 	if err != nil {
 		return nil, err
 	}
+	return youtubeMembershipLevels(ctx, account, identity)
+}
+
+// youtubeChannelIdentity verifies the account's connection and returns the
+// channel it is bound to.
+func youtubeChannelIdentity(ctx *sdk.AppCtx, account audienceAccount) (string, error) {
+	conn, err := ctx.PlatformAPI().GetConnection(account.ConnectionID)
+	if err != nil {
+		return "", err
+	}
 	if conn == nil || conn.ID != account.ConnectionID || conn.Status != "active" || conn.ProjectID != account.Project || conn.AppSlug != "youtube-api" {
-		return nil, errors.New("YouTube connection is inactive or does not match this project")
+		return "", errors.New("YouTube connection is inactive or does not match this project")
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(account.ConnectionID, "get_my_channel", map[string]any{"part": "id"})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if res == nil || !res.Success {
-		return nil, upstreamError(res)
+		return "", upstreamError(res)
 	}
 	var channel struct {
 		Items []struct {
@@ -269,13 +279,17 @@ func discoverYouTubeLevels(ctx *sdk.AppCtx, account audienceAccount) ([]membersh
 		} `json:"items"`
 	}
 	if json.Unmarshal(res.Data, &channel) != nil || len(channel.Items) != 1 || channel.Items[0].ID == "" {
-		return nil, errors.New("cannot identify connected channel")
+		return "", errors.New("cannot identify connected channel")
 	}
 	identity := channel.Items[0].ID
 	if account.ExternalID != "" && account.ExternalID != identity {
-		return nil, errors.New("connection belongs to a different channel")
+		return "", errors.New("connection belongs to a different channel")
 	}
-	res, err = ctx.PlatformAPI().ExecuteIntegrationTool(account.ConnectionID, "list_membership_levels", map[string]any{"part": "id,snippet"})
+	return identity, nil
+}
+
+func youtubeMembershipLevels(ctx *sdk.AppCtx, account audienceAccount, identity string) ([]membershipLevel, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(account.ConnectionID, "list_membership_levels", map[string]any{"part": "id,snippet"})
 	if err != nil {
 		return nil, err
 	}

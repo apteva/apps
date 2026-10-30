@@ -22,6 +22,7 @@ import {TargetDelivery,type DeliveryDiagnostics} from "./TargetDelivery";
 import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { nativeReleaseLabel, postReleaseLabel, type NativeRelease } from "./nativeRelease";
+import { SupportersCard } from "./supporters";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
@@ -5801,6 +5802,8 @@ interface AccountMetrics {
   reason?: string;
   error?: string;
   followers?: number;
+  supporters?: number;
+  supporters_state?: string;
   following?: number;
   total_likes?: number;
   total_videos?: number;
@@ -6168,6 +6171,7 @@ function MetricsView({
               <div className="text-xs uppercase tracking-wide text-text-dim">Overview</div>
               <ReportNotice report={activeMetrics.report} comparison={activeMetrics.period_comparison} />
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
+              {activeAccount && <SupportersCard key={activeAccount.id} accountId={activeAccount.id} projectId={projectId} />}
               {activeMetrics.period_metrics && activeMetrics.report?.window.kind!=="range" && <PeriodMetricsSummary metrics={activeMetrics} />}
               {activeMetrics.post_rows && <RankedPosts rows={activeMetrics.post_rows} metric={rankMetric} onMetric={setRankMetric} metrics={activeMetrics.capabilities?.metrics || activeMetrics.available || []} />}
               {(activeMetrics as AccountMetrics).status === "ok" && (
@@ -6297,6 +6301,7 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
   }
   const stats = [
     ["followers", metrics.followers],
+    ["supporters", metrics.supporters],
     ["following", metrics.following],
     ["total_videos", metrics.total_videos],
     ["posts", metrics.posts],

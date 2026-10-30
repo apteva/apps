@@ -48,7 +48,7 @@ func (q analyticsQuery) cacheKey() string {
 func (q analyticsQuery) snapshotPeriod(metric string) string {
 	if len(q.Filters) == 0 {
 		switch metric {
-		case "followers", "following", "total_likes", "total_videos", "posts":
+		case "followers", "supporters", "following", "total_likes", "total_videos", "posts":
 			return "snapshot"
 		}
 	}
@@ -73,6 +73,10 @@ func loadAccountMetricHistoryForQuery(ctx *sdk.AppCtx, pid string, accountID int
 }
 
 func accountMetricKnown(res accountMetricsResult, name string) bool {
+	if name == "supporters" {
+		// Known only from a complete count; any other state stays unavailable.
+		return res.SupportersState == "available" && res.supporters != nil && res.supporters.Complete
+	}
 	for _, available := range res.Available {
 		if available == name {
 			return true
