@@ -5,6 +5,7 @@ import { withAppDisplayNames, type AppMetadata } from "./app-display-names";
 import { HierarchyStage, OperationsStage, SystemGraph } from "./clean-stages";
 import { clock, eventColor, short, statusColor, usePalette } from "./palette";
 import PixelStage, { MAX_RESIDENTS } from "./pixel/PixelStage";
+import IsoStage from "./pixel/iso/IsoStage";
 import { THEMES, themeById } from "./themes";
 import { buildWorld, rootFocus, resolveFocus, projectWorld, contentsForAgents, PAGE_SIZE } from "./world-model";
 import type { Source, Scene, Focus } from "./world-model";
@@ -275,6 +276,7 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
           <section className="aw-scene" aria-label={theme.name}>
             <SceneViewport hostRef={canvasHost} stageRef={stageRef} width={isMap ? mapSize.width : portrait ? 540 : 1280} height={isMap ? mapSize.height : portrait ? 960 : 560} sceneKey={JSON.stringify([installId,projectId,sourceId,currentFocus,currentPage,isMap])} status={`${visibleAgents.length} agents · ${runningCount} running`}>
               {camera => !scene ? <div className="aw-loading">Connecting to the scene…</div>
+                : theme.iso ? <IsoStage stageRef={stageRef} camera={camera} agents={stageAgents} nodes={projection?.nodes || []} destinations={destinations} events={visibleEvents} teams={teams} portrait={portrait} now={animationNow} live={live} selectedAgent={selectedAgent} selectedDestination={selectedDestination} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} onFocus={navigate} onWorldSize={setMapSize} />
                 : theme.pixel ? <PixelStage theme={theme.pixel} stageRef={stageRef} camera={camera} agents={stageAgents} nodes={projection?.nodes || []} destinations={destinations} events={visibleEvents} teams={teams} portrait={portrait} now={animationNow} live={live} selectedAgent={selectedAgent} selectedDestination={selectedDestination} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} onFocus={navigate} onWorldSize={setMapSize} />
                 : projection?.nodes.length ? <HierarchyStage refNode={stageRef} nodes={projection.nodes.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE)} preset={theme.layout === "graph" ? "graph" : "operations"} label={theme.name} portrait={portrait} destinations={destinations} events={visibleEvents} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onFocus={navigate} palette={palette} />
                 : theme.layout === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={stageAgents} destinations={destinations} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} palette={palette} />

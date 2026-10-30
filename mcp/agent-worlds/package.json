@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test ui/*.test.ts ui/*.test.tsx"
+    "test": "bun test ui/*.test.ts ui/*.test.tsx ui/pixel/*.test.ts ui/pixel/iso/*.test.ts"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "20.9.0",
