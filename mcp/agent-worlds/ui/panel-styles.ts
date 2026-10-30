@@ -17,6 +17,8 @@ export const PANEL_STYLES = `
 .aw-portrait {display:flex;align-items:center;gap:7px;color:var(--text-muted,#aaa);font-size:11px}.aw input {accent-color:var(--accent,#f97316)}
 .aw-main,.aw-frame,.aw-scene {width:100%;min-width:0}.aw-content {position:relative}.aw-scene {position:relative}
 .aw-canvas {position:relative;overflow:hidden;width:100%;height:calc(100dvh - 140px);min-height:360px;background:var(--bg-subtle,#101010);touch-action:none;cursor:grab;user-select:none;isolation:isolate}
+.aw-pixel {display:block;width:100%;height:100%;image-rendering:pixelated}
+.aw-sr {position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
 .aw-canvas.is-dragging,.aw-canvas.is-dragging * {cursor:grabbing!important}.aw-canvas > svg {display:block;width:100%;height:100%}
 .aw-canvas-status,.aw-camera-hint {position:absolute;pointer-events:none;color:var(--text-muted,#aaa);background:var(--bg-card,#141414);border:1px solid var(--border,#2a2a2a);border-radius:4px;font-size:10px;padding:6px 8px;opacity:.9}
 .aw-canvas-status {top:12px;left:12px}.aw-camera-hint {bottom:12px;left:12px}

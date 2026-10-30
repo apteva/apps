@@ -2,7 +2,7 @@ module github.com/apteva/apps/mcp/agent-worlds
 
 go 1.25.1
 
-require github.com/apteva/app-sdk v0.102.0
+require github.com/apteva/app-sdk v0.109.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -17,5 +17,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.50.0 // indirect
 )
-
-replace github.com/apteva/app-sdk => ./third_party/app-sdk

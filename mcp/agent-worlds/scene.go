@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -87,7 +86,7 @@ type sceneReader struct {
 	remote      bool
 	label       string
 	projectName string
-	worlds      *App
+	enrich      func(context.Context, sceneReader, *Scene)
 	identity    string
 }
 
@@ -97,7 +96,7 @@ func newSceneReader(app *sdk.AppCtx, remote bool) (sceneReader, error) {
 		config := app.Config()
 		origin, key := strings.TrimSpace(config.Get("remote_url")), config.Get("remote_api_key")
 		if origin == "" || strings.TrimSpace(key) == "" {
-			return reader, errors.New("remote server is not configured")
+			return reader, publicError{"The remote server is not configured."}
 		}
 		var err error
 		reader.client, err = sdk.NewTelemetryClient(origin, key)
@@ -113,7 +112,7 @@ func newSceneReader(app *sdk.AppCtx, remote bool) (sceneReader, error) {
 		reader.identity = fmt.Sprintf("%x", sha256.Sum256([]byte(origin+"\x00"+key)))
 	}
 	if reader.client == nil {
-		return reader, errors.New("telemetry observation API unavailable")
+		return reader, publicError{"The telemetry observation API is unavailable on this server."}
 	}
 	return reader, nil
 }
@@ -260,16 +259,16 @@ func (a *App) scene(ctx context.Context, app *sdk.AppCtx, sourceID string) (*Sce
 	case strings.HasPrefix(sourceID, "runtime:"):
 		runtimeID = strings.TrimPrefix(sourceID, "runtime:")
 		if runtimeID == "" {
-			return nil, errors.New("runtime ID required")
+			return nil, publicError{"A runtime ID is required."}
 		}
 	case strings.HasPrefix(sourceID, "remote-runtime:"):
 		remote = true
 		runtimeID = strings.TrimPrefix(sourceID, "remote-runtime:")
 		if runtimeID == "" {
-			return nil, errors.New("runtime ID required")
+			return nil, publicError{"A runtime ID is required."}
 		}
 	default:
-		return nil, fmt.Errorf("unknown source %q", sourceID)
+		return nil, publicError{"Unknown scene source."}
 	}
 	group, err := readers(ctx, app, remote)
 	if err != nil {
@@ -287,7 +286,7 @@ func (a *App) scene(ctx context.Context, app *sdk.AppCtx, sourceID string) (*Sce
 		combined.Scope = "project"
 	}
 	parts, failures := readProjects(ctx, group, func(reader sceneReader) (*Scene, error) {
-		reader.worlds = a
+		reader.enrich = a.enrichScene
 		if runtimeID != "" {
 			runtimes, e := reader.client.ListObservedRuntimes(ctx, reader.projectID)
 			if e != nil {
@@ -339,7 +338,7 @@ func (a *App) scene(ctx context.Context, app *sdk.AppCtx, sourceID string) (*Sce
 		return nil, firstError
 	}
 	if runtimeID != "" && !matched {
-		return nil, errors.New("runtime not found in authorized projects")
+		return nil, publicError{"Runtime not found in authorized projects."}
 	}
 	if len(combined.Warnings) > 0 {
 		combined.Source.Status = "partial"
@@ -412,8 +411,8 @@ func (r sceneReader) scene(ctx context.Context, runtimeID string) (*Scene, error
 		}
 	}
 	finishScene(scene)
-	if r.worlds != nil {
-		r.worlds.enrichScene(ctx, r, scene)
+	if r.enrich != nil {
+		r.enrich(ctx, r, scene)
 	}
 	return scene, nil
 }

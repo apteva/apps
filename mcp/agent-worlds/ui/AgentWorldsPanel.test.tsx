@@ -27,73 +27,78 @@ const click=async(label:string)=>act(async()=>{
  select.value=option!.value;select.dispatchEvent(new win.Event("change",{bubbles:true}));
 });
 const crumb=()=>host.querySelector(".aw-breadcrumbs")!.textContent;
+const camera=()=>{const v=host.querySelector('.aw-canvas')!;return [v.getAttribute('data-camera-zoom'),v.getAttribute('data-camera-x'),v.getAttribute('data-camera-y')].join();};
+const agentButtons=()=>host.querySelectorAll('.aw-canvas [aria-label^="Inspect agent"], .aw-canvas .aw-sr [data-agent-id]').length;
 const poll=async()=>act(async()=>{const entry=[...timers].find(([,t])=>t.delay===2500);expect(entry).toBeTruthy();timers.delete(entry![0]);entry![1].callback();});
+const THEMES=["System graph","Operations","Pixel village","Space station"];
 afterAll(async()=>{await act(async()=>root.unmount());globalThis.fetch=originalFetch;await GlobalRegistrator.unregister();});
-test("Agent inspection keeps peers, camera, replay and pagination intact in every renderer",async()=>{
+
+test("Themes share focus, camera, inspection and replay over one model",async()=>{
  await act(async()=>root.render(React.createElement(Panel,{installId:1})));
  expect(pending.length).toBe(1);
  await act(async()=>pending[0].resolve(response()));
- await click("Pixel village");
- expect(host.querySelectorAll('select[aria-label="Visualization"] option').length).toBe(3);
- expect(host.querySelector('.aw-presets,.aw-summary,.aw-scene-head')).toBeNull();
+ expect([...host.querySelectorAll('select[aria-label="Visualization"] option')].map(o=>o.textContent)).toEqual(THEMES);
+ // Default map theme: every project is its own village on one canvas.
+ const pixel=host.querySelector('canvas[data-renderer="pixel"]')!;
+ expect(pixel.getAttribute('data-theme')).toBe('village');
+ expect(pixel.getAttribute('data-view')).toBe('project-villages');
+ expect(host.querySelectorAll('.aw-sr button[aria-label],.aw-sr button').length).toBeGreaterThan(0);
+ expect([...host.querySelectorAll('.aw-sr button')].map(b=>b.textContent)).toContain('Zoom into project Growth');
  const viewport=host.querySelector('.aw-canvas')!;
- const svg=viewport.querySelector('svg')!;
- svg.getBoundingClientRect=()=>({left:0,top:0,width:1280,height:760,right:1280,bottom:760,x:0,y:0,toJSON:()=>({})});
+ viewport.getBoundingClientRect=()=>({left:0,top:0,width:1280,height:760,right:1280,bottom:760,x:0,y:0,toJSON:()=>({})});
  const wheel=new win.WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-100,clientX:640,clientY:380});
  Object.defineProperties(wheel,{clientX:{value:640},clientY:{value:380}});
  await act(async()=>{viewport.dispatchEvent(wheel)});
  expect(wheel.defaultPrevented).toBe(true);expect(Number(viewport.getAttribute('data-camera-zoom'))).toBeGreaterThan(1);
- const zoomedBox=svg.getAttribute('viewBox');
+ const zoomed=camera();
  const pointer=(type:string,x:number,y:number)=>new win.PointerEvent(type,{bubbles:true,cancelable:true,pointerId:1,button:0,clientX:x,clientY:y});
  await act(async()=>{viewport.dispatchEvent(pointer('pointerdown',600,380));viewport.dispatchEvent(pointer('pointermove',700,400));viewport.dispatchEvent(pointer('pointerup',700,400));});
- expect(svg.getAttribute('viewBox')).not.toBe(zoomedBox);
+ expect(camera()).not.toBe(zoomed);
  // A drag ending over a project cannot navigate it; the next click still can.
  await click("Zoom into project Growth");expect(crumb()).not.toContain('Growth');
  await click('Fit visualization');expect(viewport.getAttribute('data-camera-zoom')).toBe('1');
- expect(svg.getAttribute('viewBox')).toBe('0 0 1280 760');
+ await click("System graph");
  expect(host.querySelectorAll('[data-world-node="project"]').length).toBe(3);
  await click("Zoom into project Growth");
  expect(crumb()).toContain("Growth");
- const districts=host.querySelectorAll('.aw-canvas [data-world-node]').length;
- for(const preset of ["System graph","Operations","Pixel village"]){
-  await click(preset);const beforeSelection=crumb(),box=host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox');
+ for(const theme of THEMES){
+  await click(theme);const beforeSelection=crumb(),view=camera();
   await click('Inspect agent Writer');
   expect(host.querySelector('[data-agent-details="3"]')).toBeTruthy();
   expect(host.querySelector('aside[aria-label="Agent details"] h2')!.textContent).toBe('Writer');
-  expect(host.querySelectorAll('.aw-canvas [data-world-node]').length).toBe(districts);
-  expect(crumb()).toBe(beforeSelection);expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(box);
+  expect(crumb()).toBe(beforeSelection);expect(camera()).toBe(view);
   await click('Close details');expect(host.querySelector('.aw-sidebar')).toBeNull();
  }
+ // Observed teams navigate in graph views; maps then show just that team.
+ await click("System graph");
  await click("Zoom into team Coordinator + 1");
  expect(crumb()).toContain("Observed team");
- expect(host.querySelector('svg[aria-label="Pixel village of live agents"]')).toBeTruthy();
+ await click("Pixel village");
+ expect(host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute('data-view')).toBe('village');
+ expect(agentButtons()).toBe(2);
  const before=crumb();
- await click('Zoom in visualization');const teamCamera=host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox');
+ await click('Zoom in visualization');const teamCamera=camera();
  await click("Inspect agent Researcher");
  expect(crumb()).toBe(before);
  expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
  expect(host.querySelector('.aw-side-threads')!.textContent).toContain('research-worker');
  expect(host.querySelector('.aw-side-activity')!.textContent).toContain('called crm_search');
  expect(host.querySelector('.aw-side-activity')!.textContent).not.toContain('sent a message');
- expect(host.querySelectorAll('.aw-canvas [aria-label^="Inspect agent"]').length).toBe(2);
- expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(teamCamera);
+ expect(camera()).toBe(teamCamera);
  await poll(); // a request already in flight when the user pauses
- const clockBeforePause=host.querySelector(".aw-village")!.getAttribute("data-clock");
- const positionsBeforePause=[...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")]);
+ const clockBeforePause=host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute("data-clock");
  await click("Live");
- expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
- expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
+ expect(host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute("data-clock")).toBe(clockBeforePause);
  const range=host.querySelector('input[type="range"]')!;
- for(const preset of ["System graph","Operations","Pixel village"]){
-  await click(preset);expect(crumb()).toBe(before);expect(host.querySelector('input[type="range"]')).toBe(range);
+ for(const theme of THEMES){
+  await click(theme);expect(crumb()).toBe(before);expect(host.querySelector('input[type="range"]')).toBe(range);
   expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
-  expect(host.querySelectorAll('.aw-canvas [aria-label^="Inspect agent"]').length).toBe(2);
+  expect(agentButtons()).toBe(2);
   await click('Inspect agent Coordinator');expect(host.querySelector('[data-agent-details="1"]')).toBeTruthy();
   expect(host.querySelector('.aw-side-threads')!.textContent).toContain('coordinator-main');
   await click('Inspect agent Researcher');
  }
- expect(host.querySelector(".aw-village")!.getAttribute("data-clock")).toBe(clockBeforePause);
- expect([...host.querySelectorAll("[data-agent-id]")].map(el=>[el.getAttribute("data-x"),el.getAttribute("data-y")])).toEqual(positionsBeforePause);
+ expect(host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute("data-clock")).toBe(clockBeforePause);
  // Late network responses may not mutate a paused world or reset its cursor.
  latest={...latest,events:[],agents:[{...fixture.agents[0],name:"Changed while paused"}]};
  await act(async()=>pending[1].resolve(response()));
@@ -101,18 +106,21 @@ test("Agent inspection keeps peers, camera, replay and pagination intact in ever
  const count=pending.length;await poll();expect(pending.length).toBe(count);
  await act(async()=>window.dispatchEvent(new win.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
  expect(host.querySelector('.aw-sidebar')).toBeNull();expect(crumb()).toBe(before);
- expect(host.querySelector('.aw-canvas > svg')!.getAttribute('viewBox')).toBe(teamCamera);
+ expect(camera()).toBe(teamCamera);
  await click("Growth");
  await click("Paused");
  latest={...fixture,events:[]};await poll();await act(async()=>pending.at(-1)!.resolve(response()));
+ // Graph and board views page; map views show the whole project at once.
+ await click("System graph");
  expect(host.querySelectorAll('[data-world-node="team"]').length).toBe(0);
  expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(6);
  await click("Next");expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(2);
  await click('Inspect agent Agent 7');expect(host.querySelector('[data-agent-details="7"]')).toBeTruthy();
- expect(host.querySelectorAll('svg [aria-label^="Inspect agent"]').length).toBe(2);
  await click("Operations");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
  expect(host.querySelector('[data-agent-details="7"]')).toBeTruthy();
- await click("Pixel village");expect(host.querySelector(".aw-pages")!.textContent).toContain("2 / 2");
+ await click("Pixel village");expect(host.querySelector(".aw-pages")).toBeNull();
+ expect(agentButtons()).toBe(8);
+ expect(host.querySelector('[data-agent-details="7"]')).toBeTruthy();
  // Switching installation aborts the previous source and resets its scope.
  await poll();const inflight=pending.at(-1)!;
  await act(async()=>root.render(React.createElement(Panel,{installId:2,projectId:"growth"})));

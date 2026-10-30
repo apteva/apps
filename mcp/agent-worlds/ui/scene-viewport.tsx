@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cameraBox, FIT_CAMERA, panCamera, zoomCamera, type Camera } from "./camera";
 
 type Props = {
- stageRef: React.RefObject<SVGSVGElement|null>; hostRef: React.RefObject<HTMLDivElement|null>;
- width:number; height:number; sceneKey:string; children:React.ReactNode; status:string;
+ stageRef: React.RefObject<HTMLCanvasElement|SVGSVGElement|null>; hostRef: React.RefObject<HTMLDivElement|null>;
+ width:number; height:number; sceneKey:string; children:(camera:Camera)=>React.ReactNode; status:string;
 };
 type Contact = {x:number;y:number};
 export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,children,status}:Props){
@@ -14,10 +14,10 @@ export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,ch
  const contacts=useRef(new Map<number,Contact>()),start=useRef<Contact|null>(null),moved=useRef(false),suppressClick=useRef(0);
  const change=(fn:(previous:Camera)=>Camera)=>setState(previous=>({key:current.current.sceneKey,camera:fn(previous.key===current.current.sceneKey?previous.camera:FIT_CAMERA)}));
  const reset=()=>change(()=>FIT_CAMERA);
- // Changing viewBox moves the actual scene, including keyboard hit targets and
- // exports. Nested village SVGs retain their own geometry and motion clocks.
+ // SVG stages move by viewBox, which also moves hit targets and exports.
+ // Canvas stages receive the camera and apply it while drawing.
  useLayoutEffect(()=>{
-  const svg=stageRef.current;if(!svg)return;
+  const svg=stageRef.current;if(!svg||!(svg instanceof SVGSVGElement))return;
   const box=cameraBox(camera,width,height);if(svg.getAttribute("viewBox")!==box)svg.setAttribute("viewBox",box);
  });
  const metrics=()=>{
@@ -74,9 +74,9 @@ export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,ch
   event.preventDefault();
  };
  return <div ref={hostRef} className={`aw-canvas${dragging?" is-dragging":""}`} role="region" aria-label="Interactive visualization" tabIndex={0}
-  data-camera-zoom={camera.zoom} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}
+  data-camera-zoom={camera.zoom} data-camera-x={camera.x.toFixed(4)} data-camera-y={camera.y.toFixed(4)} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}
   onKeyDown={keyboard} onClickCapture={event=>{if(!(event.target as Element).closest(".aw-camera-controls")&&Date.now()<suppressClick.current){event.preventDefault();event.stopPropagation();suppressClick.current=0;}}}>
-  {children}
+  {children(camera)}
   <div className="aw-canvas-status" aria-live="off">{status}</div>
   <div className="aw-camera-hint">Scroll to zoom · Drag to pan</div>
   <div className="aw-camera-controls" aria-label="Camera controls" onPointerDown={event=>event.stopPropagation()}>

@@ -28,28 +28,53 @@ type topologyCache struct {
 	err   error
 }
 
+func (c topologyCache) cachedAt() time.Time { return c.at }
+
+const (
+	topologyTTL   = 45 * time.Second
+	cacheCapacity = 1024
+)
+
+// storeCached sweeps expired entries at most once per TTL and, when the cache
+// is still full, replaces the oldest entry instead of silently not caching.
+func storeCached[V interface{ cachedAt() time.Time }](cache map[string]V, swept *time.Time, key string, value V, ttl time.Duration) map[string]V {
+	if cache == nil {
+		cache = map[string]V{}
+	}
+	now := time.Now()
+	if now.Sub(*swept) >= ttl {
+		*swept = now
+		for k, entry := range cache {
+			if now.Sub(entry.cachedAt()) >= ttl {
+				delete(cache, k)
+			}
+		}
+	}
+	if _, exists := cache[key]; !exists && len(cache) >= cacheCapacity {
+		oldest, oldestAt := "", now
+		for k, entry := range cache {
+			if entry.cachedAt().Before(oldestAt) {
+				oldest, oldestAt = k, entry.cachedAt()
+			}
+		}
+		delete(cache, oldest)
+	}
+	cache[key] = value
+	return cache
+}
+
 func (a *App) topology(ctx context.Context, r sceneReader, id int64) (*sdk.AgentTopology, error) {
 	scope, _ := ctx.Value(viewerKey{}).(string)
 	key := r.identity + ":" + scope + ":" + r.source("", "", 0).ID + ":" + r.projectID + ":" + strconv.FormatInt(id, 10)
 	a.catalogMu.Lock()
 	cached, ok := a.catalog[key]
 	a.catalogMu.Unlock()
-	if ok && time.Since(cached.at) < 45*time.Second {
+	if ok && time.Since(cached.at) < topologyTTL {
 		return cached.value, cached.err
 	}
 	value, err := r.client.GetAgentTopology(ctx, r.projectID, id)
 	a.catalogMu.Lock()
-	if a.catalog == nil {
-		a.catalog = map[string]topologyCache{}
-	}
-	for k, entry := range a.catalog {
-		if time.Since(entry.at) >= 45*time.Second {
-			delete(a.catalog, k)
-		}
-	}
-	if len(a.catalog) < 1024 {
-		a.catalog[key] = topologyCache{at: time.Now(), value: value, err: err}
-	}
+	a.catalog = storeCached(a.catalog, &a.swept, key, topologyCache{at: time.Now(), value: value, err: err}, topologyTTL)
 	a.catalogMu.Unlock()
 	return value, err
 }
@@ -74,7 +99,7 @@ func (a *App) enrichScene(ctx context.Context, r sceneReader, scene *Scene) {
 		}
 		agent.Threads = topology.Threads
 		for _, attachment := range topology.Attachments {
-			if attachment.Name == "agent-worlds" {
+			if attachment.Name == selfName {
 				continue
 			}
 			kind, identity := "integration", attachment.Name

@@ -25,7 +25,18 @@ type App struct {
 	ctx       *sdk.AppCtx
 	catalogMu sync.Mutex
 	catalog   map[string]topologyCache
+	swept     time.Time
 }
+
+// selfName lets enrichment skip this app's own attachment without repeating
+// the slug in code.
+var selfName = func() string {
+	m, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		return ""
+	}
+	return m.Name
+}()
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest(manifestYAML)
@@ -81,7 +92,7 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sources, err := a.sources(r.Context(), a.ctx.WithUserSession(r))
-	respond(w, sources, err)
+	a.respond(w, sources, err)
 }
 
 func (a *App) handleScene(w http.ResponseWriter, r *http.Request) {
@@ -90,14 +101,30 @@ func (a *App) handleScene(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scene, err := a.scene(viewerContext(r), a.ctx.WithUserSession(r), r.URL.Query().Get("source"))
-	respond(w, scene, err)
+	a.respond(w, scene, err)
 }
 
-func respond(w http.ResponseWriter, value any, err error) {
+// publicError marks messages that are safe to show in the panel. Other errors
+// can carry upstream URLs or transport details, so they stay in the log.
+type publicError struct{ message string }
+
+func (e publicError) Error() string { return e.message }
+
+func (a *App) respond(w http.ResponseWriter, value any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
+		message := "The scene source is unavailable."
+		var public publicError
+		if errors.As(err, &public) {
+			message = public.message
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			message = "The scene source did not respond in time."
+		}
+		if a.ctx != nil {
+			a.ctx.Logger().Warn("scene request failed", "error", err)
+		}
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(value)
