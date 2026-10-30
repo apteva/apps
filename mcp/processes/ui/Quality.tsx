@@ -195,6 +195,7 @@ export function RunRating({ api, runID, runState, steps, agentName, source = "op
           </select>
         </div>
       )}
+      <p className="small muted" style={{ margin: 0 }}>Your review of this outcome as an outside reviewer. Agents that worked on the run cannot rate it.</p>
       <ScoreInput scale={q.scale} value={score} onChange={setScore} />
       <div className="rating-tags" role="group" aria-label="Reason tags">
         {q.tags.map((t) => (

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func ratedWorkflow(t *testing.T, q *QualityConfig) (*App, *Process, Run) {
@@ -66,8 +70,15 @@ func TestRatingsValidateRevisionAndQueueReviews(t *testing.T) {
 			t.Fatalf("accepted invalid rating %v", bad)
 		}
 	}
-	if _, e := rate(a, p, "agent:7:worker", map[string]any{"run_id": r.ID, "step_id": write.ID, "score": float64(5), "idempotency_key": "self"}); e == nil || !strings.Contains(e.Error(), "executed") {
-		t.Fatalf("executor rated its own step: %v", e)
+	// Owner (7) and executors (7, 8) are not external reviewers, for steps or whole runs.
+	for _, x := range []map[string]any{{"actor": "agent:7:worker", "step_id": write.ID}, {"actor": "agent:7:main"}, {"actor": "agent:8:worker", "step_id": write.ID}} {
+		args := map[string]any{"run_id": r.ID, "score": float64(5), "idempotency_key": "self"}
+		if x["step_id"] != nil {
+			args["step_id"] = x["step_id"]
+		}
+		if _, e := rate(a, p, x["actor"].(string), args); e == nil || !strings.Contains(e.Error(), "external reviewer") {
+			t.Fatalf("%v rated a run it worked on: %v", x["actor"], e)
+		}
 	}
 	low, e := rate(a, p, "agent:9:main", map[string]any{"run_id": r.ID, "step_id": write.ID, "score": float64(2), "tags": []any{"wrong output"}, "comment": "Draft missed the brief", "criteria": map[string]any{"accuracy": float64(2), "on_time": true, "tone": "formal"}, "idempotency_key": "write-low"})
 	if e != nil {
@@ -165,7 +176,7 @@ func TestRatingsValidateRevisionAndQueueReviews(t *testing.T) {
 }
 
 func TestThumbsScaleFailedRunReviewAndHTTP(t *testing.T) {
-	a, p, r := ratedWorkflow(t, &QualityConfig{Scale: "thumbs", RequestRating: true, Review: &QualityReview{FailedRuns: true}})
+	a, p, r := ratedWorkflow(t, &QualityConfig{Scale: "thumbs", RequestRating: true, Reviewer: &Executor{Kind: "agent", AgentID: 9}, Review: &QualityReview{FailedRuns: true}})
 	finishRun(t, a, r, "failed")
 	if _, e := rate(a, p, "agent:9:main", map[string]any{"run_id": r.ID, "score": float64(4), "idempotency_key": "t"}); e == nil {
 		t.Fatal("thumbs procedure accepted a 4")
@@ -203,11 +214,8 @@ func TestThumbsScaleFailedRunReviewAndHTTP(t *testing.T) {
 		t.Fatalf("overview review count %v %v", o, e)
 	}
 	d, _ := a.runDefinition(r)
-	if msg := ratingRequest(d.Quality, p.ID, r.ID); !strings.Contains(msg, "processes_run_rate") || !strings.Contains(msg, "thumbs up") {
+	if msg := ratingRequest(d.Quality, p.ID, r.ID, "failed"); !strings.Contains(msg, "external reviewer") || !strings.Contains(msg, "thumbs up") {
 		t.Fatalf("rating request %q", msg)
-	}
-	if ratingRequest(nil, p.ID, r.ID) != "" {
-		t.Fatal("rating requested without procedure opt-in")
 	}
 }
 
@@ -218,6 +226,9 @@ func TestQualityConfigValidation(t *testing.T) {
 		{Criteria: []QualityCriterion{{Key: "c", Label: "C", Type: "choice", Options: []string{"one"}}}},
 		{Criteria: []QualityCriterion{{Key: "c", Label: "C", Type: "slider"}}},
 		{Review: &QualityReview{SamplePercent: 101}},
+		{RequestRating: true},
+		{RequestRating: true, Reviewer: &Executor{Kind: "human"}},
+		{Reviewer: &Executor{Kind: "agent"}},
 	}
 	for _, q := range bad {
 		if validateQuality(q) == nil {
@@ -229,4 +240,71 @@ func TestQualityConfigValidation(t *testing.T) {
 	if e := d.validate(); e != nil || d.Quality.Tags[0] != "Late" {
 		t.Fatalf("valid quality rejected: %v", e)
 	}
+}
+
+func TestRatingRequestsGoOnlyToExternalReviewer(t *testing.T) {
+	for _, tc := range []struct {
+		reviewer int64
+		sent     bool
+	}{{11, true}, {7, false}} {
+		a, f, _ := directSetup(t)
+		d := workflowDefinition()
+		d.Quality = &QualityConfig{RequestRating: true, Reviewer: &Executor{Kind: "agent", AgentID: tc.reviewer}}
+		p := create(t, a, d)
+		x := p.Assignments[0]
+		c := x.AssignmentConfig
+		c.Roles = map[string]Executor{"researcher": {Kind: "agent", AgentID: 8}, "writer": {Kind: "agent", AgentID: 7}, "reviewer": {Kind: "human"}, "publisher": {Kind: "agent", AgentID: 8}}
+		if _, e := a.saveAssignment(p.ProjectID, p.ID, x.ID, x.Revision, c); e != nil {
+			t.Fatal(e)
+		}
+		p = status(t, a, p.ID, "active")
+		raw, e := a.start(p.ProjectID, p.ID, "req", "")
+		if e != nil {
+			t.Fatal(e)
+		}
+		r := raw.(map[string]any)["run"].(Run)
+		finishRun(t, a, r, "completed")
+		before := len(f.events)
+		now := time.Now().UTC()
+		if e = a.notifyRatingRequests(context.Background(), now, p.ProjectID); e != nil {
+			t.Fatal(e)
+		}
+		var sent []sdk.AgentEventRequest
+		for _, ev := range f.events[before:] {
+			if strings.HasPrefix(ev.SourceEventID, "process-rating-request:") {
+				sent = append(sent, ev)
+			}
+		}
+		var delivered, note string
+		if e = a.db.QueryRow(`SELECT delivered_at,last_error FROM process_rating_requests WHERE run_id=?`, r.ID).Scan(&delivered, &note); e != nil || delivered == "" {
+			t.Fatalf("request not closed: %v", e)
+		}
+		if tc.sent {
+			if len(sent) != 1 || sent[0].AgentID != 11 || sent[0].ThreadID != "owner-default" || !strings.Contains(sent[0].Message.(string), "external reviewer") || !strings.Contains(sent[0].Message.(string), r.ID) {
+				t.Fatalf("reviewer request %+v", sent)
+			}
+			if !hasAgent(f.attached, 11) {
+				t.Fatal("reviewer tools not attached")
+			}
+		} else if len(sent) != 0 || !strings.Contains(note, "skipped") {
+			t.Fatalf("owner asked to rate its own run: %+v %q", sent, note)
+		}
+		if e = a.notifyRatingRequests(context.Background(), now.Add(time.Hour), p.ProjectID); e != nil || len(f.events) != before+len(sent) {
+			t.Fatal("request delivered twice", e)
+		}
+		// Terminal coordinator notices no longer ask the owner to rate.
+		for _, ev := range f.events {
+			if strings.HasPrefix(ev.SourceEventID, "process-run-terminal:") && strings.Contains(ev.Message.(string), "processes_run_rate") {
+				t.Fatal("coordinator notice asks for a rating")
+			}
+		}
+	}
+}
+func hasAgent(xs []int64, id int64) bool {
+	for _, x := range xs {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }

@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // Quality configuration is part of the immutable procedure version, so every
@@ -27,6 +31,7 @@ type QualityConfig struct {
 	Scale         string             `json:"scale,omitempty"`
 	Tags          []string           `json:"tags,omitempty"`
 	Criteria      []QualityCriterion `json:"criteria,omitempty"`
+	Reviewer      *Executor          `json:"reviewer,omitempty"`
 	RequestRating bool               `json:"request_rating,omitempty"`
 	Review        *QualityReview     `json:"review,omitempty"`
 }
@@ -99,6 +104,17 @@ func validateQuality(q *QualityConfig) error {
 			return errors.New("criterion type must be score, pass_fail or choice")
 		}
 	}
+	if r := q.Reviewer; r != nil {
+		switch {
+		case r.Kind == "agent" && r.AgentID > 0:
+		case r.Kind == "human" && r.AgentID == 0:
+		default:
+			return errors.New("quality reviewer must be {kind: agent, agent_id} or {kind: human}")
+		}
+	}
+	if q.RequestRating && (q.Reviewer == nil || q.Reviewer.Kind != "agent") {
+		return errors.New("request_rating sends requests to an external reviewer agent; set quality.reviewer to {kind: agent, agent_id}")
+	}
 	if r := q.Review; r != nil {
 		if r.LowScoreThreshold != nil && (*r.LowScoreThreshold < 0 || *r.LowScoreThreshold > 4) {
 			return errors.New("low_score_threshold must be 0 (off) to 4")
@@ -114,7 +130,8 @@ func qualitySchema() map[string]any {
 		"scale":          map[string]any{"type": "string", "enum": []string{"stars", "thumbs"}, "description": "stars = 1–5 (default); thumbs stores up as 5 and down as 1"},
 		"tags":           map[string]any{"type": "array", "maxItems": 12, "items": textField("Reason tag label"), "description": "Reason tags raters pick from; defaults apply when empty"},
 		"criteria":       map[string]any{"type": "array", "maxItems": 8, "items": object([]string{"key", "label", "type"}, map[string]any{"key": textField("Stable criterion key"), "label": textField("Rubric label"), "type": map[string]any{"type": "string", "enum": []string{"score", "pass_fail", "choice"}}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
-		"request_rating": map[string]any{"type": "boolean", "description": "Ask the run coordinator to rate each finished run"},
+		"reviewer":       object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}}),
+		"request_rating": map[string]any{"type": "boolean", "description": "Ask the reviewer agent to rate each finished run. Requires reviewer kind agent; it must not own or execute the runs it rates"},
 		"review": object([]string{}, map[string]any{
 			"low_score_threshold": map[string]any{"type": "integer", "minimum": 0, "maximum": 4, "description": "Queue a review for ratings at or below this score; default 2, 0 disables"},
 			"failed_runs":         map[string]any{"type": "boolean", "description": "Queue every failed run for review"},
@@ -220,6 +237,15 @@ func (a *App) runRate(project, actor, process string, args map[string]any) (any,
 	if key == "" || len(key) > 128 {
 		return nil, errors.New("stable idempotency_key required (max 128 bytes)")
 	}
+	if source == "agent" {
+		involved, e := a.runParticipants(r)
+		if e != nil {
+			return nil, e
+		}
+		if involved[rater] {
+			return nil, errors.New(errSelfRating)
+		}
+	}
 	stepID, stepKey := str(args, "step_id"), ""
 	var executor int64
 	if stepID != "" {
@@ -238,10 +264,6 @@ func (a *App) runRate(project, actor, process string, args map[string]any) (any,
 		}
 		if !found {
 			return nil, errNotFound
-		}
-		// Self-assessment belongs in summaries; a rating is another party's judgement.
-		if source == "agent" && executor > 0 && rater == fmt.Sprintf("agent:%d", executor) {
-			return nil, errors.New("an agent cannot rate a step it executed; save a run summary instead")
 		}
 	}
 	f, ok := args["score"].(float64)
@@ -372,6 +394,27 @@ func (a *App) runRate(project, actor, process string, args map[string]any) (any,
 		return nil, e
 	}
 	return a.ratingReceipt(saved, review), nil
+}
+
+// A rating is an external reviewer's judgement, like a manager's review of
+// someone else's work. Self-assessment belongs in run summaries.
+const errSelfRating = "ratings are an external reviewer's judgement: an agent cannot rate a run it owns or worked on; save a run summary instead"
+
+func (a *App) runParticipants(r Run) (map[string]bool, error) {
+	out := map[string]bool{}
+	if r.Binding.OwnerAgentID > 0 {
+		out[fmt.Sprintf("agent:%d", r.Binding.OwnerAgentID)] = true
+	}
+	steps, e := a.steps(r.ID)
+	if e != nil {
+		return nil, e
+	}
+	for _, s := range steps {
+		if s.Executor.Kind == "agent" && s.Executor.AgentID > 0 {
+			out[fmt.Sprintf("agent:%d", s.Executor.AgentID)] = true
+		}
+	}
+	return out, nil
 }
 func (a *App) ratingReceipt(r Rating, review *ReviewItem) map[string]any {
 	out := map[string]any{"saved": true, "rating_id": r.ID, "run_id": r.RunID, "revision": r.Revision, "score": r.Score, "source": r.Source, "reread": RereadReference{Tool: "processes_run_ratings", Args: map[string]any{"process_id": r.ProcessID, "run_id": r.RunID}}}
@@ -875,15 +918,98 @@ func (a *App) reviewUpdate(project, actor, process string, args map[string]any) 
 	return map[string]any{"saved": true, "review_id": id, "state": state, "revision": expected + 1, "run_id": x.RunID, "reread": RereadReference{Tool: "processes_review_queue", Args: map[string]any{"process_id": process, "state": "all"}}}, nil
 }
 
-// Coordinators are asked to judge outcomes only when the frozen procedure
-// requests it; the notice names the exact scale and tags the tool accepts.
-func ratingRequest(q *QualityConfig, process, run string) string {
-	if q == nil || !q.RequestRating {
-		return ""
-	}
+// Only the procedure's external reviewer is asked; the notice names the exact
+// scale and tags the tool accepts.
+func ratingRequest(q *QualityConfig, process, run, state string) string {
 	scale := "score 1–5"
 	if q.scale() == "thumbs" {
 		scale = "score 5 (thumbs up) or 1 (thumbs down)"
 	}
-	return fmt.Sprintf(" This procedure requests a quality rating: after verifying the outcome, call processes_run_rate once with process_id=%s run_id=%s, %s, a stable idempotency_key and reason tags from [%s] (required for scores of %d or lower). You may also rate steps other agents executed with step_id. Do not rate steps you executed yourself.", process, run, scale, strings.Join(q.tags(), ", "), ratingLowScore)
+	return fmt.Sprintf("Processes rating request: you are the external reviewer for process_id=%s. Run run_id=%s finished with state %s. Like a manager reviewing someone else's work, read it once with processes_run_get, then judge the outcome: call processes_run_rate once with process_id=%s run_id=%s, %s, a stable idempotency_key and reason tags from [%s] (required for scores of %d or lower). Add rubric criteria and a comment where useful; you may also rate individual steps with step_id. Do not execute, retry or change the run.", process, run, state, process, run, scale, strings.Join(q.tags(), ", "), ratingLowScore)
+}
+
+func (a *App) notifyRatingRequests(ctx context.Context, now time.Time, project string) error {
+	rows, err := a.db.Query(`SELECT q.run_id,r.process_id,q.agent_id,q.attempts FROM process_rating_requests q JOIN process_runs r ON r.id=q.run_id JOIN processes p ON p.id=r.process_id WHERE p.project_id=? AND q.delivered_at='' AND (q.next_attempt_at='' OR q.next_attempt_at<=?) ORDER BY q.next_attempt_at,q.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	type request struct {
+		run, process string
+		agent        int64
+		attempts     int
+	}
+	var requests []request
+	for rows.Next() {
+		var q request
+		if err = rows.Scan(&q.run, &q.process, &q.agent, &q.attempts); err != nil {
+			break
+		}
+		requests = append(requests, q)
+	}
+	if err = errors.Join(err, rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	var failures []error
+	for _, q := range requests {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		skip, err := a.sendRatingRequest(project, q.process, q.run, q.agent)
+		if err == nil {
+			_, err = a.db.Exec(`UPDATE process_rating_requests SET delivered_at=?,attempts=attempts+1,last_error=?,next_attempt_at='' WHERE run_id=?`, timestamp(), skip, q.run)
+		} else {
+			_, saveErr := a.db.Exec(`UPDATE process_rating_requests SET attempts=attempts+1,last_error=?,next_attempt_at=? WHERE run_id=?`, err.Error(), now.Add(workerCleanupBackoff(q.attempts)).UTC().Format(time.RFC3339Nano), q.run)
+			err = errors.Join(err, saveErr)
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// A reviewer bound into the run as owner or executor is not external: the
+// request is closed with a reason instead of asking it to grade itself.
+func (a *App) sendRatingRequest(project, process, run string, agent int64) (string, error) {
+	r, err := a.getRun(project, process, run)
+	if err != nil {
+		return "", err
+	}
+	involved, err := a.runParticipants(r)
+	if err != nil {
+		return "", err
+	}
+	if involved[fmt.Sprintf("agent:%d", agent)] {
+		return "skipped: reviewer owns or executed this run", nil
+	}
+	d, err := a.runDefinition(r)
+	if err != nil {
+		return "", err
+	}
+	info, err := a.ctx.GetAgent(agent)
+	if err != nil {
+		return "", err
+	}
+	if info.ProjectID != project || info.DefaultThreadID == "" {
+		return "", errors.New("rating reviewer has no thread in this project")
+	}
+	if err = a.ensureExecutorTools(project, agent); err != nil {
+		return "", err
+	}
+	events := a.ctx.WithProject(project).AgentEventsAPI()
+	if events == nil {
+		return "", errors.New("rating request API unavailable")
+	}
+	request, err := a.immutableDelivery(project, sdk.AgentEventRequest{AgentID: agent, ThreadID: info.DefaultThreadID, SourceEventID: "process-rating-request:" + run, Message: ratingRequest(d.Quality, process, run, r.State)})
+	if err != nil {
+		return "", err
+	}
+	receipt, err := events.SendTrackedAgentEvent(request)
+	if err != nil {
+		return "", err
+	}
+	if receipt == nil || (!receipt.Accepted && !receipt.Duplicate) {
+		return "", errors.New("reviewer did not accept rating request")
+	}
+	return "", nil
 }

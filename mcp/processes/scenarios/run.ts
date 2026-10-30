@@ -307,11 +307,12 @@ for (const scenario of report.results) {
       const version = db.query("SELECT version,body_json FROM process_versions WHERE process_id=? ORDER BY version DESC LIMIT 1").get(processes[0].id) as any;
       const ratings = db.query("SELECT * FROM process_run_ratings ORDER BY created_at").all() as any[];
       const reviews = db.query("SELECT * FROM process_review_items ORDER BY reason").all() as any[];
-      const evidence = {...history, version, ratings, reviews};
+      const requests = db.query("SELECT * FROM process_rating_requests ORDER BY run_id").all() as any[];
+      const evidence = {...history, version, ratings, reviews, requests};
       await Bun.write(resolve(outputDir, "ratings-evidence.json"), JSON.stringify(evidence, null, 2));
-      verifyRunRatings(scenario.tool_calls, version, runs, ratings, reviews);
+      verifyRunRatings(scenario.tool_calls, version, runs, ratings, reviews, requests);
       observed[scenario.scenario] = evidence;
-      console.log(`PASS ${scenario.scenario}: requested whole-run ratings, refused self-rating, rule-based review items resolved and quality aggregates verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      console.log(`PASS ${scenario.scenario}: external reviewer rated both runs on request, owner self-rating refused, review items resolved and quality read verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     if (scenario.scenario === PROCESS_PATCH) {

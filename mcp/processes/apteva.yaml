@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.17.0
+version: 0.17.1
 description: Create and run company procedures. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -83,7 +83,7 @@ provides:
     - { name: memory_upsert, description: Save one idempotent scoped ledger entry with exact provenance. }
     - { name: run_get, description: "Read one bounded immutable run and step state; follow exact paged evidence references when incomplete." }
     - { name: run_update, description: "Save direct run progress or outcome; receive a compact receipt and exact reread reference." }
-    - { name: run_rate, description: "Rate a finished run or another agent's step with a score, reason tags, rubric and comment." }
+    - { name: run_rate, description: "External reviewer rates a finished run or step it did not work on: score, reason tags, rubric and comment." }
     - { name: run_ratings, description: "Read active ratings for a run or page a procedure's ratings." }
     - { name: quality_get, description: "Read per-version quality: scores, coverage, tags, rubric, executors and review counts." }
     - { name: review_queue, description: "List review items for low-scored, failed or sampled runs." }
@@ -151,7 +151,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.17.0
+    ref: processes/v0.17.1
     entry: mcp/processes
   port: 8080
   health_check: /health

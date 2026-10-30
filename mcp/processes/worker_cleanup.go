@@ -68,7 +68,7 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 			failures = append(failures, err)
 		}
 	}
-	return errors.Join(append(failures, a.notifyTerminalRuns(ctx, now, project))...)
+	return errors.Join(append(failures, a.notifyTerminalRuns(ctx, now, project), a.notifyRatingRequests(ctx, now, project))...)
 }
 
 var errWorkerRunTerminal = errors.New("run is terminal; worker dispatch is forbidden")
@@ -150,9 +150,6 @@ func (a *App) notifyTerminalRun(project, process, run, thread string) error {
 		return errors.New("terminal run notification API unavailable")
 	}
 	message := fmt.Sprintf("Processes run is terminal: process_id=%s run_id=%s state=%s. Processes handles durable worker shutdown; do not spawn replacement workers or repeat completed actions. Follow the caller's final verification and reporting instructions. For a requested history check use processes_runs with process_id=%s once; for this exact outcome use processes_run_get with run_id=%s. Do not poll this terminal run. External operations already accepted may require reconciliation using saved receipts.", process, run, r.State, process, run)
-	if d, e := a.runDefinition(r); e == nil {
-		message += ratingRequest(d.Quality, process, run)
-	}
 	request, err := a.immutableDelivery(project, sdk.AgentEventRequest{AgentID: owner, ThreadID: thread, SourceEventID: "process-run-terminal:" + run, Message: message})
 	if err != nil {
 		return err

@@ -1,20 +1,49 @@
 name: processes-run-ratings
-description: A coordinator answers Processes rating requests for a completed and a failed run, is refused a self-rating, and resolves the review queue.
-timeout: 12m
+description: An external reviewer agent answers Processes rating requests for a completed and a failed run and resolves the review queue; the run owner is refused when it tries to rate its own work.
+timeout: 14m
 settle_for: 45s
-max_iterations: 90
+max_iterations: 120
 setup:
   mode: autonomous
   app: {path: ./, spawnable: true}
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        agents:
+          - id: reviewer
+            name: Quality Reviewer
+            directive: |
+              Your agent ID is ${AGENT_reviewer_ID}. You are the external quality
+              reviewer for Processes runs, like a manager reviewing other people's
+              work. You never create procedures, start runs or execute steps.
+              Wait for Processes rating requests with pace(clear_wake=true); do not
+              poll. For each request, read that run once with processes_run_get,
+              then rate the WHOLE run (no step_id) once with processes_run_rate and
+              a distinct stable idempotency_key:
+              - completed run whose check step output is DIGEST-OK: score 4,
+                tags [Great], criteria {accuracy: 4, on_time: true},
+                comment "Digest receipt verified".
+              - failed run whose check step error is FIXTURE-FAIL: score 1,
+                tags [Wrong output], criteria {accuracy: 1, on_time: false},
+                comment "Check step failed".
+              After you have rated TWO runs, call processes_review_queue once for
+              that procedure. Claim each active item with processes_review_update
+              (state claimed, its revision), then resolve it (state resolved, the
+              new revision, resolution "Fixture failure confirmed").
+              FINAL REQUIRED STEP: immediately after the last resolution, without
+              calling pace first, call processes_quality_get once for the
+              procedure. Then wait with pace(clear_wake=true).
 directive: |
   Test Processes run ratings in this isolated project. Your agent ID is
-  ${APTEVA_TEST_AGENT_ID}. Use only Processes and Core tools. No external actions;
-  all receipts are simulated.
+  ${PRIMARY_AGENT_ID}; the external quality reviewer is ${AGENT_reviewer_ID}.
+  Use only Processes and Core tools. No external actions; receipts are simulated.
   Create exactly ONE procedure named Rated digest, with a required string
   parameter mode and this quality block:
     scale stars; tags [Wrong output, Incomplete, Great];
     criteria [{key: accuracy, label: Accuracy, type: score},
               {key: on_time, label: On time, type: pass_fail}];
+    reviewer {kind: agent, agent_id: ${AGENT_reviewer_ID}};
     request_rating true; review {failed_runs: true}.
   TWO required steps in order, both role executor:
   - draft, name Draft, depends_on [], instructions: Complete with output exactly
@@ -33,49 +62,44 @@ directive: |
   with parameter mode ok, and idempotency_key rate-fail with parameter mode fail.
   Processes provisions workers; main must not claim or execute steps, spawn or
   kill threads, or cancel runs. Do not poll; wait with pace(clear_wake=true).
-  Processes notifies you when each run is terminal and asks for a rating.
-  For each notice, read that run once with processes_run_get, then rate the
-  WHOLE run (no step_id) once with processes_run_rate:
-  - completed run with check output DIGEST-OK: score 4, tags [Great],
-    criteria {accuracy: 4, on_time: true}, comment "Digest receipt verified".
-  - failed run with error FIXTURE-FAIL: score 1, tags [Wrong output],
-    criteria {accuracy: 1, on_time: false}, comment "Check step failed".
-  Use a distinct stable idempotency_key per run. For the completed run only, also
-  try ONCE to rate its draft step (step_id of draft) with score 5 and tags [Great].
-  Processes must refuse this because you executed that step; do not retry it.
-  After both whole-run ratings are saved, call processes_review_queue once for
-  the procedure. Claim each active item with processes_review_update
-  (state claimed, its revision), then resolve it (state resolved, the new
-  revision, resolution "Fixture failure confirmed").
-  FINAL REQUIRED STEP: immediately after the last resolution, without calling
-  pace first, call processes_quality_get once for the procedure. Only then stop.
+  You own these runs, so rating them is the reviewer's job, not yours. To check
+  that Processes enforces this, when the rate-ok run is terminal try ONCE to call
+  processes_run_rate on it as yourself (whole run, score 5, tags [Great]).
+  Processes must refuse it; do not retry and do not rate any run otherwise.
+  Then keep waiting with pace(clear_wake=true) until the session ends.
   Do not start more runs or edit the procedure.
 assert:
   - tool_called: processes_step_claim
   - tool_called_with:
+      agent: primary
+      tool: processes_run_rate
+      args: {score: 5}
+      count: 1
+      success: false
+      result_contains: external reviewer
+  - tool_called_with:
+      agent: reviewer
       tool: processes_run_rate
       args: {score: 4}
       count: 1
       success: true
   - tool_called_with:
+      agent: reviewer
       tool: processes_run_rate
       args: {score: 1}
       count: 1
       success: true
   - tool_called_with:
-      tool: processes_run_rate
-      args: {score: 5}
-      count: 1
-      success: false
-      result_contains: a step it executed
-  - tool_called_with:
+      agent: reviewer
       tool: processes_review_update
       args: {state: resolved, resolution: Fixture failure confirmed}
       success: true
-  - tool_called: processes_review_queue
-  - tool_called: processes_quality_get
+  - tool_called_with:
+      agent: reviewer
+      tool: processes_quality_get
+      success: true
   - tool_not_called: kill
   - tool_not_called: processes_run_cancel
 budget:
-  total_tokens: 3000000
+  total_tokens: 4000000
   cost_usd: 7.50
