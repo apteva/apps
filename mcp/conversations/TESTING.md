@@ -57,6 +57,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
 | Short multi-step cadence | Related list and todo lookups complete with one acknowledgement and one final reply, without an unnecessary progress message |
 | Long multi-step progress | A meaningful stage boundary produces one intermediate progress update before the final outcome |
+| Queue and steer | Follow-ups sent mid-task: a steered one shapes the task's single final answer; an edited queued one is answered only after that final, with its edited text; removed and pre-edit text never reach the agent |
 | Bound approval | Approval/verdict remain in the originating chat |
 | Ownership | Unchanged main/chat profiles, no mutation/delegation attempts, history recall and restart/resume |
 
@@ -244,6 +245,25 @@ browser tests (including actual touch/mobile viewport checks), consumer type
 checks, packaged UI builds, and `GOWORK=off go test -race -tags=integration ./...`.
 The dedicated real-model Tier 3 run above passed separately. This validation
 covers the v0.24.49 release; publishing does not update installed apps automatically.
+
+## Queue and steer while the agent works
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/23-queue-and-steer.yaml
+```
+
+The driver gives the agent a multi-step todo task and waits for its live
+response frame. While that response is active it sends three follow-ups with
+the composer's default queue behavior: it steers the first, edits the second,
+and removes the third. The task must end with exactly one final answer that
+includes the steered instruction's token. The edited follow-up must be released
+with its edited text and answered once, after that final. Neither the removed
+row nor the pre-edit text may appear in any agent message, including during a
+12-second quiet window. This checks the server queue and the model together; the
+browser suite separately covers the queued tray's controls.
+
+Not yet validated with a live run.
 
 ## Scoped host launcher visibility (v0.24.50)
 
