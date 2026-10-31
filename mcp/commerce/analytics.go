@@ -64,9 +64,17 @@ func (a *App) toolCartAttributionSet(ctx *sdk.AppCtx, args map[string]any) (any,
 	if e != nil {
 		return nil, e
 	}
-	cart, e := resolveCart(ctx.AppDB(), pid, args)
+	var cart *Cart
+	if intArg(args, "cart_id") == 0 && strArg(args, "session_token") != "" && intArg(args, "store_id") != 0 {
+		cart, e = dbCartGetBySession(ctx.AppDB(), pid, intArg(args, "store_id"), strArg(args, "session_token"))
+	} else {
+		cart, e = resolveCart(ctx.AppDB(), pid, args)
+	}
 	if e != nil {
 		return nil, e
+	}
+	if cart == nil {
+		return map[string]any{"cart": nil, "analytics_identity_linked": false}, nil
 	}
 	store, e := dbStoreGetByID(ctx.AppDB(), pid, cart.StoreID)
 	if e != nil {
