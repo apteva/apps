@@ -327,6 +327,9 @@ func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message
 // releaseQueuedMessages is called after a response settles. One message per
 // agent is released at a time; the next response settlement releases the next
 // FIFO row. This keeps queued turns from racing the active Core iteration.
+// Decisions are serialized, and a released row keeps its agent busy until it
+// is delivered (see agentTurnBusy): delivery workers and activity changes
+// release concurrently, and one of them used to release the next row too.
 func (a *App) releaseQueuedMessages(chat string) {
 	if a.store == nil {
 		return
@@ -335,12 +338,18 @@ func (a *App) releaseQueuedMessages(chat string) {
 	if err != nil {
 		return
 	}
+	type release struct {
+		agentID int64
+		msg     *Message
+	}
+	var releases []release
+	a.queueReleaseMu.Lock()
 	agents, err := a.store.AgentParticipants(chat)
 	if err != nil {
 		agents = []int64{conv.LeadAgentID}
 	}
 	for _, agentID := range agents {
-		if a.streamer != nil && a.streamer.responseActive(chat, agentID) {
+		if a.agentTurnBusy(chat, agentID) {
 			continue
 		}
 		rows, err := a.store.queuedMessages(chat, agentID)
@@ -361,7 +370,7 @@ func (a *App) releaseQueuedMessages(chat string) {
 			}
 			stillActive := false
 			for _, id := range ids {
-				if id != agentID && a.streamer != nil && a.streamer.responseActive(chat, id) {
+				if id != agentID && a.agentTurnBusy(chat, id) {
 					stillActive = true
 					break
 				}
@@ -372,10 +381,27 @@ func (a *App) releaseQueuedMessages(chat string) {
 					continue
 				}
 			}
-			a.dispatchOrQueue(mountedCtx, "agent-inbound:"+strconv.FormatInt(agentID, 10), conv, msg)
+			releases = append(releases, release{agentID, msg})
 			break
 		}
 	}
+	a.queueReleaseMu.Unlock()
+	// Synchronous delivery re-enters this function, so dispatch after unlocking.
+	for _, r := range releases {
+		a.dispatchOrQueue(mountedCtx, "agent-inbound:"+strconv.FormatInt(r.agentID, 10), conv, r.msg)
+	}
+}
+
+// agentTurnBusy reports whether agent is in a turn in chat or about to start
+// one. The response only becomes active once delivery begins, so a message
+// already sent to the agent but not yet delivered counts as well.
+func (a *App) agentTurnBusy(chat string, agentID int64) bool {
+	if a.streamer != nil && a.streamer.responseActive(chat, agentID) {
+		return true
+	}
+	pending, err := a.store.undeliveredTurn(chat, agentID)
+	// An unreadable ledger holds the queue; the delivery-retry worker tries again.
+	return err != nil || pending
 }
 
 func conversationEventTopic(msg *Message) string {
@@ -604,6 +630,16 @@ func (a *App) attemptDelivery(app *sdk.AppCtx, target string, conv *Conversation
 	stopLease()
 	if finishErr := a.store.FinishDelivery(msg.ID, target, claim, err); finishErr != nil && app != nil {
 		app.Logger().Warn("delivery completion persistence failed", "message", msg.ID, "target", target, "err", finishErr)
+	}
+	a.deliveryFinished(conv.ID, target)
+}
+
+// deliveryFinished retries the queue once an agent delivery settles. A fast
+// turn can finish while its delivery is still in flight; the release attempted
+// then waited on this delivery and nothing else would trigger it again.
+func (a *App) deliveryFinished(chat, target string) {
+	if strings.HasPrefix(target, "agent-inbound:") {
+		a.releaseQueuedMessages(chat)
 	}
 }
 

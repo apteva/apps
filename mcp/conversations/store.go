@@ -886,6 +886,17 @@ func (s *store) queuedMessages(conversationID string, agentID int64) ([]*Message
 	return out, rows.Err()
 }
 
+// undeliveredTurn reports a message already sent to agent whose delivery is
+// still pending or in flight. Queued and removed rows share the ledger but have
+// not been sent, so they are excluded.
+func (s *store) undeliveredTurn(conversationID string, agentID int64) (bool, error) {
+	var pending int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM deliveries d JOIN messages m ON m.id=d.message_id
+		WHERE d.target=? AND d.status IN ('pending','processing') AND m.conversation_id=? AND m.queue_state NOT IN ('queued','cancelled'))`,
+		fmt.Sprintf("agent-inbound:%d", agentID), conversationID).Scan(&pending)
+	return pending == 1, err
+}
+
 func (s *store) updateQueuedMessage(id int64, conversationID, content string) (*Message, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {

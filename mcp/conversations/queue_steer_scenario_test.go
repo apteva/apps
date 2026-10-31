@@ -15,31 +15,19 @@ import (
 )
 
 // TestScenario_QueueAndSteer talks to a busy agent the way a person talks to a
-// coding agent mid-task. While a multi-step todo task runs, one follow-up is
-// steered into the current response, one is queued and then edited, and one is
-// queued and then removed. The steer must shape the task's single final answer;
-// the edited follow-up must reach the agent only after that final; the removed
-// row and the pre-edit text must never reach it.
+// coding agent mid-task. The agent works through a five-item todo list while the
+// user steers it three times at different points (add work, leave one item for
+// me, shape the summary) and lines up two follow-ups behind it, editing one and
+// removing a destructive third. Every steer must land in the running task; the
+// follow-ups must run afterwards, in order; the removed one must never run. The
+// run passes only when the Todo data and the transcript both show all work done.
 func TestScenario_QueueAndSteer(t *testing.T) {
 	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
-	var list struct {
-		ID int64 `json:"id"`
-	}
-	if status := c.do("POST", "/api/apps/todo/lists", map[string]any{
-		"name": "Progress fixture",
-	}, &list); status != http.StatusOK || list.ID == 0 {
-		t.Fatalf("seed todo list: status=%d list=%+v", status, list)
-	}
-	for _, title := range []string{"First fixture todo", "Second fixture todo"} {
-		if status := c.do("POST", "/api/apps/todo/todos", map[string]any{
-			"title": title, "list_id": list.ID, "source": "human",
-		}, nil); status != http.StatusOK {
-			t.Fatalf("seed todo %q: status=%d", title, status)
-		}
-	}
+	seeds := []string{"Book the venue", "Confirm the caterer", "Print badges", "Order banners", "Send invites"}
+	launchID := c.seedTodoList("Launch prep", seeds...)
 
 	var conv Conversation
 	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
@@ -54,6 +42,14 @@ func TestScenario_QueueAndSteer(t *testing.T) {
 	defer closeFrames()
 
 	path := "/api/apps/conversations/messages?chat_id=" + conv.ID
+	history := func() []Message {
+		t.Helper()
+		var rows []Message
+		if status := c.do("GET", path, nil, &rows); status != http.StatusOK {
+			t.Fatalf("history: status=%d", status)
+		}
+		return rows
+	}
 	post := func(content, clientID string) Message {
 		t.Helper()
 		var msg Message
@@ -64,10 +60,9 @@ func TestScenario_QueueAndSteer(t *testing.T) {
 		}
 		return msg
 	}
-	post("Complete this two-stage read-only task. Start with a phase=acknowledgement message before any work tool. "+
-		"First call the todo lists tool and tell me how many lists you found. Send a short phase=progress update before stage two. "+
-		"Then call the todo todos tool for the Progress fixture list and summarize it. "+
-		"Finish with exactly one phase=final message containing the token QUEUE_TASK_DONE.", "live-queue-task")
+	post("Work through my Launch prep todo list. Start with a phase=acknowledgement message before any work tool. "+
+		"Complete the open todos one at a time, and after each one send a short phase=progress update naming it. "+
+		"When everything is handled, send exactly one phase=final summary containing the token LAUNCH_DONE.", "live-queue-task")
 
 	deadline := time.After(20 * time.Second)
 	for active := false; !active; {
@@ -79,103 +74,244 @@ func TestScenario_QueueAndSteer(t *testing.T) {
 		}
 	}
 
-	// Each follow-up goes out with the composer's default queue behavior.
+	// Each message goes out with the composer's default queue behavior.
 	queued := func(content, clientID string) Message {
 		t.Helper()
 		msg := post(content, clientID)
 		if msg.QueueBehavior != "queue" || msg.QueueState != "queued" {
-			t.Fatalf("%s was not queued behind the active response: behavior=%q state=%q", clientID, msg.QueueBehavior, msg.QueueState)
+			t.Fatalf("%s was not queued behind the running task (it may already have finished): behavior=%q state=%q", clientID, msg.QueueBehavior, msg.QueueState)
 		}
 		return msg
 	}
-	steer := queued("Also include the token STEER_APPLIED in your final answer for this task.", "live-queue-steer")
-	var steered Message
-	if status := c.do("POST", "/api/apps/conversations/message-queue", map[string]any{
-		"chat_id": conv.ID, "message_id": steer.ID, "action": "steer",
-	}, &steered); status != http.StatusOK || steered.QueueState != "steered" {
-		t.Fatalf("steer: status=%d msg=%+v", status, steered)
+	steerNow := func(content, clientID string) Message {
+		t.Helper()
+		msg := queued(content, clientID)
+		var steered Message
+		if status := c.do("POST", "/api/apps/conversations/message-queue", map[string]any{
+			"chat_id": conv.ID, "message_id": msg.ID, "action": "steer",
+		}, &steered); status != http.StatusOK || steered.QueueState != "steered" {
+			t.Fatalf("steer %s: status=%d msg=%+v", clientID, status, steered)
+		}
+		return steered
 	}
-	later := queued("Reply with exactly: QUEUED_DRAFT_ONLY", "live-queue-later")
-	var edited Message
-	if status := c.do("PATCH", fmt.Sprintf("%s&id=%d", path, later.ID), map[string]any{
-		"content": "Once that task is finished, reply with exactly: QUEUED_AFTER_TASK",
-	}, &edited); status != http.StatusOK || edited.QueueState != "queued" {
-		t.Fatalf("edit queued follow-up: status=%d msg=%+v", status, edited)
+	// Later steers wait for real progress in the Todo data rather than for chat
+	// messages, so they arrive mid-task even when the agent skips an update.
+	waitForDone := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(150 * time.Second)
+		for len(c.todoTitles(launchID, "done")) < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("fewer than %d Launch prep todos were completed within 150s", n)
+			}
+			time.Sleep(time.Second)
+		}
 	}
-	removed := queued("Reply with exactly: REMOVED_NEVER_SENT", "live-queue-removed")
+
+	steers := []Message{steerNow(`Also add a todo called "Notify the team" to Launch prep and complete it as part of this task.`, "live-steer-1")}
+	retro := queued("Next, create a list called Draft.", "live-queue-retro")
+	removed := queued("Delete the Launch prep list.", "live-queue-removed")
 	var cancelled Message
 	if status := c.do("DELETE", fmt.Sprintf("%s&id=%d", path, removed.ID), nil, &cancelled); status != http.StatusOK || cancelled.QueueState != "cancelled" {
 		t.Fatalf("remove queued follow-up: status=%d msg=%+v", status, cancelled)
 	}
-	t.Log("steered, edited and removed follow-ups while the task response was active")
+	count := queued("Then reply with OPEN_COUNT=<number>, where the number is how many open todos remain across all my lists.", "live-queue-count")
 
-	var transcript []Message
-	var answeredAt time.Time
-	pollDeadline := time.Now().Add(240 * time.Second)
-	for time.Now().Before(pollDeadline) {
-		transcript = nil
-		c.do("GET", path, nil, &transcript)
-		if answeredAt.IsZero() {
-			for _, message := range transcript {
-				if message.Role == "agent" && strings.Contains(message.Content, "QUEUED_AFTER_TASK") {
-					answeredAt = time.Now()
-				}
-			}
+	waitForDone(1)
+	// Hand back the last seeded todo that is still open, so the steer changes work not yet done.
+	skip := ""
+	for _, title := range seeds {
+		if containsFold(c.todoTitles(launchID, "all"), title) {
+			skip = title
 		}
-		// A quiet window after the queued answer catches a late delivery of the removed row.
-		if !answeredAt.IsZero() && time.Since(answeredAt) >= 12*time.Second {
+	}
+	if skip == "" {
+		t.Fatal("every seeded todo was completed before the second steer could be sent")
+	}
+	steers = append(steers, steerNow(fmt.Sprintf("Leave %q open, I'll do that one myself. If you already completed it, reopen it.", skip), "live-steer-2"))
+	retroText := `Next, create a list called "Retro" with one todo "Collect feedback", then reply with RETRO_READY.`
+	var edited Message
+	if status := c.do("PATCH", fmt.Sprintf("%s&id=%d", path, retro.ID), map[string]any{
+		"content": retroText,
+	}, &edited); status != http.StatusOK || edited.QueueState != "queued" {
+		t.Fatalf("edit queued follow-up: status=%d msg=%+v", status, edited)
+	}
+
+	waitForDone(2)
+	steers = append(steers, steerNow("In your final summary, list every todo you completed and include the token STEERS_APPLIED.", "live-steer-3"))
+	t.Logf("three steers sent mid-task (leave %q open); two follow-ups queued, one edited, one removed", skip)
+
+	var rows []Message
+	var answeredAt time.Time
+	answerDeadline := time.Now().Add(300 * time.Second)
+	for time.Now().Before(answerDeadline) {
+		rows = history()
+		if _, n := agentMessage(rows, "OPEN_COUNT="); answeredAt.IsZero() && n > 0 {
+			answeredAt = time.Now()
+		}
+		// A quiet window after the last follow-up catches late or duplicate work.
+		if !answeredAt.IsZero() && time.Since(answeredAt) >= 15*time.Second {
 			break
 		}
 		time.Sleep(3 * time.Second)
 	}
 	if answeredAt.IsZero() {
-		t.Fatalf("queued follow-up was not answered within 240s: %+v", transcript)
+		t.Fatalf("the last queued follow-up was not answered within 300s: %+v", rows)
 	}
 
-	var final, queuedReply *Message
-	finals, queuedReplies := 0, 0
-	for i := range transcript {
-		message := &transcript[i]
-		switch {
-		case message.ID == steer.ID && message.QueueState != "steered":
-			t.Fatalf("steered follow-up ended as %q", message.QueueState)
-		case message.ID == later.ID && (message.QueueState != "released" || !strings.Contains(message.Content, "QUEUED_AFTER_TASK")):
-			t.Fatalf("edited follow-up was not released with its edited text: state=%q content=%q", message.QueueState, message.Content)
-		case message.ID == removed.ID && message.QueueState != "cancelled":
-			t.Fatalf("removed follow-up ended as %q", message.QueueState)
-		}
-		if message.Role != "agent" {
-			continue
-		}
-		for _, token := range []string{"QUEUED_DRAFT_ONLY", "REMOVED_NEVER_SENT"} {
-			if strings.Contains(message.Content, token) {
-				t.Fatalf("agent saw text that never left the queue (%s): %q", token, message.Content)
+	for _, message := range rows {
+		switch message.ID {
+		case steers[0].ID, steers[1].ID, steers[2].ID:
+			if message.QueueState != "steered" {
+				t.Fatalf("steer %d ended as %q", message.ID, message.QueueState)
 			}
-		}
-		if message.Phase == "final" && strings.Contains(message.Content, "QUEUE_TASK_DONE") {
-			finals++
-			final = message
-		}
-		if strings.Contains(message.Content, "QUEUED_AFTER_TASK") {
-			queuedReplies++
-			if queuedReply == nil {
-				queuedReply = message
+		case retro.ID, count.ID:
+			// Released rows read back like ordinary messages, with no queue state.
+			if message.QueueState != "" {
+				t.Fatalf("follow-up %d ended as %q", message.ID, message.QueueState)
+			}
+			if message.ID == retro.ID && message.Content != retroText {
+				t.Fatalf("follow-up was released without its edit: %q", message.Content)
+			}
+		case removed.ID:
+			if message.QueueState != "cancelled" {
+				t.Fatalf("removed follow-up ended as %q", message.QueueState)
 			}
 		}
 	}
-	if finals != 1 {
-		t.Fatalf("task should end with exactly one final answer, got %d: %+v", finals, transcript)
+	task, tasks := agentMessage(rows, "LAUNCH_DONE")
+	if tasks != 1 || task.Phase != "final" {
+		t.Fatalf("the task should end with exactly one final summary, got %d: %+v", tasks, rows)
 	}
-	if !strings.Contains(final.Content, "STEER_APPLIED") {
-		t.Fatalf("steered follow-up did not shape the running task's final answer: %q", final.Content)
+	if !strings.Contains(task.Content, "STEERS_APPLIED") {
+		t.Fatalf("the last steer did not reach the running task: %q", task.Content)
 	}
-	if queuedReply.ID < final.ID {
-		t.Fatalf("queued follow-up was answered before the task finished: reply=%d final=%d", queuedReply.ID, final.ID)
+	retroReply, retroReplies := agentMessage(rows, "RETRO_READY")
+	countReply, countReplies := agentMessage(rows, "OPEN_COUNT=")
+	if retroReplies != 1 || countReplies != 1 {
+		t.Fatalf("each follow-up should be answered once: retro=%d count=%d", retroReplies, countReplies)
 	}
-	if queuedReplies != 1 {
-		t.Fatalf("queued follow-up was answered %d times", queuedReplies)
+	if retroReply.ID < task.ID {
+		t.Fatalf("the first follow-up was answered before the task finished: task=%d retro=%d", task.ID, retroReply.ID)
 	}
-	t.Logf("steer shaped the running task (%q); queued follow-up answered after it (%q)", final.Content, queuedReply.Content)
+	// Queued messages are released one per finished response, so each follow-up gets its own turn.
+	if countReply.ID <= retroReply.ID {
+		t.Fatalf("the second follow-up was not answered after the first, in its own turn: retro=%d count=%d %q", retroReply.ID, countReply.ID, countReply.Content)
+	}
+	for _, message := range rows {
+		if message.Role == "agent" && message.ID > countReply.ID {
+			t.Fatalf("the agent kept going after the last follow-up: %q", message.Content)
+		}
+	}
+
+	// The Todo data must show every requested change, and nothing the user removed or rewrote.
+	lists := c.todoListIDs()
+	if lists["launch prep"] == 0 {
+		t.Fatal("the removed follow-up ran: Launch prep was deleted")
+	}
+	if lists["draft"] != 0 {
+		t.Fatal("the pre-edit follow-up ran: a Draft list exists")
+	}
+	if lists["retro"] == 0 {
+		t.Fatalf("the edited follow-up did not create the Retro list: %v", lists)
+	}
+	open := c.todoTitles(launchID, "all")
+	if len(open) != 1 || !containsFold(open, skip) {
+		t.Fatalf("Launch prep should leave only %q open, got %v", skip, open)
+	}
+	done := c.todoTitles(launchID, "done")
+	for _, title := range append(append([]string{}, seeds...), "Notify the team") {
+		if title != skip && !containsFold(done, title) {
+			t.Fatalf("%q was not completed: done=%v", title, done)
+		}
+	}
+	retroOpen := c.todoTitles(lists["retro"], "all")
+	if len(retroOpen) != 1 || !containsFold(retroOpen, "Collect feedback") {
+		t.Fatalf("Retro should hold one open todo, Collect feedback, got %v", retroOpen)
+	}
+	if want := fmt.Sprintf("OPEN_COUNT=%d", len(c.todoTitles(0, "all"))); !strings.Contains(countReply.Content, want) {
+		t.Fatalf("open count reply %q, want %s", countReply.Content, want)
+	}
+	t.Logf("all done: %d todos completed, %q left open, Retro ready, %q", len(done), skip, countReply.Content)
+}
+
+// agentMessage returns the first agent message containing token and how many contain it.
+func agentMessage(rows []Message, token string) (Message, int) {
+	var first Message
+	n := 0
+	for _, message := range rows {
+		if message.Role == "agent" && strings.Contains(message.Content, token) {
+			if n == 0 {
+				first = message
+			}
+			n++
+		}
+	}
+	return first, n
+}
+
+func containsFold(items []string, want string) bool {
+	for _, item := range items {
+		if strings.Contains(strings.ToLower(item), strings.ToLower(want)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *scenarioClient) seedTodoList(name string, titles ...string) int64 {
+	c.t.Helper()
+	var list struct {
+		ID int64 `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/todo/lists", map[string]any{"name": name}, &list); status != http.StatusOK || list.ID == 0 {
+		c.t.Fatalf("seed todo list %q: status=%d list=%+v", name, status, list)
+	}
+	for _, title := range titles {
+		if status := c.do("POST", "/api/apps/todo/todos", map[string]any{
+			"title": title, "list_id": list.ID, "source": "human",
+		}, nil); status != http.StatusOK {
+			c.t.Fatalf("seed todo %q: status=%d", title, status)
+		}
+	}
+	return list.ID
+}
+
+// todoTitles reads one Todo view: "all" is every open todo, "done" every
+// completed one. A zero listID spans every list.
+func (c *scenarioClient) todoTitles(listID int64, view string) []string {
+	c.t.Helper()
+	path := "/api/apps/todo/todos?view=" + view
+	if listID != 0 {
+		path += fmt.Sprintf("&list_id=%d", listID)
+	}
+	var todos []struct {
+		Title string `json:"title"`
+	}
+	if status := c.do("GET", path, nil, &todos); status != http.StatusOK {
+		c.t.Fatalf("read %s todos: status=%d", view, status)
+	}
+	titles := make([]string, len(todos))
+	for i, todo := range todos {
+		titles[i] = todo.Title
+	}
+	return titles
+}
+
+// todoListIDs maps lower-cased list names to their IDs.
+func (c *scenarioClient) todoListIDs() map[string]int64 {
+	c.t.Helper()
+	var lists []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if status := c.do("GET", "/api/apps/todo/lists", nil, &lists); status != http.StatusOK {
+		c.t.Fatalf("read todo lists: status=%d", status)
+	}
+	ids := make(map[string]int64, len(lists))
+	for _, list := range lists {
+		ids[strings.ToLower(strings.TrimSpace(list.Name))] = list.ID
+	}
+	return ids
 }
 
 // responseFrames streams the conversation's live response frames, as the UI

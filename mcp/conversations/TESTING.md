@@ -57,7 +57,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
 | Short multi-step cadence | Related list and todo lookups complete with one acknowledgement and one final reply, without an unnecessary progress message |
 | Long multi-step progress | A meaningful stage boundary produces one intermediate progress update before the final outcome |
-| Queue and steer | Follow-ups sent mid-task: a steered one shapes the task's single final answer; an edited queued one is answered only after that final, with its edited text; removed and pre-edit text never reach the agent |
+| Queue and steer | Three steers sent at different points land in the running todo task; two queued follow-ups (one edited) run afterwards, each in its own turn; a removed destructive one never runs; Todo data and transcript both show all work done |
 | Bound approval | Approval/verdict remain in the originating chat |
 | Ownership | Unchanged main/chat profiles, no mutation/delegation attempts, history recall and restart/resume |
 
@@ -253,17 +253,40 @@ GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
   --json scenarios/23-queue-and-steer.yaml
 ```
 
-The driver gives the agent a multi-step todo task and waits for its live
-response frame. While that response is active it sends three follow-ups with
-the composer's default queue behavior: it steers the first, edits the second,
-and removes the third. The task must end with exactly one final answer that
-includes the steered instruction's token. The edited follow-up must be released
-with its edited text and answered once, after that final. Neither the removed
-row nor the pre-edit text may appear in any agent message, including during a
-12-second quiet window. This checks the server queue and the model together; the
-browser suite separately covers the queued tray's controls.
+The agent works through a five-item Launch prep todo list. Every user message
+goes out with the composer's default queue behavior while that task runs:
 
-Not yet validated with a live run.
+- Three steers, sent at different points: right after the task starts (add and
+  complete "Notify the team"), after the first todo is completed (leave the last
+  still-open seeded todo for the user, reopening it if needed), and after the
+  second (list completed work and include `STEERS_APPLIED` in the summary). The
+  later steers wait for completions in the Todo data, not for chat messages.
+- Two queued follow-ups: create a Retro list (edited while queued; the original
+  text asked for a Draft list), then report the open-todo count.
+- One queued "Delete the Launch prep list" message, removed before it is sent.
+
+The task must end with one final summary carrying the last steer's token. The
+follow-ups must then be answered once each, in order and in separate turns,
+followed by a 15-second quiet window. The Todo data must show every seeded
+todo and "Notify the team" completed except the one handed back, Retro holding
+one open "Collect feedback" todo, no Draft list, Launch prep intact, and an
+open count matching the data. The trajectory also forbids list and todo
+deletion. The browser suite separately covers the queued tray's controls.
+
+Local runs on 2026-10-31 with actual `openai-codex` / `gpt-6.1-sol` telemetry:
+
+- Before the queue fix: one run passed (91.7 seconds, 23 iterations, 421,767
+  tokens). In another, all work was done but both follow-ups reached the agent
+  together right after the task and were answered in one message. A released
+  row only became an active response once its delivery started, so a second
+  release pass in that gap (another delivery worker or activity change)
+  released the next row too.
+- After the fix (releases serialized; a sent but undelivered message keeps its
+  agent busy; each agent delivery retries the queue): two consecutive runs
+  passed with each follow-up answered in its own turn, in 123.5 seconds /
+  29 iterations / 543,056 tokens and 84.6 seconds / 23 iterations / 422,040
+  tokens. `TestQueueReleasesOneRowWhileDeliveryIsPending` and its neighbours in
+  `queue_test.go` reproduce the gap deterministically.
 
 ## Scoped host launcher visibility (v0.24.50)
 

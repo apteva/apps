@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.1 — 2026-10-31
+
+- Release queued follow-ups strictly one turn at a time. A released message only became an active response once its delivery started, and concurrent delivery workers or activity changes in that gap could release the next queued message too, so the agent received both in one turn. An agent now stays busy until a message already sent to it is delivered, release decisions are serialized, and each agent delivery retries the queue so a turn that finishes before its delivery is confirmed doesn't leave the next message waiting.
+- Queue a new message behind an earlier one that is still on its way to the agent, instead of delivering both in the same turn.
+- Add a Tier 3 queue-and-steer scenario: three steers sent at different points of a multi-step todo task, two queued follow-ups (one edited) answered afterwards in separate turns, and a removed destructive follow-up that never runs, checked against both the transcript and the Todo data.
+
 ## 0.25.0 — 2026-10-31
 
 - Add a Conversations widget for the project Home (`project-conversations`): every agent's conversations in one list, with the lead agent on each row, unread counts, and the chat opened beside the list. Half tiles and narrow containers stack the list and the chat with a back button that returns focus to the row and keeps drafts.

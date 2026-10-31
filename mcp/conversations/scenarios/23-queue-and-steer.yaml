@@ -1,9 +1,10 @@
 name: conversations-queue-and-steer
 description: |
-  Follow-ups sent while the agent is busy: one steered into the running task,
-  one queued and edited until the task finishes, one queued and removed.
-timeout: 12m
-max_iterations: 100
+  A busy agent works through a todo list while the user steers it three times
+  and lines up follow-ups behind it: one edited, one removed, two run in order.
+  Passes only when the transcript and the Todo data show all work done.
+timeout: 15m
+max_iterations: 150
 setup:
   app:
     path: .
@@ -11,18 +12,21 @@ setup:
     - path: ../todo
       spawnable: true
   agents: 1
-  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_QueueAndSteer$", "-v", "-count=1", "-timeout=11m", "."]
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_QueueAndSteer$", "-v", "-count=1", "-timeout=14m", "."]
 directive: |
   You are an operations and customer-support agent. Answer chat messages briefly
   and directly. When monitor or scheduler events arrive, act on them per your
   conversations skill. All operations here use isolated test data.
 budget:
-  total_tokens: 600000
+  total_tokens: 1200000
 trajectory_assert:
-  - tool_called: todo_lists_list
-  - tool_called: todo_todos_list
+  - tool_called: todo_todos_complete
+  - tool_called: todo_lists_create
+  - tool_not_called: todo_lists_delete | todo_todos_delete
   - tool_called_with:
       tool: conversations_send
       args:
         phase: final
+      # The driver checks each follow-up's separate reply; a higher count here
+      # would leave the runner waiting out the timeout after a driver result.
       min_count: 2

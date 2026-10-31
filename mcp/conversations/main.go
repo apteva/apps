@@ -37,6 +37,7 @@ var manifestYAML string
 
 type App struct {
 	attachmentMu     sync.Mutex
+	queueReleaseMu   sync.Mutex // serializes releaseQueuedMessages decisions
 	asyncDelivery    bool
 	deliveryWorker   *deliveryWorker
 	store            *store

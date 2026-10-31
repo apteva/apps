@@ -869,7 +869,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	queueState := "released"
 	if behavior == "queue" {
 		for _, agentID := range targets {
-			if a.streamer != nil && a.streamer.responseActive(conv.ID, agentID) {
+			if a.agentTurnBusy(conv.ID, agentID) {
 				queueState = "queued"
 				break
 			}

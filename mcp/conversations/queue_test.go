@@ -120,4 +120,116 @@ func TestQueueEditRemoveAndSteer(t *testing.T) {
 	}
 }
 
+// holdDeliveries leaves outbox rows pending, as the async worker does between
+// being woken and claiming a row; the test then delivers them by hand.
+func holdDeliveries(app *App) {
+	app.deliveryWorker = &deliveryWorker{wake: make(chan struct{}, 4), stop: make(chan struct{})}
+}
+
+func queueStateOf(t *testing.T, app *App, id int64) string {
+	t.Helper()
+	var state string
+	if err := app.store.db.QueryRow(`SELECT queue_state FROM messages WHERE id=?`, id).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func decodeMessage(t *testing.T, rec *httptest.ResponseRecorder) Message {
+	t.Helper()
+	var msg Message
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&msg); err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+// A released row only becomes an active response once its delivery starts.
+// A second release pass in that gap used to hand the agent the next queued
+// row as well, so both arrived in one turn.
+func TestQueueReleasesOneRowWhileDeliveryIsPending(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	holdDeliveries(app)
+	conv := mkConversation(t, app, 41)
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	first := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"first","client_message_id":"gap-1"}`))
+	second := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"second","client_message_id":"gap-2"}`))
+
+	app.streamer.finishResponse(conv.ID, 41)
+	// Another worker or activity change runs before the first row is delivered.
+	app.releaseQueuedMessages(conv.ID)
+	if got := queueStateOf(t, app, first.ID); got != "released" {
+		t.Fatalf("first state=%s", got)
+	}
+	if got := queueStateOf(t, app, second.ID); got != "queued" {
+		t.Fatalf("second row was released before the first turn started: %s", got)
+	}
+
+	app.attemptDelivery(ctx, "agent-inbound:41", conv, &first)
+	if len(platform.ensures) != 1 || !app.streamer.responseActive(conv.ID, 41) {
+		t.Fatalf("first delivery: ensures=%d active=%v", len(platform.ensures), app.streamer.responseActive(conv.ID, 41))
+	}
+	if got := queueStateOf(t, app, second.ID); got != "queued" {
+		t.Fatalf("second row was released while the first turn was active: %s", got)
+	}
+	app.streamer.finishResponse(conv.ID, 41)
+	if got := queueStateOf(t, app, second.ID); got != "released" {
+		t.Fatalf("second row was not released after the first turn: %s", got)
+	}
+}
+
+// A message sent while the previous one is still on its way to the agent waits
+// behind it rather than reaching the agent in the same turn.
+func TestNewMessageQueuesBehindUndeliveredTurn(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	holdDeliveries(app)
+	conv := mkConversation(t, app, 41)
+	first := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"first","client_message_id":"undelivered-1"}`))
+	if first.QueueState != "" {
+		t.Fatalf("an idle conversation should send at once: %+v", first)
+	}
+	second := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"second","client_message_id":"undelivered-2"}`))
+	if second.QueueState != "queued" {
+		t.Fatalf("second message skipped the queue while the first was undelivered: %+v", second)
+	}
+	app.attemptDelivery(ctx, "agent-inbound:41", conv, &first)
+	app.streamer.finishResponse(conv.ID, 41)
+	if got := queueStateOf(t, app, second.ID); got != "released" {
+		t.Fatalf("second message was not released after the first turn: %s", got)
+	}
+}
+
+// A turn can settle before its delivery is confirmed. Confirmation must then
+// release the next row instead of leaving it queued until another event.
+func TestDeliveryConfirmationReleasesAfterFastTurn(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	holdDeliveries(app)
+	conv := mkConversation(t, app, 41)
+	first := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"first","client_message_id":"fast-1"}`))
+	second := decodeMessage(t, postQueueMessage(t, app, conv, `{"content":"second","client_message_id":"fast-2"}`))
+	if second.QueueState != "queued" {
+		t.Fatalf("second state=%q", second.QueueState)
+	}
+	claim, err := app.store.ClaimDelivery(first.ID, "agent-inbound:41")
+	if err != nil || claim == nil {
+		t.Fatalf("claim: %v %+v", err, claim)
+	}
+	// The whole turn settles while the delivery is still in flight.
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	app.streamer.finishResponse(conv.ID, 41)
+	if got := queueStateOf(t, app, second.ID); got != "queued" {
+		t.Fatalf("second row released while the first delivery was in flight: %s", got)
+	}
+	if err := app.store.FinishDelivery(first.ID, "agent-inbound:41", claim, nil); err != nil {
+		t.Fatal(err)
+	}
+	app.deliveryFinished(conv.ID, "agent-inbound:41")
+	if got := queueStateOf(t, app, second.ID); got != "released" {
+		t.Fatalf("confirmation did not release the next row: %s", got)
+	}
+}
+
 func itoa(value int64) string { return fmt.Sprint(value) }
