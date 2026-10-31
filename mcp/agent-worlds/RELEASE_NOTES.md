@@ -1,3 +1,9 @@
+# Agent Worlds 0.7.1
+
+Packaging fix for 0.7.0, which could not be installed or upgraded to.
+
+- The 0.7.0 release tarballs contained macOS metadata files (`._bin` and others), so servers rejected them with "unsupported artifact path". The tarballs are now packed without them. The app itself is unchanged from 0.7.0.
+
 # Agent Worlds 0.7.0
 
 Agent Worlds can now sit on the project dashboard.
