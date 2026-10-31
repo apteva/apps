@@ -28,7 +28,13 @@ pre-upgrade soft-bounce history requires an audited delivery recovery rather tha
 a blind counter reset. The three reported CRM channels were already active.
 
 The existing Messaging recovery worker checks matching stored inbound evidence
-every 30 seconds. It repairs historical message and recipient summaries in a
+every 30 seconds. Since **0.13.62** it does so incrementally: each new
+Transient/General bounce is indexed once by feedback ID
+(`auto_response_candidates`), each new SES inbound message marks matching
+candidates ready, and only ready candidates are reconsidered. Discovery reads
+use the read-only pool in bounded id windows with query deadlines, so the
+writer connection stays available to normal requests. (0.13.61 rescanned every
+historical bounce with an unindexable `LIKE` on each pass and starved the app.) It repairs historical message and recipient summaries in a
 transaction, preserves raw events, and queues a correction with a stable event
 ID. Gateway failures leave the correction pending for retry. Reconciliation
 never resends mail or releases SDR sequence holds.

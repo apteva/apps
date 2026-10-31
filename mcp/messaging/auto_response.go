@@ -264,12 +264,202 @@ func reconcileMessageAutoResponses(ctx *sdk.AppCtx, pid string, id int64) error 
 	return tx.Commit()
 }
 
+// Recovery runs every 30s beside normal traffic, so each pass is bounded:
+// discovery reads go through the read pool in fixed id windows with a query
+// deadline, and writes are short transactions on the serialized writer.
+const (
+	autoResponseScanWindow   = 1000
+	autoResponseReadyBatch   = 50
+	autoResponseQueryTimeout = 5 * time.Second
+	autoResponsePassBudget   = 2 * time.Second
+)
+
 func reconcilePendingAutoResponses(ctx *sdk.AppCtx) error {
-	rows, err := ctx.AppDB().Query(`SELECT DISTINCT m.project_id,m.id FROM messages m JOIN delivery_events d ON d.message_id=m.id
- WHERE m.direction='out' AND m.channel='email' AND d.kind='bounced'
- AND NOT EXISTS(SELECT 1 FROM delivery_event_interpretations i WHERE i.event_id=d.id)
- AND json_valid(d.raw) AND EXISTS(SELECT 1 FROM messages r WHERE r.project_id=m.project_id AND r.provider_slug='aws-ses' AND r.direction='in' AND r.message_id_header LIKE '<' || COALESCE(json_extract(d.raw,'$.raw.bounce.feedbackId'),json_extract(d.raw,'$.bounce.feedbackId')) || '@%')`)
+	deadline := time.Now().Add(autoResponsePassBudget)
+	for {
+		more, err := indexAutoResponseBounces(ctx)
+		if err != nil {
+			return err
+		}
+		if !more || time.Now().After(deadline) {
+			break
+		}
+	}
+	for {
+		more, err := markAutoResponseInbound(ctx)
+		if err != nil {
+			return err
+		}
+		if !more || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err := reconcileReadyAutoResponses(ctx); err != nil {
+		return err
+	}
+	return flushDeliveryCorrections(ctx)
+}
+
+func autoResponseCursor(ctx *sdk.AppCtx, qctx context.Context, name, table string) (last, max int64, err error) {
+	db := ctx.AppReadDB()
+	if err = db.QueryRowContext(qctx, `SELECT last_id FROM auto_response_scan_state WHERE name=?`, name).Scan(&last); err != nil {
+		return 0, 0, err
+	}
+	err = db.QueryRowContext(qctx, `SELECT COALESCE(MAX(id),0) FROM `+table).Scan(&max)
+	return last, max, err
+}
+
+// feedbackIDHeader extracts the SES feedback ID from "<feedback@domain>".
+func feedbackIDHeader(header string) string {
+	header = strings.TrimSpace(header)
+	at := strings.IndexByte(header, '@')
+	if !strings.HasPrefix(header, "<") || at < 2 {
+		return ""
+	}
+	return header[1:at]
+}
+
+// autoResponseFeedbackID returns the feedback ID of a bounce that could be an
+// SES-forwarded automatic response, or "" for every other bounce.
+func autoResponseFeedbackID(stored string) string {
+	raw := json.RawMessage(stored)
+	var wrapper struct {
+		Raw json.RawMessage `json:"raw"`
+	}
+	_ = json.Unmarshal(raw, &wrapper)
+	if len(wrapper.Raw) > 0 {
+		raw = wrapper.Raw
+	}
+	var ev struct {
+		Bounce struct {
+			Type       string `json:"bounceType"`
+			SubType    string `json:"bounceSubType"`
+			FeedbackID string `json:"feedbackId"`
+		} `json:"bounce"`
+	}
+	if json.Unmarshal(raw, &ev) != nil || ev.Bounce.Type != "Transient" || ev.Bounce.SubType != "General" {
+		return ""
+	}
+	return ev.Bounce.FeedbackID
+}
+
+// Indexes one window of new bounce events. Each event is considered once; a
+// candidate whose inbound copy is already stored is marked ready immediately.
+func indexAutoResponseBounces(ctx *sdk.AppCtx) (bool, error) {
+	qctx, cancel := context.WithTimeout(context.Background(), autoResponseQueryTimeout)
+	defer cancel()
+	last, max, err := autoResponseCursor(ctx, qctx, "bounces", "delivery_events")
+	if err != nil || last >= max {
+		return false, err
+	}
+	end := min(last+autoResponseScanWindow, max)
+	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT d.id,m.project_id,m.id,d.raw FROM delivery_events d JOIN messages m ON m.id=d.message_id
+ WHERE d.id>? AND d.id<=? AND d.kind='bounced' AND m.direction='out' AND m.channel='email'`, last, end)
 	if err != nil {
+		return false, err
+	}
+	type candidate struct {
+		event, message int64
+		pid, feedback  string
+		ready          bool
+	}
+	var found []candidate
+	for rows.Next() {
+		var c candidate
+		var raw string
+		if err = rows.Scan(&c.event, &c.pid, &c.message, &raw); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if c.feedback = autoResponseFeedbackID(raw); c.feedback != "" {
+			found = append(found, c)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return false, err
+	}
+	for i := range found {
+		c := &found[i]
+		var one int
+		err = ctx.AppReadDB().QueryRowContext(qctx, `SELECT 1 FROM messages WHERE project_id=? AND message_id_header>=? AND message_id_header<? AND direction='in' AND provider_slug='aws-ses' LIMIT 1`, c.pid, "<"+c.feedback+"@", "<"+c.feedback+"A").Scan(&one)
+		if err != nil && err != sql.ErrNoRows {
+			return false, err
+		}
+		c.ready = err == nil
+	}
+	tx, err := ctx.AppDB().BeginTx(qctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	for _, c := range found {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO auto_response_candidates(event_id,project_id,message_id,feedback_id,ready) VALUES(?,?,?,?,?)`, c.event, c.pid, c.message, c.feedback, c.ready); err != nil {
+			return false, err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE auto_response_scan_state SET last_id=? WHERE name='bounces' AND last_id=?`, end, last); err != nil {
+		return false, err
+	}
+	return end < max, tx.Commit()
+}
+
+// Marks candidates ready when their SES inbound copy arrives after the bounce.
+func markAutoResponseInbound(ctx *sdk.AppCtx) (bool, error) {
+	qctx, cancel := context.WithTimeout(context.Background(), autoResponseQueryTimeout)
+	defer cancel()
+	last, max, err := autoResponseCursor(ctx, qctx, "inbound", "messages")
+	if err != nil || last >= max {
+		return false, err
+	}
+	end := min(last+autoResponseScanWindow, max)
+	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT project_id,COALESCE(message_id_header,'') FROM messages
+ WHERE id>? AND id<=? AND direction='in' AND channel='email' AND provider_slug='aws-ses'`, last, end)
+	if err != nil {
+		return false, err
+	}
+	type arrival struct{ pid, feedback string }
+	var arrivals []arrival
+	for rows.Next() {
+		var a arrival
+		var header string
+		if err = rows.Scan(&a.pid, &header); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if a.feedback = feedbackIDHeader(header); a.feedback != "" {
+			arrivals = append(arrivals, a)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return false, err
+	}
+	tx, err := ctx.AppDB().BeginTx(qctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	for _, a := range arrivals {
+		if _, err = tx.Exec(`UPDATE auto_response_candidates SET ready=1 WHERE project_id=? AND feedback_id=?`, a.pid, a.feedback); err != nil {
+			return false, err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE auto_response_scan_state SET last_id=? WHERE name='inbound' AND last_id=?`, end, last); err != nil {
+		return false, err
+	}
+	return end < max, tx.Commit()
+}
+
+// A ready candidate is reconsidered once; it becomes ready again only if
+// another inbound copy with the same feedback ID arrives.
+func reconcileReadyAutoResponses(ctx *sdk.AppCtx) error {
+	qctx, cancel := context.WithTimeout(context.Background(), autoResponseQueryTimeout)
+	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT DISTINCT project_id,message_id FROM auto_response_candidates WHERE ready=1 ORDER BY message_id LIMIT ?`, autoResponseReadyBatch)
+	if err != nil {
+		cancel()
 		return err
 	}
 	type target struct {
@@ -281,12 +471,14 @@ func reconcilePendingAutoResponses(ctx *sdk.AppCtx) error {
 		var t target
 		if err = rows.Scan(&t.pid, &t.id); err != nil {
 			rows.Close()
+			cancel()
 			return err
 		}
 		targets = append(targets, t)
 	}
 	err = rows.Err()
 	rows.Close()
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -294,8 +486,11 @@ func reconcilePendingAutoResponses(ctx *sdk.AppCtx) error {
 		if err = reconcileMessageAutoResponses(ctx, t.pid, t.id); err != nil {
 			return err
 		}
+		if _, err = ctx.AppDB().Exec(`UPDATE auto_response_candidates SET ready=0 WHERE message_id=? AND ready=1`, t.id); err != nil {
+			return err
+		}
 	}
-	return flushDeliveryCorrections(ctx)
+	return nil
 }
 
 func flushDeliveryCorrections(ctx *sdk.AppCtx) error {
