@@ -1,69 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePolledJSON, useAnimationClock } from "./scene-data";
 import { PANEL_STYLES, WORLD_NAV_STYLES } from "./panel-styles";
 import SceneViewport from "./scene-viewport";
 import { withAppDisplayNames, type AppMetadata } from "./app-display-names";
-import { HierarchyStage, OperationsStage, SystemGraph } from "./clean-stages";
 import { clock, eventColor, short, statusColor, usePalette } from "./palette";
-import PixelStage, { MAX_RESIDENTS } from "./pixel/PixelStage";
-import IsoStage from "./pixel/iso/IsoStage";
+import { MAX_RESIDENTS } from "./pixel/PixelStage";
+import WorldStage from "./world-stage";
 import { THEMES, themeById } from "./themes";
 import { buildWorld, rootFocus, resolveFocus, projectWorld, contentsForAgents, PAGE_SIZE } from "./world-model";
 import type { Source, Scene, Focus } from "./world-model";
 type Props = { installId: number; projectId?: string };
 
-// Buffer one polling cycle so newly observed calls begin before their walking
-// animation reaches the event, rather than jumping forward on every refresh.
-const VILLAGE_DELAY_MS = 3500;
-const API = "/api/apps/agent-worlds/api";
-
-function apiURL(path: string, installId: number, projectId: string = "") {
-  const url = new URL(path.startsWith("/api/") ? path : API + path, window.location.origin);
-  if (installId) url.searchParams.set("install_id", String(installId));
-  if (projectId) url.searchParams.set("project_id", projectId);
-  return url.pathname + url.search;
-}
-
-// Share one cancellable, sequential polling path for inventory and scenes.
-// Pausing stops network refreshes without throwing away the replay snapshot.
-function usePolledJSON<T>(path: string, installId: number, projectId: string, interval: number, polling = true) {
-  const url = apiURL(path, installId, projectId);
-  const [result, setResult] = useState<{ url: string; data: T | null; error: string }>({ url: "", data: null, error: "" });
-  const [revision, setRevision] = useState(0);
-  const pollingRef = useRef(polling);
-  pollingRef.current = polling;
-  const refresh = useCallback(() => setRevision(value => value + 1), []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: number;
-    const schedule = () => {
-      if (controller.signal.aborted) return;
-      timer = window.setTimeout(() => {
-        if (pollingRef.current && document.visibilityState !== "hidden") void load();
-        else schedule();
-      }, interval);
-    };
-    const load = async () => {
-      try {
-        const response = await fetch(url, { signal: controller.signal });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-        if (!controller.signal.aborted) setResult({ url, data: body, error: "" });
-      } catch (caught) {
-        if (!controller.signal.aborted) setResult(previous => ({ url, data: previous.url === url ? previous.data : null, error: (caught as Error).message }));
-      } finally { schedule(); }
-    };
-    void load();
-    return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [url, interval, revision]);
-
-  return { data: result.url === url ? result.data : null, error: result.url === url ? result.error : "", refresh };
-}
-
 export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const palette = usePalette();
-  const [sourceId, setSourceId] = useState("main");
-  const [themeId, setThemeId] = useState("village");
+  const [sourceId, setSourceId] = useState(() => new URLSearchParams(window.location.search).get("source") || "main");
+  // The dashboard widget links here with its own view, so the page opens on it.
+  const [themeId, setThemeId] = useState(() => new URLSearchParams(window.location.search).get("view") || "village");
   const theme = themeById(themeId);
   const isMap = theme.layout === "map";
   const [mapSize, setMapSize] = useState({ width: 1280, height: 760 });
@@ -82,7 +34,6 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const [frozenScene, setFrozenScene] = useState<Scene|null>(null);
   const [exportError, setError] = useState("");
   const [recording, setRecording] = useState(false);
-  const [animationNow, setAnimationNow] = useState(Date.now() - VILLAGE_DELAY_MS);
   const stageRef = useRef<HTMLCanvasElement | SVGSVGElement | null>(null);
   const sourceData = usePolledJSON<Source[]>("/sources", installId, projectId, 15000);
   const sceneData = usePolledJSON<Scene>(`/scene?source=${encodeURIComponent(sourceId)}`, installId, projectId, 2500, live);
@@ -97,21 +48,12 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   useEffect(() => {
     if (sourceData.data) setSourceId(current => sourceData.data!.some(source => source.id === current) ? current : "main");
   }, [sourceData.data]);
-  useEffect(() => { setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setSelectedAgentId(""); setShowInspector(false); setAnimationNow(Date.now() - VILLAGE_DELAY_MS); }, [sourceId, installId, projectId]);
+  useEffect(() => { setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setSelectedAgentId(""); setShowInspector(false); }, [sourceId, installId, projectId]);
   useEffect(() => {
     if (!rawScene) return;
     setReplayIndex(rawScene.events.length);
   }, [rawScene]);
-  // Map themes animate on a shared clock; other themes are static between polls.
-  useEffect(() => {
-    if (!live || !isMap) return;
-    setAnimationNow(Date.now() - VILLAGE_DELAY_MS);
-    const motion = typeof matchMedia === "function" ? matchMedia("(prefers-reduced-motion: reduce)") : null;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== "hidden" && !motion?.matches) setAnimationNow(Date.now() - VILLAGE_DELAY_MS);
-    }, 80);
-    return () => window.clearInterval(timer);
-  }, [live, isMap]);
+  const [animationNow, setAnimationNow] = useAnimationClock(live && isMap);
 
   // Replay is a frozen source snapshot. Focus, renderer and pagination never
   // reload it or move the replay cursor.
@@ -276,11 +218,7 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
           <section className="aw-scene" aria-label={theme.name}>
             <SceneViewport hostRef={canvasHost} stageRef={stageRef} width={isMap ? mapSize.width : portrait ? 540 : 1280} height={isMap ? mapSize.height : portrait ? 960 : 560} sceneKey={JSON.stringify([installId,projectId,sourceId,currentFocus,currentPage,isMap])} status={`${visibleAgents.length} agents · ${runningCount} running`}>
               {camera => !scene ? <div className="aw-loading">Connecting to the scene…</div>
-                : theme.iso ? <IsoStage stageRef={stageRef} camera={camera} agents={stageAgents} nodes={projection?.nodes || []} destinations={destinations} events={visibleEvents} teams={teams} portrait={portrait} now={animationNow} live={live} selectedAgent={selectedAgent} selectedDestination={selectedDestination} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} onFocus={navigate} onWorldSize={setMapSize} />
-                : theme.pixel ? <PixelStage theme={theme.pixel} stageRef={stageRef} camera={camera} agents={stageAgents} nodes={projection?.nodes || []} destinations={destinations} events={visibleEvents} teams={teams} portrait={portrait} now={animationNow} live={live} selectedAgent={selectedAgent} selectedDestination={selectedDestination} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} onFocus={navigate} onWorldSize={setMapSize} />
-                : projection?.nodes.length ? <HierarchyStage refNode={stageRef} nodes={projection.nodes.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE)} preset={theme.layout === "graph" ? "graph" : "operations"} label={theme.name} portrait={portrait} destinations={destinations} events={visibleEvents} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onFocus={navigate} palette={palette} />
-                : theme.layout === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={stageAgents} destinations={destinations} selectedDestination={selectedDestination} events={stageEvents} portrait={portrait} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} palette={palette} />
-                : <OperationsStage refNode={stageRef} agents={stageAgents} events={stageEvents} portrait={portrait} selectedAgent={selectedAgent} onSelect={setSelectedAgent} palette={palette} />}
+                : <WorldStage theme={theme} scene={scene} camera={camera} palette={palette} stageRef={stageRef} agents={stageAgents} nodes={projection?.nodes || []} destinations={destinations} events={visibleEvents} stageEvents={stageEvents} teams={teams} portrait={portrait} now={animationNow} live={live} page={currentPage} selectedAgent={selectedAgent} selectedDestination={selectedDestination} onSelect={setSelectedAgent} onSelectDestination={inspectDestination} onFocus={navigate} onWorldSize={setMapSize} />}
             </SceneViewport>
             {pages > 1 && <div className="aw-pages" aria-label="Scene pages"><button className="aw-button" disabled={currentPage === 0} onClick={() => setPage(currentPage-1)}>Previous</button><span>{currentPage+1} / {pages}</span><button className="aw-button" disabled={currentPage+1 === pages} onClick={() => setPage(currentPage+1)}>Next</button></div>}
           </section>

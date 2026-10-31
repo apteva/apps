@@ -1,3 +1,11 @@
+# Agent Worlds 0.7.0
+
+Agent Worlds can now sit on the project dashboard.
+
+- New "Agent world" dashboard widget: a live, read-only view of the project's agents at work. Its settings choose the view (Pixel village, Space station, System graph, or Operations), the source (main server, environments, or a remote server), and the height. Half and full width are supported.
+- The widget draws through the same renderer as the page, so every view looks and moves the same in both places. It polls and animates only while it is on screen.
+- Clicking the widget opens the full page on the same view and source. The page now accepts `?view=` and `?source=` in its address.
+
 # Agent Worlds 0.6.1
 
 Agents now work at the part of a building that matches the tool they call.

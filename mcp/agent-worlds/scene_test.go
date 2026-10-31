@@ -34,6 +34,13 @@ func TestManifestUsesReadOnlyMetadataPermissions(t *testing.T) {
 	if m.Name != "agent-worlds" || len(m.Provides.UIPanels) != 1 {
 		t.Fatalf("unexpected manifest: %#v", m)
 	}
+	if len(m.Provides.UIComponents) != 1 {
+		t.Fatalf("ui components=%d, want 1", len(m.Provides.UIComponents))
+	}
+	widget := m.Provides.UIComponents[0]
+	if widget.Name != "world-view" || widget.Entry != "/ui/AgentWorldsWidget.mjs" || widget.SettingsUI == nil {
+		t.Fatalf("unexpected world widget: %+v", widget)
+	}
 	manifest := string(manifestYAML)
 	for _, permission := range []string{"platform.instances.read", "platform.telemetry.observe", "platform.runtimes.observe"} {
 		if !strings.Contains(manifest, permission) {
