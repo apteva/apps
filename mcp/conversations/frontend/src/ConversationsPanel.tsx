@@ -371,7 +371,7 @@ function Overlay({
 // NewConversationDialog is the panel's port of the dashboard's
 // NewConversationModal: agent multi-select with filter, lead radio when
 // more than one, optional title.
-function NewConversationDialog({
+export function NewConversationDialog({
   open,
   projectId,
   agents,

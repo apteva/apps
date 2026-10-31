@@ -1,5 +1,5 @@
 import { ThreadActionRow } from "./threadActions";
-import { DetailsDialog } from "./ConversationsPanel";
+import { DetailsDialog, NewConversationDialog } from "./ConversationsPanel";
 import { agentAvatarMode, showsAgentAvatar, ConversationIdentity } from "./agentAppearance";
 import type { AgentInfo } from "./types";
 import type { ComposerOptions } from "./composer";
@@ -7,7 +7,7 @@ import type { ConversationHost } from "./hostUI";
 import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
-import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from "react";
 import { ConversationActivityIndicator, ConversationUnreadIndicator, shouldShowConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 import {
   ConversationChat,
@@ -19,14 +19,16 @@ import {
   agentConversationWidgetLayout,
   appendAgentScope,
   conversationDisplayMode,
+  conversationListPath,
   fixedAgentConversationInput,
-  scopedConversationListPath,
+  PROJECT_WIDGET_WIDE_MIN_PX,
   selectedConversationSeenInput,
   showNewConversation,
   showPageContext,
   showToolCompletion,
   showToolDuration,
   singleConversationListPath,
+  unreadSummaryPath,
   type AgentConversationWidgetSettings,
 } from "./agentConversations";
 
@@ -47,6 +49,13 @@ export interface AgentConversationsWidgetProps extends ConversationLocalization 
   onContextCleared?: (context: import("./pageContext").PageContext) => void;
 }
 
+interface ConversationBrowserProps extends AgentConversationsWidgetProps {
+  /** Project widgets list every agent's conversations and pick agents per conversation. */
+  allAgents?: boolean;
+  /** Host route to the full Conversations page. */
+  conversationsHref?: string;
+}
+
 interface UnreadEntry {
   conversation_id: string;
   latest_id: number;
@@ -54,13 +63,14 @@ interface UnreadEntry {
 }
 
 const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
-function useAgentDirectory(projectId: string, instanceId: number, enabled: boolean) {
+/** No instanceId means every agent in the project. */
+function useAgentDirectory(projectId: string, instanceId: number | undefined, enabled: boolean) {
   const { conversationsClient } = useConversationAPI();
   const [directory, setDirectory] = useState<{scope: string; agents: AgentInfo[]}>({scope: "", agents: []});
-  const scope = `${projectId}:${instanceId}`;
+  const scope = `${projectId}:${instanceId ?? "all"}`;
   useEffect(() => {
     let cancelled = false;
-    const load = () => { if (enabled && projectId && instanceId > 0) void conversationsClient.agents().then(agents => {
+    const load = () => { if (enabled && projectId && (instanceId === undefined || instanceId > 0)) void conversationsClient.agents().then(agents => {
       if (!cancelled) setDirectory({scope, agents});
     }, () => { if (!cancelled) setDirectory({scope, agents: []}); }); };
     load();
@@ -87,6 +97,22 @@ function useWideWidgetLayout(allowWide: boolean): boolean {
   return wide;
 }
 
+/** Measures the widget's own box; a Home tile can be narrow on a wide screen. */
+function useContainerWide(enabled: boolean, minWidth: number) {
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
+  const [wide, setWide] = useState(false);
+  useLayoutEffect(() => {
+    if (!enabled || !element) { setWide(false); return; }
+    const update = () => setWide(element.getBoundingClientRect().width >= minWidth);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element, enabled, minWidth]);
+  return [setElement, wide] as const;
+}
+
 function ConversationBrowser({
   host,
   projectId,
@@ -96,37 +122,61 @@ function ConversationBrowser({
   widgetSize,
   composerRef,
   onContextCleared,
-}: AgentConversationsWidgetProps) {
+  allAgents = false,
+  conversationsHref,
+}: ConversationBrowserProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
+  const agentId = allAgents ? undefined : instanceId;
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
+  const validScope = allAgents || validAgent;
   const showCreate = showNewConversation(widgetSettings);
-  const avatarMode = agentAvatarMode(widgetSettings?.agent_avatars);
-  const appearanceAgents = useAgentDirectory(projectId, instanceId, showsAgentAvatar(avatarMode, "threads"));
+  const avatarMode = agentAvatarMode(widgetSettings?.agent_avatars, allAgents ? "threads" : "hidden");
+  const appearanceAgents = useAgentDirectory(projectId, agentId, showsAgentAvatar(avatarMode, "threads"));
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
   const [archived, setArchived] = useState(false);
   const [listEventRevision, setListEventRevision] = useState(0);
-  const activeConversations = useConversationActivity(projectId, instanceId, !archived && validAgent, () => setListEventRevision(value => value + 1));
+  const activeConversations = useConversationActivity(projectId, agentId, !archived && validScope, () => setListEventRevision(value => value + 1));
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const wideLayout = useWideWidgetLayout(widgetSize !== "half");
-  const layout = agentConversationWidgetLayout(wideLayout);
+  const [pickerAgents, setPickerAgents] = useState<AgentInfo[] | null>(null);
+  const [pickerError, setPickerError] = useState("");
+  const viewportWide = useWideWidgetLayout(!allAgents && widgetSize !== "half");
+  const [setFrame, tileWide] = useContainerWide(allAgents, PROJECT_WIDGET_WIDE_MIN_PX);
+  const wideLayout = allAgents ? tileWide : viewportWide;
+  // Narrow project tiles show the list or the open chat, like the page on a phone.
+  const stacked = allAgents && !wideLayout;
+  const [detailOpen, setDetailOpen] = useState(false);
+  const layout = agentConversationWidgetLayout(wideLayout, stacked);
+  // Opening a chat leaves focus to the composer; going back returns it to the row.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const attachFrame = useCallback((element: HTMLDivElement | null) => { frameRef.current = element; setFrame(element); }, [setFrame]);
+  const wasDetailRef = useRef(false);
+  useLayoutEffect(() => {
+    const showingDetail = stacked && detailOpen;
+    if (!showingDetail && wasDetailRef.current) {
+      const id = returnFocusRef.current?.dataset.conversationId;
+      frameRef.current?.querySelector<HTMLButtonElement>(`button[data-conversation-id="${CSS.escape(id ?? "")}"]`)?.focus();
+    }
+    wasDetailRef.current = showingDetail;
+  }, [stacked, detailOpen]);
 
-  useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,archived]);
+  useEffect(()=>{setConversations([]);setSelectedId("");setDetailOpen(false);},[projectId,instanceId,archived]);
   const listStateRef=useRef({scope:"",count:0,selected:""});
-  const listScope=`${projectId}:${instanceId}:${archived}`;
+  const listScope=`${projectId}:${agentId ?? "all"}:${archived}`;
   listStateRef.current=listStateRef.current.scope===listScope ? {scope:listScope,count:conversations.length,selected:selectedId} : {scope:listScope,count:0,selected:""};
   const load = useCallback(async () => {
-    if (!validAgent || !projectId) return;
+    if (!validScope || !projectId) return;
     const snapshot={...listStateRef.current};
     try {
       const [rows, unreadRows] = await Promise.all([
-        refreshConversationList(scopedConversationListPath(archived,instanceId),conversationsClient,snapshot.count,snapshot.selected),
-        apiGet<UnreadEntry[]>(appendAgentScope("/unread-summary", instanceId), projectId),
+        refreshConversationList(conversationListPath(archived,agentId),conversationsClient,snapshot.count,snapshot.selected),
+        apiGet<UnreadEntry[]>(unreadSummaryPath(agentId), projectId),
       ]);
       if(snapshot.scope!==listStateRef.current.scope)return;
       const scoped = rows.filter((conversation) =>
@@ -141,7 +191,7 @@ function ConversationBrowser({
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     }
-  }, [archived, instanceId, projectId, validAgent]);
+  }, [archived, agentId, projectId, validScope]);
 
   useEffect(() => {
     void load();
@@ -155,22 +205,26 @@ function ConversationBrowser({
     [conversations, selectedId],
   );
 
+  const adopt = async (conversation: Conversation) => {
+    setArchived(false);
+    setCreating(false);
+    setTitle("");
+    setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+    setSelectedId(conversation.id);
+    setDetailOpen(true);
+    if (!archived) await load();
+  };
+
   const create = async () => {
     if (!validAgent || saving) return;
     setSaving(true);
     setError("");
     try {
-      const conversation = await apiPost<Conversation>(
+      await adopt(await apiPost<Conversation>(
         "/chats",
         fixedAgentConversationInput(instanceId, projectId, title),
         projectId,
-      );
-      setArchived(false);
-      setCreating(false);
-      setTitle("");
-      setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
-      setSelectedId(conversation.id);
-      if (!archived) await load();
+      ));
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError));
     } finally {
@@ -178,7 +232,17 @@ function ConversationBrowser({
     }
   };
 
-  if (!projectId || !validAgent) {
+  // The project picker reuses the page's dialog, which needs the agent directory.
+  const openCreate = () => {
+    setCreating(true);
+    if (!allAgents || pickerAgents) return;
+    conversationsClient.agents().then(
+      (list) => { setPickerAgents(list); setPickerError(""); },
+      (loadError) => setPickerError(loadError instanceof Error ? loadError.message : String(loadError)),
+    );
+  };
+
+  if (!projectId || !validScope) {
     return (
       <div className="grid h-full place-items-center bg-bg p-6 text-center text-sm text-text-muted">
         {t("chat.invalidScope")}
@@ -186,22 +250,26 @@ function ConversationBrowser({
     );
   }
 
+  const showList = !stacked || !detailOpen || !selected;
+  const showChat = !stacked || (detailOpen && Boolean(selected));
   return (
     <div
+      ref={attachFrame}
+      data-conversations-layout={stacked ? "stacked" : wideLayout ? "wide" : "split"}
       className="grid h-full min-h-0 overflow-hidden bg-bg text-text"
       style={layout}
     >
-      <aside
+      {showList && <aside
         className="flex min-h-0 flex-col"
         style={wideLayout
           ? { borderRight: "1px solid var(--color-border)" }
-          : { borderBottom: "1px solid var(--color-border)" }}
+          : stacked ? undefined : { borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-border p-3">
           {showCreate && (
             <button
               type="button"
-              onClick={() => setCreating(true)}
+              onClick={openCreate}
               className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
             >
               {t("chat.new")}
@@ -218,7 +286,7 @@ function ConversationBrowser({
             {archived ? t("common.active") : t("common.archived")}
           </button>
         </div>
-        {showCreate && creating && (
+        {!allAgents && showCreate && creating && (
           <form
             className="shrink-0 space-y-2 border-b border-border p-3"
             onSubmit={(event) => {
@@ -247,11 +315,11 @@ function ConversationBrowser({
         <div className="min-h-0 flex-1 overflow-auto">
           {conversations.length === 0 ? (
             <p className="p-5 text-center text-xs text-text-muted">
-              {archived ? t("chat.noArchived") : t("chat.noAgentConversations")}
+              {archived ? t("chat.noArchived") : t(allAgents ? "chat.noConversations" : "chat.noAgentConversations")}
             </p>
           ) : (
-            <ul className="divide-y divide-border">
-              <li><MoreConversations path={scopedConversationListPath(archived,instanceId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
+            <ul className="m-0 list-none divide-y divide-border p-0">
+              <li><MoreConversations path={conversationListPath(archived,agentId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
               {conversations.map((conversation) => {
                 const unreadCount = unread.get(conversation.id)?.unread ?? 0;
                 return (
@@ -259,18 +327,28 @@ function ConversationBrowser({
                     <ThreadActionRow conversation={conversation} unread={unreadCount>0} latestId={unread.get(conversation.id)?.latest_id} enabled={widgetSettings?.thread_context_menu!==false} onChanged={()=>void load()} renderDetails={close=><DetailsDialog open conversation={conversation} agents={appearanceAgents} onClose={close} onChanged={()=>void load()} onRemoved={()=>{close();void load()}}/>}>
                     <button
                       type="button"
-                      onClick={() => setSelectedId(conversation.id)}
+                      data-conversation-id={conversation.id}
+                      onClick={(event) => {
+                        returnFocusRef.current = event.currentTarget;
+                        setSelectedId(conversation.id);
+                        setDetailOpen(true);
+                      }}
                       className={`w-full border-l-2 px-3 py-2.5 text-left ${conversation.id === selectedId ? "border-accent bg-bg-hover" : "border-transparent hover:bg-bg-hover"}`}
                     >
                       <div className="thread-row-heading flex items-center gap-2">
                         {showsAgentAvatar(avatarMode, "threads") && <ConversationIdentity conversation={conversation} agents={appearanceAgents}/>}
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
                         <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
-                        {conversation.id !== selectedId && <ConversationUnreadIndicator unread={shouldShowConversationUnreadIndicator(unreadCount > 0, activeConversations.has(conversation.id))} />}
+                        {!(conversation.id === selectedId && showChat) && <ConversationUnreadIndicator unread={shouldShowConversationUnreadIndicator(unreadCount > 0, activeConversations.has(conversation.id))} />}
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
+                        {allAgents && (
+                          <span className="min-w-0 truncate">
+                            {conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}
+                          </span>
+                        )}
                         {conversation.kind === "room" && <span>{t("chat.room")}</span>}
-                        <span className="ml-auto">{relativeTime(conversation.updated_at)}</span>
+                        <span className="ml-auto shrink-0">{relativeTime(conversation.updated_at)}</span>
                       </div>
                     </button>
                     </ThreadActionRow>
@@ -280,18 +358,38 @@ function ConversationBrowser({
             </ul>
           )}
         </div>
-      </aside>
+        {conversationsHref && (
+          <a
+            href={conversationsHref}
+            className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-3 py-2 text-xs text-text-muted no-underline hover:bg-bg-hover hover:text-text"
+          >
+            <span className="truncate">{t("chat.openFullView")}</span>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12h14 M13 6l6 6-6 6"/></svg>
+          </a>
+        )}
+      </aside>}
 
-      {selected ? (
+      {showChat && (selected ? (
         <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           host={host}
           conversation={selected}
           agentAvatars={avatarMode}
           archived={archived}
+          leadingAction={stacked ? (
+            <button
+              type="button"
+              onClick={() => setDetailOpen(false)}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+              aria-label={t("panel.backToChats")}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+          ) : undefined}
           onActed={load}
           onRemoved={() => {
             setConversations(current=>current.filter(c=>c.id!==selectedId));
             setSelectedId("");
+            setDetailOpen(false);
             void load();
           }}
           emptyMessage={widgetSettings?.empty_message}
@@ -305,8 +403,18 @@ function ConversationBrowser({
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
-          {t("chat.selectOrCreate")}
+          {t(allAgents ? "chat.selectOrStart" : "chat.selectOrCreate")}
         </section>
+      ))}
+      {allAgents && showCreate && (
+        <NewConversationDialog
+          open={creating}
+          projectId={projectId}
+          agents={pickerAgents}
+          agentsError={pickerError}
+          onClose={() => setCreating(false)}
+          onCreated={(conversation) => void adopt(conversation)}
+        />
       )}
     </div>
   );
@@ -625,6 +733,15 @@ function SingleConversation({
       )}
     </div>
   );
+}
+
+export interface ProjectConversationsWidgetProps extends Omit<AgentConversationsWidgetProps, "instanceId"> {
+  conversationsHref?: string;
+}
+
+/** Every agent's conversations in one widget: the page's list, chat and new-conversation picker. */
+export function ProjectConversationsWidget(props: ProjectConversationsWidgetProps) {
+  return <ConversationBrowser {...props} instanceId={0} allAgents />;
 }
 
 export default function AgentConversationsWidget(props: AgentConversationsWidgetProps) {

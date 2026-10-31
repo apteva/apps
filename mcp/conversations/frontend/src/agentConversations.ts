@@ -31,6 +31,15 @@ export function scopedConversationListPath(archived: boolean, instanceId: number
   return appendAgentScope(`/chats${archived ? "?archived=1" : ""}`, instanceId);
 }
 
+/** The project widget passes no agent and lists every agent's conversations, as the page does. */
+export function conversationListPath(archived: boolean, instanceId?: number): string {
+  return instanceId === undefined ? `/chats${archived ? "?archived=1" : ""}` : scopedConversationListPath(archived, instanceId);
+}
+
+export function unreadSummaryPath(instanceId?: number): string {
+  return instanceId === undefined ? "/unread-summary" : appendAgentScope("/unread-summary", instanceId);
+}
+
 export function singleConversationListPath(instanceId: number, limit = 1): string {
   if (!Number.isInteger(instanceId) || instanceId <= 0) {
     throw new Error("A target agent is required.");
@@ -95,11 +104,15 @@ export function fixedAgentConversationInput(instanceId: number, projectId: strin
   };
 }
 
-export function agentConversationWidgetLayout(wide: boolean) {
+/** Stacked layouts show the list or the open chat, one at a time. */
+export function agentConversationWidgetLayout(wide: boolean, stacked = false) {
   return {
     gridTemplateColumns: wide ? "250px minmax(0,1fr)" : "minmax(0,1fr)",
-    gridTemplateRows: wide
+    gridTemplateRows: wide || stacked
       ? "minmax(0,1fr)"
       : "minmax(150px,34%) minmax(0,1fr)",
   };
 }
+
+/** Project widgets size from their own tile, which on Home is often half the page. */
+export const PROJECT_WIDGET_WIDE_MIN_PX = 640;

@@ -116,6 +116,8 @@ export const catalog = {
   "chat.noArchived": ["No archived conversations.", "Aucune conversation archivée.", "No hay conversaciones archivadas."],
   "chat.noAgentConversations": ["No conversations with this agent yet.", "Aucune conversation avec cet agent pour le moment.", "Todavía no hay conversaciones con este agente."],
   "chat.selectOrCreate": ["Select a conversation or create one with this agent.", "Sélectionnez une conversation ou créez-en une avec cet agent.", "Selecciona una conversación o crea una con este agente."],
+  "chat.selectOrStart": ["Select a conversation or start a new one.", "Sélectionnez une conversation ou démarrez-en une nouvelle.", "Selecciona una conversación o inicia una nueva."],
+  "chat.openFullView": ["Open in Conversations", "Ouvrir dans Conversations", "Abrir en Conversaciones"],
   "chat.loading": ["Loading conversation…", "Chargement de la conversation…", "Cargando conversación…"],
   "chat.starting": ["Starting…", "Démarrage…", "Iniciando…"],
   "chat.history": ["History", "Historique", "Historial"],

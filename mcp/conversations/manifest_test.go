@@ -127,6 +127,39 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 	t.Fatal("agent-conversations component missing")
 }
 
+// Chats are listed per project, so the all-agents widget stays off the global Home.
+func TestManifestDeclaresProjectConversationsOnProjectHome(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	for _, component := range manifest.Provides.UIComponents {
+		if component.Name != "project-conversations" {
+			continue
+		}
+		if component.Entry != "/ui/ProjectConversationsWidget.mjs" ||
+			len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardHome ||
+			len(component.DashboardScopes) != 1 || component.DashboardScopes[0] != sdk.UIComponentDashboardScopeProject ||
+			component.Visibility != sdk.UIComponentVisibilityProject ||
+			component.DefaultSize != "full" || len(component.SupportedSizes) != 2 || component.SupportedSizes[0] != "half" || component.SupportedSizes[1] != "full" {
+			t.Fatalf("project-conversations component=%+v", component)
+		}
+		schema, err := json.Marshal(component.SettingsSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(schema), `"display_mode"`) {
+			t.Fatal("project-conversations always lists threads; a single-thread mode needs a fixed agent")
+		}
+		bundle, err := os.ReadFile("ui/ProjectConversationsWidget.mjs")
+		if err != nil {
+			t.Fatalf("widget bundle: %v", err)
+		}
+		if !strings.Contains(string(bundle), "/apps/conversations/page") {
+			t.Fatal("project-conversations bundle is stale: rebuild panels after changing the widget")
+		}
+		return
+	}
+	t.Fatal("project-conversations component missing")
+}
+
 func TestManifestDeclaresInboxOnProjectAndGlobalHome(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	for _, component := range manifest.Provides.UIComponents {
@@ -219,7 +252,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.60"
+	const releaseVersion = "0.25.0"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)

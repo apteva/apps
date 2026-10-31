@@ -1,6 +1,7 @@
-import { ConversationChat, AgentConversations, Inbox, ConversationsPanel, ConversationThread, ApprovalCard, ReportCard, AlertCard } from "./src/react";
+import { ConversationChat, AgentConversations, ProjectConversations, Inbox, ConversationsPanel, ConversationThread, ApprovalCard, ReportCard, AlertCard } from "./src/react";
 export const components = {
   "agent-conversations": AgentConversations,
+  "project-conversations": ProjectConversations,
   "inbox-overview": Inbox,
   "conversation-chat": ConversationChat,
   "conversation-thread": ConversationThread,

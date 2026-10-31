@@ -15,7 +15,7 @@ import { ConversationLocalizationProvider, ConversationLocaleRegion, type Conver
 export { ConversationLocalizationProvider } from "./i18n";
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";
 import { forwardRef, type ReactNode } from "react";
-import AgentWidget from "./AgentConversationsWidget";
+import AgentWidget, { ProjectConversationsWidget as ProjectWidget } from "./AgentConversationsWidget";
 import { ConversationChat as Thread, type Conversation } from "./ConversationsPanel";
 import { ConversationsProvider, PageContextProvider } from "./context";
 import type { ConversationsClient } from "./client";
@@ -50,6 +50,13 @@ export const AgentConversations = forwardRef<ConversationComposerHandle, ChatPro
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
     instanceId={agentId} widgetSettings={{agent_avatars:agentAvatars,display_mode:"browser",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel,composer_layout:localization.composer?.layout}}
+  /></Surface>;
+});
+/** Every agent's conversations in one surface; new conversations pick their agents. */
+export const ProjectConversations = forwardRef<ConversationComposerHandle, Omit<ChatProps, "agentId">>(function ProjectConversations({ host, conversations, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, agentAvatars = "threads", welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }, ref) {
+  return <Surface conversations={conversations} className={className} {...localization}><ProjectWidget host={host} composerRef={ref} onContextCleared={onContextCleared}
+    appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
+    widgetSettings={{agent_avatars:agentAvatars,show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel,composer_layout:localization.composer?.layout}}
   /></Surface>;
 });
 export const ConversationThread = forwardRef<ConversationComposerHandle, ChatConfiguration & {

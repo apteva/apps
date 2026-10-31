@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.0 — 2026-10-31
+
+- Add a Conversations widget for the project Home (`project-conversations`): every agent's conversations in one list, with the lead agent on each row, unread counts, and the chat opened beside the list. Half tiles and narrow containers stack the list and the chat with a back button that returns focus to the row and keeps drafts.
+- Start new conversations from the widget with the full page's agent picker, for one agent or a room; the new conversation opens immediately.
+- Link the widget to the full Conversations page, default to agent avatars, the compact composer and no shared page context, and give it a fixed height so neighbouring Home widgets don't stretch the chat.
+- Export `ProjectConversations` from the React entry and the `project-conversations` UI component for external hosts.
+- Reset list styling on the agent widget's conversation list so hosts without Tailwind's preflight don't show bullets.
+
 ## 0.24.60 — 2026-10-30
 
 - Keep compact and single-line composers on one row in narrow docks such as the dashboard Helper: an empty draft stays one line tall even while a wrapped "Reconnecting…" placeholder is shown, and the microphone sits after the attachment menu as `[+] [mic] [input] [send]`.

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.60
+version: 0.25.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -17,9 +17,10 @@ description: |
   agent owns every route, the bot can use that agent's display name;
   shared routing automatically restores the original bot identity.
   Telegram response feedback supports native live drafts in private
-  chats, typing-only feedback, or an operator-controlled off mode. v0.24.60
-  keeps compact and single-line composers on one row in narrow docks, with
-  the microphone after the attachment menu and empty drafts one line tall.
+  chats, typing-only feedback, or an operator-controlled off mode. v0.25.0
+  adds a project Home widget that lists every agent's conversations, opens
+  them beside the list or stacked in half tiles, and starts new ones with an
+  agent picker.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -228,6 +229,45 @@ provides:
                 label: { type: string }
                 text: { type: string }
               required: [id, label, text]
+    - name: project-conversations
+      label: Conversations
+      description: Every agent's conversations in one place, with a picker for new ones.
+      entry: /ui/ProjectConversationsWidget.mjs
+      slots: [dashboard.home]
+      dashboard_scopes: [project]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      settings_schema:
+        type: object
+        properties:
+          agent_avatars:
+            type: string
+            title: Agent icons
+            enum: [hidden, header, threads, both]
+            default: threads
+          composer_layout:
+            type: string
+            title: Composer layout
+            enum: [auto, compact, expanded, single-line]
+            default: compact
+          show_new_conversation:
+            type: boolean
+            title: Show new conversation
+            default: true
+          show_page_context:
+            type: boolean
+            title: Show shared page context
+            default: false
+          show_tool_completion:
+            type: boolean
+            title: Show completed tool checkmarks
+            default: false
+          show_tool_duration:
+            type: boolean
+            title: Show tool execution time
+            default: false
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.
@@ -261,7 +301,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.60, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.25.0, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

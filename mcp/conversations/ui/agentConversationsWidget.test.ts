@@ -5,6 +5,7 @@ import AgentConversationsWidget from "./AgentConversationsWidget";
 import {
   agentConversationWidgetLayout,
   conversationDisplayMode,
+  conversationListPath,
   fixedAgentConversationInput,
   scopedConversationListPath,
   selectedConversationSeenInput,
@@ -13,6 +14,7 @@ import {
   showToolCompletion,
   showToolDuration,
   singleConversationListPath,
+  unreadSummaryPath,
 } from "./agentConversations";
 import {
   isSoftBreakMetadata,
@@ -24,6 +26,19 @@ describe("AgentConversationsWidget scope", () => {
     expect(scopedConversationListPath(false, 42)).toBe("/chats?agent_id=42");
     expect(scopedConversationListPath(true, 42)).toBe("/chats?archived=1&agent_id=42");
     expect(() => scopedConversationListPath(false, 0)).toThrow("target agent");
+  });
+
+  test("the project widget lists every agent, and an agent widget never does", () => {
+    expect(conversationListPath(false)).toBe("/chats");
+    expect(conversationListPath(true)).toBe("/chats?archived=1");
+    expect(conversationListPath(false, 42)).toBe("/chats?agent_id=42");
+    expect(() => conversationListPath(false, 0)).toThrow("target agent");
+    expect(unreadSummaryPath()).toBe("/unread-summary");
+    expect(unreadSummaryPath(42)).toBe("/unread-summary?agent_id=42");
+    const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    // Only the explicit project mode drops the agent; a missing agent still renders the invalid-scope state.
+    expect(widget).toContain("const agentId = allAgents ? undefined : instanceId;");
+    expect(widget).toContain("const validScope = allAgents || validAgent;");
   });
 
   test("creates a direct conversation with the fixed agent as participant and lead", () => {
@@ -57,7 +72,8 @@ describe("AgentConversationsWidget scope", () => {
     expect(selectedConversationSeenInput(entries, "missing")).toBeNull();
 
     const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
-    expect(widget).toContain('appendAgentScope("/unread-summary", instanceId)');
+    expect(widget).toContain("unreadSummaryPath(agentId)");
+    expect(widget).toContain('appendAgentScope("/unread-summary",instanceId)');
     expect(widget).not.toContain('apiPost("/seen", seen, projectId)');
   });
 
@@ -87,10 +103,15 @@ describe("AgentConversationsWidget scope", () => {
       gridTemplateColumns: "minmax(0,1fr)",
       gridTemplateRows: "minmax(150px,34%) minmax(0,1fr)",
     });
+    expect(agentConversationWidgetLayout(false, true)).toEqual({
+      gridTemplateColumns: "minmax(0,1fr)",
+      gridTemplateRows: "minmax(0,1fr)",
+    });
     const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).not.toContain("md:grid-cols-[");
     expect(widget).toContain("window.matchMedia");
-    expect(widget).toContain('useWideWidgetLayout(widgetSize !== "half")');
+    expect(widget).toContain('useWideWidgetLayout(!allAgents && widgetSize !== "half")');
+    expect(widget).toContain("useContainerWide(allAgents, PROJECT_WIDGET_WIDE_MIN_PX)");
     const entry = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(entry).toContain('props.slot === "dashboard.agent_detail"');
   });
