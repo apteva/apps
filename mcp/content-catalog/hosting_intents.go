@@ -173,7 +173,7 @@ func (a *App) reconcileHosting(runCtx context.Context, ctx *sdk.AppCtx) error {
 		pid, id string
 		intent  bool
 	}
-	rows, err := ctx.AppDB().Query(`SELECT project_id,id,is_intent FROM (SELECT project_id,id,1 AS is_intent,next_check_at AS due FROM hosting_intents WHERE status='waiting_checksum' AND next_check_at<=? UNION ALL SELECT project_id,id,0 AS is_intent,next_check_at AS due FROM hostings WHERE status='processing' AND remote_id<>'' AND next_check_at<=?) ORDER BY due,id LIMIT 50`, now(), now())
+	rows, err := ctx.AppDB().Query(`SELECT project_id,id,is_intent FROM (SELECT project_id,id,1 AS is_intent,next_check_at AS due FROM hosting_intents WHERE status='waiting_checksum' AND next_check_at<=? UNION ALL SELECT project_id,id,0 AS is_intent,next_check_at AS due FROM hostings WHERE status='processing' AND remote_id<>'' AND next_check_at<=? UNION ALL SELECT project_id,id,0 AS is_intent,next_check_at AS due FROM hostings WHERE status='ready' AND delivery_status='pending' AND remote_id<>'' AND next_check_at<>'' AND next_check_at<=?) ORDER BY due,id LIMIT 50`, now(), now(), now())
 	if err != nil {
 		return err
 	}

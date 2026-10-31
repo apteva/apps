@@ -35,6 +35,7 @@ type HostObservation struct {
 	ProviderStatus      *int64
 	ProviderStage       string
 	TranscodingMessages json.RawMessage
+	ProviderHash        string
 }
 
 type HostAdapter struct {
@@ -171,7 +172,8 @@ func (bunnyProvider) Check(ctx *sdk.AppCtx, connectionID int64, remoteID, librar
 	duration, durationReported := body["length"]
 	obs := HostObservation{Status: "processing", RemoteID: remoteID, LibraryID: libraryID, ReportedLibraryID: reportedLibrary,
 		CollectionID: stringValue(body, "collectionId"), CollectionReported: collectionReported,
-		DurationSeconds: intValue(body, "length"), DurationReported: durationReported && duration != nil, GUIDConfirmed: guid != "" && strings.EqualFold(guid, remoteID)}
+		DurationSeconds: intValue(body, "length"), DurationReported: durationReported && duration != nil, GUIDConfirmed: guid != "" && strings.EqualFold(guid, remoteID),
+		ProviderHash: stringValue(body, "originalHash")}
 	if status >= 0 {
 		obs.ProviderStatus = &status
 		obs.ProviderStage = bunnyStage(status)
@@ -265,16 +267,22 @@ type Hosting struct {
 	TranscodingMessages json.RawMessage `json:"transcoding_messages"`
 	NextCheckAt         string          `json:"next_check_at"`
 	CheckError          string          `json:"check_error"`
+	DeliveryStatus      string          `json:"delivery_status"`
+	DeliveryReason      string          `json:"delivery_reason"`
+	DeliveryVerifiedAt  string          `json:"delivery_verified_at"`
+	Delivery            json.RawMessage `json:"delivery"`
+	deliveryAttempts    int
 }
 
 func hostingByID(db *sql.DB, pid, id string) (*Hosting, error) {
 	h := &Hosting{}
-	var messages string
-	err := db.QueryRow(`SELECT id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match,encode_progress,provider_status,provider_stage,transcoding_messages,next_check_at,check_error FROM hostings WHERE project_id=? AND id=?`, pid, id).Scan(&h.ID, &h.AssetID, &h.Provider, &h.ConnectionID, &h.LibraryID, &h.CollectionID, &h.SourceSHA256, &h.RemoteID, &h.EmbedURL, &h.Status, &h.Error, &h.LastCheckedAt, &h.LinkOrigin, &h.DurationSeconds, &h.ProviderVerifiedAt, &h.SourceEvidence, &h.ProviderSourceMatch, &h.EncodeProgress, &h.ProviderStatus, &h.ProviderStage, &messages, &h.NextCheckAt, &h.CheckError)
+	var messages, receipt string
+	err := db.QueryRow(`SELECT id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match,encode_progress,provider_status,provider_stage,transcoding_messages,next_check_at,check_error,delivery_status,delivery_reason,delivery_verified_at,delivery_receipt,delivery_attempts FROM hostings WHERE project_id=? AND id=?`, pid, id).Scan(&h.ID, &h.AssetID, &h.Provider, &h.ConnectionID, &h.LibraryID, &h.CollectionID, &h.SourceSHA256, &h.RemoteID, &h.EmbedURL, &h.Status, &h.Error, &h.LastCheckedAt, &h.LinkOrigin, &h.DurationSeconds, &h.ProviderVerifiedAt, &h.SourceEvidence, &h.ProviderSourceMatch, &h.EncodeProgress, &h.ProviderStatus, &h.ProviderStage, &messages, &h.NextCheckAt, &h.CheckError, &h.DeliveryStatus, &h.DeliveryReason, &h.DeliveryVerifiedAt, &receipt, &h.deliveryAttempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("hosting record not found")
 	}
 	h.TranscodingMessages = json.RawMessage(messages)
+	h.Delivery = json.RawMessage(receipt)
 	return h, err
 }
 func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -625,7 +633,25 @@ func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (result any, er
 	if len(messages) == 0 {
 		messages = json.RawMessage(`[]`)
 	}
-	recorded, err := ctx.AppDB().Exec(`UPDATE hostings SET status=?,library_id=?,embed_url=?,error=?,last_checked_at=?,duration_seconds=CASE WHEN ? THEN ? ELSE duration_seconds END,provider_verified_at=?,updated_at=?,encode_progress=?,provider_status=?,provider_stage=?,transcoding_messages=?,next_check_at=?,check_attempts=0,check_error='' WHERE id=? AND project_id=? AND last_checked_at=? AND status=?`, obs.Status, obs.LibraryID, obs.EmbedURL, obs.Error, now(), obs.DurationReported, obs.DurationSeconds, now(), now(), obs.EncodeProgress, obs.ProviderStatus, obs.ProviderStage, string(messages), next, h.ID, pid, h.LastCheckedAt, h.Status)
+	// Provider readiness and delivery verification are recorded separately.
+	// Source evidence is only read once the provider reports ready.
+	checkedAt := now()
+	evidence := deliverySourceEvidence{}
+	if obs.Status == "ready" {
+		evidence = readDeliverySource(ctx, pid, h)
+	}
+	receipt := evaluateDelivery(h, obs, evidence, checkedAt)
+	attempts := 0
+	if receipt.ProviderReadiness == "ready" && receipt.DeliveryStatus == "pending" {
+		attempts = h.deliveryAttempts + 1
+		next = nextDeliveryCheck(&receipt, attempts)
+	}
+	receipt.NextCheckAt = next
+	receiptJSON, err := json.Marshal(receipt)
+	if err != nil {
+		return nil, err
+	}
+	recorded, err := ctx.AppDB().Exec(`UPDATE hostings SET status=?,library_id=?,embed_url=?,error=?,last_checked_at=?,duration_seconds=CASE WHEN ? THEN ? ELSE duration_seconds END,provider_verified_at=?,updated_at=?,encode_progress=?,provider_status=?,provider_stage=?,transcoding_messages=?,next_check_at=?,check_attempts=0,check_error='',delivery_status=?,delivery_reason=?,delivery_receipt=?,delivery_verified_at=?,delivery_attempts=? WHERE id=? AND project_id=? AND last_checked_at=? AND status=?`, obs.Status, obs.LibraryID, obs.EmbedURL, obs.Error, checkedAt, obs.DurationReported, obs.DurationSeconds, checkedAt, checkedAt, obs.EncodeProgress, obs.ProviderStatus, obs.ProviderStage, string(messages), next, receipt.DeliveryStatus, receipt.Reason, string(receiptJSON), receipt.VerifiedAt, attempts, h.ID, pid, h.LastCheckedAt, h.Status)
 	if err != nil {
 		return nil, err
 	}
@@ -637,9 +663,9 @@ func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (result any, er
 		fresh, e := hostingByID(ctx.AppDB(), pid, h.ID)
 		return map[string]any{"hosting": fresh}, e
 	}
-	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": h.ID, "status": obs.Status})
+	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": h.ID, "status": obs.Status, "delivery_status": receipt.DeliveryStatus})
 	h, err = hostingByID(ctx.AppDB(), pid, h.ID)
-	return map[string]any{"hosting": h}, err
+	return map[string]any{"hosting": h, "delivery": receipt}, err
 }
 
 // Backfill a provider video by observation. This never invokes Start/fetch_video
@@ -734,6 +760,9 @@ func (a *App) hostingLinkExisting(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if err = saveHostProgress(ctx, pid, existing.ID, obs); err != nil {
 			return nil, err
 		}
+		if err = queueDeliveryCheck(ctx, pid, existing.ID); err != nil {
+			return nil, err
+		}
 		fresh, err := hostingByID(ctx.AppDB(), pid, existing.ID)
 		return map[string]any{"hosting": fresh, "was_existing": true}, err
 	}
@@ -790,6 +819,9 @@ func (a *App) hostingLinkExisting(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if err = saveHostProgress(ctx, pid, id, obs); err != nil {
+		return nil, err
+	}
+	if err = queueDeliveryCheck(ctx, pid, id); err != nil {
 		return nil, err
 	}
 	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": id, "status": "ready", "link_origin": "existing_link"})
