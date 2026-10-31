@@ -282,6 +282,12 @@ type App struct {
 	hierarchyMu       sync.Mutex
 	hierarchyInFlight map[string]*hierarchySyncCall
 	audienceMu        sync.Mutex
+
+	clock     func() time.Time // replaced in tests
+	gate      providerGate
+	hierarchy hierarchyCache
+	listedMu  sync.Mutex
+	listedAt  map[string]time.Time
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -903,12 +909,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "adset_list",
-			Description: "List ad sets in an ad account, optionally filtered to one campaign. Args: ad_account_id, campaign_id?, limit?, after?.",
+			Description: "List ad sets in an ad account, optionally filtered to one campaign. Args: ad_account_id, campaign_id?, limit?, after?, cached? (read the local copy without calling the provider; cache_empty=true means it was never filled).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"campaign_id":   map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"after":         map[string]any{"type": "string"},
+				"cached":        map[string]any{"type": "boolean", "default": false},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolAdSetList,
 		},
@@ -1194,12 +1201,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "ad_list",
-			Description: "List ads under an ad set or ad account. Args: ad_account_id, adset_id?, limit?, after?.",
+			Description: "List ads under an ad set or ad account. Args: ad_account_id, adset_id?, limit?, after?, cached? (read the local copy without calling the provider; cache_empty=true means it was never filled).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"adset_id":      map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"after":         map[string]any{"type": "string"},
+				"cached":        map[string]any{"type": "boolean", "default": false},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolAdList,
 		},
@@ -2180,6 +2188,7 @@ func providerRateLimited(res *sdk.ExecuteResult, body string) bool {
 		"RESOURCE_EXHAUSTED",
 		"RATE LIMIT",
 		"TOO MANY CALLS",
+		"TOO MANY API CALLS",
 		"USER REQUEST LIMIT REACHED",
 		"APPLICATION REQUEST LIMIT REACHED",
 	} {
@@ -2232,7 +2241,7 @@ func (a *App) metaResourceBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, too
 		if after != "" {
 			input["after"] = after
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		res, err := a.callProvider(ctx, acct, tool, input)
 		if err != nil {
 			return false, err
 		}
@@ -2283,7 +2292,7 @@ func (a *App) metaVideoBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, tool, 
 		if after != "" {
 			input["after"] = after
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		res, err := a.callProvider(ctx, acct, tool, input)
 		if err != nil {
 			return false, err
 		}
@@ -4519,19 +4528,22 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	if acct.ManagementMode != managementModeSelected {
-		return platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
-	}
 	campaignID := stringArgAny(args, "campaign_id")
-	if campaignID != "" {
+	if acct.ManagementMode == managementModeSelected && campaignID != "" {
 		if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
 			return scopeErr, nil
 		}
+	}
+	if boolArg(args, "cached") {
+		return a.cachedEntityList(ctx, acct, "ad_group", campaignID, "")
+	}
+	if acct.ManagementMode != managementModeSelected || campaignID != "" {
 		out, err := platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
 		if err == nil && successfulProviderResult(out) {
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", resultRows(out), campaignID); persistErr != nil {
 				return nil, persistErr
 			}
+			a.markListed(acct, "ad_group", campaignID+"/")
 		}
 		return out, err
 	}
@@ -4635,20 +4647,28 @@ func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	if acct.ManagementMode != managementModeSelected {
-		return platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
-	}
 	adSetID := stringArgAny(args, "adset_id")
-	if adSetID != "" {
-		if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
-			return scopeErr, nil
+	if boolArg(args, "cached") {
+		// The local copy only ever holds entities this project may see, so a
+		// cached read needs no provider ownership check.
+		return a.cachedEntityList(ctx, acct, "ad", "", adSetID)
+	}
+	if acct.ManagementMode != managementModeSelected || adSetID != "" {
+		if acct.ManagementMode == managementModeSelected {
+			if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
+				return scopeErr, nil
+			}
 		}
-		campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+		campaignID := ""
+		if adSetID != "" {
+			campaignID, _ = a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+		}
 		out, err := platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
 		if err == nil && successfulProviderResult(out) {
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad", resultRows(out), campaignID); persistErr != nil {
 				return nil, persistErr
 			}
+			a.markListed(acct, "ad", "/"+adSetID)
 		}
 		return out, err
 	}

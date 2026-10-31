@@ -685,15 +685,13 @@ func (a *App) refreshManagedHierarchy(ctx *sdk.AppCtx, acct *adAccount, def *pla
 
 func (a *App) fetchManagedHierarchy(ctx *sdk.AppCtx, acct *adAccount, def *platformDef) map[string]any {
 	// Two account-level paginated scans replace a request per campaign and
-	// ad group. Ownership filtering in upsertDeliveryEntities remains mandatory.
-	groups, failure := a.listAllProviderChildren(ctx, acct, def, "ad_group", map[string]any{})
+	// ad group, shared by every project bound to the same provider account.
+	// Ownership filtering below and in upsertDeliveryEntities remains mandatory.
+	snapshot, failure := a.accountHierarchy(ctx, acct, def)
 	if failure != nil {
 		return failure
 	}
-	ads, failure := a.listAllProviderChildren(ctx, acct, def, "ad", map[string]any{})
-	if failure != nil {
-		return failure
-	}
+	groups, ads := snapshot.groups, snapshot.ads
 	allowed, err := a.managedCampaignSet(ctx, acct)
 	if err != nil {
 		return mcpError("load campaign scope: " + err.Error())

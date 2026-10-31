@@ -2,8 +2,19 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.54
+version: 0.1.55
 description: |
+  v0.1.55 stops excess provider calls. A rate-limit response now closes one
+  cooldown per provider account (connection and native account), shared by
+  every project bound to it and persisted across restarts; no request is sent
+  until it ends, Meta usage headers lengthen it, and rate-limited calls are
+  no longer retried within milliseconds. Meta throttling codes, including
+  subcode 2446079, are recognized. Hierarchy failures in the collector now
+  back off instead of retrying every minute. Projects sharing an ad account
+  reuse one ad set and ad snapshot for ten minutes, invalidated by mutations,
+  with per-project filtering unchanged. adset_list and ad_list accept cached,
+  and the panel's passive refreshes read cached data. Collection runs every
+  15 minutes for campaigns and 30 for ad sets and ads.
   v0.1.54 fixes Meta conversion totals, which summed every action whose name
   contained "conversion" and so counted engagement such as post_save and
   post_net_save as conversions. Totals now count purchase, lead and
@@ -302,7 +313,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.54
+    ref: ads/v0.1.55
     entry: mcp/ads
   port: 8080
   health_check: /health

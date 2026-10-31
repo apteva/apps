@@ -190,7 +190,8 @@ func TestAuditAudienceLeaseRecoveryFencesOldWorker(t *testing.T) {
 func TestAuditAudienceResumesAtCheckpointAndPollsEveryGoogleBatch(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)
-	app := &App{}
+	clock := time.Now().UTC()
+	app := &App{clock: func() time.Time { return clock }}
 	id := enqueueAuditJob(t, ctx, app, pf, "google", "batches", 1001)
 	uploads := 0
 	polling := map[string]string{"request-1": "PROCESSING", "request-3": "SUCCESS"}
@@ -218,6 +219,9 @@ func TestAuditAudienceResumesAtCheckpointAndPollsEveryGoogleBatch(t *testing.T) 
 	if err != nil || job.Status != "queued" || job.ProcessedRows != 1000 {
 		t.Fatalf("checkpoint: %#v %v", job, err)
 	}
+	// The 429 closed the account's provider gate; the batch resumes once the
+	// cooldown has passed, not on the next tick.
+	clock = clock.Add(providerCooldownMin + time.Second)
 	_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET available_at=datetime('now') WHERE id=?`, id)
 	if err := app.runAudienceSyncProcessor(context.Background(), ctx); err != nil {
 		t.Fatal(err)
@@ -430,7 +434,8 @@ func TestAuditCachedPerformanceDoesNotRefreshHierarchy(t *testing.T) {
 func TestAuditHierarchyUsesTwoAccountScans(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)
-	app := &App{}
+	clock := time.Now().UTC()
+	app := &App{clock: func() time.Time { return clock }}
 	id := seedSelectedAccount(t, ctx, "act_batch")
 	acct, def, _ := app.resolveAdAccount(ctx, map[string]any{"ad_account_id": id})
 	for i := 0; i < 20; i++ {
@@ -459,7 +464,9 @@ func TestAuditHierarchyUsesTwoAccountScans(t *testing.T) {
 		t.Fatal("unmanaged hierarchy persisted")
 	}
 	// Previously managed children moved to an unmanaged campaign must lose
-	// authorization after a complete refresh, even if IDs are unchanged.
+	// authorization after a complete refresh, even if IDs are unchanged. The
+	// shared snapshot is reused until it expires.
+	clock = clock.Add(hierarchySnapshotTTL + time.Second)
 	pf.executeResponder = func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
 		if tool == "adset_list" {
 			return executeJSON(`{"data":[{"id":"g1","campaign_id":"999"}]}`), nil
