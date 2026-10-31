@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -38,10 +39,13 @@ func insertReplayReply(t *testing.T, ctx *sdk.AppCtx, c responseReplay) {
 	}
 }
 
-func replayCase(t *testing.T, c responseReplay, replyFirst bool) {
+func replayCase(t *testing.T, c responseReplay, replyFirst bool, seed ...func(*sdk.AppCtx)) {
 	t.Helper()
 	rec := tk.NewEmitRecorder()
 	ctx := newTestCtx(t, &stubPlatform{}, tk.WithEmitter(rec))
+	for _, s := range seed {
+		s(ctx)
+	}
 	m := c.Message
 	if _, err := ctx.AppDB().Exec(`INSERT INTO messages(id,project_id,channel,direction,from_addr,to_addrs,status,provider_message_id,message_id_header) VALUES(?,'test-proj','email','out',?,?,'sent',?,?)`, m.ID, m.From, string(mustJSON(m.To)), m.ProviderMessageID, m.MessageIDHeader); err != nil {
 		t.Fatal(err)
@@ -298,5 +302,100 @@ func TestAutoResponseCorrectionOutboxRetriesFailedGatewayAcknowledgment(t *testi
 	}
 	if len(emitter.EventsByTopic("message.event")) != 1 {
 		t.Fatalf("events=%+v", emitter.Events())
+	}
+}
+
+// Production regression (0.13.61): recovery rescanned ~11k historical bounces
+// with an unindexable LIKE every 30s and starved normal requests. Recovery
+// must converge in bounded passes and then stop reconsidering old bounces.
+func seedHistoricalBounces(t *testing.T, ctx *sdk.AppCtx, n int) {
+	t.Helper()
+	// Ids stay below the replay fixtures so later rows arrive in id order,
+	// as SQLite rowids do in production.
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		id := int64(10000 + i)
+		if _, err = tx.Exec(`INSERT INTO messages(id,project_id,channel,direction,from_addr,to_addrs,status,provider_message_id,message_id_header) VALUES(?,'test-proj','email','out','sales@example.com','["lead@example.net"]','bounced',?,?)`, id, fmt.Sprintf("hist-%d", i), fmt.Sprintf("<hist-%d@example.com>", i)); err != nil {
+			t.Fatal(err)
+		}
+		raw := fmt.Sprintf(`{"raw":{"notificationType":"Bounce","bounce":{"bounceType":"Transient","bounceSubType":"General","feedbackId":"hist-feedback-%d","bouncedRecipients":[{"emailAddress":"lead@example.net"}]}}}`, i)
+		if _, err = tx.Exec(`INSERT INTO delivery_events(message_id,kind,recipient,raw) VALUES(?,'bounced','lead@example.net',?)`, id, raw); err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 {
+			if _, err = tx.Exec(`INSERT INTO messages(id,project_id,channel,direction,from_addr,to_addrs,status,provider_slug,message_id_header) VALUES(?,'test-proj','email','in','someone@example.org','[]','received','aws-ses',?)`, 30000+i/2, fmt.Sprintf("<unrelated-%d@example.org>", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAutoResponseRecoveryIsBoundedOverHistoricalBounces(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	seedHistoricalBounces(t, ctx, 11069)
+	cursorsDone := func() bool {
+		var pending int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM auto_response_scan_state s WHERE last_id < CASE s.name WHEN 'bounces' THEN (SELECT MAX(id) FROM delivery_events) ELSE (SELECT MAX(id) FROM messages) END`).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		return pending == 0
+	}
+	passes := 0
+	for !cursorsDone() {
+		start := time.Now()
+		if err := reconcilePendingAutoResponses(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if d := time.Since(start); d > autoResponsePassBudget+autoResponseQueryTimeout {
+			t.Fatalf("pass %d took %s", passes, d)
+		}
+		if passes++; passes > 50 {
+			t.Fatal("recovery did not converge")
+		}
+	}
+	var candidates, ready int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*),COALESCE(SUM(ready),0) FROM auto_response_candidates`).Scan(&candidates, &ready); err != nil {
+		t.Fatal(err)
+	}
+	if candidates != 11069 || ready != 0 {
+		t.Fatalf("candidates=%d ready=%d", candidates, ready)
+	}
+	// Steady state: nothing new means no historical bounce is reconsidered.
+	start := time.Now()
+	for range 3 {
+		if err := reconcilePendingAutoResponses(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("idle recovery passes took %s", d)
+	}
+}
+
+func TestAutomaticResponseHistoryReplayAfterBackfill(t *testing.T) {
+	data, err := os.ReadFile("testdata/auto_response_histories.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []responseReplay
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	backfill := func(ctx *sdk.AppCtx) {
+		seedHistoricalBounces(t, ctx, 3000)
+		for range 10 {
+			if err := reconcilePendingAutoResponses(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, first := range []bool{true, false} {
+		t.Run(fmt.Sprintf("reply_first=%t", first), func(t *testing.T) { replayCase(t, cases[0], first, backfill) })
 	}
 }
