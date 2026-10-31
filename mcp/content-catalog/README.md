@@ -1,5 +1,53 @@
 # Content Catalog
 
+## Version 0.6.11: delivery verification receipts
+
+`content_catalog_hosting_check` now verifies delivery after the provider reports
+ready and stores a durable receipt on the hosting record. Provider readiness
+(`status`) and delivery verification (`delivery_status`) are separate:
+
+- `delivery_status`: `pending`, `verified` or `failed`, with `delivery_reason`
+  and `delivery_verified_at`.
+- `delivery.source`: Storage file ID, the hash recorded at upload
+  (`hosted_sha256`), Storage's current verified hash, Media's source hash and
+  `hash_match` (`verified`, `mismatch`, `unavailable`). Bunny's `originalHash`,
+  when present, is recorded as `provider_hash`; it counts only as an exact SHA-256
+  match, otherwise it is `unrecognized` or `unavailable` and never fails delivery.
+- `delivery.destination`: provider, connection, library, collection, video ID,
+  GUID/library/collection confirmation and provider stage.
+- `delivery.duration`: Media `source_ms`, provider whole-second
+  `provider_seconds`, `difference_ms`, the part explained by provider rounding
+  (`provider_rounding_ms`, up to 1000 ms), the remaining audio/container
+  difference (`container_difference_ms`) and `tolerance_ms` (1500 ms).
+- `warnings`, `checked_at`, `verified_at`, `next_check_at`.
+
+Delivery is **verified** only when the hosted source hash equals Storage's
+current verified master hash, the provider confirms the video ID and library,
+and Media's duration for the same source hash is within tolerance of the
+provider length. A replaced master (`source_hash_mismatch`), a length outside
+tolerance (`duration_mismatch`) or a provider failure (`provider_failed`) is
+**failed**. Missing evidence stays **pending** with a specific reason:
+`provider_processing`, `provider_identity_unconfirmed`,
+`provider_library_unconfirmed`, `storage_checksum_unavailable`,
+`storage_checksum_<status>`, `hosted_source_hash_unknown`,
+`provider_duration_unavailable`, `media_not_bound`,
+`source_timing_unavailable` or `source_timing_not_hash_bound`.
+
+The background checker retries pending delivery for ready videos with backoff
+(up to 20 attempts; `media_not_bound` is not retried). Network failures leave
+delivery pending. Checks only read Storage, Media and the provider's video
+record: they never upload, re-fetch or read player pages or the CDN. Linking an
+existing Bunny video queues a delivery check. Historical hosting records keep
+their data and stay `pending` / `not_checked` until someone runs
+`content_catalog_hosting_check`; they are not swept automatically. Card
+summaries include `delivery_status`.
+
+SOP: after hosting, call `content_catalog_hosting_check` (or read
+`content_catalog_hosting_list`) and act on `delivery_status`. Report `verified`
+with the receipt, stop and report `failed` with its reason, and treat `pending`
+as "Catalog is still checking". Do not re-request hosting or compare durations
+yourself.
+
 ## Version 0.6.10: exact asset ID on session lists
 
 `content_catalog_assets_list` and HTTP `GET /assets` now honor optional `id` as

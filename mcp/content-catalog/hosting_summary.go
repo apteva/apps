@@ -16,6 +16,7 @@ type HostingSummary struct {
 	LastCheckedAt  string   `json:"last_checked_at"`
 	EncodeProgress *float64 `json:"encode_progress"`
 	ProviderStage  string   `json:"provider_stage"`
+	DeliveryStatus string   `json:"delivery_status"`
 }
 
 func loadAssetHostings(db *sql.DB, pid string, assets []*Asset) error {
@@ -32,7 +33,7 @@ func loadAssetHostings(db *sql.DB, pid string, assets []*Asset) error {
 		args = append(args, asset.ID)
 		byID[asset.ID] = asset
 	}
-	rows, err := db.Query(`SELECT asset_id,id,provider,connection_id,status,remote_id,last_checked_at,encode_progress,provider_stage FROM hostings WHERE project_id=? AND asset_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY created_at DESC,id DESC`, args...)
+	rows, err := db.Query(`SELECT asset_id,id,provider,connection_id,status,remote_id,last_checked_at,encode_progress,provider_stage,delivery_status FROM hostings WHERE project_id=? AND asset_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY created_at DESC,id DESC`, args...)
 	if err != nil {
 		return err
 	}
@@ -40,7 +41,7 @@ func loadAssetHostings(db *sql.DB, pid string, assets []*Asset) error {
 	for rows.Next() {
 		var assetID string
 		var summary HostingSummary
-		if err := rows.Scan(&assetID, &summary.ID, &summary.Provider, &summary.ConnectionID, &summary.Status, &summary.RemoteID, &summary.LastCheckedAt, &summary.EncodeProgress, &summary.ProviderStage); err != nil {
+		if err := rows.Scan(&assetID, &summary.ID, &summary.Provider, &summary.ConnectionID, &summary.Status, &summary.RemoteID, &summary.LastCheckedAt, &summary.EncodeProgress, &summary.ProviderStage, &summary.DeliveryStatus); err != nil {
 			rows.Close()
 			return err
 		}
