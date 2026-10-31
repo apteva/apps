@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: agent-worlds
 display_name: Agent Worlds
-version: 0.7.1
+version: 0.7.2
 description: "Live, themeable maps of Apteva agents and the apps they use: system graph, operations board, isometric pixel village, and space station, across the main server, isolated environments, and a remote server."
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
@@ -68,20 +68,20 @@ provides:
               label_field: label
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.7.1, entry: mcp/agent-worlds }
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.7.2, entry: mcp/agent-worlds }
   artifacts:
     darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.1/agent-worlds-v0.7.1-darwin-arm64.tar.gz
-      sha256: 37354c6210dbcf62df715aebfa05e1ce7b8c4f0f71ce15c873891802b4cdb4c8
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.2/agent-worlds-v0.7.2-darwin-arm64.tar.gz
+      sha256: 2f9551a9777fc7a808c27145e710a9bd695ded4968172d6219276088facc8858
     darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.1/agent-worlds-v0.7.1-darwin-amd64.tar.gz
-      sha256: 90eb9a81411cc37399ecbb98d351d7d0add6efc432420cbaddb667fa014a4c3c
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.2/agent-worlds-v0.7.2-darwin-amd64.tar.gz
+      sha256: 1121779c78d4d5bb257647dd298c99ce599228f71677099eefaafeeb195562f9
     linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.1/agent-worlds-v0.7.1-linux-amd64.tar.gz
-      sha256: 4f016307d1e965c7164976ff9a11be487d318930c76781aadd942a28bf9ba166
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.2/agent-worlds-v0.7.2-linux-amd64.tar.gz
+      sha256: e5ea30bd555ed8e0d7e338ffb3f102ec634470df8dfda24cb8e15e887f2f586b
     linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.1/agent-worlds-v0.7.1-linux-arm64.tar.gz
-      sha256: fc4ea6fc8afd52001ee56c6cc3108f23dced2f40b13a6701f498c29ac05df820
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.7.2/agent-worlds-v0.7.2-linux-arm64.tar.gz
+      sha256: 0fea30f8fee92c91dac62f9e09337d241607ec46ed9241efd08136d91ba3c7ec
   port: 8080
   health_check: /health
 config_schema:

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { Camera } from "../camera";
 import type { Agent, Destination, Event, Focus, WorldNode } from "../world-model";
-import { fitText, plate, type Point } from "./core";
+import { fitText, pixelScale, plate, type Point } from "./core";
 import { lookFor } from "./characters";
 import { buildLayout, type PlaceInput, type RegionInput } from "./layout";
 import { agentTrack } from "./motion";
@@ -76,11 +76,10 @@ export default function PixelStage(props: Props) {
       layout, theme, residents, events, now: props.now, hover: hover.current,
       selectedAgent: props.selectedAgent, selectedPlace: props.selectedDestination, reducedMotion,
     });
-    // Whole-number scaling keeps every world pixel the same size on screen.
     const dpr = window.devicePixelRatio || 1;
     const fit = Math.min(canvas.width / layout.width, canvas.height / layout.height);
     const raw = fit * props.camera.zoom;
-    const scale = raw >= 1 ? Math.floor(raw + 1e-6) : raw;
+    const scale = pixelScale(raw, dpr);
     const ox = Math.round(canvas.width / 2 - props.camera.x * layout.width * scale);
     const oy = Math.round(canvas.height / 2 - props.camera.y * layout.height * scale);
     transform.current = { scale, ox, oy, dpr };

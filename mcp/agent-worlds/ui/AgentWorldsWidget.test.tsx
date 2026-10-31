@@ -30,11 +30,25 @@ test("every view renders the scene inside one link",async()=>{
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});
   const card=host.querySelector("[data-world-view]")!;
   expect(card.getAttribute("data-world-view")).toBe(theme.id);
-  const stage=host.querySelector(".aw-widget-stage")!;
+  const stage=host.querySelector(".aw-canvas")!;
   expect(stage,`stage for ${theme.id}`).toBeTruthy();
   expect(stage.querySelector("canvas,svg"),`renderer for ${theme.id}`).toBeTruthy();
-  expect(stage.hasAttribute("inert")).toBe(true);
-  expect(host.querySelector(`a[aria-label="Open Agent Worlds · ${theme.name}"]`)!.getAttribute("href")).toContain(`view=${theme.id}`);
+  expect(host.querySelector(".aw-camera-controls"),`camera controls for ${theme.id}`).toBeTruthy();
+  expect([...host.querySelectorAll("a")].find(a=>a.textContent?.startsWith("Open"))!.getAttribute("href")).toContain(`view=${theme.id}`);
  }
  expect(requests.some(url=>url.startsWith("/api/apps/agent-worlds/api/scene?source=main")&&url.includes("project_id=p1")&&url.includes("install_id=7"))).toBe(true);
+});
+
+test("plain scrolling is left to the dashboard; pinch or Ctrl+scroll zooms",async()=>{
+ await act(async()=>root.render(React.createElement(Widget,{projectId:"p1",installId:7,widgetSettings:{view:"graph"}})));
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});
+ const view=host.querySelector(".aw-canvas")!;
+ // happy-dom drops modifier keys from WheelEvent init, so set them directly.
+ const wheel=(init:any)=>{const event=new (window as any).WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:-200});for(const [key,value] of Object.entries(init))Object.defineProperty(event,key,{value});view.dispatchEvent(event);return event;};
+ const plain=wheel({});
+ expect(plain.defaultPrevented).toBe(false);
+ expect(view.getAttribute("data-camera-zoom")).toBe("1");
+ await act(async()=>{expect(wheel({ctrlKey:true}).defaultPrevented).toBe(true);});
+ expect(Number(host.querySelector(".aw-canvas")!.getAttribute("data-camera-zoom"))).toBeGreaterThan(1);
+ expect(host.querySelector(".aw-camera-hint")!.textContent).toContain("Ctrl+scroll");
 });

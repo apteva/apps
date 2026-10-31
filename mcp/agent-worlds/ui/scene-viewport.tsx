@@ -4,16 +4,20 @@ import { cameraBox, FIT_CAMERA, panCamera, zoomCamera, type Camera } from "./cam
 type Props = {
  stageRef: React.RefObject<HTMLCanvasElement|SVGSVGElement|null>; hostRef: React.RefObject<HTMLDivElement|null>;
  width:number; height:number; sceneKey:string; children:(camera:Camera)=>React.ReactNode; status:string;
+ // Where "fit" lands; the widget frames the island rather than the whole sea.
+ fitCamera?:Camera;
+ // "modifier" leaves plain scrolling to the page; pinch or Ctrl/Cmd+scroll zooms.
+ wheel?:"always"|"modifier";
 };
 type Contact = {x:number;y:number};
-export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,children,status}:Props){
- const [state,setState]=useState({key:sceneKey,camera:FIT_CAMERA});
+export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,children,status,fitCamera=FIT_CAMERA,wheel="always"}:Props){
+ const [state,setState]=useState<{key:string;camera:Camera|null}>({key:sceneKey,camera:null});
  const [dragging,setDragging]=useState(false);
- const camera=state.key===sceneKey?state.camera:FIT_CAMERA;
- const current=useRef({camera,width,height,sceneKey});current.current={camera,width,height,sceneKey};
+ const camera=(state.key===sceneKey&&state.camera)||fitCamera;
+ const current=useRef({camera,width,height,sceneKey,fitCamera,wheel});current.current={camera,width,height,sceneKey,fitCamera,wheel};
  const contacts=useRef(new Map<number,Contact>()),start=useRef<Contact|null>(null),moved=useRef(false),suppressClick=useRef(0);
- const change=(fn:(previous:Camera)=>Camera)=>setState(previous=>({key:current.current.sceneKey,camera:fn(previous.key===current.current.sceneKey?previous.camera:FIT_CAMERA)}));
- const reset=()=>change(()=>FIT_CAMERA);
+ const change=(fn:(previous:Camera)=>Camera)=>setState(previous=>({key:current.current.sceneKey,camera:fn((previous.key===current.current.sceneKey&&previous.camera)||current.current.fitCamera)}));
+ const reset=()=>setState({key:current.current.sceneKey,camera:null});
  // SVG stages move by viewBox, which also moves hit targets and exports.
  // Canvas stages receive the camera and apply it while drawing.
  useLayoutEffect(()=>{
@@ -31,9 +35,10 @@ export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,ch
   const host=hostRef.current;if(!host)return;
   const wheel=(event:WheelEvent)=>{
    if((event.target as Element).closest(".aw-camera-controls"))return;
+   if(current.current.wheel==="modifier"&&!event.ctrlKey&&!event.metaKey)return;
    event.preventDefault();
    const box=metrics(),unit=event.deltaMode===1?16:event.deltaMode===2?box.height:1;
-   if(event.shiftKey)change(camera=>panCamera(camera,-(event.deltaX||event.deltaY)*unit/box.width,0));
+   if(event.shiftKey&&current.current.wheel==="always")change(camera=>panCamera(camera,-(event.deltaX||event.deltaY)*unit/box.width,0));
    else change(camera=>zoomCamera(camera,Math.exp(-Math.max(-250,Math.min(250,event.deltaY*unit))*(event.ctrlKey ? .012 : .003)),anchor(event.clientX,event.clientY)));
   };
   host.addEventListener("wheel",wheel,{passive:false});return()=>host.removeEventListener("wheel",wheel);
@@ -77,8 +82,8 @@ export default function SceneViewport({stageRef,hostRef,width,height,sceneKey,ch
   data-camera-zoom={camera.zoom} data-camera-x={camera.x.toFixed(4)} data-camera-y={camera.y.toFixed(4)} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}
   onKeyDown={keyboard} onClickCapture={event=>{if(!(event.target as Element).closest(".aw-camera-controls")&&Date.now()<suppressClick.current){event.preventDefault();event.stopPropagation();suppressClick.current=0;}}}>
   {children(camera)}
-  <div className="aw-canvas-status" aria-live="off">{status}</div>
-  <div className="aw-camera-hint">Scroll to zoom · Drag to pan</div>
+  {status&&<div className="aw-canvas-status" aria-live="off">{status}</div>}
+  <div className="aw-camera-hint">{wheel==="modifier"?"Pinch or Ctrl+scroll to zoom · Drag to pan":"Scroll to zoom · Drag to pan"}</div>
   <div className="aw-camera-controls" aria-label="Camera controls" onPointerDown={event=>event.stopPropagation()}>
    <button type="button" aria-label="Zoom out visualization" disabled={camera.zoom<=1} onClick={()=>change(camera=>zoomCamera(camera,.8))}>−</button>
    <button type="button" aria-label="Fit visualization" title="Reset camera (0)" onClick={reset}>{Math.round(camera.zoom*100)}%</button>

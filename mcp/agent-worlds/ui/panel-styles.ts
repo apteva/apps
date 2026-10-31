@@ -1,3 +1,15 @@
+// Camera, canvas and overlay rules shared by the page and the dashboard widget.
+export const CANVAS_STYLES = `
+.aw-canvas {position:relative;overflow:hidden;width:100%;height:calc(100dvh - 140px);min-height:360px;background:var(--bg-subtle,#101010);touch-action:none;cursor:grab;user-select:none;isolation:isolate}
+.aw-pixel {display:block;width:100%;height:100%;image-rendering:pixelated}
+.aw-sr {position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.aw-canvas.is-dragging,.aw-canvas.is-dragging * {cursor:grabbing!important}.aw-canvas > svg {display:block;width:100%;height:100%}
+.aw-canvas-status,.aw-camera-hint {position:absolute;pointer-events:none;color:var(--text-muted,#aaa);background:var(--bg-card,#141414);border:1px solid var(--border,#2a2a2a);border-radius:4px;font-size:10px;padding:6px 8px;opacity:.9}
+.aw-canvas-status {top:12px;left:12px}.aw-camera-hint {bottom:12px;left:12px}
+.aw-camera-controls {position:absolute;right:12px;bottom:12px;display:flex;border:1px solid var(--border,#2a2a2a);border-radius:5px;overflow:hidden;background:var(--bg-card,#141414)}
+.aw-camera-controls button {height:34px;min-width:36px;border:0;border-right:1px solid var(--border,#2a2a2a);background:transparent;color:var(--text,#e8e8e8);font-size:16px}.aw-camera-controls button:last-child {border-right:0}.aw-camera-controls button:nth-child(2) {font-size:11px;min-width:55px}.aw-camera-controls button:hover {background:var(--bg-hover,#252525)}
+`;
+
 export const PANEL_STYLES = `
 .aw {container:agent-worlds/inline-size;display:flex;flex-direction:column;width:100%;min-height:100%;background:var(--bg,#0a0a0a);color:var(--text,#e8e8e8);font:12px var(--font-base,ui-sans-serif,system-ui)}
 .aw * {box-sizing:border-box}.aw button,.aw select,.aw input {font:inherit}.aw button {cursor:pointer}.aw button:disabled {opacity:.4;cursor:default}
@@ -16,14 +28,7 @@ export const PANEL_STYLES = `
 .aw-field select {width:100%;height:32px;padding:0 8px;border:1px solid var(--border,#2a2a2a);border-radius:3px;background:var(--bg-input,#111);color:var(--text,#e8e8e8);font-size:11px}
 .aw-portrait {display:flex;align-items:center;gap:7px;color:var(--text-muted,#aaa);font-size:11px}.aw input {accent-color:var(--accent,#f97316)}
 .aw-main,.aw-frame,.aw-scene {width:100%;min-width:0}.aw-content {position:relative}.aw-scene {position:relative}
-.aw-canvas {position:relative;overflow:hidden;width:100%;height:calc(100dvh - 140px);min-height:360px;background:var(--bg-subtle,#101010);touch-action:none;cursor:grab;user-select:none;isolation:isolate}
-.aw-pixel {display:block;width:100%;height:100%;image-rendering:pixelated}
-.aw-sr {position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-.aw-canvas.is-dragging,.aw-canvas.is-dragging * {cursor:grabbing!important}.aw-canvas > svg {display:block;width:100%;height:100%}
-.aw-canvas-status,.aw-camera-hint {position:absolute;pointer-events:none;color:var(--text-muted,#aaa);background:var(--bg-card,#141414);border:1px solid var(--border,#2a2a2a);border-radius:4px;font-size:10px;padding:6px 8px;opacity:.9}
-.aw-canvas-status {top:12px;left:12px}.aw-camera-hint {bottom:12px;left:12px}
-.aw-camera-controls {position:absolute;right:12px;bottom:12px;display:flex;border:1px solid var(--border,#2a2a2a);border-radius:5px;overflow:hidden;background:var(--bg-card,#141414)}
-.aw-camera-controls button {height:34px;min-width:36px;border:0;border-right:1px solid var(--border,#2a2a2a);background:transparent;color:var(--text,#e8e8e8);font-size:16px}.aw-camera-controls button:last-child {border-right:0}.aw-camera-controls button:nth-child(2) {font-size:11px;min-width:55px}.aw-camera-controls button:hover {background:var(--bg-hover,#252525)}
+${CANVAS_STYLES}
 .aw-sidebar {position:absolute;right:12px;top:12px;bottom:58px;width:min(320px,calc(100% - 24px));overflow:auto;display:flex;flex-direction:column;border:1px solid var(--border,#2a2a2a);border-radius:6px;background:var(--bg-card,#141414);box-shadow:0 4px 20px #0005;z-index:2}
 .aw-pages {position:absolute;left:12px;bottom:56px;display:flex;align-items:center;gap:8px;padding:5px;background:var(--bg-card,#141414);border:1px solid var(--border,#2a2a2a);border-radius:4px;font-size:11px}
 .aw-loading {display:grid;place-items:center;height:100%;color:var(--text-dim,#888)}.aw-error,.aw-notice {padding:8px 12px;font-size:11px;color:var(--text-muted,#aaa);border-bottom:1px solid var(--border,#2a2a2a)}.aw-error {color:var(--error,#ef4444)}

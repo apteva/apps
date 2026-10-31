@@ -6,6 +6,13 @@ export type Point = { x: number; y: number };
 
 export const TILE = 16;
 
+// On a 1x screen only whole-number scales keep every world pixel the same
+// size. With two or more device pixels per CSS pixel the unevenness of a
+// fractional scale is a single device pixel, so the view can fill its box.
+export function pixelScale(raw: number, dpr: number) {
+  return raw >= 1 && dpr < 2 ? Math.floor(raw + 1e-6) : raw;
+}
+
 export function seedFor(value: string) {
   return [...value].reduce((seed, char) => (Math.imul(seed, 31) + char.charCodeAt(0)) >>> 0, 7);
 }

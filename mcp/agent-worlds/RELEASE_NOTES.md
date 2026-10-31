@@ -1,3 +1,12 @@
+# Agent Worlds 0.7.2
+
+The dashboard widget fills its space and can be moved around.
+
+- The widget has the page's pan and zoom: drag to pan, the zoom out / fit / zoom in buttons, and pinch or Ctrl/Cmd+scroll to zoom. A plain scroll still scrolls the dashboard.
+- The village opens framed on its islands, and clicking an agent or building opens the full page on the same view.
+- On high-DPI screens (2x and above) the village and the space station now scale to fill their space instead of rounding down to the next whole number. Before, standard and tall widgets showed the same small island. 1x screens keep whole-number scaling. This also makes the full page larger on high-DPI screens.
+- Widget heights are now compact 240 px, standard 340 px, and tall 520 px.
+
 # Agent Worlds 0.7.1
 
 Packaging fix for 0.7.0, which could not be installed or upgraded to.

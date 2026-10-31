@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { categoryFor } from "./categories";
-import { TILE, fitText, text, textWidth } from "./core";
+import { TILE, fitText, pixelScale, text, textWidth } from "./core";
 import { buildLayout, isWalkable, type RegionInput } from "./layout";
 import { agentTrack } from "./motion";
 import { MAX_PLACES, placesFor, regionsFor } from "./PixelStage";
@@ -79,4 +79,11 @@ test("label punctuation has glyphs", () => {
   const ctx = { fillStyle: "", calls: 0, fillRect() { this.calls++; } } as any;
   text(ctx, "·", 0, 0, "#fff");
   expect(ctx.calls).toBe(1);
+});
+
+test("pixel scale snaps to whole numbers only on 1x screens", () => {
+  expect(pixelScale(1.86, 1)).toBe(1);
+  expect(pixelScale(2.4, 1.5)).toBe(2);
+  expect(pixelScale(1.86, 2)).toBe(1.86);
+  expect(pixelScale(0.7, 1)).toBe(0.7);
 });

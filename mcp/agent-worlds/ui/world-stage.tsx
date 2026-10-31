@@ -16,12 +16,13 @@ export type WorldStageProps = {
   selectedAgent: string; selectedDestination: string;
   onSelect: (id: string) => void; onSelectDestination: (id: string) => void; onFocus: (focus: Focus) => void;
   onWorldSize?: (size: { width: number; height: number }) => void;
+  onLandBounds?: (box: { x: number; y: number; w: number; h: number }) => void;
 };
 
 export default function WorldStage(props: WorldStageProps) {
   const { theme, scene, stageRef, nodes, palette, portrait } = props;
   const stage = { stageRef, camera: props.camera, agents: props.agents, nodes, destinations: props.destinations, events: props.events, teams: props.teams, portrait, now: props.now, live: props.live, selectedAgent: props.selectedAgent, selectedDestination: props.selectedDestination, onSelect: props.onSelect, onSelectDestination: props.onSelectDestination, onFocus: props.onFocus, onWorldSize: props.onWorldSize };
-  if (theme.iso) return <IsoStage {...stage} />;
+  if (theme.iso) return <IsoStage {...stage} onLandBounds={props.onLandBounds} />;
   if (theme.pixel) return <PixelStage theme={theme.pixel} {...stage} />;
   if (nodes.length) return <HierarchyStage refNode={stageRef} nodes={nodes.slice(props.page * PAGE_SIZE, (props.page + 1) * PAGE_SIZE)} preset={theme.layout === "graph" ? "graph" : "operations"} label={theme.name} portrait={portrait} destinations={props.destinations} events={props.events} selectedAgent={props.selectedAgent} onSelect={props.onSelect} onFocus={props.onFocus} palette={palette} />;
   if (theme.layout === "graph") return <SystemGraph refNode={stageRef} source={scene.source} agents={props.agents} destinations={props.destinations} selectedDestination={props.selectedDestination} events={props.stageEvents} portrait={portrait} selectedAgent={props.selectedAgent} onSelect={props.onSelect} onSelectDestination={props.onSelectDestination} palette={palette} />;

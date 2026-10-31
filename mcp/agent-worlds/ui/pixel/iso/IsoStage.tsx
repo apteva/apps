@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
+import { pixelScale } from "../core";
 import type { Camera } from "../../camera";
 import type { Agent, Destination, Event, Focus, WorldNode } from "../../world-model";
 import { lookFor } from "../characters";
@@ -17,6 +18,8 @@ type Props = {
   selectedAgent: string; selectedDestination: string;
   onSelect: (id: string) => void; onSelectDestination: (id: string) => void; onFocus?: (focus: Focus) => void;
   onWorldSize?: (size: { width: number; height: number }) => void;
+  // The islands' bounds as fractions of the world, so a small view can frame land instead of sea.
+  onLandBounds?: (box: { x: number; y: number; w: number; h: number }) => void;
 };
 
 const STATUS: Record<string, string> = { ok: "#06d6a0", busy: "#ffd166", error: "#ef476f", off: "#adb5bd" };
@@ -57,6 +60,12 @@ export default function IsoStage(props: Props) {
   const size = scene ? { width: scene.width, height: scene.height } : { width: 1280, height: 760 };
 
   useEffect(() => { props.onWorldSize?.(size); }, [size.width, size.height]);
+  useEffect(() => {
+    if (!scene?.islands.length || !props.onLandBounds) return;
+    const left = Math.min(...scene.islands.map(i => i.x)), top = Math.min(...scene.islands.map(i => i.y));
+    const right = Math.max(...scene.islands.map(i => i.x + i.w)), bottom = Math.max(...scene.islands.map(i => i.y + i.h));
+    props.onLandBounds({ x: left / scene.width, y: top / scene.height, w: (right - left) / scene.width, h: (bottom - top) / scene.height });
+  }, [scene]);
 
   const draw = () => {
     const canvas = canvasRef.current;
@@ -69,11 +78,10 @@ export default function IsoStage(props: Props) {
       selectedAgent: props.selectedAgent, selectedPlace: props.selectedDestination, reducedMotion,
     });
     hits.current = frame.hits;
-    // Whole-number scaling keeps every world pixel the same size on screen.
     const dpr = window.devicePixelRatio || 1;
     const fit = Math.min(canvas.width / scene.width, canvas.height / scene.height);
     const raw = fit * props.camera.zoom;
-    const scale = raw >= 1 ? Math.floor(raw + 1e-6) : raw;
+    const scale = pixelScale(raw, dpr);
     const ox = Math.round(canvas.width / 2 - props.camera.x * scene.width * scale);
     const oy = Math.round(canvas.height / 2 - props.camera.y * scene.height * scale);
     transform.current = { scale, ox, oy, dpr };
