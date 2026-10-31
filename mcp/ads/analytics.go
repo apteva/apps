@@ -22,9 +22,9 @@ const (
 )
 
 var performanceCollectorIntervals = map[string]time.Duration{
-	"campaign": 5 * time.Minute,
-	"ad_group": 15 * time.Minute,
-	"ad":       15 * time.Minute,
+	"campaign": 15 * time.Minute,
+	"ad_group": 30 * time.Minute,
+	"ad":       30 * time.Minute,
 }
 
 type analyticsSyncCall struct {
@@ -886,7 +886,7 @@ func mcpErrorTextValue(value map[string]any) string {
 }
 
 func (a *App) runPerformanceCollector(runCtx context.Context, app *sdk.AppCtx) error {
-	query := `SELECT project_id, id, COALESCE(timezone_name,'')
+	query := `SELECT project_id, id, COALESCE(timezone_name,''), platform, connection_id, native_account_id
 	            FROM ad_accounts WHERE status='active'`
 	args := []any{}
 	if pid := projectScope(app); pid != "" {
@@ -902,11 +902,13 @@ func (a *App) runPerformanceCollector(runCtx context.Context, app *sdk.AppCtx) e
 		projectID string
 		accountID int64
 		timezone  string
+		provider  adAccount
 	}
 	jobs := make([]accountJob, 0)
 	for rows.Next() {
 		var job accountJob
-		if err := rows.Scan(&job.projectID, &job.accountID, &job.timezone); err != nil {
+		if err := rows.Scan(&job.projectID, &job.accountID, &job.timezone,
+			&job.provider.Platform, &job.provider.ConnectionID, &job.provider.NativeAccountID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -921,6 +923,11 @@ func (a *App) runPerformanceCollector(runCtx context.Context, app *sdk.AppCtx) e
 	due := make([]syncJob, 0, len(jobs)*len(performanceCollectorIntervals))
 	now := time.Now().UTC()
 	for _, job := range jobs {
+		// A throttled provider account is skipped for every project bound to
+		// it until its shared cooldown ends.
+		if !a.providerCooldownUntil(app, &job.provider).IsZero() {
+			continue
+		}
 		for level, interval := range performanceCollectorIntervals {
 			isDue, reconcile := analyticsSyncDue(app, job.projectID, job.accountID, level, interval, now)
 			if isDue {
@@ -978,7 +985,11 @@ func (a *App) runPerformanceSyncJob(app *sdk.AppCtx, pid string, accountID int64
 		return
 	}
 	if scopeErr != nil {
-		app.Logger().Warn("performance_collector: scope rejected", "project", pid, "account", accountID, "level", level, "err", mcpErrorTextValue(scopeErr))
+		// Hierarchy refresh failures must back off like delivery failures;
+		// returning without a record made the job due again every tick.
+		message := mcpErrorTextValue(scopeErr)
+		_, _ = recordAnalyticsSync(app, pid, accountID, request, "failed", message)
+		app.Logger().Warn("performance_collector: scope rejected", "project", pid, "account", accountID, "level", level, "err", message)
 		return
 	}
 	if empty {

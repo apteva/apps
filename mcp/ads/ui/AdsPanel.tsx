@@ -799,8 +799,18 @@ function CampaignWorkspace({
     refresh,
   }), [account.id, dateFrom, dateTo]);
 
+  // Passive loads read the local copy; only an explicit refresh, or a list
+  // that was never filled, reaches the provider.
+  const listEntities = useCallback(async (tool: "adset_list" | "ad_list", args: Record<string, unknown>, refresh: boolean) => {
+    if (!refresh) {
+      const cached = await callTool(tool, { ...args, cached: true });
+      if (!cached.cache_empty) return cached;
+    }
+    return callTool(tool, args);
+  }, [callTool]);
+
   const loadAds = useCallback(async (adSetID: string, refresh: boolean, requestID: number) => {
-    const list = await callTool("ad_list", { ad_account_id: account.id, adset_id: adSetID, limit: 100 });
+    const list = await listEntities("ad_list", { ad_account_id: account.id, adset_id: adSetID, limit: 100 }, refresh);
     if (request.current !== requestID) return;
     const nextAds = (list.data || []) as Ad[];
     setAds(nextAds);
@@ -811,7 +821,7 @@ function CampaignWorkspace({
     }
     const metrics = await callTool("performance_get", performanceArgs("ad", nextAds.map((ad) => ad.id), refresh));
     if (request.current === requestID) setAdMetrics(metrics as PerformanceResponse);
-  }, [account.id, callTool, performanceArgs]);
+  }, [account.id, callTool, listEntities, performanceArgs]);
 
   const loadWorkspace = useCallback(async (refresh: boolean) => {
     const requestID = ++request.current;
@@ -821,7 +831,7 @@ function CampaignWorkspace({
     try {
       const [campaignResult, adSetList] = await Promise.all([
         callTool("performance_get", performanceArgs("campaign", [campaign.id], refresh)),
-        callTool("adset_list", { ad_account_id: account.id, campaign_id: campaign.id, limit: 100 }),
+        listEntities("adset_list", { ad_account_id: account.id, campaign_id: campaign.id, limit: 100 }, refresh),
       ]);
       if (request.current !== requestID) return;
       setCampaignMetrics(campaignResult as PerformanceResponse);
@@ -849,7 +859,7 @@ function CampaignWorkspace({
         setLoadingMetrics(false);
       }
     }
-  }, [account.id, callTool, campaign.id, loadAds, performanceArgs, selectedAdSetID]);
+  }, [account.id, callTool, campaign.id, listEntities, loadAds, performanceArgs, selectedAdSetID]);
 
   useEffect(() => {
     loadWorkspace(false);

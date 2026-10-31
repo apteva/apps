@@ -46,6 +46,11 @@ func (a *App) execIntegrationToolWithPolicy(
 			return parsed, nil
 		}
 		errOut["attempts"] = attempt
+		// Retrying a throttled account within milliseconds only extends the
+		// block; the account-wide cooldown decides when to try again.
+		if errOut["code"] == "provider_rate_limited" {
+			return nil, errOut
+		}
 		if errOut["code"] == "provider_concurrent_modification" && attempts == 1 {
 			attempts = 3
 		}
@@ -77,7 +82,10 @@ func (a *App) execIntegrationToolOnce(
 			value.(*createDispatch).started.Store(true)
 		}
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+	res, err := a.callProvider(ctx, acct, tool, input)
+	if cooling, ok := err.(errProviderCoolingDown); ok {
+		return nil, providerCooldownError(tool, cooling.Until)
+	}
 	if err != nil {
 		return nil, mcpError(tool + ": " + err.Error())
 	}
@@ -87,6 +95,9 @@ func (a *App) execIntegrationToolOnce(
 			errOut["request_context"] = requestContext
 		}
 		return nil, errOut
+	}
+	if integrationToolMutates(tool) {
+		a.invalidateHierarchy(acct)
 	}
 	var parsed any
 	if len(res.Data) > 0 {
@@ -155,6 +166,9 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 			case providerErr.Subcode == 2490408:
 				out["code"] = "provider_optimization_goal_unavailable"
 				out["suggestion"] = "Reload the parent campaign and select an optimization goal allowed by that objective. Do not recreate or activate the campaign based on this error alone."
+			case metaRateLimitError(providerErr.Code, providerErr.Subcode):
+				out["code"] = "provider_rate_limited"
+				out["retryable"] = true
 			case providerErr.IsTransient:
 				out["code"] = "provider_transient"
 				out["retryable"] = true
