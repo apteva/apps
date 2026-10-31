@@ -1677,6 +1677,17 @@ func (a *App) voidCheckoutInvoice(ctx *sdk.AppCtx, pid string, checkout *Checkou
 		"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled",
 	}, &response); err != nil {
 		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "active provider payment") {
+			// Billing verifies that this provider payment is still cancellable;
+			// paid/captured invoices are rejected there, never voided here.
+			if cancelErr := ctx.PlatformAPI().CallAppResult("billing", "invoices_cancel_payment", map[string]any{"_project_id": pid, "invoice_id": *checkout.InvoiceID}, &response); cancelErr != nil {
+				return fmt.Errorf("cancel unpaid provider payment: %w", cancelErr)
+			}
+			if retryErr := ctx.PlatformAPI().CallAppResult("billing", "invoices_void", map[string]any{"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled"}, &response); retryErr != nil {
+				return fmt.Errorf("void cancelled invoice: %w", retryErr)
+			}
+			return nil
+		}
 		if !strings.Contains(message, "already void") && !strings.Contains(message, "already cancelled") {
 			return fmt.Errorf("void Billing invoice: %w", err)
 		}

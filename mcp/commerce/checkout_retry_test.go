@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestAttributionDoesNotReopenActiveCheckout(t *testing.T) {
 	ctx, p, store, sale := seedAnalyticsSale(t, true)
@@ -62,5 +65,35 @@ func TestRetryPreservesCancelledSaleInvoice(t *testing.T) {
 	}
 	if next.ID == ch.ID {
 		t.Fatal("reused cancelled checkout identity")
+	}
+}
+
+func TestCancelProviderPaymentBeforeVoidingUnpaidInvoice(t *testing.T) {
+	ctx, p, _, _ := seedAnalyticsSale(t, false)
+	p.responses["billing:invoices_void"] = platformResponseFunc(func(map[string]any) (any, error) {
+		if countPlatformCalls(p.calls, "billing", "invoices_void") == 1 {
+			return nil, errors.New("cannot void invoice with an active provider payment")
+		}
+		return map[string]any{"status": "void"}, nil
+	})
+	p.responses["billing:invoices_cancel_payment"] = map[string]any{"status": "cancelled"}
+	id := int64(501)
+	if e := (&App{}).voidCheckoutInvoice(ctx, ctx.CurrentProject(), &CheckoutSession{InvoiceID: &id}); e != nil {
+		t.Fatal(e)
+	}
+	if countPlatformCalls(p.calls, "billing", "invoices_cancel_payment") != 1 || countPlatformCalls(p.calls, "billing", "invoices_void") != 2 {
+		t.Fatal("incorrect cancellation sequence")
+	}
+}
+func TestPaidProviderPaymentCannotBeVoidedByRetry(t *testing.T) {
+	ctx, p, _, _ := seedAnalyticsSale(t, false)
+	p.errors["billing:invoices_void"] = errors.New("cannot void paid or partially paid invoice or active provider payment")
+	p.errors["billing:invoices_cancel_payment"] = errors.New("invoice already paid")
+	id := int64(501)
+	if e := (&App{}).voidCheckoutInvoice(ctx, ctx.CurrentProject(), &CheckoutSession{InvoiceID: &id}); e == nil {
+		t.Fatal("accepted cancellation of paid invoice")
+	}
+	if countPlatformCalls(p.calls, "billing", "invoices_void") != 1 {
+		t.Fatal("retried void after a paid-payment rejection")
 	}
 }
