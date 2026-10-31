@@ -1,3 +1,13 @@
+# Agent Worlds 0.8.0
+
+Clicking an agent or building opens a configurable panel over the side of the view.
+
+- The details panel now floats over the right side of the world instead of shrinking it. Drag its edge to resize it, collapse it to a tab, step through agents or buildings with the arrows, and close it with Escape, the close button, or a click on empty ground. The camera does not move. On phones it is a bottom sheet.
+- The panel is made of blocks you choose with Customise: add, remove, reorder, and set each block's height. Agent blocks: Now (status, what it is doing and where, model, project), Activity, Threads, Apps used, and Handoffs. Building blocks: Who is here, Recent calls, and Most used tools.
+- Widgets other apps provide for the dashboard's agent page can be added as blocks, for example Conversations (talk to the agent from the panel) and Tasks, with each app's own settings. New agent panels include Conversations when it is installed.
+- Panel layouts are saved per user and project, so they follow you across devices.
+- Clicking an agent or building on the dashboard widget opens the page with its panel already showing.
+
 # Agent Worlds 0.7.2
 
 The dashboard widget fills its space and can be moved around.

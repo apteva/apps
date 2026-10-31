@@ -69,7 +69,8 @@ export default function AgentWorldsWidget(props: Props) {
   const running = agents.filter(agent => agent.status === "running" || agent.status === "active").length;
   const link = worldPageLink(props, preferences);
   const ignore = () => {};
-  const open = () => window.location.assign(link);
+  // Agents and buildings open the page with that side panel already showing.
+  const open = (key: "agent" | "place") => (id: string) => { if (id) window.location.assign(`${link}&${key}=${encodeURIComponent(id)}`); };
   const frameLand = (box: { x: number; y: number; w: number; h: number }) =>
     setFit(previous => { const next = frameCamera(box); return Math.abs(next.zoom - previous.zoom) < 1e-3 && Math.abs(next.x - previous.x) < 1e-3 && Math.abs(next.y - previous.y) < 1e-3 ? previous : next; });
 
@@ -85,7 +86,7 @@ export default function AgentWorldsWidget(props: Props) {
       {sceneData.error && !scene ? <div className="flex h-full items-center justify-center px-4 text-center text-xs text-text-muted" role="alert">{sceneData.error}</div>
         : !scene ? <div className="flex h-full items-center justify-center text-xs text-text-dim">Connecting to the scene…</div>
         : <SceneViewport hostRef={viewport} stageRef={stageRef} width={isMap ? mapSize.width : 1280} height={isMap ? mapSize.height : 560} sceneKey={JSON.stringify([installId, projectId, preferences.source, theme.id])} status="" fitCamera={theme.iso ? fit : FIT_CAMERA} wheel="modifier">
-          {camera => <WorldStage theme={theme} scene={scene} camera={camera} palette={palette} stageRef={stageRef} agents={stageAgents} nodes={projection?.nodes || []} destinations={projection?.destinations || []} events={events} stageEvents={events.filter(event => stageIds.has(event.agent_id))} teams={teams} portrait={false} now={now} live page={0} selectedAgent="" selectedDestination="" onSelect={open} onSelectDestination={open} onFocus={ignore} onWorldSize={setMapSize} onLandBounds={frameLand} />}
+          {camera => <WorldStage theme={theme} scene={scene} camera={camera} palette={palette} stageRef={stageRef} agents={stageAgents} nodes={projection?.nodes || []} destinations={projection?.destinations || []} events={events} stageEvents={events.filter(event => stageIds.has(event.agent_id))} teams={teams} portrait={false} now={now} live page={0} selectedAgent="" selectedDestination="" onSelect={open("agent")} onSelectDestination={open("place")} onFocus={ignore} onWorldSize={setMapSize} onLandBounds={frameLand} />}
         </SceneViewport>}
     </div>
   </div>;

@@ -23,7 +23,15 @@ Agents stroll A* routes between spots on the green, the paths, and the pond shor
 
 ## Dashboard widget
 
-`world-view` (`ui/AgentWorldsWidget.tsx`) puts a live, read-only copy of any view on the project dashboard. Its settings pick the view (village, station, graph or operations), the source (listed from `/api/sources`) and a height. It renders through the same `world-stage.tsx` as the page, polls and animates only while on screen, and clicking it opens the page on the same view and source (`?view=…&source=…`).
+`world-view` (`ui/AgentWorldsWidget.tsx`) puts a live, read-only copy of any view on the project dashboard. Its settings pick the view (village, station, graph or operations), the source (listed from `/api/sources`) and a height. It renders through the same `world-stage.tsx` as the page, polls and animates only while on screen, and clicking an agent or building opens the page on the same view and source with its details already showing (`?view=…&source=…&agent=…` or `&place=…`).
+
+## Agent panel
+
+Clicking an agent or a building opens a panel that floats over the right side of the view (`ui/agent-panel/`). It never takes space from the view and does not move the camera; drag its left edge to resize it (280–640 px, remembered per browser), collapse it to a tab, step to the previous or next agent or building with the arrows, and close it with Escape, its close button, or a click on empty ground. On narrow screens it becomes a bottom sheet.
+
+The panel is a list of blocks you choose with **Customise**: add, remove, reorder, and set each block's height. Agent panels offer Now, Activity, Threads, Apps used, and Handoffs, plus any widget an installed app declares for the `dashboard.agent_detail` slot, such as Conversations or Tasks, with that app's settings form. Building panels offer Who is here, Recent calls, and Most used tools. App widgets get the same props the dashboard's agent page passes; they only show for agents on the main server, and apps whose widget is `visibility: attached` only for agents that have the app attached. A new agent panel shows Now, Activity, and Conversations when it is installed.
+
+Layouts are saved per user and project through the dashboard layout API, under the surfaces `agent-worlds.agent_panel` and `agent-worlds.place_panel` (`{id, component, settings, height}` entries, so the server checks app widget settings against their schemas). Instance-wide scenes without a project keep the layout in the browser.
 
 ## Sources
 

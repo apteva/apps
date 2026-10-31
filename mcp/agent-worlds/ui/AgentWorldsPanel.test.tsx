@@ -15,7 +15,7 @@ win.setTimeout=((callback:()=>void,delay:number)=>{timers.set(++timerId,{callbac
 win.clearTimeout=((id:number)=>timers.delete(id)) as any;
 win.setInterval=win.setTimeout;win.clearInterval=win.clearTimeout;
 const originalFetch=globalThis.fetch;
-globalThis.fetch=((url:string,options:any)=>url.startsWith("/api/apps?") || url === "/api/apps" ? Promise.resolve({ok:true,json:async()=>[]}) : url.includes("/sources")?Promise.resolve({ok:true,json:async()=>[fixture.source]}):new Promise(resolve=>pending.push({resolve,signal:options.signal}))) as any;
+globalThis.fetch=((url:string,options:any)=>url.startsWith("/api/ui-layout/")?Promise.resolve({ok:true,headers:{get:()=>'"1"'},json:async()=>({value:[]})}):url.startsWith("/api/apps?") || url === "/api/apps" ? Promise.resolve({ok:true,json:async()=>[]}) : url.includes("/sources")?Promise.resolve({ok:true,json:async()=>[fixture.source]}):new Promise(resolve=>pending.push({resolve,signal:options.signal}))) as any;
 const response=()=>({ok:true,json:async()=>structuredClone(latest)});
 const host=win.document.createElement("div");win.document.body.append(host);
 const root=createRoot(host as any);
@@ -67,7 +67,7 @@ test("Themes share focus, camera, inspection and replay over one model",async()=
   expect(host.querySelector('[data-agent-details="3"]')).toBeTruthy();
   expect(host.querySelector('aside[aria-label="Agent details"] h2')!.textContent).toBe('Writer');
   expect(crumb()).toBe(beforeSelection);expect(camera()).toBe(view);
-  await click('Close details');expect(host.querySelector('.aw-sidebar')).toBeNull();
+  await click('Close panel');expect(host.querySelector('.aw-float')).toBeNull();
  }
  // Observed teams navigate in graph views; maps then show just that team.
  await click("System graph");
@@ -81,9 +81,9 @@ test("Themes share focus, camera, inspection and replay over one model",async()=
  await click("Inspect agent Researcher");
  expect(crumb()).toBe(before);
  expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
- expect(host.querySelector('.aw-side-threads')!.textContent).toContain('research-worker');
- expect(host.querySelector('.aw-side-activity')!.textContent).toContain('called crm_search');
- expect(host.querySelector('.aw-side-activity')!.textContent).not.toContain('sent a message');
+ expect(host.querySelector('[data-block="worlds:now"]')!.textContent).toContain('running');
+ expect(host.querySelector('[data-block="worlds:activity"]')!.textContent).toContain('called crm_search');
+ expect(host.querySelector('[data-block="worlds:activity"]')!.textContent).not.toContain('sent a message');
  expect(camera()).toBe(teamCamera);
  await poll(); // a request already in flight when the user pauses
  const clockBeforePause=host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute("data-clock");
@@ -95,7 +95,7 @@ test("Themes share focus, camera, inspection and replay over one model",async()=
   expect(host.querySelector('[data-agent-details="2"]')).toBeTruthy();
   expect(agentButtons()).toBe(2);
   await click('Inspect agent Coordinator');expect(host.querySelector('[data-agent-details="1"]')).toBeTruthy();
-  expect(host.querySelector('.aw-side-threads')!.textContent).toContain('coordinator-main');
+  expect(host.querySelector('aside[aria-label="Agent details"] h2')!.textContent).toBe('Coordinator');
   await click('Inspect agent Researcher');
  }
  expect(host.querySelector('canvas[data-renderer="pixel"]')!.getAttribute("data-clock")).toBe(clockBeforePause);
@@ -105,7 +105,7 @@ test("Themes share focus, camera, inspection and replay over one model",async()=
  expect(crumb()).toBe(before);expect(host.textContent).not.toContain("Changed while paused");
  const count=pending.length;await poll();expect(pending.length).toBe(count);
  await act(async()=>window.dispatchEvent(new win.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
- expect(host.querySelector('.aw-sidebar')).toBeNull();expect(crumb()).toBe(before);
+ expect(host.querySelector('.aw-float')).toBeNull();expect(crumb()).toBe(before);
  expect(camera()).toBe(teamCamera);
  await click("Growth");
  await click("Paused");
@@ -127,5 +127,5 @@ test("Themes share focus, camera, inspection and replay over one model",async()=
  expect(inflight.signal.aborted).toBe(true);
  latest={...fixture,scope:"project",projects:[fixture.projects![0]],agents:fixture.agents.slice(0,8)};
  await act(async()=>pending.at(-1)!.resolve(response()));
- expect(crumb()).not.toContain("Instance");expect(crumb()).toContain("Growth");expect(host.querySelector(".aw-sidebar")).toBeNull();
+ expect(crumb()).not.toContain("Instance");expect(crumb()).toContain("Growth");expect(host.querySelector(".aw-float")).toBeNull();
 });

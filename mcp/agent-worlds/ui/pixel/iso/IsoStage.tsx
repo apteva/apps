@@ -187,7 +187,8 @@ export default function IsoStage(props: Props) {
   };
   const click = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const hit = hitAt(event);
-    if (!hit) return;
+    // Empty ground clears the selection, which closes the side panel.
+    if (!hit) { if (props.selectedAgent || props.selectedDestination) props.onSelect(""); return; }
     if (hit.kind === "agent") props.onSelect(hit.id);
     else if (hit.kind === "place") props.onSelectDestination(hit.id);
     else { const region = layout.regions.find(item => item.id === hit.id); if (region?.focus) props.onFocus?.(region.focus as Focus); }

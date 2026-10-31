@@ -6,6 +6,8 @@ import { withAppDisplayNames, type AppMetadata } from "./app-display-names";
 import { clock, eventColor, short, statusColor, usePalette } from "./palette";
 import { MAX_RESIDENTS } from "./pixel/PixelStage";
 import WorldStage from "./world-stage";
+import AgentPanel, { FloatingPanel } from "./agent-panel/AgentPanel";
+import { agentWidgets, type InstalledApp } from "./agent-panel/app-widgets";
 import { THEMES, themeById } from "./themes";
 import { buildWorld, rootFocus, resolveFocus, projectWorld, contentsForAgents, PAGE_SIZE } from "./world-model";
 import type { Source, Scene, Focus } from "./world-model";
@@ -19,12 +21,12 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   const theme = themeById(themeId);
   const isMap = theme.layout === "map";
   const [mapSize, setMapSize] = useState({ width: 1280, height: 760 });
-  const [showInspector, setShowInspector] = useState(false);
+  const [showInspector, setShowInspector] = useState(() => { const query = new URLSearchParams(window.location.search); return query.has("agent") || query.has("place"); });
   const [focus, setFocus] = useState<Focus>({});
   const [page, setPage] = useState(0);
-  const [selectedAgent, setSelectedAgentId] = useState("");
-  const inspectorRef = useRef<HTMLElement|null>(null);
-  const [selectedDestination, setSelectedDestination] = useState("");
+  // The dashboard widget links here with ?agent= or ?place= to open that panel.
+  const [selectedAgent, setSelectedAgentId] = useState(() => new URLSearchParams(window.location.search).get("agent") || "");
+  const [selectedDestination, setSelectedDestination] = useState(() => new URLSearchParams(window.location.search).get("place") || "");
   const [live, setLive] = useState(true);
   const [replayIndex, setReplayIndex] = useState(0);
   const [portraitChoice, setPortrait] = useState(false);
@@ -48,7 +50,13 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
   useEffect(() => {
     if (sourceData.data) setSourceId(current => sourceData.data!.some(source => source.id === current) ? current : "main");
   }, [sourceData.data]);
-  useEffect(() => { setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setSelectedAgentId(""); setShowInspector(false); }, [sourceId, installId, projectId]);
+  // Changing source or project starts over; the first render keeps a selection from the address.
+  const scopeKey = JSON.stringify([sourceId, installId, projectId]), lastScope = useRef(scopeKey);
+  useEffect(() => {
+    if (lastScope.current === scopeKey) return;
+    lastScope.current = scopeKey;
+    setFocus({}); setPage(0); setLive(true); setFrozenScene(null); setSelectedDestination(""); setSelectedAgentId(""); setShowInspector(false);
+  }, [scopeKey]);
   useEffect(() => {
     if (!rawScene) return;
     setReplayIndex(rawScene.events.length);
@@ -93,7 +101,6 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
     if (next.agentId) { setSelectedAgent(next.agentId); return; }
     setFocus(next); setPage(0); closeDetails();
   };
-  useEffect(() => { if (inspectorRef.current) inspectorRef.current.scrollTop = 0; }, [selectedAgent, selectedDestination]);
   useEffect(() => { if (scene && selectedAgent && !scene.agents.some(agent => agent.id === selectedAgent)) closeDetails(); }, [scene, selectedAgent]);
   const zoomOut = () => {
     if (currentFocus.agentId) navigate({projectId:currentFocus.projectId,teamId:currentFocus.teamId});
@@ -101,7 +108,9 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
     else if (scene?.scope === "instance") navigate({});
   };
   useEffect(() => {
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLSelectElement)) { if (showInspector) closeDetails(); else zoomOut(); } };
+    // App widgets in the panel have their own text fields; Escape there is theirs.
+    const editing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName));
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !editing(event.target)) { if (showInspector) closeDetails(); else zoomOut(); } };
     window.addEventListener("keydown",escape); return () => window.removeEventListener("keydown",escape);
   });
 
@@ -182,10 +191,18 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
 
   const threadCount = new Set([...visibleAgents.flatMap(agent => (agent.threads || []).map(thread => `${agent.id}:${thread.id}`)),...visibleEvents.filter(event => event.thread_id).map(event => `${event.agent_id}:${event.thread_id}`)]).size;
   const runningCount = visibleAgents.filter(agent => agent.status === "running" || agent.status === "active").length;
-  const inspectorContent = inspectedAgent ? contentsForAgents([inspectedAgent], destinations, visibleEvents, currentFocus.projectId) : {destinations, events:visibleEvents};
-  const inspectorDestinations = inspectorContent.destinations, inspectorEvents = inspectorContent.events;
+  const inspectorDestinations = destinations, inspectorEvents = visibleEvents;
   const destination = destinations.find(item => item.id === selectedDestination);
-  const destinationEvents = visibleEvents.filter(event => event.target_id === selectedDestination);
+  // Other apps' agent widgets, saved layouts and widget modules are scoped to
+  // the agent's project; instance-wide scenes fall back to the agent's own.
+  const panelProject = projectId || inspectedAgent?.project_id || destination?.project_id || "";
+  const appWidgets = useMemo(() => agentWidgets((appData.data || []) as InstalledApp[], panelProject), [appData.data, panelProject]);
+  const stepSelection = (direction: -1 | 1) => {
+    const list = inspectedAgent ? visibleAgents.map(agent => agent.id) : destinations.map(item => item.id), current = inspectedAgent ? selectedAgent : selectedDestination;
+    if (list.length < 2) return;
+    const next = list[(list.indexOf(current) + direction + list.length) % list.length];
+    if (inspectedAgent) setSelectedAgent(next); else inspectDestination(next);
+  };
   return <div className="aw">
     <style>{PANEL_STYLES + WORLD_NAV_STYLES}</style>
     <header className="aw-toolbar">
@@ -222,19 +239,14 @@ export default function AgentWorldsPanel({ installId, projectId = "" }: Props) {
             </SceneViewport>
             {pages > 1 && <div className="aw-pages" aria-label="Scene pages"><button className="aw-button" disabled={currentPage === 0} onClick={() => setPage(currentPage-1)}>Previous</button><span>{currentPage+1} / {pages}</span><button className="aw-button" disabled={currentPage+1 === pages} onClick={() => setPage(currentPage+1)}>Next</button></div>}
           </section>
-          {showInspector && <aside ref={inspectorRef} className="aw-sidebar" aria-label={inspectedAgent ? "Agent details" : destination ? "App details" : "World details"}>
-            <div className="aw-inspector-head"><h2>{inspectedAgent?.name || destination?.name || "World details"}</h2><button className="aw-close" aria-label="Close details" onClick={closeDetails}>×</button></div>
-            {inspectedAgent && <section className="aw-agent-detail" data-agent-details={inspectedAgent.id}>
-              <span className="aw-inspected-status" style={{color:statusColor(inspectedAgent.status,palette)}}><span className="aw-dot"/>{inspectedAgent.status}</span>
-              <dl><dt>Project</dt><dd>{world?.projects.find(project => project.id === world.projectOf(inspectedAgent))?.name || inspectedAgent.project_id || scene?.source.label}</dd>{inspectedAgent.model && <><dt>Model</dt><dd>{inspectedAgent.model}</dd></>}<dt>Latest activity</dt><dd>{inspectorEvents.at(-1)?.label || "No recent activity"}</dd></dl>
-            </section>}
-            {inspectedAgent && <section className="aw-side-threads"><div className="aw-side-head"><h3>Threads</h3><span>{inspectedAgent.threads?.length || 0}</span></div>{inspectedAgent.threads?.length ? inspectedAgent.threads.map(thread => <div className="aw-thread-row" key={thread.id}><strong>{thread.id}</strong><span>{thread.status || "Observed"}{thread.parent_id ? ` · parent ${thread.parent_id}`:""}</span></div>) : <div className="aw-plain-empty">No thread inventory available.</div>}</section>}
-            <section className="aw-side-destinations"><div className="aw-side-head"><h3>Apps &amp; integrations</h3><span>{inspectorDestinations.length}</span></div><div className="aw-destination-list">{inspectorDestinations.map(item => <button key={item.id} className={`aw-destination-row ${selectedDestination === item.id ? "is-selected" : ""}`} onClick={() => inspectDestination(selectedDestination === item.id ? "" : item.id)}><span className={`aw-destination-icon is-${item.kind}`}>{item.kind === "app" ? "▣" : item.kind === "integration" ? "⌁" : "◇"}</span><span><strong>{item.name}</strong><small>{scene?.scope === "instance" && !currentFocus.projectId ? `${world?.projects.find(project => project.id === item.project_id)?.name || item.project_id || "Source"} · ` : ""}{item.kind} · {item.status}</small></span><em>{item.call_count}</em></button>)}{!inspectorDestinations.length && <div className="aw-plain-empty">No apps or integrations available for this source.</div>}</div>{destination && <div className="aw-destination-detail"><strong>{destination.name}</strong><span>{destination.kind} · {destination.status} · {destinationEvents.filter(event => event.kind === "tool").length} visible calls</span><span>{[...new Set(destinationEvents.map(event => scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id))].join(", ") || "No agents have visited yet"}</span>{destination.tools?.length ? <small>{destination.tool_count} mapped tools · {destination.tools.slice(0, 3).join(", ")}{destination.tool_count > 3 ? "…" : ""}</small> : null}{destinationEvents.filter(event => event.kind === "tool").slice(-3).reverse().map(event => <small key={event.id}>{clock(event.time)} · {scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id} · {short(event.target || "tool", 24)}</small>)}</div>}</section>
+          {showInspector && (inspectedAgent || destination) && <AgentPanel kind={inspectedAgent ? "agent" : "place"} agent={inspectedAgent} place={inspectedAgent ? undefined : destination} palette={palette}
+            context={{agents: visibleAgents, destinations, events: visibleEvents, projectId: currentFocus.projectId, projectName: inspectedAgent ? world?.projects.find(project => project.id === world.projectOf(inspectedAgent))?.name : undefined, palette, onSelectAgent: setSelectedAgent, onSelectPlace: inspectDestination}}
+            projectId={panelProject} widgets={appWidgets} appBlocks={scene?.source.kind === "main"} onClose={closeDetails} onStep={stepSelection} />}
+          {showInspector && !inspectedAgent && !destination && <FloatingPanel title="World details" palette={palette} label="World details" onClose={closeDetails}>
+            <section className="aw-side-destinations"><div className="aw-side-head"><h3>Apps &amp; integrations</h3><span>{inspectorDestinations.length}</span></div><div className="aw-destination-list">{inspectorDestinations.map(item => <button key={item.id} className={`aw-destination-row ${selectedDestination === item.id ? "is-selected" : ""}`} onClick={() => inspectDestination(selectedDestination === item.id ? "" : item.id)}><span className={`aw-destination-icon is-${item.kind}`}>{item.kind === "app" ? "▣" : item.kind === "integration" ? "⌁" : "◇"}</span><span><strong>{item.name}</strong><small>{scene?.scope === "instance" && !currentFocus.projectId ? `${world?.projects.find(project => project.id === item.project_id)?.name || item.project_id || "Source"} · ` : ""}{item.kind} · {item.status}</small></span><em>{item.call_count}</em></button>)}{!inspectorDestinations.length && <div className="aw-plain-empty">No apps or integrations available for this source.</div>}</div></section>
             <section className="aw-side-activity"><div className="aw-side-head"><h3>Activity</h3><span>{live ? "Live feed" : "Replay"}</span></div><div className="aw-activity-list">{inspectorEvents.slice(-10).reverse().map(event => <div key={event.id} className="aw-event"><span className="aw-event-mark" style={{ background: eventColor(event.kind, palette) }} /><div><div className="aw-event-line"><b>{scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id}</b> {event.label}</div><div className="aw-event-meta">{clock(event.time)}{event.thread_id ? ` · ${short(event.thread_id, 18)}` : ""}</div></div></div>)}{!inspectorEvents.length && <div className="aw-plain-empty">Activity appears as agents work.</div>}</div></section>
             <section className="aw-side-agents"><div className="aw-side-head"><h3>Agents</h3><span>{visibleAgents.length}</span></div><div className="aw-agent-list">{visibleAgents.map(agent => <button key={agent.id} onClick={() => setSelectedAgent(agent.id)} className={`aw-agent-row ${selectedAgent === agent.id ? "is-selected" : ""}`}><span className="aw-agent-avatar">{agent.name.slice(0,1).toUpperCase()}</span><span className="aw-agent-name"><strong>{agent.name}</strong><small>{agent.model || agent.main_thread || agent.status}</small></span><span className="aw-agent-status" style={{ background: statusColor(agent.status, palette) }} title={agent.status} /></button>)}{!visibleAgents.length && <div className="aw-plain-empty">No agents in this source</div>}</div></section>
-
-
-          </aside>}
+          </FloatingPanel>}
         </div>
         {!live && <div className="aw-replay"><div><strong>Replay</strong><span>{lastEvent ? clock(lastEvent.time) : "Start"}</span></div><input aria-label="Replay position" type="range" min={0} max={scene?.events.length || 0} value={replayIndex} onChange={event => {
           const cursor = Number(event.target.value); setReplayIndex(cursor);
