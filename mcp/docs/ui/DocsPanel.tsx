@@ -16,6 +16,12 @@ import {
   HTML_LEAD_MAGNET_SETTINGS,
   HTML_LEAD_MAGNET_STARTER,
 } from "./starters";
+import {
+  MODEL_RELEASE_CSS,
+  MODEL_RELEASE_SAMPLE_DATA,
+  MODEL_RELEASE_SETTINGS,
+  MODEL_RELEASE_STARTER,
+} from "./modelRelease";
 
 interface NativePanelProps {
   appName: string;
@@ -363,9 +369,18 @@ function TemplatesView({
     setPreviewDataJSON(JSON.stringify(sampleData, null, 2));
   }, [editing?.body, sampleData, previewDataDirty]);
 
-  const startNew = (starter: "blank" | "lead-magnet" | "html-lead-magnet" = "blank") => {
+  const startNew = (starter: "blank" | "lead-magnet" | "html-lead-magnet" | "model-release" = "blank") => {
     const isHTML = starter === "html-lead-magnet";
-    const next: Template = {
+    const next: Template = starter === "model-release" ? {
+      id: 0,
+      slug: "model-release",
+      name: "Model release",
+      body: MODEL_RELEASE_STARTER,
+      stylesheet: MODEL_RELEASE_CSS,
+      source_format: "html",
+      settings: MODEL_RELEASE_SETTINGS,
+      default_folder: "/model-releases/",
+    } : {
       id: 0,
       slug: "",
       name: isHTML ? "ESP32 Starter Guide" : "",
@@ -376,7 +391,9 @@ function TemplatesView({
       default_folder: isHTML ? "/lead-magnets/" : "",
     };
     setEditing(next);
-    const data = isHTML
+    const data = starter === "model-release"
+      ? MODEL_RELEASE_SAMPLE_DATA
+      : isHTML
       ? HTML_LEAD_MAGNET_SAMPLE_DATA
       : sampleDataForVariables(extractTemplateVariables(next.body || ""));
     setPreviewDataJSON(JSON.stringify(data, null, 2));
@@ -452,6 +469,13 @@ function TemplatesView({
             className="col-span-2 px-2 py-2 text-xs border border-accent/50 text-text rounded hover:bg-bg-input"
           >
             + Professional HTML lead magnet
+          </button>
+          <button
+            type="button"
+            onClick={() => startNew("model-release")}
+            className="col-span-2 px-2 py-2 text-xs border border-border rounded hover:bg-bg-input"
+          >
+            + Model release (for Signatures)
           </button>
         </div>
         <div className="flex-1 overflow-auto border border-border rounded">
