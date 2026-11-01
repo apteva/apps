@@ -75,7 +75,7 @@ func (a *App) toolPaymentMethodsList(ctx *sdk.AppCtx, args map[string]any) (any,
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	out, err := dbPaymentMethodsList(ctx.AppDB(), pid, paymentMethodFilters{
+	out, err := dbPaymentMethodsList(ctx.AppReadDB(), pid, paymentMethodFilters{
 		customerID: int64Arg(args, "customer_id"),
 		status:     strArg(args, "status"),
 		pmType:     strArg(args, "type"),

@@ -455,7 +455,7 @@ func (a *App) handleHTTPInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rawItems, _ := body["line_items"].([]any)
-	catalogCurrency, err := resolveCatalogRefs(ctx, rawItems)
+	catalogCurrency, err := resolveCatalogRefs(ctx, pid, rawItems)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -556,7 +556,7 @@ func (a *App) handleHTTPInvoiceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rawItems, ok := patch["line_items"].([]any); ok {
-		if _, err := resolveCatalogRefs(ctx, rawItems); err != nil {
+		if _, err := resolveCatalogRefs(ctx, pid, rawItems); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -634,7 +634,7 @@ func (a *App) handleHTTPInvoiceAddLineItem(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if _, err := resolveCatalogRefs(ctx, []any{body}); err != nil {
+	if _, err := resolveCatalogRefs(ctx, pid, []any{body}); err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

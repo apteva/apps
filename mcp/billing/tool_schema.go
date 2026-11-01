@@ -367,6 +367,22 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 	}
 
+	// readOnlyHint lets the platform fan a project-granted call out over
+	// several projects (project_id "*"). Mark a tool only when no
+	// argument combination writes: invoices_render_pdf uploads with
+	// save_to_storage, and provider session tools create objects.
+	readOnly := map[string]bool{
+		"payment_processor_public_config": true, "customers_search": true, "customers_get": true,
+		"customers_get_context": true, "invoices_search": true, "invoices_get": true,
+		"invoices_history": true, "payments_list": true, "payment_methods_list": true,
+		"issuer_get": true, "billing_reconciliation_status": true,
+	}
+	for i := range tools {
+		if readOnly[tools[i].Name] {
+			tools[i].Annotations = map[string]any{"readOnlyHint": true}
+		}
+	}
+
 	for i := range tools {
 		h := tools[i].Handler
 		tools[i].Handler = func(ctx *sdk.AppCtx, args map[string]any) (any, error) {

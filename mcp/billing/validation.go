@@ -226,13 +226,14 @@ func validateCatalogCurrency(db *sql.DB, pid string, id int64, lines []any) erro
 	}
 	return nil
 }
-func cachedCatalogCall(api sdk.PlatformClient, cache map[string]map[string]any, tool string, id int64, out *map[string]any) error {
+func cachedCatalogCall(api sdk.PlatformClient, cache map[string]map[string]any, pid, tool string, id int64, out *map[string]any) error {
 	key := fmt.Sprintf("%s:%d", tool, id)
 	if v, ok := cache[key]; ok {
 		*out = v
 		return nil
 	}
-	if err := api.CallAppResult("catalog", tool, map[string]any{"id": id}, out); err != nil {
+	// A global catalog install can't infer the project, so name it.
+	if err := api.CallAppResult("catalog", tool, map[string]any{"_project_id": pid, "id": id}, out); err != nil {
 		return err
 	}
 	cache[key] = *out
