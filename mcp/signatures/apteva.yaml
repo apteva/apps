@@ -2,12 +2,16 @@ schema: apteva-app/v1
 
 name: signatures
 display_name: Signatures
-version: 0.2.4
+version: 0.3.0
 description: |
-  Send PDFs for simple electronic signature. Create an envelope from a
-  Storage file, add ordered recipients and fields, share secure signing
-  links, and save the completed PDF and audit summary back to Storage.
-  Messaging is optional and is used only for invitations and reminders.
+  Send PDFs for electronic signature. Create an envelope from a Storage
+  file, add ordered recipients and fields, share secure signing links,
+  and save the completed PDF and audit summary back to Storage. The
+  completed PDF is digitally sealed with a certification signature, so
+  Acrobat and other PDF readers show it as signed and any later edit
+  invalidates it. Use a configured AATL certificate for automatic trust,
+  or the per-install self-signed seal. Messaging is optional and is used
+  only for invitations and reminders.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/signatures
@@ -69,6 +73,8 @@ provides:
     - { name: signatures_envelopes_void, description: "Void an active envelope. Args: envelope_id, reason?.", requires: signatures.manage, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_finalize, description: "Retry completed-PDF generation after every recipient has finished. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_audit_get, description: "Return the append-only audit timeline for an envelope. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_seal_certificate_get, description: "Describe the certificate that digitally seals completed PDFs (source, subject, issuer, fingerprint, validity, PEM, Acrobat trust note).", requires: signatures.read }
+    - { name: signatures_seal_verify, description: "Check a Storage PDF's digital seal: sealed, intact over every byte, and sealed by this install. Args: file_id.", requires: signatures.read }
 
   publishes:
     - { name: envelope.sent, description: "An envelope was activated for signing." }
@@ -128,5 +134,20 @@ config_schema:
     default: ""
     label: Public URL override
     description: Optional base URL used for signing links. Normally discovered from the platform.
+  - name: seal_certificate
+    type: password
+    default: ""
+    label: Seal certificate
+    description: Certificate used to digitally seal completed PDFs, as a base64-encoded PKCS#12 (.p12/.pfx) file or PEM text with the private key and chain. Use a document-signing certificate on the Adobe Approved Trust List (AATL) so Acrobat shows the seal as trusted with no setup. Leave empty to use a self-signed certificate generated for this install.
+  - name: seal_certificate_password
+    type: password
+    default: ""
+    label: Seal certificate password
+    description: Password for a PKCS#12 seal certificate.
+  - name: timestamp_url
+    type: text
+    default: ""
+    label: Timestamp authority URL
+    description: Optional RFC 3161 timestamp server (for example http://timestamp.digicert.com). Adds a trusted signing time to the seal so it stays verifiable after the certificate expires.
 
 upgrade_policy: auto-patch

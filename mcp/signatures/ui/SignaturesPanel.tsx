@@ -80,6 +80,24 @@ const FIELD_DEFAULTS: Record<Field["field_type"], { width: number; height: numbe
 // demand; the dynamic non-literal import keeps the bundler from
 // inlining ~450KB into the panel bundle.
 let pdfjsPromise: Promise<any> | null = null;
+type SealInfo = {
+  source: "configured" | "self_signed";
+  subject: string;
+  issuer: string;
+  sha256_fingerprint: string;
+  not_after: string;
+  timestamp_url?: string;
+  trust_note: string;
+};
+
+type SealVerification = {
+  sealed: boolean;
+  intact: boolean;
+  signer_subject?: string;
+  matches_this_install_seal: boolean;
+  problems?: string[];
+};
+
 function loadPdfjs(): Promise<any> {
   if (!pdfjsPromise) {
     const entry = new URL("./vendor/pdf.min.mjs", import.meta.url).href;
@@ -102,6 +120,8 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   const [pickedFile, setPickedFile] = useState<StorageFile | null>(null);
   const [recipientDrafts, setRecipientDrafts] = useState<Array<Pick<Recipient, "name" | "email" | "role" | "signing_order">>>([]);
   const [fieldDrafts, setFieldDrafts] = useState<Field[]>([]);
+  const [seal, setSeal] = useState<SealInfo | null>(null);
+  const [showSeal, setShowSeal] = useState(false);
 
   const url = useCallback((path: string) => {
     const sep = path.includes("?") ? "&" : "?";
@@ -235,6 +255,24 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
     setMessage("Envelope voided.");
   });
 
+  const openSeal = () => run(async () => {
+    const data = await request("/seal");
+    setSeal(data.seal);
+    setCreating(false);
+    setShowSeal(true);
+  });
+
+  const verifySeal = () => run(async () => {
+    if (!detail?.completed_file_id) return;
+    const data = await request("/seal/verify", { method: "POST", body: JSON.stringify({ file_id: detail.completed_file_id }) });
+    const result: SealVerification = data.verification;
+    if (result.intact) {
+      setMessage(`Seal intact: every byte is covered by a valid signature from ${result.signer_subject || "the seal"}${result.matches_this_install_seal ? " (this install's seal)" : ""}.`);
+    } else {
+      setMessage(`Seal check failed: ${(result.problems || []).join("; ") || "unknown problem"}.`);
+    }
+  });
+
   const finalize = () => run(async () => {
     if (!detail) return;
     await request(`/envelopes/${detail.id}/finalize`, { method: "POST", body: "{}" });
@@ -246,10 +284,11 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
         <div>
           <h1 className="text-sm font-semibold">Signatures</h1>
-          <p className="text-xs text-text-muted">Send Storage PDFs for simple electronic signature.</p>
+          <p className="text-xs text-text-muted">Send Storage PDFs for electronic signature. Completed PDFs are digitally sealed.</p>
         </div>
         <button type="button" onClick={loadList} className="ml-auto px-3 py-1.5 text-xs border border-border rounded">Refresh</button>
-        <button type="button" onClick={() => setCreating(true)} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
+        <button type="button" onClick={openSeal} className="px-3 py-1.5 text-xs border border-border rounded">Document seal</button>
+        <button type="button" onClick={() => { setShowSeal(false); setCreating(true); }} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
       </header>
 
       {message && <div className="shrink-0 px-4 py-2 text-xs border-b border-border bg-bg-input">{message}</div>}
@@ -260,7 +299,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
             <ul className="divide-y divide-border">
               {envelopes.map((envelope) => (
                 <li key={envelope.id}>
-                  <button type="button" onClick={() => setSelectedId(envelope.id)} className={`w-full text-left p-4 hover:bg-bg-input ${selectedId === envelope.id ? "bg-bg-input" : ""}`}>
+                  <button type="button" onClick={() => { setShowSeal(false); setSelectedId(envelope.id); }} className={`w-full text-left p-4 hover:bg-bg-input ${selectedId === envelope.id ? "bg-bg-input" : ""}`}>
                     <div className="flex gap-2 items-center"><span className="font-medium text-sm truncate">{envelope.title}</span><Status value={envelope.status} /></div>
                     <p className="text-xs text-text-muted mt-1 truncate">{envelope.source_name}</p>
                     <p className="text-xs text-text-dim mt-2">Expires {formatDate(envelope.expires_at)}</p>
@@ -272,7 +311,23 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         </aside>
 
         <section className="min-h-0 overflow-auto p-5">
-          {creating ? (
+          {showSeal && seal ? (
+            <Card title="Document seal" right={<Secondary onClick={() => setShowSeal(false)}>Close</Secondary>}>
+              <div className="grid gap-3 max-w-3xl text-sm">
+                <p className="text-text-muted">Every completed PDF is sealed with a digital certification signature. PDF readers such as Adobe Acrobat show it in the signature panel, and any change to the file breaks it.</p>
+                <div className="grid md:grid-cols-2 gap-3 text-xs">
+                  <div><span className="block text-text-dim">Certificate</span>{seal.source === "configured" ? "Configured certificate" : "Self-signed install certificate"}</div>
+                  <div><span className="block text-text-dim">Subject</span>{seal.subject}</div>
+                  <div><span className="block text-text-dim">Issuer</span>{seal.issuer}</div>
+                  <div><span className="block text-text-dim">Valid until</span>{formatDate(seal.not_after)}</div>
+                  <div><span className="block text-text-dim">Timestamp authority</span>{seal.timestamp_url || "None (signing time from this server)"}</div>
+                  <div className="md:col-span-2"><span className="block text-text-dim">SHA-256 fingerprint</span><span className="font-mono break-all">{seal.sha256_fingerprint}</span></div>
+                </div>
+                <p className="text-xs text-text-muted">{seal.trust_note}</p>
+                <div><a className="inline-block px-3 py-1.5 text-xs border border-border rounded" href={url("/seal/certificate.cer")} download="signatures-seal.cer">Download certificate</a></div>
+              </div>
+            </Card>
+          ) : creating ? (
             <Card title="New envelope">
               <div className="grid gap-3 max-w-2xl">
                 <FilePicker projectId={projectId} picked={pickedFile} onPick={setPickedFile} onError={setMessage} />
@@ -296,6 +351,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                   {detail.status === "sent" && currentRecipient && <><Primary onClick={copyLink} disabled={busy}>Copy signing link</Primary>{currentRecipient.email && <Secondary onClick={remind} disabled={busy}>Send reminder</Secondary>}</>}
                   {detail.status === "sent" && !currentRecipient && <Secondary onClick={finalize} disabled={busy}>Retry finalization</Secondary>}
                   {(detail.status === "draft" || detail.status === "sent") && <Secondary onClick={voidEnvelope} disabled={busy}>Void</Secondary>}
+                  {detail.completed_file_id && <Secondary onClick={verifySeal} disabled={busy}>Verify seal</Secondary>}
                   {detail.completed_file_id && <span className="text-xs text-text-muted self-center">Completed file {detail.completed_file_id} · audit file {detail.audit_file_id}</span>}
                 </div>
               </Card>

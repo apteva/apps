@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,12 +20,18 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatal(err)
 	}
-	migration, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("migrations: %v", err)
 	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, file := range files {
+		migration, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
 	}
 	t.Cleanup(func() { db.Close() })
 	return db

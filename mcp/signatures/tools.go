@@ -61,6 +61,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			"envelope_id": sInteger(),
 		}, "envelope_id"), Handler: a.toolEnvelopeFinalize},
 		{Name: "signatures_audit_get", Description: "Return an envelope's append-only audit timeline.", InputSchema: schemaObject(map[string]any{"envelope_id": sInteger()}, "envelope_id"), Handler: a.toolAuditGet},
+		{Name: "signatures_seal_certificate_get", Description: "Describe the certificate that digitally seals completed PDFs: source (configured or self_signed), subject, issuer, SHA-256 fingerprint, validity, PEM, and how Acrobat will treat it.", InputSchema: schemaObject(map[string]any{}), Handler: a.toolSealCertificateGet},
+		{Name: "signatures_seal_verify", Description: "Check the digital seal of a PDF in Storage: whether it is sealed, whether every byte is still covered by an intact signature, and whether it was sealed by this install.", InputSchema: schemaObject(map[string]any{"file_id": sInteger()}, "file_id"), Handler: a.toolSealVerify},
 	}
 }
 
@@ -275,4 +277,29 @@ func (a *App) toolAuditGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"events": events}, nil
+}
+
+func (a *App) toolSealCertificateGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"seal": seal.info(ctx)}, nil
+}
+
+func (a *App) toolSealVerify(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	fileID := int64Arg(args, "file_id")
+	if fileID == 0 {
+		return nil, errors.New("file_id required")
+	}
+	file, body, err := storageDownload(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := verifySealedPDF(body, seal)
+	return map[string]any{"file_id": file.ID, "file_name": file.Name, "sha256": bytesHash(body), "verification": result}, nil
 }

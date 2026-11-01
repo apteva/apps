@@ -39,7 +39,7 @@ func TestRenderCompletedPDFStampsDrawnSignature(t *testing.T) {
 		Field:     Field{ID: 1, FieldType: "signature", Page: 1, X: .55, Y: .72, Width: .3, Height: .08},
 		ValueText: drawnSignatureFixture(t), RecipientName: "Ada Lovelace", SignedAt: nowUTC(),
 	}}
-	out, err := renderCompletedPDF(source.Bytes(), env, recipients, values)
+	out, err := renderCompletedPDF(source.Bytes(), env, recipients, values, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRenderCompletedPDFAddsFieldsAndCertificate(t *testing.T) {
 		Field:     Field{ID: 1, FieldType: "signature", Page: 1, X: .55, Y: .72, Width: .3, Height: .08},
 		ValueText: "Ada Lovelace", RecipientName: "Ada Lovelace", SignedAt: nowUTC(),
 	}}
-	out, err := renderCompletedPDF(source.Bytes(), env, recipients, values)
+	out, err := renderCompletedPDF(source.Bytes(), env, recipients, values, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -127,3 +127,66 @@ func queryInt(r *http.Request, key string, fallback int) int {
 	}
 	return n
 }
+
+func (a *App) handleSeal(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	out, err := a.toolSealCertificateGet(ctx, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleSealCertificate serves the seal certificate as DER, the format
+// Acrobat's "Import" in Trusted Certificates expects.
+func (a *App) handleSealCertificate(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/pkix-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="signatures-seal.cer"`)
+	_, _ = w.Write(seal.Certificate.Raw)
+}
+
+func (a *App) handleSealVerify(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	args, err := requestArgs(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := a.toolSealVerify(ctx, args)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
