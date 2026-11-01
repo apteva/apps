@@ -7,7 +7,8 @@ sealed completed PDF.
 
 - Creates one-document envelopes from a Storage PDF — picked or uploaded
   straight from the dashboard panel.
-- Supports ordered signers and approvers.
+- Supports signers and approvers who sign in parallel (same `signing_order`,
+  like DocuSign) or in sequence (since v0.4).
 - Visual field placement: the panel renders the PDF (vendored pdf.js) and
   fields are dragged/resized on the page; coordinates stay normalized 0–1.
 - The signing page renders the document with each recipient's field boxes
@@ -36,8 +37,11 @@ draft -> sent -> completed
              -> declined | voided | expired
 ```
 
-Recipients sign sequentially. Only the current recipient can have an active
-link. Generating a new link revokes the previous one.
+Recipients with the same `signing_order` form one round and sign in parallel:
+each gets its own link at once, and the next round starts when all of them have
+finished. Distinct orders must run 1, 2, 3… Only recipients in the current
+round can have an active link. Generating a new link revokes that recipient's
+previous one.
 
 ## Local development
 
@@ -90,5 +94,5 @@ PAdES baseline profiles (it uses the `adbe.pkcs7.detached` sub-filter),
 notarization, identity verification, or legal validity for every transaction
 or jurisdiction.
 
-Parallel routing, reusable templates, automatic scheduled reminders, provider
+Reusable templates, automatic scheduled reminders, provider
 adapters, and long-term-validation (DSS/LTV) data are later additions.

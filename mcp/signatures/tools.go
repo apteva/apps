@@ -36,7 +36,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, "envelope_id"), Handler: a.toolEnvelopeUpdate},
 		{Name: "signatures_envelopes_get", Description: "Get an envelope with recipients and fields.", InputSchema: schemaObject(map[string]any{"envelope_id": sInteger()}, "envelope_id"), Handler: a.toolEnvelopeGet},
 		{Name: "signatures_envelopes_list", Description: "List envelopes.", InputSchema: schemaObject(map[string]any{"status": sString(), "limit": sInteger()}), Handler: a.toolEnvelopeList},
-		{Name: "signatures_recipients_set", Description: "Replace a draft envelope's ordered recipients.", InputSchema: schemaObject(map[string]any{
+		{Name: "signatures_recipients_set", Description: "Replace a draft envelope's recipients. Recipients sharing a signing_order sign at the same time; distinct orders run in sequence.", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "recipients": map[string]any{"type": "array", "items": recipientItem},
 		}, "envelope_id", "recipients"), Handler: a.toolRecipientsSet},
 		{Name: "signatures_fields_set", Description: "Replace a draft envelope's fields.", InputSchema: schemaObject(map[string]any{
@@ -48,7 +48,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "signatures_envelopes_send", Description: "Freeze and activate a draft envelope.", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "delivery_mode": map[string]any{"type": "string", "enum": []string{"manual", "messaging"}}, "idempotency_key": sString(),
 		}, "envelope_id", "delivery_mode"), Handler: a.toolEnvelopeSend},
-		{Name: "signatures_recipient_link_create", Description: "Generate or rotate the current recipient's signing link.", InputSchema: schemaObject(map[string]any{
+		{Name: "signatures_recipient_link_create", Description: "Generate or rotate an active recipient's signing link (every recipient in the current signing_order group is active).", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "recipient_id": sInteger(),
 		}, "envelope_id", "recipient_id"), Handler: a.toolRecipientLinkCreate},
 		{Name: "signatures_envelopes_remind", Description: "Send a reminder through optional Messaging.", InputSchema: schemaObject(map[string]any{
@@ -188,18 +188,20 @@ func (a *App) toolEnvelopeSend(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if valid, _ := result["valid"].(bool); !valid {
 		return nil, fmt.Errorf("envelope is not ready: %v", result["errors"])
 	}
-	env, recipient, err := activateEnvelope(ctx.AppDB(), ctx.CurrentProject(), envelopeID, deliveryMode, idempotencyKey)
+	env, active, err := activateEnvelope(ctx.AppDB(), ctx.CurrentProject(), envelopeID, deliveryMode, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}
 	emit(ctx, "envelope.sent", env, 0)
-	if deliveryMode == "messaging" && recipient != nil {
-		_, _, token, err := createRecipientToken(ctx.AppDB(), env.ProjectID, env.ID, recipient.ID)
-		if err != nil {
-			return nil, fmt.Errorf("envelope activated but signing link creation failed: %w", err)
-		}
-		if err := sendInvitation(ctx, env, recipient, token, false); err != nil {
-			return nil, fmt.Errorf("envelope activated but invitation delivery failed: %w", err)
+	if deliveryMode == "messaging" {
+		for i := range active {
+			_, _, token, err := createRecipientToken(ctx.AppDB(), env.ProjectID, env.ID, active[i].ID)
+			if err != nil {
+				return nil, fmt.Errorf("envelope activated but signing link creation failed: %w", err)
+			}
+			if err := sendInvitation(ctx, env, &active[i], token, false); err != nil {
+				return nil, fmt.Errorf("envelope activated but invitation delivery failed: %w", err)
+			}
 		}
 	}
 	detail, err := getEnvelopeDetail(ctx.AppDB(), ctx.CurrentProject(), envelopeID, false)

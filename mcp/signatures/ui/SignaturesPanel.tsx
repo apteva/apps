@@ -120,6 +120,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   const [pickedFile, setPickedFile] = useState<StorageFile | null>(null);
   const [recipientDrafts, setRecipientDrafts] = useState<Array<Pick<Recipient, "name" | "email" | "role" | "signing_order">>>([]);
   const [fieldDrafts, setFieldDrafts] = useState<Field[]>([]);
+  const [signTogether, setSignTogether] = useState(false);
   const [seal, setSeal] = useState<SealInfo | null>(null);
   const [showSeal, setShowSeal] = useState(false);
 
@@ -166,6 +167,8 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         role: recipient.role,
         signing_order: recipient.signing_order,
       })));
+      const loaded = envelope.recipients || [];
+      setSignTogether(loaded.length > 1 && loaded.every((recipient) => recipient.signing_order === loaded[0].signing_order));
       setFieldDrafts((envelope.fields || []).map((field) => ({ ...field })));
     } catch (error) {
       setMessage((error as Error).message);
@@ -175,8 +178,12 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => { loadDetail(selectedId); }, [loadDetail, selectedId]);
 
+  const activeRecipients = useMemo(
+    () => (detail?.recipients || []).filter((recipient) => recipient.status === "ready" || recipient.status === "viewed"),
+    [detail],
+  );
   const currentRecipient = useMemo(
-    () => detail?.recipients?.find((recipient) => recipient.status === "ready" || recipient.status === "viewed") || null,
+    () => activeRecipients[0] || null,
     [detail],
   );
 
@@ -216,7 +223,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
     if (!detail) return;
     await request(`/envelopes/${detail.id}/recipients`, {
       method: "POST",
-      body: JSON.stringify({ recipients: recipientDrafts.map((recipient, index) => ({ ...recipient, signing_order: index + 1 })) }),
+      body: JSON.stringify({ recipients: recipientDrafts.map((recipient, index) => ({ ...recipient, signing_order: signTogether ? 1 : index + 1 })) }),
     });
     setMessage("Recipients saved. Existing fields were cleared because recipient IDs changed.");
   });
@@ -233,19 +240,19 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
       method: "POST",
       body: JSON.stringify({ delivery_mode, idempotency_key: crypto.randomUUID() }),
     });
-    setMessage(delivery_mode === "manual" ? "Envelope activated. Copy the current recipient link next." : "Envelope activated and invitation requested.");
+    setMessage(delivery_mode === "manual" ? "Envelope activated. Copy each active recipient's link next." : "Envelope activated and invitation requested.");
   });
 
-  const copyLink = () => run(async () => {
-    if (!detail || !currentRecipient) return;
-    const data = await request(`/envelopes/${detail.id}/link`, { method: "POST", body: JSON.stringify({ recipient_id: currentRecipient.id }) });
+  const copyLink = (recipient: Recipient) => run(async () => {
+    if (!detail) return;
+    const data = await request(`/envelopes/${detail.id}/link`, { method: "POST", body: JSON.stringify({ recipient_id: recipient.id }) });
     await navigator.clipboard.writeText(data.url);
-    setMessage("A new signing link was copied. Any previous link for this recipient was revoked.");
+    setMessage(`A new signing link for ${recipient.name} was copied. Any previous link for this recipient was revoked.`);
   });
 
-  const remind = () => run(async () => {
-    if (!detail || !currentRecipient) return;
-    await request(`/envelopes/${detail.id}/remind`, { method: "POST", body: JSON.stringify({ recipient_id: currentRecipient.id }) });
+  const remind = (recipient: Recipient) => run(async () => {
+    if (!detail) return;
+    await request(`/envelopes/${detail.id}/remind`, { method: "POST", body: JSON.stringify({ recipient_id: recipient.id }) });
     setMessage("Reminder requested through Messaging.");
   });
 
@@ -348,7 +355,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                 {detail.message && <p className="mt-3 text-sm">{detail.message}</p>}
                 <div className="mt-4 flex flex-wrap gap-2">
                   {detail.status === "draft" && <><Primary onClick={() => send("manual")} disabled={busy}>Send manually</Primary><Secondary onClick={() => send("messaging")} disabled={busy}>Send with Messaging</Secondary></>}
-                  {detail.status === "sent" && currentRecipient && <><Primary onClick={copyLink} disabled={busy}>Copy signing link</Primary>{currentRecipient.email && <Secondary onClick={remind} disabled={busy}>Send reminder</Secondary>}</>}
+                  {detail.status === "sent" && activeRecipients.map((recipient) => <span key={recipient.id} className="flex gap-2"><Primary onClick={() => copyLink(recipient)} disabled={busy}>{activeRecipients.length > 1 ? `Copy link: ${recipient.name}` : "Copy signing link"}</Primary>{recipient.email && <Secondary onClick={() => remind(recipient)} disabled={busy}>Send reminder</Secondary>}</span>)}
                   {detail.status === "sent" && !currentRecipient && <Secondary onClick={finalize} disabled={busy}>Retry finalization</Secondary>}
                   {(detail.status === "draft" || detail.status === "sent") && <Secondary onClick={voidEnvelope} disabled={busy}>Void</Secondary>}
                   {detail.completed_file_id && <Secondary onClick={verifySeal} disabled={busy}>Verify seal</Secondary>}
@@ -367,6 +374,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                       <button type="button" onClick={() => setRecipientDrafts(recipientDrafts.filter((_, i) => i !== index))}>×</button>
                     </div>
                   ))}
+                  <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={signTogether} onChange={(event) => setSignTogether(event.target.checked)} /> Everyone signs at the same time (otherwise in the order listed)</label>
                   <div><Primary onClick={saveRecipients} disabled={busy || recipientDrafts.length === 0}>Save recipients</Primary></div>
                 </div>
               </Card>}

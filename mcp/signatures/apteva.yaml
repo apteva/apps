@@ -2,10 +2,11 @@ schema: apteva-app/v1
 
 name: signatures
 display_name: Signatures
-version: 0.3.0
+version: 0.4.0
 description: |
   Send PDFs for electronic signature. Create an envelope from a Storage
-  file, add ordered recipients and fields, share secure signing links,
+  file, add recipients who sign together or in order, share secure
+  signing links,
   and save the completed PDF and audit summary back to Storage. The
   completed PDF is digitally sealed with a certification signature, so
   Acrobat and other PDF readers show it as signed and any later edit
@@ -64,11 +65,11 @@ provides:
     - { name: signatures_envelopes_update, description: "Update a draft envelope. Args: envelope_id and any of title, sender_name, message, expires_at.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_get, description: "Get one envelope with recipients and fields. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_list, description: "List envelopes. Args: status?, limit?.", requires: signatures.read }
-    - { name: signatures_recipients_set, description: "Replace a draft envelope's ordered recipients. Args: envelope_id, recipients[].", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_recipients_set, description: "Replace a draft envelope's recipients. Args: envelope_id, recipients[] (name, email?, role, signing_order). Recipients sharing a signing_order sign at the same time, like DocuSign; distinct orders run 1, 2, 3…", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_fields_set, description: "Replace a draft envelope's PDF fields. Args: envelope_id, fields[].", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_validate, description: "Validate that a draft is ready to send. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_send, description: "Freeze and activate an envelope. Args: envelope_id, delivery_mode (manual|messaging), idempotency_key?.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
-    - { name: signatures_recipient_link_create, description: "Generate or rotate a secure link for the current recipient. Args: envelope_id, recipient_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_recipient_link_create, description: "Generate or rotate a secure link for an active recipient (anyone in the current signing_order group). Args: envelope_id, recipient_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_remind, description: "Send a reminder through optional Messaging. Args: envelope_id, recipient_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_void, description: "Void an active envelope. Args: envelope_id, reason?.", requires: signatures.manage, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_finalize, description: "Retry completed-PDF generation after every recipient has finished. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }

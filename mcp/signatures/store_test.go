@@ -66,12 +66,15 @@ func TestSequentialSigningAndTokenRevocation(t *testing.T) {
 	if errs := validateEnvelope(db, "project-a", env.ID, 1, "manual"); len(errs) != 0 {
 		t.Fatalf("unexpected validation errors: %v", errs)
 	}
-	env, current, err := activateEnvelope(db, "project-a", env.ID, "manual", "send-1")
+	env, active, err := activateEnvelope(db, "project-a", env.ID, "manual", "send-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.Status != "sent" || current == nil || current.ID != recipients[0].ID {
-		t.Fatalf("unexpected activation: env=%+v current=%+v", env, current)
+	if env.Status != "sent" || len(active) != 1 || active[0].ID != recipients[0].ID {
+		t.Fatalf("unexpected activation: env=%+v active=%+v", env, active)
+	}
+	if _, _, _, err := createRecipientToken(db, "project-a", env.ID, recipients[1].ID); err == nil {
+		t.Fatal("second sequential signer received a link before the first signed")
 	}
 
 	_, _, tokenOne, err := createRecipientToken(db, "project-a", env.ID, recipients[0].ID)
@@ -86,7 +89,7 @@ func TestSequentialSigningAndTokenRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if finalize || next == nil || next.ID != recipients[1].ID || completedRecipient.Status != "signed" {
+	if finalize || len(next) != 1 || next[0].ID != recipients[1].ID || completedRecipient.Status != "signed" {
 		t.Fatalf("unexpected first completion: finalize=%v next=%+v recipient=%+v", finalize, next, completedRecipient)
 	}
 	if stale, _ := sessionByToken(db, tokenOne); stale != nil {
@@ -104,7 +107,7 @@ func TestSequentialSigningAndTokenRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !finalize || next != nil {
+	if !finalize || len(next) != 0 {
 		t.Fatalf("last recipient should trigger finalization: finalize=%v next=%+v", finalize, next)
 	}
 }
@@ -159,5 +162,89 @@ func TestValidationRequiresSignatureForEachSigner(t *testing.T) {
 	errs := validateEnvelope(db, "project-a", env.ID, 1, "manual")
 	if len(errs) != 1 {
 		t.Fatalf("expected one validation error, got %v", errs)
+	}
+}
+
+func TestParallelSigningGroup(t *testing.T) {
+	db := testDB(t)
+	env, err := createEnvelope(db, "project-a", StorageFile{ID: 45, Name: "release.pdf", ContentType: "application/pdf"}, "source-hash", "Model release", "Studio", "", time.Now().UTC().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipients, err := setRecipients(db, "project-a", env.ID, []map[string]any{
+		{"name": "Model", "role": "signer", "signing_order": 1},
+		{"name": "Producer", "role": "signer", "signing_order": 1},
+		{"name": "Counsel", "role": "approver", "signing_order": 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := setFields(db, "project-a", env.ID, []map[string]any{
+		{"recipient_id": recipients[0].ID, "field_type": "signature", "page": 1, "x": .1, "y": .1, "width": .3, "height": .05},
+		{"recipient_id": recipients[1].ID, "field_type": "signature", "page": 1, "x": .1, "y": .3, "width": .3, "height": .05},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, active, err := activateEnvelope(db, "project-a", env.ID, "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("both first-group signers should be active, got %+v", active)
+	}
+	_, _, modelToken, err := createRecipientToken(db, "project-a", env.ID, recipients[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, producerToken, err := createRecipientToken(db, "project-a", env.ID, recipients[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := createRecipientToken(db, "project-a", env.ID, recipients[2].ID); err == nil {
+		t.Fatal("second-group approver received a link early")
+	}
+	// The producer finishes first; the group is not done, nothing advances.
+	_, _, next, finalize, err := completeRecipient(db, producerToken, "Pat Producer", map[int64]string{fields[1].ID: "Pat Producer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalize || len(next) != 0 {
+		t.Fatalf("group still signing: finalize=%v next=%+v", finalize, next)
+	}
+	if session, _ := sessionByToken(db, modelToken); session == nil {
+		t.Fatal("model link stopped working after the producer signed")
+	}
+	_, _, next, finalize, err = completeRecipient(db, modelToken, "Mo Model", map[int64]string{fields[0].ID: "Mo Model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalize || len(next) != 1 || next[0].ID != recipients[2].ID {
+		t.Fatalf("group done should activate the approver: finalize=%v next=%+v", finalize, next)
+	}
+	_, _, approverToken, err := createRecipientToken(db, "project-a", env.ID, recipients[2].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, next, finalize, err = completeRecipient(db, approverToken, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !finalize || len(next) != 0 {
+		t.Fatalf("last group should finalize: finalize=%v next=%+v", finalize, next)
+	}
+}
+
+func TestSigningOrderGroupsMustBeContiguous(t *testing.T) {
+	db := testDB(t)
+	env, err := createEnvelope(db, "project-a", StorageFile{ID: 46, Name: "x.pdf", ContentType: "application/pdf"}, "h", "X", "", "", time.Now().UTC().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setRecipients(db, "project-a", env.ID, []map[string]any{{"name": "A", "signing_order": 1}, {"name": "B", "signing_order": 3}}); err == nil {
+		t.Fatal("gap in signing_order accepted")
+	}
+	if _, err := setRecipients(db, "project-a", env.ID, []map[string]any{{"name": "A", "signing_order": 2}, {"name": "B", "signing_order": 2}}); err == nil {
+		t.Fatal("group not starting at 1 accepted")
 	}
 }
