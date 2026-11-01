@@ -64,6 +64,9 @@ func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
 	if d.cfg.AndroidDriver != "" && d.cfg.AndroidDriver != "adb" && d.cfg.AndroidDriver != "appium" {
 		return nil, errors.New("android_driver must be adb or appium")
 	}
+	if d.cfg.IOSDriver != "" && d.cfg.IOSDriver != "native" && d.cfg.IOSDriver != "appium" {
+		return nil, errors.New("ios_driver must be native or appium")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &engine{db: db, drivers: d, backend: d, recordBackend: d, dataDir: dataDir, ctx: ctx, cancel: cancel, gates: map[string]*deviceGate{}, runs: map[string]context.CancelFunc{}, recorders: map[string]*activeRecording{}}
 	// Driver sessions may outlive the sidecar. Recover them under the same
@@ -108,6 +111,7 @@ func (e *engine) Shutdown() {
 	e.mu.Unlock()
 	e.opWG.Wait()
 	e.wg.Wait()
+	defer e.drivers.stopRunners()
 	sessions, err := e.allActive()
 	if err != nil {
 		return

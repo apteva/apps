@@ -254,6 +254,9 @@ func (d *drivers) openLink(ctx context.Context, s Session, link, app string) err
 	if !appIDPattern.MatchString(app) {
 		return problem("invalid_argument", "open_url needs the app that handles the link")
 	}
+	if s.Device.Driver == driverXCTest {
+		return d.xctestOpenLink(ctx, s, link, app)
+	}
 	if s.Device.Driver == "adb" {
 		out, err := d.shell(ctx, s.Device.UDID, "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", link, "-p", app)
 		if err == nil && (strings.Contains(string(out), "Error") || strings.Contains(string(out), "Exception")) {
@@ -382,8 +385,12 @@ func (d *drivers) waitForElement(ctx context.Context, s Session, ms []matcher, t
 	}
 }
 
-// tapPoint taps source coordinates: device pixels for ADB, points for Appium.
+// tapPoint taps source coordinates: device pixels for ADB, points for Appium
+// and the native iOS runner.
 func (d *drivers) tapPoint(ctx context.Context, s Session, x, y int) error {
+	if s.Device.Driver == driverXCTest {
+		return d.xctestTapPoint(ctx, s, x, y)
+	}
 	if s.Device.Driver == "adb" {
 		_, err := d.shell(ctx, s.Device.UDID, "input", "tap", strconv.Itoa(x), strconv.Itoa(y))
 		return err

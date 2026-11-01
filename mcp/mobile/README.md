@@ -14,6 +14,7 @@ through the normal app-to-app bridge when integrations are added separately.
 |---|---|---|---|---|
 | Android ADB | Automatic, USB or already-paired Wi-Fi | Screenshot, tap, swipe, ASCII text, keys, Chrome URL opening | Native UI source only | APK |
 | Android Appium / UiAutomator2 | ADB discovery or configured inventory | Screenshot, touch actions, focused-field text, keys | Native elements, browser sessions, contexts | APK, Appium on the same runner |
+| iOS native (Xcode on the Mac running Mobile) | Automatic: USB or Wi-Fi paired iPhones/iPads via devicectl, and booted iOS Simulators | Screenshot, tap, swipe, long press, Unicode text, home/enter, Safari and deep links | Native UI source, tap by accessibility id or label | Device-signed IPA; `.app` bundles on Simulators |
 | iOS Appium / XCUITest | Configured inventory | Screenshot, touch actions, focused-field text, home, Safari URL opening | Native elements, Safari sessions, contexts | Device-signed IPA, Appium on the same Mac |
 
 ADB text is limited to printable ASCII excluding `%`; use Appium for Unicode.
@@ -34,11 +35,12 @@ test authoring, run history, and per-step screenshots. Live view is
 |---|---|---|
 | `standard` | `adb screenrecord`, joined across its 170 s limit (needs ffmpeg past 170 s). No audio. | Appium `start/stop_recording_screen` (ffmpeg on the Appium host). No audio. |
 | `high` | scrcpy 2.1+ on the runner: full resolution, audio on Android 11+. | USB capture on the Mac running Mobile, the path QuickTime uses: full resolution, up to 60 fps, with audio. |
+| Simulator | — | `simctl io recordVideo`: full resolution H.264, no audio (both qualities). |
 
 Emulator/simulator booting, building/signing apps, cloud device providers,
 network traces, and deployment gates are not part of this release.
-Already-running Android emulators can be discovered, but Mobile does not own
-their boot/shutdown lifecycle. No simulator-specific iOS artifacts are accepted.
+Already-running Android emulators and booted iOS Simulators are discovered,
+but Mobile does not own their boot/shutdown lifecycle.
 
 ## Build and test
 
@@ -75,9 +77,43 @@ USB is a convenient starting point. Paired wireless ADB works too; Mobile uses
 the existing ADB connection and does not pair devices or expose ADB to the
 network. See the [Android ADB documentation](https://developer.android.com/tools/adb).
 
-## iOS / Appium setup
+## iOS native setup (no Appium)
 
-Use a Mac with Xcode for the supported iOS runner configuration. Prepare
+With `ios_driver=native` (the default) on a Mac with Xcode 15+, Mobile lists
+connected iPhones/iPads (`xcrun devicectl`) and booted Simulators (`simctl`) on
+its own. Touch input, typing, the UI tree and screenshots go through a small
+XCUITest bundle shipped in `runner/`: on the first session for a device Mobile
+builds it with `xcodebuild`, installs it and keeps it running, reaching it over
+usbmuxd (devices) or loopback (Simulators). Later sessions reuse the warm
+runner. If opening a session returns `setup_in_progress`, the build is still
+running; open again in a minute.
+
+One-time steps Apple requires for a physical device:
+
+1. Sign in to an Apple ID under Xcode > Settings > Accounts. A free account
+   works (its runner signature lasts 7 days; Mobile rebuilds when needed). The
+   team comes from the Apple Development certificate in the keychain, or set
+   `ios_team_id`.
+2. Connect the device, unlock it and tap Trust.
+3. Enable Developer Mode (Settings > Privacy & Security > Developer Mode) and
+   restart the device.
+4. Free accounts only: after the first install, trust the developer app under
+   Settings > General > VPN & Device Management.
+
+Simulators need none of this. Errors from these steps come back as
+`setup_required` with the step to take. The runner listens on device port
+22087 and is reachable only through the Mac's USB mux. Mobile must run outside
+any sandbox that blocks `xcodebuild` from reaching `testmanagerd`.
+
+The opt-in end-to-end test drives a booted Simulator through the real runner:
+
+```sh
+MOBILE_IOS_E2E=1 GOWORK=off go test -run TestNativeIOSEndToEnd -v .
+```
+
+## iOS through Appium (optional)
+
+Set `ios_driver=appium` to use Appium instead. Use a Mac with Xcode for the supported iOS runner configuration. Prepare
 Appium and its XCUITest driver, trust the phone, enable Developer Mode/UI
 automation, and configure a valid signing/provisioning profile for
 WebDriverAgent. Safari structured automation also needs Web Inspector and

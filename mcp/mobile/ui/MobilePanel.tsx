@@ -210,7 +210,7 @@ export default function MobilePanel({ projectId }: Props) {
               <span className="text-sm text-text font-medium truncate flex-1">{d.name}</span>
               <Status value={d.state} />
             </div>
-            <div className="text-xs text-text-muted mt-1">{d.platform === "ios" ? "iOS" : "Android"} · {d.physical ? "Physical" : "Virtual"} · {d.driver === "adb" ? "ADB" : "Appium"}</div>
+            <div className="text-xs text-text-muted mt-1">{d.platform === "ios" ? "iOS" : "Android"} · {d.physical ? "Physical" : "Virtual"} · {d.driver === "adb" ? "ADB" : d.driver === "xctest" ? "Native iOS" : "Appium"}</div>
             {d.hint && <p className="text-xs text-warn mt-1">{d.hint}</p>}
           </button>)}
 
@@ -469,22 +469,23 @@ export default function MobilePanel({ projectId }: Props) {
           </section>
           <section className="space-y-3">
             <h2 className={sectionTitleClass}>iPhone</h2>
-            <ol className="list-decimal pl-5 text-sm text-text-muted space-y-2"><li>Prepare a Mac with Xcode and Appium’s XCUITest driver.</li><li>Trust the computer and enable Developer Mode.</li><li>Configure signed WebDriverAgent and Safari automation.</li><li>Set appium_url and register the UDID in devices_json.</li></ol>
-            <p className="text-xs text-text-dim">Native apps need a device-compatible signed IPA.</p>
+            <ol className="list-decimal pl-5 text-sm text-text-muted space-y-2"><li>Run Mobile on a Mac with Xcode, and sign in to your Apple ID under Xcode › Settings › Accounts (a free account works).</li><li>Connect the iPhone, unlock it and tap Trust.</li><li>Turn on Developer Mode (Settings › Privacy & Security), then restart the phone.</li><li>Refresh Devices and open a session. The first one builds and installs Mobile’s test runner, which takes a minute or two.</li></ol>
+            <p className="text-xs text-text-dim">Free Apple IDs: trust the runner once under Settings › General › VPN & Device Management. Booted iOS Simulators appear automatically. Appium remains available with ios_driver=appium.</p>
           </section>
         </div>
         <section className="border-t border-border pt-5 space-y-3">
           <h2 className={sectionTitleClass}>Screen recording</h2>
           <ul className="list-disc pl-5 text-sm text-text-muted space-y-2">
             <li>Android standard quality uses adb. Install scrcpy 2.1+ for full-resolution recording with audio (Android 11+).</li>
-            <li>iPhone standard quality uses Appium (ffmpeg on the Appium host). High quality captures over USB on the Mac running Mobile, with audio. Allow Camera access for that app the first time.</li>
+            <li>iPhone recording captures over USB on the Mac running Mobile, with audio. Allow Camera access for that app the first time. Appium setups can also record standard quality.</li>
+            <li>iOS Simulators record at full resolution without audio, handy for store previews at exact device sizes.</li>
             <li>Install ffmpeg on the runner to export clips and read video details. Runner copies are kept for 7 days; Storage copies in /.mobile/ stay.</li>
           </ul>
         </section>
         <section className="border-t border-border pt-5 space-y-3">
           <h2 className={sectionTitleClass}>Runner diagnostics</h2>
           {diagnostics.map((hint, i) => <p className="text-sm text-text-muted" key={i}>{hint}</p>)}
-          <p className="text-xs text-text-dim">Configure runner_url, runner_token, appium_url, devices_json and the artifact directory in the app’s settings. Runner commands and examples are in the app README.</p>
+          <p className="text-xs text-text-dim">Configure runner_url, runner_token, ios_team_id, appium_url, devices_json and the artifact directory in the app’s settings. Runner commands and examples are in the app README.</p>
         </section>
         <p className="border-t border-border pt-4 text-xs text-text-dim">Use dedicated test devices and accounts. Phones retain application state. Live view uses screenshot polling.</p>
       </div>

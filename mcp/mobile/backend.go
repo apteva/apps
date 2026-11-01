@@ -29,6 +29,8 @@ type runnerConfig struct {
 	AppiumURL     string
 	DevicesJSON   string
 	AndroidDriver string
+	IOSDriver     string
+	IOSTeamID     string
 	ArtifactDir   string
 	LockDir       string
 	ToolDir       string
@@ -73,6 +75,7 @@ type drivers struct {
 	command  commandFunc
 	http     *http.Client
 	helperMu sync.Mutex
+	ios      iosRunners
 }
 
 func newDrivers(cfg runnerConfig) *drivers {
@@ -114,7 +117,7 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 					v.Driver = "adb"
 				}
 			}
-			if v.Driver != "adb" && v.Driver != "appium" || v.Platform == "ios" && v.Driver != "appium" {
+			if v.Driver != "adb" && v.Driver != "appium" || v.Platform == "ios" && v.Driver != "appium" && v.Driver != driverXCTest || v.Platform == "android" && v.Driver == driverXCTest {
 				return nil, nil, problem("invalid_configuration", "unsupported device driver")
 			}
 			v.State = "configured"
@@ -122,6 +125,10 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 			if v.Driver == "appium" && d.cfg.AppiumURL == "" {
 				v.State = "setup_required"
 				v.Hint = "Configure appium_url and prepare the device on that Appium host."
+			}
+			if v.Driver == driverXCTest && !d.nativeIOS() {
+				v.State = "setup_required"
+				v.Hint = "The native iOS driver needs Mobile running on a Mac with Xcode."
 			}
 		}
 	}
@@ -170,10 +177,22 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 			devices = append(devices, v)
 		}
 	}
-	if d.cfg.AppiumURL != "" {
+	if d.nativeIOS() {
+		taken := map[string]bool{}
+		for _, v := range devices {
+			taken[v.ID] = true
+			if v.Platform == "ios" {
+				taken["ios:"+v.UDID] = true
+				taken["ios-sim:"+v.UDID] = true
+			}
+		}
+		found, diag := d.iosDevices(ctx, taken)
+		devices = append(devices, found...)
+		diagnostics = append(diagnostics, diag...)
+	} else if d.cfg.AppiumURL != "" {
 		diagnostics = append(diagnostics, "iOS and remote Appium devices must be registered in devices_json. iOS requires a prepared device and signed WebDriverAgent; use a Mac/Xcode runner for the supported setup.")
 	} else {
-		diagnostics = append(diagnostics, "Set appium_url and devices_json to enable iOS or structured Android automation.")
+		diagnostics = append(diagnostics, "Run Mobile on a Mac with Xcode for native iOS control, or set appium_url and devices_json for iOS through Appium.")
 	}
 	return devices, diagnostics, nil
 }
@@ -185,8 +204,11 @@ func adbState(s string) string {
 }
 func capabilities(driver string) []string {
 	out := []string{"screen", "tap", "swipe", "text", "navigate", "install", "launch", "stop", "uninstall", "source"}
-	if driver == "appium" {
+	switch driver {
+	case "appium":
 		out = append(out, "structured", "elements", "contexts")
+	case driverXCTest:
+		out = append(out, "elements")
 	}
 	return out
 }
@@ -200,6 +222,14 @@ func (d *drivers) Open(ctx context.Context, v Device, mode string) (string, erro
 			return "", problem("unsupported", "structured mode requires the Appium driver")
 		}
 		_, err := d.adb(ctx, v.UDID, "get-state")
+		return "", err
+	}
+	if v.Driver == driverXCTest {
+		if mode == "structured" {
+			return "", problem("unsupported", "structured mode requires the Appium driver")
+		}
+		// The runner stays warm across sessions; Close does not stop it.
+		_, err := d.runner(ctx, v)
 		return "", err
 	}
 	if d.cfg.AppiumURL == "" {
@@ -244,7 +274,7 @@ func (d *drivers) Open(ctx context.Context, v Device, mode string) (string, erro
 	return sid, nil
 }
 func (d *drivers) Close(ctx context.Context, s Session) error {
-	if s.ProviderID == "" || s.Device.Driver == "adb" {
+	if s.ProviderID == "" || s.Device.Driver == "adb" || s.Device.Driver == driverXCTest {
 		return nil
 	}
 	err := d.wire(ctx, "DELETE", "/session/"+url.PathEscape(s.ProviderID), nil, nil)
@@ -331,6 +361,9 @@ func (d *drivers) Observe(ctx context.Context, s Session, source bool) (Observat
 	var png []byte
 	var tree string
 	var err error
+	if s.Device.Driver == driverXCTest {
+		return d.xctestObserve(ctx, s, source)
+	}
 	if s.Device.Driver == "adb" {
 		png, err = d.adb(ctx, s.Device.UDID, "exec-out", "screencap", "-p")
 		if err != nil {
@@ -408,6 +441,9 @@ func (d *drivers) Action(ctx context.Context, s Session, action string, args map
 	}
 	if s.Device.Driver == "adb" {
 		return d.adbAction(ctx, s, action, args)
+	}
+	if s.Device.Driver == driverXCTest {
+		return d.xctestAction(ctx, s, action, args)
 	}
 	switch action {
 	case "navigate":
@@ -592,7 +628,8 @@ func (d *drivers) adbAction(ctx context.Context, s Session, action string, args 
 	return map[string]any{"ok": true}, nil
 }
 
-func (d *drivers) installPath(raw, platform string) (string, error) {
+func (d *drivers) installPath(raw string, v Device) (string, error) {
+	platform := v.Platform
 	if raw == "" {
 		return "", problem("invalid_argument", "artifact is required")
 	}
@@ -613,10 +650,13 @@ func (d *drivers) installPath(raw, platform string) (string, error) {
 		return "", problem("invalid_argument", "artifact must be inside the configured artifact directory")
 	}
 	ext := strings.ToLower(filepath.Ext(p))
-	if platform == "android" && ext != ".apk" || platform == "ios" && ext != ".ipa" {
-		return "", problem("invalid_argument", "physical Android needs an APK; physical iOS needs a device-signed IPA")
-	}
 	info, e := os.Stat(p)
+	if platform == "ios" && !v.Physical && ext == ".app" && e == nil && info.IsDir() {
+		return p, nil // simulator builds are .app bundles
+	}
+	if platform == "android" && ext != ".apk" || platform == "ios" && ext != ".ipa" {
+		return "", problem("invalid_argument", "physical Android needs an APK; physical iOS needs a device-signed IPA; simulators also take a .app bundle")
+	}
 	if e != nil || !info.Mode().IsRegular() || info.Size() > 512<<20 {
 		return "", problem("invalid_argument", "artifact must be a regular file no larger than 512 MiB")
 	}
@@ -631,15 +671,21 @@ func (d *drivers) App(ctx context.Context, s Session, action string, args map[st
 		if e != nil {
 			return nil, e
 		}
+		if s.Device.Driver == driverXCTest {
+			return d.xctestApp(ctx, s, "status", app, "")
+		}
 		return d.appStatus(ctx, s, app)
 	}
 	if action == "install" {
 		if source := str(args, "source"); source != "" && source != "artifact" {
 			return d.storeInstall(ctx, s, source, args)
 		}
-		p, e := d.installPath(str(args, "artifact"), s.Device.Platform)
+		p, e := d.installPath(str(args, "artifact"), s.Device)
 		if e != nil {
 			return nil, e
+		}
+		if s.Device.Driver == driverXCTest {
+			return d.xctestApp(ctx, s, "install", "", p)
 		}
 		if s.Device.Driver == "adb" {
 			_, e = d.adb(ctx, s.Device.UDID, "install", "-r", p)
@@ -657,6 +703,9 @@ func (d *drivers) App(ctx context.Context, s Session, action string, args map[st
 	app, e := appID(args)
 	if e != nil {
 		return nil, e
+	}
+	if s.Device.Driver == driverXCTest {
+		return d.xctestApp(ctx, s, action, app, "")
 	}
 	if s.Device.Driver == "adb" {
 		var out []byte

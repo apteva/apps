@@ -404,18 +404,18 @@ func TestArtifactDirectoryBoundary(t *testing.T) {
 	root := e.drivers.cfg.ArtifactDir
 	inside := filepath.Join(root, "test.apk")
 	_ = os.WriteFile(inside, []byte("apk"), 0600)
-	if _, err := e.drivers.installPath("test.apk", "android"); err != nil {
+	if _, err := e.drivers.installPath("test.apk", Device{Platform: "android"}); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(t.TempDir(), "private.apk")
 	_ = os.WriteFile(outside, []byte("apk"), 0600)
 	_ = os.Symlink(outside, filepath.Join(root, "escape.apk"))
 	for _, name := range []string{outside, "escape.apk", "../../etc/passwd", "test.aab"} {
-		if _, err := e.drivers.installPath(name, "android"); err == nil {
+		if _, err := e.drivers.installPath(name, Device{Platform: "android"}); err == nil {
 			t.Fatalf("accepted outside/wrong artifact %s", name)
 		}
 	}
-	if _, err := e.drivers.installPath("test.apk", "ios"); err == nil {
+	if _, err := e.drivers.installPath("test.apk", Device{Platform: "ios", Physical: true}); err == nil {
 		t.Fatal("APK accepted for iOS")
 	}
 }

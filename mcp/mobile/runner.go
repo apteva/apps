@@ -233,6 +233,8 @@ func runRunner(args []string) error {
 	appium := flags.String("appium-url", "", "trusted Appium server URL")
 	devicesFile := flags.String("devices-file", "", "JSON device inventory file")
 	android := flags.String("android-driver", "adb", "adb or appium")
+	iosDriver := flags.String("ios-driver", "native", "native (Xcode on this Mac) or appium")
+	iosTeam := flags.String("ios-team-id", "", "Apple team ID that signs the native iOS runner (default: from the keychain)")
 	artifacts := flags.String("artifact-dir", "", "directory of installable APK/IPA files")
 	locks := flags.String("lock-dir", "", "shared hardware lock directory")
 	if err := flags.Parse(args); err != nil {
@@ -272,7 +274,7 @@ func runRunner(args []string) error {
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` + migrationSQL); err != nil {
 		return err
 	}
-	e, err := newEngine(db, *data, newDrivers(runnerConfig{AppiumURL: *appium, DevicesJSON: inventory, AndroidDriver: *android, ArtifactDir: *artifacts, LockDir: *locks}))
+	e, err := newEngine(db, *data, newDrivers(runnerConfig{AppiumURL: *appium, DevicesJSON: inventory, AndroidDriver: *android, IOSDriver: *iosDriver, IOSTeamID: *iosTeam, ArtifactDir: *artifacts, LockDir: *locks}))
 	if err != nil {
 		return err
 	}

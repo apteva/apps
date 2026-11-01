@@ -10,6 +10,11 @@
    0..1 coordinates, type into the focused field, or press home/back/enter.
    Observe again after actions; do not assume the screen stayed unchanged.
 5. Appium sessions also support tap_element(using,value) and context switching.
+   Native iOS sessions (driver xctest: iPhones, iPads and booted Simulators on a
+   Mac) support tap_element with using=accessibility id or id, Unicode text,
+   home and enter; iOS has no Back key, so tap the app's back button.
+   The first native iOS session builds and installs a test runner; if open
+   returns setup_in_progress, wait a minute and open again.
    ADB supports printable ASCII text excluding percent signs; use Appium for Unicode.
 6. `mobile_app` installs runner-local APK/IPA artifacts, launches/stops apps by
    package/bundle ID, and uninstalls only with confirm=true. Mobile does not build

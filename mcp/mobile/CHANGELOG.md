@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 — 2026-11-01
+
+- Native iOS control without Appium (`ios_driver=native`, the default on a
+  Mac with Xcode). iPhones and iPads are discovered through `devicectl` with
+  pairing, Developer Mode and connection state; booted iOS Simulators through
+  `simctl`.
+- A bundled XCUITest runner (`runner/`) serves screenshots, the UI tree,
+  taps, long presses, swipes, Unicode typing, home/enter, links and
+  tap-by-accessibility-id. Mobile builds it on first use (automatic signing
+  for devices, with the team from the keychain or `ios_team_id`), keeps it
+  warm across sessions and stops it on shutdown. Devices are reached through
+  usbmuxd, Simulators over loopback.
+- Native iOS app install (devicectl/simctl; `.app` bundles on Simulators),
+  launch, stop, uninstall and status; App Store and TestFlight flows run
+  through the runner.
+- Simulator screen recording through `simctl io recordVideo` (full
+  resolution, no audio).
+- Signing, trust, Developer Mode and lock-screen failures come back as
+  `setup_required` with the step to take; a first-time build returns a
+  retryable `setup_in_progress`.
+
+Validation: unit tests for discovery, signing-team detection, the usbmux
+protocol (fake usbmuxd), runner protocol and error mapping; an opt-in
+end-to-end test that discovered a booted iOS 18.5 Simulator, built and
+started the runner, observed, launched Settings, tapped by label, swiped,
+opened Safari and recorded a 17.6 s H.264 video. Physical-device signing and
+the usbmux path against a real iPhone are not yet exercised.
+
 ## 0.2.0 — 2026-11-01
 
 - Screen recording: `mobile_record` start/stop/mark/get/list/delete. Standard

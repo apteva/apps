@@ -47,6 +47,9 @@ func (d *drivers) recordMethods(v Device) (standard, high string, highAudio bool
 		}
 		return
 	}
+	if runtime.GOOS == "darwin" && !v.Physical && v.Driver == driverXCTest {
+		return methodSimctl, methodSimctl, false
+	}
 	if d.cfg.AppiumURL != "" {
 		standard = methodAppium
 	}
@@ -124,6 +127,8 @@ func (d *drivers) StartRecording(ctx context.Context, s Session, p recordPlan, o
 		return d.startAppiumRecording(ctx, s, o, path)
 	case methodUSB:
 		return d.startUSBCapture(ctx, s, p, path)
+	case methodSimctl:
+		return d.startSimRecording(ctx, s, path)
 	}
 	return nil, problem("unsupported", "unknown recording method")
 }
