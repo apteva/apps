@@ -190,3 +190,63 @@ func (a *App) handleSealVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+func (a *App) handleLayouts(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	var out any
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		out, err = a.toolLayoutsList(ctx, nil)
+	case http.MethodPost:
+		var args map[string]any
+		if args, err = requestArgs(r); err == nil {
+			if args["envelope_id"] != nil {
+				out, err = a.toolLayoutSaveFromEnvelope(ctx, args)
+			} else {
+				out, err = a.toolLayoutSave(ctx, args)
+			}
+		}
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *App) handleLayoutItem(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	id, _ := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/layouts/"), "/"), 10, 64)
+	if id == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("layout id required"))
+		return
+	}
+	var out any
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		out, err = a.toolLayoutGet(ctx, map[string]any{"layout_id": id})
+	case http.MethodDelete:
+		out, err = a.toolLayoutDelete(ctx, map[string]any{"layout_id": id})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}

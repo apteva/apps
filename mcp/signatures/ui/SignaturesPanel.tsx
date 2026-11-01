@@ -80,6 +80,15 @@ const FIELD_DEFAULTS: Record<Field["field_type"], { width: number; height: numbe
 // demand; the dynamic non-literal import keeps the bundler from
 // inlining ~450KB into the panel bundle.
 let pdfjsPromise: Promise<any> | null = null;
+type Layout = {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  recipients: Array<{ label: string; role: string; signing_order: number }>;
+  fields: unknown[];
+};
+
 type SealInfo = {
   source: "configured" | "self_signed";
   subject: string;
@@ -121,6 +130,9 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   const [recipientDrafts, setRecipientDrafts] = useState<Array<Pick<Recipient, "name" | "email" | "role" | "signing_order">>>([]);
   const [fieldDrafts, setFieldDrafts] = useState<Field[]>([]);
   const [signTogether, setSignTogether] = useState(false);
+  const [layouts, setLayouts] = useState<Layout[]>([]);
+  const [layoutSlug, setLayoutSlug] = useState("");
+  const [layoutPeople, setLayoutPeople] = useState<Array<{ name: string; email: string }>>([]);
   const [seal, setSeal] = useState<SealInfo | null>(null);
   const [showSeal, setShowSeal] = useState(false);
 
@@ -201,6 +213,21 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const selectedLayout = layouts.find((layout) => layout.slug === layoutSlug) || null;
+
+  const openCreate = () => run(async () => {
+    setShowSeal(false);
+    setCreating(true);
+    const data = await request("/layouts");
+    setLayouts(data.layouts || []);
+  });
+
+  const chooseLayout = (slug: string) => {
+    setLayoutSlug(slug);
+    const layout = layouts.find((item) => item.slug === slug);
+    setLayoutPeople((layout?.recipients || []).map(() => ({ name: "", email: "" })));
+  };
+
   const createEnvelope = () => run(async () => {
     if (!pickedFile) throw new Error("Pick a PDF first.");
     const data = await request("/envelopes", {
@@ -210,13 +237,27 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         title: newEnvelope.title || pickedFile.name.replace(/\.pdf$/i, ""),
         sender_name: newEnvelope.sender_name,
         message: newEnvelope.message,
+        ...(selectedLayout ? { layout: selectedLayout.slug, recipients: layoutPeople } : {}),
       }),
     });
     setCreating(false);
     setNewEnvelope({ title: "", sender_name: "", message: "" });
     setPickedFile(null);
+    setLayoutSlug("");
+    setLayoutPeople([]);
     setSelectedId(data.envelope.id);
-    setMessage("Draft created. Add recipients, then place their fields on the document.");
+    await loadList();
+    setMessage(selectedLayout
+      ? `Draft created with the ${selectedLayout.name} layout. Check the field positions, then send.`
+      : "Draft created. Add recipients, then place their fields on the document.");
+  });
+
+  const saveAsLayout = () => run(async () => {
+    if (!detail) return;
+    const name = window.prompt("Layout name", detail.title);
+    if (!name) return;
+    const data = await request("/layouts", { method: "POST", body: JSON.stringify({ envelope_id: detail.id, name }) });
+    setMessage(`Saved layout "${data.layout.name}". Pick it under New envelope to reuse these recipients and field positions.`);
   });
 
   const saveRecipients = () => run(async () => {
@@ -295,7 +336,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         </div>
         <button type="button" onClick={loadList} className="ml-auto px-3 py-1.5 text-xs border border-border rounded">Refresh</button>
         <button type="button" onClick={openSeal} className="px-3 py-1.5 text-xs border border-border rounded">Document seal</button>
-        <button type="button" onClick={() => { setShowSeal(false); setCreating(true); }} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
+        <button type="button" onClick={openCreate} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
       </header>
 
       {message && <div className="shrink-0 px-4 py-2 text-xs border-b border-border bg-bg-input">{message}</div>}
@@ -341,6 +382,23 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                 <Input label="Title" value={newEnvelope.title} onChange={(value) => setNewEnvelope({ ...newEnvelope, title: value })} />
                 <Input label="Sender name" value={newEnvelope.sender_name} onChange={(value) => setNewEnvelope({ ...newEnvelope, sender_name: value })} />
                 <Input label="Message" value={newEnvelope.message} onChange={(value) => setNewEnvelope({ ...newEnvelope, message: value })} />
+                <label className="grid gap-1 text-xs text-text-muted">Layout
+                  <select className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text" value={layoutSlug} onChange={(event) => chooseLayout(event.target.value)}>
+                    <option value="">None (place fields by hand)</option>
+                    {layouts.map((layout) => <option key={layout.id} value={layout.slug}>{layout.name}</option>)}
+                  </select>
+                </label>
+                {selectedLayout && <div className="grid gap-2">
+                  {selectedLayout.description && <p className="text-xs text-text-muted">{selectedLayout.description}</p>}
+                  {selectedLayout.recipients.map((role, index) => (
+                    <div key={index} className="grid gap-2 items-center" style={{ gridTemplateColumns: "140px 1fr 1fr" }}>
+                      <span className="text-xs font-semibold" style={{ color: RECIPIENT_COLORS[index % RECIPIENT_COLORS.length] }}>{role.label}</span>
+                      <input className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" placeholder={`Name (default: ${role.label})`} value={layoutPeople[index]?.name || ""} onChange={(event) => updateAt(setLayoutPeople, layoutPeople, index, { name: event.target.value })} />
+                      <input className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" placeholder="Email (optional in manual mode)" value={layoutPeople[index]?.email || ""} onChange={(event) => updateAt(setLayoutPeople, layoutPeople, index, { email: event.target.value })} />
+                    </div>
+                  ))}
+                  <p className="text-xs text-text-dim">{new Set(selectedLayout.recipients.map((role) => role.signing_order)).size === 1 && selectedLayout.recipients.length > 1 ? "Everyone signs at the same time." : "Recipients sign in the layout's order."}</p>
+                </div>}
                 <div className="flex gap-2"><Primary onClick={createEnvelope} disabled={busy || !pickedFile}>Create draft</Primary><Secondary onClick={() => { setCreating(false); setPickedFile(null); }}>Cancel</Secondary></div>
               </div>
             </Card>
@@ -358,6 +416,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                   {detail.status === "sent" && activeRecipients.map((recipient) => <span key={recipient.id} className="flex gap-2"><Primary onClick={() => copyLink(recipient)} disabled={busy}>{activeRecipients.length > 1 ? `Copy link: ${recipient.name}` : "Copy signing link"}</Primary>{recipient.email && <Secondary onClick={() => remind(recipient)} disabled={busy}>Send reminder</Secondary>}</span>)}
                   {detail.status === "sent" && !currentRecipient && <Secondary onClick={finalize} disabled={busy}>Retry finalization</Secondary>}
                   {(detail.status === "draft" || detail.status === "sent") && <Secondary onClick={voidEnvelope} disabled={busy}>Void</Secondary>}
+                  {(detail.fields?.length || 0) > 0 && <Secondary onClick={saveAsLayout} disabled={busy}>Save as layout</Secondary>}
                   {detail.completed_file_id && <Secondary onClick={verifySeal} disabled={busy}>Verify seal</Secondary>}
                   {detail.completed_file_id && <span className="text-xs text-text-muted self-center">Completed file {detail.completed_file_id} · audit file {detail.audit_file_id}</span>}
                 </div>

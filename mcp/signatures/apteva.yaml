@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: signatures
 display_name: Signatures
-version: 0.4.0
+version: 0.5.0
 description: |
   Send PDFs for electronic signature. Create an envelope from a Storage
   file, add recipients who sign together or in order, share secure
   signing links,
-  and save the completed PDF and audit summary back to Storage. The
+  and save the completed PDF and audit summary back to Storage. Saved
+  layouts place recipients and fields automatically for recurring
+  documents such as model releases. The
   completed PDF is digitally sealed with a certification signature, so
   Acrobat and other PDF readers show it as signed and any later edit
   invalidates it. Use a configured AATL certificate for automatic trust,
@@ -61,7 +63,7 @@ provides:
       description: Void envelopes and manage signing settings.
 
   mcp_tools:
-    - { name: signatures_envelopes_create, description: "Create a draft envelope from a PDF in Storage. Args: source_file_id, title, sender_name?, message?, expires_at?.", requires: signatures.send }
+    - { name: signatures_envelopes_create, description: "Create a draft envelope from a PDF in Storage. Args: source_file_id, title, sender_name?, message?, expires_at?, layout? (saved layout slug: places recipients and fields automatically), recipients? ([{name, email?}] naming the layout roles in order).", requires: signatures.send }
     - { name: signatures_envelopes_update, description: "Update a draft envelope. Args: envelope_id and any of title, sender_name, message, expires_at.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_get, description: "Get one envelope with recipients and fields. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_list, description: "List envelopes. Args: status?, limit?.", requires: signatures.read }
@@ -74,6 +76,11 @@ provides:
     - { name: signatures_envelopes_void, description: "Void an active envelope. Args: envelope_id, reason?.", requires: signatures.manage, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_envelopes_finalize, description: "Retry completed-PDF generation after every recipient has finished. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
     - { name: signatures_audit_get, description: "Return the append-only audit timeline for an envelope. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_layouts_list, description: "List saved layouts: reusable signer roles and field positions.", requires: signatures.read }
+    - { name: signatures_layouts_get, description: "Get a saved layout. Args: layout_id or slug.", requires: signatures.read }
+    - { name: signatures_layouts_save, description: "Create or replace a layout by slug. Args: name, slug?, description?, recipients[] (label, role, signing_order; equal orders sign together), fields[] (recipient = role index, field_type, page, x, y, width, height, label?, required?).", requires: signatures.manage }
+    - { name: signatures_layouts_save_from_envelope, description: "Save an envelope's recipients (names become role labels) and field positions as a layout. Args: envelope_id, name, slug?, description?.", requires: signatures.manage, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_layouts_delete, description: "Delete a saved layout. Args: layout_id.", requires: signatures.manage }
     - { name: signatures_seal_certificate_get, description: "Describe the certificate that digitally seals completed PDFs (source, subject, issuer, fingerprint, validity, PEM, Acrobat trust note).", requires: signatures.read }
     - { name: signatures_seal_verify, description: "Check a Storage PDF's digital seal: sealed, intact over every byte, and sealed by this install. Args: file_id.", requires: signatures.read }
 

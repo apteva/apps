@@ -54,6 +54,18 @@ The module is listed in the workspace-root `go.work`, so local builds use the
 checked-out `app-sdk`. Standalone installs resolve the pinned SDK version from
 `go.mod`.
 
+## Saved layouts (v0.5)
+
+A layout stores signer roles (label, role, signing order — equal orders sign
+together) and every field's page position. `signatures_envelopes_create` with
+`layout: "<slug>"` and `recipients: [{name, email?}, …]` (one per role, in role
+order; missing names fall back to the role label) creates a draft with
+recipients and fields already placed, ready to send. Save a layout with
+`signatures_layouts_save`, or from a hand-placed draft with
+`signatures_layouts_save_from_envelope` (**Save as layout** in the panel); pick
+it under **New envelope → Layout**. Positions are normalized page coordinates,
+so a layout fits any PDF rendered from the same template.
+
 ## Digital seal (v0.3)
 
 After the last recipient finishes, the stamped document and its completion
@@ -94,5 +106,5 @@ PAdES baseline profiles (it uses the `adbe.pkcs7.detached` sub-filter),
 notarization, identity verification, or legal validity for every transaction
 or jurisdiction.
 
-Reusable templates, automatic scheduled reminders, provider
+Automatic scheduled reminders, provider
 adapters, and long-term-validation (DSS/LTV) data are later additions.

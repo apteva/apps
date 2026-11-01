@@ -43,6 +43,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/envelopes", Handler: a.handleEnvelopes},
 		{Pattern: "/envelopes/", Handler: a.handleEnvelopeItem},
+		{Pattern: "/layouts", Handler: a.handleLayouts},
+		{Pattern: "/layouts/", Handler: a.handleLayoutItem},
 		{Pattern: "/seal", Handler: a.handleSeal},
 		{Pattern: "/seal/certificate.cer", Handler: a.handleSealCertificate},
 		{Pattern: "/seal/verify", Handler: a.handleSealVerify},
