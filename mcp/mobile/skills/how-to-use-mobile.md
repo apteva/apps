@@ -14,6 +14,10 @@
 6. `mobile_app` installs runner-local APK/IPA artifacts, launches/stops apps by
    package/bundle ID, and uninstalls only with confirm=true. Mobile does not build
    or sign artifacts. Files must be in the runner's configured artifact directory.
+   install with source=store or beta drives the Play Store, App Store or
+   TestFlight (app_id for Play, store_id for the App Store, app_name or store_id
+   for TestFlight). It returns once Install/Update is tapped; poll
+   action=status until installed=true. Phones must already be signed in.
 7. Close sessions when done, or renew before expiry. Closing preserves phone data.
    Sessions are exclusive across projects; do not create a second controller.
 8. For repeatable testing, close interactive sessions first and call
@@ -23,9 +27,24 @@
    is available through mobile_test_cancel.
 9. assert_text/wait_for_text match literal UI/HTML source, not OCR/visibility.
    Treat infrastructure errors, unavailable devices and assertions separately.
-10. Live view is screenshot polling in this version. Request mobile_stream for
-    details. Avoid putting credentials in step labels or test names. Screenshots
+10. Live view is screenshot polling. Request mobile_stream for details. Avoid
+    putting credentials in step labels or test names. Screenshots and videos
     may show account data. Do not claim automation is undetectable.
+11. Video: check the device's capabilities for record, record_high and
+    record_audio, then mobile_record(action=start, session_id, quality, audio).
+    Add markers with action=mark at moments worth cutting to, then stop. Only
+    one capture per session; closing the session also finishes it.
+12. For a repeatable take (store previews, demos), prefer mobile_test_run with
+    record={quality, audio}: every step becomes a marker, record_mark adds a
+    named one and wait holds the shot. The report gives recording_id.
+13. mobile_record_export(recording_id, preset, variant?, from/to or
+    from_mark/to_mark) produces a clip in the background. List presets with
+    mobile_record(action=presets). For App Store previews use
+    preset=app_store_preview and pick variant by display class (iphone, ipad, …);
+    the selection must be 15–30 s. Poll mobile_record(action=get) until ready,
+    then report the checks and valid flag rather than assuming the store will
+    accept it. Ready files carry file_url and, when Storage is bound, a Storage
+    file id under /.mobile/.
 
 If an Appium creation outcome is unknown, stop the orphaned session on its host
 before explicitly confirming mobile_session(action=recover,confirm=true).

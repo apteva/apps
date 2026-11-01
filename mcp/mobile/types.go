@@ -19,6 +19,7 @@ type Device struct {
 	Physical     bool     `json:"physical"`
 	Driver       string   `json:"driver"`
 	Browser      string   `json:"browser,omitempty"`
+	CaptureID    string   `json:"capture_id,omitempty"`
 	OS           string   `json:"os,omitempty"`
 	State        string   `json:"state"`
 	Capabilities []string `json:"capabilities"`
@@ -74,6 +75,7 @@ type TestRun struct {
 	FinishedAt  *int64       `json:"finished_at,omitempty"`
 	Error       string       `json:"error,omitempty"`
 	Results     []StepResult `json:"results"`
+	RecordingID string       `json:"recording_id,omitempty"`
 }
 
 type Backend interface {

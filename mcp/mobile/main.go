@@ -2,16 +2,19 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -20,14 +23,35 @@ import (
 //go:embed apteva.yaml
 var manifestBytes []byte
 
-//go:embed migrations/001_init.sql
-var migrationSQL string
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+// migrationSQL is every migration in filename order. All statements are
+// idempotent so a standalone runner can apply them on each boot.
+var migrationSQL = func() string {
+	entries, err := fs.Glob(migrationFiles, "migrations/*.sql")
+	if err != nil {
+		panic(err)
+	}
+	sort.Strings(entries)
+	var b strings.Builder
+	for _, name := range entries {
+		data, err := migrationFiles.ReadFile(name)
+		if err != nil {
+			panic(err)
+		}
+		b.Write(data)
+		b.WriteString("\n")
+	}
+	return b.String()
+}()
 
 type App struct {
 	executor Executor
 	local    *engine
 	project  string
 	ctx      *sdk.AppCtx
+	uploadMu sync.Mutex
 }
 
 func main() {
@@ -119,16 +143,23 @@ func (a *App) Workers() []sdk.Worker {
 			app.EmitWithProject("mobile.test.completed", a.project, map[string]any{"run_id": rid, "status": out.Run.Status, "failure_kind": out.Run.FailureKind})
 		}
 		return nil
-	}}}
+	}}, {Name: "recording_uploads", Schedule: "@every 15s", Run: a.recordingUploadWorker}}
 }
 
 func (a *App) call(ctx context.Context, tool string, args map[string]any) (any, error) {
 	if a.executor == nil {
 		return nil, errors.New("Mobile is not mounted")
 	}
+	args, early, err := a.prepareRecordCall(tool, args)
+	if err != nil || early != nil {
+		return early, err
+	}
 	result, err := a.executor.Execute(ctx, a.project, tool, args)
 	if err != nil {
 		return nil, err
+	}
+	if tool == "mobile_record" || tool == "mobile_record_export" {
+		result = a.decorateRecordings(result)
 	}
 	if tool == "mobile_test_run" {
 		var out struct {
@@ -192,9 +223,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{"mobile_session", "Reserve one phone exclusively; list/get/renew/close sessions. Close preserves data. Recover requires confirm=true after manually stopping an orphaned Appium session.", schema(sessionFields, "action")},
 		{"mobile_observe", "See a phone screenshot as image content, optionally including the UI hierarchy or browser source.", schema(map[string]any{"session_id": stringSchema(), "source": boolSchema()}, "session_id")},
 		{"mobile_action", "Navigate and interact with a mobile session. Coordinates are normalized 0..1. Element actions require Appium.", schema(actionFields(), "session_id", "action")},
-		{"mobile_app", "Install APK/IPA from the runner artifact directory; launch, stop or uninstall an app. Uninstall requires confirm=true.", schema(map[string]any{"session_id": stringSchema(), "action": enumSchema("install", "launch", "stop", "uninstall"), "app_id": stringSchema(), "artifact": stringSchema(), "confirm": boolSchema()}, "session_id", "action")},
-		{"mobile_stream", "Get screenshot polling details for a live session. This release provides polling rather than video.", schema(map[string]any{"session_id": stringSchema()}, "session_id")},
-		{"mobile_test_run", "Start a deterministic smoke test. Steps execute sequentially with screenshots; params hold action arguments. assert_text/wait_for_text match UI source; timeout_ms is bounded to 30 seconds. Returns run_id.", schema(map[string]any{"device_id": stringSchema(), "name": stringSchema(), "build_ref": stringSchema(), "mode": enumSchema("screen", "structured"), "steps": map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": schema(map[string]any{"action": enumSchema("navigate", "tap", "swipe", "text", "key", "tap_element", "context", "install", "launch", "stop", "screenshot", "assert_text", "wait_for_text"), "label": stringSchema(), "params": map[string]any{"type": "object", "additionalProperties": true}}, "action")}}, "device_id", "steps")},
+		{"mobile_app", "Install, launch, stop, uninstall or check an app. install takes source=artifact (APK/IPA in the runner artifact directory, default), store (Play Store / App Store) or beta (TestFlight; Play testing tracks via the Play listing). Store and beta installs tap Install/Update and return result=installing or already_installed; poll action=status until installed=true. iOS store needs store_id; TestFlight needs app_name or store_id. flow overrides the built-in store steps. Uninstall requires confirm=true.", schema(map[string]any{"session_id": stringSchema(), "action": enumSchema("install", "launch", "stop", "uninstall", "status"), "source": enumSchema("artifact", "store", "beta"), "app_id": stringSchema(), "app_name": stringSchema(), "store_id": stringSchema(), "artifact": stringSchema(), "confirm": boolSchema(), "flow": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "object", "additionalProperties": true}}}, "session_id", "action")},
+		{"mobile_stream", "Get screenshot polling details for a live session. Use mobile_record for video.", schema(map[string]any{"session_id": stringSchema()}, "session_id")},
+		{"mobile_record", "Record a session's screen to video. start(session_id, quality=auto|standard|high, audio?, max_seconds? ≤1800) → recording; mark(recording_id, name) adds a timestamped marker; stop(recording_id or session_id) finishes and returns metadata; get/list(status?, run_id?, kind?) include file_url and storage upload state; delete(recording_id, confirm=true) removes the runner copy; presets lists export presets; upload(recording_id) retries the Storage copy. high = scrcpy (Android) or USB capture on a Mac (iOS), both with audio.", schema(map[string]any{"action": enumSchema("start", "stop", "mark", "get", "list", "delete", "presets", "upload"), "session_id": stringSchema(), "recording_id": stringSchema(), "quality": enumSchema("auto", "standard", "high"), "audio": boolSchema(), "max_seconds": map[string]any{"type": "integer", "minimum": 5, "maximum": maxRecordSeconds}, "name": stringSchema(), "status": stringSchema(), "run_id": stringSchema(), "kind": enumSchema("capture", "export"), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}, "confirm": boolSchema()}, "action")},
+		{"mobile_record_export", "Export a ready recording for a destination. preset (raw, app_store_preview, play_promo, social_vertical, social_square, or one from export_presets_json) or custom (a preset object); variant picks the size (app_store_preview: iphone, iphone_home_large, iphone_home_medium, ipad, ipad_9_7, mac, apple_tv); orientation and fit (pad|crop|stretch) override; trim with from/to seconds or from_mark/to_mark. Runs in the background; poll mobile_record(get) until ready, then read checks and valid.", schema(map[string]any{"recording_id": stringSchema(), "preset": stringSchema(), "custom": map[string]any{"type": "object", "additionalProperties": true}, "variant": stringSchema(), "orientation": enumSchema("portrait", "landscape"), "fit": enumSchema("pad", "crop", "stretch"), "from": map[string]any{"type": "number", "minimum": 0}, "to": map[string]any{"type": "number", "minimum": 0}, "from_mark": stringSchema(), "to_mark": stringSchema()}, "recording_id")},
+		{"mobile_test_run", "Start a deterministic smoke test. Steps execute sequentially with screenshots; params hold action arguments. assert_text/wait_for_text match UI source; timeout_ms is bounded to 30 seconds. wait pauses params.ms (≤30000); record_mark adds params.name as a video marker; wait_for_app polls until params.app_id is installed (timeout_ms ≤300000); install accepts params.source=store|beta. record=true or {quality, audio} films the whole run with a marker per step (report recording_id). Returns run_id.", schema(map[string]any{"device_id": stringSchema(), "name": stringSchema(), "build_ref": stringSchema(), "mode": enumSchema("screen", "structured"), "record": map[string]any{"type": []string{"boolean", "object"}}, "steps": map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": schema(map[string]any{"action": enumSchema("navigate", "tap", "swipe", "text", "key", "tap_element", "context", "install", "launch", "stop", "screenshot", "assert_text", "wait_for_text", "wait", "record_mark", "wait_for_app"), "label": stringSchema(), "params": map[string]any{"type": "object", "additionalProperties": true}}, "action")}}, "device_id", "steps")},
 		{"mobile_test_get", "Get a durable test report by run_id, or list recent runs when omitted.", schema(map[string]any{"run_id": stringSchema()})},
 		{"mobile_test_cancel", "Request cancellation of a queued or running test.", schema(map[string]any{"run_id": stringSchema()}, "run_id")},
 	}
@@ -223,7 +256,7 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/api/call", Handler: a.handleCall}, {Pattern: "/api/screen/", Handler: a.handleScreen}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}}
+	return []sdk.Route{{Pattern: "/api/call", Handler: a.handleCall}, {Pattern: "/api/screen/", Handler: a.handleScreen}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}, {Pattern: "/api/recordings/", Handler: a.handleRecording}}
 }
 func (a *App) requestProject(r *http.Request) error {
 	if a.project == "" {

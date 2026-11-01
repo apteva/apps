@@ -100,6 +100,40 @@ func (r *remote) Execute(ctx context.Context, pid, tool string, args map[string]
 func (r *remote) Evidence(ctx context.Context, pid, aid string) ([]byte, error) {
 	return r.request(ctx, "GET", "/v1/artifacts/"+url.PathEscape(aid)+"?project_id="+url.QueryEscape(pid), nil)
 }
+
+// stream fetches a recording from the runner without buffering it.
+func (r *remote) stream(ctx context.Context, pid, rid, rangeHeader string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", r.base+"/v1/recordings/"+url.PathEscape(rid)+"/file?project_id="+url.QueryEscape(pid), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	client := *r.client
+	client.Timeout = 0 // large videos are bounded by ctx instead
+	res, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, problem("infrastructure_error", "Mobile runner is unreachable")
+	}
+	if res.StatusCode >= 300 {
+		defer res.Body.Close()
+		var failure apiError
+		if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&failure) == nil && failure.Code != "" {
+			return nil, &failure
+		}
+		return nil, problem("infrastructure_error", "Mobile runner rejected the recording request")
+	}
+	if res.Header.Get("X-Mobile-Protocol") != protocol {
+		res.Body.Close()
+		return nil, problem("infrastructure_error", "Mobile runner protocol mismatch")
+	}
+	return res, nil
+}
 func (e *engine) Evidence(_ context.Context, pid, aid string) ([]byte, error) {
 	return e.evidence(pid, aid)
 }
@@ -146,6 +180,36 @@ func runnerHandler(e *engine, token string) http.Handler {
 			return
 		}
 		writePNG(w, b)
+	})
+	mux.HandleFunc("/v1/recordings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" && r.Method != "HEAD" {
+			http.Error(w, "GET required", 405)
+			return
+		}
+		rid, tail, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/v1/recordings/"), "/")
+		if tail != "file" {
+			writeFailure(w, problem("not_found", "unknown recording path"))
+			return
+		}
+		p, rec, err := e.RecordingFile(r.URL.Query().Get("project_id"), rid)
+		if err != nil {
+			writeFailure(w, err)
+			return
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			writeFailure(w, err)
+			return
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			writeFailure(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", rec.ContentType)
+		w.Header().Set("X-Recording-Name", rec.FileName)
+		http.ServeContent(w, r, rec.FileName, info.ModTime(), f)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Mobile-Protocol", protocol)

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,12 @@ type engine struct {
 	runs    map[string]context.CancelFunc
 	wg      sync.WaitGroup
 	opWG    sync.WaitGroup
+
+	recordBackend RecordingBackend
+	recorders     map[string]*activeRecording
+	recWG         sync.WaitGroup
+	exporting     int
+	lastPrune     time.Time
 }
 
 func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
@@ -46,7 +53,10 @@ func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
 	if d.cfg.ArtifactDir == "" {
 		d.cfg.ArtifactDir = filepath.Join(dataDir, "uploads")
 	}
-	for _, dir := range []string{d.cfg.LockDir, d.cfg.ArtifactDir, filepath.Join(dataDir, "evidence")} {
+	if d.cfg.ToolDir == "" {
+		d.cfg.ToolDir = filepath.Join(dataDir, "bin")
+	}
+	for _, dir := range []string{d.cfg.LockDir, d.cfg.ArtifactDir, filepath.Join(dataDir, "evidence"), filepath.Join(dataDir, "recordings")} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return nil, err
 		}
@@ -55,7 +65,7 @@ func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
 		return nil, errors.New("android_driver must be adb or appium")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &engine{db: db, drivers: d, backend: d, dataDir: dataDir, ctx: ctx, cancel: cancel, gates: map[string]*deviceGate{}, runs: map[string]context.CancelFunc{}}
+	e := &engine{db: db, drivers: d, backend: d, recordBackend: d, dataDir: dataDir, ctx: ctx, cancel: cancel, gates: map[string]*deviceGate{}, runs: map[string]context.CancelFunc{}, recorders: map[string]*activeRecording{}}
 	// Driver sessions may outlive the sidecar. Recover them under the same
 	// host-wide hardware lock before permitting another session on that phone.
 	if err := e.recover(); err != nil {
@@ -73,6 +83,10 @@ func newEngine(db *sql.DB, dataDir string, d *drivers) (*engine, error) {
 				return
 			case <-tick.C:
 				e.reap()
+				if time.Since(e.lastPrune) > time.Hour {
+					e.lastPrune = time.Now()
+					e.pruneRecordings()
+				}
 			}
 		}
 	}()
@@ -110,6 +124,7 @@ func (e *engine) Shutdown() {
 	}
 	// A terminating process must release its OS handles even if Appium cleanup
 	// failed. The durable cleanup_failed row will be recovered by its successor.
+	e.recWG.Wait()
 	e.mu.Lock()
 	for _, g := range e.gates {
 		g.mu.Lock()
@@ -139,6 +154,10 @@ func (e *engine) recover() error {
 		g.mu.Unlock()
 	}
 	_, err = e.db.Exec(`UPDATE mobile_runs SET status='interrupted',failure_kind='infrastructure_error',error='Mobile runner restarted',finished_at=? WHERE status IN ('queued','running')`, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	_, err = e.db.Exec(`UPDATE mobile_recordings SET status='failed',error='Mobile runner restarted before the recording finished',finished_at=? WHERE status IN ('recording','processing')`, time.Now().Unix())
 	return err
 }
 func (e *engine) lockIdentity(d Device) string {
@@ -186,6 +205,9 @@ func (e *engine) finishLocked(ctx context.Context, s Session, g *deviceGate, sta
 	if s.Status == "cleanup_failed" && s.Device.Driver == "appium" && s.ProviderID == "" {
 		return problem("infrastructure_error", "Appium creation had an unknown outcome. Stop any orphaned Appium session, then call mobile_session(action=recover, confirm=true).")
 	}
+	// Captures are finished first: some need the driver session to collect
+	// the video, and none may outlive the lease.
+	e.stopSessionRecordings(s.ID, 3*time.Minute)
 	if err := e.backend.Close(ctx, s); err != nil {
 		_, dbErr := e.db.Exec(`UPDATE mobile_sessions SET status='cleanup_failed',error=? WHERE id=?`, "Device cleanup failed; retrying before reuse", s.ID)
 		if dbErr != nil {
@@ -522,6 +544,14 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 		return e.withSession(ctx, pid, str(args, "session_id"), func(ctx context.Context, s Session) (any, error) {
 			return map[string]any{"session_id": s.ID, "mode": "poll", "interval_ms": 1500, "screenshot_tool": "mobile_observe"}, nil
 		})
+	case "mobile_record":
+		return e.recordTool(ctx, pid, args)
+	case "mobile_record_export":
+		r, err := e.export(pid, args)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"recording": r}, nil
 	case "mobile_test_run":
 		return e.startTest(pid, args)
 	case "mobile_test_get":
@@ -564,6 +594,9 @@ func (e *engine) run(pid, rid string) (TestRun, error) {
 func (e *engine) testGet(pid, rid string) (any, error) {
 	if rid != "" {
 		r, err := e.run(pid, rid)
+		if err == nil {
+			r.RecordingID = e.runRecording(r.ID)
+		}
 		return map[string]any{"run": r}, err
 	}
 	rows, err := e.db.Query(`SELECT `+runColumns+` FROM mobile_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 50`, pid)
@@ -579,7 +612,19 @@ func (e *engine) testGet(pid, rid string) (any, error) {
 		}
 		runs = append(runs, r)
 	}
-	return map[string]any{"runs": runs}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range runs {
+		runs[i].RecordingID = e.runRecording(runs[i].ID)
+	}
+	return map[string]any{"runs": runs}, nil
+}
+func (e *engine) runRecording(rid string) string {
+	var id string
+	_ = e.db.QueryRow(`SELECT id FROM mobile_recordings WHERE run_id=? AND kind='capture' ORDER BY created_at LIMIT 1`, rid).Scan(&id)
+	return id
 }
 func (e *engine) startTest(pid string, args map[string]any) (any, error) {
 	device, err := requireString(args, "device_id")
@@ -592,9 +637,24 @@ func (e *engine) startTest(pid string, args map[string]any) (any, error) {
 	}
 	for _, step := range steps {
 		switch step.Action {
-		case "navigate", "tap", "swipe", "text", "key", "tap_element", "context", "install", "launch", "stop", "screenshot", "assert_text", "wait_for_text":
+		case "navigate", "tap", "swipe", "text", "key", "tap_element", "context", "install", "launch", "stop", "screenshot", "assert_text", "wait_for_text", "wait", "record_mark", "wait_for_app":
 		default:
 			return nil, problem("invalid_argument", "unsupported test action: "+step.Action)
+		}
+		if step.Action == "wait" {
+			if ms := integer(step.Params, "ms", 0); ms < 1 || ms > 30000 {
+				return nil, problem("invalid_argument", "wait needs params.ms between 1 and 30000")
+			}
+		}
+		if step.Action == "record_mark" {
+			if _, err := requireString(step.Params, "name"); err != nil {
+				return nil, err
+			}
+		}
+		if step.Action == "wait_for_app" {
+			if _, err := appID(step.Params); err != nil {
+				return nil, err
+			}
 		}
 		if len(step.Label) > 200 {
 			return nil, problem("invalid_argument", "step label exceeds 200 characters")
@@ -608,6 +668,18 @@ func (e *engine) startTest(pid string, args map[string]any) (any, error) {
 	mode := str(args, "mode")
 	if mode != "" && mode != "screen" && mode != "structured" {
 		return nil, problem("invalid_argument", "mode must be screen or structured")
+	}
+	var record map[string]any
+	if raw, ok := args["record"]; ok && raw != nil && raw != false {
+		record = map[string]any{}
+		if m, ok := raw.(map[string]any); ok {
+			record = m
+		} else if raw != true {
+			return nil, problem("invalid_argument", "record must be true or an object with quality and audio")
+		}
+		if _, err := recordingOptions(merge(record, map[string]any{"max_seconds": maxRecordSeconds})); err != nil {
+			return nil, err
+		}
 	}
 	name := str(args, "name")
 	build := str(args, "build_ref")
@@ -635,7 +707,7 @@ func (e *engine) startTest(pid string, args map[string]any) (any, error) {
 		defer e.wg.Done()
 		defer cancel()
 		defer func() { e.mu.Lock(); delete(e.runs, r.ID); e.mu.Unlock() }()
-		e.executeTest(ctx, r, steps, mode)
+		e.executeTest(ctx, r, steps, mode, record)
 	}()
 	return map[string]any{"run_id": r.ID, "status": r.Status}, nil
 }
@@ -643,9 +715,13 @@ func (e *engine) saveRun(r TestRun) error {
 	_, err := e.db.Exec(`UPDATE mobile_runs SET status=?,failure_kind=?,session_id=?,finished_at=?,error=?,results_json=? WHERE id=?`, r.Status, r.FailureKind, r.SessionID, r.FinishedAt, r.Error, jsonText(r.Results), r.ID)
 	return err
 }
-func (e *engine) executeTest(ctx context.Context, r TestRun, steps []Step, mode string) {
+func (e *engine) executeTest(ctx context.Context, r TestRun, steps []Step, mode string, record map[string]any) {
 	finish := func(err error) {
 		if r.SessionID != "" {
+			// Finalise the video before the lease ends so it covers every step.
+			if rid := e.runRecording(r.ID); rid != "" {
+				_, _ = e.recordingStop(r.ProjectID, rid, 3*time.Minute)
+			}
 			// A passing report also requires successful session teardown. Cleanup
 			// bypasses request admission so shutdown/cancellation can release a lease.
 			if s, getErr := e.session(r.ProjectID, r.SessionID); getErr == nil {
@@ -703,8 +779,26 @@ func (e *engine) executeTest(ctx context.Context, r TestRun, steps []Step, mode 
 		finish(err)
 		return
 	}
+	if record != nil {
+		_, err = e.withSession(ctx, r.ProjectID, s.ID, func(ctx context.Context, s Session) (any, error) {
+			opts := merge(record, map[string]any{"max_seconds": maxRecordSeconds})
+			return e.startRecording(ctx, s, r.ID, opts)
+		})
+		if err != nil {
+			finish(err)
+			return
+		}
+	}
 	for i, step := range steps {
 		result := StepResult{Index: i, Action: step.Action, Label: step.Label, Status: "passed"}
+		marker := step.Label
+		if marker == "" {
+			marker = fmt.Sprintf("step %d: %s", i+1, step.Action)
+		}
+		if step.Action == "record_mark" {
+			marker = str(step.Params, "name")
+		}
+		e.markSession(s.ID, marker)
 		if err = ctx.Err(); err == nil {
 			err = e.testStep(ctx, r.ProjectID, s.ID, step)
 		}
@@ -779,8 +873,46 @@ func (e *engine) testStep(ctx context.Context, pid, sid string, step Step) error
 			case <-timer.C:
 			}
 		}
-	case "screenshot":
+	case "screenshot", "record_mark":
 		return nil
+	case "wait":
+		timer := time.NewTimer(time.Duration(integer(args, "ms", 0)) * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	case "wait_for_app":
+		duration := time.Duration(integer(args, "timeout_ms", 120000)) * time.Millisecond
+		if duration < time.Second || duration > 5*time.Minute {
+			return problem("invalid_argument", "timeout_ms must be 1000..300000")
+		}
+		deadline := time.Now().Add(duration)
+		args["action"] = "status"
+		for {
+			v, err := e.Execute(ctx, pid, "mobile_app", args)
+			if err != nil {
+				return err
+			}
+			var status struct {
+				Installed bool `json:"installed"`
+			}
+			if decodeMap(v, &status) == nil && status.Installed {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return problem("assertion_failed", "the app was not installed before the timeout")
+			}
+			timer := time.NewTimer(3 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
 	case "install", "launch", "stop":
 		_, err := e.Execute(ctx, pid, "mobile_app", args)
 		return err

@@ -8,7 +8,7 @@ This app is self-contained. It does not require or modify Deploy, Code,
 Computer, Devices, Instances, or Simulator. Other apps can call its MCP surface
 through the normal app-to-app bridge when integrations are added separately.
 
-## What works in v0.1
+## What works
 
 | Backend | Discovery | Screen/input | Structured interaction | Installation |
 |---|---|---|---|---|
@@ -25,11 +25,18 @@ provide an Android-style system Back key; Back in a browser session navigates
 browser history.
 
 The dashboard includes device inventory, manual control, screenshot polling,
-source inspection, app installation/launch/stop, test authoring, run history,
-and per-step screenshots. Live view is **screenshot polling**, not video.
+source inspection, app installation/launch/stop, store and TestFlight installs,
+screen recording with markers, a recordings library with playback and export,
+test authoring, run history, and per-step screenshots. Live view is
+**screenshot polling**; recordings are real video files.
+
+| Recording | Android | iOS |
+|---|---|---|
+| `standard` | `adb screenrecord`, joined across its 170 s limit (needs ffmpeg past 170 s). No audio. | Appium `start/stop_recording_screen` (ffmpeg on the Appium host). No audio. |
+| `high` | scrcpy 2.1+ on the runner: full resolution, audio on Android 11+. | USB capture on the Mac running Mobile, the path QuickTime uses: full resolution, up to 60 fps, with audio. |
 
 Emulator/simulator booting, building/signing apps, cloud device providers,
-recorded video, network traces, and deployment gates are not part of v0.1.
+network traces, and deployment gates are not part of this release.
 Already-running Android emulators can be discovered, but Mobile does not own
 their boot/shutdown lifecycle. No simulator-specific iOS artifacts are accepted.
 
@@ -108,6 +115,81 @@ installation is rejected because the artifact filesystem is not shared.
 References: [XCUITest requirements](https://appium.github.io/appium-xcuitest-driver/latest/getting-started/system-requirements/),
 [device setup](https://appium.github.io/appium-xcuitest-driver/latest/getting-started/device-setup/).
 
+## Recording and export
+
+Start a capture on an open session, mark moments, and stop it:
+
+```json
+{"action":"start","session_id":"ses_...","quality":"high","audio":true,"max_seconds":600}
+{"action":"mark","recording_id":"rec_...","name":"gameplay"}
+{"action":"stop","recording_id":"rec_..."}
+```
+
+`quality=auto` (default) picks high when its tool is available. Asking for
+`audio:true` on a method without audio fails instead of silently recording
+without sound. One capture runs per session, up to `max_seconds` (default 600,
+maximum 1800). Closing, expiring or recovering a session finishes its capture
+first, so the driver session is never torn down under a recorder. A runner
+restart marks unfinished captures as failed.
+
+Stopping returns the finished recording with duration, resolution, frame rate,
+codecs, size and markers (read with ffprobe; without it the file is kept but
+unverified). `file_url` streams it with range support for playback and
+`&download=1` downloads it. Files stay on the runner for 7 days; when Storage
+is installed and bound, Mobile also copies each finished recording to
+`/.mobile/recordings/` and each export to `/.mobile/exports/` (1 MiB parts,
+SHA-256 verified, retried with backoff, `mobile_record(action=upload)` to retry
+now) and emits `mobile.recording.uploaded`.
+
+Export a clip with a preset:
+
+```json
+{"recording_id":"rec_...","preset":"app_store_preview","variant":"iphone","from_mark":"gameplay","to":31.5}
+```
+
+| Preset | Output |
+|---|---|
+| `raw` | Trim only, streams copied (cuts land on keyframes) |
+| `app_store_preview` | 15–30 s, H.264 High ≤ level 4.0, ≤30 fps, 10–12 Mbps, stereo 256 kbps AAC (silent track added if the capture has none), ≤500 MB. Variants: `iphone` 886×1920, `iphone_home_large` 1080×1920, `iphone_home_medium` 750×1334, `ipad` 1200×1600, `ipad_9_7` 900×1200, `mac` / `apple_tv` 1920×1080 landscape only |
+| `play_promo` | 1080p H.264 for a YouTube upload linked from Google Play |
+| `social_vertical`, `social_square` | 1080×1920 and 1080×1080 |
+
+Sizes are portrait and swap for landscape; orientation follows the recording
+unless set. `fit` is `pad` (default, black bars), `crop` or `stretch`. Trim
+with `from`/`to` seconds or `from_mark`/`to_mark`; a selection outside the
+preset's duration limits is rejected before encoding. Exports run in the
+background (two at a time per runner). When done, the export lists `checks`
+(duration, resolution, codec, frame rate, audio, size) and `valid`. App Store
+sizes follow Apple's [app preview specifications](https://developer.apple.com/help/app-store-connect/reference/app-information/app-preview-specifications).
+
+Projects add presets in `export_presets_json`, and callers can pass a one-off
+`custom` preset with the same fields. Presets are validated data; ffmpeg
+arguments are never taken from callers.
+
+For a repeatable take, record a test run. Each step adds a marker named after
+its label, `record_mark` adds a named one, and `wait` holds the shot:
+
+```json
+{"device_id":"ios-test","record":{"quality":"high","audio":true},"steps":[
+  {"action":"launch","params":{"app_id":"com.example.game"}},
+  {"action":"wait","params":{"ms":3000}},
+  {"action":"record_mark","params":{"name":"gameplay"}},
+  {"action":"tap","label":"Start","params":{"x":0.5,"y":0.8}},
+  {"action":"wait","params":{"ms":25000}}
+]}
+```
+
+`mobile_test_get` then reports `recording_id`.
+
+### iOS USB capture
+
+On first use Mobile compiles a small Swift helper (`capture/ioscapture.swift`)
+with `xcrun swiftc` into its data directory. The phone must be connected by
+cable, unlocked and trusted. macOS asks for Camera permission for the app that
+runs Mobile (Terminal, the Apteva app or the runner's service); grant it under
+System Settings > Privacy & Security > Camera. If the capture device ID
+differs from the UDID, set `capture_id` on the device in `devices_json`.
+
 ## Remote runner
 
 The same binary can serve the device execution API without an Apteva server
@@ -125,6 +207,10 @@ export APTEVA_MOBILE_RUNNER_TOKEN="$(openssl rand -hex 32)"
 
 Omit the last two flags for ADB-only Android. Optional flags:
 `--android-driver adb|appium`, `--artifact-dir`, `--lock-dir`.
+
+Recording and export run on the runner, so install ffmpeg (and scrcpy, or
+Xcode for iOS USB capture) there. The app streams videos from the runner for
+playback and Storage uploads.
 
 The runner only binds loopback. Use an SSH tunnel or an HTTPS reverse proxy,
 then configure the project's Mobile app with `runner_url` and the same
@@ -147,8 +233,10 @@ ADB/Appium clients outside Mobile. Do not run other controllers concurrently.
 | `mobile_session` | open, list, get, renew, close, recover |
 | `mobile_observe` | Screenshot image content; optional UI source |
 | `mobile_action` | navigate, tap, swipe, text, key, tap_element, context |
-| `mobile_app` | install, launch, stop, uninstall (confirm required) |
+| `mobile_app` | install (artifact, store, beta), launch, stop, status, uninstall (confirm required) |
 | `mobile_stream` | Screenshot polling metadata |
+| `mobile_record` | start, stop, mark, get, list, delete, presets, upload |
+| `mobile_record_export` | Export a ready recording with a preset |
 | `mobile_test_run` | Submit a deterministic test, return run_id |
 | `mobile_test_get` | Retrieve a report or list recent runs |
 | `mobile_test_cancel` | Request cancellation |
@@ -175,6 +263,7 @@ Dashboard routes, authenticated by the platform:
 - `POST /api/apps/mobile/api/call` with `{ "tool": "...", "args": {} }`
 - `GET /api/apps/mobile/api/screen/{session_id}` for a PNG
 - `GET /api/apps/mobile/api/artifacts/{artifact_id}` for saved test evidence
+- `GET /api/apps/mobile/api/recordings/{recording_id}/file` for a video (Range supported, `?download=1` to download)
 
 An optional `project_id` query must match this installation's project. Session
 IDs can be handed between authorized callers within that project. They do not
@@ -197,6 +286,27 @@ prepare device APKs. iOS takes a device-compatible signed IPA, not a simulator
 `.app`. Mobile does not build, sign, re-sign or fetch arbitrary artifact URLs.
 Populate remote runner artifacts directly via your existing file-transfer tools.
 
+### From the App Store, Play Store or TestFlight
+
+```json
+{"session_id":"ses_...","action":"install","source":"beta","app_name":"My Game"}
+{"session_id":"ses_...","action":"install","source":"store","app_id":"com.example.game"}
+{"session_id":"ses_...","action":"status","app_id":"com.example.game"}
+```
+
+Mobile opens the store page (Play: `app_id`; App Store: numeric `store_id`;
+TestFlight: `app_name` as listed, or `store_id`), taps Install or Update and
+returns `result: installing` or `already_installed`. It does not wait for the
+download: poll `status`, or use a `wait_for_app` test step. Play testing
+tracks install from the normal Play listing once the signed-in account has
+joined the test, so `beta` and `store` behave the same on Android.
+
+The phone must already be signed in to the store account, with any TestFlight
+invitation accepted or acceptable in the app. App Store purchases that need
+Face ID or a password are not automated. Store layouts change: pass `flow`
+(steps of `launch`, `open_url`, `tap`, `expect` or `wait`, matching visible
+text) to override the built-in steps without waiting for a release.
+
 ## Smoke tests
 
 ```json
@@ -216,7 +326,9 @@ Populate remote runner artifacts directly via your existing file-transfer tools.
 Tests reserve their own device session, so close an interactive session first.
 Tests fail promptly with `device_unavailable` when the phone is busy; there is
 no unbounded device queue. Limits: 8 concurrent/pending runs per runner, 50 steps,
-10 minutes per test, 30 seconds per text wait, 12 MiB per PNG, 4 MiB per UI source.
+10 minutes per test, 30 seconds per text wait or `wait` step, 5 minutes per
+`wait_for_app`, 12 MiB per PNG, 4 MiB per UI source. `record` films the run;
+see Recording and export.
 
 `assert_text` and `wait_for_text` perform literal matches against UI/HTML source;
 they are not OCR or proof that a matched node is visible. Browser accessibility

@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type runnerConfig struct {
 	AndroidDriver string
 	ArtifactDir   string
 	LockDir       string
+	ToolDir       string
 }
 
 // Device commands never run in a host shell. ADB's *remote* shell still
@@ -67,9 +69,10 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, error
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
 type drivers struct {
-	cfg     runnerConfig
-	command commandFunc
-	http    *http.Client
+	cfg      runnerConfig
+	command  commandFunc
+	http     *http.Client
+	helperMu sync.Mutex
 }
 
 func newDrivers(cfg runnerConfig) *drivers {
@@ -115,7 +118,7 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 				return nil, nil, problem("invalid_configuration", "unsupported device driver")
 			}
 			v.State = "configured"
-			v.Capabilities = capabilities(v.Driver)
+			v.Capabilities = append(capabilities(v.Driver), d.recordCapabilities(*v)...)
 			if v.Driver == "appium" && d.cfg.AppiumURL == "" {
 				v.State = "setup_required"
 				v.Hint = "Configure appium_url and prepare the device on that Appium host."
@@ -152,7 +155,8 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 			if d.cfg.AndroidDriver == "appium" {
 				driver = "appium"
 			}
-			v := Device{ID: "android:" + f[0], UDID: f[0], Name: name, Platform: "android", Physical: !strings.HasPrefix(f[0], "emulator-"), Driver: driver, State: adbState(f[1]), Capabilities: capabilities(driver)}
+			v := Device{ID: "android:" + f[0], UDID: f[0], Name: name, Platform: "android", Physical: !strings.HasPrefix(f[0], "emulator-"), Driver: driver, State: adbState(f[1])}
+			v.Capabilities = append(capabilities(driver), d.recordCapabilities(v)...)
 			if f[1] != "device" {
 				v.Hint = "Unlock the phone and authorize debugging, or reconnect it."
 			}
@@ -622,7 +626,17 @@ func (d *drivers) App(ctx context.Context, s Session, action string, args map[st
 	if action == "uninstall" && !boolean(args, "confirm") {
 		return nil, problem("invalid_argument", "uninstall requires confirm=true")
 	}
+	if action == "status" {
+		app, e := appID(args)
+		if e != nil {
+			return nil, e
+		}
+		return d.appStatus(ctx, s, app)
+	}
 	if action == "install" {
+		if source := str(args, "source"); source != "" && source != "artifact" {
+			return d.storeInstall(ctx, s, source, args)
+		}
 		p, e := d.installPath(str(args, "artifact"), s.Device.Platform)
 		if e != nil {
 			return nil, e
@@ -638,7 +652,7 @@ func (d *drivers) App(ctx context.Context, s Session, action string, args map[st
 		return d.sessionWire(ctx, s, "POST", "/appium/device/install_app", map[string]any{"appPath": p})
 	}
 	if action != "launch" && action != "stop" && action != "uninstall" {
-		return nil, problem("invalid_argument", "app action must be install, launch, stop or uninstall")
+		return nil, problem("invalid_argument", "app action must be install, launch, stop, uninstall or status")
 	}
 	app, e := appID(args)
 	if e != nil {
