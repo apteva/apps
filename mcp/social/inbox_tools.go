@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -163,9 +164,16 @@ type inboxOutcome struct {
 	ExternalID      string          `json:"external_id,omitempty"` // first platform-side id created
 	Permalink       string          `json:"permalink,omitempty"`
 	Deliveries      []inboxDelivery `json:"deliveries,omitempty"`
+	// Send receipt fields, set by inbox_reply's send intent.
+	SendID         int64  `json:"send_id,omitempty"`
+	SendState      string `json:"send_state,omitempty"` // sent | failed | uncertain | pending
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Replayed       bool   `json:"replayed,omitempty"`
 }
 
-func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+// inboxReplyOnce performs one provider send. toolInboxReply wraps it with
+// the durable send intent (inbox_sends.go).
+func (a *App) inboxReplyOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
@@ -254,6 +262,8 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return instagramInboxReply(ctx, item, message), nil
 	case "twitter":
 		return twitterInboxReply(ctx, item, message.Body), nil
+	case "youtube":
+		return youtubeInboxReply(ctx, item, message.Body), nil
 	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,
@@ -320,6 +330,9 @@ func (a *App) toolInboxDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if item.Platform == "facebook" {
 		return facebookInboxDelete(ctx, item), nil
 	}
+	if item.Platform == "youtube" {
+		return youtubeInboxDelete(ctx, item), nil
+	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,
 		SocialAccountID: item.SocialAccountID,
@@ -362,6 +375,9 @@ func moderateComment(ctx *sdk.AppCtx, args map[string]any, action string, hide b
 	}
 	if item.Platform == "facebook" {
 		return facebookInboxHide(ctx, item, hide), nil
+	}
+	if item.Platform == "youtube" {
+		return youtubeInboxHide(ctx, item, hide), nil
 	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,
@@ -409,11 +425,12 @@ func commentModerationStub(ctx *sdk.AppCtx, args map[string]any, action string) 
 	}, nil
 }
 
-// ─── inbox_sync (stub — poll worker lands later) ───────────────────
+// ─── inbox_sync ────────────────────────────────────────────────────
 
 func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
+	scheduled, _ := args[inboxScheduledArg].(bool)
 	// Resolve which accounts to (eventually) sync — if caller passed
 	// none we'd cover all active accounts. For now we still return the
 	// list so callers can see what WILL be synced once the worker
@@ -450,9 +467,11 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Reason          string `json:"reason,omitempty"`
 		Error           string `json:"error,omitempty"`
 		Report          any    `json:"report,omitempty"`
+		Coverage        string `json:"coverage,omitempty"`
 	}
 	results := make([]syncResult, 0, len(ids))
 	for _, id := range ids {
+		resetInboxCounts(ctx.AppDB(), id)
 		var platform, providerSlug string
 		var providerAccountID string
 		var connID int64
@@ -543,13 +562,58 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				Status:          status,
 				Report:          report,
 			})
+		case "youtube":
+			report, err := syncYouTubeAccount(ctx, pid, id, scheduled)
+			if err != nil {
+				results = append(results, syncResult{
+					SocialAccountID: id,
+					Platform:        platform,
+					Status:          "failed",
+					Error:           err.Error(),
+				})
+				continue
+			}
+			result := syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          inboxSyncStatus(report.Warnings),
+				Report:          report,
+			}
+			if report.Skipped != "" {
+				result.Status, result.Reason = "skipped", "YouTube is polled every 30 minutes to save quota; inbox_sync runs it now"
+			}
+			results = append(results, result)
 		default:
+			reason := fmt.Sprintf("%s has no inbox support in Social", platform)
+			if limits := inboxPlatformLimits[platform]; len(limits.Missing) > 0 {
+				reason = strings.Join(limits.Missing, " ")
+			}
 			results = append(results, syncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          "unsupported",
-				Reason:          fmt.Sprintf("%s poll handler not yet wired", platform),
+				Reason:          reason,
 			})
+		}
+	}
+	for i := range results {
+		r := &results[i]
+		counts := takeInboxCounts(ctx.AppDB(), r.SocialAccountID)
+		if r.Platform == "" {
+			continue
+		}
+		detail := r.Error
+		if detail == "" {
+			if warnings := inboxReportWarnings(r.Report); len(warnings) > 0 {
+				detail = strings.Join(warnings, "; ")
+			} else if r.Status != "ok" {
+				detail = r.Reason
+			}
+		}
+		recordInboxCoverage(ctx, pid, r.SocialAccountID, r.Platform, r.Status, detail)
+		emitInboxSynced(ctx, pid, r.SocialAccountID, r.Platform, r.Status, counts)
+		if r.Status != "skipped" {
+			r.Coverage = inboxCoverageState(r.Status, detail)
 		}
 	}
 	return map[string]any{
@@ -632,4 +696,21 @@ func inboxSyncStatus(warnings []string) string {
 		return "partial"
 	}
 	return "ok"
+}
+
+// inboxReportWarnings reads the Warnings field every platform sync report
+// carries, whatever its concrete type.
+func inboxReportWarnings(report any) []string {
+	if report == nil {
+		return nil
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return nil
+	}
+	var body struct {
+		Warnings []string `json:"warnings"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	return body.Warnings
 }

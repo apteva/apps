@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.21.0
+version: 0.22.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -153,6 +153,7 @@ provides:
     - { name: inbox_like,                 description: "Like a comment on the platform side." }
     - { name: inbox_delete,               description: "Delete a comment where the platform permits." }
     - { name: inbox_sync,                 description: "Trigger an out-of-cycle inbox poll for one or more accounts." }
+    - { name: inbox_coverage,             description: "Per-account inbox coverage: supported actions, missing access, last successful sync." }
   ui_panels:
     - slot: project.page
       label: Social
@@ -227,7 +228,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.21.0
+    ref: social/v0.22.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -618,11 +619,9 @@ var platforms = map[string]platformDef{
 			{Name: "title", Type: "text", Label: "Photo title",
 				Help: "Optional TikTok photo title. The main post body is sent as the photo description."},
 		},
-		// TikTok exposes a "publish comment" verb but no read API for
-		// comments on others' content — leaving Comments* false until
-		// that side lands. Until then inbox_reply against tiktok is
-		// effectively a "create a top-level comment" surface; we'll
-		// expose it once we wire the write endpoint.
+		// TikTok serves owned-video comments and DMs only through its
+		// separate API for Business and Business Messaging, which this
+		// connection does not have. inbox_coverage explains what is missing.
 		Inbox: inboxCaps{},
 	},
 	"youtube": {
@@ -685,9 +684,12 @@ var platforms = map[string]platformDef{
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Thumbnail",
 				Help: "Optional image from Storage. YouTube applies it after the video upload returns a video id."},
 		},
+		// Comments only: YouTube has no DM API. Delete covers the
+		// channel's own comments; viewers' comments are hidden instead.
 		Inbox: inboxCaps{
 			CommentsRead:   true,
 			CommentsWrite:  true,
+			CommentsHide:   true,
 			CommentsDelete: true,
 		},
 	},
@@ -1202,13 +1204,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "inbox_reply",
 			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|partial|unsupported|skipped|failed, reason?, error?, external_id?, permalink?, deliveries?}. " +
 				"For comment items, mode controls the route: `auto`/`public` creates a public child comment, `private` sends a private reply where supported (Facebook Pages and Instagram Business). " +
-				"For DMs, attachments can reference Storage through media_storage_ids or attachments:[{source:'storage',storage_id}], or a public HTTPS URL through attachments:[{source:'url',url,type}]. Platform capabilities decide the allowed types. Args: id, body?, mode?, media_storage_ids?, media_project_id?, attachments?.",
+				"For DMs, attachments can reference Storage through media_storage_ids or attachments:[{source:'storage',storage_id}], or a public HTTPS URL through attachments:[{source:'url',url,type}]. Platform capabilities decide the allowed types. " +
+				"Every send is recorded before the provider call: pass idempotency_key to make retries safe; without one, an identical reply to the same item within 10 minutes, or while an earlier one is unconfirmed, returns status=skipped. The result carries send_id and send_state (sent|failed|uncertain); uncertain sends are confirmed by the next sync. Args: id, body?, mode?, idempotency_key?, media_storage_ids?, media_project_id?, attachments?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                map[string]any{"type": "integer"},
 				"body":              map[string]any{"type": "string"},
 				"mode":              map[string]any{"type": "string", "enum": []string{"auto", "public", "private"}, "default": "auto"},
 				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"media_project_id":  map[string]any{"type": "string"},
+				"idempotency_key":   map[string]any{"type": "string", "description": "Optional. Retrying with the same key returns the first result instead of sending again."},
 				"attachments": map[string]any{
 					"type": "array",
 					"items": map[string]any{
@@ -1239,7 +1243,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "inbox_hide",
-			Description: "Hide a comment on the platform side (Facebook, Instagram). Returns `unsupported` for platforms without a hide verb. Args: id.",
+			Description: "Hide a comment on the platform side (Facebook, Instagram, YouTube). Returns `unsupported` for platforms without a hide verb. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
@@ -1276,6 +1280,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 			}, nil),
 			Handler: a.toolInboxSync,
+		},
+		{
+			Name:        "inbox_coverage",
+			Description: "Per-account inbox coverage: which inbox actions each account supports, what access is missing, when it last synced successfully, and whether coverage is complete. Args: social_account_ids?.",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, nil),
+			Handler:     a.toolInboxCoverage,
+			Annotations: map[string]any{"readOnlyHint": true},
 		},
 	}
 	tools = append(tools, append(a.historyTools(), publicationReconcileTool(a), accountSupportersTool(a))...)
@@ -5835,7 +5848,7 @@ func (a *App) runInboxCollector(runCtx context.Context, ctx *sdk.AppCtx) error {
 	if runCtx.Err() != nil || projectScope(ctx) == "" {
 		return runCtx.Err()
 	}
-	result, err := a.toolInboxSync(ctx, map[string]any{})
+	result, err := a.toolInboxSync(ctx, map[string]any{inboxScheduledArg: true})
 	if err != nil {
 		return err
 	}

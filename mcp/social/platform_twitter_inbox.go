@@ -156,7 +156,7 @@ func syncTwitterMentions(ctx *sdk.AppCtx, projectID string, creds *twitterAccoun
 		if externalPostID == "" {
 			externalPostID = tw.ID
 		}
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
@@ -226,7 +226,7 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 			continue
 		}
 		author := users[dm.SenderID]
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
