@@ -225,3 +225,27 @@ func TestAccountAddFreshOAuthKeepsExistingAccountsAcrossPlatforms(t *testing.T) 
 		})
 	}
 }
+
+func TestPlatformsReportReusableConnectionForPickerPlatforms(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{connectionFixture(21, "facebook", "test-proj", "active"), connectionFixture(22, "twitter", "test-proj", "active"), connectionFixture(23, "pinterest", "test-proj", "active"), connectionFixture(24, "youtube", "other", "active")}
+	newSocialCtx(t, unfilteredConnections{pf})
+	rec := httptest.NewRecorder()
+	(&App{}).handlePlatforms(rec, httptest.NewRequest("GET", "/platforms?project_id=test-proj", nil))
+	var out struct{ Platforms []map[string]any }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, p := range out.Platforms {
+		got[toString(p["platform"])] = p["reusable_connection"] == true
+	}
+	// Instagram shares Facebook's facebook-api login; X, Pinterest and
+	// YouTube logins are one account each, and other projects never count.
+	want := map[string]bool{"facebook": true, "instagram": true, "twitter": false, "pinterest": false, "youtube": false}
+	for name, reusable := range want {
+		if got[name] != reusable {
+			t.Errorf("%s reusable_connection = %v, want %v", name, got[name], reusable)
+		}
+	}
+}

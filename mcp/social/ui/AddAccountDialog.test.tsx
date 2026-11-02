@@ -28,6 +28,7 @@ async function render(
   started: (id: number) => void = () => {},
   close = () => {},
   projectId = "content-sites",
+  reused: (pendingId: number, connectionId: number) => void = () => {},
 ) {
   globals();
   if (!root) {
@@ -43,6 +44,7 @@ async function render(
         projectId={projectId}
         onClose={close}
         setStatus={() => {}}
+        onReuseExisting={reused}
         onOAuthStarted={started}
       />,
     ),
@@ -288,4 +290,81 @@ test("repeated clicks cannot create duplicate OAuth operations", async () => {
       }),
     ),
   );
+});
+
+for (const name of ["facebook", "instagram"]) {
+  test(`${name}: an existing project login is reused without a popup`, async () => {
+    let opened = 0;
+    browser.open = (() => { opened++; return { location: { href: "" }, close() {} }; }) as any;
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ pending_account_id: 14, platform: name, reused_connection: 5 });
+    }) as typeof fetch;
+    let landed: number[] = [];
+    let started = 0;
+    await render(
+      [platform(name, { requires_picker: true, reusable_connection: true })],
+      () => started++,
+      () => {},
+      "content-sites",
+      (pendingId, connectionId) => (landed = [pendingId, connectionId]),
+    );
+    expect(browser.document.body.textContent).toContain("Uses this project’s existing login");
+    await click(name === "facebook" ? "Add page" : "Add account");
+    expect(opened).toBe(0);
+    expect(bodies).toEqual([{ platform: name, profile_id: 27 }]);
+    expect(landed).toEqual([14, 5]);
+    expect(started).toBe(0);
+  });
+}
+test("several saved logins: the newest is reused without asking", async () => {
+  browser.open = (() => { throw new Error("no popup expected"); }) as any;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    bodies.push(body);
+    if (!body.connection_id) {
+      return Response.json({ status: "select_connection", connections: [{ id: 3 }, { id: 8 }, { id: 5 }] });
+    }
+    return Response.json({ pending_account_id: 21, reused_connection: body.connection_id });
+  }) as typeof fetch;
+  let landed: number[] = [];
+  await render(
+    [platform("facebook", { requires_picker: true, reusable_connection: true })],
+    () => {},
+    () => {},
+    "content-sites",
+    (pendingId, connectionId) => (landed = [pendingId, connectionId]),
+  );
+  await click("Add page");
+  expect(bodies).toEqual([
+    { platform: "facebook", profile_id: 27 },
+    { platform: "facebook", profile_id: 27, connection_id: 8 },
+  ]);
+  expect(landed).toEqual([21, 8]);
+});
+test("a vanished saved login falls back to a fresh sign-in on the next click", async () => {
+  let opened = 0;
+  const popup = { location: { href: "about:blank" }, close() {} };
+  browser.open = (() => { opened++; return popup; }) as any;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return Response.json({ pending_account_id: 30, authorize_url: "https://facebook.example/authorize" });
+  }) as typeof fetch;
+  let started = 0;
+  await render(
+    [platform("facebook", { requires_picker: true, reusable_connection: true })],
+    (id) => (started = id),
+  );
+  await click("Add page");
+  expect(opened).toBe(0);
+  expect(started).toBe(0);
+  expect(browser.document.body.textContent).toContain("no longer available");
+  await click("Connect new account");
+  expect(opened).toBe(1);
+  expect(bodies[1]).toEqual({ platform: "facebook", force_new: true, profile_id: 27 });
+  expect(started).toBe(30);
+  expect(popup.location.href).toBe("https://facebook.example/authorize");
 });
