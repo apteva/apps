@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.22.0
+version: 0.22.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -228,7 +228,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.22.0
+    ref: social/v0.22.1
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -10578,6 +10578,15 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		}); err == nil && len(conns) > 0 {
 			available = true
 		}
+		// reusable_connection — the project already has an active login
+		// that can add more Pages / IG accounts, so the panel goes
+		// straight to the picker instead of a new OAuth.
+		reusable := false
+		if def.ListPagesTool != "" && pid != "" {
+			if choices, err := accountConnectionChoices(globalCtx, pid, def); err == nil && len(choices) > 0 {
+				reusable = true
+			}
+		}
 		// option_fields drives the compose-dialog "Customize" expander —
 		// when a user picks an account whose platform has fields, the
 		// panel renders inputs for them. Empty array = no per-target
@@ -10588,14 +10597,15 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			fields = []optionField{}
 		}
 		out = append(out, map[string]any{
-			"platform":         def.Platform,
-			"display_name":     def.DisplayName,
-			"integration_slug": def.IntegrationSlug,
-			"requires_picker":  def.ListPagesTool != "",
-			"available":        available,
-			"zernio_available": zernioAvailable,
-			"option_fields":    fields,
-			"inbox":            inboxCapabilitiesPayload(def.Inbox),
+			"platform":            def.Platform,
+			"display_name":        def.DisplayName,
+			"integration_slug":    def.IntegrationSlug,
+			"requires_picker":     def.ListPagesTool != "",
+			"available":           available,
+			"reusable_connection": reusable,
+			"zernio_available":    zernioAvailable,
+			"option_fields":       fields,
+			"inbox":               inboxCapabilitiesPayload(def.Inbox),
 		})
 	}
 	for _, p := range zernioProviderPlatforms() {

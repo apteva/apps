@@ -238,6 +238,9 @@ interface PlatformInfo {
   // Existing-connection hint only; environment-configured OAuth clients
   // can start a new login even when no connection exists yet.
   available: boolean;
+  // The project already has a login that can add another Page/IG
+  // account/board; adding reuses it instead of a new OAuth.
+  reusable_connection?: boolean;
   zernio_available?: boolean;
   provider_only?: boolean;
   // option_fields — per-platform overrides the compose dialog can
@@ -612,6 +615,9 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
+  const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
+    setOauthLanding((current) => current?.pendingId === pendingId ? current : ({ pendingId, connectionId }));
+  }, []);
 
   return (
     <div className="h-full min-w-0 overflow-hidden flex flex-col">
@@ -647,6 +653,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             projectId={projectId}
             oauthLanding={oauthLanding}
             onClearLanding={clearOauthLanding}
+            onSetLanding={setOauthLandingFromReuse}
             onOAuthStarted={(pendingId, popup) => setPendingOAuthPopup({ pendingId, popup, projectId })}
             onChange={loadAccounts}
             onImported={loadPosts}
@@ -1078,13 +1085,14 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onOAuthStarted, onChange, onImported, setStatus,
+  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onOAuthStarted, onChange, onImported, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   activeProfile: Profile | null;
   projectId?: string | null;
   oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
+  onSetLanding: (pendingId: number, connectionId: number) => void;
   onOAuthStarted: (pendingId: number, popup: Window) => void;
   onChange: () => void;
   onImported: () => void;
@@ -1184,6 +1192,10 @@ function AccountsView({
           projectId={projectId}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
+          onReuseExisting={(pendingId, connectionId) => {
+            onSetLanding(pendingId, connectionId);
+            setAdding(false);
+          }}
           onOAuthStarted={onOAuthStarted}
         />
       )}
@@ -2618,18 +2630,21 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 export function AddAccountDialog({
-  platforms, activeProfile, projectId, onClose, setStatus, onOAuthStarted,
+  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
   activeProfile: Profile | null;
   projectId?: string | null;
   onClose: () => void;
   setStatus: (s: string) => void;
+  onReuseExisting: (pendingId: number, connectionId: number) => void;
   onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  // Platforms whose saved login turned out to be gone; the next click signs in fresh.
+  const [freshLogin, setFreshLogin] = useState<Record<string, boolean>>({});
   const starting = useRef(false);
-  const startRequest = useRef<{ controller: AbortController; popup: Window } | null>(null);
+  const startRequest = useRef<{ controller: AbortController; popup: Window | null } | null>(null);
   useEffect(() => {
     setBusy(null);
     return () => {
@@ -2637,7 +2652,7 @@ export function AddAccountDialog({
       startRequest.current = null;
       starting.current = false;
       request?.controller.abort();
-      try { request?.popup.close(); } catch {}
+      try { request?.popup?.close(); } catch {}
     };
   }, [projectId, activeProfile?.id]);
   // Inline error inside the modal. The panel-header status used to
@@ -2648,18 +2663,22 @@ export function AddAccountDialog({
   const zernioConnected = platforms.some((p) => !!p.zernio_available);
   const visiblePlatforms = zernioConnected ? platforms : platforms.filter((p) => !p.provider_only);
 
+  const reuses = (p: PlatformInfo) => !!p.reusable_connection && !freshLogin[p.platform];
+
   const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
     if (starting.current || (provider === "zernio" && !p.zernio_available)) return;
     setErr("");
-    // Open during the click so popup blockers allow the new account's login.
-    const popup = window.open("about:blank", "social_oauth", "width=600,height=700");
-    if (!popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
+    const reuse = provider === "native" && reuses(p);
+    // A new login opens its popup during the click so popup blockers allow
+    // it. Reusing the project's existing login needs no popup.
+    const popup = reuse ? null : window.open("about:blank", "social_oauth", "width=600,height=700");
+    if (!reuse && !popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
     starting.current = true;
     const request = { controller: new AbortController(), popup };
     startRequest.current = request;
     const busyKey = provider === "zernio" ? `${p.platform}:zernio` : p.platform;
     setBusy(busyKey);
-    setStatus("Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
+    setStatus(reuse ? `Loading ${pickerKind(p.platform).plural}…` : "Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
     (async () => {
       const fail = (msg: string) => {
         if (startRequest.current !== request) return;
@@ -2668,26 +2687,32 @@ export function AddAccountDialog({
         setStatus(msg);
         setBusy(null);
         starting.current = false;
-        try { popup.close(); } catch {}
+        try { popup?.close(); } catch {}
       };
       try {
         const payload: Record<string, any> = provider === "zernio"
           ? { platform: p.platform, provider: "zernio" }
-          : { platform: p.platform, force_new: true };
+          : reuse ? { platform: p.platform } : { platform: p.platform, force_new: true };
         if (activeProfile?.id) payload.profile_id = activeProfile.id;
-        const res = await fetch(appURL("/accounts/start", projectId), {
-          method: "POST",
-          credentials: "same-origin",
-          signal: request.controller.signal,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
-          return;
-        }
-        const data = await res.json();
+        const post = async (body: Record<string, any>) => {
+          const res = await fetch(appURL("/accounts/start", projectId), {
+            method: "POST",
+            credentials: "same-origin",
+            signal: request.controller.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+          return res.json();
+        };
+        let data = await post(payload);
         if (startRequest.current !== request) return;
+        // Several saved logins: use the newest, which is the most recent sign-in.
+        if (reuse && data?.status === "select_connection" && Array.isArray(data.connections) && data.connections.length) {
+          const newest = Math.max(...data.connections.map((c: any) => Number(c.id)).filter(Number.isSafeInteger));
+          data = await post({ ...payload, connection_id: newest });
+          if (startRequest.current !== request) return;
+        }
         // The backend tool returns MCP-shaped errors as 200 with
         // {isError: true, content: [{type: "text", text: "..."}]}
         // because the same handler serves agent MCP calls. Detect
@@ -2699,7 +2724,19 @@ export function AddAccountDialog({
           fail(inner || "OAuth start returned an error envelope");
           return;
         }
-        if (!Number.isSafeInteger(data.pending_account_id) || data.pending_account_id <= 0 ||
+        if (reuse) {
+          if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0 && Number.isSafeInteger(data.reused_connection)) {
+            startRequest.current = null;
+            starting.current = false;
+            onReuseExisting(data.pending_account_id, data.reused_connection);
+            return;
+          }
+          // The saved login is gone; the next click signs in fresh.
+          setFreshLogin((current) => ({ ...current, [p.platform]: true }));
+          fail(`The saved ${p.display_name} login is no longer available. Click Connect new account to sign in again.`);
+          return;
+        }
+        if (!popup || !Number.isSafeInteger(data.pending_account_id) || data.pending_account_id <= 0 ||
             typeof data.authorize_url !== "string") {
           fail("The sign-in service returned an incomplete authorization request. Try connecting again.");
           return;
@@ -2735,7 +2772,7 @@ export function AddAccountDialog({
           <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="text-text-dim text-xs mb-3">
-          Choose a platform to connect a new account. Sign in as the account you want to add.
+          Choose a platform to add an account. Facebook and Instagram reuse this project’s existing login when it has one; otherwise sign in as the account you want to add.
         </div>
         {err && (
           <div className="mb-3 border border-error rounded p-2 bg-error/10">
@@ -2760,7 +2797,7 @@ export function AddAccountDialog({
                 <div className="min-w-0">
                   <div className="text-text truncate">{p.display_name}</div>
                   <div className="text-text-dim text-xs">
-                    {p.provider_only ? "Provider-backed" : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Multiple accounts supported"}
+                    {p.provider_only ? "Provider-backed" : reuses(p) ? `Uses this project’s existing login` : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Multiple accounts supported"}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -2770,7 +2807,7 @@ export function AddAccountDialog({
                       disabled={directDisabled}
                       className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
                     >
-                      {zernioConnected ? "Connect directly" : "Connect new account"}
+                      {reuses(p) ? `Add ${pickerKind(p.platform).singular}` : zernioConnected ? "Connect directly" : "Connect new account"}
                     </button>
                   )}
                   {zernioConnected && (
