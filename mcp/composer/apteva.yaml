@@ -2,8 +2,15 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.9.3
+version: 0.10.0
 description: |
+  v0.10.0 makes web-canvas-1 procedures executable. A procedure is an HTML
+  page that draws any time t through setTime(t) (or composer.onTime), reading
+  parameters, canvas, timeline, and input asset URLs from window.composer.
+  Local scripts and stylesheets are inlined into one document; the renderer
+  captures it frame by frame in headless Chrome, and the panel's JSON tab
+  previews the identical document in a sandboxed iframe with play/scrub and an
+  editable parameters field, so timing changes need no render.
   v0.9.3 fixes procedure_create and procedure_get asset examples to use the
   selected procedure revision's actual target instead of hardcoding clip.
   Composition, audio, and still procedure examples now pass target validation.

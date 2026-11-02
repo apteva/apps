@@ -1,3 +1,21 @@
+# Composer v0.10.0
+
+`web-canvas-1` procedures now run. The entrypoint is an HTML page that draws a
+frame for any time `t`: define `setTime(t)` (or call `composer.onTime(fn)`),
+optionally expose a `composerReady` promise, and read
+`window.composer.{parameters, canvas, timeline, assets, files}`. Local
+`<script src>` and stylesheet links are inlined into one document, which the
+renderer captures frame by frame with the existing headless-Chrome pipeline
+(target `clip` → mp4, `still` → png). The JSON tab previews the same document
+in a sandboxed iframe with play/scrub and a parameters editor that writes back
+into the clip binding, so retiming a scene no longer needs a render.
+
+No migration. Existing Python, Bun, and Go procedures are unchanged.
+Validation: full Composer Go suite, `go vet`, panel unit tests, and a real
+Chrome capture test for the new runtime.
+
+---
+
 # Composer v0.9.3
 
 `procedure_create` and `procedure_get` now return example assets with the

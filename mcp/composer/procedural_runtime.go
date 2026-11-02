@@ -351,40 +351,20 @@ func runProcedureLocal(parent context.Context, appCtx *sdk.AppCtx, revision *Pro
 	if err := os.WriteFile(jobPath, jobJSON, 0o400); err != nil {
 		return result, err
 	}
-	executable := procedureExecutable(appCtx, revision.Runtime)
-	if executable == "" || revision.Runtime == "web-canvas-1" {
-		return result, fmt.Errorf("runtime %q is declared but local execution is not implemented", revision.Runtime)
-	}
-	args := []string{revision.Entrypoint}
-	if revision.Runtime == "go-1.25-media" {
-		args = []string{"run", revision.Entrypoint}
-	}
 	timeoutCtx, cancel := context.WithTimeout(parent, proceduralTimeout(appCtx))
 	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, executable, args...)
-	cmd.Dir = sourceDir
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=" + tmpDir, "TMPDIR=" + tmpDir,
-		"COMPOSER_JOB=" + jobPath, "COMPOSER_OUTPUT=" + outputDir, "COMPOSER_TMP=" + tmpDir,
-		"FFMPEG_PATH=" + ffmpegPath(), "FFPROBE_PATH=" + ffprobePath(),
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 5 * time.Second
 	logs := &boundedProcedureLog{limit: procedureLogLimit}
-	cmd.Stdout, cmd.Stderr = logs, logs
-	err = cmd.Run()
+	if revision.Runtime == webCanvasRuntime {
+		err = runWebCanvasProcedure(timeoutCtx, appCtx, revision, job, outputDir, tmpDir, logs)
+	} else {
+		err = runProcedureProcess(timeoutCtx, appCtx, revision, sourceDir, tmpDir, outputDir, jobPath, logs)
+	}
 	result.Logs = logs.String()
 	if timeoutCtx.Err() != nil {
 		return result, fmt.Errorf("procedure stopped: %w", timeoutCtx.Err())
 	}
 	if err != nil {
-		return result, fmt.Errorf("procedure process: %w", err)
+		return result, err
 	}
 	artifact, duration, err := readProcedureResult(outputDir, binding.OutputName, revision.OutputKind, proceduralMaxOutputBytes(appCtx))
 	if err != nil {
@@ -408,6 +388,37 @@ func runProcedureLocal(parent context.Context, appCtx *sdk.AppCtx, revision *Pro
 		result.DurationSeconds = probedDuration
 	}
 	return result, nil
+}
+
+func runProcedureProcess(ctx context.Context, appCtx *sdk.AppCtx, revision *ProcedureRevisionRecord, sourceDir, tmpDir, outputDir, jobPath string, logs *boundedProcedureLog) error {
+	executable := procedureExecutable(appCtx, revision.Runtime)
+	if executable == "" {
+		return fmt.Errorf("runtime %q has no local executable", revision.Runtime)
+	}
+	args := []string{revision.Entrypoint}
+	if revision.Runtime == "go-1.25-media" {
+		args = []string{"run", revision.Entrypoint}
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.Dir = sourceDir
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=" + tmpDir, "TMPDIR=" + tmpDir,
+		"COMPOSER_JOB=" + jobPath, "COMPOSER_OUTPUT=" + outputDir, "COMPOSER_TMP=" + tmpDir,
+		"FFMPEG_PATH=" + ffmpegPath(), "FFPROBE_PATH=" + ffprobePath(),
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Stdout, cmd.Stderr = logs, logs
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("procedure process: %w", err)
+	}
+	return nil
 }
 
 func validateProcedureInputName(name string) error {

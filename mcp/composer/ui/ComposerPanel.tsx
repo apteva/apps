@@ -1,4 +1,5 @@
 import OutputPresets from "./output-presets";
+import ProcedurePreview from "./procedure-preview";
 // ComposerPanel - AI-native multi-track editor for the stable Composer timeline.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -2348,6 +2349,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
             </div>
           ) : (
             <JSONEditor
+              projectId={projectId}
               editText={jsonEdit}
               outputText={jsonOutput}
               onEdit={(value) => { editEpoch.current++; setDirty(true); setJsonEdit(value); }}
@@ -4444,12 +4446,14 @@ function AIAssetEditor({
 }
 
 function JSONEditor({
+  projectId,
   editText,
   outputText,
   onEdit,
   onOutput,
   onApply,
 }: {
+  projectId: string;
   editText: string;
   outputText: string;
   onEdit: (s: string) => void;
@@ -4459,6 +4463,7 @@ function JSONEditor({
   const mono = "ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace";
   return (
     <div className="flex-1 overflow-auto p-4 space-y-4">
+      <ProcedurePreview projectId={projectId} editText={editText} outputText={outputText} onEdit={onEdit} />
       <Field label="Edit JSON">
         <textarea
           value={editText}
