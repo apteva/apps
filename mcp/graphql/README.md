@@ -476,6 +476,112 @@ against direct native results; Database adapter forwarding/result mapping;
 mixed Tables/Database/HTTP/Function queries; pagination; API/project/environment
 isolation; realtime hub scoping; Auth and trusted Function invocation.
 
+### Database pipelines (`database_pipeline`)
+
+`database_pipeline` answers a whole report from Database without SQL. It is a
+resolver operation on a `database` source and needs Database 0.6.0 or later (the
+manifest requires it)
+(read batches, `count_distinct`, metric filters, lookups and buckets). A run
+has up to three phases:
+
+1. **access** (optional): checks permissions from the verified identity and
+   resolves the values the caller may read, such as teams, before any data is
+   read. Requested values must be a subset of what the caller may read; refusals
+   fail the field with `permission_denied`.
+2. **steps**: 1 to 100 `aggregate`, `find`, `count` or `get` operations, sent
+   to Database as ONE read-only `db_batch`, so every number comes from the
+   same snapshot.
+3. **combine** (optional): joins grouped step rows on their keys, adds a
+   total row from ungrouped steps, and computes fields with resolver-module
+   expressions (`add`, `subtract`, `divide`, `safe_divide`, `round`, `if`, ...).
+
+```json
+{
+  "params": {
+    "from":  {"from": "$args.from", "type": "datetime", "required": true},
+    "to":    {"from": "$args.to", "type": "datetime", "required": true},
+    "teams": {"from": "$args.teamIds", "type": "string_list"},
+    "user":  {"from": "$identity.subject", "type": "string", "required": true}
+  },
+  "access": {
+    "require_any_permission": ["reports:read"],
+    "values": {"teams": {
+      "requested": "$param.teams",
+      "unrestricted_if_permission": "reports:all_teams",
+      "default":   {"collection": "teams", "field": "id", "where": {"field": "active", "op": "eq", "value": true}},
+      "otherwise": {"collection": "members", "field": "team_id", "where": {"field": "user_id", "op": "eq", "value": "$param.user"}},
+      "single": true
+    }}
+  },
+  "steps": [
+    {"id": "calls", "op": "aggregate", "max_rows": 100, "args": {
+      "collection": "calls",
+      "where": {"and": [
+        {"field": "team_id", "op": "in", "value": "$scope.teams"},
+        {"field": "started_at", "op": "gte", "value": "$param.from"},
+        {"field": "started_at", "op": "lt", "value": "$param.to"}]},
+      "groupBy": ["agent_id"],
+      "metrics": [
+        {"name": "callers", "op": "count_distinct", "field": "caller"},
+        {"name": "answered", "op": "count_distinct", "field": "caller", "where": {"field": "answered", "op": "eq", "value": true}}]}},
+    {"id": "calls_total", "op": "aggregate", "args": {"collection": "calls", "where": {"field": "team_id", "op": "in", "value": "$scope.teams"},
+      "metrics": [{"name": "callers", "op": "count_distinct", "field": "caller"}, {"name": "answered", "op": "count_distinct", "field": "caller", "where": {"field": "answered", "op": "eq", "value": true}}]}}
+  ],
+  "combine": {"byAgent": {
+    "join": ["calls"], "on": ["agent_id"], "missing": "zero",
+    "total": {"key": "__total__", "steps": {"calls": "calls_total"}},
+    "fields": {
+      "callers": "calls.callers",
+      "unanswered": {"op": "subtract", "args": ["calls.callers", "calls.answered"]},
+      "answer_rate": {"op": "safe_divide", "args": ["calls.answered", "calls.callers"]}
+    }
+  }},
+  "result": {"agents": "$combine.byAgent", "teams": "$scope.teams"}
+}
+```
+
+Rules:
+
+- Collections, fields, metrics, groupings, lookups, buckets and ordering are
+  resolver configuration. Clients reach a plan only through declared `params`
+  (`$args`, `$parent`, verified `$identity`, or fixed values; types `string`,
+  `number`, `boolean`, `datetime`, `json`, `string_list`). `$param.<name>` and
+  `$scope.<name>` are accepted only as filter values, metric-filter values and
+  `get` keys.
+- Access values: an unrestricted caller (`unrestricted_if_permission`) gets
+  exactly the values it requested, or the `default` read when it requested
+  none. Every other caller gets the `otherwise` read (`single: true` requires
+  exactly one value), narrowed to its request. Permissions come from the
+  verified Auth identity. Access reads run in their own read batch before the
+  steps.
+- `result` maps output fields to `$steps.<id>` (rows, records, a count or a
+  record), `$steps.<id>.first`, `$combine.<id>` or `$scope.<name>`. Declare the
+  field non-null in your SDL so any failure nulls the whole report.
+- Failures are never partial: a step over its `max_rows` (default and maximum
+  1000) fails with `source_result_truncated`; Database budgets fail with
+  `resource_limit`; exceeding `timeout_ms` (default 15000, maximum 60000)
+  fails with `timeout`. A `find` step marked `top_n: true` returns its first
+  `max_rows` records instead (for "latest N" lists).
+- Integer counts and sums that Database returns as decimal strings become JSON
+  numbers while they stay exact (within 2^53); larger values stay strings.
+- A `Subscription` bound to a pipeline watches every collection the plan reads
+  (steps, lookup targets and access reads) through one Database watch, and
+  each change re-runs the whole report once per subscriber group.
+
+What Database cannot compute while reading, such as window-function
+deduplication ("first call per caller") or one-to-many existence checks,
+belongs in fields stored on the record when it is written. Joins are
+many-to-one lookups by primary key.
+
+Measured end to end (`TestRealDatabasePipeline`, Database 0.6.0 on AptevaDB,
+50,000 calls and 5,556 sales, 7 steps): every figure equals an independent Go
+computation over the same records, including Paris day buckets across the
+October DST change and a chained lookup; GraphQL adds well under 1 ms over
+replaying the same `db_batch` directly; a sale commit reaches two subscribers
+with one batch. Batch cost equals the sum of its steps: there, a chained lookup
+(about 410 ms) and an unindexed latest-5 sort (about 78 ms) dominated; the
+other steps took 1 to 17 ms each.
+
 ## Execution performance
 
 Independent root query fields execute concurrently (up to eight); mutation
@@ -522,7 +628,7 @@ config watches other or additional collections instead:
 }
 ```
 
-Requirements, all set by a project operator in Database (0.5.3 or later): the
+Requirements, all set by a project operator in Database (0.6.0 or later): the
 database uses the `aptevadb` adapter, capture is enabled with
 `db_realtime_configure`, and `graphql` has read access via `db_access_grant`.
 Otherwise the subscribe message fails with Database's reason.

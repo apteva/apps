@@ -364,6 +364,9 @@ func sharedSubscriptionRead(p *preparedOperation, b *executionBindings) bool {
 		}
 		switch s.Kind {
 		case "database":
+			if r.Operation == databasePipelineOperation {
+				continue
+			}
 			if tool, err := databaseTool(r.Operation); err != nil || !databaseReadTool(tool) {
 				return false
 			}

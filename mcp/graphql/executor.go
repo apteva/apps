@@ -905,6 +905,9 @@ func boundedArg(server, client any) any {
 }
 
 func (a *App) callDatabase(ctx context.Context, operation string, config map[string]any) (any, error) {
+	if operation == databasePipelineOperation {
+		return a.callDatabasePipeline(ctx, config)
+	}
 	tool, err := databaseTool(operation)
 	if err != nil {
 		return nil, err

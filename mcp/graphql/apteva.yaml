@@ -31,9 +31,9 @@ requires:
       optional: true
       reason: Used to attach a GraphQL hostname when configured.
     - name: database
-      version: ">=0.5.3"
+      version: ">=0.6.0"
       optional: true
-      reason: Provides collection queries, writes and native aggregation on project databases granted to graphql with db_access_grant.
+      reason: Provides collection queries, writes, native aggregation and database_pipeline read batches on project databases granted to graphql with db_access_grant.
     - name: tables
       version: ">=0.2.16"
       optional: true
@@ -90,7 +90,7 @@ provides:
     - name: graphql_source_list
       description: List configured GraphQL sources.
     - name: graphql_resolver_set
-      description: Bind a typed GraphQL field to a source operation, including aggregate_pipeline.
+      description: Bind a typed GraphQL field to a source operation, including aggregate_pipeline and database_pipeline.
     - name: graphql_resolver_list
       description: List resolver bindings.
     - name: graphql_module_create

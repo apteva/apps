@@ -233,6 +233,10 @@ func setResolverModuleMetadata(db *sql.DB, id int64, m moduleMetadata) error {
 	return err
 }
 
+// moduleExpressionOps is the expression language shared by resolver modules
+// and database_pipeline combine fields.
+var moduleExpressionOps = map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "safe_divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true, "date_add": true, "datetime_add": true, "date_diff_days": true, "format_datetime": true}
+
 func validateResolverModuleDefinition(inputs, definition map[string]any) []string {
 	problems := []string{}
 	for name, raw := range inputs {
@@ -271,8 +275,7 @@ func validateResolverModuleDefinition(inputs, definition map[string]any) []strin
 			return
 		}
 		op, _ := node["op"].(string)
-		supported := map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true, "date_add": true, "datetime_add": true, "date_diff_days": true, "format_datetime": true}
-		if !supported[op] {
+		if !moduleExpressionOps[op] {
 			problems = append(problems, path+" has unsupported op "+op)
 			return
 		}
@@ -573,6 +576,15 @@ func (runtime moduleRuntime) eval(raw any, inputs map[string]any, depth int) (an
 		}
 	case "add", "subtract", "multiply", "divide", "sum", "min", "max":
 		return calculateModuleNumber(op, values)
+	case "safe_divide":
+		// Ratios over empty groups are null rather than a failed report.
+		if len(values) != 2 || values[0] == nil || values[1] == nil {
+			return nil, nil
+		}
+		if divisor, err := moduleNumber(values[1]); err != nil || divisor.Sign() == 0 {
+			return nil, err
+		}
+		return calculateModuleNumber("divide", values)
 	case "round":
 		value, err := runtime.eval(node["value"], inputs, depth+1)
 		if err != nil {

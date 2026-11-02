@@ -362,7 +362,11 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 		}
 	}
 	if source.Kind == "database" {
-		if _, err := databaseTool(operation); err != nil {
+		if operation == databasePipelineOperation {
+			if _, err := validateDatabasePipeline(mergeMaps(source.Config, config)); err != nil {
+				return nil, err
+			}
+		} else if _, err := databaseTool(operation); err != nil {
 			return nil, err
 		}
 	}

@@ -39,12 +39,22 @@ func (s databaseWatchSpec) key() string { return s.project + "\x00" + s.topic() 
 // watch_collections overrides the source collection, for example to re-run an
 // aggregate when a related collection changes.
 func databaseWatchFor(project string, source sourceRecord, resolver resolverRecord) (databaseWatchSpec, bool) {
+	config := mergeMaps(source.Config, resolver.Config)
+	var derived []string
 	switch strings.ToLower(strings.TrimSpace(resolver.Operation)) {
 	case "find", "list", "search", "get", "count", "aggregate":
+		derived = []string{stringValue(config["collection"], "")}
+	case databasePipelineOperation:
+		// A report re-runs whenever anything it reads changes, lookups and
+		// access reads included.
+		plan, err := validateDatabasePipeline(config)
+		if err != nil {
+			return databaseWatchSpec{}, false
+		}
+		derived = plan.Collections()
 	default:
 		return databaseWatchSpec{}, false
 	}
-	config := mergeMaps(source.Config, resolver.Config)
 	seen := map[string]bool{}
 	collections := []string{}
 	add := func(value any) {
@@ -59,7 +69,9 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 		}
 	}
 	if len(collections) == 0 {
-		add(config["collection"])
+		for _, name := range derived {
+			add(name)
+		}
 	}
 	if len(collections) == 0 {
 		return databaseWatchSpec{}, false
