@@ -1557,7 +1557,7 @@ func (a *App) upsertZernioInboxItem(ctx *sdk.AppCtx, pid string, accountID int64
 		mediaJSON = normalizeInboxMediaJSON(b)
 	}
 	rawJSON, _ := json.Marshal(item)
-	_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+	_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 		ProjectID:        pid,
 		SocialAccountID:  accountID,
 		Platform:         platform,

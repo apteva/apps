@@ -225,7 +225,7 @@ func upsertIGComment(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds, p
 		return false
 	}
 	occurred := parseIGTimestamp(c.Timestamp)
-	_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+	_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 		ProjectID:        projectID,
 		SocialAccountID:  creds.AccountID,
 		Platform:         "instagram",
@@ -354,7 +354,7 @@ func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igA
 
 		occurred := parseIGTimestamp(m.CreatedTime)
 		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "instagram",
@@ -418,7 +418,7 @@ func syncInstagramMentions(ctx *sdk.AppCtx, projectID string, creds *igAccountCr
 			continue
 		}
 		occurred := parseIGTimestamp(t.Timestamp)
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:       projectID,
 			SocialAccountID: creds.AccountID,
 			Platform:        "instagram",

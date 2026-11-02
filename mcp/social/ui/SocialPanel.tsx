@@ -1578,6 +1578,11 @@ function InboxView({
     }
   }, [accounts.length, accountFilter, kindFilter, statusFilter, projectId, setStatus, onCountChange, selectedAccountIDs.join(",")]);
 
+  // New comments, DMs and replies arrive on the app bus; refresh the list.
+  useAppEvents("social", projectId, (ev) => {
+    if (ev.topic.startsWith("inbox.") && ev.topic !== "inbox.coverage_changed") void loadItems();
+  });
+
   const loadThread = useCallback(async (id: number | null) => {
     const current = threadGate.current.begin();
     setSelected(null); setThread([]);setThreadMore(false);setThreadBefore(undefined);setLoadingOlder(false);
