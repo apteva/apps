@@ -8,8 +8,8 @@ github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f h1:JjxwchlO
 github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f/go.mod h1:tMDTce/yLLN/SK8gMOxQfnyeMeCg8KGzp0D1cbECEeo=
 github.com/apteva/app-sdk v0.113.0 h1:RHG49evv1T5jLKv9wfuMcSsKrmoaDwXT54O0eeIUkiM=
 github.com/apteva/app-sdk v0.113.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
-github.com/apteva/db v0.2.0-alpha.13 h1:vRGNZBZEMqFaSlvY4+ei6dBDG6ba6+oQlK9uQ0myKws=
-github.com/apteva/db v0.2.0-alpha.13/go.mod h1:g1aROFEShHWYjiQW1itoDxRf1X5dSw4Cl6jsxyKNluc=
+github.com/apteva/db v0.2.0-alpha.14 h1:POBAmixVzfN1lf3UniBJczuK/fpc1pNxaA+lQW8gRQU=
+github.com/apteva/db v0.2.0-alpha.14/go.mod h1:g1aROFEShHWYjiQW1itoDxRf1X5dSw4Cl6jsxyKNluc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.2.0 h1:DC2CZ1Ep5Y4k3ZQ899DldepgrayRUGE6BBZ/cd9Cj44=

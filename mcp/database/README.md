@@ -23,7 +23,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.13` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.14` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -212,12 +212,12 @@ Four optional extensions keep dashboard queries in one aggregate pass, with no n
 
 SQLite runs `count_distinct` and metric filters as native `COUNT(DISTINCT …)` and `FILTER (WHERE …)`.
 
-AptevaDB (alpha.13) runs all four natively, in its parallel pipeline and its bounded stream:
+AptevaDB (alpha.14) runs all four natively, in its parallel pipeline and its bounded stream:
 - filters on stored fields form a leading `$match`, which reads through an index when one applies, including a compound index whose leading fields the filter binds by equality or `in` lists (one index range per value combination, at most 64), optionally with a range on the next field (alpha.12 added compound indexes, alpha.13 `in` lists);
 - each lookup becomes `$lookup` on the target's primary-key field, followed by `$unwind` that keeps unmatched rows;
 - filters on joined fields form a second `$match`;
 - buckets become `$dateTrunc` group keys;
-- metrics become filtered `$count`, `$sum`, … and `$countDistinct` accumulators.
+- metrics become filtered `$count`, `$sum`, … and `$countDistinct` accumulators. Distinct counts are exact: when one group's distinct sets outgrow the work budget (several filtered `count_distinct` metrics without `groupBy`, for example), alpha.14 counts disjoint slices of the values in separate passes over the spilled state.
 
 Alpha.11 bounds a lookup's hash table by rows, not bytes, so the join may hold at most one target row per 512 bytes of work budget (32,768 rows at 16 MiB). A larger target falls back to the portable path.
 
