@@ -248,7 +248,7 @@ func (a *App) getPostMetricsQuery(ctx *sdk.AppCtx, target metricsTarget, q analy
 	return out
 }
 func postReportCacheKey(t metricsTarget, q analyticsQuery) string {
-	return fmt.Sprintf("publication-facts-v1:%s:%d:%s:%s:%s:%s", t.Platform, t.ConnID, t.ExtPostID, t.ProviderSlug, t.ProviderPostID, q.cacheKey())
+	return fmt.Sprintf("publication-facts-v2:%s:%d:%s:%s:%s:%s", t.Platform, t.ConnID, t.ExtPostID, t.ProviderSlug, t.ProviderPostID, q.cacheKey())
 }
 func normalizedMetricValues(m *normalizedMetrics) map[string]int64 {
 	if m == nil {
