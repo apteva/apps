@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -50,6 +51,9 @@ type analyticsCapabilities struct {
 type analyticsBreakdownRow struct {
 	Dimensions map[string]string `json:"dimensions"`
 	Metrics    map[string]int64  `json:"metrics"`
+	// DecimalMetrics keeps fractional values (percentages, ratios) that
+	// Metrics would truncate.
+	DecimalMetrics map[string]float64 `json:"decimal_metrics,omitempty"`
 }
 
 type analyticsBreakdown struct {
@@ -296,6 +300,12 @@ func (a *App) addAccountBreakdowns(ctx *sdk.AppCtx, out *accountMetricsResult, c
 			})
 			continue
 		}
+		if _, planned := providerBreakdownFilters[out.Platform]; planned {
+			if plan := planBreakdown(out.Platform, dimension, query.Filters); plan.Mode == breakdownUnsupported {
+				out.Breakdowns = append(out.Breakdowns, analyticsBreakdown{Dimension: dimension, Status: "unsupported", Reason: plan.Reason})
+				continue
+			}
+		}
 		var breakdown analyticsBreakdown
 		switch {
 		case out.Platform == "youtube" && (provider == "" || provider == "native"):
@@ -329,30 +339,129 @@ func (a *App) fetchYouTubeBreakdown(ctx *sdk.AppCtx, connID int64, dimension str
 		breakdown.Status, breakdown.Reason = "unsupported", "Unsupported YouTube dimension."
 		return breakdown
 	}
-	since, until := query.dates()
-	input := map[string]any{
-		"ids":        "channel==MINE",
-		"startDate":  since,
-		"endDate":    until,
-		"metrics":    "views,estimatedMinutesWatched",
-		"dimensions": nativeDimension,
-		"sort":       "-views",
-		"maxResults": 200,
+	plan := planBreakdown("youtube", dimension, query.Filters)
+	switch plan.Mode {
+	case breakdownUnsupported:
+		breakdown.Status, breakdown.Reason = "unsupported", plan.Reason
+		return breakdown
+	case breakdownPerPost:
+		return a.fetchYouTubeVideoBreakdownPerVideo(ctx, connID, plan.Filter, query)
 	}
-	if filters := youtubeFilters(query.Filters); filters != "" {
-		input["filters"] = filters
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_analytics_report", input)
+	input := youtubeBreakdownInput(dimension, query, query.Filters)
+	input["maxResults"] = 200
+	rows, err := runYouTubeBreakdown(ctx, connID, input, dimension)
 	if err != nil {
 		breakdown.Status, breakdown.Reason = "failed", err.Error()
 		return breakdown
 	}
+	breakdown.Rows = rows
+	breakdown.Status = "ok"
+	return breakdown
+}
+
+func youtubeBreakdownInput(dimension string, query analyticsQuery, filters map[string][]string) map[string]any {
+	since, until := query.dates()
+	metrics, rank := youtubeBreakdownMetrics(dimension)
+	input := map[string]any{
+		"ids":        "channel==MINE",
+		"startDate":  since,
+		"endDate":    until,
+		"metrics":    metrics,
+		"dimensions": youtubeDimensions[dimension],
+		"sort":       "-" + rank,
+	}
+	if value := youtubeFilters(filters); value != "" {
+		input["filters"] = value
+	}
+	return input
+}
+
+// youtubeBreakdownMetrics: YouTube reports sharing services only by
+// shares; every other breakdown by views and watch time.
+func youtubeBreakdownMetrics(dimension string) (metrics, rank string) {
+	if dimension == "sharing_service" {
+		return "shares", "shares"
+	}
+	return "views,estimatedMinutesWatched", "views"
+}
+
+func runYouTubeBreakdown(ctx *sdk.AppCtx, connID int64, input map[string]any, dimension string) ([]analyticsBreakdownRow, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_analytics_report", input)
+	if err != nil {
+		return nil, err
+	}
 	if res == nil || !res.Success {
-		breakdown.Status, breakdown.Reason = "failed", upstreamError(res).Error()
+		return nil, upstreamError(res)
+	}
+	return parseYouTubeBreakdownRows(res.Data, dimension), nil
+}
+
+// fetchYouTubeVideoBreakdownPerVideo answers "views per video from one
+// traffic source / sharing service / content type", which YouTube cannot
+// rank directly: it takes the top videos by total views, then reads each
+// video's own breakdown of the filter and keeps the filtered values.
+func (a *App) fetchYouTubeVideoBreakdownPerVideo(ctx *sdk.AppCtx, connID int64, filter string, query analyticsQuery) analyticsBreakdown {
+	breakdown := analyticsBreakdown{Dimension: "video", Source: "youtube_analytics_per_video"}
+	limit := perPostBreakdownLimit(query)
+	rankFilters := map[string][]string{}
+	for key, values := range query.Filters {
+		if key != filter {
+			rankFilters[key] = values
+		}
+	}
+	rankInput := youtubeBreakdownInput("video", query, rankFilters)
+	rankInput["maxResults"] = limit
+	top, err := runYouTubeBreakdown(ctx, connID, rankInput, "video")
+	if err != nil {
+		breakdown.Status, breakdown.Reason = "failed", err.Error()
 		return breakdown
 	}
-	breakdown.Rows = parseYouTubeBreakdownRows(res.Data, dimension)
+	wanted := map[string]bool{}
+	for _, value := range query.Filters[filter] {
+		wanted[strings.ToLower(youtubeDimensionValue(filter, value))] = true
+	}
+	rows := make([]analyticsBreakdownRow, len(top))
+	errs := make([]error, len(top))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+	for i, video := range top {
+		wg.Add(1)
+		go func(i int, videoID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			filters := map[string][]string{"video": {videoID}}
+			for key, values := range rankFilters {
+				filters[key] = values
+			}
+			perVideo, err := runYouTubeBreakdown(ctx, connID, youtubeBreakdownInput(filter, query, filters), filter)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			row := analyticsBreakdownRow{Dimensions: map[string]string{"video": videoID}, Metrics: map[string]int64{}}
+			for _, part := range perVideo {
+				if wanted[strings.ToLower(part.Dimensions[filter])] {
+					for name, value := range part.Metrics {
+						row.Metrics[name] += value
+					}
+				}
+			}
+			rows[i] = row
+		}(i, video.Dimensions["video"])
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			breakdown.Status, breakdown.Reason = "failed", err.Error()
+			return breakdown
+		}
+	}
+	_, rank := youtubeBreakdownMetrics(filter)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Metrics[rank] > rows[j].Metrics[rank] })
+	breakdown.Rows = rows
 	breakdown.Status = "ok"
+	breakdown.Reason = fmt.Sprintf("YouTube cannot rank videos by %s, so these are the top %d videos by total views, each with its %s-only numbers.", dimensionLabel(filter), limit, dimensionLabel(filter))
 	return breakdown
 }
 
@@ -392,6 +501,7 @@ func parseYouTubeBreakdownRows(raw json.RawMessage, dimension string) []analytic
 		ColumnHeaders []struct {
 			Name       string `json:"name"`
 			ColumnType string `json:"columnType"`
+			DataType   string `json:"dataType"`
 		} `json:"columnHeaders"`
 		Rows [][]any `json:"rows"`
 	}
@@ -408,7 +518,14 @@ func parseYouTubeBreakdownRows(raw json.RawMessage, dimension string) []analytic
 			if header.ColumnType == "DIMENSION" || i == 0 {
 				row.Dimensions[dimension] = normalizeDimensionValue(dimension, toString(values[i]))
 			} else {
-				row.Metrics[canonicalMetricName(header.Name)] = insightValueToInt64(values[i])
+				name := canonicalMetricName(header.Name)
+				row.Metrics[name] = insightValueToInt64(values[i])
+				if header.DataType == "FLOAT" {
+					if row.DecimalMetrics == nil {
+						row.DecimalMetrics = map[string]float64{}
+					}
+					row.DecimalMetrics[name] = insightValueToFloat64(values[i])
+				}
 			}
 		}
 		if row.Dimensions[dimension] != "" {

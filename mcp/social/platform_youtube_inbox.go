@@ -114,9 +114,9 @@ func youtubeAPIError(tool string, res *sdk.ExecuteResult, err error) error {
 	case res != nil && res.Status == 404 && strings.Contains(body, "tool not found"):
 		return errors.New(youtubeErrPrefixCat + "this platform's YouTube integration has no " + tool + " tool yet; update the platform")
 	case reason == "insufficientPermissions" || strings.Contains(body, "access_token_scope_insufficient") || (res != nil && res.Status == 401):
-		return errors.New(youtubeErrPrefixPerm + "reconnect this YouTube channel in Integrations to grant comment access")
+		return errors.New(youtubeErrPrefixPerm + "reconnect this YouTube channel in Integrations to grant the missing access")
 	case reason == "quotaExceeded" || reason == "rateLimitExceeded" || reason == "dailyLimitExceeded":
-		return errors.New(youtubeErrPrefixQuota + "YouTube API quota is used up; comments sync resumes later")
+		return errors.New(youtubeErrPrefixQuota + "YouTube API quota is used up; sync resumes later")
 	case reason != "":
 		return fmt.Errorf("%s: %s", tool, reason)
 	}

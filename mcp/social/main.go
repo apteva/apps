@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.22.1
+version: 0.23.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -154,6 +154,7 @@ provides:
     - { name: inbox_delete,               description: "Delete a comment where the platform permits." }
     - { name: inbox_sync,                 description: "Trigger an out-of-cycle inbox poll for one or more accounts." }
     - { name: inbox_coverage,             description: "Per-account inbox coverage: supported actions, missing access, last successful sync." }
+    - { name: post_retention,             description: "Audience retention curve for a published video (YouTube, Facebook Page videos), decimals kept, with opening drop-off summary." }
   ui_panels:
     - slot: project.page
       label: Social
@@ -228,7 +229,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.22.1
+    ref: social/v0.23.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1099,7 +1100,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "post_metrics",
-			Description: "Fetch per-target performance metrics for a post by fanning out to each platform's analytics tool. Returns a per-target array of {status: ok|unsupported|skipped|failed, metrics?: {views, likes, comments, shares, raw}, reason?, error?}. " +
+			Description: "Fetch per-target performance metrics for a post by fanning out to each platform's analytics tool. Returns a per-target array of {status: ok|unsupported|skipped|failed, metrics?: {views, likes, comments, shares, impressions?, impressions_ctr?, raw}, thumbnails?: [{size, url, width?, height?}] largest first, reason?, error?}. YouTube impressions_ctr is a ratio from daily reach reports (impressions_coverage). " +
 				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn through Zernio. " +
 				"Results are cached for up to four hours; refresh=true fetches upstream again. Normalized snapshots are stored for history. Be mindful of upstream rate limits when looping over many posts. Args: post_id or post_ids (max 20), range?, start_date?, end_date?, refresh?. Reporting metadata states actual scope, metric availability and lifetime versus date-range semantics.",
 			InputSchema: schemaObject(map[string]any{
@@ -1110,8 +1111,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPostMetrics,
 		},
 		{
+			Name: "post_retention",
+			Description: "Audience retention curve for a published video: points from position 0 (start) to 1 (end) with audience_watch_ratio, the share of views still watching (above 1 means rewatching), kept as decimals. Summary gives start, at_5pct, at_10pct, at_25pct, at_50pct, at_75pct and average so the opening drop-off is easy to compare. " +
+				"YouTube adds relative_retention (above 0.5 = better than similar videos at that point) and filters by audience_type (organic default, ad_instream, ad_indisplay, all); Facebook Page videos use the retention graph. Other platforms return unsupported; videos without data return empty. " +
+				"Args: post_id, or social_account_id with platform_post_id (any video of the account, published through Social or not), audience_type?, start_date?, end_date? (default: publish date to today).",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":           map[string]any{"type": "integer"},
+				"social_account_id": map[string]any{"type": "integer"},
+				"platform_post_id":  map[string]any{"type": "string", "description": "Platform video ID, e.g. a YouTube video ID."},
+				"audience_type":     map[string]any{"type": "string", "enum": []string{"organic", "ad_instream", "ad_indisplay", "all"}},
+				"start_date":        map[string]any{"type": "string", "description": "Only views from this day (YYYY-MM-DD); default the publish date."},
+				"end_date":          map[string]any{"type": "string", "description": "Only views up to this day (YYYY-MM-DD); default today."},
+			}, nil),
+			Handler:     a.toolPostRetention,
+			Annotations: map[string]any{"readOnlyHint": true},
+		},
+		{
 			Name:        "account_metrics",
-			Description: "Fetch normalized totals, history, and provider-supported audience breakdowns. Use social_account_id for the backward-compatible single-account response. Use social_account_ids or profile_id with group_by=['social_account'] to compare channels; filters such as {device:['tv']} rank only matching views. Unsupported dimensions are reported explicitly and never treated as zero. YouTube supports device, OS, country, traffic source, audience type, content type, sharing service, and video; Instagram supports available audience demographics; organic X currently exposes temporal metrics but no device breakdown. Optional scope=destination|provider_account, group_by=[post], sort_by, limit, compare, published_in_range. Pinterest destinations aggregate current board Pins with explicit coverage; provider-account results must not be counted once per board.",
+			Description: "Fetch normalized totals, history, and provider-supported audience breakdowns. Use social_account_id for the backward-compatible single-account response. Use social_account_ids or profile_id with group_by=['social_account'] to compare channels; filters such as {device:['tv']} rank only matching views. Unsupported dimensions are reported explicitly and never treated as zero; so are breakdown+filter pairs the provider cannot combine (the reason lists the filters that work). A video breakdown filtered by traffic source, device, OS, content type or sharing service runs per video over the top `limit` videos by total views (default 10, max 25). YouTube impressions and impressions_ctr (ratio) come from daily reach reports; impressions_coverage says which days are in. YouTube supports device, OS, country, traffic source, audience type, content type, sharing service, and video; Instagram supports available audience demographics; organic X currently exposes temporal metrics but no device breakdown. Optional scope=destination|provider_account, group_by=[post], sort_by, limit, compare, published_in_range. Pinterest destinations aggregate current board Pins with explicit coverage; provider-account results must not be counted once per board.",
 			InputSchema: schemaObject(map[string]any{
 				"destination_id":     map[string]any{"type": "string", "description": "Optional publishing destination to report on; native Pinterest board ID."},
 				"scope":              map[string]any{"type": "string", "enum": []string{"destination", "provider_account"}},
@@ -5959,18 +5976,21 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 // etc.) that don't fit the common shape.
 
 type normalizedMetrics struct {
-	Impressions    int64           `json:"impressions"`
-	VideoViews     int64           `json:"video_views"`
-	PinClicks      int64           `json:"pin_clicks"`
-	OutboundClicks int64           `json:"outbound_clicks"`
-	Engagements    int64           `json:"engagements"`
-	Views          int64           `json:"views"`
-	Reach          int64           `json:"reach"`
-	Likes          int64           `json:"likes"`
-	Comments       int64           `json:"comments"`
-	Shares         int64           `json:"shares"`
-	Saves          int64           `json:"saves"`
-	Clicks         int64           `json:"clicks"`
+	Impressions    int64 `json:"impressions"`
+	VideoViews     int64 `json:"video_views"`
+	PinClicks      int64 `json:"pin_clicks"`
+	OutboundClicks int64 `json:"outbound_clicks"`
+	Engagements    int64 `json:"engagements"`
+	Views          int64 `json:"views"`
+	Reach          int64 `json:"reach"`
+	Likes          int64 `json:"likes"`
+	Comments       int64 `json:"comments"`
+	Shares         int64 `json:"shares"`
+	Saves          int64 `json:"saves"`
+	Clicks         int64 `json:"clicks"`
+	// ImpressionsCTR is the click-through rate of thumbnail impressions,
+	// as a ratio (0.05 = 5%).
+	ImpressionsCTR *float64        `json:"impressions_ctr,omitempty"`
 	Available      []string        `json:"available"`
 	Raw            json.RawMessage `json:"raw,omitempty"`
 }
@@ -5989,6 +6009,20 @@ type targetMetricsOutcome struct {
 	Error           string             `json:"error,omitempty"`
 	Warnings        []string           `json:"warnings,omitempty"`
 	Metrics         *normalizedMetrics `json:"metrics,omitempty"`
+	Thumbnails      []postThumbnail    `json:"thumbnails,omitempty"`
+	// ImpressionsCoverage says which days impressions cover where they
+	// come from bulk reports (YouTube).
+	ImpressionsCoverage *reachCoverage `json:"impressions_coverage,omitempty"`
+}
+
+// postThumbnail is one preview image of a published post, largest first.
+// Width and height are set when the platform reports them. Provider
+// image URLs can be signed and expire; re-read them rather than storing.
+type postThumbnail struct {
+	Size   string `json:"size,omitempty"`
+	URL    string `json:"url"`
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
 }
 
 // metricsTarget is the resolved per-target context the dispatcher
@@ -6313,6 +6347,9 @@ func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 				LikeCount    string `json:"likeCount"`
 				CommentCount string `json:"commentCount"`
 			} `json:"statistics"`
+			Snippet struct {
+				Thumbnails map[string]postThumbnail `json:"thumbnails"`
+			} `json:"snippet"`
 		} `json:"items"`
 	}
 	_ = json.Unmarshal(res.Data, &resp)
@@ -6322,6 +6359,7 @@ func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 		return out
 	}
 	stats := resp.Items[0].Statistics
+	out.Thumbnails = youtubeThumbnails(resp.Items[0].Snippet.Thumbnails)
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
 		Views:     parseInt64(stats.ViewCount),
@@ -6331,6 +6369,27 @@ func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 		Available: []string{"views", "likes", "comments"},
 		Raw:       sanitizeRawJSON(res.Data),
 	}
+	addYouTubeVideoReach(ctx, &out)
+	return out
+}
+
+// youtubeThumbnails orders YouTube's sizes (default 120x90 up to maxres
+// 1280x720) largest first.
+func youtubeThumbnails(sizes map[string]postThumbnail) []postThumbnail {
+	out := make([]postThumbnail, 0, len(sizes))
+	for size, thumb := range sizes {
+		if thumb.URL == "" {
+			continue
+		}
+		thumb.Size = size
+		out = append(out, thumb)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Width != out[j].Width {
+			return out[i].Width > out[j].Width
+		}
+		return out[i].Size < out[j].Size
+	})
 	return out
 }
 
@@ -6356,7 +6415,7 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, ta
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(target.ConnID, "query_videos", map[string]any{
 		"filters": map[string]any{"video_ids": []string{publicID}},
-		"fields":  "id,title,share_url,view_count,like_count,comment_count,share_count",
+		"fields":  "id,title,share_url,cover_image_url,view_count,like_count,comment_count,share_count",
 	})
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -6371,6 +6430,7 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, ta
 			Videos []struct {
 				ID           exactJSONID `json:"id"`
 				ShareURL     string      `json:"share_url"`
+				CoverURL     string      `json:"cover_image_url"`
 				ViewCount    int64       `json:"view_count"`
 				LikeCount    int64       `json:"like_count"`
 				CommentCount int64       `json:"comment_count"`
@@ -6389,6 +6449,9 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, ta
 	if v.ShareURL != "" {
 		out.PlatformURL = v.ShareURL
 		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=? AND social_account_id=? AND platform_post_id=?`, v.ShareURL, target.TargetID, target.SocialAccountID, publicID)
+	}
+	if v.CoverURL != "" {
+		out.Thumbnails = []postThumbnail{{Size: "cover", URL: v.CoverURL}}
 	}
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
@@ -6578,7 +6641,7 @@ func (a *App) getInstagramPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 
 	mediaRes, mediaErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media", map[string]any{
 		"mediaId":      out.PlatformPostID,
-		"fields":       "id,media_type,media_product_type,permalink,like_count,comments_count",
+		"fields":       "id,media_type,media_product_type,permalink,like_count,comments_count,thumbnail_url,media_url",
 		"access_token": token,
 	})
 	if mediaErr == nil && mediaRes != nil && mediaRes.Success {
@@ -6586,8 +6649,17 @@ func (a *App) getInstagramPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 			Permalink    string `json:"permalink"`
 			LikeCount    int64  `json:"like_count"`
 			CommentCount int64  `json:"comments_count"`
+			MediaType    string `json:"media_type"`
+			ThumbnailURL string `json:"thumbnail_url"`
+			MediaURL     string `json:"media_url"`
 		}
 		if json.Unmarshal(mediaRes.Data, &media) == nil {
+			// Videos and Reels carry a thumbnail_url; images are their own preview.
+			if media.ThumbnailURL != "" {
+				out.Thumbnails = []postThumbnail{{Size: "thumbnail", URL: media.ThumbnailURL}}
+			} else if media.MediaURL != "" && media.MediaType != "VIDEO" {
+				out.Thumbnails = []postThumbnail{{Size: "media", URL: media.MediaURL}}
+			}
 			values["likes"] = media.LikeCount
 			values["comments"] = media.CommentCount
 			available = append(available, "likes", "comments")
@@ -6723,27 +6795,31 @@ type accountMetricsResult struct {
 	Supporters      int64                      `json:"supporters,omitempty"`
 	SupportersState string                     `json:"supporters_state,omitempty"`
 	supporters      *supporterSnapshot
-	Following       int64                 `json:"following,omitempty"`
-	TotalLikes      int64                 `json:"total_likes,omitempty"`
-	TotalVideos     int64                 `json:"total_videos,omitempty"`
-	Posts           int64                 `json:"posts,omitempty"`
-	Reach           int64                 `json:"reach,omitempty"`
-	Impressions     int64                 `json:"impressions,omitempty"`
-	Engagements     int64                 `json:"engagements,omitempty"`
-	Views           int64                 `json:"views,omitempty"`
-	Likes           int64                 `json:"likes,omitempty"`
-	Comments        int64                 `json:"comments,omitempty"`
-	Shares          int64                 `json:"shares,omitempty"`
-	Saves           int64                 `json:"saves,omitempty"`
-	Sends           int64                 `json:"sends,omitempty"`
-	Clicks          int64                 `json:"clicks,omitempty"`
-	EngagementRate  float64               `json:"engagement_rate,omitempty"`
-	Insights        insightSeries         `json:"insights,omitempty"`
-	Breakdowns      []analyticsBreakdown  `json:"breakdowns,omitempty"`
-	Capabilities    analyticsCapabilities `json:"capabilities"`
-	HistorySource   string                `json:"history_source,omitempty"`
-	UpdatedAt       string                `json:"updated_at,omitempty"`
-	Raw             json.RawMessage       `json:"raw,omitempty"`
+	Following       int64    `json:"following,omitempty"`
+	TotalLikes      int64    `json:"total_likes,omitempty"`
+	TotalVideos     int64    `json:"total_videos,omitempty"`
+	Posts           int64    `json:"posts,omitempty"`
+	Reach           int64    `json:"reach,omitempty"`
+	Impressions     int64    `json:"impressions,omitempty"`
+	ImpressionsCTR  *float64 `json:"impressions_ctr,omitempty"`
+	// ImpressionsCoverage says which days impressions cover where they
+	// come from bulk reports (YouTube).
+	ImpressionsCoverage *reachCoverage        `json:"impressions_coverage,omitempty"`
+	Engagements         int64                 `json:"engagements,omitempty"`
+	Views               int64                 `json:"views,omitempty"`
+	Likes               int64                 `json:"likes,omitempty"`
+	Comments            int64                 `json:"comments,omitempty"`
+	Shares              int64                 `json:"shares,omitempty"`
+	Saves               int64                 `json:"saves,omitempty"`
+	Sends               int64                 `json:"sends,omitempty"`
+	Clicks              int64                 `json:"clicks,omitempty"`
+	EngagementRate      float64               `json:"engagement_rate,omitempty"`
+	Insights            insightSeries         `json:"insights,omitempty"`
+	Breakdowns          []analyticsBreakdown  `json:"breakdowns,omitempty"`
+	Capabilities        analyticsCapabilities `json:"capabilities"`
+	HistorySource       string                `json:"history_source,omitempty"`
+	UpdatedAt           string                `json:"updated_at,omitempty"`
+	Raw                 json.RawMessage       `json:"raw,omitempty"`
 }
 
 type insightPoint struct {
@@ -6754,6 +6830,9 @@ type insightPoint struct {
 	Partial    bool   `json:"partial,omitempty"`
 	Time       string `json:"time,omitempty"`
 	Value      int64  `json:"value"`
+	// DecimalValue keeps a fractional value (a percentage, a ratio) that
+	// Value truncates.
+	DecimalValue *float64 `json:"decimal_value,omitempty"`
 }
 
 type insightSeries map[string][]insightPoint
@@ -7040,6 +7119,7 @@ func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 	out.TotalVideos = parseInt64(s.VideoCount)
 	out.Views = parseInt64(s.ViewCount)
 	a.addYoutubeAnalytics(ctx, &out, connID, query)
+	addYouTubeReach(ctx, &out, query)
 	out.Raw = sanitizeRawJSON(res.Data)
 	return out
 }
@@ -7070,7 +7150,8 @@ func (a *App) addYoutubeAnalytics(ctx *sdk.AppCtx, out *accountMetricsResult, co
 func parseYoutubeAnalyticsSeries(raw json.RawMessage) insightSeries {
 	var resp struct {
 		ColumnHeaders []struct {
-			Name string `json:"name"`
+			Name     string `json:"name"`
+			DataType string `json:"dataType"`
 		} `json:"columnHeaders"`
 		Rows [][]any `json:"rows"`
 	}
@@ -7088,10 +7169,12 @@ func parseYoutubeAnalyticsSeries(raw json.RawMessage) insightSeries {
 			if name == "" {
 				continue
 			}
-			out[name] = append(out[name], insightPoint{
-				Time:  day,
-				Value: insightValueToInt64(row[i]),
-			})
+			point := insightPoint{Time: day, Value: insightValueToInt64(row[i])}
+			if resp.ColumnHeaders[i].DataType == "FLOAT" {
+				value := insightValueToFloat64(row[i])
+				point.DecimalValue = &value
+			}
+			out[name] = append(out[name], point)
 		}
 	}
 	if len(out) == 0 {
@@ -7330,6 +7413,18 @@ func parseInsightSeries(raw json.RawMessage) insightSeries {
 	return out
 }
 
+func insightValueToFloat64(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return f
+	default:
+		return 0
+	}
+}
+
 func insightValueToInt64(v any) int64 {
 	switch x := v.(type) {
 	case float64:
@@ -7386,6 +7481,7 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 		if err := a.collectProjectPostMetrics(ctx, app, pid); err != nil {
 			app.Logger().Warn("analytics_collector: post metrics failed", "project", pid, "err", err)
 		}
+		a.collectProjectReach(ctx, app, pid)
 	}
 	return nil
 }
@@ -8342,6 +8438,41 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return mcpError("post not found"), nil
 	}
+	trs, err := loadMetricsTargets(ctx, pid, postID)
+	if err != nil {
+		return nil, err
+	}
+	outcomes := make([]targetMetricsOutcome, 0, len(trs))
+	for _, r := range trs {
+		if r.Platform == "" || r.ConnID == 0 {
+			outcomes = append(outcomes, targetMetricsOutcome{
+				TargetID: r.TargetID, SocialAccountID: r.SocialAccountID,
+				Platform: r.Platform, PlatformPostID: r.ExtPostID,
+				Status: "skipped",
+				Reason: "social account row gone — was the account disconnected?",
+			})
+			continue
+		}
+		ctx.Logger().Info("post_metrics: fetching",
+			"post", postID, "platform", r.Platform, "platform_post_id", r.ExtPostID)
+		outcome := a.getPostMetricsQuery(ctx, r, query)
+		if err := persistPostMetricOutcome(ctx, pid, profileID, postID, outcome); err != nil {
+			ctx.Logger().Warn("post_metrics: persist failed",
+				"project", pid, "post", postID, "target", outcome.TargetID, "err", err)
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	return map[string]any{
+		"post_id": postID,
+		"body":    body,
+		"status":  status,
+		"targets": outcomes,
+	}, nil
+}
+
+// loadMetricsTargets resolves a post's targets with their account and
+// connection for the per-platform metric fetchers.
+func loadMetricsTargets(ctx *sdk.AppCtx, pid string, postID int64) ([]metricsTarget, error) {
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
 		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
@@ -8377,32 +8508,23 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			trs = append(trs, r)
 		}
 	}
-	outcomes := make([]targetMetricsOutcome, 0, len(trs))
-	for _, r := range trs {
-		if r.Platform == "" || r.ConnID == 0 {
-			outcomes = append(outcomes, targetMetricsOutcome{
-				TargetID: r.TargetID, SocialAccountID: r.SocialAccountID,
-				Platform: r.Platform, PlatformPostID: r.ExtPostID,
-				Status: "skipped",
-				Reason: "social account row gone — was the account disconnected?",
-			})
-			continue
-		}
-		ctx.Logger().Info("post_metrics: fetching",
-			"post", postID, "platform", r.Platform, "platform_post_id", r.ExtPostID)
-		outcome := a.getPostMetricsQuery(ctx, r, query)
-		if err := persistPostMetricOutcome(ctx, pid, profileID, postID, outcome); err != nil {
-			ctx.Logger().Warn("post_metrics: persist failed",
-				"project", pid, "post", postID, "target", outcome.TargetID, "err", err)
-		}
-		outcomes = append(outcomes, outcome)
+	return trs, rows.Err()
+}
+
+// loadAccountMetricsTarget targets one platform post of an account,
+// whether or not Social published it.
+func loadAccountMetricsTarget(ctx *sdk.AppCtx, pid string, accountID int64, platformPostID string) (metricsTarget, error) {
+	target := metricsTarget{SocialAccountID: accountID, ExtPostID: platformPostID}
+	err := ctx.AppDB().QueryRow(
+		`SELECT platform, connection_id, COALESCE(external_account_id,''), COALESCE(page_credentials,''),
+		        COALESCE(provider_slug,'native'), COALESCE(provider_account_id,'')
+		 FROM social_accounts WHERE id=? AND project_id=?`,
+		accountID, pid,
+	).Scan(&target.Platform, &target.ConnID, &target.ExternalAccountID, &target.PageCreds, &target.ProviderSlug, &target.ProviderAccountID)
+	if err == sql.ErrNoRows {
+		return target, errors.New("social account not found")
 	}
-	return map[string]any{
-		"post_id": postID,
-		"body":    body,
-		"status":  status,
-		"targets": outcomes,
-	}, nil
+	return target, err
 }
 
 // toolAccountMetrics is the account_metrics MCP entrypoint.
