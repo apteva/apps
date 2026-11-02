@@ -480,3 +480,7 @@ func nativeKeyFromCanonical(c Collection, pk string) ([]byte, error) {
 	key, _, e := indexTuple(c, primaryIndex(c), r)
 	return key, e
 }
+
+// A read transaction is a snapshot and its context; native snapshots serve
+// concurrent readers (parallel aggregates already share one).
+func (t *aptevaTx) concurrentReads() bool { return t.batch == nil }
