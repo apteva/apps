@@ -347,16 +347,41 @@ func (a *App) fetchYouTubeBreakdown(ctx *sdk.AppCtx, connID int64, dimension str
 	case breakdownPerPost:
 		return a.fetchYouTubeVideoBreakdownPerVideo(ctx, connID, plan.Filter, query)
 	}
-	input := youtubeBreakdownInput(dimension, query, query.Filters)
+	// YouTube rejects a breakdown filtered on its own dimension, so that
+	// filter is applied to the rows here instead.
+	filters := map[string][]string{}
+	for key, values := range query.Filters {
+		if key != dimension {
+			filters[key] = values
+		}
+	}
+	input := youtubeBreakdownInput(dimension, query, filters)
 	input["maxResults"] = 200
 	rows, err := runYouTubeBreakdown(ctx, connID, input, dimension)
 	if err != nil {
 		breakdown.Status, breakdown.Reason = "failed", err.Error()
 		return breakdown
 	}
+	if values, ok := query.Filters[dimension]; ok {
+		rows = keepBreakdownRows(rows, dimension, values)
+	}
 	breakdown.Rows = rows
 	breakdown.Status = "ok"
 	return breakdown
+}
+
+func keepBreakdownRows(rows []analyticsBreakdownRow, dimension string, values []string) []analyticsBreakdownRow {
+	wanted := map[string]bool{}
+	for _, value := range values {
+		wanted[strings.ToLower(youtubeDimensionValue(dimension, value))] = true
+	}
+	kept := rows[:0]
+	for _, row := range rows {
+		if wanted[strings.ToLower(row.Dimensions[dimension])] {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 func youtubeBreakdownInput(dimension string, query analyticsQuery, filters map[string][]string) map[string]any {
