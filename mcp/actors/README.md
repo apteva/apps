@@ -41,6 +41,12 @@ Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a
 
 ## Verify saved copy
 
+Whole-number fields (`type: integer`) use exact signed 64-bit parsing. Comma,
+dot and Unicode-space thousands separators must form consistent three-digit
+groups (for example, `1,041` becomes `1041`). Fractional values, malformed groups
+and overflow fail extraction instead of truncating or rounding audience counts
+and IDs. Money and decimal fields keep their existing locale-aware parsing.
+
 Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Use an explicit `separator` when the editor represents paragraph boundaries differently from inline line breaks (for example, `"\n\n"` for ProseMirror paragraphs). Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
 
 For saved plain-text messages whose renderer adds indentation around line breaks,
