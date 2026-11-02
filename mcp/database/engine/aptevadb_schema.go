@@ -42,27 +42,24 @@ func (t *aptevaTx) stageDDL(before, after *Collection) error {
 }
 func (t *aptevaTx) createCollection(c Collection) error { return t.stageDDL(nil, &c) }
 func (t *aptevaTx) dropCollection(c Collection) error   { return t.stageDDL(&c, nil) }
+
+// nativeIndexBuildLimit is MaxNativeIndexBuildRecords; tests lower it.
+var nativeIndexBuildLimit int64 = MaxNativeIndexBuildRecords
+
+// createIndex only counts the records: AptevaDB builds the index in one
+// pass over the collection, validates uniqueness and key sizes before
+// publishing it, and commitDDL rolls the schema back if the build fails.
 func (t *aptevaTx) createIndex(c Collection, i Index) error {
-	rows, e := t.find(c, Query{}, MaxIndexBuildRecords+1)
+	h, e := t.readCollection(c)
 	if e != nil {
-		return e
+		return nativeError(e)
 	}
-	if len(rows) > MaxIndexBuildRecords {
-		return fail("resource_limit", "synchronous index build exceeds 10000 records")
+	n, e := h.CountDocuments(t.ctx, []byte(`{}`), native.CountOptions{MaxMemoryBytes: int64(t.backend.options.QueryWorkBytes)})
+	if e != nil {
+		return nativeError(e)
 	}
-	seen := map[string]bool{}
-	for _, r := range rows {
-		tuple, nullable, e := indexTuple(c, i, r)
-		if e != nil {
-			return e
-		}
-		if i.Unique && !nullable {
-			key := string(tuple)
-			if seen[key] {
-				return fail("unique_conflict", "index contains duplicate values")
-			}
-			seen[key] = true
-		}
+	if n > nativeIndexBuildLimit {
+		return fail("resource_limit", "synchronous index build exceeds %d records (collection has %d)", nativeIndexBuildLimit, n)
 	}
 	before := cloneCollection(c)
 	c.Indexes = append(append([]Index(nil), c.Indexes...), i)

@@ -23,7 +23,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.12` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.13` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -212,8 +212,8 @@ Four optional extensions keep dashboard queries in one aggregate pass, with no n
 
 SQLite runs `count_distinct` and metric filters as native `COUNT(DISTINCT …)` and `FILTER (WHERE …)`.
 
-AptevaDB (alpha.12) runs all four natively, in its parallel pipeline and its bounded stream:
-- filters on stored fields form a leading `$match`, which reads through an index when one applies, including a compound index whose leading fields the filter binds by equality, optionally with a range on the next field (since alpha.12; alpha.11 used single-field indexes only);
+AptevaDB (alpha.13) runs all four natively, in its parallel pipeline and its bounded stream:
+- filters on stored fields form a leading `$match`, which reads through an index when one applies, including a compound index whose leading fields the filter binds by equality or `in` lists (one index range per value combination, at most 64), optionally with a range on the next field (alpha.12 added compound indexes, alpha.13 `in` lists);
 - each lookup becomes `$lookup` on the target's primary-key field, followed by `$unwind` that keeps unmatched rows;
 - filters on joined fields form a second `$match`;
 - buckets become `$dateTrunc` group keys;
@@ -232,7 +232,7 @@ In the portable path, filters on stored fields are pushed to the adapter's scan 
 
 ## Query and mutation rules
 
-Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `is_null`, `is_not_null`, `starts_with`. Null predicates omit `value`. String matching is literal, case-sensitive UTF-8 byte comparison.
+Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `is_null`, `is_not_null`, `starts_with`. Null predicates omit `value`. `in` takes 1–100 non-null values; a one-value list is treated as `eq`, so it binds index prefixes on every adapter. String matching is literal, case-sensitive UTF-8 byte comparison.
 
 `find` accepts `select`, `orderBy`, `limit`, and `cursor`, returning `records`, `hasMore`, and `nextCursor`. Repeat the same query with the returned cursor. Primary-key fields are appended to the sort as tie-breakers. `requireIndex` rejects plans that cannot narrow candidates through an index. `explain` reports adapter-specific plan details. Pebble handles primary/unique lookups, leading compound equality/range/prefix predicates, and compatible index ordering; complex OR/IN combinations may require bounded scans and sorting.
 
@@ -280,7 +280,7 @@ Pebble has no fixed scanned-candidate limit or cumulative input-byte limit. It s
 
 Pebble scans reuse a record iterator, materialize the fields needed for the query, and decode full documents after filtering when required for output. Aggregates use typed accumulators and format counts/integers when producing their output. These optimizations preserve the existing storage format and durability settings; see the [scan optimization measurements](benchmarks/OPTIMIZED-SCANS.md).
 
-Index creation is synchronous and atomic on all three adapters, limited to 10,000 existing records and the query work buffer. Builds block access to that database while its write lock is held. Create indexes before large imports. Background index jobs/rebuilds and read-through maintenance are later milestones.
+Index creation is synchronous and atomic on all three adapters. SQLite and Pebble are limited to 10,000 existing records and the query work buffer. AptevaDB counts the records and builds the index natively, up to 1,000,000 existing records within a 30 s deadline (0.5–0.9 s for 328,000 records of about 600 bytes); it checks uniqueness itself and leaves no index behind when a build fails. Builds block access to that database while its write lock is held. Create indexes before large imports. Background index jobs/rebuilds and read-through maintenance are later milestones.
 
 The proposal also includes features that are **not implemented yet**: schema alteration/defaults, request-id deduplication, granular shared database bindings, backups and portable export/import, events/outbox, configurable quotas, handle eviction, comprehensive crash fault injection, and sustained capacity testing. The dashboard is an initial administration surface; record updates/deletes and index/database removal are available through the API. Cloud adapters and migrating CRM/Tables remain separate projects.
 

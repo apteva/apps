@@ -12,7 +12,8 @@ import (
 
 // The adapter checks requireIndex against its own planner, which uses
 // compound indexes; the pinned AptevaDB must narrow native aggregations
-// through them too (alpha.11 and earlier scanned).
+// through them too (alpha.11 and earlier scanned), including a list of
+// scopes (alpha.12 scanned).
 func TestNativeAggregateUsesCompoundIndex(t *testing.T) {
 	db, e := native.Open(t.TempDir(), native.Options{})
 	if e != nil {
@@ -39,6 +40,7 @@ func TestNativeAggregateUsesCompoundIndex(t *testing.T) {
 	for _, match := range []string{
 		`{"scope_id":{"$eq":"s1"},"day":{"$eq":"2026-10-06"}}`,
 		`{"$and":[{"scope_id":{"$eq":"s1"}},{"$and":[{"day":{"$ne":null}},{"day":{"$gte":"2026-10-06"}}]},{"$and":[{"day":{"$ne":null}},{"day":{"$lt":"2026-10-08"}}]}]}`,
+		`{"$and":[{"$and":[{"scope_id":{"$ne":null}},{"scope_id":{"$in":["s1","s3"]}}]},{"$and":[{"day":{"$ne":null}},{"day":{"$gte":"2026-10-06"}}]},{"$and":[{"day":{"$ne":null}},{"day":{"$lt":"2026-10-08"}}]}]}`,
 	} {
 		var stats native.AggregateStats
 		pipe := `[{"$match":` + match + `},{"$group":{"_id":"$status","n":{"$sum":1}}}]`
@@ -52,22 +54,23 @@ func TestNativeAggregateUsesCompoundIndex(t *testing.T) {
 	}
 }
 
-// BenchmarkScopedDayAggregates is a dashboard over one scope and one day of a
-// larger collection with a (scope_id, day) index: one grouped aggregate, and a
-// read batch of 14. DB_SCOPED_BENCH_ROWS sizes it (default 100,000 over 4
-// scopes and 26 days, so about 960 records match).
+// BenchmarkScopedDayAggregates is a dashboard over one day of a larger
+// collection with a (scope_id, day) index: one grouped aggregate and a read
+// batch of 14, with the scope given as eq, a one-value in list, and a
+// two-scope list. DB_SCOPED_BENCH_ROWS sizes it (default 100,000 over 4
+// scopes and 26 days, so about 960 records match one scope).
 func BenchmarkScopedDayAggregates(b *testing.B) {
 	rows := 100000
 	if v, e := strconv.Atoi(os.Getenv("DB_SCOPED_BENCH_ROWS")); e == nil && v > 0 {
 		rows = v
 	}
-	where := &Filter{And: []Filter{{Field: "scope_id", Op: "eq", Value: "s1"}, {Field: "day", Op: "eq", Value: "2026-10-05"}}}
-	one := Request{Database: "dash", Collection: "inbound", Query: Query{Where: where}, GroupBy: []string{"status"}, Metrics: []Metric{{"calls", "count", "", nil}, {"amount", "sum", "amount", nil}}}
-	var batch []Operation
-	for i := 0; i < 14; i++ {
-		r := one
-		r.Metrics = []Metric{{"calls", "count", "", &Filter{Field: "status", Op: "eq", Value: fmt.Sprint("st", i%5)}}}
-		batch = append(batch, Operation{Op: "aggregate", Request: r})
+	scopes := []struct {
+		name  string
+		scope Filter
+	}{
+		{"eq", Filter{Field: "scope_id", Op: "eq", Value: "s1"}},
+		{"in1", Filter{Field: "scope_id", Op: "in", Value: []any{"s1"}}},
+		{"in2", Filter{Field: "scope_id", Op: "in", Value: []any{"s1", "s3"}}},
 	}
 	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		b.Run(adapter, func(b *testing.B) {
@@ -93,16 +96,32 @@ func BenchmarkScopedDayAggregates(b *testing.B) {
 				}
 				exec("insert", Request{Database: "dash", Collection: "inbound", Records: records})
 			}
-			b.Run("aggregate", func(b *testing.B) {
-				for b.Loop() {
-					exec("aggregate", one)
+			for _, s := range scopes {
+				// built per run: validation rewrites a one-value list in place
+				request := func() Request {
+					where := &Filter{And: []Filter{s.scope, {Field: "day", Op: "gte", Value: "2026-10-05"}, {Field: "day", Op: "lt", Value: "2026-10-06"}}}
+					if s.scope.Op == "in" {
+						where.And[0].Value = append([]any(nil), s.scope.Value.([]any)...)
+					}
+					return Request{Database: "dash", Collection: "inbound", Query: Query{Where: where}, GroupBy: []string{"status"}, Metrics: []Metric{{"calls", "count", "", nil}, {"amount", "sum", "amount", nil}}}
 				}
-			})
-			b.Run("batch14", func(b *testing.B) {
-				for b.Loop() {
-					exec("batch", Request{Database: "dash", Operations: batch})
-				}
-			})
+				b.Run("aggregate_"+s.name, func(b *testing.B) {
+					for b.Loop() {
+						exec("aggregate", request())
+					}
+				})
+				b.Run("batch14_"+s.name, func(b *testing.B) {
+					for b.Loop() {
+						batch := make([]Operation, 14)
+						for i := range batch {
+							r := request()
+							r.Metrics = []Metric{{"calls", "count", "", &Filter{Field: "status", Op: "eq", Value: fmt.Sprint("st", i%5)}}}
+							batch[i] = Operation{Op: "aggregate", Request: r}
+						}
+						exec("batch", Request{Database: "dash", Operations: batch})
+					}
+				})
+			}
 		})
 	}
 }

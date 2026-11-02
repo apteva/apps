@@ -23,7 +23,7 @@ func OperationTimeout(op string, timeoutMS int) (time.Duration, error) {
 		}
 		return time.Duration(timeoutMS) * time.Millisecond, nil
 	}
-	if query {
+	if query || op == "index_create" {
 		return 30 * time.Second, nil
 	}
 	return 2 * time.Second, nil
