@@ -110,6 +110,11 @@ func normalizeProcedureSource(args map[string]any) (runtime, entrypoint, target,
 		err = fmt.Errorf("entrypoint: %w", err)
 		return
 	}
+	if runtime == webCanvasRuntime {
+		if err = validateWebCanvasSource(target, outputKind, entrypoint); err != nil {
+			return
+		}
+	}
 	if _, ok := files[entrypoint]; !ok {
 		err = fmt.Errorf("entrypoint %q is not present in files", entrypoint)
 		return
@@ -430,6 +435,10 @@ func (a *App) handleProcedureByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "invalid procedure id", http.StatusBadRequest)
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "preview" {
+		a.handleProcedurePreview(w, r, id)
 		return
 	}
 	ctx := requestAppCtx(r)
