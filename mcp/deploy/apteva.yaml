@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.30.7
+version: 0.30.8
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,9 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.8 pauses App Store Connect calls per connection on rate limits and
+  timeouts, retries failing releases on a growing schedule, fails releases on
+  final provider errors or 48 hours after processing, and stops superseded ones.
   v0.30.7 omits an empty Apple marketing URL and uploads 6.9-inch iPhone
   screenshots as APP_IPHONE_67, the type App Store Connect accepts.
   v0.30.6 validates every Apple age-rating attribute against the audited
@@ -214,7 +217,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.30.7
+    ref: deploy/v0.30.8
     entry: mcp/deploy
   port: 8080
   health_check: /health

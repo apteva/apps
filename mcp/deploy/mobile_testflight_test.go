@@ -121,6 +121,11 @@ func betaGroupResource(group appleBetaGroup) map[string]any {
 
 func setupTestFlightRelease(t *testing.T, platform *testFlightPlatform, betaGroupID string) (*App, *Release) {
 	t.Helper()
+	return setupTestFlightReleaseWith(t, platform, betaGroupID)
+}
+
+func setupTestFlightReleaseWith(t *testing.T, platform sdk.PlatformClient, betaGroupID string) (*App, *Release) {
+	t.Helper()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
 	oldGlobal := globalCtx
 	globalCtx = ctx
@@ -250,8 +255,9 @@ func TestIOSReleaseReusesCreatedGroupOnRepeatedPublishing(t *testing.T) {
 	if platform.createCount != 1 {
 		t.Fatalf("created groups=%d, want 1; calls=%+v", platform.createCount, platform.calls)
 	}
-	if countIntegrationCalls(platform.calls, "add_builds_to_beta_group") != 2 {
-		t.Fatalf("assignment calls=%d, want 2; calls=%+v", countIntegrationCalls(platform.calls, "add_builds_to_beta_group"), platform.calls)
+	// Once Apple accepts the assignment, later syncs only check availability.
+	if countIntegrationCalls(platform.calls, "add_builds_to_beta_group") != 1 {
+		t.Fatalf("assignment calls=%d, want 1; calls=%+v", countIntegrationCalls(platform.calls, "add_builds_to_beta_group"), platform.calls)
 	}
 }
 
