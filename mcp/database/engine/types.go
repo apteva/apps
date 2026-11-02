@@ -110,6 +110,10 @@ func Invalid(format string, args ...any) error    { return fail("invalid_argumen
 
 const MaxRecords = 1000
 const MaxIndexBuildRecords = 10000
+
+// MaxNativeIndexBuildRecords bounds AptevaDB's synchronous index builds,
+// which run natively (0.5–0.9 s for 328k records of 600 bytes).
+const MaxNativeIndexBuildRecords = 1000000
 const MaxQueryWorkBytes = 16 << 20
 const MaxBytes = 4 << 20
 

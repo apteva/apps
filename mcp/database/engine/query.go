@@ -80,6 +80,11 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 			}
 			a[i] = n
 		}
+		// A one-value list is equality: planners bind an index prefix only
+		// on equality (a caller's single scope arrives as a list).
+		if len(a) == 1 {
+			f.Op, f.Value = "eq", a[0]
+		}
 		return nil
 	}
 	switch f.Op {
