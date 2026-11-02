@@ -465,6 +465,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e != nil {
 			return nil, e
 		}
+		if reads {
+			return executeReads(tx, r, cursorKey)
+		}
 		out := []any{}
 		total := 0
 		for _, o := range r.Operations {
@@ -473,19 +476,6 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 			if o.Request.Database != "" && o.Request.Database != r.Database {
 				return nil, Invalid("batch cannot span databases")
-			}
-			if reads {
-				// Every read runs inside this one read transaction, so all
-				// results come from the same snapshot.
-				v, e := execute(tx, o.Op, o.Request, cursorKey)
-				if e != nil {
-					return nil, e
-				}
-				if total += len(marshal(v)); total > MaxBytes {
-					return nil, fail("resource_limit", "read batch response exceeds 4 MiB")
-				}
-				out = append(out, v)
-				continue
 			}
 			v, e := execute(tx, o.Op, o.Request, cursorKey)
 			if e != nil {
