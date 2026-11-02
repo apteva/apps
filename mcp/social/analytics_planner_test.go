@@ -172,3 +172,18 @@ func TestYouTubePostMetricsCarryThumbnails(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 }
+
+func TestYouTubeBreakdownFilteredOnItsOwnDimensionFiltersRows(t *testing.T) {
+	pf := funcPlatform{recordingPlatform: newRecordingPlatform()}
+	pf.answer = func(tool string, input map[string]any) *sdk.ExecuteResult {
+		if _, filtered := input["filters"]; filtered {
+			t.Errorf("own-dimension filter sent to YouTube: %v", input)
+		}
+		return okJSON(`{"columnHeaders":[{"name":"insightTrafficSourceType","columnType":"DIMENSION"},{"name":"views","columnType":"METRIC"}],"rows":[["RELATED_VIDEO",100],["YT_SEARCH",800]]}`)
+	}
+	ctx := newSocialCtx(t, pf)
+	got := (&App{}).fetchYouTubeBreakdown(ctx, 7, "traffic_source", analyticsQuery{RangeDays: 28, Filters: map[string][]string{"traffic_source": {"related_video"}}})
+	if got.Status != "ok" || len(got.Rows) != 1 || got.Rows[0].Dimensions["traffic_source"] != "related_video" || got.Rows[0].Metrics["views"] != 100 {
+		t.Fatalf("%+v", got)
+	}
+}

@@ -5107,7 +5107,9 @@ func TestYouTubeBreakdownMapsDeviceFilterAndRows(t *testing.T) {
 		RangeDays: 28,
 		Filters:   map[string][]string{"device": {"tv"}},
 	})
-	if got.Status != "ok" || len(got.Rows) != 2 {
+	// YouTube rejects a breakdown filtered on its own dimension, so the
+	// filter keeps the matching rows instead of going upstream.
+	if got.Status != "ok" || len(got.Rows) != 1 {
 		t.Fatalf("breakdown = %+v", got)
 	}
 	if got.Rows[0].Dimensions["device"] != "tv" || got.Rows[0].Metrics["views"] != 420 || got.Rows[0].Metrics["watch_time_minutes"] != 900 {
@@ -5117,7 +5119,7 @@ func TestYouTubeBreakdownMapsDeviceFilterAndRows(t *testing.T) {
 		t.Fatalf("calls = %d, want 1", len(pf.executeCalls))
 	}
 	input := pf.executeCalls[0].Input
-	if input["dimensions"] != "deviceType" || input["filters"] != "deviceType==TV" || input["sort"] != "-views" {
+	if _, filtered := input["filters"]; input["dimensions"] != "deviceType" || filtered || input["sort"] != "-views" {
 		t.Fatalf("query input = %+v", input)
 	}
 }
