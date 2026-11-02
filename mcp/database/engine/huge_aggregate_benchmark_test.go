@@ -182,7 +182,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		}
 		calls++
 	}
-	metrics := []Metric{{"count", "count", ""}, {"sum", "sum", "n"}, {"avg", "avg", "n"}, {"min", "min", "n"}, {"max", "max", "n"}}
+	metrics := []Metric{{"count", "count", "", nil}, {"sum", "sum", "n", nil}, {"avg", "avg", "n", nil}, {"min", "min", "n", nil}, {"max", "max", "n", nil}}
 	verifyGroups := func(field string, groups int, firstOf func(Record) int) func(any) {
 		return func(v any) {
 			rows := v.(map[string]any)["rows"].([]Record)
@@ -209,7 +209,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 	for repeat := 0; repeat < 5; repeat++ {
 		measure("numeric_four_groups", Request{GroupBy: []string{"bucket"}, Metrics: metrics}, verifyGroups("bucket", 4, bucketFirst), "")
 		measure("numeric_1000_groups", Request{GroupBy: []string{"tenant"}, Metrics: metrics, Query: Query{Limit: 1000}}, verifyGroups("tenant", 1000, tenantFirst), "")
-		measure("integer_four_groups", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"count", "count", ""}, {"sum", "sum", "i"}, {"avg", "avg", "i"}, {"min", "min", "i"}, {"max", "max", "i"}}}, func(v any) {
+		measure("integer_four_groups", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"count", "count", "", nil}, {"sum", "sum", "i", nil}, {"avg", "avg", "i", nil}, {"min", "min", "i", nil}, {"max", "max", "i", nil}}}, func(v any) {
 			rows := v.(map[string]any)["rows"].([]Record)
 			if len(rows) != 4 {
 				t.Fatal(rows)
@@ -224,7 +224,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 				}
 			}
 		}, "")
-		measure("nullable_count_four_groups", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "count", ""}, {"present", "count", "optional"}}}, func(v any) {
+		measure("nullable_count_four_groups", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "count", "", nil}, {"present", "count", "optional", nil}}}, func(v any) {
 			rows := v.(map[string]any)["rows"].([]Record)
 			if len(rows) != 4 {
 				t.Fatal(rows)
@@ -255,7 +255,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		expectedError = ""
 	}
 	for repeat := 0; repeat < 3; repeat++ {
-		measure("one_group_per_record_top1", Request{GroupBy: []string{"id"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{OrderBy: []Order{{"count", "desc"}}, Limit: 1}}, func(v any) {
+		measure("one_group_per_record_top1", Request{GroupBy: []string{"id"}, Metrics: []Metric{{"count", "count", "", nil}}, Query: Query{OrderBy: []Order{{"count", "desc"}}, Limit: 1}}, func(v any) {
 			rows := v.(map[string]any)["rows"].([]Record)
 			if len(rows) != 1 || rows[0]["id"] != "r000000000" || rows[0]["count"] != "1" {
 				t.Fatal(rows)
@@ -269,7 +269,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 		nonPrimaryError = ""
 	}
 	for repeat := 0; repeat < 3; repeat++ {
-		measure("one_group_per_non_primary_value_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{OrderBy: []Order{{"count", "desc"}}, Limit: 1}}, func(v any) {
+		measure("one_group_per_non_primary_value_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", "", nil}}, Query: Query{OrderBy: []Order{{"count", "desc"}}, Limit: 1}}, func(v any) {
 			rows := v.(map[string]any)["rows"].([]Record)
 			if len(rows) != 1 || rows[0]["i"] != "0" || rows[0]["count"] != "1" {
 				t.Fatal(rows)
@@ -278,7 +278,7 @@ func TestHugeAggregateBenchmark(t *testing.T) {
 	}
 	if adapter == "sqlite" || adapter == "aptevadb" {
 		for repeat := 0; repeat < 3; repeat++ {
-			measure("non_primary_numeric_million_groups_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", ""}, {"sum_i", "sum", "i"}, {"min_i", "min", "i"}, {"max_i", "max", "i"}, {"avg_n", "avg", "n"}}, Query: Query{OrderBy: []Order{{"sum_i", "desc"}}, Limit: 1}}, func(v any) {
+			measure("non_primary_numeric_million_groups_top1", Request{GroupBy: []string{"i"}, Metrics: []Metric{{"count", "count", "", nil}, {"sum_i", "sum", "i", nil}, {"min_i", "min", "i", nil}, {"max_i", "max", "i", nil}, {"avg_n", "avg", "n", nil}}, Query: Query{OrderBy: []Order{{"sum_i", "desc"}}, Limit: 1}}, func(v any) {
 				rows := v.(map[string]any)["rows"].([]Record)
 				last := strconv.Itoa(n - 1)
 				if len(rows) != 1 || rows[0]["i"] != last || rows[0]["sum_i"] != last || rows[0]["min_i"] != last || rows[0]["max_i"] != last || rows[0]["count"] != "1" || number(rows[0]["avg_n"]) != float64(n-1) {

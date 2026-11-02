@@ -81,20 +81,28 @@ var specs = []toolSpec{
 	{"index_create", "Create a single-field or compound ordered index, optionally unique. Builds atomically; duplicates abort a unique build.", []string{"index"}, []string{"collection", "index"}},
 	{"index_drop", "Drop a secondary index; confirm=true is required.", []string{"name", "confirm"}, []string{"collection", "name", "confirm"}},
 	{"get", "Get a record by its exact primary-key object.", []string{"key"}, []string{"collection", "key"}},
-	{"find", "Find records with typed filters, projection, ordering and cursor pagination. Broad queries default to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "select", "orderBy", "limit", "cursor", "requireIndex", "timeoutMs"}, []string{"collection"}},
+	{"find", "Find records with typed filters, projection, ordering and cursor pagination. lookups [{as,collection,localField,select?}] nest the record of another collection whose single-field primary key equals localField (null when absent). Broad queries default to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "select", "orderBy", "limit", "cursor", "requireIndex", "timeoutMs", "lookups"}, []string{"collection"}},
 	{"insert", "Atomically insert 1–1000 records. Integers use decimal strings; undeclared fields are rejected.", []string{"records"}, []string{"collection", "records"}},
 	{"update", "Atomically patch records using set or increment. Exact key or where required; maxAffected defaults to 1.", []string{"key", "where", "set", "increment", "ifVersion", "maxAffected", "all", "requireIndex"}, []string{"collection"}},
 	{"delete", "Atomically delete records by key or filter. maxAffected defaults to 1; full deletion needs all=true.", []string{"key", "where", "ifVersion", "maxAffected", "all", "requireIndex"}, []string{"collection"}},
 	{"upsert", "Atomically insert or patch records using their primary key or a named unique conflictIndex.", []string{"records", "conflictIndex"}, []string{"collection", "records"}},
 	{"count", "Count matching records exactly; returns a decimal string. Defaults to a 30-second deadline, configurable up to 60 seconds with timeoutMs.", []string{"where", "requireIndex", "timeoutMs"}, []string{"collection"}},
-	{"aggregate", "Group matching records and compute count, sum, avg, min or max. Integers/counts are decimal strings; no groups means one summary row. Metrics use {name,op,field?}. Defaults to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs"}, []string{"collection", "metrics"}},
-	{"batch", "Atomically execute record writes across collections in ONE database. Operations are {op,args}; at most 100 operations and 1000 affected records.", []string{"operations"}, []string{"operations"}},
+	{"aggregate", "Group matching records and compute count, count_distinct, sum, avg, min or max. Metrics use {name,op,field?,where?}; a metric where counts only matching rows (conditional metrics in one pass). lookups [{as,collection,localField,select?}] join the record whose single-field primary key equals localField, so \"as.field\" works in where, groupBy and metrics without duplicating rows. buckets [{name,field,unit,timezone?,weekStart?}] derive hour/day/week/month/year keys from a datetime in an IANA timezone for groupBy. Integers/counts are decimal strings; no groups means one summary row. Defaults to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs", "lookups", "buckets"}, []string{"collection", "metrics"}},
+	{"batch", "Run operations {op,args} in ONE database: either record writes (insert, update, delete, upsert) applied atomically, at most 1000 affected records; or reads (get, find, count, aggregate) answered from one consistent snapshot, which only needs read access. At most 100 operations; reads and writes cannot mix. timeoutMs applies to read batches.", []string{"operations", "timeoutMs"}, []string{"operations"}},
 	{"explain", "Inspect the adapter's query access path without executing it.", []string{"where", "orderBy", "requireIndex"}, []string{"collection"}},
 	{"access_grant", "Let a calling app use one existing project database with read or write access. Calling apps reach it with scope=\"project\". Repeating changes the access level.", []string{"app", "access"}, []string{"database", "app", "access"}},
 	{"access_revoke", "Remove a calling app's access to a project database.", []string{"app"}, []string{"database", "app"}},
 	{"access_list", "List calling apps allowed to use a project database.", nil, []string{"database"}},
 }
 
+// requestPermission is permission for one call: a batch of only reads needs
+// read access.
+func requestPermission(op string, r engine.Request) string {
+	if engine.QueryKind(op, r) == "read_batch" {
+		return "database.read"
+	}
+	return permission(op)
+}
 func permission(op string) string {
 	switch op {
 	case "changes":
@@ -167,12 +175,12 @@ func (a *App) MCPTools() []sdk.Tool {
 					return nil, &engine.Error{Code: "permission_denied", Message: "calling apps cannot change database access"}
 				}
 				if namespace == "project" {
-					if accessible, e = a.appProjectAccess(ctx, caller, projectScope, s.op, db); e != nil {
+					if accessible, e = a.appProjectAccess(ctx, caller, projectScope, s.op, requestPermission(s.op, r), db); e != nil {
 						return nil, e
 					}
 				}
 			}
-			if s.op != "databases_list" && !caller.Allows(permission(s.op), "database/"+db) {
+			if s.op != "databases_list" && !caller.Allows(requestPermission(s.op, r), "database/"+db) {
 				return nil, &engine.Error{Code: "permission_denied", Message: "database operation is not granted"}
 			}
 			if s.op == "changes" && !caller.Allows("database.read", "database/"+db) {
@@ -205,7 +213,7 @@ func (a *App) MCPTools() []sdk.Tool {
 // A calling app reaches a project-owned database only through an operator's
 // access grant. It can read, watch and (with write access) change records, but
 // never manage schema, realtime capture or the database itself.
-func (a *App) appProjectAccess(ctx context.Context, caller *sdk.Caller, projectScope, op, db string) (map[string]string, error) {
+func (a *App) appProjectAccess(ctx context.Context, caller *sdk.Caller, projectScope, op, need, db string) (map[string]string, error) {
 	denied := &engine.Error{Code: "permission_denied", Message: fmt.Sprintf("app %s has no access to project database %s; a project operator can grant it with db_access_grant", caller.AppName, db)}
 	if a.manager == nil {
 		return nil, &engine.Error{Code: "storage_error", Message: "app is not mounted"}
@@ -216,7 +224,6 @@ func (a *App) appProjectAccess(ctx context.Context, caller *sdk.Caller, projectS
 	if op == "databases_list" {
 		return a.manager.AppAccessible(ctx, projectScope, caller.AppName)
 	}
-	need := permission(op)
 	if need == "database.manage" {
 		return nil, &engine.Error{Code: "permission_denied", Message: "calling apps cannot manage project databases"}
 	}
@@ -264,7 +271,7 @@ func (a *App) run(ctx context.Context, scope, op string, r engine.Request) (any,
 	if a.manager == nil {
 		return nil, &engine.Error{Code: "storage_error", Message: "app is not mounted"}
 	}
-	timeout, e := engine.OperationTimeout(op, r.TimeoutMS)
+	timeout, e := engine.OperationTimeout(engine.QueryKind(op, r), r.TimeoutMS)
 	if e != nil {
 		return nil, e
 	}
@@ -367,7 +374,9 @@ func inputSchema(s toolSpec) map[string]any {
 	obj := func() map[string]any { return map[string]any{"type": "object"} }
 	arr := func(items any) map[string]any { return map[string]any{"type": "array", "items": items} }
 	order := map[string]any{"type": "object", "properties": map[string]any{"field": str(), "direction": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}}, "required": []string{"field"}}
-	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "sum", "avg", "min", "max"}}, "field": str()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all["lookups"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "object", "properties": map[string]any{"as": str(), "collection": str(), "localField": str(), "select": arr(str())}, "required": []string{"as", "collection", "localField"}, "additionalProperties": false}}
+	all["buckets"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "field": str(), "unit": map[string]any{"type": "string", "enum": []string{"hour", "day", "week", "month", "year"}}, "timezone": map[string]any{"type": "string", "description": "IANA timezone such as Europe/Paris; defaults to UTC."}, "weekStart": map[string]any{"type": "string", "enum": []string{"monday", "sunday"}}}, "required": []string{"name", "field", "unit"}, "additionalProperties": false}}
 	all["timeoutMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 60000, "description": "Query deadline in milliseconds; omitted or 0 defaults to 30000. An earlier caller deadline takes precedence."}
 	all["collections"] = map[string]any{"type": "array", "items": str(), "minItems": 1, "maxItems": 16}
 	all["after"] = str()

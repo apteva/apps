@@ -14,6 +14,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 - Several independently defined collections in every database.
 - Typed records, UUID defaults, composite primary keys, exact int64 values encoded as decimal strings, and service-owned timestamps/versions.
 - `get`, `find`, `insert`, `update`, `delete`, `upsert`, `count`, `aggregate`, `batch`, and `explain`.
+- Dashboard aggregates: distinct counts, per-metric filters, many-to-one lookups and timezone calendar buckets; read batches answered from one snapshot.
 - Generic single-field/compound, ascending/descending, and unique indexes. Native SQLite and AptevaDB compound indexes; ordered secondary and uniqueness keys in Pebble.
 - Atomic record writes and batches across collections in one database; optimistic version checks. Pebble automatically groups concurrent record writes into shared durable commits.
 - Filtering, projection, stable ordering, and signed cursor pagination. A cursor expires after one hour and becomes invalid after an index/schema change. Pages observe fresh snapshots; changing sort keys between pages can move records.
@@ -22,7 +23,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.10` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.11` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -180,7 +181,54 @@ Result:
 
 Changing `database` to a Pebble database with that schema and data executes the same contract. Aggregates operate on all matching input within work limits, not a page of input records. An output limit is applied after grouping and sorting; `truncated` only refers to output groups. SQLite uses native SQL aggregation; Pebble reduces filtered ordered-index scans.
 
-`count` with no field counts records. `count` with a field counts non-null values; other metrics skip null. Empty ungrouped input yields one row with zero counts and null other metrics. Empty grouped input yields no rows. Integer sums/counts are decimal strings and integer overflow fails; averages and floating sums are approximate. `min`/`max` support scalar fields, while `sum`/`avg` require numeric fields. No cross-collection joins, date buckets, distinct aggregates, or custom expressions yet.
+`count` with no field counts records. `count` with a field counts non-null values; other metrics skip null. Empty ungrouped input yields one row with zero counts and null other metrics. Empty grouped input yields no rows. Integer sums/counts are decimal strings and integer overflow fails; averages and floating sums are approximate. `min`/`max` support scalar fields, while `sum`/`avg` require numeric fields.
+
+### Dashboard aggregates
+
+Four optional extensions keep dashboard queries in one aggregate pass, with no new operations:
+
+```json
+{
+  "database":"calls",
+  "collection":"calls",
+  "lookups":[{"as":"campaign","collection":"campaigns","localField":"campaign_id","select":["name","channel"]}],
+  "buckets":[{"name":"day","field":"started_at","unit":"day","timezone":"Europe/Paris"}],
+  "where":{"field":"campaign.channel","op":"eq","value":"ads"},
+  "groupBy":["day","campaign.name"],
+  "metrics":[
+    {"name":"calls","op":"count"},
+    {"name":"callers","op":"count_distinct","field":"caller_id"},
+    {"name":"sales","op":"count","where":{"field":"status","op":"eq","value":"sale"}},
+    {"name":"revenue","op":"sum","field":"amount","where":{"field":"status","op":"eq","value":"sale"}}
+  ],
+  "orderBy":[{"field":"day","direction":"asc"}]
+}
+```
+
+- **`count_distinct`** counts distinct non-null values of a scalar field (or of a bucket).
+- **Metric `where`** restricts one metric to matching rows, so conditional counts and sums need no second query. It uses the normal filter language.
+- **`lookups`** (at most 4) attach the one record of another collection in the same database whose single-field primary key equals `localField`. The join is many-to-one, so it never multiplies counted rows. Its fields are addressed as `as.field` in `where`, `groupBy`, metrics and metric filters; null and dangling references give null fields. A lookup's `localField` may be an earlier lookup's field. `localField` and the target key must have the same type.
+- **`buckets`** (at most 4) derive `hour`, `day`, `week` (`weekStart` `monday` or `sunday`), `month` or `year` keys from a datetime in an IANA timezone (default UTC). Calendar units return the local start date such as `2026-03-23`; `hour` returns the UTC instant at which the local hour starts, which stays unambiguous across daylight-saving changes and for half-hour offsets. Timezone data is compiled in.
+
+SQLite runs `count_distinct` and metric filters as native `COUNT(DISTINCT …)` and `FILTER (WHERE …)`.
+
+AptevaDB (alpha.11) runs all four natively, in its parallel pipeline and its bounded stream:
+- filters on stored fields form a leading `$match`;
+- each lookup becomes `$lookup` on the target's primary-key field, followed by `$unwind` that keeps unmatched rows;
+- filters on joined fields form a second `$match`;
+- buckets become `$dateTrunc` group keys;
+- metrics become filtered `$count`, `$sum`, … and `$countDistinct` accumulators.
+
+Alpha.11 bounds a lookup's hash table by rows, not bytes, so the join may hold at most one target row per 512 bytes of work budget (32,768 rows at 16 MiB). A larger target falls back to the portable path.
+
+Everything else uses the portable streaming accumulator on the request's snapshot:
+- SQLite requests with lookups or buckets;
+- every extended request on Pebble;
+- on AptevaDB, buckets used outside `groupBy`, staged writes, and lookups past the row cap.
+
+In the portable path, filters on stored fields are pushed to the adapter's scan and the rest run after joining. Joined records are read by primary key and cached within the query's work budget.
+
+`find` accepts the same `lookups` and nests each referenced record under its `as` name (null when absent). Filtering and ordering stay on the collection's own fields, and `select` must include each `localField`.
 
 ## Query and mutation rules
 
@@ -193,6 +241,8 @@ Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` 
 `upsert` uses the primary key or a named unique `conflictIndex`. It patches supplied fields and preserves the others. Conflict-index fields must be supplied and non-null. A unique index allows multiple null-containing tuples, consistently across all three adapters.
 
 `batch` takes `operations:[{op,args}]` and executes record writes across collections in ONE database atomically. Supplying another database, schema operations, or nested batches is rejected. Later operations see earlier writes. Uniqueness is checked after each operation, so temporarily conflicting key swaps are rejected.
+
+A batch of only reads (`get`, `find`, `count`, `aggregate`) runs in one read transaction, so every result comes from the same snapshot. It needs `database.read` (or a `read` app grant), accepts `timeoutMs` like a query, and returns `{results:[...]}` in operation order, limited to 4 MiB in total. Reads and writes cannot be mixed in one batch.
 
 Pebble automatically groups concurrent record-write requests per database, including across collections, while keeping each request atomic. Every success waits for a synchronous disk flush. There is no artificial batching delay; a lone writer still pays the flush cost. Up to 64 requests may wait behind the active group; overflow returns `resource_limit`. Grouped batches flush after reaching 1 MiB of encoded writes, without splitting a single API transaction. Canceled requests are skipped before staging; staged writes wait for a definitive commit outcome.
 
@@ -218,7 +268,7 @@ Each calling app gets its own private namespace within the authenticated project
 {"database": "prod", "app": "graphql", "access": "read"}
 ```
 
-Grants are made with `db_access_grant` (agents need `database.manage` on the database) or `POST /operations/access_grant` from the dashboard surface, listed with `db_access_list` and removed with `db_access_revoke`. They are keyed by the caller's server-asserted app name, so they apply to that app's install in this project only. `read` allows describe, list, get, find, count, aggregate, explain and `db_changes`; `write` adds insert, update, delete, upsert and batch. Calling apps can never create, drop or alter project databases, collections or indexes, configure realtime capture, or change grants. Grants require an existing database, and dropping a database removes its grants. `db_databases_list` with `scope: "project"` lists only granted databases. Agent and grant-policy checks (`database.read`/`write`/`watch`) still apply on top. Administration of another app's private databases is future work.
+Grants are made with `db_access_grant` (agents need `database.manage` on the database) or `POST /operations/access_grant` from the dashboard surface, listed with `db_access_list` and removed with `db_access_revoke`. They are keyed by the caller's server-asserted app name, so they apply to that app's install in this project only. `read` allows describe, list, get, find, count, aggregate, explain, read-only batches and `db_changes`; `write` adds insert, update, delete, upsert and batch. Calling apps can never create, drop or alter project databases, collections or indexes, configure realtime capture, or change grants. Grants require an existing database, and dropping a database removes its grants. `db_databases_list` with `scope: "project"` lists only granted databases. Agent and grant-policy checks (`database.read`/`write`/`watch`) still apply on top. Administration of another app's private databases is future work.
 
 ## Initial limits and remaining work
 

@@ -307,6 +307,15 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "mappedCacheBytes": t.backend.options.MappedCacheBytes, "managedMemoryBytes": t.backend.options.ManagedMemoryBytes, "aggregateDiskBytes": t.backend.options.AggregateDiskBytes, "aggregateMaxGroups": t.backend.options.AggregateMaxGroups, "aggregateStrategy": "parallel-then-bounded-stream", "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
+	if r.analytics != nil {
+		// Alpha.11 evaluates lookups, date buckets, distinct counts and
+		// filtered metrics natively. Staged writes and buckets used outside
+		// groupBy keep the portable accumulator on this snapshot.
+		if len(t.pending) == 0 && nativeAnalyticsSupported(r) {
+			return t.aggregateNative(c, r, outSchema)
+		}
+		return t.aggregatePortable(c, r, outSchema)
+	}
 	if rows, ok, err := t.aggregatePrimaryCount(c, r); ok {
 		return rows, err
 	}

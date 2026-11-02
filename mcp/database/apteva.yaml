@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.5.3
+version: 0.6.0
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -39,14 +39,14 @@ provides:
     - {name: db_index_create, description: Create an ordered compound or unique index.}
     - {name: db_index_drop, description: Delete a secondary index.}
     - {name: db_get, description: Get a record by primary key.}
-    - {name: db_find, description: "Filter, order, project and paginate records."}
+    - {name: db_find, description: "Filter, order, project and paginate records, optionally nesting looked-up records."}
     - {name: db_insert, description: Atomically insert records.}
     - {name: db_update, description: Atomically patch matching records.}
     - {name: db_delete, description: Atomically delete matching records.}
     - {name: db_upsert, description: Atomically insert or patch by a unique key.}
     - {name: db_count, description: Count matching records exactly.}
-    - {name: db_aggregate, description: "Group records and compute count, sum, avg, min and max."}
-    - {name: db_batch, description: Atomic writes across collections within one database.}
+    - {name: db_aggregate, description: "Group records and compute count, distinct count, sum, avg, min and max, with per-metric filters, lookups and timezone date buckets."}
+    - {name: db_batch, description: "Atomic writes, or reads from one snapshot, within one database."}
     - {name: db_explain, description: Inspect query index use and sorting.}
     - {name: db_access_grant, description: Let a calling app use a project database.}
     - {name: db_access_revoke, description: Remove a calling app's project database access.}
@@ -62,7 +62,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.5.3, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.6.0, entry: mcp/database}
   port: 8080
   health_check: /health
 db:

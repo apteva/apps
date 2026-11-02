@@ -730,7 +730,7 @@ func (t *pebbleTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "pebble", "plan": plan(c, q), "candidateLimit": nil, "maxRetainedBytes": MaxQueryWorkBytes, "executionBound": "deadline"}, nil
 }
 func (t *pebbleTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
-	if r.Where == nil && !r.RequireIndex && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
+	if r.analytics == nil && r.Where == nil && !r.RequireIndex && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
 		it, e := t.iter([]byte("r/" + c.Name + "/"))
 		if e != nil {
 			return nil, e

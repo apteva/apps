@@ -40,7 +40,7 @@ func TestAptevaSyncProfilesWriteAndReopen(t *testing.T) {
 				t.Fatal(got)
 			}
 			call(t, m, "p", "update", Request{Database: "native", Collection: "items", Key: Record{"id": "a"}, Increment: Record{"i": "1"}})
-			v, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"sum", "sum", "i"}}})
+			v, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"sum", "sum", "i", nil}}})
 			checkErr(t, e)
 			if v.(map[string]any)["rows"].([]Record)[0]["sum"] != "9007199254740994" {
 				t.Fatal(v)

@@ -673,6 +673,66 @@ func (t *sqliteTx) checkIndex(c Collection, q Query) error {
 	}
 	return nil
 }
+
+// scanFields streams matching rows in storage order for the portable
+// aggregator. Only the requested fields are read from v2 tables.
+func (t *sqliteTx) scanFields(c Collection, q Query, names []string, consume func(Record, []byte) bool) error {
+	if e := t.checkIndex(c, q); e != nil {
+		return e
+	}
+	where, args := compileFilter(c, q.Where)
+	selectSQL := "__doc"
+	var fields []Field
+	if v2(c) {
+		wanted := map[string]bool{}
+		for _, n := range names {
+			wanted[n] = true
+		}
+		for _, f := range allFields(c) {
+			if wanted[f.Name] || len(names) == 0 {
+				fields = append(fields, f)
+			}
+		}
+		selectSQL = "1"
+		if len(fields) > 0 {
+			selectSQL = sqlColumns(fields)
+		}
+	}
+	rows, e := t.tx.QueryContext(t.ctx, "SELECT "+selectSQL+" FROM "+table(c)+" WHERE "+where, args...)
+	if e != nil {
+		return e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r Record
+		if v2(c) {
+			if len(fields) == 0 {
+				var one int
+				if e := rows.Scan(&one); e != nil {
+					return e
+				}
+				r = Record{}
+			} else if r, _, e = scanRecord(rows, fields); e != nil {
+				return e
+			}
+		} else {
+			var b []byte
+			if e := rows.Scan(&b); e != nil {
+				return e
+			}
+			if e := decode(b, &r); e != nil {
+				return e
+			}
+		}
+		if !consume(r, nil) {
+			break
+		}
+	}
+	if e := rows.Err(); e != nil {
+		return e
+	}
+	return t.ctx.Err()
+}
 func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	if e := t.checkIndex(c, q); e != nil {
 		return nil, e
@@ -819,7 +879,13 @@ func (t *sqliteTx) aggregate(c Collection, r Request, out Collection) ([]Record,
 	if e := t.checkIndex(c, Query{Where: r.Where, RequireIndex: r.RequireIndex}); e != nil {
 		return nil, e
 	}
+	if r.analytics.derived() {
+		return aggregateRecords(t.ctx, c, r, out, func(q Query, fields []string, consume func(Record, []byte) bool) error {
+			return t.scanFields(c, q, fields, consume)
+		})
+	}
 	selects := []string{}
+	args := []any{}
 	for _, g := range r.GroupBy {
 		selects = append(selects, quote(g))
 	}
@@ -828,9 +894,19 @@ func (t *sqliteTx) aggregate(c Collection, r Request, out Collection) ([]Record,
 		if m.Field != "" {
 			field = quote(m.Field)
 		}
-		selects = append(selects, strings.ToUpper(m.Op)+"("+field+") AS "+quote(m.Name))
+		call := strings.ToUpper(m.Op) + "(" + field + ")"
+		if m.Op == "count_distinct" {
+			call = "COUNT(DISTINCT " + field + ")"
+		}
+		if m.Where != nil {
+			cond, condArgs := compileFilter(c, m.Where)
+			call += " FILTER (WHERE " + cond + ")"
+			args = append(args, condArgs...)
+		}
+		selects = append(selects, call+" AS "+quote(m.Name))
 	}
-	where, args := compileFilter(c, r.Where)
+	where, whereArgs := compileFilter(c, r.Where)
+	args = append(args, whereArgs...)
 	s := "SELECT " + strings.Join(selects, ",") + " FROM " + table(c) + " WHERE " + where
 	if len(r.GroupBy) > 0 {
 		groups := []string{}

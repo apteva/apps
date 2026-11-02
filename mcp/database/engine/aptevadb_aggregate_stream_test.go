@@ -43,7 +43,7 @@ func TestNativeAggregateSpillParityAndSnapshot(t *testing.T) {
 	d, err := m.resolve(context.Background(), "p", "aptevadb", "", false)
 	checkErr(t, err)
 	b := d.backend.(*aptevaBackend)
-	base := Request{Collection: "items", GroupBy: []string{"k", "label"}, Metrics: []Metric{{"rows", "count", ""}, {"present", "count", "n"}, {"total", "sum", "amount"}, {"average", "avg", "n"}, {"low", "min", "k"}, {"flag_max", "max", "flag"}}, Query: Query{Limit: 3}}
+	base := Request{Collection: "items", GroupBy: []string{"k", "label"}, Metrics: []Metric{{"rows", "count", "", nil}, {"present", "count", "n", nil}, {"total", "sum", "amount", nil}, {"average", "avg", "n", nil}, {"low", "min", "k", nil}, {"flag_max", "max", "flag", nil}}, Query: Query{Limit: 3}}
 	// Prove this fixture cannot pass through the old materializing executor.
 	checkErr(t, b.transaction(context.Background(), false, func(tx transaction) error {
 		c, e := tx.collection("items")
@@ -71,7 +71,7 @@ func TestNativeAggregateSpillParityAndSnapshot(t *testing.T) {
 		return nil
 	}))
 	for _, group := range [][]string{{"k"}, {"label", "k"}} {
-		for _, metrics := range [][]Metric{{{"rows", "count", ""}, {"present", "count", "n"}}, base.Metrics} {
+		for _, metrics := range [][]Metric{{{"rows", "count", "", nil}, {"present", "count", "n", nil}}, base.Metrics} {
 			for _, order := range [][]Order{nil, {{"rows", "desc"}, {"k", "desc"}}} {
 				r := base
 				r.GroupBy = group
@@ -168,7 +168,7 @@ func TestNativeAggregateSpillParityAndSnapshot(t *testing.T) {
 		{"id": "overflow-a", "k": "9223372036854775806", "label": "zz_overflow", "amount": strconv.FormatInt(math.MaxInt64, 10), "n": math.MaxFloat64, "flag": true},
 		{"id": "overflow-b", "k": "9223372036854775806", "label": "zz_overflow", "amount": "1", "n": math.MaxFloat64, "flag": true},
 	}})
-	for _, metric := range []Metric{{"total", "sum", "amount"}, {"total", "sum", "n"}} {
+	for _, metric := range []Metric{{"total", "sum", "amount", nil}, {"total", "sum", "n", nil}} {
 		q := base
 		q.Database = "aptevadb"
 		q.Metrics = []Metric{metric}

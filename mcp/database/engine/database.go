@@ -291,11 +291,12 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "changes" {
 		return m.pollChanges(ctx, scope, r)
 	}
-	timeout, err := OperationTimeout(op, r.TimeoutMS)
+	kind := QueryKind(op, r)
+	timeout, err := OperationTimeout(kind, r.TimeoutMS)
 	if err != nil {
 		return nil, err
 	}
-	if op == "find" || op == "count" || op == "aggregate" {
+	if kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch" {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -320,7 +321,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		return nil, e
 	}
 	defer release()
-	if d.info.Adapter == "aptevadb" && (op == "find" || op == "count" || op == "aggregate") {
+	if d.info.Adapter == "aptevadb" && (kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch") {
 		done, err := m.acquireNativeQuery(ctx)
 		if err != nil {
 			return nil, err
@@ -370,8 +371,8 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		e = os.RemoveAll(filepath.Join(m.root, "databases", d.info.ID))
 		return map[string]any{"deleted": e == nil}, e
 	}
-	write := isWrite(op)
-	if isRecordWrite(op) {
+	write := isWrite(op) && kind != "read_batch"
+	if isRecordWrite(op) && write {
 		if grouped, ok := d.backend.(groupedBackend); ok {
 			return d.enqueueWrite(ctx, grouped, func(tx transaction) (any, error) {
 				return execute(d.cachedTransaction(tx, false), op, r, d.key)
@@ -407,6 +408,40 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	})
 	return out, e
 }
+
+// batchReads reports whether a batch holds only reads. Reads and writes never
+// mix: a write batch is atomic, a read batch shares one snapshot.
+func batchReads(r Request) (bool, error) {
+	if len(r.Operations) == 0 || len(r.Operations) > 100 {
+		return false, Invalid("batch requires 1–100 operations")
+	}
+	reads, writes := 0, 0
+	for _, o := range r.Operations {
+		switch o.Op {
+		case "get", "find", "count", "aggregate":
+			reads++
+		case "insert", "update", "delete", "upsert":
+			writes++
+		default:
+			return false, Invalid("batch accepts record writes (insert, update, delete, upsert) or reads (get, find, count, aggregate)")
+		}
+	}
+	if reads > 0 && writes > 0 {
+		return false, Invalid("batch cannot mix reads and writes")
+	}
+	return reads > 0, nil
+}
+
+// QueryKind names the work an operation does: a batch of only reads is a
+// "read_batch", with read permissions and query deadlines.
+func QueryKind(op string, r Request) string {
+	if op == "batch" {
+		if reads, _ := batchReads(r); reads {
+			return "read_batch"
+		}
+	}
+	return op
+}
 func isRecordWrite(op string) bool {
 	switch op {
 	case "insert", "update", "delete", "upsert", "batch":
@@ -426,22 +461,31 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		return tx.collections()
 	}
 	if op == "batch" {
-		if len(r.Operations) == 0 || len(r.Operations) > 100 {
-			return nil, Invalid("batch requires 1–100 operations")
+		reads, e := batchReads(r)
+		if e != nil {
+			return nil, e
 		}
 		out := []any{}
 		total := 0
 		for _, o := range r.Operations {
 			if o.Request.TimeoutMS != 0 {
-				return nil, Invalid("batch record operations do not accept timeoutMs")
-			}
-			switch o.Op {
-			case "insert", "update", "delete", "upsert":
-			default:
-				return nil, Invalid("batch only accepts record writes")
+				return nil, Invalid("batch operations do not accept timeoutMs; set it on the batch")
 			}
 			if o.Request.Database != "" && o.Request.Database != r.Database {
 				return nil, Invalid("batch cannot span databases")
+			}
+			if reads {
+				// Every read runs inside this one read transaction, so all
+				// results come from the same snapshot.
+				v, e := execute(tx, o.Op, o.Request, cursorKey)
+				if e != nil {
+					return nil, e
+				}
+				if total += len(marshal(v)); total > MaxBytes {
+					return nil, fail("resource_limit", "read batch response exceeds 4 MiB")
+				}
+				out = append(out, v)
+				continue
 			}
 			v, e := execute(tx, o.Op, o.Request, cursorKey)
 			if e != nil {
@@ -537,6 +581,19 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if op == "explain" {
 			return tx.explain(c, r.Query)
 		}
+		if len(r.Buckets) > 0 {
+			return nil, Invalid("find does not accept buckets")
+		}
+		if len(r.Lookups) > 0 {
+			for _, l := range r.Lookups {
+				if !lookupLocalIsStored(l) || len(r.Select) > 0 && !contains(r.Select, l.LocalField) {
+					return nil, Invalid("lookup %s needs localField %s as a stored, selected field", l.As, l.LocalField)
+				}
+			}
+			if e := prepareAnalytics(tx, c, &r); e != nil {
+				return nil, e
+			}
+		}
 		q := r.Query
 		if q.Cursor != "" {
 			after, e := afterCursor(c, &q, cursorKey)
@@ -549,7 +606,18 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e != nil {
 			return nil, e
 		}
-		return page(c, r.Query, rows, cursorKey)
+		out, e := page(c, r.Query, rows, cursorKey)
+		if e != nil || r.analytics == nil {
+			return out, e
+		}
+		records := out.(map[string]any)["records"].([]Record)
+		if e := r.analytics.attach(records); e != nil {
+			return nil, e
+		}
+		if len(marshal(records)) > MaxBytes {
+			return nil, fail("resource_limit", "records with lookups exceed 4 MiB; select fewer lookup fields or lower limit")
+		}
+		return out, nil
 	case "count":
 		r.Metrics = []Metric{{Name: "count", Op: "count"}}
 		r.GroupBy = nil
@@ -557,9 +625,19 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		r.Limit = 1
 		fallthrough
 	case "aggregate":
-		outSchema, e := validateAggregate(c, &r)
+		view := c
+		if needsAnalytics(r) {
+			if e := prepareAnalytics(tx, c, &r); e != nil {
+				return nil, e
+			}
+			view = r.analytics.view
+		}
+		outSchema, e := validateAggregate(view, &r)
 		if e != nil {
 			return nil, e
+		}
+		if r.analytics != nil {
+			r.analytics.finish(c, r)
 		}
 		rows, e := tx.aggregate(c, r, outSchema)
 		if e != nil {
@@ -801,6 +879,15 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 		}
 	}
 	return map[string]any{"affected": len(keys), "keys": keys}, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func stamp(r, old Record, now string) {

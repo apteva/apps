@@ -58,7 +58,11 @@ func (t *aptevaTx) aggregatePrimaryCount(c Collection, r Request) ([]Record, boo
 // reducers retain full validation before pagination. Native sort+limit avoids
 // materializing every result map, but the engine still retains hash group state.
 func nativeAggregatePipeline(r Request, spec nativeAggregationPlan) []byte {
-	stages := []json.RawMessage{marshal(map[string]any{"$group": spec.group})}
+	stages := []json.RawMessage{}
+	for _, stage := range spec.prefix {
+		stages = append(stages, marshal(stage))
+	}
+	stages = append(stages, marshal(map[string]any{"$group": spec.group}))
 	eligible := len(r.OrderBy) > 0
 	for _, m := range r.Metrics {
 		if m.Op != "count" {
@@ -66,9 +70,9 @@ func nativeAggregatePipeline(r Request, spec nativeAggregationPlan) []byte {
 		}
 	}
 	if eligible {
-		group := map[string]bool{}
-		for _, f := range r.GroupBy {
-			group[f] = true
+		group := map[string]string{}
+		for i, f := range r.GroupBy {
+			group[f] = spec.ids[i]
 		}
 		var sort bytes.Buffer
 		sort.WriteString(`{"$sort":{`)
@@ -77,8 +81,8 @@ func nativeAggregatePipeline(r Request, spec nativeAggregationPlan) []byte {
 				sort.WriteByte(',')
 			}
 			field := o.Field
-			if group[field] {
-				field = "_id." + field
+			if id, ok := group[field]; ok {
+				field = "_id." + id
 			}
 			sort.Write(marshal(field))
 			sort.WriteByte(':')

@@ -45,9 +45,10 @@ type Filter struct {
 	Value any      `json:"value,omitempty"`
 }
 type Metric struct {
-	Name  string `json:"name"`
-	Op    string `json:"op"`
-	Field string `json:"field,omitempty"`
+	Name  string  `json:"name"`
+	Op    string  `json:"op"`
+	Field string  `json:"field,omitempty"`
+	Where *Filter `json:"where,omitempty"`
 }
 type Query struct {
 	after        Record   // authenticated cursor values, never accepted from JSON
@@ -89,7 +90,10 @@ type Request struct {
 	Query
 	GroupBy    []string    `json:"groupBy,omitempty"`
 	Metrics    []Metric    `json:"metrics,omitempty"`
+	Lookups    []Lookup    `json:"lookups,omitempty"`
+	Buckets    []Bucket    `json:"buckets,omitempty"`
 	Operations []Operation `json:"operations,omitempty"`
+	analytics  *analyticsPlan
 }
 type Operation struct {
 	Op      string  `json:"op"`
