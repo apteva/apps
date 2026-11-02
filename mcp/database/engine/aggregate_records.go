@@ -20,21 +20,31 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 		sum     float64
 		integer int64
 		value   any
+		seen    map[any]struct{} // count_distinct
 	}
 	type groupState struct {
 		row     Record
 		metrics []metricState
 	}
 	groups := map[any]*groupState{}
+	// Lookup fields, bucket keys and metric filters are typed by the view;
+	// the adapter still scans the stored collection c.
+	a := r.analytics
+	view := c
+	var cache *lookupCache
+	if a != nil {
+		view = a.view
+		cache = newLookupCache(len(a.lookups), workLimit/4)
+	}
 	metricFields := make([]Field, len(r.Metrics))
 	for i, m := range r.Metrics {
 		if m.Field != "" {
-			metricFields[i], _ = c.field(m.Field)
+			metricFields[i], _ = view.field(m.Field)
 		}
 	}
 	groupFields := make([]Field, len(r.GroupBy))
 	for i, g := range r.GroupBy {
-		groupFields[i], _ = c.field(g)
+		groupFields[i], _ = view.field(g)
 	}
 	workBytes := 0
 	init := func(key any, row Record) error {
@@ -68,8 +78,20 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 			fields = append(fields, m.Field)
 		}
 	}
+	if a != nil {
+		input.Where = a.pushed
+		fields = a.fields
+	}
 	vals := make([]any, len(r.GroupBy))
 	e := scan(input, fields, func(row Record, _ []byte) bool {
+		if a != nil {
+			if aggErr = a.enrich(row, cache); aggErr != nil {
+				return false
+			}
+			if !matches(view, row, a.residual) {
+				return true
+			}
+		}
 		var key any
 		if len(r.GroupBy) > 0 {
 			for i, g := range r.GroupBy {
@@ -94,13 +116,30 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 			group = groups[key]
 		}
 		for i, m := range r.Metrics {
+			if m.Where != nil && !matches(view, row, m.Where) {
+				continue
+			}
 			v := row[m.Field]
 			state := &group.metrics[i]
 			if v == nil && !(m.Op == "count" && m.Field == "") {
 				continue
 			}
+			if m.Op == "count_distinct" {
+				if state.seen == nil {
+					state.seen = map[any]struct{}{}
+				}
+				if _, dup := state.seen[v]; dup {
+					continue
+				}
+				workBytes += 64 + retainedBytes(v)
+				if workBytes > workLimit {
+					aggErr = fail("resource_limit", "aggregate group state exceeds %d MiB", workLimit>>20)
+					return false
+				}
+				state.seen[v] = struct{}{}
+			}
 			state.count++
-			if m.Op == "count" {
+			if m.Op == "count" || m.Op == "count_distinct" {
 				continue
 			}
 			f := metricFields[i]
@@ -153,7 +192,7 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 		for i, m := range r.Metrics {
 			state := group.metrics[i]
 			var v any
-			if m.Op == "count" {
+			if m.Op == "count" || m.Op == "count_distinct" {
 				v = strconv.FormatInt(state.count, 10)
 			} else if state.count > 0 {
 				switch m.Op {

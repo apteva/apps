@@ -16,10 +16,10 @@ func OperationTimeout(op string, timeoutMS int) (time.Duration, error) {
 	if op == "realtime_configure" && timeoutMS == 0 {
 		return 30 * time.Second, nil
 	}
-	query := op == "find" || op == "count" || op == "aggregate"
+	query := op == "find" || op == "count" || op == "aggregate" || op == "read_batch"
 	if timeoutMS != 0 {
 		if !query || timeoutMS < 1 || timeoutMS > 60000 {
-			return 0, Invalid("timeoutMs is supported for find/count/aggregate and must be 1–60000")
+			return 0, Invalid("timeoutMs is supported for find/count/aggregate and read batches and must be 1–60000")
 		}
 		return time.Duration(timeoutMS) * time.Millisecond, nil
 	}

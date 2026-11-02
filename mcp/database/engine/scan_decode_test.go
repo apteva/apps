@@ -122,9 +122,9 @@ func TestScanIteratorKeysAndPagination(t *testing.T) {
 	for _, groupBy := range [][]string{nil, {"n"}, {"rank"}, {"label", "n"}} {
 		for _, where := range []*Filter{nil, {Field: "n", Op: "gt", Value: 1000.}} {
 			r := Request{Collection: "items", GroupBy: groupBy, Query: Query{Where: where}, Metrics: []Metric{
-				{"rows", "count", ""}, {"ranked", "count", "rank"}, {"documents", "count", "data"},
-				{"total", "sum", "rank"}, {"average", "avg", "rank"}, {"lowest", "min", "rank"}, {"highest", "max", "rank"},
-				{"numeric_total", "sum", "n"}, {"numeric_average", "avg", "n"}, {"first_label", "min", "label"}, {"last_label", "max", "label"},
+				{"rows", "count", "", nil}, {"ranked", "count", "rank", nil}, {"documents", "count", "data", nil},
+				{"total", "sum", "rank", nil}, {"average", "avg", "rank", nil}, {"lowest", "min", "rank", nil}, {"highest", "max", "rank", nil},
+				{"numeric_total", "sum", "n", nil}, {"numeric_average", "avg", "n", nil}, {"first_label", "min", "label", nil}, {"last_label", "max", "label", nil},
 			}}
 			r.Database = "sqlite"
 			want := call(t, m, "p", "aggregate", r)

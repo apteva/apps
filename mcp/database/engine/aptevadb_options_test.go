@@ -22,7 +22,7 @@ func TestAptevaConfigBudgetAndReopen(t *testing.T) {
 				rs = append(rs, Record{"label": fmt.Sprintf("%04d", i) + strings.Repeat("x", 2048), "i": "1"})
 			}
 			call(t, m, "p", "insert", Request{Database: "native", Collection: "items", Records: rs})
-			for _, metrics := range [][]Metric{{{"count", "count", ""}}, {{"count", "count", ""}, {"total", "sum", "i"}}} {
+			for _, metrics := range [][]Metric{{{"count", "count", "", nil}}, {{"count", "count", "", nil}, {"total", "sum", "i", nil}}} {
 				v, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", GroupBy: []string{"label"}, Metrics: metrics, Query: Query{Limit: 1000}})
 				if budget == 1<<20 {
 					expectCode(t, e, "resource_limit")
@@ -82,20 +82,20 @@ func TestAptevaParallelParityAndIntegerAverageProtection(t *testing.T) {
 		}
 	}
 	for _, groups := range [][]string{nil, {"bucket"}} {
-		r := Request{Database: "native", Collection: "items", GroupBy: groups, Metrics: []Metric{{"count", "count", ""}, {"sum", "sum", "n"}, {"avg", "avg", "n"}, {"min", "min", "i"}, {"max", "max", "i"}}}
+		r := Request{Database: "native", Collection: "items", GroupBy: groups, Metrics: []Metric{{"count", "count", "", nil}, {"sum", "sum", "n", nil}, {"avg", "avg", "n", nil}, {"min", "min", "i", nil}, {"max", "max", "i", nil}}}
 		want := call(t, managers[0], "p", "aggregate", r)
 		got := call(t, managers[1], "p", "aggregate", r)
 		if !equalJSON(got, want) {
 			t.Fatal("parallel native results differ")
 		}
 	}
-	avg := call(t, managers[1], "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"avg", "avg", "i"}}}).(map[string]any)["rows"].([]Record)[0]["avg"]
+	avg := call(t, managers[1], "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"avg", "avg", "i", nil}}}).(map[string]any)["rows"].([]Record)[0]["avg"]
 	if number(avg) != float64(math.MaxInt64) {
 		t.Fatal("upstream integer average overflow leaked", avg)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, e := managers[1].Execute(ctx, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"sum", "sum", "n"}}})
+	_, e := managers[1].Execute(ctx, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"sum", "sum", "n", nil}}})
 	if e != context.Canceled {
 		t.Fatal(e)
 	}

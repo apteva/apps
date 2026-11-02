@@ -141,7 +141,7 @@ func TestAptevaProjectedSortAndAggregateBound(t *testing.T) {
 	if len(page) != 40 || page[0]["n"] != 39. {
 		t.Fatal("projected top page failed")
 	}
-	v := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", GroupBy: []string{"id", "pad"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{Limit: 1}}).(map[string]any)
+	v := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", GroupBy: []string{"id", "pad"}, Metrics: []Metric{{"count", "count", "", nil}}, Query: Query{Limit: 1}}).(map[string]any)
 	if !v["truncated"].(bool) || v["rows"].([]Record)[0]["count"] != "1" || len(v["rows"].([]Record)[0]["pad"].(string)) != 512<<10 {
 		t.Fatal("bounded spill page", v)
 	}
@@ -180,7 +180,7 @@ func TestNativeAggregateParity(t *testing.T) {
 		fixture(t, m, adapter)
 		managers = append(managers, m)
 	}
-	metrics := []Metric{{"count", "count", ""}, {"total", "sum", "amount"}, {"average", "avg", "amount"}, {"low_integer", "min", "units"}, {"high_integer", "max", "units"}, {"first_email", "min", "email"}, {"last_email", "max", "email"}, {"first_active", "min", "active"}}
+	metrics := []Metric{{"count", "count", "", nil}, {"total", "sum", "amount", nil}, {"average", "avg", "amount", nil}, {"low_integer", "min", "units", nil}, {"high_integer", "max", "units", nil}, {"first_email", "min", "email", nil}, {"last_email", "max", "email", nil}, {"first_active", "min", "active", nil}}
 	for _, groups := range [][]string{nil, {"country"}, {"units", "active"}} {
 		for _, where := range []*Filter{nil, {Field: "country", Op: "is_null"}, {Field: "amount", Op: "gt", Value: 1000.}} {
 			r := Request{Database: "shop", Collection: "orders", GroupBy: groups, Metrics: metrics, Query: Query{Where: where}}
@@ -199,7 +199,7 @@ func TestNativeAggregateParity(t *testing.T) {
 	call(t, m, "p", "collection_create", Request{Database: "overflow", Collection: "items", Fields: []Field{{"n", "number", false}, {"i", "integer", false}}})
 	call(t, m, "p", "insert", Request{Database: "overflow", Collection: "items", Records: []Record{{"n": math.MaxFloat64, "i": "9223372036854775807"}, {"n": math.MaxFloat64, "i": "9223372036854775807"}}})
 	for _, f := range []string{"n", "i"} {
-		_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "overflow", Collection: "items", Metrics: []Metric{{"total", "sum", f}}})
+		_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "overflow", Collection: "items", Metrics: []Metric{{"total", "sum", f, nil}}})
 		expectCode(t, e, "resource_limit")
 	}
 }

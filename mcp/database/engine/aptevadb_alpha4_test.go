@@ -23,8 +23,8 @@ func TestAptevaAlpha4NativeReducersAndAppOverflowContract(t *testing.T) {
 			rs := []Record{{"id": "a", "i": "9007199254740993", "optional": "0", "b": false}, {"id": "b", "i": "7", "optional": nil, "b": nil}}
 			call(t, m, "p", "insert", Request{Database: "native", Collection: "items", Records: rs})
 			for _, metrics := range [][]Metric{
-				{{"rows", "count", ""}, {"total", "sum", "i"}, {"average", "avg", "i"}, {"present", "count", "optional"}, {"false_count", "count", "b"}},
-				{{"total", "sum", "i"}, {"rows", "count", ""}, {"present", "count", "optional"}, {"average", "avg", "i"}, {"false_count", "count", "b"}},
+				{{"rows", "count", "", nil}, {"total", "sum", "i", nil}, {"average", "avg", "i", nil}, {"present", "count", "optional", nil}, {"false_count", "count", "b", nil}},
+				{{"total", "sum", "i", nil}, {"rows", "count", "", nil}, {"present", "count", "optional", nil}, {"average", "avg", "i", nil}, {"false_count", "count", "b", nil}},
 			} {
 				got := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: metrics}).(map[string]any)["rows"].([]Record)[0]
 				if got["total"] != "9007199254741000" || got["rows"] != "2" || got["present"] != "1" || got["false_count"] != "1" || got["average"] != float64(4503599627370500) {
@@ -34,7 +34,7 @@ func TestAptevaAlpha4NativeReducersAndAppOverflowContract(t *testing.T) {
 			// The range proof cannot certify this sum, but the checked rescan succeeds.
 			call(t, m, "p", "update", Request{Database: "native", Collection: "items", Key: Record{"id": "a"}, Set: Record{"i": strconv.FormatInt(math.MaxInt64, 10)}})
 			call(t, m, "p", "update", Request{Database: "native", Collection: "items", Key: Record{"id": "b"}, Set: Record{"i": "0"}})
-			got := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i"}}}).(map[string]any)["rows"].([]Record)[0]
+			got := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i", nil}}}).(map[string]any)["rows"].([]Record)[0]
 			if got["total"] != strconv.FormatInt(math.MaxInt64, 10) {
 				t.Fatal(got)
 			}
@@ -42,13 +42,13 @@ func TestAptevaAlpha4NativeReducersAndAppOverflowContract(t *testing.T) {
 			// checked int64 contract must still reject it (a,b,c primary-key order).
 			call(t, m, "p", "update", Request{Database: "native", Collection: "items", Key: Record{"id": "b"}, Set: Record{"i": "1"}})
 			call(t, m, "p", "insert", Request{Database: "native", Collection: "items", Records: []Record{{"id": "c", "i": "-1", "optional": nil, "b": nil}}})
-			_, e = m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i"}}})
+			_, e = m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i", nil}}})
 			expectCode(t, e, "resource_limit")
 			call(t, m, "p", "update", Request{Database: "native", Collection: "items", Key: Record{"id": "b"}, Set: Record{"i": strconv.FormatInt(math.MaxInt64, 10)}})
 			call(t, m, "p", "delete", Request{Database: "native", Collection: "items", Key: Record{"id": "c"}})
-			_, e = m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i"}}})
+			_, e = m.Execute(context.Background(), "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"total", "sum", "i", nil}}})
 			expectCode(t, e, "resource_limit")
-			avg := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"average", "avg", "i"}}}).(map[string]any)["rows"].([]Record)[0]
+			avg := call(t, m, "p", "aggregate", Request{Database: "native", Collection: "items", Metrics: []Metric{{"average", "avg", "i", nil}}}).(map[string]any)["rows"].([]Record)[0]
 			if avg["average"] != float64(math.MaxInt64) {
 				t.Fatal(avg)
 			}

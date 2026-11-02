@@ -58,7 +58,7 @@ func TestAdapters(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)
 			t.Run("aggregate", func(t *testing.T) {
-				r := Request{Database: "shop", Collection: "orders", GroupBy: []string{"country"}, Metrics: []Metric{{"orders", "count", ""}, {"priced", "count", "amount"}, {"revenue", "sum", "amount"}, {"average", "avg", "amount"}, {"min", "min", "amount"}, {"max", "max", "amount"}, {"units", "sum", "units"}}}
+				r := Request{Database: "shop", Collection: "orders", GroupBy: []string{"country"}, Metrics: []Metric{{"orders", "count", "", nil}, {"priced", "count", "amount", nil}, {"revenue", "sum", "amount", nil}, {"average", "avg", "amount", nil}, {"min", "min", "amount", nil}, {"max", "max", "amount", nil}, {"units", "sum", "units", nil}}}
 				out := call(t, m, "p", "aggregate", r).(map[string]any)["rows"].([]Record)
 				if len(out) != 3 {
 					t.Fatal(out)
@@ -320,7 +320,7 @@ func TestAggregateWithIndexAndPrefix(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)
 			call(t, m, "p", "index_create", Request{Database: "shop", Collection: "orders", Index: &Index{Name: "email", Fields: []Order{{"email", "desc"}}}})
-			r := Request{Database: "shop", Collection: "orders", Query: Query{Where: &Filter{Field: "email", Op: "starts_with", Value: "a@"}, RequireIndex: true, OrderBy: []Order{{"total", "desc"}}}, Metrics: []Metric{{"total", "sum", "amount"}}}
+			r := Request{Database: "shop", Collection: "orders", Query: Query{Where: &Filter{Field: "email", Op: "starts_with", Value: "a@"}, RequireIndex: true, OrderBy: []Order{{"total", "desc"}}}, Metrics: []Metric{{"total", "sum", "amount", nil}}}
 			v := call(t, m, "p", "aggregate", r).(map[string]any)["rows"].([]Record)
 			if len(v) != 1 || v[0]["total"] != 10. {
 				t.Fatal(v)
@@ -341,7 +341,7 @@ func TestPebbleLargeScanAndCursorSeek(t *testing.T) {
 		}
 		call(t, m, "p", "insert", Request{Database: "large", Collection: "items", Records: records})
 	}
-	aggregate := call(t, m, "p", "aggregate", Request{Database: "large", Collection: "items", Metrics: []Metric{{"total", "sum", "n"}}}).(map[string]any)["rows"].([]Record)
+	aggregate := call(t, m, "p", "aggregate", Request{Database: "large", Collection: "items", Metrics: []Metric{{"total", "sum", "n", nil}}}).(map[string]any)["rows"].([]Record)
 	if len(aggregate) != 1 || number(aggregate[0]["total"]) != float64(10999*11000/2) {
 		t.Fatal(aggregate)
 	}
@@ -353,7 +353,7 @@ func TestPebbleLargeScanAndCursorSeek(t *testing.T) {
 	if call(t, m, "p", "count", Request{Database: "large", Collection: "items"}).(map[string]any)["count"] != "11000" {
 		t.Fatal("large count mismatch")
 	}
-	groups := call(t, m, "p", "aggregate", Request{Database: "large", Collection: "items", GroupBy: []string{"n"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{OrderBy: []Order{{"n", "desc"}}, Limit: 1}}).(map[string]any)
+	groups := call(t, m, "p", "aggregate", Request{Database: "large", Collection: "items", GroupBy: []string{"n"}, Metrics: []Metric{{"count", "count", "", nil}}, Query: Query{OrderBy: []Order{{"n", "desc"}}, Limit: 1}}).(map[string]any)
 	if !groups["truncated"].(bool) || number(groups["rows"].([]Record)[0]["n"]) != 10999 {
 		t.Fatal(groups)
 	}

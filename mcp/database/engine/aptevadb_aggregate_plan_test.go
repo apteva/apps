@@ -28,7 +28,7 @@ func TestPrimaryCountAggregateMatchesSQLite(t *testing.T) {
 		call(t, m, "p", "insert", Request{Database: adapter, Collection: "items", Records: records})
 	}
 	for _, group := range [][]string{{"tenant", "n"}, {"n", "tenant"}, {"tenant"}} {
-		for _, metrics := range [][]Metric{{{"z_count", "count", ""}, {"a_count", "count", ""}}, {{"present", "count", "optional"}}} {
+		for _, metrics := range [][]Metric{{{"z_count", "count", "", nil}, {"a_count", "count", "", nil}}, {{"present", "count", "optional", nil}}} {
 			for _, where := range []*Filter{nil, {Field: "tenant", Op: "eq", Value: "1"}, {Field: "tenant", Op: "eq", Value: "absent"}} {
 				for _, order := range [][]Order{nil, {{metrics[0].Name, "desc"}, {group[0], "desc"}}} {
 					for _, limit := range []int{1, 3, 100} {
@@ -45,7 +45,7 @@ func TestPrimaryCountAggregateMatchesSQLite(t *testing.T) {
 			}
 		}
 	}
-	indexed := Request{Database: "aptevadb", Collection: "items", GroupBy: []string{"tenant", "n"}, Metrics: []Metric{{"rows", "count", ""}}, Query: Query{Where: &Filter{Field: "tenant", Op: "eq", Value: "1"}, RequireIndex: true, Limit: 1}}
+	indexed := Request{Database: "aptevadb", Collection: "items", GroupBy: []string{"tenant", "n"}, Metrics: []Metric{{"rows", "count", "", nil}}, Query: Query{Where: &Filter{Field: "tenant", Op: "eq", Value: "1"}, RequireIndex: true, Limit: 1}}
 	if len(call(t, m, "p", "aggregate", indexed).(map[string]any)["rows"].([]Record)) != 1 {
 		t.Fatal("indexed primary count")
 	}
@@ -61,7 +61,7 @@ func TestPrimaryCountAggregateMatchesSQLite(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		v, err := execute(tx, "aggregate", Request{Collection: "items", GroupBy: []string{"tenant", "n"}, Metrics: []Metric{{"count", "count", ""}}, Query: Query{Limit: 1}}, d.key)
+		v, err := execute(tx, "aggregate", Request{Collection: "items", GroupBy: []string{"tenant", "n"}, Metrics: []Metric{{"count", "count", "", nil}}, Query: Query{Limit: 1}}, d.key)
 		if err != nil {
 			return err
 		}
@@ -82,7 +82,7 @@ func TestNativeCountTopKMatchesSQLite(t *testing.T) {
 	other := manager(t)
 	fixture(t, other, "aptevadb")
 	for _, group := range [][]string{{"country"}, {"country", "active"}, {"units"}} {
-		for _, metric := range []Metric{{"rows", "count", ""}, {"present", "count", "amount"}} {
+		for _, metric := range []Metric{{"rows", "count", "", nil}, {"present", "count", "amount", nil}} {
 			for _, order := range [][]Order{{{metric.Name, "desc"}}, {{group[len(group)-1], "desc"}, {metric.Name, "asc"}}} {
 				r := Request{Database: "shop", Collection: "orders", GroupBy: group, Metrics: []Metric{metric}, Query: Query{OrderBy: order, Limit: 1}}
 				got := call(t, other, "p", "aggregate", r)
@@ -111,7 +111,7 @@ func TestNativeCountTopKAvoidsAllResultMaps(t *testing.T) {
 		}
 		call(t, m, "p", "insert", Request{Database: "n", Collection: "items", Records: records})
 	}
-	r := Request{Database: "n", Collection: "items", GroupBy: []string{"label"}, Metrics: []Metric{{"rows", "count", ""}}, Query: Query{OrderBy: []Order{{"rows", "desc"}, {"label", "desc"}}, Limit: 1}}
+	r := Request{Database: "n", Collection: "items", GroupBy: []string{"label"}, Metrics: []Metric{{"rows", "count", "", nil}}, Query: Query{OrderBy: []Order{{"rows", "desc"}, {"label", "desc"}}, Limit: 1}}
 	v := call(t, m, "p", "aggregate", r).(map[string]any)
 	if !v["truncated"].(bool) || v["rows"].([]Record)[0]["label"] != "1999"+strings.Repeat("x", 96) {
 		t.Fatal(v)
@@ -147,6 +147,6 @@ func TestAggregateTopKDoesNotHideOverflow(t *testing.T) {
 	call(t, m, "p", "database_create", Request{Database: "n", Adapter: "aptevadb"})
 	call(t, m, "p", "collection_create", Request{Database: "n", Collection: "items", Fields: []Field{{"bucket", "text", false}, {"i", "integer", false}}})
 	call(t, m, "p", "insert", Request{Database: "n", Collection: "items", Records: []Record{{"bucket": "a", "i": "1"}, {"bucket": "z", "i": strconv.FormatInt(math.MaxInt64, 10)}, {"bucket": "z", "i": "1"}}})
-	_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "n", Collection: "items", GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "sum", "i"}}, Query: Query{OrderBy: []Order{{"bucket", "asc"}}, Limit: 1}})
+	_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "n", Collection: "items", GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "sum", "i", nil}}, Query: Query{OrderBy: []Order{{"bucket", "asc"}}, Limit: 1}})
 	expectCode(t, e, "resource_limit")
 }

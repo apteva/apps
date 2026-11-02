@@ -124,7 +124,7 @@ func TestLargeScanBenchmark(t *testing.T) {
 						t.Fatal("sort mismatch")
 					}
 				}
-				v = measure("aggregate", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"count", "count", ""}, {"sum", "sum", "n"}, {"avg", "avg", "n"}, {"min", "min", "n"}, {"max", "max", "n"}}}).(map[string]any)["rows"].([]Record)
+				v = measure("aggregate", Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"count", "count", "", nil}, {"sum", "sum", "n", nil}, {"avg", "avg", "n", nil}, {"min", "min", "n", nil}, {"max", "max", "n", nil}}}).(map[string]any)["rows"].([]Record)
 				if len(v) != 4 {
 					t.Fatal("aggregate group mismatch")
 				}

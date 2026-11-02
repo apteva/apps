@@ -46,7 +46,7 @@ func BenchmarkAptevaPaths(b *testing.B) {
 		}
 		exec(b, "insert", Request{Records: rs})
 	}
-	stats := []Metric{{"count", "count", ""}, {"sum", "sum", "n"}, {"avg", "avg", "n"}, {"min", "min", "n"}, {"max", "max", "n"}}
+	stats := []Metric{{"count", "count", "", nil}, {"sum", "sum", "n", nil}, {"avg", "avg", "n", nil}, {"min", "min", "n", nil}, {"max", "max", "n", nil}}
 	cases := []struct {
 		name string
 		op   string
@@ -66,10 +66,10 @@ func BenchmarkAptevaPaths(b *testing.B) {
 			return Request{GroupBy: []string{"bucket"}, Metrics: stats, Query: Query{Limit: 100}}
 		}},
 		{"agg_4_groups_int_sum", "aggregate", func(int) Request {
-			return Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "sum", "i"}}, Query: Query{Limit: 100}}
+			return Request{GroupBy: []string{"bucket"}, Metrics: []Metric{{"total", "sum", "i", nil}}, Query: Query{Limit: 100}}
 		}},
 		{"agg_1000_groups", "aggregate", func(int) Request {
-			return Request{GroupBy: []string{"tenant"}, Metrics: []Metric{{"total", "sum", "i"}, {"count", "count", ""}}, Query: Query{Limit: 1000}}
+			return Request{GroupBy: []string{"tenant"}, Metrics: []Metric{{"total", "sum", "i", nil}, {"count", "count", "", nil}}, Query: Query{Limit: 1000}}
 		}},
 		{"agg_indexed_tenant", "aggregate", func(i int) Request {
 			return Request{GroupBy: []string{"bucket"}, Metrics: stats, Query: Query{Where: &Filter{Field: "tenant", Op: "eq", Value: fmt.Sprintf("g%04d", i%1000)}, Limit: 100}}
@@ -78,7 +78,7 @@ func BenchmarkAptevaPaths(b *testing.B) {
 			return Request{GroupBy: []string{"tenant"}, Metrics: stats, Query: Query{Where: &Filter{Field: "bucket", Op: "eq", Value: "3"}, Limit: 1000}}
 		}},
 		{"agg_high_cardinality_spill", "aggregate", func(int) Request {
-			return Request{GroupBy: []string{"i"}, Metrics: []Metric{{"total", "sum", "n"}}, Query: Query{OrderBy: []Order{{"total", "desc"}}, Limit: 1}}
+			return Request{GroupBy: []string{"i"}, Metrics: []Metric{{"total", "sum", "n", nil}}, Query: Query{OrderBy: []Order{{"total", "desc"}}, Limit: 1}}
 		}},
 		{"update_indexed_where", "update", func(i int) Request {
 			return Request{Query: Query{Where: &Filter{Field: "tenant", Op: "eq", Value: fmt.Sprintf("g%04d", i%1000)}}, Set: Record{"pad": pad}, MaxAffected: MaxRecords}

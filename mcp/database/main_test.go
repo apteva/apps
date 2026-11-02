@@ -183,6 +183,16 @@ func TestAppProjectDatabaseAccess(t *testing.T) {
 		t.Fatal("granted database not listed", v)
 	}
 	denied(graphql, "insert", insert)
+	// A batch of only reads needs read access and accepts a query deadline;
+	// a write batch still needs write access.
+	reads := must(invoke(a, graphql, "batch", map[string]any{"scope": "project", "database": "prod", "timeoutMs": 45000, "operations": []any{
+		map[string]any{"op": "count", "args": map[string]any{"collection": "orders"}},
+		map[string]any{"op": "aggregate", "args": map[string]any{"collection": "orders", "metrics": []any{map[string]any{"name": "big", "op": "count", "where": map[string]any{"field": "total", "op": "gt", "value": 1}}}}},
+	}})).(map[string]any)["results"].([]any)
+	if len(reads) != 2 || reads[0].(map[string]any)["count"] != "1" || reads[1].(map[string]any)["rows"].([]engine.Record)[0]["big"] != "1" {
+		t.Fatal("read batch", reads)
+	}
+	denied(graphql, "batch", map[string]any{"scope": "project", "database": "prod", "operations": []any{map[string]any{"op": "insert", "args": map[string]any{"collection": "orders", "records": insert["records"]}}}})
 	denied(graphql, "collection_drop", map[string]any{"scope": "project", "database": "prod", "collection": "orders", "confirm": true})
 	denied(graphql, "realtime_configure", map[string]any{"scope": "project", "database": "prod", "enabled": true})
 	denied(other, "find", find)

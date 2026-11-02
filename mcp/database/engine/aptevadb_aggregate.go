@@ -2,8 +2,10 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
+	"time"
 
 	native "github.com/apteva/db"
 )
@@ -19,40 +21,87 @@ type nativeAggregationPlan struct {
 	sumCounts map[string]string
 	guards    []nativeSumGuard
 	hidden    []string
+	// ids names each groupBy entry inside _id. Joined names contain dots,
+	// which native paths would read as nesting, so analytics use g0, g1...
+	ids    []string
+	prefix []any // stages before $group: filters, lookups
+	view   Collection
+	hours  map[string]bool // groupBy names that are hour buckets
 }
 
 func nativeAggregatePlan(c Collection, r Request) nativeAggregationPlan {
-	spec := nativeAggregationPlan{group: map[string]any{"_id": nil}, sumCounts: map[string]string{}}
+	a := r.analytics
+	spec := nativeAggregationPlan{group: map[string]any{"_id": nil}, sumCounts: map[string]string{}, view: c, hours: map[string]bool{}}
+	where := r.Where
+	if a != nil {
+		spec.view = a.view
+		where = a.pushed
+	}
+	if where != nil {
+		spec.prefix = append(spec.prefix, map[string]any{"$match": nativeFilter(c, where)})
+	}
+	buckets := map[string]bucketPlan{}
+	if a != nil {
+		// Joins match the target's primary-key field: many-to-one, and an
+		// unmatched or null reference keeps the row with null joined fields.
+		for _, l := range a.lookups {
+			spec.prefix = append(spec.prefix,
+				map[string]any{"$lookup": map[string]any{"from": nativeCollectionName(l.Collection), "localField": l.LocalField, "foreignField": l.target.PrimaryKey[0], "as": l.As}},
+				map[string]any{"$unwind": map[string]any{"path": "$" + l.As, "preserveNullAndEmptyArrays": true}})
+		}
+		if a.residual != nil {
+			spec.prefix = append(spec.prefix, map[string]any{"$match": nativeFilter(a.view, a.residual)})
+		}
+		for _, b := range a.buckets {
+			buckets[b.Name] = b
+		}
+	}
 	if len(r.GroupBy) > 0 {
 		id := map[string]any{}
-		for _, field := range r.GroupBy {
-			id[field] = "$" + field
+		for i, field := range r.GroupBy {
+			alias := field
+			if a != nil {
+				alias = fmt.Sprint("g", i)
+			}
+			spec.ids = append(spec.ids, alias)
+			if b, ok := buckets[field]; ok {
+				id[alias] = map[string]any{"$dateTrunc": map[string]any{"date": "$" + b.Field, "unit": b.Unit, "timezone": b.Timezone, "startOfWeek": b.weekStart.String()}}
+				spec.hours[field] = b.Unit == "hour"
+			} else {
+				id[alias] = "$" + field
+			}
 		}
 		spec.group["_id"] = id
 	}
-	for _, m := range r.Metrics {
-		if m.Op == "count" {
-			if m.Field == "" {
-				spec.group[m.Name] = map[string]any{"$count": map[string]any{}}
-			} else {
-				spec.group[m.Name] = map[string]any{"$countNonNull": "$" + m.Field}
-			}
-		} else {
-			spec.group[m.Name] = map[string]any{"$" + m.Op: "$" + m.Field}
+	accumulator := func(op, field string, where *Filter) map[string]any {
+		var acc map[string]any
+		switch {
+		case op == "count" && field == "":
+			acc = map[string]any{"$count": map[string]any{}}
+		case op == "count":
+			acc = map[string]any{"$countNonNull": "$" + field}
+		case op == "count_distinct":
+			acc = map[string]any{"$countDistinct": "$" + field}
+		default:
+			acc = map[string]any{"$" + op: "$" + field}
 		}
+		if where != nil {
+			acc["where"] = nativeFilter(spec.view, where)
+		}
+		return acc
 	}
-	ensure := func(op, field, name string) string {
-		f, _ := c.field(field)
+	for _, m := range r.Metrics {
+		spec.group[m.Name] = accumulator(m.Op, m.Field, m.Where)
+	}
+	// Guards for a filtered sum must see the same rows as the sum.
+	ensure := func(op, field, name string, where *Filter) string {
+		f, _ := spec.view.field(field)
 		for _, m := range r.Metrics {
-			if m.Op == op && (m.Field == field || op == "count" && m.Field == "" && !f.Nullable) {
+			if m.Op == op && (m.Field == field || op == "count" && m.Field == "" && !f.Nullable) && equalJSON(m.Where, where) {
 				return m.Name
 			}
 		}
-		if op == "count" {
-			spec.group[name] = map[string]any{"$countNonNull": "$" + field}
-		} else {
-			spec.group[name] = map[string]any{"$" + op: "$" + field}
-		}
+		spec.group[name] = accumulator(op, field, where)
 		spec.hidden = append(spec.hidden, name)
 		return name
 	}
@@ -60,14 +109,33 @@ func nativeAggregatePlan(c Collection, r Request) nativeAggregationPlan {
 		if m.Op != "sum" {
 			continue
 		}
-		count := ensure("count", m.Field, "_apteva_count_"+m.Name)
+		count := ensure("count", m.Field, "_apteva_count_"+m.Name, m.Where)
 		spec.sumCounts[m.Name] = count
-		f, _ := c.field(m.Field)
+		f, _ := spec.view.field(m.Field)
 		if f.Type == "integer" {
-			spec.guards = append(spec.guards, nativeSumGuard{m.Name, count, ensure("min", m.Field, "_apteva_min_"+m.Name), ensure("max", m.Field, "_apteva_max_"+m.Name)})
+			spec.guards = append(spec.guards, nativeSumGuard{m.Name, count, ensure("min", m.Field, "_apteva_min_"+m.Name, m.Where), ensure("max", m.Field, "_apteva_max_"+m.Name, m.Where)})
 		}
 	}
 	return spec
+}
+
+// nativeAnalyticsSupported reports whether the native pipeline can evaluate
+// the extensions. Buckets are native only as group keys.
+func nativeAnalyticsSupported(r Request) bool {
+	a := r.analytics
+	if a == nil || len(a.buckets) == 0 {
+		return true
+	}
+	derived := map[string]bool{}
+	for _, b := range a.buckets {
+		derived[b.Name] = true
+	}
+	stored := func(n string) bool { return !derived[n] }
+	ok := onlyFields(a.residual, stored)
+	for _, m := range r.Metrics {
+		ok = ok && !derived[m.Field] && onlyFields(m.Where, stored)
+	}
+	return ok
 }
 
 func nativeSumBoundSafe(count, low, high int64) bool {
@@ -86,25 +154,20 @@ func nativeSumBoundSafe(count, low, high int64) bool {
 
 func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	spec := nativeAggregatePlan(c, r)
-
+	// A leading $match lets the native planner pick an index range and shard
+	// it, or shard the full scan, instead of one serial Query source.
 	pipeline := nativeAggregatePipeline(r, spec)
-	if r.Where != nil {
-		// A leading $match lets the native planner pick an index range and
-		// shard it, or shard the full scan, instead of one serial Query source.
-		match := `[{"$match":` + string(marshal(nativeFilter(c, r.Where))) + `},`
-		pipeline = append([]byte(match), pipeline[1:]...)
-	}
 	p, e := native.ParsePipeline(pipeline)
 	if e != nil {
 		return nil, nativeError(e)
 	}
 	workLimit := t.backend.options.QueryWorkBytes
-	p.SetLimits(native.Limits{MaxBytes: int64(workLimit), MaxGroups: t.backend.options.AggregateMaxGroups})
+	p.SetLimits(nativeLimits(r, workLimit, t.backend.options.AggregateMaxGroups))
 	h, e := t.readCollection(c)
 	if e != nil {
 		return nil, e
 	}
-	if r.RequireIndex && !plan(c, r.Query).IndexedLookup {
+	if r.RequireIndex && !plan(c, Query{Where: nativeScanFilter(r)}).IndexedLookup {
 		return nil, fail("query_too_expensive", "query requires a selective index")
 	}
 	values, e := h.RunParallel(t.ctx, p, t.backend.options.AggregateWorkers)
@@ -117,7 +180,7 @@ func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection
 	if len(values) == 0 && len(r.GroupBy) == 0 {
 		values = []map[string]any{{}}
 		for _, m := range r.Metrics {
-			if m.Op == "count" {
+			if m.Op == "count" || m.Op == "count_distinct" {
 				values[0][m.Name] = int64(0)
 			} else {
 				values[0][m.Name] = nil
@@ -171,11 +234,18 @@ func normalizeNativeAggregateRow(c Collection, r Request, outSchema Collection, 
 	}
 	id, _ := row["_id"].(map[string]any)
 	delete(row, "_id")
-	for _, name := range r.GroupBy {
-		v := id[name]
-		f, _ := c.field(name)
+	for i, name := range r.GroupBy {
+		v := id[spec.ids[i]]
+		f, _ := spec.view.field(name)
 		if v != nil && f.Type == "integer" {
 			v = strconv.FormatInt(v.(int64), 10)
+		}
+		if s, ok := v.(string); ok && spec.hours[name] {
+			t, e := time.Parse(time.RFC3339Nano, s)
+			if e != nil {
+				return nil, fail("storage_error", "invalid native hour bucket %q", s)
+			}
+			v = t.UTC().Format("2006-01-02T15:04:05.000000Z")
 		}
 		row[name] = v
 	}
@@ -188,7 +258,7 @@ func normalizeNativeAggregateRow(c Collection, r Request, outSchema Collection, 
 	}
 	for _, m := range r.Metrics {
 		v := row[m.Name]
-		if m.Op == "count" {
+		if m.Op == "count" || m.Op == "count_distinct" {
 			v = strconv.FormatInt(v.(int64), 10)
 		} else if v != nil {
 			f, _ := outSchema.field(m.Name)
@@ -210,4 +280,24 @@ func normalizeNativeAggregateRow(c Collection, r Request, outSchema Collection, 
 		delete(row, name)
 	}
 	return Record(row), nil
+}
+
+// nativeScanFilter is the part of the filter on stored fields.
+func nativeScanFilter(r Request) *Filter {
+	if r.analytics != nil {
+		return r.analytics.pushed
+	}
+	return r.Where
+}
+
+// nativeLimits bounds one pipeline. Alpha.11 caps a lookup's hash table by
+// rows, not bytes, so a join's row cap scales with the work budget (16 MiB
+// allows 32,768 target rows). Larger targets exceed it and are joined by
+// primary-key reads in the portable accumulator.
+func nativeLimits(r Request, workBytes, groups int) native.Limits {
+	l := native.Limits{MaxBytes: int64(workBytes), MaxGroups: groups}
+	if r.analytics != nil && len(r.analytics.lookups) > 0 {
+		l.MaxRows = max(256, workBytes/512)
+	}
+	return l
 }

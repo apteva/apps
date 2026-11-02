@@ -15,11 +15,7 @@ func (t *aptevaTx) aggregateStream(c Collection, r Request, out Collection, spec
 	if err != nil {
 		return nil, err
 	}
-	stages := []any{}
-	if r.Where != nil {
-		stages = append(stages, map[string]any{"$match": nativeFilter(c, r.Where)})
-	}
-	stages = append(stages, map[string]any{"$group": spec.group})
+	stages := append(append([]any{}, spec.prefix...), map[string]any{"$group": spec.group})
 	p, err := native.ParsePipeline(marshal(stages))
 	if err != nil {
 		return nil, nativeError(err)
@@ -28,7 +24,7 @@ func (t *aptevaTx) aggregateStream(c Collection, r Request, out Collection, spec
 	// fixed reservations together stay within the configured query work budget.
 	work := t.backend.options.QueryWorkBytes
 	resultBudget := work / 4
-	p.SetLimits(native.Limits{MaxBytes: int64(work - resultBudget), MaxGroups: t.backend.options.AggregateMaxGroups})
+	p.SetLimits(nativeLimits(r, work-resultBudget, t.backend.options.AggregateMaxGroups))
 	top := &topRecords{collection: out, query: r.Query, limit: r.Limit + 1, workLimit: resultBudget}
 	var rowErr error
 	err = h.RunEach(t.ctx, p, native.AggregateOptions{
@@ -46,6 +42,11 @@ func (t *aptevaTx) aggregateStream(c Collection, r Request, out Collection, spec
 		}
 		return rowErr == nil
 	})
+	// A lookup target too large for a native hash table is joined by
+	// primary-key reads in the portable accumulator instead.
+	if errors.Is(err, native.ErrLimit) && r.analytics != nil && len(r.analytics.lookups) > 0 {
+		return t.aggregatePortable(c, r, out)
+	}
 	// Cleanup errors and native failures must not be hidden by a callback stop.
 	if err != nil {
 		return nil, nativeError(err)

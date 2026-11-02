@@ -424,11 +424,22 @@ func validateAggregate(c Collection, r *Request) (Collection, error) {
 		}
 		seen[m.Name] = true
 		f := Field{Name: m.Name, Type: "integer"}
+		if e := validateFilter(c, m.Where, 0, &n); e != nil {
+			return c, e
+		}
 		if m.Op == "count" {
 			if m.Field != "" {
 				if _, e := c.field(m.Field); e != nil {
 					return c, e
 				}
+			}
+		} else if m.Op == "count_distinct" {
+			src, e := c.field(m.Field)
+			if e != nil {
+				return c, e
+			}
+			if src.Type == "json" {
+				return c, Invalid("count_distinct requires a scalar field")
 			}
 		} else {
 			src, e := c.field(m.Field)
