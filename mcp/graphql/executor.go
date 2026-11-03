@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -889,6 +890,28 @@ func databaseTool(operation string) (string, error) {
 	return tool, nil
 }
 
+// databaseErrorCodes are Database's structured failure classes. Clients act on
+// them (a stale or out-of-scope edit is version_conflict), so they surface as
+// errors[].extensions.code instead of a generic execution_error.
+var databaseErrorCodes = map[string]bool{
+	"invalid_argument": true, "not_found": true, "permission_denied": true,
+	"unique_conflict": true, "version_conflict": true, "schema_conflict": true,
+	"resource_limit": true, "query_too_expensive": true, "unsupported": true,
+	"realtime_disabled": true, "history_expired": true, "resume_invalid": true,
+}
+
+// App-to-app calls report Database's engine error as text:
+// "database.db_update: version_conflict: record version changed (code=-32000)".
+var databaseErrorPattern = regexp.MustCompile(`(?s)^database\.[a-z_]+: ([a-z_]+): (.*?)(?: \(code=-?\d+\))?$`)
+
+func databaseCallError(err error) error {
+	match := databaseErrorPattern.FindStringSubmatch(err.Error())
+	if match == nil || !databaseErrorCodes[match[1]] {
+		return err
+	}
+	return &graphqlError{Code: match[1], Message: match[2]}
+}
+
 // boundedArg lets a client lower a server-configured numeric bound such as
 // limit or maxAffected, never raise it.
 func boundedArg(server, client any) any {
@@ -924,7 +947,13 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 		input["where"] = client
 	}
 	for _, name := range []string{"limit", "maxAffected"} {
-		if value := boundedArg(config[name], args[name]); value != nil {
+		server := config[name]
+		// Database's own default is 1; without a resolver bound a client must
+		// not be able to raise it.
+		if name == "maxAffected" && server == nil && (tool == "db_update" || tool == "db_delete") {
+			server = 1
+		}
+		if value := boundedArg(server, args[name]); value != nil {
 			input[name] = value
 		}
 	}
@@ -961,7 +990,7 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 	input["_project_id"] = config["_project_id"]
 	var out any
 	if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "database", tool, input, &out); err != nil {
-		return nil, err
+		return nil, databaseCallError(err)
 	}
 	// search keeps the cursor, in the same page shape as Tables search.
 	if page, ok := out.(map[string]any); ok && strings.EqualFold(strings.TrimSpace(operation), "search") {

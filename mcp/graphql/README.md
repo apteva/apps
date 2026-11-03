@@ -476,6 +476,32 @@ against direct native results; Database adapter forwarding/result mapping;
 mixed Tables/Database/HTTP/Function queries; pagination; API/project/environment
 isolation; realtime hub scoping; Auth and trusted Function invocation.
 
+### Database writes and access guards
+
+`update` and `delete` resolvers on a Database source forward the client's
+`key`, `set`/`increment` and `ifVersion`. A `where` in the resolver config is
+the access guard: it is always sent, and a client `where` is combined with it
+(`and`), so a client can only narrow it. `maxAffected` can be lowered but not
+raised; without a resolver value it is 1. `all`, `conflictIndex` and
+`requireIndex` come only from resolver config.
+
+With Database 0.6.5 or later, a key plus a guard edits the record only if it
+also matches the guard. A miss reads like an absent record: `affected: 0`, or
+`version_conflict` with `ifVersion`. Earlier Database versions refuse a key
+combined with a guard with `invalid_argument`.
+
+Database's failure classes reach clients as `errors[].extensions.code`, with
+Database's message: `version_conflict` (stale revision, or a record outside
+the guard), `unique_conflict`, `not_found`, `invalid_argument`,
+`permission_denied`, `resource_limit`, `query_too_expensive`, `schema_conflict`,
+`unsupported`, and the realtime codes. Other failures stay `execution_error`.
+
+`TestRealDatabaseGuardedEdits` checks all of this against a real Database: a
+client filter with `or`, `all: true` or a raised bound cannot reach another
+centre's record; stale, cross-centre and missing keys give `version_conflict`
+and change nothing; of two concurrent edits with the same revision exactly
+one wins.
+
 ### Database pipelines (`database_pipeline`)
 
 `database_pipeline` answers a whole report from Database without SQL. It is a

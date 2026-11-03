@@ -892,6 +892,13 @@ func (run *databasePipelineRun) batch(ctx context.Context, operations []any) ([]
 // timeout or budget overrun from a bad request. Nothing partial is returned.
 func databasePipelineError(ctx context.Context, err error) error {
 	message := err.Error()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return runtimeError("timeout", "database pipeline timed out: "+message)
+	}
+	var coded *graphqlError
+	if errors.As(databaseCallError(err), &coded) {
+		return coded
+	}
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded), strings.Contains(message, "deadline"), strings.Contains(message, "timeout"):
 		return runtimeError("timeout", "database pipeline timed out: "+message)
