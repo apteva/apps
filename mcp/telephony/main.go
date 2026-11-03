@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.16.2
+version: 0.16.3
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -409,7 +409,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.16.2
+    ref: telephony/v0.16.3
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -628,6 +628,11 @@ func (a *App) initializeActiveRuntime(ctx *sdk.AppCtx) error {
         last_error = 'recording import interrupted by app restart', import_started_at = '',
         next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
 	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET provider_status='failed',storage_status='failed',last_error='local recording interrupted by app restart' WHERE provider='telephony' AND provider_status='in-progress'`)
+	if n, err := a.reconcileAbandonedDirectSIPCalls(ctx); err != nil {
+		return fmt.Errorf("reconcile direct SIP calls abandoned by restart: %w", err)
+	} else if n > 0 {
+		ctx.Logger().Info("ended direct SIP calls abandoned by restart", "calls", n)
+	}
 	if err := a.restoreAIPolicyRuntimes(); err != nil {
 		return fmt.Errorf("restore AI call policies: %w", err)
 	}

@@ -944,6 +944,14 @@ func (g *sipGateway) sessionByCall(id string) *sipSession {
 	return g.byCall[id]
 }
 
+// hasCall reports whether the gateway holds a live inbound or outbound dialog
+// for the call.
+func (g *sipGateway) hasCall(id string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.byCall[id] != nil || g.outboundByCall[id] != nil
+}
+
 func (g *sipGateway) sessionCount() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
