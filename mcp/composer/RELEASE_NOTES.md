@@ -1,3 +1,23 @@
+# Composer v0.11.1
+
+Fixes found by deploying the 0.11.0 renderer on a real server:
+
+- The renderer worker (`composer-renderer` 0.11.1) reports lifecycle `load`
+  as a number. 0.11.0 sent an object, so Server never confirmed admission and
+  every renderer deployment rolled back after its startup timeout.
+- `/renderer-io/` is declared `no_auth` in the manifest. Server only lets
+  anonymous requests reach routes the manifest marks that way, so 0.11.0
+  workers got `401` on every upload. The relay still verifies the job grant.
+- `composition_render(executor)` and output render plans now steer browser V2
+  renders and `web-canvas-1` procedures too, not only V1 FFmpeg renders:
+  `local` keeps them in the sidecar even when `execution_mode=component`.
+
+Validation: full Composer Go suite and `go vet`, renderer worker tests, and a
+local deployment of the renderer component rendering V1, browser V2 (output
+identical to the local render) and a web-canvas procedure end to end.
+
+---
+
 # Composer v0.11.0
 
 Remote rendering moves from the Instances SSH path to Composer's private

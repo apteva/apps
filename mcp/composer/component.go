@@ -42,6 +42,29 @@ func withComponentOwner(ctx context.Context, owner string) context.Context {
 	return context.WithValue(ctx, componentOwnerKey{}, owner)
 }
 
+type renderPlacementKey struct{}
+
+// withRenderPlacement records a render's executor override so browser and
+// procedure captures follow the same choice as FFmpeg renders. "auto" and ""
+// leave the decision to the install's execution mode.
+func withRenderPlacement(ctx context.Context, executor string) context.Context {
+	switch executor {
+	case "local":
+		return context.WithValue(ctx, renderPlacementKey{}, false)
+	case "component", "remote":
+		return context.WithValue(ctx, renderPlacementKey{}, true)
+	}
+	return ctx
+}
+
+// useRenderer reports whether work under ctx runs on the renderer component.
+func useRenderer(ctx context.Context, app *sdk.AppCtx) bool {
+	if component, ok := ctx.Value(renderPlacementKey{}).(bool); ok {
+		return component
+	}
+	return componentRenderingEnabled(app)
+}
+
 func componentOwner(ctx context.Context, stage string) string {
 	owner, _ := ctx.Value(componentOwnerKey{}).(string)
 	if owner == "" {

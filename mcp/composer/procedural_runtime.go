@@ -175,7 +175,7 @@ func (a *App) materializeProceduralAssets(ctx context.Context, appCtx *sdk.AppCt
 			runner := a.procedureRunner
 			if runner == nil {
 				runner = runProcedureLocal
-				if revision.Runtime == webCanvasRuntime && componentRenderingEnabled(appCtx) {
+				if revision.Runtime == webCanvasRuntime && useRenderer(ctx, appCtx) {
 					runner = runProcedureComponent
 				}
 			}
