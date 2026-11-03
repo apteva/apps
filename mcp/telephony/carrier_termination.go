@@ -15,29 +15,30 @@ func carrierAnswerObserved(row *callRow) bool {
 // Ending an unanswered inbound attempt is a rejection; an established call
 // needs hangup. This policy applies before the burst threshold as well as after
 // it, and leaves any preceding announcement to the routing executor.
+//
+// terminateCarrierCall is the single decision point: it selects the operation
+// directly and only calls leaf operations, never rejectInboundCarrierCall. In
+// 0.12.28 the two called each other when they disagreed about "answered" (a
+// direct SIP call answered by Telephony itself but by no adviser) until the
+// stack overflowed and the app died.
 func (a *App) terminateCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row == nil {
 		return errors.New("call unavailable")
 	}
-	if row.CarrierSID == "" && !a.callUsesDirectSIP(row) {
-		return a.terminateUnidentifiedCarrierCall(ctx, row)
-	}
-	answered := carrierAnswerObserved(row)
 	if a.callUsesDirectSIP(row) {
-		answered = row.AnsweredAt != "" || row.MediaConnectedAt != "" || row.Status == "answered" || row.Status == "in-progress"
-	}
-	if row.Direction == "inbound" && !answered {
-		return a.rejectInboundCarrierCall(ctx, row)
-	}
-	if a.callUsesDirectSIP(row) {
+		// The live dialog, not a stored timestamp, says whether SIP needs a
+		// decline or a BYE.
 		gateway := a.directSIPGateway()
 		if gateway == nil {
 			return errors.New("direct SIP gateway is not running")
 		}
-		return gateway.Hangup(row)
+		return gateway.End(row)
 	}
 	if row.CarrierSID == "" {
-		return nil
+		return a.terminateUnidentifiedCarrierCall(ctx, row)
+	}
+	if row.Direction == "inbound" && !carrierAnswerObserved(row) {
+		return a.rejectUnansweredCarrierCall(ctx, row)
 	}
 	carrier, err := a.carrierForRow(ctx, nil, row)
 	if err != nil {

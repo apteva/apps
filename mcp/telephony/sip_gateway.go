@@ -676,6 +676,32 @@ func (g *sipGateway) StartMedia(row *callRow) error {
 	return session.startMedia()
 }
 
+// Distinguish a dialog that is already gone, or already answered, from a
+// failed command so termination can choose its operation without guessing.
+var (
+	errSIPDialogGone      = errors.New("direct SIP dialog is no longer active")
+	errSIPAlreadyAnswered = errors.New("direct SIP call has already been answered")
+)
+
+// End ends a direct SIP call by its live dialog state: an inbound INVITE we
+// have not answered is declined, an answered dialog (ours or an adviser's) is
+// hung up. A dialog that has already ended needs nothing, so ending twice is
+// safe. Persisted answer timestamps are not consulted: the gateway's own 200 OK
+// sets carrier_answered_at before any adviser answers.
+func (g *sipGateway) End(row *callRow) error {
+	if rowUsesOutboundSIP(row) {
+		return g.Hangup(row)
+	}
+	err := g.Reject(row)
+	if errors.Is(err, errSIPAlreadyAnswered) {
+		err = g.Hangup(row)
+	}
+	if errors.Is(err, errSIPDialogGone) {
+		return nil
+	}
+	return err
+}
+
 func (g *sipGateway) Reject(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
@@ -683,13 +709,13 @@ func (g *sipGateway) Reject(row *callRow) error {
 	defer g.finishWork()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
-		return errors.New("direct SIP dialog is no longer active")
+		return errSIPDialogGone
 	}
 	session.answerMu.Lock()
 	answered := session.media != nil
 	session.answerMu.Unlock()
 	if answered {
-		return errors.New("direct SIP call has already been answered")
+		return errSIPAlreadyAnswered
 	}
 	session.finalSent.Store(true)
 	if err := session.dialog.Respond(sipStatusDecline, "Decline", nil); err != nil {
@@ -712,7 +738,7 @@ func (g *sipGateway) Hangup(row *callRow) error {
 	}
 	session := g.sessionByCall(row.ID)
 	if session == nil {
-		return errors.New("direct SIP dialog is no longer active")
+		return errSIPDialogGone
 	}
 	return session.hangup()
 }

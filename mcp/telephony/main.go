@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.16.1
+version: 0.16.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -409,7 +409,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.16.1
+    ref: telephony/v0.16.2
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -2675,20 +2675,22 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow, requests .
 	}
 }
 
+// rejectInboundCarrierCall ends an inbound call that should not proceed. Once
+// it has been answered a rejection is no longer possible, so the decision is
+// delegated to terminateCarrierCall, which never calls back here.
 func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row == nil {
 		return errors.New("call unavailable")
 	}
-	if carrierAnswerObserved(row) {
+	if a.callUsesDirectSIP(row) || carrierAnswerObserved(row) {
 		return a.terminateCarrierCall(ctx, row)
 	}
-	if a.callUsesDirectSIP(row) {
-		gateway := a.directSIPGateway()
-		if gateway == nil {
-			return errors.New("direct SIP gateway is not running")
-		}
-		return gateway.Reject(row)
-	}
+	return a.rejectUnansweredCarrierCall(ctx, row)
+}
+
+// rejectUnansweredCarrierCall is the provider's reject operation for a ringing
+// inbound carrier call. It is a leaf: it never re-dispatches.
+func (a *App) rejectUnansweredCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	switch row.CarrierSlug {
 	case "twilio":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{

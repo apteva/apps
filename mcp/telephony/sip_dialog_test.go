@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	"github.com/emiago/sipgo/sip"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/rtp"
@@ -27,6 +28,7 @@ import (
 
 type sipDialogFixture struct {
 	app              *App
+	ctx              *sdk.AppCtx
 	gateway          *sipGateway
 	signaling, media *net.UDPConn
 	call             *callRow
@@ -83,7 +85,7 @@ func newSIPDialogFixtureWithRoute(t *testing.T, secure bool, ackTimeout time.Dur
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	f := &sipDialogFixture{app: app, gateway: gateway, signaling: conn, media: media, to: "<sip:+12025550100@127.0.0.1>", localPort: conn.LocalAddr().(*net.UDPAddr).Port}
+	f := &sipDialogFixture{app: app, ctx: ctx, gateway: gateway, signaling: conn, media: media, to: "<sip:+12025550100@127.0.0.1>", localPort: conn.LocalAddr().(*net.UDPAddr).Port}
 	protocol := "RTP/AVP"
 	crypto := ""
 	if secure {
