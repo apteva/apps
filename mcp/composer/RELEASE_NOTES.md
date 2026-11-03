@@ -1,3 +1,20 @@
+# Composer v0.11.2
+
+- The renderer worker (`composer-renderer` 0.11.2) no longer provisions
+  FFmpeg inside its startup budget. Unpacking the pinned release takes about
+  100 s on a one-vCPU host, so 0.11.1 workers on small Instances hosts failed
+  to mount and Server rolled the deployment back ("runtime readiness deadline
+  exceeded"). Mount now starts provisioning in the background. Jobs wait for
+  it, bounded by their own deadline, and a failed attempt is retried by the
+  next job. `capabilities` reports `ffmpeg_status`.
+
+Validation: renderer worker tests (including under `-race`) and the full Composer Go
+suite. The renderer component was deployed to a one-vCPU DigitalOcean host
+through the Instances native backend, where it activated in 18 s and rendered a
+V1 composition end to end once FFmpeg was ready.
+
+---
+
 # Composer v0.11.1
 
 Fixes found by deploying the 0.11.0 renderer on a real server:
