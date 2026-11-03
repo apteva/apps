@@ -616,6 +616,20 @@ Rules:
                   "then": "$scope.catalogue", "else": "$scope.grantOffers"}}
   ```
 
+- `"distinct": true` on an access read fetches the field's distinct values as
+  a Database aggregate (`groupBy` on the field, null values excluded), so
+  `max` bounds the distinct values instead of the matching records: 5,000
+  sales in one centre are one centre. More than `max` distinct values fail
+  with `source_result_truncated`; nothing is silently dropped. It cannot be
+  combined with `orderBy`/`limit` or `single_record` (which counts records),
+  and the field must be a scalar (Database rejects grouping on JSON fields).
+
+  ```json
+  "saleCentres": {"optional": true, "otherwise": {"collection": "sales",
+                  "field": "centre_id", "distinct": true, "max": 999,
+                  "where": {"field": "offer_id", "op": "in", "value": "$scope.grantOffers"}}}
+  ```
+
 - `in` filters with more than 100 values are split into `or` chunks of 100
   (Database's limit per `in`); a find or count whose filter matches nothing
   is answered locally without a Database call.

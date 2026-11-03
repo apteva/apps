@@ -44,6 +44,9 @@ type databasePipelineRead struct {
 	Max        int
 	OrderBy    any
 	Limit      int
+	// Distinct reads the field's distinct values as a Database aggregate, so
+	// max bounds the values rather than the matching records.
+	Distinct bool
 }
 
 type databasePipelineAccessValue struct {
@@ -232,7 +235,7 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 	if !ok {
 		return nil, invalid("database_pipeline access %s must be an object", label)
 	}
-	if err := onlyKeys(spec, "database_pipeline access "+label, "collection", "field", "max", "where", "orderBy", "limit"); err != nil {
+	if err := onlyKeys(spec, "database_pipeline access "+label, "collection", "field", "max", "where", "orderBy", "limit", "distinct"); err != nil {
 		return nil, err
 	}
 	// One extra record detects overflow, within Database's 1000-record page.
@@ -267,6 +270,14 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 			return nil, err
 		}
 		read.OrderBy = raw
+	}
+	if raw, ok := spec["distinct"]; ok {
+		if read.Distinct, ok = raw.(bool); !ok {
+			return nil, invalid("database_pipeline access %s distinct must be a boolean", label)
+		}
+		if read.Distinct && (spec["orderBy"] != nil || spec["limit"] != nil) {
+			return nil, invalid("database_pipeline access %s distinct does not take orderBy or limit", label)
+		}
 	}
 	if where, ok := spec["where"]; ok {
 		if err := plan.validateFilter(where, true, "access "+label+".where"); err != nil {
@@ -499,6 +510,9 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 			}
 			if value.SingleRecord && (value.Otherwise == nil || value.Otherwise.Limit > 0) {
 				return invalid("database_pipeline access value %s single_record needs an otherwise read without limit", name)
+			}
+			if value.SingleRecord && value.Otherwise.Distinct {
+				return invalid("database_pipeline access value %s single_record counts records, so its otherwise read cannot be distinct", name)
 			}
 		}
 		if deps[name] {
@@ -1642,6 +1656,19 @@ func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []
 		default:
 			read = value.Otherwise
 		}
+		if read.Distinct {
+			// Null groups carry no value, so they are excluded rather than
+			// counted against max; the filter only narrows.
+			where := any(map[string]any{"field": read.Field, "op": "is_not_null"})
+			if read.Where != nil {
+				where = map[string]any{"and": []any{run.filter(read.Where), where}}
+			}
+			args := map[string]any{"collection": read.Collection, "where": where, "groupBy": []any{read.Field},
+				"metrics": []any{map[string]any{"name": distinctAccessMetric(read.Field), "op": "count"}}, "limit": read.Max + 1}
+			reads = append(reads, databasePipelinePendingRead{value: value, read: read, index: len(operations)})
+			operations = append(operations, map[string]any{"op": "aggregate", "args": args})
+			continue
+		}
 		args := map[string]any{"collection": read.Collection, "select": []any{read.Field}, "limit": read.Max + 1}
 		if read.Limit > 0 {
 			args["limit"] = read.Limit
@@ -1678,7 +1705,15 @@ func (run *databasePipelineRun) applyAccessReads(reads []databasePipelinePending
 	for _, p := range reads {
 		page, _ := results[p.index].(map[string]any)
 		records, _ := page["records"].([]any)
-		if p.read.Limit == 0 && (page["hasMore"] == true || len(records) > p.read.Max) {
+		if p.read.Distinct {
+			var ok bool
+			if records, ok = page["rows"].([]any); !ok {
+				return runtimeError("source_error", "access read for "+p.value.Name+" returned an invalid result")
+			}
+			if page["truncated"] == true || len(records) > p.read.Max {
+				return runtimeError("source_result_truncated", "distinct access values for "+p.value.Name+" exceed their max")
+			}
+		} else if p.read.Limit == 0 && (page["hasMore"] == true || len(records) > p.read.Max) {
 			return runtimeError("source_result_truncated", "access values for "+p.value.Name+" exceed their max")
 		}
 		restricted := p.read == p.value.Otherwise
@@ -1722,6 +1757,15 @@ func (run *databasePipelineRun) applyAccessReads(reads []databasePipelinePending
 		run.scope[p.value.Name] = values
 	}
 	return nil
+}
+
+// distinctAccessMetric names the count a distinct access read needs (Database
+// aggregates require a metric) without colliding with the grouped field.
+func distinctAccessMetric(field string) string {
+	if field == "access_count" {
+		return "access_count_n"
+	}
+	return "access_count"
 }
 
 func asAnyList(value any) []any {
