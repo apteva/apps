@@ -2,8 +2,16 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.11.2
+version: 0.11.3
 description: |
+  v0.11.3 makes browser captures independent of host fonts and reports
+  renderer readiness at deploy. The renderer bundles Inter and Go Mono with its
+  own fontconfig, so a minimal Linux host no longer renders blank text, and a
+  browser job fails explicitly if those fonts cannot be installed. Mount starts
+  provisioning Chrome headless shell and Node.js in the background;
+  capabilities report browser_status (ready, missing system libraries, fonts)
+  before the first render.
+
   v0.11.0 replaces the Instances SSH render path with Composer's private
   renderer component (apteva.composer-renderer/v1), deployed and placed by
   Server: on the Composer host or on any execution backend, such as an
@@ -505,7 +513,7 @@ components:
       schema: apteva-app/v1
       name: composer-renderer
       display_name: Composer Renderer
-      version: 0.11.2
+      version: 0.11.3
       description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
       scopes: [project, global]
       requires:
@@ -528,7 +536,7 @@ components:
         kind: source
         source:
           repo: github.com/apteva/apps
-          ref: 488639f22b84326b289000ce5deda7a6ce0bf766
+          ref: 566b3d8baf2574d42676de6e17cb57c12a202caf
           entry: mcp/composer/renderer
         port: 8080
         health_check: /health
