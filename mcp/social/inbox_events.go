@@ -90,47 +90,77 @@ func inboxEventsSince(db *sql.DB, accountID int64) time.Time {
 	return since
 }
 
-// recordInboxItem saves an item seen by a poller and emits the matching
-// bus event the first time it is seen. Re-polls update the row and emit
+// recordInboxItem saves an item seen by a poller and queues the matching
+// durable bus event the first time it is seen. Re-polls update the row and emit
 // nothing. Reply handlers record their own sends with upsertInboxItem:
 // those are announced as inbox.reply_sent by inbox_reply.
 func recordInboxItem(ctx *sdk.AppCtx, in inboxUpsertInput) (int64, bool, error) {
-	id, inserted, err := upsertInboxItem(ctx.AppDB(), in)
-	if err != nil || !inserted {
-		return id, inserted, err
-	}
 	db := ctx.AppDB()
 	occurred := in.OccurredAt
 	if occurred.IsZero() {
 		occurred = time.Now().UTC()
 	}
 	backfill := occurred.Before(inboxEventsSince(db, in.SocialAccountID).Add(-inboxBackfillGrace))
-	if in.Outbound {
-		if intent := reconcileInboxSend(ctx, in, id); intent != nil {
-			countInbox(db, in.SocialAccountID, func(c *inboxSyncCounts) { c.Reconciled++ })
-			return id, inserted, nil
+	// The row, the decision about it and its pending event commit
+	// together, so a crash cannot keep the item and lose the event.
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	id, inserted, err := upsertInboxItemIn(tx, in)
+	if err != nil || !inserted {
+		if err != nil {
+			_ = tx.Rollback()
+			recordInboxWriteError(db, in.SocialAccountID, err)
+			return id, inserted, err
 		}
-		if backfill {
-			countInbox(db, in.SocialAccountID, func(c *inboxSyncCounts) { c.Backfilled++ })
-			return id, inserted, nil
+		return id, inserted, tx.Commit()
+	}
+	topic, count, intent := "", func(*inboxSyncCounts) {}, (*inboxSendIntent)(nil)
+	switch {
+	case in.Outbound:
+		if intent, err = reconcileInboxSend(tx, in, id); err != nil {
+			_ = tx.Rollback()
+			return 0, false, err
 		}
-		if in.ParentExternalID == "" && in.Kind != inboxKindDM {
+		switch {
+		case intent != nil:
+			count = func(c *inboxSyncCounts) { c.Reconciled++ }
+		case backfill:
+			count = func(c *inboxSyncCounts) { c.Backfilled++ }
+		case in.ParentExternalID == "" && in.Kind != inboxKindDM:
 			// The owner's own top-level comment, not an answer to anyone.
-			return id, inserted, nil
+		default:
+			// The account owner answered outside Social (YouTube Studio,
+			// the Facebook app...). The parent counts as handled.
+			if err := markInboxRepliedByExternalID(tx, in.SocialAccountID, in.Kind, in.ParentExternalID); err != nil {
+				_ = tx.Rollback()
+				return 0, false, err
+			}
+			topic, count = inboxEventHumanReply, func(c *inboxSyncCounts) { c.HumanReplies++ }
 		}
-		// The account owner answered outside Social (YouTube Studio, the
-		// Facebook app...). The parent counts as handled.
-		_ = markInboxRepliedByExternalID(db, in.SocialAccountID, in.Kind, in.ParentExternalID)
-		countInbox(db, in.SocialAccountID, func(c *inboxSyncCounts) { c.HumanReplies++ })
-		ctx.EmitWithProject(inboxEventHumanReply, in.ProjectID, inboxItemEventPayload(id, in, occurred))
-		return id, inserted, nil
+	case backfill:
+		count = func(c *inboxSyncCounts) { c.Backfilled++ }
+	default:
+		topic, count = inboxEventReceived, func(c *inboxSyncCounts) { c.Received++ }
 	}
-	if backfill {
-		countInbox(db, in.SocialAccountID, func(c *inboxSyncCounts) { c.Backfilled++ })
-		return id, inserted, nil
+	if topic != "" {
+		eventTopic, payload := queuedEvent(topic, inboxItemEventPayload(id, in, occurred))
+		if _, err := tx.Exec(`UPDATE inbox_items SET `+queueEventSQL+` WHERE id=?`, eventTopic, payload, id); err != nil {
+			_ = tx.Rollback()
+			return 0, false, err
+		}
 	}
-	countInbox(db, in.SocialAccountID, func(c *inboxSyncCounts) { c.Received++ })
-	ctx.EmitWithProject(inboxEventReceived, in.ProjectID, inboxItemEventPayload(id, in, occurred))
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	countInbox(db, in.SocialAccountID, count)
+	if intent != nil {
+		publishRowEvent(ctx, durableInboxSends, intent.ID)
+	}
+	if topic != "" {
+		publishRowEvent(ctx, durableInboxItems, id)
+	}
 	return id, inserted, nil
 }
 

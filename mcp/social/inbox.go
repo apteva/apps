@@ -159,12 +159,16 @@ type inboxUpsertInput struct {
 // notification. Dedup is via UNIQUE(social_account_id, kind,
 // external_id) — re-polls and (future) webhook replays are no-ops on
 // the body/permalink axis but DO refresh fetched_at.
-func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (resultID int64, wasInserted bool, resultErr error) {
-	defer func() {
-		if resultErr != nil {
-			recordInboxWriteError(db, in.SocialAccountID, resultErr)
-		}
-	}()
+func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
+	id, inserted, err := upsertInboxItemIn(db, in)
+	if err != nil {
+		recordInboxWriteError(db, in.SocialAccountID, err)
+	}
+	return id, inserted, err
+}
+
+// upsertInboxItemIn is upsertInboxItem inside a caller's transaction.
+func upsertInboxItemIn(db sqlRunner, in inboxUpsertInput) (int64, bool, error) {
 	if in.SocialAccountID == 0 {
 		return 0, false, errors.New("social_account_id required")
 	}
@@ -468,7 +472,7 @@ func setInboxStatus(db *sql.DB, projectID string, id int64, status string) error
 // markInboxRepliedByExternalID flips the parent row to status='replied'
 // once a reply has been posted upstream. No-op when the parent isn't
 // in our table yet (we replied to a thread we hadn't synced).
-func markInboxRepliedByExternalID(db *sql.DB, socialAccountID int64, kind, externalID string) error {
+func markInboxRepliedByExternalID(db sqlRunner, socialAccountID int64, kind, externalID string) error {
 	if externalID == "" {
 		return nil
 	}

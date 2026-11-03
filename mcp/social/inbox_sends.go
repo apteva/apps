@@ -172,13 +172,14 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	state := inboxSendStateFor(out)
 	out.SendID, out.SendState, out.IdempotencyKey = intentID, state, key
-	outcomeJSON, _ := json.Marshal(out)
-	_, _ = db.Exec(`UPDATE inbox_send_intents SET state=?, external_id=?, outcome_json=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		state, out.ExternalID, string(outcomeJSON), nullableStr(out.Error), intentID)
 	if state == inboxSendUncertain {
 		out.Reason = strings.TrimSpace(out.Reason + " The provider did not confirm the send; Social will match it on the next sync. Retry with the same idempotency_key to read the result without sending twice.")
 	}
-	emitInboxSend(ctx, pid, item, out)
+	outcomeJSON, _ := json.Marshal(out)
+	topic, event := inboxSendEvent(item, out)
+	_, _ = db.Exec(`UPDATE inbox_send_intents SET state=?, external_id=?, outcome_json=?, error=?, updated_at=CURRENT_TIMESTAMP, `+queueEventSQL+` WHERE id=?`,
+		state, out.ExternalID, string(outcomeJSON), nullableStr(out.Error), topic, event, intentID)
+	publishRowEvent(ctx, durableInboxSends, intentID)
 	return out, nil
 }
 
@@ -239,7 +240,9 @@ func replayInboxSend(base inboxOutcome, prior *inboxSendIntent) inboxOutcome {
 	return out
 }
 
-func emitInboxSend(ctx *sdk.AppCtx, pid string, item *inboxItem, out inboxOutcome) {
+// inboxSendEvent is the reply_sent / reply_failed / reply_uncertain event
+// queued with the send's final state.
+func inboxSendEvent(item *inboxItem, out inboxOutcome) (string, string) {
 	topic := inboxEventReplyFailed
 	switch out.SendState {
 	case inboxSendSent:
@@ -260,20 +263,19 @@ func emitInboxSend(ctx *sdk.AppCtx, pid string, item *inboxItem, out inboxOutcom
 			payload[key] = value
 		}
 	}
-	ctx.EmitWithProject(topic, pid, payload)
+	return queuedEvent(topic, payload)
 }
 
 // reconcileInboxSend settles an open intent when sync finds our own reply
 // upstream: same account and target, and the same text. Returns the
 // settled intent, or nil when the reply was not sent through Social.
-func reconcileInboxSend(ctx *sdk.AppCtx, in inboxUpsertInput, itemID int64) *inboxSendIntent {
-	db := ctx.AppDB()
+func reconcileInboxSend(db sqlRunner, in inboxUpsertInput, itemID int64) (*inboxSendIntent, error) {
 	rows, err := db.Query(`SELECT id, project_id, inbox_item_id, COALESCE(idempotency_key,''), body_text, target_external_id, target_root_id, target_thread_id, created_at
 		FROM inbox_send_intents
 		WHERE social_account_id=? AND kind=? AND state IN ('pending','uncertain') AND created_at >= ?
 		ORDER BY id`, in.SocialAccountID, in.Kind, time.Now().UTC().Add(-inboxReconcileWindow).Format("2006-01-02 15:04:05"))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	type candidate struct {
 		id, itemID                       int64
@@ -298,18 +300,10 @@ func reconcileInboxSend(ctx *sdk.AppCtx, in inboxUpsertInput, itemID int64) *inb
 	}
 	rows.Close()
 	if match == nil {
-		return nil
+		return nil, nil
 	}
 	out := inboxOutcome{InboxItemID: match.itemID, SocialAccountID: in.SocialAccountID, Platform: in.Platform, Status: "ok", ExternalID: in.ExternalID, Permalink: in.Permalink, SendID: match.id, SendState: inboxSendSent, IdempotencyKey: match.key, Reason: "confirmed by sync"}
 	outcomeJSON, _ := json.Marshal(out)
-	res, err := db.Exec(`UPDATE inbox_send_intents SET state='sent', external_id=?, outcome_json=?, error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state IN ('pending','uncertain')`, in.ExternalID, string(outcomeJSON), match.id)
-	if err != nil {
-		return nil
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil
-	}
-	_ = markInboxRepliedByExternalID(db, in.SocialAccountID, in.Kind, match.target)
 	payload := map[string]any{
 		"send_id":           match.id,
 		"inbox_item_id":     match.itemID,
@@ -324,6 +318,16 @@ func reconcileInboxSend(ctx *sdk.AppCtx, in inboxUpsertInput, itemID int64) *inb
 	if match.key != "" {
 		payload["idempotency_key"] = match.key
 	}
-	ctx.EmitWithProject(inboxEventReplySent, match.pid, payload)
-	return &inboxSendIntent{ID: match.id, InboxItemID: match.itemID, IdempotencyKey: match.key, State: inboxSendSent, ExternalID: in.ExternalID}
+	topic, event := queuedEvent(inboxEventReplySent, payload)
+	res, err := db.Exec(`UPDATE inbox_send_intents SET state='sent', external_id=?, outcome_json=?, error=NULL, updated_at=CURRENT_TIMESTAMP, `+queueEventSQL+` WHERE id=? AND state IN ('pending','uncertain')`, in.ExternalID, string(outcomeJSON), topic, event, match.id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, nil
+	}
+	if err := markInboxRepliedByExternalID(db, in.SocialAccountID, in.Kind, match.target); err != nil {
+		return nil, err
+	}
+	return &inboxSendIntent{ID: match.id, InboxItemID: match.itemID, IdempotencyKey: match.key, State: inboxSendSent, ExternalID: in.ExternalID}, nil
 }
