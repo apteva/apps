@@ -163,6 +163,30 @@ func (b *nativeBackend) record(id string) (nativeRecord, error) {
 	e = json.Unmarshal([]byte(raw), &d)
 	return d, e
 }
+
+// tombstone records a delete for an ID this backend never prepared, so the
+// caller can settle it even when a prepare response was lost, and a late or
+// retried prepare returns the deleted record instead of creating a service.
+// Nothing runs on the target, so only the addressing is checked, not whether
+// the instance is still reachable. The per-deployment lock serializes this
+// with prepare.
+func (b *nativeBackend) tombstone(r nativeRequest) (nativeRecord, error) {
+	if r.InstallID == b.installID || r.Target.InstallID != b.installID {
+		return nativeRecord{}, errors.New("target is not owned by this Instances installation")
+	}
+	instance, e := strconv.ParseInt(r.Target.ID, 10, 64)
+	if e != nil || instance <= 0 {
+		return nativeRecord{}, errors.New("native backend supports registered remote Linux hosts only")
+	}
+	var o nativeOptions
+	_ = json.Unmarshal([]byte(nativeJSON(r.Options)), &o)
+	if o.GatewayURL == "" {
+		o.GatewayURL = r.GatewayURL
+	}
+	d := nativeRecord{ID: r.DeploymentID, InstallID: r.InstallID, Generation: r.Generation, InstanceID: instance, Fingerprint: nativeFingerprint(r, o), Execution: nativeExecution{State: "deleted", StoppedConfirmed: true}}
+	_, e = b.db.Exec(`INSERT INTO native_deployments(id,install_id,instance_id,record) VALUES(?,?,?,?)`, d.ID, d.InstallID, d.InstanceID, nativeJSON(d))
+	return d, e
+}
 func (b *nativeBackend) saveCAS(before string, d nativeRecord) error {
 	result, e := b.db.Exec(`UPDATE native_deployments SET record=? WHERE id=? AND record=?`, nativeJSON(d), d.ID, before)
 	if e != nil {
@@ -855,6 +879,14 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, e = b.record(req.DeploymentID)
+	if errors.Is(e, sql.ErrNoRows) && tail == "delete" {
+		if d, e = b.tombstone(req); e != nil {
+			http.Error(w, e.Error(), 409)
+			return
+		}
+		writeNative(w, d.Execution)
+		return
+	}
 	if e != nil {
 		http.Error(w, "deployment not found; ownership cannot be established", 404)
 		return

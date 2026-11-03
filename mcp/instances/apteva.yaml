@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.16.0
+version: 0.16.1
 description: |
+  v0.16.1 records a delete for a deployment it never prepared as a deleted
+  tombstone, so Server can discard a candidate whose prepare failed or was
+  lost, and a late prepare for that ID cannot start a service.
   v0.16.0 reports a confirmed native process exit as state "exited" with the
   last PID, systemd result, exit code or signal and exit time, so Server can
   recover crashed deployments. Monitoring buffers history writes (WAL, 10s
@@ -271,7 +274,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.16.0
+    ref: instances/v0.16.1
     entry: mcp/instances
   port: 8080
   health_check: /health
