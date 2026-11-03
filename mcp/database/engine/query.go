@@ -30,8 +30,14 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 	if f.Field != "" {
 		branches++
 	}
+	if f.Fields != nil {
+		branches++
+	}
 	if branches != 1 {
-		return Invalid("filter requires exactly one of field, and, or")
+		return Invalid("filter requires exactly one of field, fields, and, or")
+	}
+	if f.Fields != nil || f.Op == opLikeContainsASCII {
+		return validateSearch(c, f)
 	}
 	if f.And != nil || f.Or != nil {
 		if f.Op != "" || f.Value != nil {
@@ -218,6 +224,9 @@ func matches(c Collection, r Record, f *Filter) bool {
 			}
 		}
 		return false
+	}
+	if f.Fields != nil {
+		return matchesSearch(r, f)
 	}
 	v := r[f.Field]
 	if f.Op == "is_null" {

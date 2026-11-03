@@ -620,6 +620,17 @@ func compileFilter(c Collection, f *Filter) (string, []any) {
 		}
 		return strings.Join(parts, join), args
 	}
+	if f.Fields != nil {
+		if searchAll(f) {
+			return "1", nil
+		}
+		// SQLite's default LIKE folds ASCII case only, as the other adapters do.
+		cols := make([]string, len(f.Fields))
+		for i, name := range f.Fields {
+			cols[i] = "coalesce(" + quote(name) + ",'')"
+		}
+		return "(" + strings.Join(cols, "||' '||") + ") LIKE ?", []any{searchPattern(f.Value.(string))}
+	}
 	col := quote(f.Field)
 	fld, _ := c.field(f.Field)
 	switch f.Op {
@@ -758,6 +769,9 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 			}
 			if f.Field != "" {
 				wanted[f.Field] = true
+			}
+			for _, name := range f.Fields {
+				wanted[name] = true
 			}
 			for i := range f.And {
 				visit(&f.And[i])
