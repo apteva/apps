@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.16.1
+version: 0.17.0
 description: |
+  v0.17.0 installs host profiles on native targets. A release that declares
+  runtime.package.host_profiles (chrome-headless: the system libraries and
+  base fonts headless Chrome needs) gets them installed with apt before
+  prepare, only when the placement approves it; inspect-target reports each
+  profile as present, installable or unsupported.
   v0.16.1 records a delete for a deployment it never prepared as a deleted
   tombstone, so Server can discard a candidate whose prepare failed or was
   lost, and a late prepare for that ID cannot start a service.
@@ -274,7 +279,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.16.1
+    ref: instances/v0.17.0
     entry: mcp/instances
   port: 8080
   health_check: /health

@@ -44,6 +44,8 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
  awk '/MemAvailable:/ {printf "%.0f\n", $2/1024}' /proc/meminfo
  df -Pm /var/lib | awk 'NR==2 {print $4}'
  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then printf 'ABI=gnu\n'; elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then printf 'ABI=musl\n'; else printf 'ABI=unknown\n'; fi
+ os=$( . /etc/os-release 2>/dev/null || true; printf '%s:%s' "${ID:-unknown}" "${ID_LIKE:-}" ); printf 'OS=%s\n' "$os"
+ printf 'FONTS=%s\n' "$(find /usr/share/fonts /usr/local/share/fonts -type f \( -name '*.ttf' -o -name '*.otf' -o -name '*.ttc' \) 2>/dev/null | head -n 1 | wc -l | tr -d ' ')"
  if command -v ldconfig >/dev/null; then ldconfig -p 2>/dev/null | awk '/=>/ {print "LIB=" $1}' | sort -u; fi
  state_path=`+quoteShellArg(statePath)+`
  while ! test -d "$state_path"; do state_path=$(dirname "$state_path"); done
@@ -57,7 +59,7 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
 }
 func parseNativeTargetProbe(out string) (nativeProbe, error) {
 	v := strings.Split(strings.TrimSpace(out), "\n")
-	if len(v) < 6 || len(v) > 2055 || len(v[1]) != 32 || v[2] == "" {
+	if len(v) < 6 || len(v) > 2057 || len(v[1]) != 32 || v[2] == "" {
 		return nativeProbe{}, errors.New("invalid host identity probe")
 	}
 	platform := ""
@@ -83,7 +85,20 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 	}
 	var libraries []string
 	var available *int64
+	var osID, osLike string
+	fonts := false
 	for _, line := range v[6:] {
+		if value, ok := strings.CutPrefix(line, "OS="); ok {
+			id, like, _ := strings.Cut(value, ":")
+			if nativeOSToken(id) && nativeOSToken(like) {
+				osID, osLike = id, like
+			}
+			continue
+		}
+		if value, ok := strings.CutPrefix(line, "FONTS="); ok {
+			fonts = value == "1"
+			continue
+		}
 		if strings.HasPrefix(line, "STATE_AVAILABLE=") {
 			n, e := strconv.ParseInt(strings.TrimPrefix(line, "STATE_AVAILABLE="), 10, 64)
 			if e != nil || n < 0 || available != nil {
@@ -108,7 +123,20 @@ func parseNativeTargetProbe(out string) (nativeProbe, error) {
 		}
 		libraries = append(libraries, lib)
 	}
-	return nativeProbe{StateAvailableBytes: available, ABI: abi, SystemLibraries: libraries, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
+	return nativeProbe{StateAvailableBytes: available, ABI: abi, SystemLibraries: libraries, OSID: osID, OSLike: osLike, Fonts: fonts, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
+}
+
+// nativeOSToken accepts os-release ID/ID_LIKE values (lowercase words).
+func nativeOSToken(v string) bool {
+	if len(v) > 64 {
+		return false
+	}
+	for _, c := range v {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == ' ') {
+			return false
+		}
+	}
+	return true
 }
 
 func nativeHostIdentity(d nativeRecord) string {

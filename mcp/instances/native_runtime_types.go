@@ -93,6 +93,9 @@ type nativeRequest struct {
 	StateRef         string                  `json:"state_ref,omitempty"`
 	// Forward compatible with a future explicit Server gateway handoff.
 	GatewayURL string `json:"gateway_url,omitempty"`
+	// ApprovedHostProfiles are the manifest's host profiles the placement lets
+	// this backend install on the target.
+	ApprovedHostProfiles []string `json:"approved_host_profiles,omitempty"`
 }
 type nativePackageReference struct {
 	ID               string   `json:"id"`
@@ -151,9 +154,13 @@ type nativeRecord struct {
 	EnvDigest    string                    `json:"env_digest,omitempty"`
 	HealthPath   string                    `json:"health_path"`
 	Execution    nativeExecution           `json:"execution"`
+	HostProfiles []string                  `json:"host_profiles,omitempty"` // approved profiles installed before prepare
 }
 type nativeProbe struct {
 	StateAvailableBytes *int64
+	OSID                string // os-release ID
+	OSLike              string // os-release ID_LIKE
+	Fonts               bool   // at least one font file is installed
 	ABI                 string
 	SystemLibraries     []string
 	Platform            string
@@ -224,7 +231,7 @@ func nativeCapabilities() any {
 	return nativeCapabilitiesFor(defaultNativeSnapshotLimits(), 2*time.Hour)
 }
 func nativeCapabilitiesFor(limits nativeSnapshotLimits, timeout time.Duration) any {
-	return map[string]any{"ingress_upstream": true, "state_transfer": nativeStatePolicy{Format: "tar.gz", MaxArchiveBytes: limits.ArchiveBytes, MaxExpandedBytes: limits.StateBytes, MaxEntries: nativeEntryLimit(limits), TimeoutSeconds: int64(timeout / time.Second)}, "snapshot_limits": map[string]any{"max_archive_bytes": limits.ArchiveBytes, "max_expanded_bytes": limits.StateBytes, "max_file_bytes": limits.StateBytes, "max_entries": nativeStateMaxEntries, "tar_overhead_bytes": nativeStateTarOverhead, "hard_max_bytes": nativeStateHardLimit, "disk_reserve_bytes": nativeStateReserve, "timeout_seconds": int64(timeout / time.Second)}, "snapshot_progress": map[string]any{"endpoint": nativePrefix + "/state-progress", "poll_interval_ms": 1000}, "firewall_policies": true, "firewall_capabilities_endpoint": "/api/instances-firewall-capabilities", "target_listing": true, "managed_ingress": false, "ingress_provider": map[string]any{"id": "caddy"}, "target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": nativeSnapshotsSupported, "replicas": false, "fencing": false, "resource_controls": true, "resource_capabilities": nativeResourceCapabilities(),
+	return map[string]any{"ingress_upstream": true, "state_transfer": nativeStatePolicy{Format: "tar.gz", MaxArchiveBytes: limits.ArchiveBytes, MaxExpandedBytes: limits.StateBytes, MaxEntries: nativeEntryLimit(limits), TimeoutSeconds: int64(timeout / time.Second)}, "snapshot_limits": map[string]any{"max_archive_bytes": limits.ArchiveBytes, "max_expanded_bytes": limits.StateBytes, "max_file_bytes": limits.StateBytes, "max_entries": nativeStateMaxEntries, "tar_overhead_bytes": nativeStateTarOverhead, "hard_max_bytes": nativeStateHardLimit, "disk_reserve_bytes": nativeStateReserve, "timeout_seconds": int64(timeout / time.Second)}, "snapshot_progress": map[string]any{"endpoint": nativePrefix + "/state-progress", "poll_interval_ms": 1000}, "firewall_policies": true, "firewall_capabilities_endpoint": "/api/instances-firewall-capabilities", "target_listing": true, "managed_ingress": false, "ingress_provider": map[string]any{"id": "caddy"}, "target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": nativeSnapshotsSupported, "replicas": false, "fencing": false, "resource_controls": true, "resource_capabilities": nativeResourceCapabilities(), "host_profiles": nativeHostProfileNames(),
 		"target_schema":  map[string]any{"type": "object", "required": []string{"app_install_id", "resource_type", "resource_id"}, "properties": map[string]any{"app_install_id": map[string]any{"type": "integer"}, "resource_type": map[string]any{"const": "instances.instance"}, "resource_id": map[string]any{"type": "string"}}},
 		"options_schema": map[string]any{"type": "object", "required": []string{"artifact_id", "gateway_url"}, "properties": map[string]any{"firewall": firewallPolicySchema(), "artifact_id": map[string]any{"type": "string"}, "gateway_url": map[string]any{"type": "string"}, "browser_endpoint": map[string]any{"type": "string"}, "endpoints": map[string]any{"type": "object", "maxProperties": 16, "additionalProperties": map[string]any{"type": "string"}}, "control_port": map[string]any{"type": "integer", "minimum": 1024, "maximum": 65535}}}}
 }

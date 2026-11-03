@@ -43,6 +43,7 @@ type nativeBackend struct {
 	mu              sync.Mutex
 	locks           map[string]*sync.Mutex
 	jobs            map[string]context.CancelFunc
+	hostRun         func(context.Context, *Instance, string) (string, error) // host setup runner; nativeRun when nil
 	artifactMu      sync.Mutex
 	allocationMu    sync.Mutex
 	stateMu         sync.Mutex
@@ -328,6 +329,9 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e = b.verifyTargetPackage(r, a, p); e != nil {
 		return nil, o, a, p, e
 	}
+	if _, e = nativeHostProfilePlan(r, p); e != nil {
+		return nil, o, a, p, e
+	}
 	var size int64
 	for _, f := range a.Files {
 		size += f.Size
@@ -364,6 +368,9 @@ func (b *nativeBackend) create(r nativeRequest, o nativeOptions, a nativeArtifac
 	d = nativeRecord{HealthPath: r.Manifest.Runtime.HealthCheck, ID: r.DeploymentID, InstallID: r.InstallID, Generation: r.Generation, InstanceID: inst.ID, Fingerprint: nativeFingerprint(r, o), Options: o, Artifact: a, ReleaseDir: base + "/releases/" + hash, DataDir: base + "/data", Unit: fmt.Sprintf("apteva-native-%d-%s.service", b.installID, hash), ControlPort: port,
 		Execution: nativeExecution{IngressHostKey: p.HostKey, IngressUpstream: fmt.Sprintf("http://127.0.0.1:%d", port), BrowserEndpoint: o.BrowserEndpoint, Endpoints: o.Endpoints, Handle: r.DeploymentID, State: "preparing", HostKey: p.HostKey, ReleaseDigest: nativeArtifactDigest(a), Platform: a.Platform, StateRef: stateRef, AppCapabilities: a.AppCapabilities, Ports: []nativePort{{Protocol: "tcp", Start: port, End: port, Exclusive: true}}}}
 	nativeIngressEndpoints(&d, r)
+	if d.HostProfiles, e = nativeHostProfilePlan(r, p); e != nil {
+		return d, e
+	}
 	if d.HealthPath == "" {
 		d.HealthPath = "/health"
 	}
@@ -439,7 +446,11 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 		b.mu.Unlock()
 		return
 	}
-	c, cancel := context.WithTimeout(b.ctx, 5*time.Minute)
+	budget := 5 * time.Minute
+	if len(d.HostProfiles) > 0 {
+		budget += 15 * time.Minute
+	}
+	c, cancel := context.WithTimeout(b.ctx, budget)
 	b.jobs[d.ID] = cancel
 	b.mu.Unlock()
 	go func() {
@@ -470,7 +481,12 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 		if c.Err() != nil {
 			return
 		}
-		e = b.transport.Prepare(c, inst, current, b.artifactDir(current.Artifact.ID))
+		if len(current.HostProfiles) > 0 {
+			e = b.installHostProfiles(c, inst, current)
+		}
+		if e == nil {
+			e = b.transport.Prepare(c, inst, current, b.artifactDir(current.Artifact.ID))
+		}
 
 		if e != nil {
 			current.Execution.State = "unknown"

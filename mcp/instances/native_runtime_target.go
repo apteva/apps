@@ -58,7 +58,7 @@ func (b *nativeBackend) inspectTarget(r nativeRequest) (nativeTargetInfo, error)
 	if p.HostKey == "" || p.Platform != "linux-amd64" && p.Platform != "linux-arm64" {
 		return out, errors.New("unsupported target identity/platform")
 	}
-	return nativeTargetInfo{RuntimeTargetInfo: sdk.RuntimeTargetInfo{Platform: p.Platform, HostKey: p.HostKey, ABI: p.ABI, SystemLibraries: p.SystemLibraries, Formats: []string{"binary"}}, StateAvailableBytes: p.StateAvailableBytes}, nil
+	return nativeTargetInfo{RuntimeTargetInfo: sdk.RuntimeTargetInfo{Platform: p.Platform, HostKey: p.HostKey, ABI: p.ABI, SystemLibraries: p.SystemLibraries, HostProfiles: nativeHostProfileStates(p), Formats: []string{"binary"}}, StateAvailableBytes: p.StateAvailableBytes}, nil
 }
 func (b *nativeBackend) verifyTargetPackage(r nativeRequest, a nativeArtifact, p nativeProbe) error {
 	if metadata := r.Manifest.Runtime.Package; metadata != nil && metadata.AppCapabilities != nil && nativeJSON(metadata.AppCapabilities) != nativeJSON(a.AppCapabilities) {
