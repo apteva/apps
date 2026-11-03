@@ -957,9 +957,12 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 			input[name] = value
 		}
 	}
-	// Whole-collection writes, upsert conflict targets and index requirements
-	// are resolver policy, so clients cannot set them.
-	for _, name := range []string{"all", "conflictIndex", "requireIndex"} {
+	// Whole-collection writes, upsert conflict targets, index requirements,
+	// lookups and buckets are resolver policy, so clients cannot set them.
+	if err := validateDatabaseResolverOptions(operation, config); err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"all", "conflictIndex", "requireIndex", "lookups", "buckets"} {
 		if value, ok := config[name]; ok {
 			input[name] = value
 		}

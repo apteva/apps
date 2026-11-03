@@ -188,6 +188,11 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 				return invalid("resolver %s.%s references unpublished module %s", resolver.ParentType, resolver.FieldName, key)
 			}
 		}
+		if source.Kind == "database" {
+			if err := validateDatabaseResolverOptions(resolver.Operation, mergeMaps(source.Config, resolver.Config)); err != nil {
+				return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+			}
+		}
 		if source.Kind == "database" && resolver.Operation == databasePipelineOperation {
 			plan, err := validateDatabasePipeline(mergeMaps(source.Config, resolver.Config))
 			if err != nil {

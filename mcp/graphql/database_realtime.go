@@ -43,7 +43,8 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 	var derived []string
 	switch strings.ToLower(strings.TrimSpace(resolver.Operation)) {
 	case "find", "list", "search", "get", "count", "aggregate":
-		derived = []string{stringValue(config["collection"], "")}
+		// Lookup targets change the joined record, so they are watched too.
+		derived = append([]string{stringValue(config["collection"], "")}, databaseLookupCollections(config["lookups"])...)
 	case databasePipelineOperation:
 		// A report re-runs whenever anything it reads changes, lookups and
 		// access reads included.

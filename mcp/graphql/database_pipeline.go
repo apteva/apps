@@ -81,6 +81,7 @@ type databasePipelinePlan struct {
 	Steps        []databasePipelineStep
 	Combines     []databasePipelineCombine
 	Result       map[string]string
+	ResultRoot   string // a single reference returned as the field value
 	TimeoutMS    int
 	stepIndex    map[string]int
 	accessIndex  map[string]bool
@@ -115,8 +116,9 @@ func validateDatabasePipeline(config map[string]any) (*databasePipelinePlan, err
 		combineIndex: map[string]bool{},
 	}
 	if raw, ok := config["timeout_ms"]; ok {
-		plan.TimeoutMS = intValue(raw)
-		if plan.TimeoutMS < 1 || plan.TimeoutMS > maxDatabasePipelineTimeout {
+		var integral bool
+		plan.TimeoutMS, integral = strictInt(raw)
+		if !integral || plan.TimeoutMS < 1 || plan.TimeoutMS > maxDatabasePipelineTimeout {
 			return nil, invalid("database_pipeline timeout_ms must be between 1 and %d", maxDatabasePipelineTimeout)
 		}
 	}
@@ -154,6 +156,12 @@ func (plan *databasePipelinePlan) parseParams(raw any) error {
 		if !ok {
 			return invalid("database_pipeline param %s must be an object", name)
 		}
+		if err := onlyKeys(spec, "database_pipeline param "+name, "type", "required", "from", "value"); err != nil {
+			return err
+		}
+		if raw, exists := spec["type"]; exists && !nonEmptyString(raw) {
+			return invalid("database_pipeline param %s type must be a string", name)
+		}
 		p := databasePipelineParam{Type: stringValue(spec["type"], "string")}
 		switch p.Type {
 		case "string", "number", "boolean", "datetime", "json", "string_list":
@@ -169,6 +177,9 @@ func (plan *databasePipelinePlan) parseParams(raw any) error {
 		}
 		from, hasFrom := spec["from"].(string)
 		value, hasValue := spec["value"]
+		if _, exists := spec["from"]; exists && !hasFrom {
+			return invalid("database_pipeline param %s from must be a string", name)
+		}
 		if hasFrom == hasValue {
 			return invalid("database_pipeline param %s requires exactly one of from or value", name)
 		}
@@ -186,16 +197,20 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 	if !ok {
 		return nil, invalid("database_pipeline access %s must be an object", label)
 	}
+	if err := onlyKeys(spec, "database_pipeline access "+label, "collection", "field", "max", "where"); err != nil {
+		return nil, err
+	}
 	// One extra record detects overflow, within Database's 1000-record page.
 	read := &databasePipelineRead{Max: 999}
 	read.Collection, _ = spec["collection"].(string)
 	read.Field, _ = spec["field"].(string)
-	if strings.TrimSpace(read.Collection) == "" || strings.TrimSpace(read.Field) == "" {
-		return nil, invalid("database_pipeline access %s requires collection and field", label)
+	if strings.TrimSpace(read.Collection) == "" || strings.TrimSpace(read.Field) == "" || strings.HasPrefix(read.Collection, "$") || strings.HasPrefix(read.Field, "$") {
+		return nil, invalid("database_pipeline access %s requires a literal collection and field", label)
 	}
 	if raw, ok := spec["max"]; ok {
-		read.Max = intValue(raw)
-		if read.Max < 1 || read.Max > 999 {
+		var integral bool
+		read.Max, integral = strictInt(raw)
+		if !integral || read.Max < 1 || read.Max > 999 {
 			return nil, invalid("database_pipeline access %s max must be between 1 and 999", label)
 		}
 	}
@@ -215,6 +230,9 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 	access, ok := raw.(map[string]any)
 	if !ok {
 		return invalid("database_pipeline access must be an object")
+	}
+	if err := onlyKeys(access, "database_pipeline access", "require_any_permission", "values"); err != nil {
+		return err
 	}
 	if list, exists := access["require_any_permission"]; exists {
 		values, err := pipelineStringList(list)
@@ -240,6 +258,14 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		if !ok {
 			return invalid("database_pipeline access value %s must be an object", name)
 		}
+		if err := onlyKeys(spec, "database_pipeline access value "+name, "requested", "unrestricted_if_permission", "single", "default", "otherwise"); err != nil {
+			return err
+		}
+		for _, key := range []string{"requested", "unrestricted_if_permission"} {
+			if raw, exists := spec[key]; exists && !nonEmptyString(raw) {
+				return invalid("database_pipeline access value %s %s must be a non-empty string", name, key)
+			}
+		}
 		value := databasePipelineAccessValue{Name: name}
 		value.Requested, _ = spec["requested"].(string)
 		if value.Requested != "" {
@@ -250,7 +276,9 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		}
 		value.UnrestrictedPermission, _ = spec["unrestricted_if_permission"].(string)
 		if single, exists := spec["single"]; exists {
-			value.Single, _ = single.(bool)
+			if value.Single, ok = single.(bool); !ok {
+				return invalid("database_pipeline access value %s single must be Boolean", name)
+			}
 		}
 		var err error
 		if spec["default"] != nil {
@@ -378,6 +406,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 		if !ok {
 			return invalid("database_pipeline step %d must be an object", i)
 		}
+		if err := onlyKeys(spec, fmt.Sprintf("database_pipeline step %d", i), "id", "op", "args", "max_rows", "top_n"); err != nil {
+			return err
+		}
 		step := databasePipelineStep{Metrics: map[string]bool{}}
 		step.ID, _ = spec["id"].(string)
 		step.Op, _ = spec["op"].(string)
@@ -408,16 +439,35 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				if err := plan.validatePlaceholders(value, true, "step "+step.ID+".key"); err != nil {
 					return err
 				}
+			case "lookups":
+				if err := validateDatabaseLookups(value, "database_pipeline step "+step.ID+" lookups"); err != nil {
+					return err
+				}
+			case "buckets":
+				if err := validateDatabaseBuckets(value, "database_pipeline step "+step.ID+" buckets"); err != nil {
+					return err
+				}
 			case "metrics":
 				metrics, _ := value.([]any)
 				if len(metrics) == 0 {
 					return invalid("database_pipeline step %s metrics must be a non-empty list", step.ID)
 				}
 				for _, rawMetric := range metrics {
-					metric, _ := rawMetric.(map[string]any)
+					metric, ok := rawMetric.(map[string]any)
+					if !ok {
+						return invalid("database_pipeline step %s metrics must be objects", step.ID)
+					}
 					name, _ := metric["name"].(string)
 					if name == "" {
 						return invalid("database_pipeline step %s metric requires a name", step.ID)
+					}
+					if err := onlyKeys(metric, "database_pipeline step "+step.ID+" metric "+name, "name", "op", "field", "where"); err != nil {
+						return err
+					}
+					switch metric["op"] {
+					case "count", "count_distinct", "sum", "avg", "min", "max":
+					default:
+						return invalid("database_pipeline step %s metric %s op must be count, count_distinct, sum, avg, min or max", step.ID, name)
 					}
 					for metricKey, metricValue := range metric {
 						var err error
@@ -452,10 +502,11 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 			return invalid("database_pipeline step %s aggregate requires metrics", step.ID)
 		}
 		step.MaxRows = 1000
+		integral := true
 		if raw, exists := spec["max_rows"]; exists {
-			step.MaxRows = intValue(raw)
+			step.MaxRows, integral = strictInt(raw)
 		}
-		if step.MaxRows < 1 || step.MaxRows > 1000 {
+		if !integral || step.MaxRows < 1 || step.MaxRows > 1000 {
 			return invalid("database_pipeline step %s max_rows must be between 1 and 1000", step.ID)
 		}
 		if raw, exists := spec["top_n"]; exists {
@@ -493,6 +544,12 @@ func (plan *databasePipelinePlan) parseCombine(raw any) error {
 		if !ok {
 			return invalid("database_pipeline combine %s must be an object", id)
 		}
+		if err := onlyKeys(spec, "database_pipeline combine "+id, "join", "on", "missing", "total", "fields"); err != nil {
+			return err
+		}
+		if raw, exists := spec["missing"]; exists && !nonEmptyString(raw) {
+			return invalid("database_pipeline combine %s missing must be null or zero", id)
+		}
 		c := databasePipelineCombine{ID: id, Missing: stringValue(spec["missing"], "null"), TotalSteps: map[string]string{}, Fields: map[string]any{}}
 		var err error
 		if c.Join, err = pipelineStringList(spec["join"]); err != nil || len(c.Join) == 0 {
@@ -511,6 +568,9 @@ func (plan *databasePipelinePlan) parseCombine(raw any) error {
 			return invalid("database_pipeline combine %s missing must be null or zero", id)
 		}
 		if total, ok := spec["total"].(map[string]any); ok {
+			if err := onlyKeys(total, "database_pipeline combine "+id+" total", "key", "steps"); err != nil {
+				return err
+			}
 			c.TotalKey, _ = total["key"].(string)
 			steps, _ := total["steps"].(map[string]any)
 			if c.TotalKey == "" || len(steps) == 0 {
@@ -633,35 +693,49 @@ func combineExpression(raw any) any {
 	return raw
 }
 
+// parseResult accepts either an object mapping output fields to references
+// or one reference returned as the field value itself, so a list field such as
+// commercials: [Commercial!]! can take "$steps.rows" directly.
 func (plan *databasePipelinePlan) parseResult(raw any) error {
+	if ref, ok := raw.(string); ok {
+		if !plan.validResultRef(ref) {
+			return invalid("database_pipeline result references unknown %q", ref)
+		}
+		plan.ResultRoot = ref
+		return nil
+	}
 	result, ok := raw.(map[string]any)
 	if !ok || len(result) == 0 {
-		return invalid("database_pipeline result must map output fields to $steps, $combine or $scope references")
+		return invalid("database_pipeline result must be a $steps, $combine or $scope reference, or an object mapping output fields to them")
 	}
 	for name, rawRef := range result {
 		ref, _ := rawRef.(string)
 		if !graphqlName(name) {
 			return invalid("database_pipeline result field %q is invalid", name)
 		}
-		parts := strings.Split(ref, ".")
-		valid := false
-		switch {
-		case len(parts) == 2 && parts[0] == "$steps":
-			_, valid = plan.stepIndex[parts[1]]
-		case len(parts) == 3 && parts[0] == "$steps" && parts[2] == "first":
-			index, ok := plan.stepIndex[parts[1]]
-			valid = ok && (plan.Steps[index].Op == "aggregate" || plan.Steps[index].Op == "find")
-		case len(parts) == 2 && parts[0] == "$combine":
-			valid = plan.combineIndex[parts[1]]
-		case len(parts) == 2 && parts[0] == "$scope":
-			valid = plan.accessIndex[parts[1]]
-		}
-		if !valid {
+		if !plan.validResultRef(ref) {
 			return invalid("database_pipeline result %s references unknown %q", name, ref)
 		}
 		plan.Result[name] = ref
 	}
 	return nil
+}
+
+func (plan *databasePipelinePlan) validResultRef(ref string) bool {
+	parts := strings.Split(ref, ".")
+	switch {
+	case len(parts) == 2 && parts[0] == "$steps":
+		_, ok := plan.stepIndex[parts[1]]
+		return ok
+	case len(parts) == 3 && parts[0] == "$steps" && parts[2] == "first":
+		index, ok := plan.stepIndex[parts[1]]
+		return ok && (plan.Steps[index].Op == "aggregate" || plan.Steps[index].Op == "find")
+	case len(parts) == 2 && parts[0] == "$combine":
+		return plan.combineIndex[parts[1]]
+	case len(parts) == 2 && parts[0] == "$scope":
+		return plan.accessIndex[parts[1]]
+	}
+	return false
 }
 
 // Collections reports every collection a run reads, including lookup targets
@@ -1141,8 +1215,7 @@ func (run *databasePipelineRun) assemble(steps map[string]any) (any, error) {
 		}
 		combined[c.ID] = rows
 	}
-	out := make(map[string]any, len(run.plan.Result))
-	for name, ref := range run.plan.Result {
+	resolve := func(ref string) any {
 		parts := strings.Split(ref, ".")
 		switch parts[0] {
 		case "$steps":
@@ -1154,12 +1227,20 @@ func (run *databasePipelineRun) assemble(steps map[string]any) (any, error) {
 					value = rows[0]
 				}
 			}
-			out[name] = value
+			return value
 		case "$combine":
-			out[name] = combined[parts[1]]
+			return combined[parts[1]]
 		case "$scope":
-			out[name] = run.scope[parts[1]]
+			return run.scope[parts[1]]
 		}
+		return nil
+	}
+	if run.plan.ResultRoot != "" {
+		return resolve(run.plan.ResultRoot), nil
+	}
+	out := make(map[string]any, len(run.plan.Result))
+	for name, ref := range run.plan.Result {
+		out[name] = resolve(ref)
 	}
 	return out, nil
 }

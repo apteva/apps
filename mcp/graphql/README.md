@@ -482,8 +482,14 @@ isolation; realtime hub scoping; Auth and trusted Function invocation.
 `key`, `set`/`increment` and `ifVersion`. A `where` in the resolver config is
 the access guard: it is always sent, and a client `where` is combined with it
 (`and`), so a client can only narrow it. `maxAffected` can be lowered but not
-raised; without a resolver value it is 1. `all`, `conflictIndex` and
-`requireIndex` come only from resolver config.
+raised; without a resolver value it is 1. `all`, `conflictIndex`,
+`requireIndex`, `lookups` and `buckets` come only from resolver config.
+
+Read resolvers (`find`, `list`, `search`, `aggregate`) forward configured
+`lookups` (`[{as, collection, localField, select?}]`, at most 4) and, on
+`aggregate`, `buckets` (`[{name, field, unit, timezone?, weekStart?}]`).
+Both are validated when a release is published, and a subscription on such a
+resolver also watches the lookup targets.
 
 With Database 0.6.5 or later, a key plus a guard edits the record only if it
 also matches the guard. A miss reads like an absent record: `affected: 0`, or
@@ -581,8 +587,14 @@ Rules:
   verified Auth identity. Access reads run in their own read batch before the
   steps.
 - `result` maps output fields to `$steps.<id>` (rows, records, a count or a
-  record), `$steps.<id>.first`, `$combine.<id>` or `$scope.<name>`. Declare the
-  field non-null in your SDL so any failure nulls the whole report.
+  record), `$steps.<id>.first`, `$combine.<id>` or `$scope.<name>`. It can
+  also be one of those references on its own (`"result": "$steps.rows"`), and
+  the field then returns that value directly, for list fields such as
+  `commercials: [Commercial!]!`. Declare the field non-null in your SDL so any
+  failure nulls the whole report.
+- Configuration is strict: unknown keys, mistyped values (`"single": "yes"`,
+  `"max": 2.5`) and malformed lookups, buckets or metrics fail validation
+  instead of being ignored.
 - Failures are never partial: a step over its `max_rows` (default and maximum
   1000) fails with `source_result_truncated`; Database budgets fail with
   `resource_limit`; exceeding `timeout_ms` (default 15000, maximum 60000)
