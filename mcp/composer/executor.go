@@ -41,7 +41,7 @@ func reportRenderProgress(ctx context.Context, progress RenderProgress) {
 // completion. Async executors return Sync=false with ProviderRenderID
 // populated; a worker poll loop handles completion.
 //
-// v0.1 ships local + remote only.
+// Composer ships local + component (renderer worker) executors.
 type Executor interface {
 	Name() string
 	Render(ctx context.Context, app *sdk.AppCtx, edit *Edit, output Output, projectID string) (Result, error)
@@ -60,10 +60,11 @@ type Result struct {
 // selectExecutor walks the precedence ladder:
 //
 //  1. render_executor integration bound → SaaS path (stub in v0.1)
-//  2. render_host_id config / RENDER_HOST_ID env > 0 → remote ffmpeg via instances
+//  2. execution_mode=component (or a legacy render_host_id) → the private
+//     renderer component, placed by Server
 //  3. otherwise → local ffmpeg
 //
-// Callers can override via composition_render(executor: "local"|"remote")
+// Callers can override via composition_render(executor: "local"|"component")
 // — see chooseExecutor.
 func selectExecutor(ctx *sdk.AppCtx) Executor {
 	if bound := ctx.IntegrationFor("render_executor"); bound != nil {
@@ -72,26 +73,23 @@ func selectExecutor(ctx *sdk.AppCtx) Executor {
 		ctx.Logger().Warn("render_executor bound but SaaS executors not wired in v0.1; falling back",
 			"slug", bound.AppSlug)
 	}
-	if id := renderHostID(ctx); id > 0 {
-		return &remoteFFmpegExecutor{hostID: id}
+	if componentRenderingEnabled(ctx) {
+		return &componentFFmpegExecutor{}
 	}
 	return &localFFmpegExecutor{}
 }
 
 // chooseExecutor honours an explicit override from the tool/HTTP
-// caller. "" → use the ladder; "local"|"remote" → force.
+// caller. "" → use the ladder; "local"|"component" → force. "remote" is
+// the pre-0.11 name for offloaded rendering and maps to the component.
 func chooseExecutor(ctx *sdk.AppCtx, override string) (Executor, error) {
 	switch override {
-	case "":
+	case "", "auto":
 		return selectExecutor(ctx), nil
 	case "local":
 		return &localFFmpegExecutor{}, nil
-	case "remote":
-		hostID := renderHostID(ctx)
-		if hostID == 0 {
-			return nil, errors.New("executor=remote but render_host_id config is unset")
-		}
-		return &remoteFFmpegExecutor{hostID: hostID}, nil
+	case "component", "remote":
+		return &componentFFmpegExecutor{}, nil
 	}
 	return nil, errors.New("unknown executor: " + override)
 }

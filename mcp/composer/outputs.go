@@ -431,6 +431,7 @@ func (a *App) runOutputAttempt(ctx *sdk.AppCtx, id int64) (any, error) {
 		}
 	}
 	rctx, cancel := context.WithTimeout(composerLifetimeContext(), 30*time.Minute)
+	rctx = withComponentOwner(rctx, fmt.Sprintf("render:%d", id))
 	defer cancel()
 	unregister := registerRenderCancel(id, cancel)
 	defer unregister()

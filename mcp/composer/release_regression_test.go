@@ -178,7 +178,7 @@ func TestLargeUploadUsesBoundedPartsAndAbortsFailures(t *testing.T) {
 
 func TestRemoteChunkUploadHasAuthentication(t *testing.T) {
 	script := remoteStorageUploadScriptFragment
-	i := strings.Index(script, `--data-binary "@$PART_FILE"`)
+	i := strings.Index(script, `--data-binary "@$SEND_FILE"`)
 	if i < 0 {
 		t.Fatal("missing chunk PUT")
 	}

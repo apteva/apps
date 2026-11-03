@@ -43,6 +43,7 @@ type procedureTimeline struct {
 
 type procedureRunResult struct {
 	LocalPath       string
+	StorageID       int64 // set when the runner already uploaded the artifact (renderer component)
 	Kind            string
 	DurationSeconds float64
 	Logs            string
@@ -174,6 +175,9 @@ func (a *App) materializeProceduralAssets(ctx context.Context, appCtx *sdk.AppCt
 			runner := a.procedureRunner
 			if runner == nil {
 				runner = runProcedureLocal
+				if revision.Runtime == webCanvasRuntime && componentRenderingEnabled(appCtx) {
+					runner = runProcedureComponent
+				}
 			}
 			timeline := procedureTimeline{
 				JobID:            fmt.Sprintf("composition-%d:%s", compositionID, clip.UID),
@@ -191,8 +195,11 @@ func (a *App) materializeProceduralAssets(ctx context.Context, appCtx *sdk.AppCt
 				_, _ = appCtx.AppDB().Exec(`UPDATE procedure_materializations SET status='failed',logs=?,error=?,runtime_job_id=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND cache_key=?`, result.Logs, runErr.Error(), result.RuntimeJobID, projectID, cacheKey)
 				return changed, fmt.Errorf("clip %s procedure execution failed: %w", clip.UID, runErr)
 			}
-			format := strings.TrimPrefix(strings.ToLower(filepath.Ext(result.LocalPath)), ".")
-			storageID := saveRenderOutputContext(ctx, appCtx, result.LocalPath, format, projectID, compositionID)
+			storageID := result.StorageID
+			if storageID <= 0 {
+				format := strings.TrimPrefix(strings.ToLower(filepath.Ext(result.LocalPath)), ".")
+				storageID = saveRenderOutputContext(ctx, appCtx, result.LocalPath, format, projectID, compositionID)
+			}
 			if storageID <= 0 {
 				err = errors.New("procedure artifact could not be saved to Storage")
 				binding.Status, binding.Error = "failed", err.Error()
