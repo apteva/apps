@@ -23,7 +23,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 
 All three adapters are embedded and local to the Apteva host. Choosing an adapter preserves the record and aggregate request format.
 
-AptevaDB pins `github.com/apteva/db v0.2.0-alpha.14` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
+AptevaDB pins `github.com/apteva/db v0.2.0-alpha.15` and uses synchronous writes with full flushes by default. Create a new database with `{"database":"native","adapter":"aptevadb"}`, or select **AptevaDB (experimental)** in the panel. Its private directory belongs to one app process. Existing SQLite and Pebble databases keep their adapters; changing backends requires an explicit export/import. Ungrouped row counts use native `CountDocuments`; covered scalar equality predicates count index entries without loading documents. Counts with staged writes retain transaction-aware evaluation, and field counts retain non-null semantics.
 
 The native format remains 10 (no new migration from Database 0.5.0): opening an older native database permanently upgrades it, so back up native data with its original binary before installing this build. The app does not mount standalone directories.
 
@@ -212,7 +212,7 @@ Four optional extensions keep dashboard queries in one aggregate pass, with no n
 
 SQLite runs `count_distinct` and metric filters as native `COUNT(DISTINCT …)` and `FILTER (WHERE …)`.
 
-AptevaDB (alpha.14) runs all four natively, in its parallel pipeline and its bounded stream:
+AptevaDB (alpha.15) runs all four natively, in its parallel pipeline and its bounded stream:
 - filters on stored fields form a leading `$match`, which reads through an index when one applies, including a compound index whose leading fields the filter binds by equality or `in` lists (one index range per value combination, at most 64), optionally with a range on the next field (alpha.12 added compound indexes, alpha.13 `in` lists);
 - each lookup becomes `$lookup` on the target's primary-key field, followed by `$unwind` that keeps unmatched rows;
 - filters on joined fields form a second `$match`;
@@ -233,6 +233,8 @@ In the portable path, filters on stored fields are pushed to the adapter's scan 
 ## Query and mutation rules
 
 Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `is_null`, `is_not_null`, `starts_with`. Null predicates omit `value`. `in` takes 1–100 non-null values; a one-value list is treated as `eq`, so it binds index prefixes on every adapter. String matching is literal, case-sensitive UTF-8 byte comparison.
+
+Text search is one filter node over several text fields: `{fields:["resource_key","opportunity_key","commercial_id"], op:"like_contains_ascii", value:"23 op"}`. Nulls read as `""` and the fields are joined in the given order with one space; the result matches `"%" + value + "%"` with SQLite's default `LIKE`: `%` and `_` stay wildcards (`_` is one UTF-8 character), ASCII letters compare case-insensitively (other letters exactly), backslash has no escape meaning, and whitespace is kept. An empty value matches every record and is dropped from the plan, so it costs nothing. 1–16 existing `text` fields, a string value of at most 1024 bytes. It combines with `and`/`or` and works in `find`, `count`, `aggregate`, metric `where` and read batches, before pagination and aggregation. Every adapter evaluates it natively (AptevaDB `$like`, SQLite `LIKE`) and none can use an index for it, so keep the indexed scope (centre, date range) beside it: the planner still narrows through those, and the search reads only the records in that range.
 
 `find` accepts `select`, `orderBy`, `limit`, and `cursor`, returning `records`, `hasMore`, and `nextCursor`. Repeat the same query with the returned cursor. Primary-key fields are appended to the sort as tie-breakers. `requireIndex` rejects plans that cannot narrow candidates through an index. `explain` reports adapter-specific plan details. Pebble handles primary/unique lookups, leading compound equality/range/prefix predicates, and compatible index ordering; complex OR/IN combinations may require bounded scans and sorting.
 

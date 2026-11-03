@@ -30,6 +30,9 @@ func newScanDecoder(c Collection, names []string, where *Filter) *scanDecoder {
 		if f.Field != "" {
 			wanted[f.Field] = true
 		}
+		for _, name := range f.Fields {
+			wanted[name] = true
+		}
 		for i := range f.And {
 			visit(&f.And[i])
 		}

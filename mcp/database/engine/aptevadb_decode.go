@@ -35,6 +35,9 @@ func newNativeScanDecoder(c Collection, names []string, where *Filter) *nativeSc
 		if f.Field != "" {
 			wanted[f.Field] = true
 		}
+		for _, name := range f.Fields {
+			wanted[name] = true
+		}
 		for i := range f.And {
 			visit(&f.And[i])
 		}
@@ -73,11 +76,12 @@ func (d *nativeScanDecoder) decode(data []byte) (Record, error) {
 // path on a dependency upgrade; unlisted versions safely use the public
 // decoder, and TestNativeFlatDecoderCoversPinnedVersion fails until they are
 // audited. doc.go (DocBuilder/DecodeDocument) is byte-identical from alpha.5
-// through alpha.14; documents.go only gained a QueryStats counter.
+// through alpha.15; documents.go only gained a QueryStats counter.
 var nativeFlatCodecVersions = map[string]bool{
 	"0.2.0-alpha.5": true, "0.2.0-alpha.6": true, "0.2.0-alpha.7": true,
 	"0.2.0-alpha.8": true, "0.2.0-alpha.9": true, "0.2.0-alpha.10": true, "0.2.0-alpha.11": true,
 	"0.2.0-alpha.12": true, "0.2.0-alpha.13": true, "0.2.0-alpha.14": true,
+	"0.2.0-alpha.15": true,
 }
 
 func (d *nativeScanDecoder) decodeFlat(data []byte) (bool, error) {

@@ -23,6 +23,12 @@ func nativeFilter(c Collection, f *Filter) any {
 		}
 		return map[string]any{op: out}
 	}
+	if f.Fields != nil {
+		if searchAll(f) {
+			return map[string]any{}
+		}
+		return map[string]any{"$like": map[string]any{"fields": f.Fields, "separator": " ", "pattern": searchPattern(f.Value.(string))}}
+	}
 	if f.Op == "is_null" {
 		return map[string]any{f.Field: map[string]any{"$eq": nil}}
 	}

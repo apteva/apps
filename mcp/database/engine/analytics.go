@@ -257,6 +257,9 @@ func visitFilterFields(f *Filter, visit func(string)) {
 	if f.Field != "" {
 		visit(f.Field)
 	}
+	for _, name := range f.Fields {
+		visit(name)
+	}
 	for i := range f.And {
 		visitFilterFields(&f.And[i], visit)
 	}

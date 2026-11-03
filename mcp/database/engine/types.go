@@ -41,8 +41,10 @@ type Filter struct {
 	And   []Filter `json:"and,omitempty"`
 	Or    []Filter `json:"or,omitempty"`
 	Field string   `json:"field,omitempty"`
-	Op    string   `json:"op,omitempty"`
-	Value any      `json:"value,omitempty"`
+	// Fields names the text fields a like_contains_ascii search joins.
+	Fields []string `json:"fields,omitempty"`
+	Op     string   `json:"op,omitempty"`
+	Value  any      `json:"value,omitempty"`
 }
 type Metric struct {
 	Name  string  `json:"name"`
