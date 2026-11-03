@@ -583,9 +583,58 @@ Rules:
 - Access values: an unrestricted caller (`unrestricted_if_permission`) gets
   exactly the values it requested, or the `default` read when it requested
   none. Every other caller gets the `otherwise` read (`single: true` requires
-  exactly one value), narrowed to its request. Permissions come from the
-  verified Auth identity. Access reads run in their own read batch before the
-  steps.
+  exactly one distinct value, `single_record: true` exactly one matching
+  record), narrowed to its request. `require_any_permission` on a value refuses
+  callers holding none of the listed permissions. Permissions come from the
+  verified Auth identity. Access reads run before the steps.
+- Access values can chain. A read's `where` may use `$scope.<value>`, and
+  `{"union": [...]}` or `{"intersect": [...]}` combines earlier values without
+  a read. Values run in dependency order, one read batch per level, for at
+  most 4 levels; cycles are rejected. An array field contributes each element.
+  A read with `orderBy` and `limit` keeps its first records instead of failing
+  past `max` (for example "the latest enabled grant"). An empty value refuses
+  the request before anything that depends on it is read.
+
+  ```json
+  "values": {
+    "grant":  {"otherwise": {"collection": "grants", "field": "id",
+               "where": {"and": [{"field": "user_id", "op": "eq", "value": "$param.user"},
+                                 {"field": "enabled", "op": "eq", "value": true}]},
+               "orderBy": [{"field": "granted_at", "direction": "desc"}], "limit": 1}},
+    "offers": {"otherwise": {"collection": "grant_offers", "field": "offer_id",
+               "where": {"field": "grant_id", "op": "in", "value": "$scope.grant"}}},
+    "grids":  {"otherwise": {"collection": "offers", "field": "grid_ids",
+               "where": {"field": "id", "op": "in", "value": "$scope.offers"}}},
+    "offerCentres": {"otherwise": {"collection": "offers", "field": "centre_id",
+               "where": {"field": "id", "op": "in", "value": "$scope.offers"}}},
+    "home":   {"otherwise": {"collection": "profiles", "field": "centre_id",
+               "where": {"field": "user_id", "op": "eq", "value": "$param.user"}},
+               "single_record": true},
+    "centres": {"intersect": ["offerCentres", "home"]}
+  }
+  ```
+
+  Each level reads its own snapshot; the steps still read one snapshot.
+  Database sources do not use `security.row_filters`, which are Tables-only
+  (setting one on another source is rejected): access values are the Database
+  authorization mechanism, and client params can only narrow them because they
+  appear only as filter values.
+- Paging: a `find` step with `"page": {"size": "$param.first", "cursor":
+  "$param.after"}` reads one page (size defaults to `max_rows`, and larger
+  requests are capped at it) and never fails on `hasMore`. Results can select
+  `$steps.<id>.hasMore` and `$steps.<id>.nextCursor` (null on the last page).
+  A count step with `"count_of": "<find step>"` counts the same collection and
+  filter in the same snapshot. Paging uses Database cursors; offsets are not
+  supported.
+- Field masking: params can bind `$identity.permissions` (a `string_list` of
+  the verified permissions), and combine expressions can read `$param.<name>`
+  and `$scope.<name>`. The `in` op tests membership. `keep` copies a joined
+  step's columns unchanged, so a combine over a `find` step on its key can
+  null one field for some callers:
+  `{"join": ["rows"], "on": ["id"], "keep": ["rows"], "fields": {"amount":
+  {"op": "if", "condition": {"op": "in", "args": [{"const": "finance:read"},
+  "$param.perms"]}, "then": "rows.amount", "else": {"const": null}}}}`.
+  Resolver modules accept `in` and `$identity.permissions` too.
 - `result` maps output fields to `$steps.<id>` (rows, records, a count or a
   record), `$steps.<id>.first`, `$combine.<id>` or `$scope.<name>`. It can
   also be one of those references on its own (`"result": "$steps.rows"`), and

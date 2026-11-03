@@ -329,6 +329,12 @@ func aggregatePipelineValue(ctx context.Context, path string, args map[string]an
 			return nil, false
 		}
 		return identity.Tenant, true
+	case "$identity.permissions":
+		identity := securityIdentity(ctx)
+		if identity == nil {
+			return nil, false
+		}
+		return verifiedPermissionList(identity), true
 	}
 	var root any
 	var suffix string

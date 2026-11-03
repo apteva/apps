@@ -1,7 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -12,9 +19,13 @@ import (
 // realDatabase is a Database sidecar plus a GraphQL sidecar bound to it through
 // the same grant a real install uses.
 type realDatabase struct {
-	t        *testing.T
-	operator func(tool string, args map[string]any) map[string]any
-	graph    *tk.Sidecar
+	t           *testing.T
+	operator    func(tool string, args map[string]any) map[string]any
+	graph       *tk.Sidecar
+	environment string
+	// permissions answers Auth /me for pipelineToken(user); a user missing
+	// here is unauthenticated.
+	permissions map[string][]string
 }
 
 func newRealDatabase(t *testing.T, project string) *realDatabase {
@@ -28,14 +39,37 @@ func newRealDatabase(t *testing.T, project string) *realDatabase {
 		adapter = "aptevadb"
 	}
 	database := tk.SpawnSidecar(t, databaseDir, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", ""), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", ""))
-	r := &realDatabase{t: t}
+	r := &realDatabase{t: t, environment: "development", permissions: map[string][]string{}}
 	r.operator = func(tool string, args map[string]any) map[string]any {
 		args["database"] = "crm"
 		return database.MCPAs(tool, args, 1, "", project)
 	}
 	r.operator("db_database_create", map[string]any{"adapter": adapter})
 	bridge := newDatabaseBridge(t, database, project)
-	r.graph = spawnGraph(t, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", bridge.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "graphql-query-test"))
+	target, _ := url.Parse(bridge.URL)
+	forward := httputil.NewSingleHostReverseProxy(target)
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/apps/auth/me" {
+			forward.ServeHTTP(w, req)
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), ".")
+		var claims struct {
+			U string `json:"u"`
+		}
+		if len(parts) == 3 {
+			raw, _ := base64.RawURLEncoding.DecodeString(parts[1])
+			_ = json.Unmarshal(raw, &claims)
+		}
+		perms, ok := r.permissions[claims.U]
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"org": "default", "user": map[string]any{"id": json.Number(claims.U)}, "authorization": map[string]any{"permissions": perms}})
+	}))
+	t.Cleanup(platform.Close)
+	r.graph = spawnGraph(t, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "graphql-query-test"))
 	r.graph.MCP("graphql_source_add", map[string]any{"name": "crm", "kind": "database", "config": map[string]any{"database": "crm"}})
 	return r
 }
@@ -67,8 +101,8 @@ func (r *realDatabase) publish(sdl string, resolvers map[string]map[string]any) 
 			return failure
 		}
 	}
-	schema := r.graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": sdl})
-	return r.tool("graphql_release_publish", map[string]any{"environment": "development", "schema_version": schema["schema"].(map[string]any)["version"]})
+	schema := r.graph.MCP("graphql_schema_create", map[string]any{"environment": r.environment, "sdl": sdl})
+	return r.tool("graphql_release_publish", map[string]any{"environment": r.environment, "schema_version": schema["schema"].(map[string]any)["version"]})
 }
 
 // tool calls a GraphQL tool and returns its error text, if any.
@@ -93,6 +127,31 @@ func (r *realDatabase) query(query string, variables map[string]any) graphRespon
 	var out graphResponse
 	if resp := r.graph.POST("/graphql", map[string]any{"query": query, "variables": variables}, &out); resp.Status != 200 {
 		r.t.Fatalf("graphql status %d: %v", resp.Status, out)
+	}
+	return out
+}
+
+// requireAuth switches the API to verified Auth identities.
+func (r *realDatabase) requireAuth() {
+	r.environment = "production"
+	r.graph.MCP("graphql_security_set", map[string]any{"security": map[string]any{"mode": "auth", "tenant_id": "default", "environment": "production", "claims": []string{"permissions"}}})
+}
+
+// queryAs sends an authenticated request on the public endpoint.
+func (r *realDatabase) queryAs(user, query string, variables map[string]any) graphResponse {
+	r.t.Helper()
+	body, _ := json.Marshal(map[string]any{"query": query, "variables": variables})
+	req, _ := http.NewRequest("POST", r.graph.URL()+"/public/graphql/default", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+pipelineToken(user))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out graphResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		r.t.Fatal(err)
 	}
 	return out
 }
@@ -157,9 +216,9 @@ type Query { calls: [Call!]! daily: [Day!]! callList: [Call!]! }`
 
 	// Silently ignored options are now publish errors.
 	resolvers["Query.callList"]["config"].(map[string]any)["access"] = map[string]any{"values": map[string]any{"agents": map[string]any{
-		"otherwise": map[string]any{"collection": "agents", "field": "id", "orderBy": []any{map[string]any{"field": "name"}}},
+		"otherwise": map[string]any{"collection": "agents", "field": "id", "sort": []any{map[string]any{"field": "name"}}},
 	}}}
-	if failure := r.publish(sdl, resolvers); !strings.Contains(failure, `"orderBy"`) {
+	if failure := r.publish(sdl, resolvers); !strings.Contains(failure, `"sort"`) {
 		t.Fatalf("publish with an unsupported access option: %q", failure)
 	}
 	t.Logf("lookups on find, Paris buckets on aggregate, list-valued pipeline result, strict publish validation")

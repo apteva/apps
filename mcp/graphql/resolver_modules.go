@@ -235,7 +235,7 @@ func setResolverModuleMetadata(db *sql.DB, id int64, m moduleMetadata) error {
 
 // moduleExpressionOps is the expression language shared by resolver modules
 // and database_pipeline combine fields.
-var moduleExpressionOps = map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "safe_divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true, "date_add": true, "datetime_add": true, "date_diff_days": true, "format_datetime": true}
+var moduleExpressionOps = map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "safe_divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true, "date_add": true, "datetime_add": true, "date_diff_days": true, "format_datetime": true, "in": true}
 
 func validateResolverModuleDefinition(inputs, definition map[string]any) []string {
 	problems := []string{}
@@ -552,6 +552,30 @@ func (runtime moduleRuntime) eval(raw any, inputs map[string]any, depth int) (an
 			branch = "then"
 		}
 		return runtime.eval(node[branch], inputs, depth+1)
+	case "in":
+		// in(value, list): membership, with eq's comparison (so 3 is in
+		// ["3"]). A null list contains nothing.
+		if len(values) != 2 {
+			return nil, invalid("in requires a value and a list")
+		}
+		var list []any
+		switch typed := values[1].(type) {
+		case nil:
+		case []any:
+			list = typed
+		case []string:
+			for _, item := range typed {
+				list = append(list, item)
+			}
+		default:
+			return nil, invalid("in requires a list as its second argument")
+		}
+		for _, item := range list {
+			if comparison, err := compareModuleValues(values[0], item); err == nil && comparison == 0 && (values[0] == nil) == (item == nil) {
+				return true, nil
+			}
+		}
+		return false, nil
 	case "eq", "neq", "lt", "lte", "gt", "gte":
 		if len(values) != 2 {
 			return nil, invalid("%s requires two arguments", op)
@@ -886,7 +910,7 @@ func moduleInputMapping(config map[string]any) (map[string]any, error) {
 			return nil, invalid("invalid module input name %q", name)
 		}
 		if path, ok := value.(string); ok && strings.HasPrefix(path, "$") {
-			valid := strings.HasPrefix(path, "$parent.") || strings.HasPrefix(path, "$args.") || path == "$identity.subject" || path == "$identity.tenant" || strings.HasPrefix(path, "$identity.claim.")
+			valid := strings.HasPrefix(path, "$parent.") || strings.HasPrefix(path, "$args.") || path == "$identity.subject" || path == "$identity.tenant" || path == "$identity.permissions" || strings.HasPrefix(path, "$identity.claim.")
 			if !valid {
 				return nil, invalid("unsupported module input path %q", path)
 			}
@@ -1021,6 +1045,10 @@ func resolveModuleInput(value any, parent any, args map[string]any, identity *re
 	case path == "$identity.tenant":
 		if identity != nil {
 			return identity.Tenant
+		}
+	case path == "$identity.permissions":
+		if identity != nil {
+			return verifiedPermissionList(identity)
 		}
 	case strings.HasPrefix(path, "$identity.claim."):
 		if identity != nil {

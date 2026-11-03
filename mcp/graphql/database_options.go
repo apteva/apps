@@ -175,3 +175,26 @@ func databaseLookupCollections(value any) []string {
 	}
 	return out
 }
+
+func validateDatabaseOrderBy(value any, path string) error {
+	list, ok := value.([]any)
+	if !ok || len(list) == 0 || len(list) > maxDatabaseQueryOptions {
+		return invalid("%s must be a list of 1 to %d {field, direction} entries", path, maxDatabaseQueryOptions)
+	}
+	for _, raw := range list {
+		order, ok := raw.(map[string]any)
+		if !ok {
+			return invalid("%s entries must be objects", path)
+		}
+		if err := onlyKeys(order, path+" entry", "field", "direction"); err != nil {
+			return err
+		}
+		if !nonEmptyString(order["field"]) || strings.HasPrefix(order["field"].(string), "$") {
+			return invalid("%s entries require a literal field", path)
+		}
+		if direction, exists := order["direction"]; exists && direction != "asc" && direction != "desc" {
+			return invalid("%s direction must be asc or desc", path)
+		}
+	}
+	return nil
+}

@@ -21,8 +21,9 @@ func TestDatabasePipelineRejectsUnknownOrMistypedConfig(t *testing.T) {
 		return `{"steps":[` + spec + `],"result":{"r":"$steps.s"}}`
 	}
 	cases := map[string]string{
-		"access read orderBy":    access(`{"otherwise":` + fmt.Sprintf(read, `,"orderBy":[{"field":"created_at","direction":"desc"}]`) + `}`),
-		"access read limit":      access(`{"otherwise":` + fmt.Sprintf(read, `,"limit":1`) + `}`),
+		"access read sort":       access(`{"otherwise":` + fmt.Sprintf(read, `,"sort":[{"field":"created_at"}]`) + `}`),
+		"access orderBy dir":     access(`{"otherwise":` + fmt.Sprintf(read, `,"orderBy":[{"field":"created_at","direction":"newest"}]`) + `}`),
+		"access limit unordered": access(`{"otherwise":` + fmt.Sprintf(read, `,"limit":1`) + `}`),
 		"access read fractional": access(`{"otherwise":` + fmt.Sprintf(read, `,"max":2.5`) + `}`),
 		"access value typo":      access(`{"otherwise":` + fmt.Sprintf(read, ``) + `,"singel":true}`),
 		"single not Boolean":     access(`{"otherwise":` + fmt.Sprintf(read, ``) + `,"single":"yes"}`),
@@ -30,7 +31,7 @@ func TestDatabasePipelineRejectsUnknownOrMistypedConfig(t *testing.T) {
 		"access unknown key":     strings.Replace(access(`{"otherwise":`+fmt.Sprintf(read, ``)+`}`), `"access":{`, `"access":{"mode":"strict",`, 1),
 		"param unknown key":      strings.Replace(access(`{"otherwise":`+fmt.Sprintf(read, ``)+`}`), `"required":true`, `"required":true,"default":"x"`, 1),
 		"param from not string":  step(`{"id":"s","op":"count","args":{"collection":"c"}}`)[:1] + `"params":{"p":{"from":5}},` + step(`{"id":"s","op":"count","args":{"collection":"c"}}`)[1:],
-		"step unknown key":       step(`{"id":"s","op":"find","page":{"size":10},"args":{"collection":"c"}}`),
+		"step unknown key":       step(`{"id":"s","op":"find","pages":{"size":10},"args":{"collection":"c"}}`),
 		"max_rows string":        step(`{"id":"s","op":"find","max_rows":"10","args":{"collection":"c"}}`),
 		"metric unknown key":     step(`{"id":"s","op":"aggregate","args":{"collection":"c","metrics":[{"name":"n","op":"count","distinct":true}]}}`),
 		"metric unknown op":      step(`{"id":"s","op":"aggregate","args":{"collection":"c","metrics":[{"name":"n","op":"median","field":"x"}]}}`),
