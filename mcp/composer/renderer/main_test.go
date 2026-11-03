@@ -371,6 +371,42 @@ func TestBrowserNeedsAreValidatedAndFailExplicitly(t *testing.T) {
 		t.Fatalf("capabilities do not report the browser failure: %v", caps)
 	}
 }
+// Mount does not wait for FFmpeg provisioning, so a job submitted while it is
+// in flight waits for it instead of running without FFmpeg.
+func TestJobsWaitForFFmpegProvisioning(t *testing.T) {
+	a, app := testRenderer(t)
+	activate(a)
+	ff, probe := a.ffmpeg.paths()
+	a.ffmpeg.mu.Lock()
+	a.ffmpeg.ffmpeg, a.ffmpeg.ffprobe = "", ""
+	a.ffmpeg.mu.Unlock()
+	a.ffmpeg.prepare <- struct{}{} // provisioning attempt in flight
+	expired := args("expired", "echo should-not-run > ran", 1)
+	expired["timeout_s"] = 1
+	if _, err := a.submit(t.Context(), app, expired); err != nil {
+		t.Fatal(err)
+	}
+	if r := waitJob(t, a, app, "expired"); r.Status != "cancelled" || !r.Stopped {
+		t.Fatalf("%+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(a.root, "ran")); err == nil {
+		t.Fatal("plan ran before FFmpeg was provisioned")
+	}
+	if _, err := a.submit(t.Context(), app, args("waits", "printf %s \"$FFMPEG\"", 1)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if out, _ := a.get(t.Context(), app, map[string]any{"job_id": "waits"}); terminal(out.(receipt).Status) {
+		t.Fatalf("job finished before FFmpeg was provisioned: %+v", out)
+	}
+	a.ffmpeg.mu.Lock()
+	a.ffmpeg.ffmpeg, a.ffmpeg.ffprobe = ff, probe
+	a.ffmpeg.mu.Unlock()
+	<-a.ffmpeg.prepare
+	if r := waitJob(t, a, app, "waits"); r.Status != "succeeded" || r.Output != ff {
+		t.Fatalf("%+v", r)
+	}
+}
 func TestBrowserEnvironmentIsExposedToPlans(t *testing.T) {
 	env := strings.Join(workerEnv("/root", "/opt/ff/ffmpeg", "/opt/ff/ffprobe", browserPaths{Chrome: "/opt/chrome", Node: "/opt/node", ExtraArgs: []string{"--no-sandbox"}}), "\n")
 	for _, want := range []string{"CHROME_BIN=/opt/chrome", "NODE_BIN=/opt/node", "CHROME_EXTRA_ARGS=--no-sandbox", "FFMPEG=/opt/ff/ffmpeg", "PATH=/opt/ff:"} {

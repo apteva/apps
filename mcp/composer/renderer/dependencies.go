@@ -48,37 +48,102 @@ var nodeArtifacts = map[string]artifact{
 	"arm64": {"node-v24.22.1-linux-arm64.tar.gz", "33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3"},
 }
 
-func (a *RendererApp) prepareFFmpeg(ctx context.Context) error {
-	if a.ffmpeg != "" && a.ffprobe != "" {
-		return nil
+// ffmpegDeps resolves FFmpeg and FFprobe once per worker process. When they
+// are neither configured, on PATH nor already provisioned, mount starts the
+// download without waiting for it: unpacking the xz release takes minutes on a
+// one-vCPU host, past the startup budget. Jobs wait for that shared attempt; a
+// failure is retried by the next job.
+type ffmpegDeps struct {
+	prepare   chan struct{} // held by the one provisioning attempt; mu guards state
+	mu        sync.Mutex
+	ffmpeg    string
+	ffprobe   string
+	lastError string
+}
+
+// resolve adopts binaries that need no download and reports whether
+// provisioning is still required.
+func (f *ffmpegDeps) resolve(root, ffmpegConfig, ffprobeConfig string) (bool, error) {
+	f.prepare = make(chan struct{}, 1)
+	ff, probe := executable(ffmpegConfig, "ffmpeg"), executable(ffprobeConfig, "ffprobe")
+	if ff == "" || probe == "" {
+		if _, ok := ffmpegArtifacts[runtime.GOARCH]; runtime.GOOS != "linux" || !ok {
+			return false, errors.New("install FFmpeg/FFprobe on this worker target or configure their executable paths")
+		}
+		ff, probe = ffmpegBinaries(root)
+		if executable(ff, "") == "" || executable(probe, "") == "" {
+			return true, nil
+		}
 	}
-	source, ok := ffmpegArtifacts[runtime.GOARCH]
-	if runtime.GOOS != "linux" || !ok {
-		return errors.New("install FFmpeg/FFprobe on this worker target or configure their executable paths")
+	f.ffmpeg, f.ffprobe = ff, probe
+	return false, nil
+}
+
+func (f *ffmpegDeps) paths() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ffmpeg, f.ffprobe
+}
+
+func (f *ffmpegDeps) status() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]any{"release": ffmpegRelease, "ready": f.ffmpeg != "" && f.ffprobe != ""}
+	if f.lastError != "" {
+		out["error"] = f.lastError
 	}
-	target := filepath.Join(a.root, "dependencies", "ffmpeg-"+ffmpegRelease)
-	ff, probe := filepath.Join(target, "bin", "ffmpeg"), filepath.Join(target, "bin", "ffprobe")
-	if executable(ff, "") != "" && executable(probe, "") != "" {
-		a.ffmpeg, a.ffprobe = ff, probe
-		return nil
+	return out
+}
+
+func (f *ffmpegDeps) ensure(ctx context.Context, root string) (string, string, error) {
+	if ff, probe := f.paths(); ff != "" && probe != "" {
+		return ff, probe, nil
 	}
-	err := installDependency(ctx, target, "https://github.com/BtbN/FFmpeg-Builds/releases/download/"+ffmpegRelease+"/"+source.Name, source.SHA, 300<<20,
+	select {
+	case f.prepare <- struct{}{}:
+	case <-ctx.Done():
+		return "", "", fmt.Errorf("FFmpeg is still being provisioned on this worker: %w", ctx.Err())
+	}
+	defer func() { <-f.prepare }()
+	if ff, probe := f.paths(); ff != "" && probe != "" {
+		return ff, probe, nil
+	}
+	err := provisionFFmpeg(ctx, root)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
+		f.lastError = err.Error()
+		return "", "", err
+	}
+	f.ffmpeg, f.ffprobe = ffmpegBinaries(root)
+	f.lastError = ""
+	return f.ffmpeg, f.ffprobe, nil
+}
+
+func ffmpegBinaries(root string) (string, string) {
+	target := filepath.Join(root, "dependencies", "ffmpeg-"+ffmpegRelease)
+	return filepath.Join(target, "bin", "ffmpeg"), filepath.Join(target, "bin", "ffprobe")
+}
+
+func provisionFFmpeg(ctx context.Context, root string) error {
+	source := ffmpegArtifacts[runtime.GOARCH]
+	ff, _ := ffmpegBinaries(root)
+	target := filepath.Dir(filepath.Dir(ff))
+	return installDependency(ctx, target, "https://github.com/BtbN/FFmpeg-Builds/releases/download/"+ffmpegRelease+"/"+source.Name, source.SHA, 300<<20,
 		func(archive, unpack string) error {
 			// Only the two tools the renderer uses; ffplay and docs are not unpacked.
 			cmd := exec.CommandContext(ctx, "tar", "-xJf", archive, "--strip-components=1", "-C", unpack, "--wildcards", "*/bin/ffmpeg", "*/bin/ffprobe")
 			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("FFmpeg dependency extraction failed: %s", strings.TrimSpace(string(out)))
+				if ctx.Err() != nil {
+					err = ctx.Err()
+				}
+				return fmt.Errorf("FFmpeg dependency extraction failed: %v %s", err, strings.TrimSpace(string(out)))
 			}
 			if executable(filepath.Join(unpack, "bin", "ffmpeg"), "") == "" || executable(filepath.Join(unpack, "bin", "ffprobe"), "") == "" {
 				return errors.New("FFmpeg dependency binaries missing")
 			}
 			return nil
 		})
-	if err != nil {
-		return err
-	}
-	a.ffmpeg, a.ffprobe = ff, probe
-	return nil
 }
 
 // installDependency downloads a pinned artifact, verifies its checksum, unpacks
