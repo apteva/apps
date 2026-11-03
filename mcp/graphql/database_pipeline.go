@@ -57,12 +57,19 @@ type databasePipelineAccessValue struct {
 	SingleRecord           bool                  // restricted: exactly one matching record
 	Union                  []string              // derived from earlier values, no read
 	Intersect              []string
+	Expr                   any  // derived: a server-owned expression returning a list
+	Optional               bool // may resolve to an empty list instead of refusing
 	deps                   []string
 }
 
+func (value databasePipelineAccessValue) derived() bool {
+	return value.Union != nil || value.Intersect != nil || value.Expr != nil
+}
+
 // Access values form a dependency graph: a read may filter on an earlier
-// value ($scope.<name>) and union/intersect combine earlier values. Each level
-// is one read batch, so chains are bounded.
+// value ($scope.<name>); union, intersect and expr derive values in memory.
+// Each level of reads is one read batch, so chains are bounded; derived values
+// run after the reads they need and do not add a level.
 const maxDatabasePipelineAccessLevels = 4
 
 type databasePipelineStep struct {
@@ -270,6 +277,91 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 	return read, nil
 }
 
+// accessExpressionOps are the expression ops an expr access value may use:
+// logic, comparisons, membership, length and coalesce. Nothing that calls out,
+// formats or computes dates.
+var accessExpressionOps = map[string]bool{"if": true, "and": true, "or": true, "not": true, "in": true, "length": true,
+	"eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "coalesce": true}
+
+// validateAccessExpression accepts $scope.<value> (another access value) and
+// $param.<name> where the param is verified identity or a fixed value, never
+// client input: an authorization decision must not take a client flag.
+func (plan *databasePipelinePlan) validateAccessExpression(raw any, self string, deps map[string]bool, depth int) error {
+	if depth > 32 {
+		return errors.New("expression is too deep")
+	}
+	ref, isRef := raw.(string)
+	node, isNode := raw.(map[string]any)
+	if isNode {
+		if input, ok := node["input"].(string); ok && len(node) == 1 {
+			ref, isRef = input, true
+		}
+	}
+	if isRef {
+		if name, ok := strings.CutPrefix(ref, "$scope."); ok {
+			if !plan.accessIndex[name] || name == self {
+				return fmt.Errorf("references unknown access value %q", ref)
+			}
+			deps[name] = true
+			return nil
+		}
+		if name, ok := strings.CutPrefix(ref, "$param."); ok {
+			p, declared := plan.Params[name]
+			if !declared {
+				return fmt.Errorf("references undeclared %q", ref)
+			}
+			if !p.HasValue && !strings.HasPrefix(p.From, "$identity.") {
+				return fmt.Errorf("%q comes from client input; use $identity params or fixed values", ref)
+			}
+			return nil
+		}
+		return fmt.Errorf("input %q must be $scope.<value> or $param.<name>", ref)
+	}
+	if !isNode {
+		return errors.New("must be a reference or an expression object")
+	}
+	if _, ok := node["const"]; ok {
+		if len(node) != 1 {
+			return errors.New("const takes no other keys")
+		}
+		return nil
+	}
+	op, _ := node["op"].(string)
+	if !accessExpressionOps[op] {
+		return fmt.Errorf("unsupported op %q", op)
+	}
+	allowed := []string{"op", "args"}
+	if op == "if" {
+		allowed = []string{"op", "condition", "then", "else"}
+	}
+	for key := range node {
+		if !contains(allowed, key) {
+			return fmt.Errorf("%s does not accept %q", op, key)
+		}
+	}
+	if op == "if" {
+		for _, key := range []string{"condition", "then", "else"} {
+			if _, ok := node[key]; !ok {
+				return fmt.Errorf("if requires %s", key)
+			}
+			if err := plan.validateAccessExpression(node[key], self, deps, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	args, ok := node["args"].([]any)
+	if !ok || len(args) == 0 {
+		return fmt.Errorf("%s requires args", op)
+	}
+	for _, arg := range args {
+		if err := plan.validateAccessExpression(arg, self, deps, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // scopeRefs lists the access values a configuration fragment references.
 func scopeRefs(raw any, out map[string]bool) {
 	switch value := raw.(type) {
@@ -324,7 +416,7 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		if !ok {
 			return invalid("database_pipeline access value %s must be an object", name)
 		}
-		if err := onlyKeys(spec, "database_pipeline access value "+name, "requested", "unrestricted_if_permission", "require_any_permission", "single", "single_record", "default", "otherwise", "union", "intersect"); err != nil {
+		if err := onlyKeys(spec, "database_pipeline access value "+name, "requested", "unrestricted_if_permission", "require_any_permission", "single", "single_record", "default", "otherwise", "union", "intersect", "expr", "optional"); err != nil {
 			return err
 		}
 		for _, key := range []string{"requested", "unrestricted_if_permission"} {
@@ -348,7 +440,7 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 			}
 			value.RequireAny = permissions
 		}
-		for key, target := range map[string]*bool{"single": &value.Single, "single_record": &value.SingleRecord} {
+		for key, target := range map[string]*bool{"single": &value.Single, "single_record": &value.SingleRecord, "optional": &value.Optional} {
 			if raw, exists := spec[key]; exists {
 				if *target, ok = raw.(bool); !ok {
 					return invalid("database_pipeline access value %s %s must be Boolean", name, key)
@@ -358,7 +450,15 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		deps := map[string]bool{}
 		_, hasUnion := spec["union"]
 		_, hasIntersect := spec["intersect"]
-		if hasUnion || hasIntersect {
+		if expr, hasExpr := spec["expr"]; hasExpr {
+			if hasUnion || hasIntersect || spec["default"] != nil || spec["otherwise"] != nil || value.UnrestrictedPermission != "" || value.Requested != "" || value.Single || value.SingleRecord {
+				return invalid("database_pipeline access value %s: expr stands alone (no reads, set operations, requested, unrestricted_if_permission or single assertions)", name)
+			}
+			if err := plan.validateAccessExpression(expr, name, deps, 0); err != nil {
+				return invalid("database_pipeline access value %s expr: %s", name, err)
+			}
+			value.Expr = expr
+		} else if hasUnion || hasIntersect {
 			if hasUnion == hasIntersect || spec["default"] != nil || spec["otherwise"] != nil || value.UnrestrictedPermission != "" || value.Requested != "" {
 				return invalid("database_pipeline access value %s: union or intersect stands alone (no reads, requested or unrestricted_if_permission)", name)
 			}
@@ -420,8 +520,12 @@ func (plan *databasePipelinePlan) orderAccess() error {
 	for i, value := range plan.Access {
 		index[value.Name] = i
 	}
+	// level counts read batches: a read runs one level after what it filters
+	// on; a derived value runs in the level of its deepest dependency, after
+	// that level's reads. topo is a dependency-first order for evaluation.
 	level := make([]int, len(plan.Access))
 	state := make([]int, len(plan.Access)) // 0 new, 1 visiting, 2 done
+	topo := make([]int, 0, len(plan.Access))
 	var visit func(int) error
 	visit = func(i int) error {
 		switch state[i] {
@@ -431,16 +535,21 @@ func (plan *databasePipelinePlan) orderAccess() error {
 			return nil
 		}
 		state[i] = 1
+		step := 1
+		if plan.Access[i].derived() {
+			step = 0
+		}
 		for _, dep := range plan.Access[i].deps {
 			j := index[dep]
 			if err := visit(j); err != nil {
 				return err
 			}
-			if level[j]+1 > level[i] {
-				level[i] = level[j] + 1
+			if level[j]+step > level[i] {
+				level[i] = level[j] + step
 			}
 		}
 		state[i] = 2
+		topo = append(topo, i)
 		return nil
 	}
 	for i := range plan.Access {
@@ -448,15 +557,27 @@ func (plan *databasePipelinePlan) orderAccess() error {
 			return err
 		}
 		if level[i] >= maxDatabasePipelineAccessLevels {
-			return invalid("database_pipeline access chain through %s is deeper than %d levels", plan.Access[i].Name, maxDatabasePipelineAccessLevels)
+			return invalid("database_pipeline access chain through %s needs more than %d read levels", plan.Access[i].Name, maxDatabasePipelineAccessLevels)
 		}
 	}
+	// Within a level, reads keep name order (plan.Access is sorted) and
+	// derived values follow in dependency order.
 	plan.AccessLevels = nil
-	for i := range plan.Access {
+	place := func(i int) {
 		for len(plan.AccessLevels) <= level[i] {
 			plan.AccessLevels = append(plan.AccessLevels, nil)
 		}
 		plan.AccessLevels[level[i]] = append(plan.AccessLevels[level[i]], i)
+	}
+	for i := range plan.Access {
+		if !plan.Access[i].derived() {
+			place(i)
+		}
+	}
+	for _, i := range topo {
+		if plan.Access[i].derived() {
+			place(i)
+		}
 	}
 	return nil
 }
@@ -1178,10 +1299,115 @@ func (run *databasePipelineRun) filter(raw any) any {
 			out[key] = item
 		}
 	}
-	return out
+	return normalizeInLeaf(out)
 }
 
+// Database accepts 1 to 100 values for in. A bound list outside that range is
+// rewritten, never dropped: an empty list becomes a predicate that matches
+// nothing (the same field both null and not null), so and/or, counts and
+// aggregates keep their meaning; a longer list becomes an or of chunks.
+const maxDatabaseInValues = 100
+
+func normalizeInLeaf(leaf map[string]any) map[string]any {
+	if leaf["op"] != "in" {
+		return leaf
+	}
+	values, ok := leaf["value"].([]any)
+	if !ok {
+		return leaf
+	}
+	field := leaf["field"]
+	if len(values) == 0 {
+		return matchNothing(field)
+	}
+	if len(values) <= maxDatabaseInValues {
+		return leaf
+	}
+	chunks := []any{}
+	for start := 0; start < len(values); start += maxDatabaseInValues {
+		end := min(start+maxDatabaseInValues, len(values))
+		chunks = append(chunks, map[string]any{"field": field, "op": "in", "value": values[start:end]})
+	}
+	return map[string]any{"or": chunks}
+}
+
+func matchNothing(field any) map[string]any {
+	return map[string]any{"and": []any{
+		map[string]any{"field": field, "op": "is_null"},
+		map[string]any{"field": field, "op": "is_not_null"},
+	}}
+}
+
+// filterMatchesNothing reports whether a bound filter is provably empty, so a
+// find or count can be answered without reading the collection.
+func filterMatchesNothing(raw any) bool {
+	node, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	if children, ok := node["and"].([]any); ok {
+		if len(children) == 2 {
+			a, _ := children[0].(map[string]any)
+			b, _ := children[1].(map[string]any)
+			if a != nil && b != nil && a["field"] != nil && a["field"] == b["field"] && a["op"] == "is_null" && b["op"] == "is_not_null" {
+				return true
+			}
+		}
+		for _, child := range children {
+			if filterMatchesNothing(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if children, ok := node["or"].([]any); ok && len(children) > 0 {
+		for _, child := range children {
+			if !filterMatchesNothing(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// batch sends one read batch. Finds and counts whose filter matches nothing
+// are answered locally with Database's empty shapes; aggregates are always
+// sent so their summary-row semantics stay Database's.
 func (run *databasePipelineRun) batch(ctx context.Context, operations []any) ([]any, error) {
+	results := make([]any, len(operations))
+	sent := []any{}
+	positions := []int{}
+	for i, raw := range operations {
+		op, _ := raw.(map[string]any)
+		args, _ := op["args"].(map[string]any)
+		if filterMatchesNothing(args["where"]) {
+			switch op["op"] {
+			case "find":
+				results[i] = map[string]any{"records": []any{}, "hasMore": false}
+				continue
+			case "count":
+				results[i] = map[string]any{"count": "0"}
+				continue
+			}
+		}
+		sent = append(sent, raw)
+		positions = append(positions, i)
+	}
+	if len(sent) == 0 {
+		return results, nil
+	}
+	answered, err := run.send(ctx, sent)
+	if err != nil {
+		return nil, err
+	}
+	for j, i := range positions {
+		results[i] = answered[j]
+	}
+	return results, nil
+}
+
+func (run *databasePipelineRun) send(ctx context.Context, operations []any) ([]any, error) {
 	input := map[string]any{
 		"database":    run.plan.Database,
 		"scope":       run.plan.Scope,
@@ -1306,53 +1532,100 @@ func (run *databasePipelineRun) resolveAccess(ctx context.Context) error {
 			return err
 		}
 		for _, i := range level {
-			if name := plan.Access[i].Name; len(run.scope[name]) == 0 {
-				return forbidden("caller has no accessible " + name)
+			// An optional value may be a known empty list; reads that failed
+			// have already returned their error.
+			if value := plan.Access[i]; len(run.scope[value.Name]) == 0 && !value.Optional {
+				return forbidden("caller has no accessible " + value.Name)
 			}
 		}
 	}
 	return nil
 }
 
-func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []int, held map[string]bool, requested map[string][]string) error {
-	type pending struct {
-		value databasePipelineAccessValue
-		read  *databasePipelineRead
-		index int
+type databasePipelinePendingRead struct {
+	value databasePipelineAccessValue
+	read  *databasePipelineRead
+	index int
+}
+
+// deriveAccessValue computes union, intersect and expr values in memory from
+// values already resolved.
+func (run *databasePipelineRun) deriveAccessValue(value databasePipelineAccessValue) error {
+	values, seen := []string{}, map[string]bool{}
+	add := func(item string) {
+		if item = strings.TrimSpace(item); item != "" && !seen[item] {
+			seen[item] = true
+			values = append(values, item)
+		}
 	}
-	var reads []pending
+	switch {
+	case value.Union != nil:
+		for _, ref := range value.Union {
+			for _, item := range run.scope[ref] {
+				add(item)
+			}
+		}
+	case value.Intersect != nil:
+		for _, item := range run.scope[value.Intersect[0]] {
+			inAll := true
+			for _, ref := range value.Intersect[1:] {
+				inAll = inAll && contains(run.scope[ref], item)
+			}
+			if inAll {
+				add(item)
+			}
+		}
+	case value.Expr != nil:
+		inputs := map[string]any{}
+		for name, param := range run.params {
+			inputs["$param."+name] = param
+		}
+		for name, list := range run.scope {
+			items := make([]any, len(list))
+			for i, item := range list {
+				items[i] = item
+			}
+			inputs["$scope."+name] = items
+		}
+		result, err := moduleRuntime{}.eval(combineExpression(value.Expr), inputs, 0)
+		if err != nil {
+			return runtimeError("invalid_result", "database pipeline access value "+value.Name+": "+err.Error())
+		}
+		switch list := result.(type) {
+		case nil:
+		case []any:
+			for _, item := range list {
+				if item == nil {
+					continue
+				}
+				switch item.(type) {
+				case map[string]any, []any:
+					return runtimeError("invalid_result", "database pipeline access value "+value.Name+" must be a list of scalar values")
+				}
+				add(fmt.Sprint(item))
+			}
+		case []string:
+			for _, item := range list {
+				add(item)
+			}
+		default:
+			return runtimeError("invalid_result", "database pipeline access value "+value.Name+" must evaluate to a list")
+		}
+	}
+	run.scope[value.Name] = values
+	return nil
+}
+
+func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []int, held map[string]bool, requested map[string][]string) error {
+	var reads []databasePipelinePendingRead
 	var operations []any
 	for _, i := range level {
 		value := run.plan.Access[i]
 		if len(value.RequireAny) > 0 && !holdsAny(held, value.RequireAny) {
 			return forbidden("caller lacks a permission required for " + value.Name)
 		}
-		switch {
-		case value.Union != nil:
-			values, seen := []string{}, map[string]bool{}
-			for _, ref := range value.Union {
-				for _, item := range run.scope[ref] {
-					if !seen[item] {
-						seen[item] = true
-						values = append(values, item)
-					}
-				}
-			}
-			run.scope[value.Name] = values
-			continue
-		case value.Intersect != nil:
-			values := []string{}
-			for _, item := range run.scope[value.Intersect[0]] {
-				inAll := true
-				for _, ref := range value.Intersect[1:] {
-					inAll = inAll && contains(run.scope[ref], item)
-				}
-				if inAll && !contains(values, item) {
-					values = append(values, item)
-				}
-			}
-			run.scope[value.Name] = values
-			continue
+		if value.derived() {
+			continue // evaluated after this level's reads
 		}
 		unrestricted := value.UnrestrictedPermission != "" && held[value.UnrestrictedPermission]
 		var read *databasePipelineRead
@@ -1379,16 +1652,29 @@ func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []
 		if read.Where != nil {
 			args["where"] = run.filter(read.Where)
 		}
-		reads = append(reads, pending{value: value, read: read, index: len(operations)})
+		reads = append(reads, databasePipelinePendingRead{value: value, read: read, index: len(operations)})
 		operations = append(operations, map[string]any{"op": "find", "args": args})
 	}
-	if len(operations) == 0 {
-		return nil
+	if len(operations) > 0 {
+		results, err := run.batch(ctx, operations)
+		if err != nil {
+			return err
+		}
+		if err := run.applyAccessReads(reads, results, requested); err != nil {
+			return err
+		}
 	}
-	results, err := run.batch(ctx, operations)
-	if err != nil {
-		return err
+	for _, i := range level {
+		if value := run.plan.Access[i]; value.derived() {
+			if err := run.deriveAccessValue(value); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
+}
+
+func (run *databasePipelineRun) applyAccessReads(reads []databasePipelinePendingRead, results []any, requested map[string][]string) error {
 	for _, p := range reads {
 		page, _ := results[p.index].(map[string]any)
 		records, _ := page["records"].([]any)

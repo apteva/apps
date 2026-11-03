@@ -593,7 +593,32 @@ Rules:
   most 4 levels; cycles are rejected. An array field contributes each element.
   A read with `orderBy` and `limit` keeps its first records instead of failing
   past `max` (for example "the latest enabled grant"). An empty value refuses
-  the request before anything that depends on it is read.
+  the request before anything that depends on it is read, unless the value is
+  `optional: true`: then it stays an empty scope, and any filter using it
+  matches nothing (an empty `in` is sent as a contradiction, never dropped).
+  Read failures (truncation past `max`, `single`/`single_record`,
+  `require_any_permission`, Database errors) still refuse an optional value.
+- `{"expr": ...}` derives a value from verified params and earlier values
+  with `if` (`condition`/`then`/`else`), `and`, `or`, `not`, `in`, `length`,
+  `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `coalesce` and `{"const": ...}`.
+  It may reference `$scope.<value>` and `$param.<name>` only for params with a
+  fixed value or a `$identity.` source, never client `$args`. It must return a
+  flat list (null is empty). Derived values (`union`, `intersect`, `expr`) run
+  in their dependency's level and do not count towards the 4 read levels.
+
+  ```json
+  "grantOffers": {"optional": true, "otherwise": {"collection": "grants",
+                  "field": "offer_ids", "where": {"field": "user_id", "op": "eq", "value": "$param.user"},
+                  "orderBy": [{"field": "id", "direction": "desc"}], "limit": 1}},
+  "catalogue":   {"optional": true, "otherwise": {"collection": "offers", "field": "id"}},
+  "offers":      {"optional": true, "expr": {"op": "if",
+                  "condition": {"op": "in", "args": [{"const": "reports:all"}, "$param.permissions"]},
+                  "then": "$scope.catalogue", "else": "$scope.grantOffers"}}
+  ```
+
+- `in` filters with more than 100 values are split into `or` chunks of 100
+  (Database's limit per `in`); a find or count whose filter matches nothing
+  is answered locally without a Database call.
 
   ```json
   "values": {

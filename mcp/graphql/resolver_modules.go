@@ -519,6 +519,8 @@ func (runtime moduleRuntime) eval(raw any, inputs map[string]any, depth int) (an
 			return int64(len([]rune(value))), nil
 		case []any:
 			return int64(len(value)), nil
+		case []string:
+			return int64(len(value)), nil
 		case map[string]any:
 			return int64(len(value)), nil
 		}

@@ -26,6 +26,7 @@ mcp/ffmpeg/ffmpeg
 mcp/finance/finance
 mcp/fleet/fleet
 mcp/functions/functions
+mcp/graphql/graphql
 mcp/health/health
 mcp/media-studio/media-studio
 mcp/instances/instances

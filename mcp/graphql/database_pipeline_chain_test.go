@@ -159,9 +159,10 @@ func TestDatabasePipelineAccessGraphValidation(t *testing.T) {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	// a, b, c, d chain over four levels; a union over d would be a fifth.
-	if _, err := validateDatabasePipeline(decodeConfig(t, plan(`"a":`+read("a", "")+`,"b":`+read("b", dep("a"))+`,"c":`+read("c", dep("b"))+`,"d":`+read("d", dep("c"))+`,"u":{"union":["a","d"]}`))); err == nil {
-		t.Error("union beyond four levels was accepted")
+	// a, b, c, d use four read levels; a union over d is computed in memory
+	// and needs no fifth.
+	if _, err := validateDatabasePipeline(decodeConfig(t, plan(`"a":`+read("a", "")+`,"b":`+read("b", dep("a"))+`,"c":`+read("c", dep("b"))+`,"d":`+read("d", dep("c"))+`,"u":{"union":["a","d"]}`))); err != nil {
+		t.Errorf("derived value after four read levels rejected: %v", err)
 	}
 	if _, err := validateDatabasePipeline(decodeConfig(t, plan(`"a":`+read("a", "")+`,"b":`+read("b", dep("a"))+`,"c":`+read("c", dep("b"))+`,"d":`+read("d", dep("c"))))); err != nil {
 		t.Fatalf("four levels rejected: %v", err)
