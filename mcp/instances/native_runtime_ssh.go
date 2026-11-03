@@ -183,10 +183,10 @@ func nativeReleasedListeners(d nativeRecord) string {
 
 // Read systemd's related properties from one consistent response.
 func nativeUnitProperties() string {
-	return `properties=$(systemctl show "$unit" -p ActiveState -p MainPID -p ControlGroup -p FragmentPath)
- state=; pid=; cg=; fragment=
+	return `properties=$(systemctl show "$unit" -p ActiveState -p MainPID -p ControlGroup -p FragmentPath -p Result -p ExecMainPID -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp)
+ state=; pid=; cg=; fragment=; result=; main_pid=; main_code=; main_status=; main_start=; main_exit=
  while IFS='=' read -r property value; do
-  case "$property" in ActiveState) state=$value;; MainPID) pid=$value;; ControlGroup) cg=$value;; FragmentPath) fragment=$value;; esac
+  case "$property" in ActiveState) state=$value;; MainPID) pid=$value;; ControlGroup) cg=$value;; FragmentPath) fragment=$value;; Result) result=$value;; ExecMainPID) main_pid=$value;; ExecMainCode) main_code=$value;; ExecMainStatus) main_status=$value;; ExecMainStartTimestamp) main_start=$value;; ExecMainExitTimestamp) main_exit=$value;; esac
  done <<APTEVA_PROPERTIES
 $properties
 APTEVA_PROPERTIES

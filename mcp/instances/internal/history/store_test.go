@@ -54,6 +54,9 @@ func TestPeaksSurviveEveryTierAndReplay(t *testing.T) {
 	if err := s.Ingest(7, b); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	for _, tier := range Tiers {
 		var data string
 		if err := s.DB.QueryRow(`SELECT data FROM points WHERE host=7 AND step=?`, tier.Step).Scan(&data); err != nil {

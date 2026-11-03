@@ -42,6 +42,9 @@ func (e *Engine) Gap(m Metrics) {
 	e.pressureSince = 0
 }
 func (e *Engine) SetLatest(m Metrics) { e.mu.Lock(); defer e.mu.Unlock(); e.Latest = &m }
+
+// Recording reports whether an incident is open and wants fine-grained samples.
+func (e *Engine) Recording() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.active != "" }
 func readingPoint(m Metrics, at, duration int64) Point {
 	p := Point{Time: at / 1000 * 1000, Step: 1000, ObservedMS: duration, Samples: 1, Values: map[string]Aggregate{}}
 	values := map[string]float64{"cpu": m.CPU.TotalPct, "core": m.CPU.BusiestCorePct, "cpu_user": m.CPU.UserPct, "cpu_system": m.CPU.SystemPct, "iowait": m.CPU.IOWaitPct, "steal": m.CPU.StealPct}

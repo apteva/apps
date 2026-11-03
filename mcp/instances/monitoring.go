@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -28,6 +29,21 @@ type monitoringManager struct {
 	done    chan struct{}
 	started bool
 	slots   chan struct{}
+	// Unix ms of the last live/history/incident read per host. Unwatched hosts
+	// are polled and sampled slowly; a viewer gets full resolution within a poll.
+	watched sync.Map
+	// The local in-process sampler's current CPU interval in ms.
+	localInterval atomic.Int64
+}
+
+const watchWindow = time.Minute
+const idleRemotePoll = 10 * time.Second
+const localIdleSample = time.Second
+
+func (m *monitoringManager) watch(id int64) { m.watched.Store(id, time.Now().UnixMilli()) }
+func (m *monitoringManager) watchedRecently(id int64) bool {
+	at, ok := m.watched.Load(id)
+	return ok && time.Now().UnixMilli()-at.(int64) < watchWindow.Milliseconds()
 }
 
 var monitoringManagersMu sync.Mutex
@@ -215,7 +231,15 @@ func (m *monitoringManager) monitorHost(work context.Context, id int64) {
 				localDone = make(chan struct{})
 				localEngine := engine
 				localStopped := localDone
-				go func() { defer close(localStopped); monitor.Run(localWork, localEngine) }()
+				interval := func() time.Duration {
+					wait := localIdleSample
+					if m.watchedRecently(id) || localEngine.Recording() {
+						wait = monitor.SampleInterval
+					}
+					m.localInterval.Store(wait.Milliseconds())
+					return wait
+				}
+				go func() { defer close(localStopped); monitor.RunAdaptive(localWork, localEngine, interval) }()
 			}
 			batch := engine.Export(status.LastPoint)
 			if batch.Latest != nil {
@@ -233,6 +257,9 @@ func (m *monitoringManager) monitorHost(work context.Context, id int64) {
 				if err == nil {
 					installed = true
 				}
+			}
+			if !m.watchedRecently(id) {
+				nextPoll = idleRemotePoll
 			}
 			if err == nil {
 				var batch monitor.Batch
@@ -267,9 +294,15 @@ func liveMonitoring(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.watch(id)
 	status, err := m.store.Status(id)
 	if err != nil {
 		return nil, err
+	}
+	if inst, err := dbGetInstance(ctx.AppDB(), id); err == nil && inst.IsLocal() {
+		if ms := m.localInterval.Load(); ms > 0 {
+			status.SampleIntervalMS = int(ms)
+		}
 	}
 	metrics, err := m.store.Latest(id)
 	if err == sql.ErrNoRows {
@@ -326,6 +359,7 @@ func monitoringHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.watch(id)
 	return m.store.History(id, from, to, strArg(args, "resolution"), max)
 }
 func monitoringIncidents(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -337,6 +371,7 @@ func monitoringIncidents(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.watch(id)
 	if event := strArg(args, "incident_id"); event != "" {
 		ev, err := m.store.Incident(id, event)
 		return map[string]any{"incident": ev}, err
