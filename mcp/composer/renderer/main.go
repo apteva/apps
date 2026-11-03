@@ -609,7 +609,7 @@ func (a *RendererApp) status(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	writeJSON(w, map[string]any{"deployment_id": a.deploymentID, "generation": a.generation,
-		"state": a.lifecycleState, "admitting": a.active, "load": map[string]any{"used": a.used, "capacity": a.capacity}})
+		"state": a.lifecycleState, "admitting": a.active, "load": float64(a.used) / float64(a.capacity)})
 }
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

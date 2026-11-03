@@ -265,11 +265,13 @@ func TestManagedLifecycleIdentityAndStatus(t *testing.T) {
 			Generation   int64  `json:"generation"`
 			State        string `json:"state"`
 			Admitting    bool   `json:"admitting"`
+			// Server decodes load as a scalar; anything else fails admission.
+			Load *float64 `json:"load"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.DeploymentID != "deployment-test" || got.Generation != 7 || got.State != state || got.Admitting != admitting {
+		if got.DeploymentID != "deployment-test" || got.Generation != 7 || got.State != state || got.Admitting != admitting || got.Load == nil || *got.Load != 0 {
 			t.Fatalf("status=%+v", got)
 		}
 	}
