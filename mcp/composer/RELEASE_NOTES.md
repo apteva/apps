@@ -1,3 +1,28 @@
+# Composer v0.11.3
+
+- Browser captures no longer depend on host fonts. The renderer worker
+  (`composer-renderer` 0.11.3) bundles Inter (SIL OFL 1.1) and Go Mono (BSD)
+  and gives Chrome its own fontconfig: generic, system and common named
+  families (`sans-serif`, `-apple-system`, `Helvetica`, `Arial`, `monospace`,
+  `Menlo`, `Courier New`, ...) resolve to the bundled fonts, with host font
+  directories as a fallback for other glyphs. On a minimal Debian host without
+  fonts, 0.11.2 completed browser renders and web-canvas-1 procedures with
+  blank text. If the bundled fonts cannot be installed, browser jobs now fail
+  explicitly instead of rendering. FFmpeg-only jobs keep the host environment.
+- Browser readiness is visible right after deploy. Mount starts provisioning
+  Chrome headless shell and Node.js in the background, as it does for FFmpeg,
+  and `capabilities` reports `browser_status`: `ready`, `provisioning`,
+  `missing_libraries`, `fonts` (`bundled`, `system` or `unavailable`) and the
+  last error. Jobs wait for that attempt; a failed attempt is retried by the
+  next browser job, so installing missing libraries needs no redeploy. The
+  `browser` key is kept for 0.11.2 parents.
+
+Validation: renderer worker tests (including under `-race`) and the full
+Composer Go suite; the generated fontconfig resolves the aliased families to
+the bundled faces with fontconfig's `fc-match`.
+
+---
+
 # Composer v0.11.2
 
 - The renderer worker (`composer-renderer` 0.11.2) no longer provisions
