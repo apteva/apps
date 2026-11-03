@@ -756,12 +756,21 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			return nil, Invalid("mutations do not accept pagination, ordering or projection")
 		}
 		if len(r.Key) > 0 {
-			if r.Where != nil || r.All || len(r.Key) != len(c.PrimaryKey) {
-				return nil, Invalid("use an exact key or a filter")
+			if r.All || len(r.Key) != len(c.PrimaryKey) {
+				return nil, Invalid("key must contain exactly the primary key fields and cannot be combined with all")
 			}
 			filters := []Filter{}
 			for _, p := range c.PrimaryKey {
+				if _, ok := r.Key[p]; !ok {
+					return nil, Invalid("key must contain exactly the primary key fields and cannot be combined with all")
+				}
 				filters = append(filters, Filter{Field: p, Op: "eq", Value: r.Key[p]})
+			}
+			// A where with a key is a guard: the record must also match it. A
+			// failed guard reads like an absent record (affected 0, or
+			// version_conflict with ifVersion), in the same write transaction.
+			if r.Where != nil {
+				filters = append(filters, *r.Where)
 			}
 			r.Where = &Filter{And: filters}
 		}
