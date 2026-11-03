@@ -249,3 +249,59 @@ func TestPlatformsReportReusableConnectionForPickerPlatforms(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionUsableInProjectAcceptsGlobalButNotOtherProjects(t *testing.T) {
+	ok := func(c sdk.PlatformConnection) bool { return connectionUsableInProject(&c, 19, "test-proj", "youtube-api") }
+	base := sdk.PlatformConnection{ID: 19, AppSlug: "youtube-api", Status: "active", ProjectID: "test-proj"}
+	global := base
+	global.ProjectID = ""
+	other := base
+	other.ProjectID = "other"
+	inactive := base
+	inactive.Status = "disconnected"
+	wrongApp := global
+	wrongApp.AppSlug = "facebook-api"
+	wrongID := global
+	wrongID.ID = 20
+	if !ok(base) || !ok(global) {
+		t.Fatal("project and global connections must be usable")
+	}
+	for name, c := range map[string]sdk.PlatformConnection{"other project": other, "inactive": inactive, "wrong integration": wrongApp, "wrong id": wrongID} {
+		if ok(c) {
+			t.Errorf("%s connection accepted", name)
+		}
+	}
+	if connectionUsableInProject(nil, 19, "test-proj", "youtube-api") || connectionUsableInProject(&global, 19, "", "youtube-api") {
+		t.Fatal("nil connection or missing project accepted")
+	}
+}
+
+type globalConnectionPlatform struct {
+	*recordingPlatform
+	conn sdk.PlatformConnection
+}
+
+func (p *globalConnectionPlatform) GetConnection(int64) (*sdk.PlatformConnection, error) {
+	c := p.conn
+	return &c, nil
+}
+
+func TestYouTubeChannelIdentityWorksOnGlobalConnection(t *testing.T) {
+	pf := &globalConnectionPlatform{recordingPlatform: newRecordingPlatform(), conn: sdk.PlatformConnection{ID: 19, AppSlug: "youtube-api", Status: "active"}}
+	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[{"id":"UCmonika"}]}`)}
+	ctx := newSocialCtx(t, pf)
+	account := audienceAccount{ID: 3, ConnectionID: 19, Project: "test-proj", Platform: "youtube", ExternalID: "UCmonika"}
+	if id, err := youtubeChannelIdentity(ctx, account); err != nil || id != "UCmonika" {
+		t.Fatalf("global connection rejected: %q %v", id, err)
+	}
+	// The channel identity check still guards a global connection.
+	account.ExternalID = "UCsomeoneelse"
+	if _, err := youtubeChannelIdentity(ctx, account); err == nil || !strings.Contains(err.Error(), "different channel") {
+		t.Fatalf("identity not verified: %v", err)
+	}
+	pf.conn.ProjectID = "other"
+	account.ExternalID = "UCmonika"
+	if _, err := youtubeChannelIdentity(ctx, account); err == nil {
+		t.Fatal("another project's connection accepted")
+	}
+}

@@ -73,7 +73,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if err != nil {
 		return "", "", err
 	}
-	if conn == nil || conn.ID != j.connID || conn.Status != "active" || conn.ProjectID != projectScope(ctx) || conn.AppSlug != def.IntegrationSlug {
+	if !connectionUsableInProject(conn, j.connID, projectScope(ctx), def.IntegrationSlug) {
 		return "", "", errors.New("YouTube connection is not active in this project")
 	}
 	var id, session, fingerprint, retryAt string

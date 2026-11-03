@@ -263,8 +263,8 @@ func youtubeChannelIdentity(ctx *sdk.AppCtx, account audienceAccount) (string, e
 	if err != nil {
 		return "", err
 	}
-	if conn == nil || conn.ID != account.ConnectionID || conn.Status != "active" || conn.ProjectID != account.Project || conn.AppSlug != "youtube-api" {
-		return "", errors.New("YouTube connection is inactive or does not match this project")
+	if !connectionUsableInProject(conn, account.ConnectionID, account.Project, "youtube-api") {
+		return "", errors.New("YouTube connection is inactive, for another integration, or belongs to another project")
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(account.ConnectionID, "get_my_channel", map[string]any{"part": "id"})
 	if err != nil {
