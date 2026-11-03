@@ -1,5 +1,5 @@
-// Composer v0.3.0 - multi-clip video compositions rendered locally (or
-// on a render host via instances). Asset sources accept storage:N /
+// Composer - multi-clip video compositions rendered locally (or on
+// Composer's private renderer component). Asset sources accept storage:N /
 // mediastudio:N / https URLs, plus AI asset specs materialized via
 // Media Studio; output lands back in storage (or the sidecar's local
 // cache when storage is unbound).
@@ -8,7 +8,9 @@
 //   - compositions.go     canonical Edit JSON + validator
 //   - executor.go         Executor interface + selectExecutor ladder
 //   - exec_local.go       bundled ffmpeg + filter_complex translator
-//   - exec_remote.go      SSH-exec on a host managed by `instances`
+//   - exec_component.go   V1 ffmpeg plans for the renderer component
+//   - component.go        renderer component client, durable job records
+//   - component_transfer.go job-scoped Storage relay for renderer uploads
 //   - tools.go            MCP tool surface
 //   - dispatch.go         HTTP routes + render orchestration
 //   - cache.go            local fallback when storage is unbound
@@ -30,8 +32,20 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 replaces the Instances SSH render path with Composer's private
+  renderer component (apteva.composer-renderer/v1), deployed and placed by
+  Server: on the Composer host or on any execution backend, such as an
+  Instances host. With execution_mode=component, V1 FFmpeg renders, browser V2
+  renders and web-canvas-1 procedures run on the renderer, which provisions
+  pinned FFmpeg, Chrome headless shell and Node.js builds, reports progress, and
+  uploads results through a job-scoped Storage relay; Composer's platform
+  token never leaves the sidecar. Native V2 renders and script procedures stay
+  local. Installs that had render_host_id set keep offloading and fail
+  explicitly until the renderer is deployed. Composer no longer depends on the
+  Instances app.
+
   v0.10.0 makes web-canvas-1 procedures executable. A procedure is an HTML
   page that draws any time t through setTime(t) (or composer.onTime), reading
   parameters, canvas, timeline, and input asset URLs from window.composer.
@@ -123,7 +137,7 @@ description: |
   honor explicit clip starts on an absolute background canvas whenever gaps,
   overlaps, or out-of-order clips prevent safe concatenation; contiguous and
   legacy implicit tracks keep the efficient concat path.
-  Renders locally via ffmpeg, on a render host via instances, or against a
+  Renders locally via ffmpeg, on the private renderer component, or against a
   bound render_executor integration.
   Live chat cards expose evolving compositions and durable render progress.
   Render rows are created before AI materialization, asynchronous submissions
@@ -148,7 +162,6 @@ requires:
     - platform.apps.call
   apps:
     - { name: storage, version: ">=0.10.13" }
-    - { name: instances, version: ">=0.2.0", optional: true }
     - { name: media-studio, version: ">=0.10.62", optional: true }
   integrations:
     - role: render_executor
@@ -234,28 +247,16 @@ db:
   path: /data/composer.db
   migrations: migrations/
 config_schema:
-  - name: render_host_id
-    type: select_from_app
-    app: instances
-    discovery:
-      route: /api/instances
-      response_path: instances
-      value_field: id
-      label_field: name
-    fallback: text
-    default: "0"
-    label: Remote render host
-    description: |
-      Pick a host from the Instances app inventory to offload Composer
-      ffmpeg renders. 0 means local sidecar rendering. Remote renders
-      download signed input URLs on the selected host and upload the
-      finished composition back to Storage.
+  - name: execution_mode
+    type: text
+    default: local
+    label: Render execution
+    description: "local renders in the Composer sidecar. component sends V1 FFmpeg renders, browser V2 renders and web-canvas-1 procedures to Composer's private renderer, placed by Server (deploy it through this installation's Components API first). Unavailable renderer calls fail explicitly; they never fall back to local rendering."
   - name: ffmpeg_path
     type: text
     default: "ffmpeg"
     label: ffmpeg binary
-    description: PATH lookup by default for local renders. Remote renders
-      bootstrap a static ffmpeg on the selected host when needed.
+    description: PATH lookup for local renders. The renderer component provisions its own pinned FFmpeg.
   - name: ffprobe_path
     type: text
     default: "ffprobe"
@@ -285,6 +286,76 @@ config_schema:
     type: text
     default: "1073741824"
     label: Maximum procedure artifact bytes
+components:
+  renderer:
+    protocol: apteva.composer-renderer/v1
+    required: false
+    capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
+    manifest:
+      schema: apteva-app/v1
+      name: composer-renderer
+      display_name: Composer Renderer
+      version: 0.11.0
+      description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
+      scopes: [project, global]
+      requires:
+        permissions: [net.egress]
+      provides:
+        http_routes:
+          - prefix: /_apteva/runtime/app/
+        mcp_tools:
+          - name: capabilities
+            description: Report available render dependencies, execution limits and the gateway this worker reaches.
+          - name: submit
+            description: Submit an idempotent, deadline-bounded render plan from the owning Composer installation.
+          - name: get
+            description: Inspect a render attempt (status and progress) without replaying it.
+          - name: cancel
+            description: Cancel an attempt and confirm process-group termination.
+          - name: acknowledge
+            description: Compact a render receipt after the parent durably records it, retaining the idempotency tombstone.
+      runtime:
+        kind: source
+        source:
+          repo: github.com/apteva/apps
+          ref: 6c18d737d8e4e6325b312fcf42fc1d91a652f4e4
+          entry: mcp/composer/renderer
+        port: 8080
+        health_check: /health
+        startup_timeout_seconds: 120
+        package:
+          app_capabilities:
+            passive_start: true
+            drain: true
+            replica_safe: false
+            worker_coordination: false
+            routing: key
+      config_schema:
+        - name: work_capacity
+          type: text
+          default: "2"
+          description: Weighted render capacity; browser captures weigh 2, encodes 1.
+        - name: ffmpeg_path
+          type: text
+          default: ffmpeg
+          description: FFmpeg executable on the execution target. A pinned static build is provisioned on Linux when missing.
+        - name: ffprobe_path
+          type: text
+          default: ffprobe
+          description: FFprobe executable on the execution target.
+        - name: chrome_path
+          type: text
+          default: ""
+          description: Chrome/Chromium executable for browser capture. Empty uses a local browser or provisions the pinned Chrome headless shell on Linux.
+        - name: node_path
+          type: text
+          default: ""
+          description: Node.js 22+ executable for browser capture. Empty uses node on PATH or provisions the pinned Node.js build on Linux.
 upgrade_policy: auto-patch
 `
 
@@ -320,7 +391,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.renderPoolCancel = startComposerRenderPool(ctx)
 	ctx.Logger().Info("composer mounted",
 		"ffmpeg_path", ffmpegPath(),
-		"render_host_id", renderHostID(ctx),
+		"component_rendering", componentRenderingEnabled(ctx),
 	)
 	return nil
 }
@@ -461,24 +532,6 @@ func composerV2Enabled() bool {
 		return true
 	}
 	return v != "0" && v != "false" && v != "no" && v != "off"
-}
-
-// renderHostID reads the optional install-config field. When > 0,
-// renders SSH-execute on that instance via the `instances` app
-// instead of running locally.
-func renderHostID(ctx *sdk.AppCtx) int64 {
-	v := ""
-	if ctx != nil {
-		v = strings.TrimSpace(ctx.Config().Get("render_host_id"))
-	}
-	if v == "" {
-		v = strings.TrimSpace(os.Getenv("RENDER_HOST_ID"))
-	}
-	if v == "" {
-		return 0
-	}
-	n, _ := strconv.ParseInt(v, 10, 64)
-	return n
 }
 
 // --- generic arg helpers (mirror media-studio's set) -------------

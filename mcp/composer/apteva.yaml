@@ -2,8 +2,20 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 replaces the Instances SSH render path with Composer's private
+  renderer component (apteva.composer-renderer/v1), deployed and placed by
+  Server: on the Composer host or on any execution backend, such as an
+  Instances host. With execution_mode=component, V1 FFmpeg renders, browser V2
+  renders and web-canvas-1 procedures run on the renderer, which provisions
+  pinned FFmpeg, Chrome headless shell and Node.js builds, reports progress, and
+  uploads results through a job-scoped Storage relay; Composer's platform
+  token never leaves the sidecar. Native V2 renders and script procedures stay
+  local. Installs that had render_host_id set keep offloading and fail
+  explicitly until the renderer is deployed. Composer no longer depends on the
+  Instances app.
+
   v0.10.0 makes web-canvas-1 procedures executable. A procedure is an HTML
   page that draws any time t through setTime(t) (or composer.onTime), reading
   parameters, canvas, timeline, and input asset URLs from window.composer.
@@ -331,10 +343,6 @@ requires:
     - name: storage
       version: ">=0.10.13"
       reason: source bytes via signed URLs, rendered output written back as a new file
-    - name: instances
-      version: ">=0.2.0"
-      optional: true
-      reason: when render_host_id config > 0, renders SSH-execute on that instance (auto-installs ffmpeg on first use)
     - name: media-studio
       version: ">=0.10.62"
       optional: true
@@ -348,7 +356,7 @@ requires:
         video.compose: queue_render
       required: false
       label: "Render backend (optional)"
-      hint: "When unbound, renders run locally via the sidecar's bundled ffmpeg (or remote via instances if render_host_id is set). SaaS executors are reserved for a later release."
+      hint: "When unbound, renders run locally via the sidecar's bundled ffmpeg (or on the renderer component when execution_mode=component). SaaS executors are reserved for a later release."
 
 provides:
   http_routes:
@@ -374,7 +382,7 @@ provides:
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
     - { name: composition_delete, description: "Delete a composition (cascades renders). Args: id." }
     - name: composition_render
-      description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote'), wait? (default true for compatibility; false returns render_id immediately and continues durably in the background)."
+      description: "Submit a composition for rendering. Args: id, executor? ('local'|'component'), wait? (default true for compatibility; false returns render_id immediately and continues durably in the background)."
       async_result:
         id_field: render_id
         notify:
@@ -439,27 +447,16 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: render_host_id
-    type: select_from_app
-    app: instances
-    discovery:
-      route: /api/instances
-      response_path: instances
-      value_field: id
-      label_field: name
-    fallback: text
-    default: "0"
-    label: Remote render host
-    description: |
-      Pick a host from the Instances app inventory to offload Composer
-      ffmpeg renders. 0 means local sidecar rendering. Remote renders
-      download signed input URLs on the selected host and upload the
-      finished composition back to Storage.
+  - name: execution_mode
+    type: text
+    default: local
+    label: Render execution
+    description: "local renders in the Composer sidecar. component sends V1 FFmpeg renders, browser V2 renders and web-canvas-1 procedures to Composer's private renderer, placed by Server (deploy it through this installation's Components API first). Unavailable renderer calls fail explicitly; they never fall back to local rendering."
   - name: ffmpeg_path
     type: text
     default: "ffmpeg"
     label: ffmpeg binary
-    description: PATH lookup by default for local renders. Remote renders bootstrap a static ffmpeg on the selected host when needed.
+    description: PATH lookup for local renders. The renderer component provisions its own pinned FFmpeg.
   - name: ffprobe_path
     type: text
     default: "ffprobe"
@@ -489,5 +486,76 @@ config_schema:
     type: text
     default: "1073741824"
     label: Maximum procedure artifact bytes
+
+components:
+  renderer:
+    protocol: apteva.composer-renderer/v1
+    required: false
+    capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
+    manifest:
+      schema: apteva-app/v1
+      name: composer-renderer
+      display_name: Composer Renderer
+      version: 0.11.0
+      description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
+      scopes: [project, global]
+      requires:
+        permissions: [net.egress]
+      provides:
+        http_routes:
+          - prefix: /_apteva/runtime/app/
+        mcp_tools:
+          - name: capabilities
+            description: Report available render dependencies, execution limits and the gateway this worker reaches.
+          - name: submit
+            description: Submit an idempotent, deadline-bounded render plan from the owning Composer installation.
+          - name: get
+            description: Inspect a render attempt (status and progress) without replaying it.
+          - name: cancel
+            description: Cancel an attempt and confirm process-group termination.
+          - name: acknowledge
+            description: Compact a render receipt after the parent durably records it, retaining the idempotency tombstone.
+      runtime:
+        kind: source
+        source:
+          repo: github.com/apteva/apps
+          ref: 6c18d737d8e4e6325b312fcf42fc1d91a652f4e4
+          entry: mcp/composer/renderer
+        port: 8080
+        health_check: /health
+        startup_timeout_seconds: 120
+        package:
+          app_capabilities:
+            passive_start: true
+            drain: true
+            replica_safe: false
+            worker_coordination: false
+            routing: key
+      config_schema:
+        - name: work_capacity
+          type: text
+          default: "2"
+          description: Weighted render capacity; browser captures weigh 2, encodes 1.
+        - name: ffmpeg_path
+          type: text
+          default: ffmpeg
+          description: FFmpeg executable on the execution target. A pinned static build is provisioned on Linux when missing.
+        - name: ffprobe_path
+          type: text
+          default: ffprobe
+          description: FFprobe executable on the execution target.
+        - name: chrome_path
+          type: text
+          default: ""
+          description: Chrome/Chromium executable for browser capture. Empty uses a local browser or provisions the pinned Chrome headless shell on Linux.
+        - name: node_path
+          type: text
+          default: ""
+          description: Node.js 22+ executable for browser capture. Empty uses node on PATH or provisions the pinned Node.js build on Linux.
 
 upgrade_policy: auto-patch

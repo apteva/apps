@@ -1,3 +1,31 @@
+# Composer v0.11.0
+
+Remote rendering moves from the Instances SSH path to Composer's private
+`renderer` owned component (`apteva.composer-renderer/v1`), deployed and placed
+by Server: on the Composer host or on any execution backend, such as an
+Instances host. Set `execution_mode=component` and V1 FFmpeg renders, browser
+V2 renders, and `web-canvas-1` procedures run on the renderer, which:
+
+- provisions pinned, checksum-verified FFmpeg, Chrome headless shell, and
+  Node.js builds;
+- reports progress, journals receipts, and confirms cancellation and drain;
+- uploads results through a job-scoped Storage relay, so Composer's platform
+  token never leaves the sidecar.
+
+Native V2 renders and script procedures stay local. Composer no longer depends
+on the Instances app; `render_host_id` and the panel host picker are removed.
+Installs that had `render_host_id` set keep offloading and fail explicitly
+until the renderer is deployed (`POST /api/apps/installs/<id>/components/renderer`).
+Migration 007 adds the renderer job tables and fails any render still running
+on an Instances host instead of replaying it.
+
+app-sdk moves from v0.77.1 to v0.113.0. Validation: full Composer Go suite and
+`go vet`, renderer worker tests, panel tests, and end-to-end tests that execute
+V1 FFmpeg, browser V2, and web-canvas plans through the relay into a fake
+Storage.
+
+---
+
 # Composer v0.10.0
 
 `web-canvas-1` procedures now run. The entrypoint is an HTML page that draws a

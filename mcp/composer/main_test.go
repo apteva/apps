@@ -2574,38 +2574,39 @@ func TestComposerV2ExamplesValidate(t *testing.T) {
 	}
 }
 
-func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
-	script := remoteRenderScript(
-		[]string{"https://example.com/in.mp4"},
-		"ffmpeg -i ./in0 ./out.mp4",
-		"mp4",
-		"project-1",
-		"https://agents.example.com/",
-		"token-redacted",
-		"composition.mp4",
-		"video/mp4",
-		map[string]string{composerFontInterBold: "https://agents.example.com/api/apps/composer/render-font?project_id=project-1&face=inter-bold"},
-	)
+// renderUploadScript is the post-render tail of a renderer plan for out.<format>.
+func renderUploadScript(format string) string {
+	s := newRendererScript()
+	s.upload(rendererEnv{Relay: "https://gw.example/api/apps/composer/_install/7/renderer-io/api/apps/callback/apps/storage/proxy", Grant: "grant-token", ProjectID: "owner"}, "./out."+format, "out.mp4", "video/mp4")
+	return s.String()
+}
+
+func TestRendererPlanUploadsThroughScopedRelay(t *testing.T) {
+	t.Setenv("APTEVA_APP_TOKEN", "parent-platform-token")
+	script := renderUploadScript("mp4")
 	for _, want := range []string{
-		`export STORAGE_BASE=https://agents.example.com/api/apps/callback/apps/storage/proxy`,
+		`export STORAGE_BASE=https://gw.example/api/apps/composer/_install/7/renderer-io/api/apps/callback/apps/storage/proxy`,
+		`export STORAGE_TOKEN=grant-token`,
+		"export APTEVA_TRANSFER_ENCODING=base64",
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID",
+		"X-Apteva-Transfer-Encoding: base64",
 		"composer-render",
-		"Authorization: Bearer token-redacted",
-		"-o ./composer-inter-bold.ttf",
-		"/api/apps/composer/render-font?project_id=project-1&face=inter-bold",
 		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
 		"STORAGE_INIT_FAILED code=$INIT_CODE",
 		"STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE",
 	} {
 		if !strings.Contains(script, want) {
-			t.Fatalf("remote script missing %q\n%s", want, script)
+			t.Fatalf("renderer plan missing %q\n%s", want, script)
 		}
 	}
-	if strings.Contains(script, `export STORAGE_BASE="https://agents.example.com/api/apps/storage"`) {
-		t.Fatal("remote script uses the direct cross-install Storage route")
+	if strings.Contains(script, "parent-platform-token") {
+		t.Fatal("renderer plan carries Composer's platform token")
+	}
+	if strings.Contains(script, "iflag=") {
+		t.Fatal("renderer plan uses GNU-only dd flags; macOS workers cannot split parts")
 	}
 	oneShot := "$STORAGE_BASE/files?project_id=$PROJECT_ID"
 	if first := strings.Index(script, "$STORAGE_BASE/files/init?project_id=$PROJECT_ID"); first < 0 {
@@ -2615,11 +2616,14 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 	}
 }
 
-func TestRemoteExecFailurePreservesRemoteOutput(t *testing.T) {
-	err := remoteExecFailure(errors.New("remote exit_code=22"), "curl: HTTP 403\nstorage upload rejected")
-	for _, want := range []string{"remote exit_code=22", "HTTP 403", "storage upload rejected"} {
+func TestRendererResultFailureKeepsWorkerOutput(t *testing.T) {
+	err := rendererResultErr(rendererReceipt{JobID: "j1", Status: "failed", Error: "render failed", Stopped: true, Output: "curl: HTTP 403\nstorage upload rejected"})
+	for _, want := range []string{"j1", "render failed", "HTTP 403", "storage upload rejected"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
+	}
+	if err := rendererResultErr(rendererReceipt{JobID: "j2", Status: "running"}); !errors.Is(err, errRendererUnresolved) {
+		t.Fatalf("unstopped receipt must be unresolved, got %v", err)
 	}
 }

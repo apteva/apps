@@ -802,6 +802,12 @@ func (r *v2NativeRender) fitText(text string, bold bool, size float64, box image
 }
 
 func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output, projectID, framePattern, outFile string, duration float64, fps int) ([]string, error) {
+	return buildV2EncodeArgs(func(src string) (string, error) { return resolveAssetLocal(app, src) }, spec, framePattern, outFile, duration, fps)
+}
+
+// buildV2EncodeArgs muxes captured frames with the composition's audio. resolve
+// maps each audio source to an ffmpeg input (local path, URL or worker file).
+func buildV2EncodeArgs(resolve func(string) (string, error), spec *V2Composition, framePattern, outFile string, duration float64, fps int) ([]string, error) {
 	assets := map[string]V2Asset{}
 	for _, asset := range spec.Assets {
 		assets[asset.ID] = asset
@@ -820,7 +826,7 @@ func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output
 		if clipAssetType(c, "audio") == "silence" {
 			continue
 		}
-		url, err := resolveAssetLocal(app, c.Asset.Src)
+		url, err := resolve(c.Asset.Src)
 		if err != nil {
 			return nil, err
 		}
@@ -829,7 +835,7 @@ func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output
 	}
 	soundtrackIdx := -1
 	if hasSoundtrack {
-		url, err := resolveAssetLocal(app, soundtrack.Src)
+		url, err := resolve(soundtrack.Src)
 		if err != nil {
 			return nil, err
 		}
