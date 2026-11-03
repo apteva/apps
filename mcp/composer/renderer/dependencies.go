@@ -199,52 +199,78 @@ func installDependency(ctx context.Context, target, source, sha string, limit in
 }
 
 type browserPaths struct {
-	Chrome    string   `json:"chrome"`
-	Node      string   `json:"node"`
-	ExtraArgs []string `json:"extra_args,omitempty"`
+	Chrome     string   `json:"chrome"`
+	Node       string   `json:"node"`
+	FontConfig string   `json:"fontconfig_file,omitempty"`
+	ExtraArgs  []string `json:"extra_args,omitempty"`
 }
 
-// browserDeps resolves Chrome and Node once per worker process. Concurrent
-// browser jobs share one provisioning attempt; a failure is retried by the next.
+// browserCheck is what a provisioning attempt learned about the target, kept
+// for status even when the attempt failed.
+type browserCheck struct {
+	Missing []string
+	Fonts   string // bundled, system or unavailable
+}
+
+// browserResolver is replaced in tests that must not download Chrome.
+var browserResolver = resolveBrowser
+
+// browserDeps resolves Chrome, Node and fonts once per worker process. A
+// managed mount starts provisioning without waiting for it so a target that
+// cannot capture is reported right after deploy; jobs wait for that shared
+// attempt, and a failure is retried by the next job.
 type browserDeps struct {
-	prepare      sync.Mutex // serializes provisioning; mu guards reported state
+	prepare      chan struct{} // held by the one provisioning attempt; mu guards state
 	mu           sync.Mutex
 	chromeConfig string
 	nodeConfig   string
 	ready        *browserPaths
 	lastError    string
-	missingLibs  []string
+	check        browserCheck
+}
+
+func (b *browserDeps) current() *browserPaths {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ready
 }
 
 func (b *browserDeps) status() map[string]any {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := map[string]any{"chrome_release": chromeRelease, "node_release": nodeRelease, "ready": b.ready != nil}
+	out := map[string]any{"chrome_release": chromeRelease, "node_release": nodeRelease, "ready": b.ready != nil, "provisioning": len(b.prepare) > 0}
 	if b.ready != nil {
 		out["chrome"], out["node"] = b.ready.Chrome, b.ready.Node
 	}
 	if b.lastError != "" {
 		out["error"] = b.lastError
 	}
-	if len(b.missingLibs) > 0 {
-		out["missing_libraries"] = b.missingLibs
+	if len(b.check.Missing) > 0 {
+		out["missing_libraries"] = b.check.Missing
+	}
+	if b.check.Fonts != "" {
+		out["fonts"] = b.check.Fonts
 	}
 	return out
 }
 
 func (b *browserDeps) ensure(ctx context.Context, root string) (browserPaths, error) {
-	b.prepare.Lock()
-	defer b.prepare.Unlock()
-	b.mu.Lock()
-	ready := b.ready
-	b.mu.Unlock()
-	if ready != nil {
+	if ready := b.current(); ready != nil {
 		return *ready, nil
 	}
-	paths, missing, err := resolveBrowser(ctx, root, b.chromeConfig, b.nodeConfig)
+	select {
+	case b.prepare <- struct{}{}:
+	case <-ctx.Done():
+		return browserPaths{}, fmt.Errorf("browser dependencies are still being provisioned on this worker: %w", ctx.Err())
+	}
+	defer func() { <-b.prepare }()
+	if ready := b.current(); ready != nil {
+		return *ready, nil
+	}
+	paths, check, err := browserResolver(ctx, root, b.chromeConfig, b.nodeConfig)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.missingLibs = missing
+	b.check = check
 	if err != nil {
 		b.lastError = err.Error()
 		return browserPaths{}, err
@@ -254,18 +280,28 @@ func (b *browserDeps) ensure(ctx context.Context, root string) (browserPaths, er
 	return paths, nil
 }
 
-func resolveBrowser(ctx context.Context, root, chromeConfig, nodeConfig string) (browserPaths, []string, error) {
+func resolveBrowser(ctx context.Context, root, chromeConfig, nodeConfig string) (browserPaths, browserCheck, error) {
 	var paths browserPaths
+	check := browserCheck{Fonts: "system"}
+	if bundledFontsEnabled {
+		// Never capture without fonts: a host with none renders blank text.
+		conf, err := prepareFonts(root)
+		if err != nil {
+			check.Fonts = "unavailable"
+			return paths, check, fmt.Errorf("bundled fonts unavailable: %w", err)
+		}
+		check.Fonts, paths.FontConfig = "bundled", conf
+	}
 	node, err := resolveNode(ctx, root, nodeConfig)
 	if err != nil {
-		return paths, nil, err
+		return paths, check, err
 	}
 	chrome, err := resolveChrome(ctx, root, chromeConfig)
 	if err != nil {
-		return paths, nil, err
+		return paths, check, err
 	}
-	if missing := missingLibraries(ctx, chrome); len(missing) > 0 {
-		return paths, missing, fmt.Errorf("Chrome is missing system libraries on this target: %s", strings.Join(missing, ", "))
+	if check.Missing = missingLibraries(ctx, chrome); len(check.Missing) > 0 {
+		return paths, check, fmt.Errorf("Chrome is missing system libraries on this target: %s", strings.Join(check.Missing, ", "))
 	}
 	paths.Chrome, paths.Node = chrome, node
 	if os.Geteuid() == 0 {
@@ -276,7 +312,7 @@ func resolveBrowser(ctx context.Context, root, chromeConfig, nodeConfig string) 
 		// Small hosts mount a tiny /dev/shm; render through /tmp instead.
 		paths.ExtraArgs = append(paths.ExtraArgs, "--disable-dev-shm-usage")
 	}
-	return paths, nil, nil
+	return paths, check, nil
 }
 
 var nodeVersion = regexp.MustCompile(`^v(\d+)\.`)
@@ -366,8 +402,8 @@ func resolveChrome(ctx context.Context, root, configured string) (string, error)
 	return bin, nil
 }
 
-// missingLibraries lists shared objects the dynamic loader cannot resolve. The
-// native backend does not install host packages; operators get exact names.
+// missingLibraries lists shared objects the dynamic loader cannot resolve, so
+// operators get exact names.
 func missingLibraries(ctx context.Context, binary string) []string {
 	if runtime.GOOS != "linux" {
 		return nil

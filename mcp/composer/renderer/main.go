@@ -110,6 +110,7 @@ func (a *RendererApp) OnMount(app *sdk.AppCtx) error {
 	}
 	a.browser.chromeConfig = strings.TrimSpace(app.Config().Get("chrome_path"))
 	a.browser.nodeConfig = strings.TrimSpace(app.Config().Get("node_path"))
+	a.browser.prepare = make(chan struct{}, 1)
 	a.life, a.stop = context.WithCancel(context.Background())
 	if err := os.MkdirAll(a.root, 0700); err != nil {
 		return err
@@ -172,8 +173,20 @@ func (a *RendererApp) OnMount(app *sdk.AppCtx) error {
 			_, _, _ = a.ffmpeg.ensure(ctx, a.root)
 		}()
 	}
+	if browserAtMount {
+		// Missing system libraries or fonts show in capabilities right after
+		// deploy instead of failing the first browser render.
+		go func() {
+			ctx, cancel := context.WithTimeout(a.life, 30*time.Minute)
+			defer cancel()
+			_, _ = a.browser.ensure(ctx, a.root)
+		}()
+	}
 	return nil // Always passive until Server activates this generation.
 }
+
+// browserAtMount is disabled by tests that must not download Chrome.
+var browserAtMount = true
 func positive(raw string, fallback int) int {
 	n, e := strconv.Atoi(raw)
 	if e != nil || n < 1 {
@@ -244,8 +257,10 @@ func (a *RendererApp) MCPTools() []sdk.Tool {
 func (a *RendererApp) capabilities(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	// The gateway URL is where this worker reaches the platform. The parent
 	// addresses its job-scoped transfer relay through it; it is not a credential.
+	// "browser" is kept for Composer 0.11.2 parents, which read that key.
 	ffmpeg, ffprobe := a.ffmpeg.paths()
-	return map[string]any{"protocol": protocol, "ffmpeg": ffmpeg, "ffprobe": ffprobe, "ffmpeg_status": a.ffmpeg.status(), "browser": a.browser.status(),
+	browser := a.browser.status()
+	return map[string]any{"protocol": protocol, "ffmpeg": ffmpeg, "ffprobe": ffprobe, "ffmpeg_status": a.ffmpeg.status(), "browser_status": browser, "browser": browser,
 		"capacity": a.capacity, "platform": executionPlatform(), "gateway_url": strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")}, nil
 }
 func project(app *sdk.AppCtx) string { return app.CurrentProject() }
@@ -461,8 +476,7 @@ func (a *RendererApp) run(ctx context.Context, j *job, req request) {
 	}
 	var browser browserPaths
 	if err == nil && len(req.Needs) > 0 {
-		// Browser dependencies are provisioned on first use so FFmpeg-only
-		// installations never download or keep Chrome.
+		// Waits for the attempt mount started, or retries a failed one.
 		if browser, err = a.browser.ensure(ctx, a.root); err != nil {
 			failure = "browser dependencies unavailable: " + err.Error()
 		}
@@ -562,10 +576,18 @@ func workerEnv(root, ffmpeg, ffprobe string, browser browserPaths) []string {
 		path = filepath.Dir(ffmpeg) + ":" + path
 	}
 	env := []string{"HOME=" + root, "TMPDIR=" + root, "PATH=" + path, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "FFMPEG=" + ffmpeg, "FFPROBE=" + ffprobe}
+	ownFonts := browser.Chrome != "" && browser.FontConfig != ""
 	if browser.Chrome != "" {
 		env = append(env, "CHROME_BIN="+browser.Chrome, "NODE_BIN="+browser.Node, "CHROME_EXTRA_ARGS="+strings.Join(browser.ExtraArgs, " "))
 	}
+	if ownFonts {
+		// Browser captures use the renderer's own fonts, not the host's config.
+		env = append(env, "FONTCONFIG_FILE="+browser.FontConfig)
+	}
 	for _, key := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT", "FONTCONFIG_FILE", "FONTCONFIG_PATH"} {
+		if ownFonts && strings.HasPrefix(key, "FONTCONFIG_") {
+			continue
+		}
 		if v := os.Getenv(key); v != "" {
 			env = append(env, key+"="+v)
 		}

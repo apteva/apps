@@ -6,9 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +22,11 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	// Mounting must not download Chrome; readiness tests opt back in.
+	browserAtMount = false
+	os.Exit(m.Run())
+}
 func testRenderer(t *testing.T) (*RendererApp, *sdk.AppCtx) {
 	t.Helper()
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_DATA_DIR", t.TempDir()))
@@ -463,5 +471,135 @@ func TestArchiveExtractionRejectsEscapes(t *testing.T) {
 	}
 	if err := extractTarGzMember(tgz, "node-v1/bin/missing", filepath.Join(dir, "x")); err == nil {
 		t.Fatal("missing member reported as extracted")
+	}
+}
+
+func TestBundledFontsConfigPrefersRendererFonts(t *testing.T) {
+	root := t.TempDir()
+	conf, err := prepareFonts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(conf)
+	for _, name := range []string{"Inter-Regular.ttf", "Inter-Bold.ttf", "Go-Mono.ttf", "Go-Mono-Bold.ttf", "INTER-LICENSE.txt", "GO-FONTS-LICENSE.txt"} {
+		if st, err := os.Stat(filepath.Join(dir, name)); err != nil || st.Size() == 0 {
+			t.Fatalf("bundled %s missing: %v", name, err)
+		}
+	}
+	raw, err := os.ReadFile(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for decoder := xml.NewDecoder(strings.NewReader(text)); ; {
+		if _, err := decoder.Token(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("fonts.conf is not well-formed: %v", err)
+		}
+	}
+	own, system := strings.Index(text, "<dir>"+dir+"</dir>"), strings.Index(text, "<dir>/usr/share/fonts</dir>")
+	if own < 0 || system < 0 || own > system {
+		t.Fatalf("bundled directory must come before host fonts:\n%s", text)
+	}
+	for _, want := range []string{
+		"<cachedir>" + filepath.Join(dir, "cache") + "</cachedir>",
+		`<alias binding="strong"><family>-apple-system</family><prefer><family>Inter</family></prefer></alias>`,
+		`<alias binding="strong"><family>sans-serif</family><prefer><family>Inter</family></prefer></alias>`,
+		`<alias binding="strong"><family>serif</family><prefer><family>Inter</family></prefer></alias>`,
+		`<alias binding="strong"><family>Menlo</family><prefer><family>Go Mono</family></prefer></alias>`,
+		`<alias binding="strong"><family>monospace</family><prefer><family>Go Mono</family></prefer></alias>`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s in\n%s", want, text)
+		}
+	}
+	if again, err := prepareFonts(root); err != nil || again != conf {
+		t.Fatalf("fonts not reused: %q %v", again, err)
+	}
+}
+func TestBundledFontsOnlyReachBrowserJobs(t *testing.T) {
+	t.Setenv("FONTCONFIG_FILE", "/etc/host-fonts.conf")
+	t.Setenv("FONTCONFIG_PATH", "/etc/host-fonts")
+	browser := strings.Join(workerEnv("/root", "/opt/ff/ffmpeg", "/opt/ff/ffprobe", browserPaths{Chrome: "/opt/chrome", Node: "/opt/node", FontConfig: "/root/dependencies/fonts-x/fonts.conf"}), "\n")
+	if !strings.Contains(browser, "FONTCONFIG_FILE=/root/dependencies/fonts-x/fonts.conf") || strings.Contains(browser, "/etc/host-fonts") {
+		t.Fatalf("browser job does not use the bundled fonts only:\n%s", browser)
+	}
+	encode := strings.Join(workerEnv("/root", "/opt/ff/ffmpeg", "/opt/ff/ffprobe", browserPaths{}), "\n")
+	if strings.Contains(encode, "fonts-x") || !strings.Contains(encode, "FONTCONFIG_FILE=/etc/host-fonts.conf") {
+		t.Fatalf("FFmpeg-only job environment changed:\n%s", encode)
+	}
+	system := strings.Join(workerEnv("/root", "/opt/ff/ffmpeg", "/opt/ff/ffprobe", browserPaths{Chrome: "/opt/chrome", Node: "/opt/node"}), "\n")
+	if !strings.Contains(system, "FONTCONFIG_FILE=/etc/host-fonts.conf") {
+		t.Fatalf("system-font browser job lost the host fontconfig:\n%s", system)
+	}
+}
+// A browser capture without fonts would succeed with blank text, so a job
+// fails before running its plan when the bundled fonts cannot be installed.
+func TestBrowserJobsFailWhenFontsCannotBeInstalled(t *testing.T) {
+	enabled := bundledFontsEnabled
+	bundledFontsEnabled = true
+	t.Cleanup(func() { bundledFontsEnabled = enabled })
+	a, app := testRenderer(t)
+	activate(a)
+	if err := os.WriteFile(filepath.Join(a.root, "dependencies"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request := args("no-fonts", "echo should-not-run > ran", 2)
+	request["needs"] = []string{"browser"}
+	if _, err := a.submit(t.Context(), app, request); err != nil {
+		t.Fatal(err)
+	}
+	r := waitJob(t, a, app, "no-fonts")
+	if r.Status != "failed" || !strings.Contains(r.Error, "browser dependencies unavailable: bundled fonts unavailable") {
+		t.Fatalf("%+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(a.root, "ran")); err == nil {
+		t.Fatal("plan ran without fonts")
+	}
+	caps, _ := a.capabilities(t.Context(), app, nil)
+	if status := caps.(map[string]any)["browser_status"].(map[string]any); status["fonts"] != "unavailable" || status["ready"] != false {
+		t.Fatalf("browser_status = %v", status)
+	}
+}
+// Mount starts browser provisioning without waiting for it, so missing system
+// libraries are reported by capabilities before any render is submitted.
+func TestBrowserReadinessIsReportedAfterMount(t *testing.T) {
+	calls := make(chan struct{}, 8)
+	resolver := browserResolver
+	browserResolver = func(context.Context, string, string, string) (browserPaths, browserCheck, error) {
+		calls <- struct{}{}
+		return browserPaths{}, browserCheck{Missing: []string{"libnss3.so"}, Fonts: "bundled"}, errors.New("Chrome is missing system libraries on this target: libnss3.so")
+	}
+	browserAtMount = true
+	t.Cleanup(func() { browserResolver, browserAtMount = resolver, false })
+	a, app := testRenderer(t)
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mount did not start browser provisioning")
+	}
+	// The attempt's receive completes before this send, ordering its writes.
+	a.browser.prepare <- struct{}{}
+	<-a.browser.prepare
+	caps, _ := a.capabilities(t.Context(), app, nil)
+	status := caps.(map[string]any)["browser_status"].(map[string]any)
+	if status["ready"] != false || status["provisioning"] != false || status["fonts"] != "bundled" || fmt.Sprint(status["missing_libraries"]) != "[libnss3.so]" || !strings.Contains(fmt.Sprint(status["error"]), "libnss3.so") {
+		t.Fatalf("browser_status = %v", status)
+	}
+	if caps.(map[string]any)["browser"] == nil {
+		t.Fatal("capabilities dropped the browser key older parents read")
+	}
+	activate(a)
+	request := args("needs-libs", "echo should-not-run > ran", 2)
+	request["needs"] = []string{"browser"}
+	if _, err := a.submit(t.Context(), app, request); err != nil {
+		t.Fatal(err)
+	}
+	if r := waitJob(t, a, app, "needs-libs"); r.Status != "failed" || !strings.Contains(r.Error, "missing system libraries on this target: libnss3.so") {
+		t.Fatalf("%+v", r)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("job did not retry the failed attempt (%d further calls)", len(calls))
 	}
 }
