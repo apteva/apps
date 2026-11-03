@@ -32,7 +32,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.11.0
+version: 0.11.1
 description: |
   v0.11.0 replaces the Instances SSH render path with Composer's private
   renderer component (apteva.composer-renderer/v1), deployed and placed by
@@ -174,6 +174,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    # Renderer uploads authenticate with a job-scoped grant, not a platform
+    # credential; the handler verifies the grant.
+    - prefix: /renderer-io/
+      no_auth: true
   mcp_tools:
     - { name: composition_outputs }
     - { name: composition_output_update }
@@ -300,7 +304,7 @@ components:
       schema: apteva-app/v1
       name: composer-renderer
       display_name: Composer Renderer
-      version: 0.11.0
+      version: 0.11.1
       description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
       scopes: [project, global]
       requires:
@@ -323,7 +327,7 @@ components:
         kind: source
         source:
           repo: github.com/apteva/apps
-          ref: 6c18d737d8e4e6325b312fcf42fc1d91a652f4e4
+          ref: 910ea656bb72259680cb73d3a918890c2535bfe1
           entry: mcp/composer/renderer
         port: 8080
         health_check: /health

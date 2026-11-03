@@ -608,7 +608,7 @@ func (a *App) renderComposition(parent context.Context, ctx *sdk.AppCtx, args ma
 		}
 	}
 	rctx, cancel := context.WithTimeout(parent, 30*time.Minute)
-	rctx = withComponentOwner(rctx, fmt.Sprintf("render:%d", renderID))
+	rctx = withRenderPlacement(withComponentOwner(rctx, fmt.Sprintf("render:%d", renderID)), executorOverride)
 	unregister := registerRenderCancel(renderID, cancel)
 	defer func() { cancel(); unregister() }()
 	var currentStatus string

@@ -67,7 +67,7 @@ func browserFrameGeometry(spec *V2Composition, excerptStart, excerptEnd float64)
 }
 
 func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string, excerptStart, excerptEnd float64) (Result, []string, error) {
-	if componentRenderingEnabled(app) {
+	if useRenderer(ctx, app) {
 		return renderV2BrowserComponent(ctx, app, spec, projectID, excerptStart, excerptEnd)
 	}
 	start := time.Now()

@@ -252,6 +252,28 @@ func TestComponentModeFailsExplicitlyWithoutRenderer(t *testing.T) {
 	}
 }
 
+func TestRenderExecutorOverridesExecutionModeForCaptures(t *testing.T) {
+	component := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"execution_mode": "component"}))
+	local := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"execution_mode": "local"}))
+	bg := context.Background()
+	for _, tc := range []struct {
+		app      *sdk.AppCtx
+		executor string
+		want     bool
+	}{
+		{component, "", true},
+		{component, "auto", true},
+		{component, "local", false},
+		{local, "", false},
+		{local, "component", true},
+		{local, "remote", true},
+	} {
+		if got := useRenderer(withRenderPlacement(bg, tc.executor), tc.app); got != tc.want {
+			t.Fatalf("executor %q with mode %q: renderer=%v, want %v", tc.executor, tc.app.Config().Get("execution_mode"), got, tc.want)
+		}
+	}
+}
+
 func TestRelayRejectsForeignFoldersAndExpiredGrants(t *testing.T) {
 	_, app := newRendererTestPlatform(t)
 	grant, _, err := newRendererGrant(app, "owner", 60)
@@ -382,4 +404,24 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// Server only lets anonymous requests through to routes the manifest marks
+// no_auth; the SDK flag alone leaves the renderer relay unreachable.
+func TestNoAuthRoutesAreDeclaredInManifest(t *testing.T) {
+	for name, raw := range map[string][]byte{"apteva.yaml": mustRead(t, "apteva.yaml"), "main.go manifestYAML": []byte(manifestYAML)} {
+		m, err := sdk.ParseManifest(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, route := range (&App{}).HTTPRoutes() {
+			declared := false
+			for _, spec := range m.Provides.HTTPRoutes {
+				declared = declared || spec.NoAuth && spec.Prefix == route.Pattern
+			}
+			if route.NoAuth != declared {
+				t.Fatalf("%s: route %s no_auth=%v in code but declared=%v", name, route.Pattern, route.NoAuth, declared)
+			}
+		}
+	}
 }
