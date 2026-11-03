@@ -170,8 +170,13 @@ type carrierBridgeLease struct {
 	replacementPending atomic.Bool
 	replaced           atomic.Bool
 	decodeEvidenceAt   atomic.Int64
-	finished           bool
-	commandCancel      context.CancelFunc
+	// handoverUntil marks an intentional stream stop (Twilio keypad tones are
+	// played by replacing the call's TwiML). Until then a stop is not a failure.
+	handoverUntil atomic.Int64
+	// plannedHandover: this lease replaced a stream stopped intentionally.
+	plannedHandover bool
+	finished        bool
+	commandCancel   context.CancelFunc
 }
 
 func carrierEvidenceDetail(row *callRow, value string) string {
@@ -275,6 +280,7 @@ func (a *App) claimCarrierBridgeVerified(row *callRow, parent context.Context, p
 	if old != nil {
 		old.mu.Lock()
 		b.deadline, b.attempts, b.episodeID = old.deadline, old.attempts, old.episodeID
+		b.plannedHandover = old.first == nil && old.handoverActive(time.Now())
 		if proof != nil && b.deadline == "" {
 			b.deadline = ringTime(time.Now().Add(time.Duration(mediaRecoveryOrDefault(row.MediaRecoveryTimeoutSec)) * time.Second))
 			b.episodeID = newCallID()
@@ -575,8 +581,13 @@ func (b *carrierBridgeLease) media() {
 	}
 	b.connected = true
 	b.flowing.Store(true)
-	b.recovered = b.deadline != ""
+	b.recovered = b.deadline != "" && !b.plannedHandover
 	b.appendLocked(carrierBridgeEvidence{Kind: "media_flowing", StreamID: b.stream})
+	if b.plannedHandover {
+		// The stream is back; the keypad command no longer holds off recovery
+		// or later commands.
+		_, _ = b.app.db().db.Exec(`DELETE FROM call_carrier_commands WHERE call_id=? AND operation=?`, b.row.ID, carrierCommandDTMF)
+	}
 	_ = b.persistLocked("connected")
 	_, _ = b.app.db().db.Exec(`UPDATE carrier_media_bridges SET connected_at=? WHERE generation=?`, ringTime(time.Now()), b.generation)
 	_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "connected", "", 0, "", "", b.generation)
@@ -644,9 +655,19 @@ func (b *carrierBridgeLease) finish() {
 	leg, code, reason := b.closeState.Cause()
 	state := "disconnected"
 	newFailure := false
+	handover := false
 	if b.first == nil && !b.replaced.Load() {
 		current, err := b.app.db().findCall(b.row.ID)
-		if err == nil && current != nil && !isTerminalStatus(current.Status) {
+		if err == nil && current != nil && !isTerminalStatus(current.Status) && b.handoverActive(time.Now()) {
+			// The replacement stream is expected. Keep a recovery deadline so a
+			// replacement that never arrives is still restarted, but record no
+			// failure.
+			b.appendLocked(carrierBridgeEvidence{Kind: "planned_handover", Leg: string(leg), Detail: reason, LocalCloseCode: int(code)})
+			if b.deadline == "" {
+				b.deadline = ringTime(time.Now().Add(time.Duration(mediaRecoveryOrDefault(b.row.MediaRecoveryTimeoutSec)) * time.Second))
+			}
+			handover = true
+		} else if err == nil && current != nil && !isTerminalStatus(current.Status) {
 			if b.deadline == "" {
 				b.episodeID = newCallID()
 			}
@@ -660,7 +681,7 @@ func (b *carrierBridgeLease) finish() {
 			}
 		}
 	}
-	if b.first != nil {
+	if b.first != nil || handover {
 		state = "recovering"
 	}
 	for leg, writer := range b.writers {
@@ -679,11 +700,40 @@ func (b *carrierBridgeLease) finish() {
 	if state == "disconnected" {
 		_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "disconnected", "", int(code), reason, string(leg), b.generation)
 	}
+	if handover {
+		_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "disconnected", "", int(code), "planned stream handover", string(leg), b.generation)
+	}
 	_, _ = b.app.db().db.Exec(`UPDATE calls SET media_active=0 WHERE id=? AND media_generation=?`, b.row.ID, b.generation)
 	if state == "recovering" {
 		b.scheduleRecovery()
 	}
 }
+func (b *carrierBridgeLease) handoverActive(now time.Time) bool {
+	return now.UnixNano() < b.handoverUntil.Load()
+}
+
+// markCarrierHandover announces that the call's current stream will be stopped
+// on purpose before until. It returns false when no stream is attached.
+func (a *App) markCarrierHandover(id string, until time.Time) bool {
+	a.mediaBridges.mu.Lock()
+	b := a.mediaBridges.current[id]
+	a.mediaBridges.mu.Unlock()
+	if b == nil || b.ctx.Err() != nil {
+		return false
+	}
+	b.handoverUntil.Store(until.UnixNano())
+	return true
+}
+
+func (a *App) clearCarrierHandover(id string) {
+	a.mediaBridges.mu.Lock()
+	b := a.mediaBridges.current[id]
+	a.mediaBridges.mu.Unlock()
+	if b != nil {
+		b.handoverUntil.Store(0)
+	}
+}
+
 func (a *App) cancelCarrierBridge(id string) {
 	a.mediaBridges.mu.Lock()
 	b := a.mediaBridges.current[id]

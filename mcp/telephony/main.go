@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.16.3
+version: 0.17.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -181,6 +181,7 @@ provides:
     - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
+    - { name: telephony_send_dtmf,    description: "Press keypad keys (DTMF) on a connected call. Args: call_id, digits, idempotency_key?." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
@@ -409,7 +410,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.16.3
+    ref: telephony/v0.17.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -964,6 +965,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"call_id": map[string]any{"type": "string", "description": "Call id returned by telephony_place_call."},
 			}, []string{"call_id"}),
 			HandlerCtx: a.toolHangup,
+		},
+		{
+			Name:        "telephony_send_dtmf",
+			Description: "Press keypad keys on a connected call, e.g. to navigate a phone menu. Sends real DTMF tones, not speech. Args: call_id (required), digits (required, 1-16 of 0-9 * #), idempotency_key (optional; a retry with the same key does not press the keys again).",
+			InputSchema: schemaObject(map[string]any{
+				"call_id":         map[string]any{"type": "string", "description": "The call to press keys on (the current call's id)."},
+				"digits":          map[string]any{"type": "string", "description": "Keys to press in order: 0-9, * and #, at most 16."},
+				"idempotency_key": map[string]any{"type": "string", "description": "Optional key identifying this press, e.g. call_id:menu-step:1. Reusing it returns the first outcome."},
+			}, []string{"call_id", "digits"}),
+			HandlerCtx: a.toolSendDTMF,
 		},
 		{
 			Name:        "telephony_active_calls",
@@ -3950,8 +3961,14 @@ func (a *App) twilioStreamTwiML(row *callRow) string {
 		recording = fmt.Sprintf(`<Start><Recording name="call-%s" channels="%s" track="both" recordingStatusCallback="%s" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed absent"/></Start>`,
 			xmlEscape(row.ID), channels, xmlEscape(a.twilioRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 	}
-	return fmt.Sprintf(`<Response>%s<Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect></Response>`,
-		recording,
+	return `<Response>` + recording + a.twilioConnectStreamTwiML(row) + `</Response>`
+}
+
+// twilioConnectStreamTwiML attaches the call's media stream. A recording
+// started with <Start> continues across later TwiML updates, so updates that
+// only replace the stream use this alone.
+func (a *App) twilioConnectStreamTwiML(row *callRow) string {
+	return fmt.Sprintf(`<Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect>`,
 		xmlEscape(a.publicWSStreamURL("twilio", row.ID, row.CallbackSecret)),
 		xmlEscape(a.twilioStreamStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 }

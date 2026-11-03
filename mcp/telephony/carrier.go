@@ -273,6 +273,9 @@ func (a *App) sendCarrierDTMF(ctx *sdk.AppCtx, row *callRow, digits string) erro
 		}
 		return pacer.queueDTMF(digits)
 	}
+	if strings.EqualFold(strings.TrimSpace(row.CarrierSlug), "twilio") {
+		return a.sendTwilioDTMF(ctx, row, digits)
+	}
 	input := map[string]any{"digits": digits}
 	tool := ""
 	switch strings.ToLower(strings.TrimSpace(row.CarrierSlug)) {

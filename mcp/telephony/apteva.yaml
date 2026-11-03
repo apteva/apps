@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.16.3
+version: 0.17.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -134,6 +134,7 @@ provides:
     - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
+    - { name: telephony_send_dtmf,    description: "Press keypad keys (DTMF) on a connected call. Args: call_id, digits, idempotency_key?." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
@@ -362,7 +363,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.16.3
+    ref: telephony/v0.17.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
