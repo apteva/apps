@@ -75,8 +75,7 @@ type RendererApp struct {
 	changed        chan struct{}
 	life           context.Context
 	stop           context.CancelFunc
-	ffmpeg         string
-	ffprobe        string
+	ffmpeg         ffmpegDeps
 	browser        browserDeps
 	deploymentID   string
 	generation     int64
@@ -109,17 +108,14 @@ func (a *RendererApp) OnMount(app *sdk.AppCtx) error {
 	if a.capacity > 16 {
 		return errors.New("work_capacity exceeds 16")
 	}
-	a.ffmpeg = executable(app.Config().Get("ffmpeg_path"), "ffmpeg")
-	a.ffprobe = executable(app.Config().Get("ffprobe_path"), "ffprobe")
 	a.browser.chromeConfig = strings.TrimSpace(app.Config().Get("chrome_path"))
 	a.browser.nodeConfig = strings.TrimSpace(app.Config().Get("node_path"))
 	a.life, a.stop = context.WithCancel(context.Background())
 	if err := os.MkdirAll(a.root, 0700); err != nil {
 		return err
 	}
-	dependencyCtx, stopDependencies := context.WithTimeout(context.Background(), 115*time.Second)
-	defer stopDependencies()
-	if err := a.prepareFFmpeg(dependencyCtx); err != nil {
+	provision, err := a.ffmpeg.resolve(a.root, app.Config().Get("ffmpeg_path"), app.Config().Get("ffprobe_path"))
+	if err != nil {
 		return err
 	}
 	a.jobs = map[string]*job{}
@@ -168,6 +164,13 @@ func (a *RendererApp) OnMount(app *sdk.AppCtx) error {
 		}
 		close(j.done)
 		a.jobs[j.JobID] = j
+	}
+	if provision {
+		go func() {
+			ctx, cancel := context.WithTimeout(a.life, 30*time.Minute)
+			defer cancel()
+			_, _, _ = a.ffmpeg.ensure(ctx, a.root)
+		}()
 	}
 	return nil // Always passive until Server activates this generation.
 }
@@ -241,7 +244,8 @@ func (a *RendererApp) MCPTools() []sdk.Tool {
 func (a *RendererApp) capabilities(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	// The gateway URL is where this worker reaches the platform. The parent
 	// addresses its job-scoped transfer relay through it; it is not a credential.
-	return map[string]any{"protocol": protocol, "ffmpeg": a.ffmpeg, "ffprobe": a.ffprobe, "browser": a.browser.status(),
+	ffmpeg, ffprobe := a.ffmpeg.paths()
+	return map[string]any{"protocol": protocol, "ffmpeg": ffmpeg, "ffprobe": ffprobe, "ffmpeg_status": a.ffmpeg.status(), "browser": a.browser.status(),
 		"capacity": a.capacity, "platform": executionPlatform(), "gateway_url": strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")}, nil
 }
 func project(app *sdk.AppCtx) string { return app.CurrentProject() }
@@ -449,6 +453,12 @@ func (a *RendererApp) run(ctx context.Context, j *job, req request) {
 	exit := -1
 	stopped := true
 	failure := "render failed"
+	var ffmpeg, ffprobe string
+	if err == nil {
+		if ffmpeg, ffprobe, err = a.ffmpeg.ensure(ctx, a.root); err != nil {
+			failure = "FFmpeg unavailable: " + err.Error()
+		}
+	}
 	var browser browserPaths
 	if err == nil && len(req.Needs) > 0 {
 		// Browser dependencies are provisioned on first use so FFmpeg-only
@@ -464,7 +474,7 @@ func (a *RendererApp) run(ctx context.Context, j *job, req request) {
 		}
 		cmd := exec.Command("bash", "-c", command)
 		cmd.Dir = a.root
-		cmd.Env = workerEnv(a.root, a.ffmpeg, a.ffprobe, browser)
+		cmd.Env = workerEnv(a.root, ffmpeg, ffprobe, browser)
 		cmd.Stdout = &output
 		cmd.Stderr = &output
 		configureProcess(cmd)

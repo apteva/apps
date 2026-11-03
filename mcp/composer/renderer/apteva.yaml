@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: composer-renderer
 display_name: Composer Renderer
-version: 0.11.1
+version: 0.11.2
 description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
 scopes: [project, global]
 requires:
@@ -24,7 +24,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: composer-renderer/v0.11.1
+    ref: composer-renderer/v0.11.2
     entry: mcp/composer/renderer
   port: 8080
   health_check: /health
