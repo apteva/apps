@@ -329,7 +329,7 @@ func TestYouTubeReplyGoesUnderTheTopLevelCommentWithAReceipt(t *testing.T) {
 	if _, status := inboxRow(t, ctx, "T.1"); status != inboxStatusReplied {
 		t.Fatalf("answered item status = %q", status)
 	}
-	if events := eventsNamed(rec, inboxEventReplySent); len(events) != 1 || events[0]["external_id"] != "T.9" || events[0]["send_id"] != out.SendID {
+	if events := eventsNamed(rec, inboxEventReplySent); len(events) != 1 || events[0]["external_id"] != "T.9" || events[0]["send_id"] != float64(out.SendID) {
 		t.Fatalf("reply events = %+v", events)
 	}
 	// Sync later sees our own reply: no human-intervention event.

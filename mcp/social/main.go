@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.23.2
+version: 0.24.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -109,6 +109,7 @@ provides:
     - { name: inbox_collector, schedule: "@every 5m" }
     - { name: analytics_collector, schedule: "@every 1h" }
     - { name: provider_reconciler, schedule: "@every 15m" }
+    - { name: event_publisher, schedule: "@every 1m" }
   mcp_tools:
     - { name: account_list_connections, description: "Choose an active direct connection or connect another account." }
     - { name: destination_list, description: "List publishing destinations under an account." }
@@ -229,7 +230,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.23.2
+    ref: social/v0.24.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -777,6 +778,11 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "provider_reconciler",
 			Schedule: "@every 15m",
 			Run:      a.runProviderReconciler,
+		},
+		{
+			Name:     "event_publisher",
+			Schedule: "@every 1m",
+			Run:      a.runEventPublisher,
 		},
 	}
 }
@@ -2923,17 +2929,18 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 				failures++
 				continue
 			}
-			_, _ = ctx.AppDB().Exec(
-				`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?`,
-				nullable(platformPostID), nullable(platformURL), j.targetID,
-			)
-			ctx.Emit("target.published", map[string]any{
+			topic, event := queuedEvent("target.published", map[string]any{
 				"target_id":        j.targetID,
 				"platform":         j.platform,
 				"provider":         j.providerSlug,
 				"platform_post_id": platformPostID,
 				"platform_url":     platformURL,
 			})
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueEventSQL+` WHERE id=?`,
+				nullable(platformPostID), nullable(platformURL), topic, event, j.targetID,
+			)
+			publishRowEvent(ctx, durablePostTargets, j.targetID)
 			successes++
 			continue
 		}
@@ -2980,21 +2987,22 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 					continue
 				}
 
+				topic, event := queuedEvent("target.published_warning", map[string]any{
+					"target_id": j.targetID,
+					"platform":  j.platform,
+					"warning":   warning.Error(),
+				})
 				_, _ = ctx.AppDB().Exec(
 					`UPDATE post_targets
 					    SET status='published', platform_post_id=?, platform_url=?,
 					        publish_operation_id=?, identity_resolve_attempts=0,
 					        identity_resolve_after=CASE WHEN ?!='' THEN datetime('now','+5 minutes') ELSE NULL END,
-					        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?
+					        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?, `+queueEventSQL+`
 					  WHERE id=? AND attempts=? AND status='publishing'`,
 					nullable(platformPostID), nullable(platformURL), warning.operationID,
-					warning.operationID, warning.Error(), j.targetID, j.deliveryAttempt,
+					warning.operationID, warning.Error(), topic, event, j.targetID, j.deliveryAttempt,
 				)
-				ctx.Emit("target.published_warning", map[string]any{
-					"target_id": j.targetID,
-					"platform":  j.platform,
-					"warning":   warning.Error(),
-				})
+				publishRowEvent(ctx, durablePostTargets, j.targetID)
 				successes++
 				continue
 			}
@@ -3002,20 +3010,21 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			failures++
 			continue
 		}
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE post_targets
-			    SET status='published', platform_post_id=?, platform_url=?,
-			        publish_operation_id='', identity_resolve_after=NULL,
-			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL
-			  WHERE id=? AND attempts=? AND status='publishing'`,
-			nullable(platformPostID), nullable(platformURL), j.targetID, j.deliveryAttempt,
-		)
-		ctx.Emit("target.published", map[string]any{
+		topic, event := queuedEvent("target.published", map[string]any{
 			"target_id":        j.targetID,
 			"platform":         j.platform,
 			"platform_post_id": platformPostID,
 			"platform_url":     platformURL,
 		})
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE post_targets
+			    SET status='published', platform_post_id=?, platform_url=?,
+			        publish_operation_id='', identity_resolve_after=NULL,
+			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueEventSQL+`
+			  WHERE id=? AND attempts=? AND status='publishing'`,
+			nullable(platformPostID), nullable(platformURL), topic, event, j.targetID, j.deliveryAttempt,
+		)
+		publishRowEvent(ctx, durablePostTargets, j.targetID)
 		successes++
 	}
 
@@ -5170,20 +5179,21 @@ func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, fai
 		attempt = expectedAttempt[0]
 	}
 	msg = redactDeliverySecrets(msg)
-	_, _ = ctx.AppDB().Exec(
-		`UPDATE post_targets
-		    SET status='failed',delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?, failure_code=?, retryable=?,
-		        upstream_status=?, existing_post_id=?
-		  WHERE id=? AND (?<0 OR attempts=?)`,
-		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, targetID, attempt, attempt,
-	)
-	ctx.Emit("target.failed", map[string]any{
+	topic, event := queuedEvent("target.failed", map[string]any{
 		"target_id":        targetID,
 		"error":            msg,
 		"failure_code":     failure.Code,
 		"retryable":        failure.Retryable,
 		"existing_post_id": failure.ExistingPostID,
 	})
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='failed',delivery_recorded_at=CURRENT_TIMESTAMP, last_error=?, failure_code=?, retryable=?,
+		        upstream_status=?, existing_post_id=?, `+queueEventSQL+`
+		  WHERE id=? AND (?<0 OR attempts=?)`,
+		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, topic, event, targetID, attempt, attempt,
+	)
+	publishRowEvent(ctx, durablePostTargets, targetID)
 }
 
 // ─── post_list ────────────────────────────────────────────────────
