@@ -22,6 +22,15 @@ type socialConnectionChoice struct {
 	Accounts []linkedConnectionAccount `json:"accounts"`
 }
 
+// connectionUsableInProject checks the connection an account is linked to:
+// the expected, active integration connection, owned by this project or
+// global (no project). Connections of other projects are refused. Callers
+// still verify the provider identity (channel, page) behind it.
+func connectionUsableInProject(conn *sdk.PlatformConnection, id int64, pid, slug string) bool {
+	return conn != nil && pid != "" && conn.ID == id && conn.Status == "active" && conn.AppSlug == slug &&
+		(conn.ProjectID == pid || conn.ProjectID == "")
+}
+
 // Supplied IDs select active project grants; they do not authorize a connection.
 func accountConnectionChoices(ctx *sdk.AppCtx, pid string, def platformDef) ([]socialConnectionChoice, error) {
 	if strings.TrimSpace(pid) == "" {

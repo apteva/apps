@@ -213,7 +213,7 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	}
 	conn, err := ctx.PlatformAPI().GetConnection(r.ConnectionID)
 	def, ok := platforms[r.Platform]
-	if err != nil || conn == nil || !ok || conn.ID != r.ConnectionID || conn.Status != "active" || conn.ProjectID != projectScope(ctx) || conn.AppSlug != def.IntegrationSlug {
+	if err != nil || !ok || !connectionUsableInProject(conn, r.ConnectionID, projectScope(ctx), def.IntegrationSlug) {
 		e["reason"] = "connection is not active for this project and integration"
 		return e, "", nil
 	}
