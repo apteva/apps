@@ -102,14 +102,11 @@ requires `replacement_authorized:true` and a unique `request_id`. Reuse the same
 request identity when investigating failures; never mint a new key to retry an
 uncertain Replace File or Save click.
 
-The default Browserbase path retains Computer's 100 MiB transport ceiling.
-Files over that limit fail before changing the existing clip. The `_local`
-variants require an explicit `local_context_id`, use only that local backend,
-and stream up to 5 GiB to private disk before native file selection. The browser
-and Computer must share the host filesystem. Configure and log into that context
-separately; these operations never copy cloud login cookies or choose a different
-backend automatically. A local Mac test does not prove a production host has a
-working local-browser installation or an authenticated Clips4Sale context.
+The production workflow uses the existing Browserbase contexts and smaller
+videos within Computer's 100 MiB transport ceiling. Files exceeding the limit
+fail before changing the existing clip. No separate local browser, login or
+credential migration is needed. The Clips4Sale template exposes only the cloud
+replacement operations; the generic Computer app remains independently usable.
 
 Staged files expire after 15 minutes and are removed after use, replacement or
 session closure. An upload with `require_prepared:true` cannot silently fetch a

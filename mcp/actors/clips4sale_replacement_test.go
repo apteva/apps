@@ -78,7 +78,7 @@ func TestRevealRequiresFullControlBeforeSave(t *testing.T) {
 
 func TestReplacementDefinitionRequiresStagingPersistenceAndNoPublication(t *testing.T) {
 	d := realPerformerDefinition(t)
-	for _, name := range []string{"replace_clip_video", "replace_clip_video_local"} {
+	for _, name := range []string{"replace_clip_video"} {
 		op := d.Operations[name]
 		prepared, uploaded, saved, reloaded := false, false, false, false
 		for _, s := range op.Steps {
