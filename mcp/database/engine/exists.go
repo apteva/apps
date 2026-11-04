@@ -127,6 +127,7 @@ type existsState struct {
 	probes    int64
 	setsBuilt int64
 	rowsRead  int64
+	examined  int64 // documents key set scans actually read
 	nodes     int
 	nested    bool
 }
@@ -461,7 +462,7 @@ func (p *existsPlan) buildSets() error {
 	spent := p.state.work()
 	bytes := 0
 	tooMany, tooLarge := false, false
-	e := scanner.scanRecords(p.foreign, Query{}, read, func(r Record) bool {
+	e := scanner.scanRecords(p.foreign, p.setScan(), read, func(r Record) bool {
 		p.state.rowsRead++
 		if p.state.work()-spent > allowance {
 			tooMany = true
@@ -524,6 +525,56 @@ func (p *existsPlan) buildSets() error {
 		}
 	}
 	return nil
+}
+
+// setScan bounds a key set scan by the index prefix the ordinary part of Where
+// can seek. The complete Where still decides every key. Terms outside the prefix
+// stay out of the bound: a row they reject would never reach the callback, so it
+// would escape the build's row allowance. Without a usable index the scan is full
+// and the allowance stops it, as it always has.
+func (p *existsPlan) setScan() Query {
+	q := Query{examined: &p.state.examined}
+	terms := conjuncts(stripExists(p.where))
+	chosen := plan(p.foreign, Query{Where: conjunction(terms)})
+	if !chosen.IndexedLookup {
+		return q
+	}
+	for _, idx := range indexes(p.foreign) {
+		if idx.Name != chosen.Index {
+			continue
+		}
+		bound := indexPrefixTerms(idx, terms)
+		if plan(p.foreign, Query{Where: conjunction(bound)}).IndexedLookup {
+			q.Where = conjunction(bound)
+		}
+		break
+	}
+	return q
+}
+
+// indexPrefixTerms keeps the terms an index seeks: equalities along its leading
+// fields, then the range on the first field without one.
+func indexPrefixTerms(idx Index, terms []Filter) []Filter {
+	kept := []Filter{}
+	for _, o := range idx.Fields {
+		exact, ranged := []Filter{}, []Filter{}
+		for _, t := range terms {
+			if t.Field != o.Field {
+				continue
+			}
+			switch t.Op {
+			case "eq", "in", "is_null":
+				exact = append(exact, t)
+			case "gt", "gte", "lt", "lte":
+				ranged = append(ranged, t)
+			}
+		}
+		if len(exact) == 0 {
+			return append(kept, ranged...)
+		}
+		kept = append(kept, exact...)
+	}
+	return kept
 }
 
 // matchesExists evaluates an exists or not_exists node. An unprepared clause or

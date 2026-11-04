@@ -776,6 +776,9 @@ func (t *pebbleTx) scanFields(c Collection, q Query, unordered bool, fields []st
 			if e := t.ctx.Err(); e != nil {
 				return e
 			}
+			if q.examined != nil {
+				*q.examined++
+			}
 			raw := it.Value()
 			if !direct {
 				key = append(key[:len(recordPrefix)], raw...)

@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -154,4 +155,35 @@ func FuzzNativeScanDecoder(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A projection allocates for the fields it reads, not for every field of the row.
+func TestNativeFlatDecoderAllocatesOnlyWantedFields(t *testing.T) {
+	fields := []Field{{"wanted", "text", false}, {"meta", "json", true}}
+	r := Record{"id": "a", "wanted": "x", "meta": map[string]any{"k": "v"}, "_created_at": "2026-01-01T00:00:00Z", "_updated_at": "2026-01-01T00:00:00Z", "_version": "1"}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("f%02d", i)
+		fields = append(fields, Field{name, "text", true})
+		r[name] = strings.Repeat("y", 40)
+	}
+	c, e := newCollection(Request{Collection: "wide", Fields: fields})
+	checkErr(t, e)
+	data, e := encodeNativeRecord(c, r)
+	checkErr(t, e)
+	d := newNativeScanDecoder(c, []string{"wanted"}, nil)
+	allocs := testing.AllocsPerRun(200, func() {
+		if ok, e := d.decodeFlat(data); !ok || e != nil {
+			t.Fatal(ok, e)
+		}
+	})
+	if allocs > 2 {
+		t.Fatalf("%.0f allocations per row reading one of %d fields", allocs, len(allFields(c)))
+	}
+	// JSON still decodes when it is wanted.
+	withJSON := newNativeScanDecoder(c, []string{"meta"}, nil)
+	got, e := withJSON.decode(data)
+	checkErr(t, e)
+	if m, ok := got["meta"].(map[string]any); !ok || m["k"] != "v" {
+		t.Fatalf("json field: %#v", got["meta"])
+	}
 }

@@ -59,6 +59,7 @@ type Query struct {
 	after        Record // authenticated cursor values, never accepted from JSON
 	hint         string // index an exists probe seeks through
 	diag         *countDiagnostics
+	examined     *int64   // adds the documents a scan read
 	Where        *Filter  `json:"where,omitempty"`
 	Select       []string `json:"select,omitempty"`
 	OrderBy      []Order  `json:"orderBy,omitempty"`
