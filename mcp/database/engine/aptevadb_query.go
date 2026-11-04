@@ -347,6 +347,14 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	opts := nativeQueryOptions(c, Query{Where: q.Where}, 0)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
 	opts.Stats = q.diag.nativeStats("documents")
+	if q.examined != nil {
+		stats := opts.Stats
+		if stats == nil {
+			stats = &native.QueryStats{}
+			opts.Stats = stats
+		}
+		defer func() { *q.examined += stats.DocumentFetches }()
+	}
 	decoder := newNativeScanDecoder(c, fields, q.Where)
 	var consumeErr error
 	stopped := false

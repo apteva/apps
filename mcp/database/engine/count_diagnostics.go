@@ -82,7 +82,7 @@ func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists 
 		out["plan"] = plan
 	}
 	if exists != nil {
-		out["exists"] = map[string]any{"probes": exists.probes, "keySetsBuilt": exists.setsBuilt, "relatedRowsRead": exists.rowsRead, "keySetBytes": exists.setBytes}
+		out["exists"] = map[string]any{"probes": exists.probes, "keySetsBuilt": exists.setsBuilt, "relatedRowsRead": exists.rowsRead, "relatedDocumentsExamined": exists.examined, "keySetBytes": exists.setBytes}
 	}
 	return out
 }
