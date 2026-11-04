@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.17.2
+version: 0.18.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -138,6 +138,7 @@ provides:
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
+    - { name: telephony_audio_incident, description: "Read-only report of browser audio drops across a project in a time window: what stopped first on each call, when it reconnected, which calls stayed healthy, alerts and network checks. Args: from?, to? (RFC 3339, at most 6 hours; default the last 15 minutes)." }
     - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
@@ -363,7 +364,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.17.2
+    ref: telephony/v0.18.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -377,6 +378,8 @@ config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
   - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. The built-in panel prefers WebRTC when available; embedded clients choose their transport. Requires reachable ICE/UDP or configured TURN." }
+  - { name: softphone_webrtc_path_recovery, type: boolean, default: false, label: "Restart a stalled WebRTC audio path", description: "When a browser reports its audio path disconnected for 3 seconds, try an ICE restart on the existing connection. If signaling does not answer and audio has stopped, reconnect at once instead of waiting. Applies to new browser connections." }
+  - { name: softphone_webrtc_handover, type: boolean, default: false, label: "Keep audio during a signaling reconnect", description: "When signaling drops while WebRTC audio is still flowing, keep the current audio until a replacement connection is ready, for up to 20 seconds. Revocation, takeover, lease expiry and hangup still stop it at once. Applies to new browser connections." }
   - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "distribution", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
   - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
@@ -386,6 +389,8 @@ config_schema:
   - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
   - { name: softphone_webrtc_udp_port_max, type: text, label: "WebRTC UDP range end", description: "Inclusive UDP range end; must be greater than or equal to the start." }
   - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Legacy setting; client IP now uses Server-signed SDK metadata, with socket-peer fallback. Configure trusted proxies in Server. This setting no longer accepts unsigned forwarded addresses." }
+  - { name: audio_telemetry_local_proxy_cidrs, type: text, label: "Local proxy for browser addresses", description: "Off when empty. Set to 127.0.0.1/32 or ::1/128 only when a proxy on this same server connects directly to Telephony and overwrites X-Forwarded-For, so audio events record the real browser address. Only loopback ranges are accepted. A label for diagnostics, never used for access. Stored for the browser network event retention period." }
+  - { name: audio_incident_probe_targets, type: text, label: "Network check targets", description: "Comma-separated host:port list checked from this server when 3 or more browser calls drop within 15 seconds, at most once every 5 minutes. A TCP connection only; nothing is sent. Empty uses the platform gateway, sip.telnyx.com:5060 and 1.1.1.1:443. Set to off to disable." }
   - { name: audio_telemetry_known_vpn_exits, type: text, label: "Known office VPN exits", description: "Optional comma-separated IPv4/IPv6 addresses or CIDRs. Observational known_vpn_exit/unknown labels only; never blocks calls or media." }
   - { name: audio_telemetry_network_retention_days, type: text, default: "7", label: "Browser network event retention (days)", description: "1–31 days, snapshotted per connection. Raw IP connection events are operator-only; expired events are hidden and purged in background batches. No effect on calls." }
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }

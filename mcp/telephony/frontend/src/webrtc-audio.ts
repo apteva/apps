@@ -10,6 +10,7 @@ import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, mediaDiagnosticID, mediaRecoveryContext, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import type { AudioConnection } from "./audio";
 import { rtcQualityPolicy, RTCQualityPolicy, RTCControlBudget, RTCPathHealth } from "./webrtc-quality";
+import { RecoveryRecorder, runRecoveryChecks, type RecoveryEvidence, type RecoveryOutcome } from "./media-recovery-record";
 
 export type MediaTransport = "websocket" | "webrtc" | "auto";
 export function mediaTransport(value?: MediaTransport): MediaTransport {
@@ -23,6 +24,18 @@ export function rtcMediaURL(url: string, fec?: boolean, options:RTCICEOptions = 
   parsed.searchParams.delete("webrtc_fec");
   if(fec!==undefined)parsed.searchParams.set("webrtc_fec",String(fec));
   return parsed.toString();
+}
+
+/** Limits for automatic reconnection only; the first connection keeps 18 s.
+ * Healthy setups finish within 1.7 s, and on 2026-11-04 attempts that had not
+ * finished in that time mostly hung until 18 s while the next connected in 1 s.
+ * Later attempts keep the full limit, but the 30 s window usually ends the third.
+ * A path that needs over about 14 s then connects through the slower recovery loop. */
+export interface RTCSetupLimits { socketOpenMs:number; mediaConnectMs:number }
+export function rtcRecoveryLimits(attempt:number):RTCSetupLimits|undefined {
+  if(attempt===1)return {socketOpenMs:4000,mediaConnectMs:5000};
+  if(attempt===2)return {socketOpenMs:6000,mediaConnectMs:8000};
+  return undefined;
 }
 
 const safe = (callback: (() => void) | undefined) => { try { callback?.(); } catch { /* observers never gate media */ } };
@@ -182,6 +195,19 @@ export class WebRTCAudioConnection implements AudioConnection {
   private recoveryContext?:MediaRecoveryContext;
   private recoveryExpiry?: ReturnType<typeof setTimeout>;
   private recoveryRequest?:AbortController;
+  private recorder?:RecoveryRecorder;
+  private recoveryChecks?:Promise<void>;
+  private mediaURL?:string;
+  // Latest browser stat for incoming audio, and when it was read.
+  private inboundAge?:number;
+  private inboundAgeAt=0;
+  // Set by the server only when path recovery is enabled for this install.
+  private pathRecovery=false;
+  private pathStall?:ReturnType<typeof setTimeout>;
+  private pathAck?:ReturnType<typeof setTimeout>;
+  private handoverSupported=false;
+  private handingOver=false;
+  private handoverDeferred?:string;
   private ringback?: () => void;
   private options?: SoftphoneAudioOptions;
   private workletURL?: string;
@@ -221,13 +247,14 @@ export class WebRTCAudioConnection implements AudioConnection {
     if (!workletURL) throw new Error("WebRTC requires the shared Telephony audio processor");
     if (typeof RTCPeerConnection!=="function") throw new Error("WebRTC audio is unavailable in this browser");
     playbackBufferOptions(options);
-    await this.connect(url,prepared);
+    await this.connect(url,prepared,options.setupLimits);
   }
   private current(generation:number){return !this.stopped && this.generation===generation;}
   private guard(generation:number){if(!this.current(generation)) throw new Error("Audio session cancelled");}
-  private async connect(url:string,prepared?:PreparedAudioDevices):Promise<void> {
+  private async connect(url:string,prepared?:PreparedAudioDevices,limits?:RTCSetupLimits):Promise<void> {
     this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
     this.runtime.observeEnvironment();
+    this.mediaURL=url;this.inboundAge=undefined;this.pathRecovery=this.handoverSupported=this.handingOver=false;this.handoverDeferred=undefined;
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
     for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
@@ -272,9 +299,12 @@ export class WebRTCAudioConnection implements AudioConnection {
     const socket=new WebSocket(rtcMediaURL(url,options.webrtcFec,options));socket.binaryType="arraybuffer";this.socket=socket;
     let connected=false,finished=false,relayRequired=false;
     await measureAudioSetup("audio_transport", event=>this.recordSessionEvent(event), () => new Promise<void>((resolve,reject)=>{
-      const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(relayRequired?Object.assign(err,{code:"turn_relay_required"}):err):resolve();};
+      let socketTimer:ReturnType<typeof setTimeout>|undefined,mediaTimer:ReturnType<typeof setTimeout>|undefined;
+      const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);clearTimeout(socketTimer);clearTimeout(mediaTimer);this.cancelSetup=undefined;err?reject(relayRequired?Object.assign(err,{code:"turn_relay_required"}):err):resolve();};
       const timeout=setTimeout(()=>finish(new Error("WebRTC audio connection timed out")),18000);
       this.cancelSetup=()=>finish(new Error("Audio session cancelled"));
+      if(limits)socketTimer=setTimeout(()=>finish(Object.assign(new Error("Audio socket did not open in time"),{code:"socket_open_timeout"})),limits.socketOpenMs);
+      socket.onopen=()=>{clearTimeout(socketTimer);if(this.current(generation))this.recorder?.stage("socket_open");};
       const maybeReady=()=>{if(this.current(generation)&&this.ready&&connected){
         this.gate();finish();this.updateLiveState();
       }};
@@ -284,9 +314,12 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(typeof event.data!=="string")return;
         let value:any;try{value=JSON.parse(event.data);}catch{return;}
         if(value.type==="webrtc.error"){finish(Object.assign(new Error("Required TURN relay is unavailable"),{code:value.code}));return;}
+        if((value.type==="webrtc.ice_config"&&value.recovery===true)||(value.type==="webrtc.ice_status"&&value.state==="recovery_busy"))this.clearPathAck();
         if(this.ice?.handle(value))return;
         if(value.type==="webrtc.config"){
  relayRequired=value.ice_transport_policy==="relay";
+          this.pathRecovery=value.ice_recover_supported===true;this.handoverSupported=value.handover===true;
+          this.recorder?.stage("configured");
           if(value.network_policy){try{const networkProfile=validateNetworkPolicy(value.network_policy);this.quality=rtcQualityPolicy({...options,networkProfile});this.pathHealth=new RTCPathHealth(networkProfile);}catch{finish(new Error("Invalid network policy"));return;}}
           this.relayConfigured=typeof value.relay_configured==="boolean"?value.relay_configured:undefined;
           this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_configuration",outcome:rtcRelayEvidence(value.relay_configured)});
@@ -311,7 +344,8 @@ export class WebRTCAudioConnection implements AudioConnection {
             pc.onconnectionstatechange=()=>{
               if(!this.current(generation))return;
               this.recordSessionEvent({timestamp:new Date().toISOString(),action:"webrtc",outcome:pc.connectionState});
-              if(pc.connectionState==="connected"){connected=true;maybeReady();}
+              if(pc.connectionState==="connected"){connected=true;clearTimeout(mediaTimer);if(!finished)this.recorder?.stage("media_connected");maybeReady();}
+              if(finished)this.watchMediaPath(generation,pc);
               if(pc.connectionState==="failed"||pc.connectionState==="closed"){
                 if(!finished)finish(new Error("WebRTC connection failed"));else this.disconnected(generation,"webrtc_"+pc.connectionState);
               }
@@ -323,16 +357,21 @@ export class WebRTCAudioConnection implements AudioConnection {
               pc.onicegatheringstatechange=()=>{if(pc.iceGatheringState==="complete"){clearTimeout(timer);pc.onicegatheringstatechange=null;resolve();}};
             });
             this.guard(generation);socket.send(JSON.stringify({type:"webrtc.offer",sdp:pc.localDescription!.sdp,ice_version:1}));
+            this.recorder?.stage("offer_sent");
           })().catch(error=>finish(error instanceof Error?error:new Error("WebRTC setup failed")));
           return;
         }
-        if(value.type==="webrtc.answer") {void this.pc?.setRemoteDescription({type:"answer",sdp:value.sdp}).catch(()=>finish(new Error("Invalid WebRTC answer")));return;}
+        if(value.type==="webrtc.answer") {
+          if(!finished){this.recorder?.stage("answered");
+            // A required relay can take longer to allocate, so it keeps the full limit.
+            if(limits&&!relayRequired&&!connected)mediaTimer=setTimeout(()=>finish(Object.assign(new Error("Audio path did not connect in time"),{code:"media_connect_timeout"})),limits.mediaConnectMs);}
+          void this.pc?.setRemoteDescription({type:"answer",sdp:value.sdp}).catch(()=>finish(new Error("Invalid WebRTC answer")));return;}
         if(value.type==="media.ready"||value.type==="media.not_ready"){
           if(!Number.isSafeInteger(value.revision)||value.revision<=this.mediaRevision)return;
           this.mediaRevision=value.revision;this.mediaPathReady=value.type==="media.ready";
           safe(()=>this.callbacks.onMediaReadiness?.(value));this.updateLiveState();
         }
-        if(value.type==="ready"){this.ready=true;this.send({type:"media.capabilities",version:2,versions:[3],whisper:true});maybeReady();}
+        if(value.type==="ready"){this.ready=true;if(!finished)this.recorder?.stage("ready");this.send({type:"media.capabilities",version:2,versions:[3],whisper:true});maybeReady();}
         if(value.type==="peer.connected"){this.peer=true;this.gate();maybeReady();}
         if(value.type==="peer.disconnected"){this.peer=false;this.gate();this.updateLiveState();safe(()=>this.callbacks.onNotice?.("Carrier audio interrupted; the call remains connected."));}
         if(value.type==="call.status"){this.answered=["answered","in-progress"].includes(value.status);maybeReady();safe(()=>this.callbacks.onCallStatus?.(value));}
@@ -360,7 +399,7 @@ export class WebRTCAudioConnection implements AudioConnection {
         this.recordSessionEvent({timestamp:new Date().toISOString(),action:"websocket",outcome:"closed",code:String(e.code),was_clean:e.wasClean});
         if(!finished){finish(Object.assign(new Error("WebRTC signaling unavailable"),e.code===1008?{status:403}:{}));return;}
         if(e.code===1008){this.stop();safe(()=>this.callbacks.onState?.("error","Media authorization ended"));return;}
-        this.disconnected(generation,"signaling_closed");
+        if(!this.tryHandover(generation,"signaling_closed"))this.disconnected(generation,"signaling_closed");
       };
     }));
     this.guard(generation);
@@ -385,6 +424,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     try{
       const result=rtcStatistics(await pc.getStats(),this.previous);if(!this.current(generation)||this.pc!==pc)return;
       this.previous=result.previous;this.lastValidStatsAt=performance.now();
+      if(result.metrics.receiver_last_packet_age_ms!==undefined){this.inboundAge=result.metrics.receiver_last_packet_age_ms;this.inboundAgeAt=this.lastValidStatsAt;}
       this.nativeCounts={packetsLost:result.webrtc.packetsLost,packetsDiscarded:result.webrtc.packetsDiscarded,concealedMs:result.webrtc.concealedMs};
       result.webrtc.packetsLost+=this.completedCounts.packetsLost;
       result.webrtc.packetsDiscarded+=this.completedCounts.packetsDiscarded;
@@ -456,10 +496,75 @@ export class WebRTCAudioConnection implements AudioConnection {
     const frame=this.context.sampleRate===8000?pcm:this.whisperResampler.process(pcm,8000,this.context.sampleRate);
     this.whisper?.port.postMessage({type:"whisper",frame,received_audio_ms:this.context.currentTime*1000-excess},[frame.buffer]);
   }
+  private inboundAgeMs(){return this.inboundAge===undefined?undefined:this.inboundAge+Math.max(0,performance.now()-this.inboundAgeAt);}
+  private clearPathAck(){clearTimeout(this.pathAck);this.pathAck=undefined;}
+  // Runs only on a connection state change, so a healthy call never reaches it.
+  // The browser's "disconnected" can clear by itself, so wait before acting. If
+  // signaling answers, the ICE controller restarts the path on the same connection
+  // and the microphone and tracks stay in place. If signaling does not answer and
+  // audio has also stopped, both are gone and waiting longer helps nobody.
+  private watchMediaPath(generation:number,pc:RTCPeerConnection){
+    clearTimeout(this.pathStall);this.pathStall=undefined;
+    if(pc.connectionState!=="disconnected"){this.clearPathAck();return;}
+    if(!this.pathRecovery||this.pathAck)return;
+    this.pathStall=setTimeout(()=>{
+      this.pathStall=undefined;
+      if(!this.current(generation)||this.recovering||pc.connectionState!=="disconnected"||this.socket?.readyState!==WebSocket.OPEN)return;
+      this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_restart",outcome:"path_recovery_requested"});
+      this.send({type:"webrtc.ice_recover"});
+      this.pathAck=setTimeout(()=>{
+        this.pathAck=undefined;
+        if(!this.current(generation)||this.recovering)return;
+        const age=this.inboundAgeMs();
+        if(age!==undefined&&age>=3000)this.disconnected(generation,"signaling_unresponsive");
+      },3000);
+    },3000);
+  }
+  // Read before cleanup: afterwards the connection, socket and track are gone.
+  private recoveryEvidence():RecoveryEvidence{
+    const ready=this.socket?.readyState,age=this.inboundAgeMs();
+    const evidence:RecoveryEvidence={connection_state:this.pc?.connectionState,ice_state:this.pc?.iceConnectionState,signaling_state:ready===undefined?"none":["connecting","open","closing","closed"][ready],microphone:this.stream?.getAudioTracks()[0]?.readyState};
+    if(age!==undefined)evidence.last_packet_age_ms=Math.round(age);
+    try{if(typeof navigator!=="undefined"&&typeof navigator.onLine==="boolean")evidence.online=navigator.onLine;}catch{/* restricted getter */}
+    try{if(typeof document!=="undefined")evidence.visibility=document.visibilityState;}catch{/* restricted getter */}
+    return evidence;
+  }
+  private startRecoveryRecord(recoveryID:string,cause:string){
+    const recorder=new RecoveryRecorder(recoveryID,cause,this.recoveryEvidence());this.recorder=recorder;this.recoveryChecks=undefined;
+    // A page only. Nothing here runs unless audio has already been interrupted.
+    if(this.mediaURL&&typeof location!=="undefined"&&typeof fetch==="function")try{this.recoveryChecks=runRecoveryChecks(recorder,this.mediaURL,location.origin);}catch{/* evidence only */}
+  }
+  private finishRecoveryRecord(outcome:RecoveryOutcome){
+    const recorder=this.recorder,checks=this.recoveryChecks;this.recorder=undefined;this.recoveryChecks=undefined;if(!recorder)return;
+    recorder.finish(outcome);
+    const deliver=()=>safe(()=>this.callbacks.onRecoveryRecord?.(recorder.record));
+    if(checks)void checks.then(deliver,deliver);else deliver();
+  }
+  // Runs only when signaling has failed. Audio must be demonstrably flowing, or a
+  // replacement started here would gain nothing over ordinary reconnection.
+  private tryHandover(generation:number,cause:string):boolean{
+    if(!this.handoverSupported||!this.callbacks.startHandover||this.recovering||this.handingOver||this.pc?.connectionState!=="connected")return false;
+    const age=this.inboundAgeMs();
+    if(age===undefined||age>=2000)return false;
+    let pending:Promise<boolean>|null=null;
+    try{pending=this.callbacks.startHandover(cause,this.recoveryEvidence());}catch{/* the ordinary path still works */}
+    if(!pending)return false;
+    this.handingOver=true;this.handoverDeferred=undefined;
+    void pending.catch(()=>false).then(swapped=>{
+      if(!this.current(generation))return;
+      this.handingOver=false;
+      if(!swapped)this.disconnected(generation,this.handoverDeferred??cause);
+    });
+    return true;
+  }
   private disconnected(generation:number,cause:string){
     if(!this.current(generation)||this.recovering)return;
+    // This connection failed too. Keep waiting for the replacement, which is doing
+    // what ordinary recovery would, but say that audio is interrupted.
+    if(this.handingOver){this.handoverDeferred??=cause;safe(()=>this.callbacks.onState?.("reconnecting","Reconnecting WebRTC audio; the carrier call stays connected."));return;}
     this.recovering=true;
     const recovery=mediaRecoveryContext("automatic_retry");this.recoveryContext=recovery;
+    this.startRecoveryRecord(recovery.recovery_id,cause);
     this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"started",code:cause,...recovery});this.cleanup();
     safe(()=>this.callbacks.onState?.("reconnecting","Reconnecting WebRTC audio; the carrier call stays connected."));
     const recoveryGeneration=++this.recoveryGeneration;
@@ -468,24 +573,30 @@ export class WebRTCAudioConnection implements AudioConnection {
       if(!recovering())return;
       this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"timed_out",...this.recoveryContext});
       ++this.recoveryGeneration;this.recovering=false;clearTimeout(this.retry);this.cancelSetup?.();this.recoveryRequest?.abort();this.cleanup();
+      this.finishRecoveryRecord("timed_out");
       safe(()=>this.callbacks.onState?.("error","Network unavailable; waiting to restore audio to the existing call.",{recoverable:true}));
     },30000);
+    let attempts=0;
     const attempt=async()=>{
       if(!recovering())return;
       const context={...recovery,attempt_id:mediaDiagnosticID("attempt")};this.recoveryContext=context;
+      this.recorder?.attempt(context.attempt_id);
       this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"attempt_started",code:cause,...context});
       try{
         if(!this.callbacks.refreshMediaURL)throw new Error("Fresh media authorization is required");
         this.recoveryRequest=new AbortController();
-        const url=await this.callbacks.refreshMediaURL(context,this.recoveryRequest.signal);if(!recovering())return;await this.connect(url);if(!recovering())return;
+        const url=await this.callbacks.refreshMediaURL(context,this.recoveryRequest.signal);if(!recovering())return;this.recorder?.stage("session");await this.connect(url,undefined,rtcRecoveryLimits(++attempts));if(!recovering())return;
         if(this.pc?.connectionState!=="connected")throw new Error("WebRTC disconnected during recovery");
         clearTimeout(this.recoveryExpiry);
         this.recovering=false;this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"connected",...context});
+        this.finishRecoveryRecord("connected");
       }catch(error){
         if(!recovering())return;this.cleanup();
-        const failure=mediaFailure(error);
-        this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:permanentRTCFailure(error)?"revoked":"attempt_failed",...context,status:failure.status,code:failure.code});
-        if(permanentRTCFailure(error)){clearTimeout(this.recoveryExpiry);this.recovering=false;safe(()=>this.callbacks.onState?.("error","Media authorization or microphone access ended"));return;}
+        const failure=mediaFailure(error),code=(error as {code?:unknown})?.code;
+        const reportedCode=failure.code??(typeof code==="string"?code:undefined);
+        this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:permanentRTCFailure(error)?"revoked":"attempt_failed",...context,status:failure.status,code:reportedCode});
+        this.recorder?.attemptFailed(reportedCode);
+        if(permanentRTCFailure(error)){clearTimeout(this.recoveryExpiry);this.recovering=false;this.finishRecoveryRecord("revoked");safe(()=>this.callbacks.onState?.("error","Media authorization or microphone access ended"));return;}
         this.retry=setTimeout(()=>void attempt(),1000);
       }
     };void attempt();
@@ -501,6 +612,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.transportSender.stop();
     if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key]??0;this.nativeCounts=undefined;}
     ++this.generation;this.ready=this.peer=false;this.stopRingback();clearInterval(this.timer);this.timer=undefined;
+    clearTimeout(this.pathStall);this.pathStall=undefined;this.clearPathAck();
     const socket=this.socket;this.socket=undefined;if(socket){
       if(socket.readyState===WebSocket.OPEN)try{socket.send(JSON.stringify({type:"media.shutdown",reason:this.stopped?"session_cleanup":"audio_error"}));}catch{/* observational only */}
       socket.onclose=socket.onmessage=socket.onerror=null;socket.close(1000,"client_shutdown");}
@@ -511,7 +623,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.capture?.disconnect();this.capture=undefined;this.whisper?.disconnect();this.whisper=undefined;this.whisperEpoch=null;this.whisperBase=null;this.whisperResampler=new PreviewResampler();
     const context=this.context;this.context=undefined;if(context){context.onstatechange=null;void context.close().catch(()=>{});}this.speaker=undefined;this.speakerMeter=undefined;
   }
-  stop(){if(this.stopped)return;if(this.recovering)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"cancelled",...this.recoveryContext});this.stopped=true;this.recoveryRequest?.abort();++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
+  stop(){if(this.stopped)return;if(this.recovering){this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"cancelled",...this.recoveryContext});this.finishRecoveryRecord("cancelled");}this.stopped=true;this.recoveryRequest?.abort();++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
 }
 
 /** Try one transport at a time; failed setup releases all resources first. */

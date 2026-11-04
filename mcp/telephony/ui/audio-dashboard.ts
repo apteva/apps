@@ -150,6 +150,59 @@ export function audioDashboardURL(
     if (filters[k]) q.set(k, filters[k]);
   return `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`;
 }
+export interface AudioIncidentCall {
+  call_id: string;
+  adviser?: string;
+  disconnected_at: string;
+  first_failed: string;
+  audio_age_ms?: number;
+  signaling_age_ms?: number;
+  error_class?: string;
+  ice_state?: string;
+  reconnected_at?: string;
+  reconnect_ms?: number;
+  disconnects: number;
+  failed_attempts: number;
+  recovery?: {
+    outcome?: string;
+    lost_ms?: number;
+    attempts_total?: number;
+    last_packet_age_ms?: number;
+    online?: boolean;
+    checks?: { telephony?: { ok: boolean; ms: number }; page?: { ok: boolean; ms: number } };
+  };
+}
+export interface AudioIncidentReport {
+  from: string;
+  to: string;
+  reading: string;
+  summary: { affected_calls: number; reconnected: number; not_reconnected: number; healthy_calls: number; first_failed: Record<string, number>; median_reconnect_ms?: number; longest_reconnect_ms?: number };
+  calls: AudioIncidentCall[];
+  healthy_calls: { call_id: string; adviser?: string }[];
+  alerts: { stage: string; state: string; call_count: number; occurred_at: string }[];
+  network_checks: { occurred_at: string; calls: number; results: { target: string; ok: boolean; ms: number; error?: string }[] }[];
+  truncated: boolean;
+}
+export const audioFirstFailedLabels: Record<string, string> = {
+  audio: "Audio",
+  signaling: "Signaling",
+  both: "Both",
+  neither: "Neither",
+  unknown: "Not recorded",
+};
+/** Blank times mean the last 15 minutes, chosen by the server. */
+export function audioIncidentURL(host: AudioDashboardHost, from = "", to = ""): string {
+  const q = new URLSearchParams({ view: "incident" });
+  if (host.projectId) q.set("project_id", host.projectId);
+  if (host.installId) q.set("install_id", String(host.installId));
+  for (const [key, value] of [["from", from], ["to", to]] as const) {
+    if (!value) continue;
+    const at = Date.parse(value);
+    if (!Number.isFinite(at)) throw new Error("Choose a valid time.");
+    q.set(key, new Date(at).toISOString());
+  }
+  return `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`;
+}
 export function audioDashboardLink(
   host: AudioDashboardHost,
   filters: Partial<AudioFilters> = {},

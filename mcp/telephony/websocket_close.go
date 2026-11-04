@@ -91,6 +91,12 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
+	// Set once this socket has failed but its call continues without it, so every
+	// write succeeds without touching the socket.
+	discard atomic.Bool
+	// A failed write must not end the media by itself: the reader sees the same
+	// failure and decides. Set only when audio handover is on.
+	readerOwnsFailure  atomic.Bool
 	audioRate          atomic.Int64
 	maxWriteBudget     atomic.Int64
 	sipResidenceBudget atomic.Int64
@@ -502,6 +508,9 @@ func (p *websocketWriterPump) queueControl(data []byte) bool {
 	return p.queueControlFrame(ws.OpText, data)
 }
 func (p *websocketWriterPump) queueControlFrame(op ws.OpCode, data []byte) bool {
+	if p.discard.Load() {
+		return true
+	}
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	if p.closeSent {
@@ -529,6 +538,9 @@ func (p *websocketWriterPump) Write(op ws.OpCode, payload []byte) error {
 func (p *websocketWriterPump) write(op ws.OpCode, payload []byte, timeout time.Duration) error {
 	if p == nil {
 		return net.ErrClosed
+	}
+	if p.discard.Load() {
+		return nil
 	}
 	if budget := time.Duration(p.maxWriteBudget.Load()); budget > 0 {
 		if timeout <= 0 || timeout > budget {

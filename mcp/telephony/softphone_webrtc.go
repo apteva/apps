@@ -41,6 +41,10 @@ type softphoneRTCConfig struct {
 	KnownVPNExits    string
 	CollectNetwork   func(audioNetworkEvent)
 	Enabled          bool
+	// Both off by default: each lets a call keep its audio through a signaling or
+	// path fault, and each is enabled per install.
+	PathRecovery     bool
+	Handover         bool
 	ICEServers       []webrtc.ICEServer
 	PublicIPs        []string
 	PortMin, PortMax uint16
@@ -63,7 +67,7 @@ func (c softphoneRTCConfig) relayConfigured() bool {
 func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
-	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000}
+	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000, PathRecovery: values["softphone_webrtc_path_recovery"] == "true", Handover: values["softphone_webrtc_handover"] == "true"}
 	c.ReceiveEstimator = values["softphone_webrtc_receive_estimator"]
 	if c.ReceiveEstimator == "" {
 		// Measured equal or better on loss and concealment in every replay
@@ -168,6 +172,7 @@ type rtcHubConn struct {
 	stop    func()
 	stats   *rtcMediaStats
 	whisper func([]byte, func() bool) bool
+	setup   *rtcSetupTrace
 }
 
 func (c *rtcHubConn) Close() error { c.stop(); return nil }
@@ -454,6 +459,8 @@ func (j *rtcJitter) pop(now time.Time) *rtp.Packet {
 // crosses that socket. Private coaching is mixed only at this browser boundary,
 // after carrier/recording/listener taps, retaining the pinned-adviser validator.
 func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, settings ...func(*webrtc.SettingEngine)) (net.Conn, func(), error) {
+	setupStarted := time.Now()
+	setup := &rtcSetupTrace{}
 	stats := &rtcMediaStats{}
 	stats.ingress.socket = &rtcSocketTelemetry{}
 	c.socketTelemetry = stats.ingress.socket
@@ -468,6 +475,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 		return nil, nil, err
 	}
 	signalWriter := newWebSocketWriterPump(signal, ws.StateServerSide)
+	signalWriter.readerOwnsFailure.Store(c.Handover)
 	hub, bridge := net.Pipe()
 	input := newWebSocketWriterPump(bridge, ws.StateClientSide)
 	done := make(chan struct{})
@@ -498,6 +506,8 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 			event.CloseCode = disconnect.closeCode()
 			event.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
 			event.ExpiresAt = time.Now().Add(event.Retention).UTC().Format(time.RFC3339Nano)
+			setup.FailedMS = time.Since(setupStarted).Milliseconds()
+			event.Setup = setup
 			c.CollectNetwork(event)
 		}
 		stop()
@@ -586,6 +596,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 		SDP        string `json:"sdp"`
 		ICEVersion int    `json:"ice_version"`
 	}
+	setup.OfferMS = time.Since(setupStarted).Milliseconds()
 	if op != ws.OpText || len(data) > 65536 || json.Unmarshal(data, &offer) != nil || offer.Type != "webrtc.offer" || len(offer.SDP) > 60000 || strings.Contains(offer.SDP, "m=video ") || strings.Contains(offer.SDP, "m=application ") {
 		return fail(errors.New("invalid audio SDP offer"))
 	}
@@ -622,11 +633,34 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 	if err := signalWriter.Write(ws.OpText, answerJSON); err != nil {
 		return fail(err)
 	}
+	setup.AnswerMS = time.Since(setupStarted).Milliseconds()
 	go func() {
 		for {
 			data, op, err := readWebSocketData(signalRead, ws.StateServerSide, signalWriter)
 			if err != nil {
 				disconnect.capture(err, "")
+				// A close frame is the browser choosing to leave, and a socket closed from
+				// this side is a revocation that must stop audio now. Anything else may
+				// be the signaling path alone, with audio still flowing.
+				var closed wsutil.ClosedError
+				if c.Handover && !errors.As(err, &closed) && !errors.Is(err, net.ErrClosed) {
+					signalWriter.discard.Store(true)
+					holdRTCForHandover(pc, stats, done, func() {
+						if c.CollectNetwork == nil {
+							return
+						}
+						event := c.NetworkContext
+						at := time.Now().UTC()
+						event.ID = event.ConnectionID + ":signaling_lost"
+						event.Event = "softphone.browser.signaling_lost"
+						event.Action = "signaling_lost"
+						info := disconnect.snapshot(err)
+						event.Disconnect = &info
+						event.OccurredAt = at.Format(time.RFC3339Nano)
+						event.ExpiresAt = at.Add(event.Retention).Format(time.RFC3339Nano)
+						c.CollectNetwork(event)
+					})
+				}
 				stop()
 				return
 			}
@@ -644,6 +678,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 			if json.Unmarshal(data, &control) == nil {
 				if control.Type == "webrtc.ice_refresh" {
 					iceSession.requestRefresh()
+					continue
+				}
+				if control.Type == "webrtc.ice_recover" {
+					if c.PathRecovery {
+						iceSession.requestPathRecovery(signalWriter, time.Now())
+					}
 					continue
 				}
 				if control.Type == "webrtc.restart_offer" {
@@ -665,6 +705,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 		return fail(errors.New("WebRTC connection timed out"))
 	}
 	signal.SetReadDeadline(time.Time{})
+	setup.ConnectedMS = time.Since(setupStarted).Milliseconds()
 	if c.TURN != nil {
 		go iceSession.run(signalWriter)
 	}
@@ -673,7 +714,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig, sett
 		return queueRTCWhisper(whispers, data, valid, done)
 	}
 	go sendRTCAudio(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled(), liveAudioMaxAge, 320, whispers, c.InputRate)
-	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: queueWhisper, disconnect: disconnect}, stop, nil
+	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: queueWhisper, disconnect: disconnect, setup: setup}, stop, nil
 }
 
 func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, estimator ...string) {
@@ -907,6 +948,9 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			}
 			if op == ws.OpText {
 				if err := signal.Write(op, data); err != nil {
+					if signal.readerOwnsFailure.Load() {
+						continue
+					}
 					stop()
 					return
 				}

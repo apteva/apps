@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -67,5 +69,104 @@ func TestSIPCrossedBYERequiresConfirmedPeerAndRetainsOtherErrors(t *testing.T) {
 	timeout := errors.New("socket timeout")
 	if got := sipTerminationResult(nil, timeout, true); got != timeout {
 		t.Fatal("timeout hidden")
+	}
+}
+
+func sipTestResponse(status int) error {
+	return sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: status}}
+}
+
+func TestSIPByeRetriesSilenceButNotResponses(t *testing.T) {
+	timeout := context.DeadlineExceeded
+	for name, c := range map[string]struct {
+		results  []error
+		calls    int
+		want     error
+		retried  bool
+		finished bool
+	}{
+		"confirmed first time":  {results: []error{nil}, calls: 1},
+		"lost then confirmed":   {results: []error{timeout, nil}, calls: 2, retried: true},
+		"rejected is final":     {results: []error{sipTestResponse(500)}, calls: 1, want: sipTestResponse(500)},
+		"481 first is an error": {results: []error{sipTestResponse(481)}, calls: 1, want: sipTestResponse(481)},
+		"481 after a lost try":  {results: []error{timeout, sipTestResponse(481)}, calls: 2, want: sipTestResponse(481), retried: true, finished: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			err, retried := sendSIPByeWithRetry(func(context.Context) error {
+				calls++
+				return c.results[calls-1]
+			}, nil, nil, nil)
+			if calls != c.calls || retried != c.retried || sipByeRetryFinished(err, retried) != c.finished {
+				t.Fatalf("calls=%d retried=%v finished=%v", calls, retried, sipByeRetryFinished(err, retried))
+			}
+			if (err == nil) != (c.want == nil) {
+				t.Fatalf("err=%v want=%v", err, c.want)
+			}
+		})
+	}
+}
+
+func TestSIPByeRetryStopsAtDeadlineAndWhenPeerEnds(t *testing.T) {
+	calls := 0
+	silent := func(ctx context.Context) error {
+		calls++
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	started := time.Now()
+	err, _ := sendSIPByeWithRetry(silent, nil, func() time.Time { return started.Add(300 * time.Millisecond) }, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 || time.Since(started) > 2*time.Second {
+		t.Fatalf("stop deadline ignored: err=%v calls=%d after=%v", err, calls, time.Since(started))
+	}
+	calls = 0
+	retries := 0
+	err, retried := sendSIPByeWithRetry(func(context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	}, func() bool { return true }, nil, func(error) { retries++ })
+	if !errors.Is(err, errSIPByeCrossed) || !retried || calls != 1 || retries != 1 {
+		t.Fatalf("peer end ignored: err=%v calls=%d retries=%d", err, calls, retries)
+	}
+	if got := sipTerminationResult(nil, err, false); got != nil {
+		t.Fatalf("crossed BYE should end the call cleanly: %v", got)
+	}
+}
+
+func TestSIPByeRetryUsesItsWholeBudgetOnSilence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the retry budget")
+	}
+	calls := 0
+	started := time.Now()
+	err, retried := sendSIPByeWithRetry(func(ctx context.Context) error {
+		calls++
+		<-ctx.Done()
+		return ctx.Err()
+	}, nil, nil, nil)
+	elapsed := time.Since(started)
+	if err == nil || !retried || calls < 3 || elapsed > sipByeRetryBudget+time.Second {
+		t.Fatalf("err=%v retried=%v calls=%d elapsed=%v", err, retried, calls, elapsed)
+	}
+}
+
+// A gateway that starts stopping during the retries still gets its deadline.
+func TestSIPByeRetryHonoursAStopThatStartsDuringRetries(t *testing.T) {
+	var stop atomic.Int64
+	started := time.Now()
+	calls := 0
+	err, _ := sendSIPByeWithRetry(func(ctx context.Context) error {
+		calls++
+		stop.Store(time.Now().Add(100 * time.Millisecond).UnixNano())
+		<-ctx.Done()
+		return ctx.Err()
+	}, nil, func() time.Time {
+		if at := stop.Load(); at != 0 {
+			return time.Unix(0, at)
+		}
+		return time.Time{}
+	}, nil)
+	if err == nil || calls != 1 || time.Since(started) > sipByeAttemptTimeout+2*sipByeRetryDelay {
+		t.Fatalf("err=%v calls=%d after=%v", err, calls, time.Since(started))
 	}
 }

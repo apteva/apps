@@ -68,6 +68,14 @@ export function mediaFailure(error: unknown): { status?: number; code?: string; 
   return { status, code, expired, denied: !expired && [401, 403, 404, 410].includes(status!) };
 }
 
+/** The generation named by a 409, when it is well formed. */
+export function mediaCurrentGeneration(error: unknown): string | undefined {
+  try {
+    const current = JSON.parse((error as {body?: string})?.body ?? "{}").current_generation;
+    return typeof current === "string" && /^session-[a-f0-9-]{1,64}$/.test(current) ? current : undefined;
+  } catch { return undefined; }
+}
+
 export interface LeaseTimers {
   now(): number;
   setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;

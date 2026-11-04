@@ -3,6 +3,7 @@ import {runNetworkCheck} from "./network-check";
 import { boundedMediaRequest } from "./media-lease";
 import {RuntimeTelephonyTransport, type TelephonyRuntimeMode, type DirectTelephonyConnection} from "./runtime-transport";
 import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
+import type { MediaRecoveryRecord } from "./media-recovery-record";
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
 import { listenerAudioOptions } from "./listener-audio";
@@ -61,6 +62,8 @@ export interface CallControlResult {
 }
 export interface CallSession {
   attachment_guard_version?: number;
+  /** A candidate grant: not valid until its own connection has replaced the current one. */
+  handover_pending?: boolean;
   call_id: string;
   media_url: string;
   session_generation?: string;
@@ -354,9 +357,14 @@ export class TelephonyClient {
   }
 
   /** Attach an assigned human call; never dials or takes another user's call. */
-  async attach(id: string, diagnostics?: MediaAttachmentDiagnostics, init?:RequestInit, expectedGeneration?:string): Promise<CallSession> {
+  async attach(id: string, diagnostics?: MediaAttachmentDiagnostics, init?:RequestInit, expectedGeneration?:string, handover?:boolean): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await boundedMediaRequest(signal=>this.mediaPost(this.path(`/softphone/attach/${callID(id)}`), {...(diagnostics ? {media_diagnostics:diagnostics} : {}),...(expectedGeneration!==undefined && diagnostics?.attempt_id ? {attachment_guard:{id:diagnostics.attempt_id,expected_generation:expectedGeneration}} : {})},{...init,signal}),init?.signal??undefined), id, "media", started);
+    return this.session(await boundedMediaRequest(signal=>this.mediaPost(this.path(`/softphone/attach/${callID(id)}`), {...(diagnostics ? {media_diagnostics:diagnostics} : {}),...(expectedGeneration!==undefined && diagnostics?.attempt_id ? {attachment_guard:{id:diagnostics.attempt_id,expected_generation:expectedGeneration,...(handover?{handover:true}:{})}} : {})},{...init,signal}),init?.signal??undefined), id, "media", started);
+  }
+
+  /** Sent over HTTP because a recovery usually means signaling is unavailable. */
+  reportMediaRecovery(id: string, record: MediaRecoveryRecord): Promise<unknown> {
+    return boundedMediaRequest(signal=>this.mediaPost(this.path(`/softphone/recovery/${callID(id)}`),{record},{signal}));
   }
 
   async takeover(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {

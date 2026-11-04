@@ -598,6 +598,40 @@ func TestSIPRefreshMissingACKAndExpirySendBYE(t *testing.T) {
 		})
 	}
 }
+
+// The inbound side of the same retry, over real sipgo: silence gets a second BYE.
+func TestSIPInboundBYEIsRetriedAfterSilence(t *testing.T) {
+	f := newSIPDialogFixture(t, false, 500*time.Millisecond)
+	f.answer(t)
+	f.session.answerMu.Lock()
+	f.session.timerUpdated = time.Now().Add(-91 * time.Second)
+	signalSIPTimer(f.session.timerWake)
+	f.session.answerMu.Unlock()
+	first := readSIPResponseContaining(t, f.signaling, "BYE sip:")
+	// The first try has to run out before the next is sent, so read past it.
+	var second string
+	deadline := time.Now().Add(sipByeAttemptTimeout + 2*time.Second)
+	for second == "" && time.Now().Before(deadline) {
+		buffer := make([]byte, 4096)
+		_ = f.signaling.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		n, _, err := f.signaling.ReadFromUDP(buffer)
+		if err != nil {
+			continue
+		}
+		text := string(buffer[:n])
+		if strings.Contains(text, "BYE sip:") && sipTestHeader(text, "CSeq") != sipTestHeader(first, "CSeq") {
+			second = text
+		}
+	}
+	if second == "" {
+		t.Fatal("no second BYE after the first went unanswered")
+	}
+	if sipTestHeader(second, "Call-ID") != sipTestHeader(first, "Call-ID") {
+		t.Fatal("the retry must stay in the same dialog")
+	}
+	f.respond(t, second, "")
+	f.waitEnded(t)
+}
 func TestSIPForeignDialogAndUnmatchedCancelCannotEndCall(t *testing.T) {
 	f := newSIPDialogFixture(t, false, 2*time.Second)
 	f.answer(t)

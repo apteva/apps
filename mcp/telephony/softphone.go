@@ -633,6 +633,14 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reason, verifiedExpiry, identity, sessionCorrelation := a.phoneMediaCheckState(row, token, true)
+	// A candidate connects on its own grant, here and over WebRTC only.
+	handover := false
+	if reason == "media_token_replaced" && r.URL.Query().Get("transport") == "webrtc" {
+		if pendingReason, expiry, pendingIdentity, pendingSession, pending := a.phoneMediaPendingCheck(row, token); pending {
+			handover = true
+			reason, verifiedExpiry, identity, sessionCorrelation = pendingReason, expiry, pendingIdentity, pendingSession
+		}
+	}
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
 		if reason == "media_token_replaced" {
@@ -703,7 +711,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	if globalCtx != nil {
 		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
 	}
-	networkAddress, metadataErr := resolveAudioNetworkAddress(r)
+	networkAddress, metadataErr := resolveAudioNetworkAddress(r, networkConfig["audio_telemetry_local_proxy_cidrs"])
 	if metadataErr != nil {
 		// SDK error messages are fixed reason strings: never log assertion values,
 		// media URLs or credentials. Observational failures do not reject media.
@@ -722,7 +730,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	if transport == "webrtc" {
 		rtcConfig.NetworkContext = networkContext
 		rtcConfig.KnownVPNExits = networkConfig["audio_telemetry_known_vpn_exits"]
-		rtcConfig.CollectNetwork = a.audioNetworks.enqueue
+		rtcConfig.CollectNetwork = a.collectBrowserNetwork
 		// Negotiate before replacing the browser or answering the carrier. Failed
 		// setup leaves the existing hub/carrier untouched, including auto fallback.
 		var stopRTC func()
@@ -733,15 +741,24 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer stopRTC()
+		if hubConn, ok := conn.(*rtcHubConn); ok {
+			networkContext.Setup = hubConn.setup
+		}
 		readConn = conn
 		unlock = a.softphones.lockClaim(callID)
 		current, findErr := a.db().findCall(callID)
 		if findErr != nil || current == nil || isTerminalStatus(current.Status) {
 			return
 		}
-		reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
-		if reason != "" {
-			return
+		if handover {
+			if verifiedExpiry, identity, err = a.commitHandover(current, token, networkContext); err != nil {
+				return
+			}
+		} else {
+			reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
+			if reason != "" {
+				return
+			}
 		}
 		row = current
 	}
@@ -755,7 +772,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	})
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
 	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
-	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, networkContext, a.audioNetworks.enqueue)
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, networkContext, a.collectBrowserNetwork)
 	writer.setDiagnosticID(connectionID)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
@@ -1207,6 +1224,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if strings.HasPrefix(action, "recovery/") {
+		a.handleMediaRecoveryRecord(w, r, project, strings.TrimPrefix(action, "recovery/"))
+		return
+	}
 	for _, name := range []string{"attach", "takeover", "renew"} {
 		if strings.HasPrefix(action, name+"/") {
 			a.handlePhoneSession(w, r, project, name, strings.TrimPrefix(action, name+"/"))
@@ -1231,6 +1252,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 
 type softphoneSession struct {
 	AttachmentGuardVersion int    `json:"attachment_guard_version,omitempty"`
+	HandoverPending        bool   `json:"handover_pending,omitempty"`
 	SessionGeneration      string `json:"session_generation,omitempty"`
 	CallID                 string `json:"call_id"`
 	MediaURL               string `json:"media_url"`

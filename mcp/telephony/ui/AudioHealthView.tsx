@@ -1,5 +1,6 @@
 import AudioHealthCharts from "./AudioHealthCharts";
 import CallDiagnostics from "./CallDiagnostics";
+import AudioIncidentSection from "./AudioIncidentSection";
 import { subscribeAudioDashboardEvents, type AudioUpdatesMode } from "./audio-dashboard-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -252,6 +253,7 @@ export default function AudioHealthView(props: AudioDashboardHost) {
           {loading ? "Refreshing…" : "Refresh audio health"}
         </button>
       </header>
+      <AudioIncidentSection host={props} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {field("Time window", "range", [
           { value: "1h", label: "Last hour" },

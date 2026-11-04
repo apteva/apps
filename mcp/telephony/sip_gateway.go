@@ -268,6 +268,13 @@ func (g *sipGateway) Start() error {
 }
 
 func (g *sipGateway) Stop() { g.stopWithReason("application_shutdown") }
+
+// Zero until the gateway starts stopping.
+func (g *sipGateway) signalStopDeadline() time.Time {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.stopDeadline
+}
 func (g *sipGateway) stopWithReason(reason string) {
 	if g == nil {
 		return
@@ -850,22 +857,18 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if leg != "carrier" && s.dialog != nil {
 		if s.dialog.LoadState() >= sip.DialogStateEstablished && s.dialog.LoadState() != sip.DialogStateEnded {
 			s.signalMu.Lock()
-			deadline := time.Now().Add(3 * time.Second)
-			s.gateway.mu.RLock()
-			stopDeadline := s.gateway.stopDeadline
-			s.gateway.mu.RUnlock()
-			if !stopDeadline.IsZero() && stopDeadline.Before(deadline) {
-				deadline = stopDeadline
-			}
-			ctx, cancel := context.WithDeadline(context.Background(), deadline)
 			s.answerMu.Lock()
 			target := s.remoteTarget
 			s.answerMu.Unlock()
 			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
-			signalingErr = s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
+			var retried bool
+			signalingErr, retried = sendSIPByeWithRetry(func(ctx context.Context) error {
+				return s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
+			}, func() bool { return s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded }, s.gateway.signalStopDeadline, func(err error) {
+				s.diagnostics.event("sip_bye_retry", "local", transportEvidenceError(err), 0)
+			})
 			signalingErr = sipTerminationResult(s.diagnostics, signalingErr,
-				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded)
-			cancel()
+				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded || sipByeRetryFinished(signalingErr, retried))
 			s.signalMu.Unlock()
 		}
 	}

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 test("installed headless client talks through real Telephony with host-owned UI", async ({ page, context }) => {
-  test.skip(["headless-webrtc-turn-recovery","headless-pcm-recovery-120"].includes(process.env.TELEPHONY_TEST_SURFACE??""));
+  test.skip(["headless-webrtc-turn-recovery","application-user-webrtc-handover","headless-pcm-recovery-120"].includes(process.env.TELEPHONY_TEST_SURFACE??""));
   const gateway = process.env.TELEPHONY_TEST_GATEWAY;
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
@@ -256,5 +256,67 @@ test("packaged softphone recovers after a long HTTP interruption",async({page,co
  await page.evaluate(()=>{const w=window as any;w.phone.setMuted(false);w.maxSpeaker=0;w.maxMic=0;});
  await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
  await expect.poll(()=>page.evaluate(()=>(window as any).maxMic),{timeout:10000}).toBeGreaterThan(.001);
+ await page.evaluate(async()=>{const w=window as any;await w.phone.hangup();w.phone.dispose();});
+});
+
+// The 2026-11-04 shape: the signaling connection dies while the audio path is
+// healthy. Real Chromium, real Pion, real TURN: only the TCP socket is cut.
+test("audio keeps playing while a lost signaling connection is replaced",async({page,context,request})=>{
+ test.skip(process.env.TELEPHONY_TEST_SURFACE!=="application-user-webrtc-handover");
+ test.setTimeout(70000);
+ const gateway=process.env.TELEPHONY_TEST_GATEWAY!;
+ const fixture=async(path:string)=>await (await request.fetch(gateway+path,{method:path.endsWith("drop-browser")?"POST":"GET"})).json();
+ await context.addInitScript(()=>{
+  const original=window.RTCPeerConnection,w=window as any;w.handoverPeers=[];
+  window.RTCPeerConnection=class extends original{constructor(config?:RTCConfiguration){super({...config,iceTransportPolicy:"relay"});w.handoverPeers.push(this);}};
+ });
+ await page.goto("/?application-user");await page.waitForFunction(()=>typeof (window as any).loadPhone==="function");
+ await page.evaluate(({gateway,token})=>(window as any).loadPhone(gateway,token),{gateway,token:process.env.TELEPHONY_TEST_USER_TOKEN});
+ await page.evaluate(()=>(window as any).phone.configureAudio({mediaTransport:"webrtc"}));await page.click("#answer");
+ await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:20000}).toBe("live");
+ await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
+ await expect.poll(async()=>(await fixture("/fixture/audio-ready")).ready,{timeout:15000}).toBe(true);
+ const before=await page.evaluate(()=>{const w=window as any;return {id:w.phone.getSnapshot().callId,generation:w.phone.session.session_generation,peers:w.handoverPeers.length};});
+ expect(before.peers).toBe(1);
+ // Packets across every open connection: a gap here is silence on the line.
+ await page.evaluate(()=>{
+  const w=window as any,seen=new Map<RTCPeerConnection,number>();w.handoverWatch={run:true,maxGap:0,states:[] as string[],samples:0};
+  let lastRise=performance.now();
+  void (async()=>{while(w.handoverWatch.run){
+   let rose=false;
+   for(const pc of w.handoverPeers as RTCPeerConnection[]){
+    if(pc.connectionState==="closed")continue;
+    let packets=0;(await pc.getStats()).forEach((s:any)=>{if(s.type==="inbound-rtp"&&s.kind==="audio")packets+=s.packetsReceived??0;});
+    if(packets>(seen.get(pc)??0)){seen.set(pc,packets);rose=true;}
+   }
+   const now=performance.now();if(rose)lastRise=now;
+   w.handoverWatch.maxGap=Math.max(w.handoverWatch.maxGap,now-lastRise);w.handoverWatch.samples++;
+   const state=w.phone.getSnapshot().audioState;if(w.handoverWatch.states.at(-1)!==state)w.handoverWatch.states.push(state);
+   await new Promise(resolve=>setTimeout(resolve,40));
+  }})();
+ });
+ await page.waitForTimeout(1000);
+ expect((await fixture("/fixture/drop-browser")).ok).toBe(true);
+ await expect.poll(()=>page.evaluate(()=>(window as any).phone.session.session_generation),{timeout:15000}).not.toBe(before.generation);
+ await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:5000}).toBe("live");
+ await page.waitForTimeout(1500);
+ const watched=await page.evaluate(()=>{const w=window as any;w.handoverWatch.run=false;return {...w.handoverWatch,peers:w.handoverPeers.map((pc:RTCPeerConnection)=>pc.connectionState),callId:w.phone.getSnapshot().callId};});
+ console.log("handover",JSON.stringify(watched));
+ const events=await page.evaluate(()=>(window as any).sessionEvents.filter((e:any)=>["handover","reconnect"].includes(e.action)).map((e:any)=>e.action+":"+e.outcome));
+ console.log("handover events",JSON.stringify(events));
+ expect(events).toEqual(["handover:started","handover:committed"]);
+ expect(await page.evaluate(()=>(window as any).phone.session.handover_pending)).toBe(true);
+ expect(watched.callId).toBe(before.id);
+ expect(watched.samples).toBeGreaterThan(20);
+ expect(watched.peers).toEqual(["closed","connected"]);
+ expect(watched.states).toEqual(["live"]);
+ expect(watched.maxGap).toBeLessThan(1500);
+ expect((await request.get(gateway+"/fixture/media-connections").then(r=>r.json())).count).toBe(2);
+ // Both directions on the replacement connection, as far as the carrier.
+ const loud=(await request.get(gateway+"/fixture/carrier-loud-frames").then(r=>r.json())).count;
+ await page.evaluate(()=>{const w=window as any;w.maxSpeaker=0;w.maxMic=0;});
+ await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
+ await expect.poll(()=>page.evaluate(()=>(window as any).maxMic),{timeout:10000}).toBeGreaterThan(.001);
+ await expect.poll(async()=>(await request.get(gateway+"/fixture/carrier-loud-frames").then(r=>r.json())).count,{timeout:10000}).toBeGreaterThan(loud+10);
  await page.evaluate(async()=>{const w=window as any;await w.phone.hangup();w.phone.dispose();});
 });

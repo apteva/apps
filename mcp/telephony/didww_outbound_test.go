@@ -24,6 +24,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/srtp/v3"
+	"sync/atomic"
 )
 
 func didwwTestCredentials() map[string]string {
@@ -157,6 +158,25 @@ func TestGenericOutboundSIPProvisionalKeysAndFinalCodec(t *testing.T) {
 		})
 	}
 }
+
+// BYEs the carrier fixture ignores before it answers, and how many it received.
+var outboundFixtureSilentBYEs, outboundFixtureBYEs atomic.Int32
+
+// Real sipgo and a real dialog: the retry has to put a second BYE on the wire, and
+// the hangup has to wait for it and report the confirmation.
+func TestGenericOutboundSIPHangupRetriesALostBYE(t *testing.T) {
+	outboundFixtureSilentBYEs.Store(1)
+	outboundFixtureBYEs.Store(0)
+	t.Cleanup(func() { outboundFixtureSilentBYEs.Store(0) })
+	started := time.Now()
+	runOutboundSIPPeerScenario(t, "telnyx", "PCMU", true, false, false, false, false, false)
+	if n := outboundFixtureBYEs.Load(); n != 2 {
+		t.Fatal("the carrier must see the BYE again after silence", n)
+	}
+	if took := time.Since(started); took < sipByeAttemptTimeout {
+		t.Fatal("the first BYE was not left unanswered", took)
+	}
+}
 func TestGenericOutboundSIPHangupReportsCarrierFailure(t *testing.T) {
 	runOutboundSIPPeerScenario(t, "telnyx", "PCMU", true, false, false, false, true, false)
 }
@@ -287,6 +307,10 @@ func runOutboundSIPPeerScenario(t *testing.T, provider, codec string, secureAnsw
 		_ = tx.Respond(response)
 	})
 	server.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
+		outboundFixtureBYEs.Add(1)
+		if outboundFixtureSilentBYEs.Add(-1) >= 0 {
+			return
+		}
 		status := sip.StatusOK
 		if failBYE {
 			status = 503

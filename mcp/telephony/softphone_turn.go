@@ -332,6 +332,11 @@ func (a *App) configureManagedTURN(c *softphoneRTCConfig, row *callRow, token st
 			reason, _ = a.listenerSessionCheck(current, token)
 		} else {
 			reason, _, _ = a.phoneMediaCheckDetails(current, token)
+			if reason == "media_token_replaced" {
+				if pendingReason, _, _, _, pending := a.phoneMediaPendingCheck(current, token); pending {
+					reason = pendingReason
+				}
+			}
 		}
 		if reason != "" {
 			return rtcTURNCredentials{}, errors.New("media authorization unavailable")

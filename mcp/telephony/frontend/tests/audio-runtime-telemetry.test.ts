@@ -8,6 +8,15 @@ test("main thread scheduling delay is timestamped and does not change audio",()=
  expect(events).toEqual([{timestamp:"2026-10-06T10:00:00Z",action:"main_thread",outcome:"scheduling_gap",duration_ms:500}]);
  expect(t.counters.main_thread_pause_count).toBe(1);expect(t.counters.main_thread_max_pause_ms).toBe(500);
 });
+test("time spent reconnecting is not counted as a main thread pause",()=>{
+ let now=0;const events:any[]=[];
+ const t=new AudioRuntimeTelemetry(e=>events.push(e),()=>now);
+ t.tick();now=1000;t.tick();
+ t.stopEnvironment();now=21000; // Recovery: the 1 s timer stopped for 20 s.
+ t.tick();now=22000;t.tick();
+ expect(events).toEqual([]);expect(t.counters.main_thread_pause_count).toBe(0);expect(t.counters.main_thread_max_pause_ms).toBe(0);
+ now=23500;t.tick();expect(t.counters.main_thread_max_pause_ms).toBe(500); // A real gap still counts.
+});
 test("AudioContext suspension and interruption share a duration and resume once",()=>{
  let now=0;const events:any[]=[];const t=new AudioRuntimeTelemetry(e=>events.push(e),()=>now);
  t.context("running");now=10;t.context("suspended");now=20;t.context("suspended");now=40;t.context("interrupted");now=3010;t.context("running");

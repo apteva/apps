@@ -37,6 +37,9 @@ export class AudioRuntimeTelemetry {
     } catch { /* Restricted environment getters cannot affect audio startup. */ }
   }
   stopEnvironment(): void {
+    // The 1 s timer stops with the session. Time spent reconnecting is not a
+    // main-thread pause, so the next session starts a new measurement.
+    this.lastTick = undefined;
     for (const cleanup of this.environmentCleanup.splice(0)) {
       try { cleanup(); } catch { /* Cleanup must not prevent media cleanup. */ }
     }

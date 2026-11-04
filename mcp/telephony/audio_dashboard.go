@@ -529,6 +529,10 @@ func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, projec
 		a.serveCallStatistics(w, r, project)
 		return
 	}
+	if r.URL.Query().Get("view") == "incident" {
+		a.serveAudioIncident(w, r, project)
+		return
+	}
 	if id := r.URL.Query().Get("call_id"); id != "" {
 		row, e := a.db().findCall(id)
 		if e != nil {

@@ -29,6 +29,9 @@ type rtcICESession struct {
 	revision    atomic.Uint64
 	refresh     chan struct{}
 	done        <-chan struct{}
+	// Browser-requested path recoveries, guarded by mu.
+	recoveries   int
+	lastRecovery time.Time
 }
 
 // Control-plane evidence is bounded and contains no SDP, credentials or URLs.
@@ -81,8 +84,45 @@ func (s *rtcICESession) initial(listener bool) []byte {
 			state = "unavailable"
 		}
 	}
-	raw, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": s.credentials.ICEServers, "ice_transport_policy": policy, "ice_revision": s.revision.Load(), "ice_restart_supported": true, "turn_source": state, "expires_at": s.credentials.ExpiresAt, "relay_configured": hasTURN(s.credentials.ICEServers), "bitrate": s.config.Bitrate, "fec_requested": s.config.fecEnabled(), "listener": listener, "network_policy": s.config.NetworkPolicy})
+	value := map[string]any{"type": "webrtc.config", "ice_servers": s.credentials.ICEServers, "ice_transport_policy": policy, "ice_revision": s.revision.Load(), "ice_restart_supported": true, "turn_source": state, "expires_at": s.credentials.ExpiresAt, "relay_configured": hasTURN(s.credentials.ICEServers), "bitrate": s.config.Bitrate, "fec_requested": s.config.fecEnabled(), "listener": listener, "network_policy": s.config.NetworkPolicy}
+	if !listener && s.config.PathRecovery {
+		value["ice_recover_supported"] = true
+	}
+	if !listener && s.config.Handover {
+		value["handover"] = true
+	}
+	raw, _ := json.Marshal(value)
 	return raw
+}
+
+const (
+	rtcPathRecoveryMinGap = 10 * time.Second
+	rtcPathRecoveryMax    = 6
+)
+
+// The browser may send an ICE restart offer only for a revision newer than the
+// one it holds. This issues one for the servers already in use, so no credential
+// service is involved. The request comes from the browser, so it is rate limited.
+func (s *rtcICESession) requestPathRecovery(writer *websocketWriterPump, now time.Time) {
+	s.mu.Lock()
+	if s.recoveries >= rtcPathRecoveryMax || (!s.lastRecovery.IsZero() && now.Sub(s.lastRecovery) < rtcPathRecoveryMinGap) {
+		s.mu.Unlock()
+		raw, _ := json.Marshal(map[string]any{"type": "webrtc.ice_status", "state": "recovery_busy"})
+		writer.queueControl(raw)
+		return
+	}
+	s.recoveries++
+	s.lastRecovery = now
+	credentials := s.credentials
+	revision := s.revision.Add(1)
+	s.mu.Unlock()
+	policy := s.config.ICEPolicy
+	if policy == "" {
+		policy = "all"
+	}
+	s.record("path_recovery_requested", revision, newAudioSessionID(), now, 0)
+	raw, _ := json.Marshal(map[string]any{"type": "webrtc.ice_config", "ice_servers": credentials.ICEServers, "expires_at": credentials.ExpiresAt, "ice_transport_policy": policy, "revision": revision, "recovery": true})
+	writer.queueControl(raw)
 }
 func (s *rtcICESession) requestRefresh() {
 	if s.config.TURN != nil {
@@ -151,7 +191,9 @@ func (s *rtcICESession) runAfter(writer *websocketWriterPump, delay time.Duratio
 			continue
 		}
 		failures = 0
+		s.mu.Lock()
 		s.credentials = v
+		s.mu.Unlock()
 		revision := s.revision.Add(1)
 		s.record("credentials_refreshed", revision, attemptID, last, int(time.Until(time.Unix(v.ExpiresAt, 0))/time.Millisecond))
 		raw, _ := json.Marshal(map[string]any{"type": "webrtc.ice_config", "ice_servers": v.ICEServers, "expires_at": v.ExpiresAt, "ice_transport_policy": s.config.ICEPolicy, "revision": revision})

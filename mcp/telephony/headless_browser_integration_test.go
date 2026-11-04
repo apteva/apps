@@ -34,7 +34,7 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "application-user-webrtc-handover", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
@@ -81,7 +81,13 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	}
 	platform := newTier2PlatformGateway(t)
 	config := map[string]string{"softphone_webrtc_encoder_input_rate": inputRate}
-	if surface == "headless-webrtc-turn-recovery" {
+	// Trusted operators' first session has no generation, so application users are
+	// the path a handover protects. Same sign-in and routing as application-user.
+	applicationUser := surface == "application-user" || surface == "application-user-webrtc-handover"
+	if surface == "application-user-webrtc-handover" {
+		config["softphone_webrtc_handover"] = "true"
+	}
+	if surface == "headless-webrtc-turn-recovery" || surface == "application-user-webrtc-handover" {
 		config["softphone_webrtc_enabled"] = "true"
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -119,7 +125,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	var authSidecar *tk.Sidecar
 	var refreshToken string
 	browserToken := "headless-browser-fixture"
-	if surface == "application-user" {
+	if applicationUser {
 		authSidecar = tk.SpawnSidecar(t, "../auth", tk.WithProjectID(tier2Project), tk.WithConfig(map[string]string{"email_verification_required": "false", "app_url": "http://localhost:8080"}))
 		client := authSidecar.MCP("auth_clients_create", map[string]any{"organization_slug": "default", "name": "telephony-browser-regression", "type": "spa", "allowed_origins": []any{hostOrigin}})
 		credentials := map[string]any{"client_id": client["client_id"], "email": "telephony-regression@example.invalid", "password": "Temporary-Test-Only!234"}
@@ -166,7 +172,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		request("POST", "/routing/routes/assign", map[string]any{"flow_id": flow["id"], "route_id": route["id"]})
 		request("PUT", "/access/policy", phonePolicy{
 			Users:     []phoneUser{{Identity: phoneIdentity{"auth", "11", "user", fmt.Sprint(user["id"]), fmt.Sprint(user["organization_id"])}, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{destination}}}},
-			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: authSidecar.URL() + "/me?project_id=" + tier2Project, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
+			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: platform.serveAuth(t, authSidecar.URL()) + "/me?project_id=" + tier2Project, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
 		})
 	}
 
@@ -211,6 +217,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		r.Header.Set("X-Apteva-Project-ID", tier2Project)
 	}
 	var audioVerified atomic.Bool
+	var carrierLoudFrames atomic.Int64
 	var mediaMu sync.Mutex
 	var mediaConn net.Conn
 	var mediaConnections int
@@ -242,6 +249,10 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			writeTier2JSON(w, map[string]int{"count": n})
 			return
 		}
+		if r.URL.Path == "/fixture/carrier-loud-frames" {
+			writeTier2JSON(w, map[string]int64{"count": carrierLoudFrames.Load()})
+			return
+		}
 		if r.URL.Path == "/fixture/audio-ready" {
 			writeTier2JSON(w, map[string]bool{"ready": audioVerified.Load()})
 			return
@@ -264,7 +275,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		if media || audioAsset {
 			path = strings.TrimPrefix(path, "/_install/42")
 		}
-		if surface == "application-user" && !media && !strings.HasPrefix(path, "/user/") && !strings.HasPrefix(path, "/ui/frontend") {
+		if applicationUser && !media && !strings.HasPrefix(path, "/user/") && !strings.HasPrefix(path, "/ui/frontend") {
 			http.Error(w, "operator API unavailable to application browser", 403)
 			return
 		}
@@ -276,7 +287,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		proxy.ServeHTTP(w, r)
 	}))
 	defer public.Close()
-	if surface != "application-user" {
+	if !applicationUser {
 		script := exec.CommandContext(t.Context(), "bun", "frontend/tests/script-client.ts")
 		script.Env = append(os.Environ(), "TELEPHONY_TEST_GATEWAY="+public.URL)
 		if output, err := script.CombinedOutput(); err != nil {
@@ -369,8 +380,16 @@ waitAnswer:
 	_ = carrier.SetReadDeadline(time.Time{})
 	go func() {
 		for {
-			if _, _, err := wsutil.ReadServerData(carrier); err != nil {
+			data, _, err := wsutil.ReadServerData(carrier)
+			if err != nil {
 				return
+			}
+			var frame carrierMediaFrame
+			if json.Unmarshal(data, &frame) != nil || frame.Event != "media" || frame.Media == nil {
+				continue
+			}
+			if raw, err := base64.StdEncoding.DecodeString(frame.Media.Payload); err == nil && rmsPCM(bytesToPCM16(raw)) > 500 {
+				carrierLoudFrames.Add(1)
 			}
 		}
 	}()

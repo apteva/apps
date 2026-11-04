@@ -112,10 +112,17 @@ export interface SoftphoneCallbacks {
   onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
   /** Pushed call progress; hosts may keep polling as a fallback. */
   onCallStatus?: (status: SoftphoneCallStatus) => void;
+  /** One summary per finished recovery, sent by the controller over HTTP. */
+  onRecoveryRecord?: (record: import("../frontend/src/media-recovery-record").MediaRecoveryRecord) => void;
+  /** Signaling failed with audio still flowing: replace this connection while it plays.
+   * Null means not now. Resolves true after the swap, which stops this connection. */
+  startHandover?: (cause: string, evidence: import("../frontend/src/media-recovery-record").RecoveryEvidence) => Promise<boolean> | null;
 }
 
 export interface SoftphoneAudioOptions {
  networkProfile?: import("../frontend/src/network-policy").NetworkPolicy;
+  /** Shorter connection limits for a replacement. The first connection never sets these. */
+  setupLimits?: { socketOpenMs: number; mediaConnectMs: number };
   turnTransport?: "all"|"udp"|"tcp"|"tls";
   iceTransportPolicy?: "all"|"relay";
   turnTLSPort?:number;

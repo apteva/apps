@@ -331,15 +331,14 @@ func (s *outboundSIPSession) waitAnswer() {
 		// arrive between the 200 response and ACK; sending BYE from that
 		// goroutine would race the ACK and could send it twice.
 		if s.ended.Load() && s.dialog.LoadState() == sip.DialogStateConfirmed {
-			byeCtx, stopBye := context.WithTimeout(context.Background(), 3*time.Second)
 			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
 			s.signalMu.Lock()
-			err := s.dialog.Bye(byeCtx)
+			err, retried := sendSIPByeWithRetry(s.dialog.Bye, func() bool { return s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded }, s.gateway.signalStopDeadline, func(err error) {
+				s.diagnostics.event("sip_bye_retry", "local", transportEvidenceError(err), 0)
+			})
 			s.terminationErr = sipTerminationResult(s.diagnostics, err,
-				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded)
+				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded || sipByeRetryFinished(err, retried))
 			s.signalMu.Unlock()
-
-			stopBye()
 		}
 		close(s.inviteDone)
 		if s.ended.Load() {
@@ -468,7 +467,9 @@ func (s *outboundSIPSession) waitAnswer() {
 
 func (s *outboundSIPSession) hangup() error {
 	s.finish("local", nil)
-	timer := time.NewTimer(4 * time.Second)
+	// Long enough for the BYE retries, so a BYE confirmed on a later try is reported
+	// as confirmed. Only a carrier that answers nothing takes this long.
+	timer := time.NewTimer(sipByeRetryBudget + time.Second)
 	defer timer.Stop()
 	select {
 	case <-s.inviteDone:

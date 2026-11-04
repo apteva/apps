@@ -38,6 +38,8 @@ type audioNetworkEvent struct {
 	lastBrowser           audioDisconnectInfo
 	ReplacedBy            *audioSessionCorrelation `json:"replaced_by,omitempty"`
 	Disconnect            *audioDisconnectInfo     `json:"disconnect,omitempty"`
+	Recovery              *audioRecoveryRecord     `json:"recovery,omitempty"`
+	Setup                 *rtcSetupTrace           `json:"setup,omitempty"`
 	Session               audioSessionCorrelation  `json:"session,omitempty"`
 	CurrentSessionID      string                   `json:"current_session_id,omitempty"`
 	MediaPath             *rtcMediaEndpoint        `json:"media_path,omitempty"`
@@ -121,15 +123,48 @@ type audioNetworkAddress struct {
 // Resolve once at the authenticated handshake, before upgrading or rewriting
 // the request. Missing/invalid platform metadata falls back only to the socket
 // peer; unsigned forwarded headers cannot override a rejected assertion.
-func resolveAudioNetworkAddress(r *http.Request) (audioNetworkAddress, error) {
+//
+// A browser that reaches this server through a proxy on the same machine has no
+// signed metadata, and every event then shows 127.0.0.1. An operator can name that
+// proxy, and only then is its forwarded address used. It is a diagnostic label.
+func resolveAudioNetworkAddress(r *http.Request, localProxies ...string) (audioNetworkAddress, error) {
 	peer, source := audioPeerAddress(r, "")
 	address := audioNetworkAddress{Client: peer, SocketPeer: peer, Source: source, ProxyConnectionID: boundedTransportID(r.Header.Get(proxyConnectionHeader))}
 	ip, err := sdk.ClientIPFromRequest(r)
 	if err == nil && ip != "" {
 		address.Client, _ = netip.ParseAddr(ip)
 		address.Source = "trusted_proxy"
+		return address, nil
+	}
+	if err == nil && len(localProxies) > 0 {
+		if allowed := audioLocalProxyPrefixes(localProxies[0]); allowed != "" {
+			if client, from := audioPeerAddress(r, allowed); from == "trusted_forwarded_peer" && client.IsValid() {
+				address.Client, address.Source = client, "local_proxy"
+			}
+		}
 	}
 	return address, err
+}
+
+// Loopback only, whatever is configured: anything else could let a remote client
+// write its own address into diagnostics.
+func audioLocalProxyPrefixes(setting string) string {
+	if len(setting) > 256 {
+		return ""
+	}
+	allowed := []string{}
+	for _, raw := range strings.Split(setting, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		minimum := 8
+		if err == nil && prefix.Addr().Is6() {
+			minimum = 128
+		}
+		if err != nil || !prefix.Masked().Addr().IsLoopback() || prefix.Bits() < minimum {
+			continue
+		}
+		allowed = append(allowed, prefix.Masked().String())
+	}
+	return strings.Join(allowed, ",")
 }
 
 func newAudioNetworkContextWithAddress(row *callRow, identity phoneIdentity, address audioNetworkAddress, config map[string]string) audioNetworkEvent {

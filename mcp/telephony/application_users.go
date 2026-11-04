@@ -167,7 +167,7 @@ func phoneAction(r *http.Request) string {
 		return "call.dial"
 	case strings.HasPrefix(path, "/softphone/answer/"):
 		return "call.answer"
-	case strings.HasPrefix(path, "/softphone/offer/ack/"):
+	case strings.HasPrefix(path, "/softphone/offer/ack/"), strings.HasPrefix(path, "/softphone/recovery/"):
 		return "call.read"
 	case strings.HasPrefix(path, "/softphone/offer/decline/"):
 		return "call.answer"
@@ -497,7 +497,7 @@ func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guar
 	raw, _ := json.Marshal(s)
 	token := newSecret()
 	var saved string
-	query := `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
+	query := `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,pending_token_hash='',pending_expires_at=0,pending_diagnostic_json='{}',diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
 	args := []any{row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix() + phoneLeaseSeconds, string(raw)}
 	if guard != nil {
 		query = strings.Replace(query, `VALUES(?,?,?,?,?,?,?)`, `SELECT ?,?,?,?,?,?,? WHERE ?='' OR EXISTS(SELECT 1 FROM telephony_media_sessions WHERE call_id=? AND project_id=?)`, 1)
@@ -596,31 +596,35 @@ func (a *App) phoneMediaCheckState(row *callRow, token string, includeCorrelatio
 	if !secureEqual(phoneHash(token), hash) {
 		return "media_token_replaced", expires, phoneIdentity{}, session
 	}
+	reason, identity := a.phoneMediaPrincipalReason(row, principal)
+	return reason, expires, identity, session
+}
+func (a *App) phoneMediaPrincipalReason(row *callRow, principal string) (string, phoneIdentity) {
 	if principal == "" {
-		return "", expires, phoneIdentity{}, session
+		return "", phoneIdentity{}
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return "media_principal_invalid", expires, phoneIdentity{}, session
+		return "media_principal_invalid", phoneIdentity{}
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
 	if err != nil {
 		if errors.Is(err, errPhoneAccessDenied) {
-			return "user_access_revoked", expires, phoneIdentity{}, session
+			return "user_access_revoked", phoneIdentity{}
 		}
-		return "policy_lookup_failed", expires, phoneIdentity{}, session
+		return "policy_lookup_failed", phoneIdentity{}
 	}
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
-			return "owner_lookup_failed", expires, phoneIdentity{}, session
+			return "owner_lookup_failed", phoneIdentity{}
 		}
 		if owner != identity.key() {
-			return "call_ownership_changed", expires, phoneIdentity{}, session
+			return "call_ownership_changed", phoneIdentity{}
 		}
-		return "call_permission_revoked", expires, phoneIdentity{}, session
+		return "call_permission_revoked", phoneIdentity{}
 	}
-	return "", expires, identity, session
+	return "", identity
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	// Optional HTTP metadata may await request bytes. Never hold the media claim
@@ -722,7 +726,16 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
 		return
 	}
-	session, err := a.issueGuardedPhoneSession(r.Context(), row, p, diagnostic, guard)
+	var session *softphoneSession
+	if guard != nil && guard.Handover {
+		if !softphoneHandoverEnabled(row.ProjectID) {
+			writeJSONStatus(w, 409, map[string]any{"code": "handover_unavailable"})
+			return
+		}
+		session, err = a.issuePendingPhoneSession(r.Context(), row, p, diagnostic, guard)
+	} else {
+		session, err = a.issueGuardedPhoneSession(r.Context(), row, p, diagnostic, guard)
+	}
 	if err != nil {
 		if errors.Is(err, errPhoneSessionChanged) {
 			result := map[string]any{"code": "media_session_changed"}

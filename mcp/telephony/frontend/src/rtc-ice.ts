@@ -82,10 +82,15 @@ export class RTCICEController {
    }return true;
   }
   if(!Number.isSafeInteger(value.revision)||value.revision<=this.revision)return true;
+  // A path recovery re-sends the servers in use. They may have no expiry at all,
+  // and the restart is still worth trying because direct candidates need none.
+  const recovery=value.recovery===true;
   let config:RTCConfiguration;
-  try{config=rtcICEConfiguration(value);if(!Number.isFinite(value.expires_at)||value.expires_at*1000<=Date.now()+1000)throw new Error();}
+  try{config=rtcICEConfiguration(value);if(!recovery&&(!Number.isFinite(value.expires_at)||value.expires_at*1000<=Date.now()+1000))throw new Error();}
   catch{this.report("invalid_ice_refresh");return true;}
-  this.revision=value.revision;try{this.configured?.(config);}catch{/* observers cannot interrupt media */}this.report("credentials_refreshed",{code:`ice_rev_${value.revision}`,remaining_ms:Math.max(0,Math.min(3600000,Math.round(value.expires_at*1000-Date.now())))});
+  this.revision=value.revision;try{this.configured?.(config);}catch{/* observers cannot interrupt media */}
+  if(recovery)this.report("path_recovery_started",{code:`ice_rev_${value.revision}`});
+  else this.report("credentials_refreshed",{code:`ice_rev_${value.revision}`,remaining_ms:Math.max(0,Math.min(3600000,Math.round(value.expires_at*1000-Date.now())))});
   this.work=this.work.then(async()=>{
    if(!this.alive()||this.revision!==value.revision)return;
    const outcomes=await Promise.allSettled([...this.peers.values()].filter(peer=>this.alive(peer)).map(peer=>this.restart(peer,config,value.revision)));

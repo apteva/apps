@@ -16,6 +16,8 @@ var errPhoneSessionChanged = errors.New("media session generation changed")
 type phoneAttachmentGuard struct {
 	ID       string `json:"id"`
 	Expected string `json:"expected_generation"`
+	// Ask for a candidate grant instead of replacing the current one.
+	Handover bool `json:"handover,omitempty"`
 }
 
 func (g *phoneAttachmentGuard) valid() bool {
