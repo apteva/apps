@@ -82,6 +82,15 @@ func nativeFilter(c Collection, f *Filter) any {
 func nativeQueryOptions(c Collection, q Query, limit int) native.QueryOptions {
 	p := plan(c, q)
 	opts := native.QueryOptions{Limit: limit, MaxMemoryBytes: MaxQueryWorkBytes}
+	if p.ranges != nil {
+		// The native planner expands the same in prefix, and reads documents by
+		// key only while that is cheaper than scanning them. A hint would give it
+		// one range over the whole index.
+		for _, o := range q.OrderBy {
+			opts.Sort = append(opts.Sort, native.IndexField{Field: o.Field, Desc: o.Direction == "desc"})
+		}
+		return opts
+	}
 	if !p.Sort && len(q.OrderBy) > 0 {
 		// Physical record keys already encode the complete typed primary tuple in
 		// ascending order. Native index suffixes therefore supply the app's stable
@@ -184,6 +193,9 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	if e != nil {
 		return nil, e
 	}
+	if u := plan(c, q).union; u != nil && t.unionIsCheaper(h, c, *u, q, limit) {
+		return t.findPending(c, q, limit)
+	}
 	opts := nativeQueryOptions(c, q, limit)
 	bound := q
 	if evaluate {
@@ -243,6 +255,64 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	}
 	return out, t.ctx.Err()
 }
+
+// unionIsCheaper compares reading a page through an ordered stream, which visits
+// about limit*size/matches documents, with reading every match by key and sorting
+// them, which costs several times more per document. Both counts come from index
+// entries alone. Any doubt keeps the stream.
+func (t *aptevaTx) unionIsCheaper(h *native.Collection, c Collection, u accessPlan, q Query, limit int) bool {
+	scope := unionScope(c, u, q.Where)
+	if scope == nil {
+		return false
+	}
+	opts := native.CountOptions{MaxMemoryBytes: int64(t.backend.options.QueryWorkBytes)}
+	matches, e := h.CountDocuments(t.ctx, marshal(nativeFilter(c, scope)), opts)
+	if e != nil {
+		return false
+	}
+	size, e := h.CountDocuments(t.ctx, []byte(`{}`), opts)
+	if e != nil {
+		return false
+	}
+	return 4*matches*matches < int64(limit)*size
+}
+
+// unionScope keeps the predicates a union's index covers, so counting them reads
+// no documents: listed values on its leading fields, then the following range.
+func unionScope(c Collection, u accessPlan, where *Filter) *Filter {
+	terms := conjuncts(where)
+	for _, idx := range indexes(c) {
+		if idx.Name != u.Index {
+			continue
+		}
+		scope := []Filter{}
+		for _, o := range idx.Fields {
+			listed, ranged := []Filter{}, []Filter{}
+			for _, p := range terms {
+				if p.Field != o.Field {
+					continue
+				}
+				switch p.Op {
+				case "eq", "is_null", "in":
+					listed = append(listed, p)
+				case "gt", "gte", "lt", "lte":
+					ranged = append(ranged, p)
+				}
+			}
+			if len(listed) > 0 {
+				scope = append(scope, listed...)
+				continue
+			}
+			scope = append(scope, ranged...)
+			break
+		}
+		if len(scope) > 0 {
+			return &Filter{And: scope}
+		}
+	}
+	return nil
+}
+
 func (t *aptevaTx) findPending(c Collection, q Query, limit int) ([]Record, error) {
 	order := q
 	if len(order.OrderBy) == 0 {
@@ -276,6 +346,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	}
 	opts := nativeQueryOptions(c, Query{Where: q.Where}, 0)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
+	opts.Stats = q.diag.nativeStats("documents")
 	decoder := newNativeScanDecoder(c, fields, q.Where)
 	var consumeErr error
 	stopped := false
@@ -358,6 +429,7 @@ func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 		return t.aggregatePortable(c, r, outSchema)
 	}
 	if rows, ok, err := t.aggregatePrimaryCount(c, r); ok {
+		r.diag.strategy("primary-count")
 		return rows, err
 	}
 	if len(t.pending) == 0 && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
@@ -370,9 +442,10 @@ func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 			return nil, e
 		}
 		opts := native.CountOptions{MaxMemoryBytes: int64(t.backend.options.QueryWorkBytes)}
-		if p.IndexedLookup {
+		if p.IndexedLookup && p.ranges == nil {
 			opts.Hint = p.Index
 		}
+		opts.Stats = r.diag.nativeStats("native-count")
 		count, e := h.CountDocuments(t.ctx, marshal(nativeFilter(c, r.Where)), opts)
 		if e != nil {
 			return nil, nativeError(e)
@@ -419,6 +492,7 @@ func (t *aptevaTx) scanRecords(c Collection, q Query, fields []string, consume f
 }
 func (t *aptevaTx) aggregatePortable(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	return aggregateRecordsWithBudget(t.ctx, c, r, outSchema, t.backend.options.QueryWorkBytes, func(q Query, fields []string, consume func(Record, []byte) bool) error {
+		q.diag = r.diag
 		return t.scanFields(c, q, fields, consume, nil)
 	})
 }

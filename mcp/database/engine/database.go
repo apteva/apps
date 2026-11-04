@@ -291,6 +291,9 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "changes" {
 		return m.pollChanges(ctx, scope, r)
 	}
+	if op == "count" && r.Diagnostics {
+		r.diag = &countDiagnostics{started: time.Now()}
+	}
 	kind := QueryKind(op, r)
 	timeout, err := OperationTimeout(kind, r.TimeoutMS)
 	if err != nil {
@@ -328,6 +331,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		}
 		defer done()
 	}
+	r.diag.queued()
 	if op == "database_create" || op == "database_describe" {
 		info := d.info
 		if op == "database_describe" && info.Adapter == "aptevadb" {
@@ -457,6 +461,10 @@ func isWrite(op string) bool {
 	return true
 }
 func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error) {
+	if r.Diagnostics && op != "count" {
+		return nil, Invalid("diagnostics is supported by count")
+	}
+	r.diag.snapshotted()
 	if op == "collections_list" {
 		return tx.collections()
 	}
@@ -573,7 +581,12 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			return nil, e
 		}
 		if op == "explain" {
-			return tx.explain(c, r.Query)
+			out, e := tx.explain(c, r.Query)
+			if plan, ok := out.(map[string]any); ok {
+				plan["executed"] = false
+				plan["note"] = "Planned find access; nothing ran. Use count with diagnostics:true for what a count actually did."
+			}
+			return out, e
 		}
 		if len(r.Buckets) > 0 {
 			return nil, Invalid("find does not accept buckets")
@@ -616,6 +629,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		}
 		return out, nil
 	case "count":
+		if r.Diagnostics && r.diag == nil {
+			r.diag = &countDiagnostics{} // inside a read batch, which shares one queue and snapshot
+		}
 		r.Metrics = []Metric{{Name: "count", Op: "count"}}
 		r.GroupBy = nil
 		r.OrderBy = nil
@@ -640,7 +656,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e != nil {
 			return nil, e
 		}
+		r.diag.begin()
 		rows, e := tx.aggregate(c, r, outSchema)
+		r.diag.end()
 		if e == nil {
 			e = exists.failure()
 		}
@@ -648,7 +666,11 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			return nil, e
 		}
 		if op == "count" {
-			return map[string]any{"count": rows[0]["count"]}, nil
+			out := map[string]any{"count": rows[0]["count"]}
+			if r.diag != nil {
+				out["diagnostics"] = r.diag.report(tx, c, r.Query, exists)
+			}
+			return out, nil
 		}
 		if len(marshal(rows)) > MaxBytes {
 			return nil, fail("resource_limit", "aggregate response exceeds 4 MiB")

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -425,8 +426,13 @@ type accessPlan struct {
 	Index         string `json:"index"`
 	IndexedLookup bool   `json:"indexedLookup"`
 	Sort          bool   `json:"sort"`
+	Ranges        int    `json:"ranges,omitempty"`
 	lower, upper  []byte
+	ranges        []keyRange  // set for a union; lower and upper are then unused
+	union         *accessPlan // a union an ordered plan could give way to
 }
+
+type keyRange struct{ lower, upper []byte }
 
 func conjuncts(f *Filter) []Filter {
 	if f == nil {
@@ -444,9 +450,158 @@ func conjuncts(f *Filter) []Filter {
 	}
 	return []Filter{*f}
 }
+
+// fieldBounds narrows prefix by the range predicates on the next index field.
+func fieldBounds(f Field, o Order, prefix []byte, terms []Filter) (lower, upper []byte, n int) {
+	lower = append([]byte{}, prefix...)
+	upper = prefixEnd(prefix)
+	for _, p := range terms {
+		if p.Field != o.Field {
+			continue
+		}
+		op := p.Op
+		if op == "starts_with" {
+			encoded := scalar(f, p.Value, o.Direction == "desc")
+			v := append(append([]byte{}, prefix...), encoded[:len(encoded)-2]...)
+			if bytes.Compare(v, lower) > 0 {
+				lower = v
+			}
+			hi := prefixEnd(v)
+			if upper == nil || bytes.Compare(hi, upper) < 0 {
+				upper = hi
+			}
+			n++
+			continue
+		}
+		if op != "gt" && op != "gte" && op != "lt" && op != "lte" {
+			continue
+		}
+		if o.Direction == "desc" {
+			op = map[string]string{"gt": "lt", "gte": "lte", "lt": "gt", "lte": "gte"}[op]
+		}
+		v := append(append([]byte{}, prefix...), scalar(f, p.Value, o.Direction == "desc")...)
+		switch op {
+		case "gt":
+			v = prefixEnd(v)
+			if bytes.Compare(v, lower) > 0 {
+				lower = v
+			}
+			n++
+		case "gte":
+			if bytes.Compare(v, lower) > 0 {
+				lower = v
+			}
+			n++
+		case "lt":
+			if upper == nil || bytes.Compare(v, upper) < 0 {
+				upper = v
+			}
+			n++
+		case "lte":
+			v = prefixEnd(v)
+			if upper == nil || bytes.Compare(v, upper) < 0 {
+				upper = v
+			}
+			n++
+		}
+	}
+	return lower, upper, n
+}
+
+// maxPlanRanges and maxPlanRangeBytes bound the ranges a multi-value in expands
+// to. Past them the plan keeps its single range and the filter still applies.
+const (
+	maxPlanRanges     = 64
+	maxPlanRangeBytes = 1 << 20
+)
+
+// unionRanges expands a multi-value in on leading index fields into one range
+// per listed tuple, each bounded by a range on the next field. Scalar encodings
+// are prefix-free, so distinct tuples give disjoint ranges and no record is read
+// twice. The caller's matches still checks the complete predicate.
+func unionRanges(c Collection, idx Index, terms []Filter) (out []keyRange, n int, ok bool) {
+	prefixes := [][]byte{indexPrefix(c, idx, false)}
+	multi := false
+	var field *Order
+	for k := range idx.Fields {
+		o := idx.Fields[k]
+		f, _ := c.field(o.Field)
+		var equal, in *Filter
+		for j := range terms {
+			p := &terms[j]
+			if p.Field != o.Field {
+				continue
+			}
+			if p.Op == "eq" || p.Op == "is_null" {
+				equal = p
+				break
+			}
+			if p.Op == "in" && in == nil {
+				in = p
+			}
+		}
+		values := []any{}
+		switch {
+		case equal != nil:
+			values = append(values, equal.Value)
+		case in != nil:
+			values = in.Value.([]any)
+			multi = true
+		default:
+			field = &idx.Fields[k]
+		}
+		if field != nil {
+			break
+		}
+		seen := map[string]bool{}
+		grown := [][]byte{}
+		for _, v := range values {
+			encoded := scalar(f, v, o.Direction == "desc")
+			if seen[string(encoded)] {
+				continue
+			}
+			seen[string(encoded)] = true
+			if len(prefixes)*len(seen) > maxPlanRanges {
+				return nil, 0, false
+			}
+			for _, prefix := range prefixes {
+				grown = append(grown, append(prefix[:len(prefix):len(prefix)], encoded...))
+			}
+		}
+		prefixes = grown
+		n += 10
+	}
+	if !multi {
+		return nil, 0, false
+	}
+	out = make([]keyRange, 0, len(prefixes))
+	size := 0
+	for _, prefix := range prefixes {
+		lower, upper := prefix, prefixEnd(prefix)
+		if field != nil {
+			f, _ := c.field(field.Field)
+			var m int
+			lower, upper, m = fieldBounds(f, *field, prefix, terms)
+			if len(out) == 0 {
+				n += m
+			}
+		}
+		if size += len(lower) + len(upper); size > maxPlanRangeBytes {
+			return nil, 0, false
+		}
+		if bytes.Compare(lower, upper) < 0 {
+			out = append(out, keyRange{lower, upper})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].lower, out[j].lower) < 0 })
+	return out, n, true
+}
+
 func plan(c Collection, q Query) accessPlan {
 	best := accessPlan{Sort: true}
 	score := -1
+	var union *accessPlan
+	unionScore := -1
 	for _, idx := range indexes(c) {
 		if q.hint != "" && idx.Name != q.hint {
 			continue
@@ -472,58 +627,9 @@ func plan(c Collection, q Query) accessPlan {
 				n += 10
 				continue
 			}
-			lower = append([]byte{}, prefix...)
-			upper = prefixEnd(prefix)
-			for _, p := range terms {
-				if p.Field != o.Field {
-					continue
-				}
-				op := p.Op
-				if op == "starts_with" {
-					encoded := scalar(f, p.Value, o.Direction == "desc")
-					v := append(append([]byte{}, prefix...), encoded[:len(encoded)-2]...)
-					if bytes.Compare(v, lower) > 0 {
-						lower = v
-					}
-					hi := prefixEnd(v)
-					if upper == nil || bytes.Compare(hi, upper) < 0 {
-						upper = hi
-					}
-					n++
-					continue
-				}
-				if op != "gt" && op != "gte" && op != "lt" && op != "lte" {
-					continue
-				}
-				if o.Direction == "desc" {
-					op = map[string]string{"gt": "lt", "gte": "lte", "lt": "gt", "lte": "gte"}[op]
-				}
-				v := append(append([]byte{}, prefix...), scalar(f, p.Value, o.Direction == "desc")...)
-				switch op {
-				case "gt":
-					v = prefixEnd(v)
-					if bytes.Compare(v, lower) > 0 {
-						lower = v
-					}
-					n++
-				case "gte":
-					if bytes.Compare(v, lower) > 0 {
-						lower = v
-					}
-					n++
-				case "lt":
-					if upper == nil || bytes.Compare(v, upper) < 0 {
-						upper = v
-					}
-					n++
-				case "lte":
-					v = prefixEnd(v)
-					if upper == nil || bytes.Compare(v, upper) < 0 {
-						upper = v
-					}
-					n++
-				}
-			}
+			var m int
+			lower, upper, m = fieldBounds(f, o, prefix, terms)
+			n += m
 			break
 		}
 		if lower == nil {
@@ -593,8 +699,30 @@ func plan(c Collection, q Query) accessPlan {
 		}
 		if s > score {
 			score = s
-			best = accessPlan{idx.Name, n > 0, !ordered, lower, upper}
+			best = accessPlan{Index: idx.Name, IndexedLookup: n > 0, Sort: !ordered, lower: lower, upper: upper}
 		}
+		// Exists probes name their index and bind it by equality, so they stay
+		// on one range.
+		if q.hint == "" {
+			if ranges, m, ok := unionRanges(c, idx, terms); ok && m*10 > unionScore {
+				unionScore = m * 10
+				u := accessPlan{Index: idx.Name, IndexedLookup: true, Sort: len(q.OrderBy) > 0, Ranges: len(ranges), ranges: ranges}
+				union = &u
+			}
+		}
+	}
+	if union == nil {
+		return best
+	}
+	// A union is in key order only within each range, so it reads every match to
+	// sort a page, where an ordered stream can stop early. Only the caller can
+	// weigh those, knowing how many records match.
+	if len(q.OrderBy) > 0 && !best.Sort && (best.IndexedLookup || !q.RequireIndex) {
+		best.union = union
+		return best
+	}
+	if unionScore > score {
+		return *union
 	}
 	return best
 }
@@ -611,9 +739,6 @@ func (t *pebbleTx) scanFields(c Collection, q Query, unordered bool, fields []st
 	if q.RequireIndex && !p.IndexedLookup {
 		return fail("query_too_expensive", "query requires a selective index")
 	}
-	if p.upper != nil && bytes.Compare(p.lower, p.upper) >= 0 {
-		return nil
-	}
 	// A broad unordered scan can stream the record values directly instead of
 	// traversing a secondary key and doing a second lookup for every record.
 	direct := unordered && !p.IndexedLookup
@@ -621,15 +746,18 @@ func (t *pebbleTx) scanFields(c Collection, q Query, unordered bool, fields []st
 		p.lower = []byte("r/" + c.Name + "/")
 		p.upper = prefixEnd(p.lower)
 	}
-	it, e := t.reader.NewIter(&pebble.IterOptions{LowerBound: p.lower, UpperBound: p.upper})
-	if e != nil {
-		return e
+	spans := p.ranges
+	if spans == nil {
+		if p.upper != nil && bytes.Compare(p.lower, p.upper) >= 0 {
+			return nil
+		}
+		spans = []keyRange{{p.lower, p.upper}}
 	}
-	defer it.Close()
 	var records *pebble.Iterator
 	recordPrefix := []byte("r/" + c.Name + "/")
 	key := append([]byte{}, recordPrefix...)
 	if !direct {
+		var e error
 		records, e = t.iter(recordPrefix)
 		if e != nil {
 			return e
@@ -637,42 +765,57 @@ func (t *pebbleTx) scanFields(c Collection, q Query, unordered bool, fields []st
 		defer records.Close()
 	}
 	decoder := newScanDecoder(c, fields, q.Where)
-	for it.First(); it.Valid(); it.Next() {
-		if e := t.ctx.Err(); e != nil {
-			return e
-		}
-		raw := it.Value()
-		if !direct {
-			key = append(key[:len(recordPrefix)], raw...)
-			// Preserve index order while reusing a record iterator. Adjacent primary
-			// keys usually need just Next; non-adjacent or differently encoded keys
-			// seek exactly, including compound/numeric keys and secondary indexes.
-			if records.Valid() && bytes.Compare(records.Key(), key) < 0 {
-				if !records.Next() && records.Error() != nil {
-					return records.Error()
-				}
-			}
-			if !records.Valid() || !bytes.Equal(records.Key(), key) {
-				records.SeekGE(key)
-			}
-			if e := records.Error(); e != nil {
-				return e
-			}
-			if !records.Valid() || !bytes.Equal(records.Key(), key) {
-				return fail("storage_error", "index references a missing record")
-			}
-			raw = records.Value()
-		}
-		r, e := decoder.decode(raw)
+	stopped := false
+	scan := func(span keyRange) error {
+		it, e := t.reader.NewIter(&pebble.IterOptions{LowerBound: span.lower, UpperBound: span.upper})
 		if e != nil {
 			return e
 		}
-		if matches(c, r, q.Where) && !consume(r, raw) {
+		defer it.Close()
+		for it.First(); it.Valid(); it.Next() {
+			if e := t.ctx.Err(); e != nil {
+				return e
+			}
+			raw := it.Value()
+			if !direct {
+				key = append(key[:len(recordPrefix)], raw...)
+				// Preserve index order while reusing a record iterator. Adjacent primary
+				// keys usually need just Next; non-adjacent or differently encoded keys
+				// seek exactly, including compound/numeric keys and secondary indexes.
+				if records.Valid() && bytes.Compare(records.Key(), key) < 0 {
+					if !records.Next() && records.Error() != nil {
+						return records.Error()
+					}
+				}
+				if !records.Valid() || !bytes.Equal(records.Key(), key) {
+					records.SeekGE(key)
+				}
+				if e := records.Error(); e != nil {
+					return e
+				}
+				if !records.Valid() || !bytes.Equal(records.Key(), key) {
+					return fail("storage_error", "index references a missing record")
+				}
+				raw = records.Value()
+			}
+			r, e := decoder.decode(raw)
+			if e != nil {
+				return e
+			}
+			if matches(c, r, q.Where) && !consume(r, raw) {
+				stopped = true
+				break
+			}
+		}
+		return it.Error()
+	}
+	for _, span := range spans {
+		if e := scan(span); e != nil {
+			return e
+		}
+		if stopped {
 			break
 		}
-	}
-	if e := it.Error(); e != nil {
-		return e
 	}
 	return t.ctx.Err()
 }
