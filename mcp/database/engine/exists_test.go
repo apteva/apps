@@ -290,21 +290,21 @@ func testCorrelatedExists(t *testing.T) {
 			exists := func(c *ExistsClause) *Filter { return &Filter{Exists: c} }
 			on := []ExistsOn{{LocalField: "order_id", ForeignField: "local_id"}}
 			for name, where := range map[string]*Filter{
-				"unknown local":   exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "nope", ForeignField: "local_id"}}}),
-				"unknown foreign": exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "nope"}}}),
-				"mixed types":     exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "id"}}}),
-				"bad comparison":  exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "id", Comparison: "numeric"}}}),
-				"no pairs":        exists(&ExistsClause{Collection: "orders"}),
-				"empty on":        exists(&ExistsClause{Collection: "orders", On: []ExistsOn{}}),
-				"on and anyOf":    exists(&ExistsClause{Collection: "orders", On: on, AnyOf: []ExistsMatch{{On: on}}}),
-				"empty anyOf":     exists(&ExistsClause{Collection: "orders", AnyOf: []ExistsMatch{}}),
-				"empty match":     exists(&ExistsClause{Collection: "orders", AnyOf: []ExistsMatch{{}}}),
-				"nested":          exists(&ExistsClause{Collection: "orders", On: on, Where: exists(&ExistsClause{Collection: "calls", On: on})}),
-				"bad where":       exists(&ExistsClause{Collection: "orders", On: on, Where: &Filter{Field: "nope", Op: "eq", Value: "x"}}),
-				"with op":         {Op: "eq", Exists: &ExistsClause{Collection: "orders", On: on}},
-				"both":            {Exists: &ExistsClause{Collection: "orders", On: on}, NotExists: &ExistsClause{Collection: "orders", On: on}},
-				"null in not_in":  {Field: "local_id", Op: "not_in", Value: []any{nil}},
-				"empty not_in":    {Field: "local_id", Op: "not_in", Value: []any{}},
+				"unknown local":    exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "nope", ForeignField: "local_id"}}}),
+				"unknown foreign":  exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "nope"}}}),
+				"mixed types":      exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "id"}}}),
+				"bad comparison":   exists(&ExistsClause{Collection: "orders", On: []ExistsOn{{LocalField: "order_id", ForeignField: "id", Comparison: "numeric"}}}),
+				"no pairs":         exists(&ExistsClause{Collection: "orders"}),
+				"empty on":         exists(&ExistsClause{Collection: "orders", On: []ExistsOn{}}),
+				"on and anyOf":     exists(&ExistsClause{Collection: "orders", On: on, AnyOf: []ExistsMatch{{On: on}}}),
+				"empty anyOf":      exists(&ExistsClause{Collection: "orders", AnyOf: []ExistsMatch{}}),
+				"empty match":      exists(&ExistsClause{Collection: "orders", AnyOf: []ExistsMatch{{}}}),
+				"nested bad local": exists(&ExistsClause{Collection: "orders", On: on, Where: exists(&ExistsClause{Collection: "calls", On: on})}),
+				"bad where":        exists(&ExistsClause{Collection: "orders", On: on, Where: &Filter{Field: "nope", Op: "eq", Value: "x"}}),
+				"with op":          {Op: "eq", Exists: &ExistsClause{Collection: "orders", On: on}},
+				"both":             {Exists: &ExistsClause{Collection: "orders", On: on}, NotExists: &ExistsClause{Collection: "orders", On: on}},
+				"null in not_in":   {Field: "local_id", Op: "not_in", Value: []any{nil}},
+				"empty not_in":     {Field: "local_id", Op: "not_in", Value: []any{}},
 			} {
 				if _, e := exec("count", "calls", Request{Query: Query{Where: where}}); e == nil {
 					t.Fatalf("%s accepted", name)
