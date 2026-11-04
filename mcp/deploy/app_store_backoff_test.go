@@ -4,22 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-// appStoreSyncPlatform wraps testFlightPlatform with forced provider failures
-// and a chosen TestFlight build state.
+// appStoreSyncPlatform wraps testFlightPlatform with forced provider failures,
+// canned replies, a chosen TestFlight build state and a hook that runs while a
+// get_build call is in flight.
 type appStoreSyncPlatform struct {
 	*testFlightPlatform
 	fail       map[string]*sdk.ExecuteResult
+	replies    map[string]*sdk.ExecuteResult
 	buildState string
+	onGetBuild func()
 }
 
 func (p *appStoreSyncPlatform) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
-	if reply := p.fail[tool]; reply != nil {
+	if tool == "get_build" && p.onGetBuild != nil {
+		p.onGetBuild()
+	}
+	reply := p.fail[tool]
+	if reply == nil {
+		reply = p.replies[tool]
+	}
+	if reply != nil {
 		p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
 		return reply, nil
 	}
@@ -35,6 +48,7 @@ func setupAppStoreSync(t *testing.T) (*appStoreSyncPlatform, *Release, *time.Tim
 	platform := &appStoreSyncPlatform{
 		testFlightPlatform: &testFlightPlatform{groups: []appleBetaGroup{{ID: "group-1", Name: "Deploy Internal", IsInternal: true}}},
 		fail:               map[string]*sdk.ExecuteResult{},
+		replies:            map[string]*sdk.ExecuteResult{},
 	}
 	_, release := setupTestFlightReleaseWith(t, platform, "group-1")
 	now := time.Now().UTC()
@@ -218,13 +232,16 @@ func TestStuckReleasesStayWithinCallBudget(t *testing.T) {
 	p.buildState = "READY_FOR_BETA_TESTING"
 	runWorkerMinutes(t, now, 10)
 	// Unbounded, four releases would cost about 4 calls each per minute (160).
-	// The first run lists, looks up and assigns. Availability checks then run
-	// at minutes 0, 1 and 6.
+	// The first run lists, looks up and assigns. Availability and tester checks
+	// then run together at minutes 0, 1 and 6.
 	if got := countIntegrationCalls(p.calls, "get_build"); got != 12 {
 		t.Fatalf("get_build calls=%d, want 12", got)
 	}
-	if len(p.calls) > 21 {
-		t.Fatalf("calls=%d exceed budget 21: %+v", len(p.calls), p.calls)
+	if got := countIntegrationCalls(p.calls, "list_beta_testers"); got != 12 {
+		t.Fatalf("list_beta_testers calls=%d, want 12", got)
+	}
+	if len(p.calls) > 33 {
+		t.Fatalf("calls=%d exceed budget 33: %+v", len(p.calls), p.calls)
 	}
 }
 
@@ -400,5 +417,320 @@ func TestAppStoreSuccessfulCheckClearsStaleError(t *testing.T) {
 	fresh, _ = dbGetRelease(db, release.ID)
 	if fresh.Error != "" || fresh.ExternalStatus != "ready_for_beta_testing" {
 		t.Fatalf("recovered check did not clear error: %+v", fresh)
+	}
+}
+
+func cannedReply(data string) *sdk.ExecuteResult {
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(data)}
+}
+
+func releaseWithMeta(t *testing.T, id int64) (*Release, mobileReleaseMeta) {
+	t.Helper()
+	rel, err := dbGetRelease(globalCtx.AppDB(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta mobileReleaseMeta
+	if err := json.Unmarshal([]byte(rel.ReleaseMetaJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	return rel, meta
+}
+
+// checkTimes runs the worker once a minute and returns when tool was called.
+func checkTimes(t *testing.T, p *appStoreSyncPlatform, now *time.Time, tool string, minutes int) []time.Duration {
+	t.Helper()
+	start, seen := *now, countIntegrationCalls(p.calls, tool)
+	var at []time.Duration
+	for i := 0; i < minutes; i++ {
+		runMobileWorker(t)
+		if got := countIntegrationCalls(p.calls, tool); got != seen {
+			seen = got
+			at = append(at, now.Sub(start))
+		}
+		*now = now.Add(time.Minute)
+	}
+	return at
+}
+
+func minutesOf(values ...int) []time.Duration {
+	out := make([]time.Duration, len(values))
+	for i, value := range values {
+		out[i] = time.Duration(value) * time.Minute
+	}
+	return out
+}
+
+func TestAppStoreEmptyInternalGroupWarnsUntilTesterAppears(t *testing.T) {
+	p, release, _ := setupAppStoreSync(t)
+	p.buildState = "READY_FOR_BETA_TESTING"
+	runMobileWorker(t)
+	fresh, meta := releaseWithMeta(t, release.ID)
+	if fresh.Status != "starting" || fresh.Error != "" || meta.TesterAccess != testerAccessNoTesters || meta.TesterCount != 0 {
+		t.Fatalf("release=%+v meta=%+v", fresh, meta)
+	}
+	if !strings.Contains(meta.TesterWarning, "likely") {
+		t.Fatalf("warning must not state a certain cause: %q", meta.TesterWarning)
+	}
+
+	sync := func() map[string]any {
+		t.Helper()
+		result, err := (&App{}).toolReleaseSync(globalCtx, map[string]any{"release_id": float64(release.ID)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.(map[string]any)
+	}
+	if got := sync()["tester_warning"]; got != emptyTesterGroupWarning {
+		t.Fatalf("deploy_release_sync tester_warning=%v", got)
+	}
+
+	// A tester in the group clears the warning. Only the count is kept.
+	p.replies["list_beta_testers"] = cannedReply(`{"data":[{"id":"tester-1","attributes":{"email":"tester@example.com"}}]}`)
+	if got, ok := sync()["tester_warning"]; ok {
+		t.Fatalf("warning kept with a tester in the group: %v", got)
+	}
+	fresh, meta = releaseWithMeta(t, release.ID)
+	if meta.TesterAccess != "configured" || meta.TesterCount != 1 || meta.TesterWarning != "" {
+		t.Fatalf("meta=%+v", meta)
+	}
+	if strings.Contains(fresh.ReleaseMetaJSON, "tester@example.com") {
+		t.Fatal("tester email stored on the release")
+	}
+
+	// A later state ends the warning without another lookup.
+	delete(p.replies, "list_beta_testers")
+	sync()
+	if _, meta = releaseWithMeta(t, release.ID); meta.TesterWarning == "" {
+		t.Fatal("group emptied again but no warning")
+	}
+	lookups := countIntegrationCalls(p.calls, "list_beta_testers")
+	p.buildState = "IN_BETA_TESTING"
+	sync()
+	fresh, meta = releaseWithMeta(t, release.ID)
+	if fresh.Status != "live" || meta.TesterWarning != "" || meta.TesterAccess == testerAccessNoTesters {
+		t.Fatalf("release=%+v meta=%+v", fresh, meta)
+	}
+	if countIntegrationCalls(p.calls, "list_beta_testers") != lookups {
+		t.Fatal("available build still looked up testers")
+	}
+}
+
+func TestAppStoreTesterLookupOnlyForWaitingInternalBuilds(t *testing.T) {
+	t.Run("other internal state", func(t *testing.T) {
+		p, _, _ := setupAppStoreSync(t)
+		p.buildState = "MISSING_EXPORT_COMPLIANCE"
+		runMobileWorker(t)
+		if got := countIntegrationCalls(p.calls, "list_beta_testers"); got != 0 {
+			t.Fatalf("list_beta_testers calls=%d, want 0", got)
+		}
+	})
+	t.Run("external channel", func(t *testing.T) {
+		p, release, _ := setupAppStoreSync(t)
+		p.groups = []appleBetaGroup{{ID: "group-1", Name: "Deploy External"}}
+		p.replies["get_build"] = cannedReply(`{"data":{"id":"build-42"},"included":[{"type":"buildBetaDetails","attributes":{"externalBuildState":"READY_FOR_BETA_TESTING"}}]}`)
+		if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"channel": "external"}); err != nil {
+			t.Fatal(err)
+		}
+		runMobileWorker(t)
+		fresh, meta := releaseWithMeta(t, release.ID)
+		if fresh.ExternalStatus != "ready_for_beta_testing" || meta.TesterWarning != "" {
+			t.Fatalf("release=%+v meta=%+v", fresh, meta)
+		}
+		if got := countIntegrationCalls(p.calls, "list_beta_testers"); got != 0 {
+			t.Fatalf("list_beta_testers calls=%d, want 0", got)
+		}
+	})
+}
+
+func TestAppStoreTesterLookupFailureKeepsCheckWorking(t *testing.T) {
+	p, release, _ := setupAppStoreSync(t)
+	p.buildState = "READY_FOR_BETA_TESTING"
+	p.fail["list_beta_testers"] = &sdk.ExecuteResult{Status: 500, Data: json.RawMessage(`{"errors":[{"code":"UNEXPECTED_ERROR"}]}`)}
+	runMobileWorker(t)
+	fresh, meta := releaseWithMeta(t, release.ID)
+	if fresh.Status != "starting" || fresh.ExternalStatus != "ready_for_beta_testing" || fresh.Error != "" {
+		t.Fatalf("failed lookup changed the release: %+v", fresh)
+	}
+	if meta.TesterAccess != "" || meta.TesterWarning != "" {
+		t.Fatalf("failed lookup reported a tester state: %+v", meta)
+	}
+	var failures int
+	if err := globalCtx.AppDB().QueryRow(`SELECT failures FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&failures); err != nil || failures != 0 {
+		t.Fatalf("failed lookup counted as a sync failure: failures=%d err=%v", failures, err)
+	}
+}
+
+func TestAppStoreAvailabilityCheckKeepsConcurrentStatusChange(t *testing.T) {
+	for _, state := range []string{"READY_FOR_BETA_TESTING", "IN_BETA_TESTING", "EXPIRED"} {
+		t.Run(state, func(t *testing.T) {
+			p, release, _ := setupAppStoreSync(t)
+			p.buildState = state
+			// The stop lands while Apple's answer is on its way back.
+			p.onGetBuild = func() {
+				if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"status": "stopped", "external_status": "stopped_by_user"}); err != nil {
+					t.Error(err)
+				}
+			}
+			runMobileWorker(t)
+			fresh, _ := releaseWithMeta(t, release.ID)
+			if fresh.Status != "stopped" || fresh.ExternalStatus != "stopped_by_user" || fresh.Error != "" {
+				t.Fatalf("availability check overwrote the stop: %+v", fresh)
+			}
+			var checks int
+			if err := globalCtx.AppDB().QueryRow(`SELECT idle_checks FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks); err == nil {
+				t.Fatal("stopped release kept a sync schedule")
+			}
+		})
+	}
+}
+
+func TestAppStoreProcessingChecksSpaceOutUntilProcessed(t *testing.T) {
+	p, release, now := setupAppStoreSync(t)
+	db := globalCtx.AppDB()
+	p.replies["list_builds"] = cannedReply(`{"data":[{"id":"build-42","attributes":{"version":"42","processingState":"PROCESSING"}}]}`)
+	got := checkTimes(t, p, now, "list_builds", 70)
+	if want := minutesOf(0, 1, 3, 8, 13, 23, 38, 53, 68); !reflect.DeepEqual(got, want) {
+		t.Fatalf("checks at %v, want %v", got, want)
+	}
+	fresh, _ := releaseWithMeta(t, release.ID)
+	if fresh.Status != "starting" || fresh.ExternalStatus != "processing" || fresh.Error != "" {
+		t.Fatalf("release=%+v", fresh)
+	}
+
+	// Finished processing moves straight on and starts the waiting schedule.
+	delete(p.replies, "list_builds")
+	p.buildState = "READY_FOR_BETA_TESTING"
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	runMobileWorker(t)
+	var checks int
+	var observed string
+	if err := db.QueryRow(`SELECT idle_checks,observed_status FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 || observed != "ready_for_beta_testing" {
+		t.Fatalf("idle_checks=%d observed=%q", checks, observed)
+	}
+}
+
+func TestAppStoreProcessingTimeoutIgnoresCheckSchedule(t *testing.T) {
+	p, release, now := setupAppStoreSync(t)
+	db := globalCtx.AppDB()
+	p.replies["list_builds"] = cannedReply(`{"data":[]}`)
+	runMobileWorker(t)
+	if releaseSyncDue(db, release.ID) {
+		t.Fatal("processing build due again straight away")
+	}
+	if _, err := db.Exec(`UPDATE releases SET created_at=? WHERE id=?`, now.Add(-49*time.Hour).Format(time.RFC3339), release.ID); err != nil {
+		t.Fatal(err)
+	}
+	runMobileWorker(t)
+	fresh, _ := releaseWithMeta(t, release.ID)
+	if fresh.Status != "failed" || fresh.ExternalStatus != "processing_timeout" {
+		t.Fatalf("release=%+v", fresh)
+	}
+}
+
+func setupAppStoreReview(t *testing.T) (*appStoreSyncPlatform, *Release, *time.Time, func(string) *sdk.ExecuteResult) {
+	t.Helper()
+	p, release, now := setupAppStoreSync(t)
+	meta := mobileReleaseMeta{Platform: "ios", AppID: "app-1", BuildNumber: "42", VersionName: "1.0", AppStoreVersionID: "version-1",
+		BuildProcessed: true, Prepared: true, SubmitForReview: true, ReviewSubmitted: true}
+	if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{
+		"channel": "production", "external_id": "build-42", "external_status": "waiting_for_review", "release_meta_json": mustJSON(meta),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	version := func(state string) *sdk.ExecuteResult {
+		return cannedReply(fmt.Sprintf(`{"data":{"id":"version-1","attributes":{"appVersionState":%q}}}`, state))
+	}
+	return p, release, now, version
+}
+
+func TestAppStoreReviewChecksSpaceOutUntilStateChanges(t *testing.T) {
+	p, release, now, version := setupAppStoreReview(t)
+	db := globalCtx.AppDB()
+	p.replies["get_app_version"] = version("IN_REVIEW")
+	got := checkTimes(t, p, now, "get_app_version", 112)
+	if want := minutesOf(0, 1, 6, 21, 51, 111); !reflect.DeepEqual(got, want) {
+		t.Fatalf("checks at %v, want %v", got, want)
+	}
+
+	// A new answer from Apple goes back to the start of the schedule.
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.replies["get_app_version"] = version("PENDING_DEVELOPER_RELEASE")
+	runMobileWorker(t)
+	var checks int
+	if err := db.QueryRow(`SELECT idle_checks FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks); err != nil || checks != 1 {
+		t.Fatalf("state change kept the slow interval: idle_checks=%d err=%v", checks, err)
+	}
+
+	// Release ends the wait and removes the schedule.
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.replies["get_app_version"] = version("READY_FOR_SALE")
+	runMobileWorker(t)
+	fresh, _ := releaseWithMeta(t, release.ID)
+	if fresh.Status != "live" || fresh.ExternalStatus != "ready_for_sale" {
+		t.Fatalf("release=%+v", fresh)
+	}
+	if err := db.QueryRow(`SELECT idle_checks FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks); err == nil {
+		t.Fatal("finished release kept a sync schedule")
+	}
+}
+
+func TestAppStoreReleaseRequestChecksOnNextRun(t *testing.T) {
+	p, release, now, version := setupAppStoreReview(t)
+	db := globalCtx.AppDB()
+	p.replies["get_app_version"] = version("IN_REVIEW")
+	runMobileWorker(t)
+	if err := dbUpdateRelease(db, release.ID, map[string]any{"external_status": "pending_apple_release"}); err != nil {
+		t.Fatal(err)
+	}
+	deferReleaseSync(db, release.ID, now.Add(time.Hour))
+	fresh, _ := releaseWithMeta(t, release.ID)
+	if _, err := (&App{}).releaseApprovedMobileVersion(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if !releaseSyncDue(db, release.ID) {
+		t.Fatal("requested release still waits out the long interval")
+	}
+}
+
+func TestAppStoreWaitScheduleOnlyWhileAppleMovesNext(t *testing.T) {
+	assigned := mobileReleaseMeta{BuildProcessed: true, BetaGroupAssigned: "group-1"}
+	submitted := mobileReleaseMeta{BuildProcessed: true, AppStoreVersionID: "v", Prepared: true, SubmitForReview: true, ReviewSubmitted: true}
+	for _, tt := range []struct {
+		name                  string
+		provider, status, ext string
+		channel               string
+		meta                  mobileReleaseMeta
+		want                  []time.Duration
+	}{
+		{"processing", "app_store_connect", "starting", "processing", "internal", mobileReleaseMeta{}, releaseProcessingSchedule},
+		{"processing for production", "app_store_connect", "starting", "processing", "production", mobileReleaseMeta{}, releaseProcessingSchedule},
+		{"assigned internal", "app_store_connect", "starting", "ready_for_beta_testing", "internal", assigned, releaseAwaitingAppleSchedule},
+		{"assigned external", "app_store_connect", "starting", "waiting_for_beta_review", "external", assigned, releaseAwaitingAppleSchedule},
+		{"submitted version", "app_store_connect", "starting", "in_review", "production", submitted, releaseAwaitingAppleSchedule},
+		{"prepared without submission", "app_store_connect", "starting", "ready_for_review", "production", mobileReleaseMeta{BuildProcessed: true, AppStoreVersionID: "v", Prepared: true}, releaseAwaitingAppleSchedule},
+		{"live but still in review", "app_store_connect", "live", "in_review", "production", submitted, releaseAwaitingAppleSchedule},
+		{"submission unfinished", "app_store_connect", "starting", "ready_for_review", "production", mobileReleaseMeta{BuildProcessed: true, AppStoreVersionID: "v", Prepared: true, SubmitForReview: true}, nil},
+		{"processed, group not accepted", "app_store_connect", "starting", "sync_error", "internal", mobileReleaseMeta{BuildProcessed: true}, nil},
+		{"processed, version not prepared", "app_store_connect", "starting", "processing", "production", mobileReleaseMeta{BuildProcessed: true}, nil},
+		{"live and finished", "app_store_connect", "live", "ready_for_sale", "production", submitted, nil},
+		{"failed", "app_store_connect", "failed", "rejected", "production", submitted, nil},
+		{"other provider", "google_play", "starting", "draft", "internal", assigned, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rel := &Release{Provider: tt.provider, Status: tt.status, ExternalStatus: tt.ext, Channel: tt.channel, ReleaseMetaJSON: mustJSON(tt.meta)}
+			if got := releaseWaitSchedule(rel); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("schedule=%v, want %v", got, tt.want)
+			}
+		})
 	}
 }

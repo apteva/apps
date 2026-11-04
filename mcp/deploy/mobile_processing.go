@@ -7,7 +7,13 @@ import (
 	"strings"
 )
 
-// Availability is provider evidence, not merely beta-group membership.
+const testerAccessNoTesters = "no_testers"
+
+const emptyTesterGroupWarning = "This build's internal TestFlight group has no testers, which is the likely reason the build has not become available. Add a tester with deploy_distribution_update."
+
+// Availability is provider evidence, not merely beta-group membership. Its
+// status writes apply only while the release still has the status this sync
+// read, because a stop or another sync can land during the Apple call.
 func (a *App) syncTestFlightAvailability(bound *sdk.BoundIntegration, rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
 	raw, err := executeIntegration(bound, "get_build", map[string]any{"build_id": buildID, "include": "buildBetaDetail,betaAppReviewSubmission"})
 	if err != nil {
@@ -33,18 +39,45 @@ func (a *App) syncTestFlightAvailability(bound *sdk.BoundIntegration, rel *Relea
 		}
 	}
 	meta.BetaGroupID = groupID
+	observeTesterGroup(bound, rel, groupID, state, meta)
 	switch state {
 	case "IN_BETA_TESTING":
 		return markTestFlightAvailable(rel, buildID, groupID, meta)
 	case "EXPIRED", "BETA_REJECTED", "INVALID_BINARY":
-		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "external_id": buildID, "external_status": strings.ToLower(state), "error": "TestFlight build is unavailable: " + state, "release_meta_json": mustJSON(meta)})
+		_, err = dbUpdateReleaseIfStatus(globalCtx.AppDB(), rel.ID, rel.Status, map[string]any{"status": "failed", "external_id": buildID, "external_status": strings.ToLower(state), "error": "TestFlight build is unavailable: " + state, "release_meta_json": mustJSON(meta)})
+		return err
 	default:
 		if state == "" {
 			state = "AVAILABILITY_UNCONFIRMED"
 		}
-		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "starting", "external_id": buildID, "external_status": strings.ToLower(state), "release_meta_json": mustJSON(meta), "error": ""})
+		_, err = dbUpdateReleaseIfStatus(globalCtx.AppDB(), rel.ID, rel.Status, map[string]any{"status": "starting", "external_id": buildID, "external_status": strings.ToLower(state), "release_meta_json": mustJSON(meta), "error": ""})
+		return err
 	}
 }
+
+// observeTesterGroup records whether an internal build Apple is holding at
+// READY_FOR_BETA_TESTING has anyone to reach. Only the count is kept. A failed
+// lookup never fails the availability check; the last answer stays until the next.
+func observeTesterGroup(bound *sdk.BoundIntegration, rel *Release, groupID, state string, meta *mobileReleaseMeta) {
+	if rel.Channel != "internal" || state != "READY_FOR_BETA_TESTING" {
+		if meta.TesterAccess == testerAccessNoTesters {
+			meta.TesterAccess = ""
+		}
+		meta.TesterWarning = ""
+		return
+	}
+	raw, err := executeIntegration(bound, "list_beta_testers", map[string]any{"group_id": groupID, "limit": 200})
+	if err != nil {
+		return
+	}
+	meta.TesterCount = len(parseAppleTesters(raw))
+	meta.TesterSyncedAt = nowUTC()
+	meta.TesterAccess, meta.TesterWarning = "configured", ""
+	if meta.TesterCount == 0 {
+		meta.TesterAccess, meta.TesterWarning = testerAccessNoTesters, emptyTesterGroupWarning
+	}
+}
+
 func appleProcessingBuild(raw json.RawMessage, buildNumber string) (string, string, error) {
 	var response struct {
 		Data []struct {

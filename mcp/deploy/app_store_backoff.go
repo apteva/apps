@@ -22,9 +22,13 @@ const appStoreBackoffMax = time.Hour
 // Per-release retry schedule after consecutive sync failures.
 var releaseSyncSchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour}
 
-// Checks for an assigned build while Apple's answer stays the same. Any change
-// in that answer goes back to the start of the schedule.
+// Checks for an assigned build or a version in App Store review while Apple's
+// answer stays the same. Any change in that answer goes back to the start.
 var releaseAwaitingAppleSchedule = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// Checks for a build Apple is still processing. That usually takes minutes, and
+// testers are waiting on the next step, so this holds at 15 minutes, not an hour.
+var releaseProcessingSchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute}
 
 // A processed build must be accepted into a TestFlight group within this window.
 const testFlightAssignmentTimeout = 48 * time.Hour
@@ -193,33 +197,60 @@ func deferReleaseSync(db *sql.DB, releaseID int64, until time.Time) {
 		ON CONFLICT(release_id) DO UPDATE SET next_sync_at=excluded.next_sync_at`, releaseID, until.UTC().Format(googlePlayTimeFormat))
 }
 
-// recordReleaseSyncSuccess resets failures. A build that is assigned and still
-// waiting on Apple keeps a growing interval; anything else is due again next run.
+// recordReleaseSyncSuccess resets failures. A release waiting on Apple keeps a
+// growing interval; anything else is due again next run.
 func recordReleaseSyncSuccess(db *sql.DB, releaseID int64) {
-	if rel, err := dbGetRelease(db, releaseID); err == nil && rel != nil && releaseAwaitingApple(rel) {
-		recordReleaseAwaitingApple(db, releaseID, rel.ExternalStatus)
-		return
+	if rel, err := dbGetRelease(db, releaseID); err == nil && rel != nil {
+		if schedule := releaseWaitSchedule(rel); schedule != nil {
+			recordReleaseAwaitingApple(db, releaseID, rel.ExternalStatus, schedule)
+			return
+		}
 	}
+	restartReleaseSync(db, releaseID)
+}
+
+// restartReleaseSync makes the release due on the next worker run.
+func restartReleaseSync(db *sql.DB, releaseID int64) {
 	_, _ = db.Exec(`DELETE FROM release_sync_state WHERE release_id=?`, releaseID)
 }
 
-func releaseAwaitingApple(rel *Release) bool {
-	if rel.Provider != "app_store_connect" || rel.Status != "starting" || (rel.Channel != "internal" && rel.Channel != "external") {
-		return false
+// releaseWaitSchedule returns the check schedule for a release that needs Apple
+// to move next, or nil when Deploy still has work to do and should keep trying.
+func releaseWaitSchedule(rel *Release) []time.Duration {
+	if rel.Provider != "app_store_connect" {
+		return nil
+	}
+	inReview := rel.Status == "live" && (rel.ExternalStatus == "waiting_for_review" || rel.ExternalStatus == "in_review")
+	if rel.Status != "starting" && !inReview {
+		return nil
 	}
 	var meta mobileReleaseMeta
-	return json.Unmarshal([]byte(rel.ReleaseMetaJSON), &meta) == nil && meta.BetaGroupAssigned != ""
+	if json.Unmarshal([]byte(rel.ReleaseMetaJSON), &meta) != nil {
+		return nil
+	}
+	switch {
+	case meta.AppStoreVersionID != "" && meta.Prepared:
+		if meta.SubmitForReview && !meta.ReviewSubmitted {
+			return nil
+		}
+		return releaseAwaitingAppleSchedule
+	case !meta.BuildProcessed:
+		return releaseProcessingSchedule
+	case (rel.Channel == "internal" || rel.Channel == "external") && meta.BetaGroupAssigned != "":
+		return releaseAwaitingAppleSchedule
+	}
+	return nil
 }
 
-func recordReleaseAwaitingApple(db *sql.DB, releaseID int64, status string) {
+func recordReleaseAwaitingApple(db *sql.DB, releaseID int64, status string, schedule []time.Duration) {
 	var checks int
 	var observed string
 	if err := db.QueryRow(`SELECT idle_checks,observed_status FROM release_sync_state WHERE release_id=?`, releaseID).Scan(&checks, &observed); err != nil || observed != status {
 		checks = 0
 	}
-	delay := releaseAwaitingAppleSchedule[len(releaseAwaitingAppleSchedule)-1]
-	if checks < len(releaseAwaitingAppleSchedule) {
-		delay = releaseAwaitingAppleSchedule[checks]
+	delay := schedule[len(schedule)-1]
+	if checks < len(schedule) {
+		delay = schedule[checks]
 	}
 	_, _ = db.Exec(`INSERT INTO release_sync_state(release_id,failures,next_sync_at,last_error,idle_checks,observed_status) VALUES (?,0,?,'',?,?)
 		ON CONFLICT(release_id) DO UPDATE SET failures=0, next_sync_at=excluded.next_sync_at, last_error='', idle_checks=excluded.idle_checks, observed_status=excluded.observed_status`,

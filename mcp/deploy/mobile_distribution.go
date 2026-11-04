@@ -124,9 +124,6 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 	if err := validateDistributionAudienceForPlatform(d.TargetKind, audience); err != nil {
 		return nil, err
 	}
-	if err := a.persistDesiredDistribution(d, target.Channel, audience, installURL); err != nil {
-		return nil, err
-	}
 	target.DesiredConfigured = true
 	target.DesiredAudience = append([]distributionAudienceMember(nil), audience...)
 	target.InstallURL = installURL
@@ -140,7 +137,13 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 		err = errors.New("distribution audiences apply only to Android or Apple deployments")
 	}
 	if err != nil {
+		// The audience is saved only once the provider accepts it. A saved store
+		// row also makes production releases treat the listing as configured, so
+		// a refused update must not create one. An existing row records the failure.
 		_ = a.persistDistributionFailure(d, target.Channel, err)
+		return nil, err
+	}
+	if err := a.persistDesiredDistribution(d, target.Channel, audience, installURL); err != nil {
 		return nil, err
 	}
 	if err := a.persistDistributionObservation(d, state, ""); err != nil {

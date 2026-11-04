@@ -300,7 +300,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_distribution_update", Handler: a.toolDistributionUpdate,
-			Description: "Persist and reconcile the desired test audience for a mobile channel. Android uses exact Google Group replacement, including empty-list removal; iOS adds or invites individual testers without removing existing account access. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience?, google_groups?, install_url?.",
+			Description: "Reconcile the desired test audience for a mobile channel and save it once the provider accepts it; a refused update saves nothing. Android uses exact Google Group replacement, including empty-list removal; iOS adds or invites individual testers without removing existing account access. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience?, google_groups?, install_url?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -335,7 +335,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_release_sync", Handler: a.toolReleaseSync,
-			Description: "Refresh a mobile store release from its provider, including review submission/item state and the exact reviewed artifact when available. Also refreshes store readiness. Args: release_id.",
+			Description: "Refresh a mobile store release from its provider, including review submission/item state and the exact reviewed artifact when available. Also refreshes store readiness. Returns tester_warning when an internal TestFlight build is waiting and its group has no testers. Args: release_id.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"release_id": map[string]any{"type": "integer"}},

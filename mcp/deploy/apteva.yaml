@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.30.9
+version: 0.30.10
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,9 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.10 saves tester audiences only after the provider accepts them, warns
+  when an internal TestFlight group is empty, keeps status changes made during
+  availability checks and slows checks during processing and App Store review.
   v0.30.9 slows checks for assigned TestFlight builds waiting on Apple, fails
   only builds no group accepted within 48 hours and clears stale sync errors.
   v0.30.8 pauses App Store Connect calls per connection on rate limits and
@@ -219,7 +222,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.30.9
+    ref: deploy/v0.30.10
     entry: mcp/deploy
   port: 8080
   health_check: /health

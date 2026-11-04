@@ -201,7 +201,8 @@ Test audiences are managed through Deploy rather than by calling store
 integrations directly:
 
 - `deploy_distribution_status` reads the current provider-backed audience.
-- `deploy_distribution_update` stores the desired audience and reconciles it.
+- `deploy_distribution_update` reconciles the desired audience and saves it once
+  the provider accepts it. A refused update saves nothing.
 - iOS channels accept individual tester emails and safely add them to managed
   TestFlight groups. Existing tester access is not removed automatically.
 - Android test tracks accept Google Group addresses and use exact replacement,
@@ -550,12 +551,21 @@ TestFlight is reported available only after Apple reports `IN_BETA_TESTING`;
 assignment to a beta group alone is insufficient. Failed processing and modern
 App Store states are visible, and interrupted review preparation is retried.
 
-An assigned build waiting on Apple stays in progress. Deploy checks it after 1,
-5, 15 and 30 minutes and then hourly, returning to the start of that schedule
-when Apple's answer changes. `deploy_release_sync` checks immediately. Waiting
-ends when Apple reports the build available or expired, or a newer release
-supersedes it. Only a processed build that no group accepted within 48 hours
-fails, as `testflight_assignment_timeout`.
+A build Apple is still processing is checked after 1, 2, 5, 5 and 10 minutes and
+then every 15 minutes, and fails after 48 hours as `processing_timeout`. An
+assigned build or a version in App Store review stays in progress. Deploy checks
+it after 1, 5, 15 and 30 minutes and then hourly, returning to the start of that
+schedule when Apple's answer changes or a manual release is requested.
+`deploy_release_sync` checks immediately. Waiting on TestFlight ends when Apple
+reports the build available or expired, or a newer release supersedes it. Only a
+processed build that no group accepted within 48 hours fails, as
+`testflight_assignment_timeout`.
+
+When Apple holds an internal build at `READY_FOR_BETA_TESTING` and its group has
+no testers, the release records `tester_access: no_testers` and a
+`tester_warning`, and `deploy_release_sync` returns the warning. The panel shows
+this as `0 · no testers`. An empty group is the likely cause, not a confirmed one.
+Deploy keeps only the tester count on the release.
 
 Artifact reads and release starts hold a retention lock. Retention also pins
 requested releases and recovery artifacts; newly discovered orphan directories

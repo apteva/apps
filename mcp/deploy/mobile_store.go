@@ -2781,6 +2781,8 @@ func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
 		return nil, err
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_status": "release_requested"})
+	// Apple's answer changes soon after a release request; don't wait out a long interval.
+	restartReleaseSync(globalCtx.AppDB(), rel.ID)
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "manual_release_requested", mustJSON(map[string]any{"version_id": meta.AppStoreVersionID}))
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
