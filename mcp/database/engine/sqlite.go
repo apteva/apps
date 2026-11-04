@@ -620,6 +620,9 @@ func compileFilter(c Collection, f *Filter) (string, []any) {
 		}
 		return strings.Join(parts, join), args
 	}
+	if f.Exists != nil || f.NotExists != nil {
+		return compileExists(c, f)
+	}
 	if f.Fields != nil {
 		if searchAll(f) {
 			return "1", nil
@@ -646,6 +649,14 @@ func compileFilter(c Collection, f *Filter) (string, []any) {
 			args = append(args, sqlValue(fld, v))
 		}
 		return col + " IN (" + strings.Join(qs, ",") + ")", args
+	case "not_in":
+		args := []any{}
+		qs := []string{}
+		for _, v := range f.Value.([]any) {
+			qs = append(qs, "?")
+			args = append(args, sqlValue(fld, v))
+		}
+		return col + " NOT IN (" + strings.Join(qs, ",") + ")", args
 	case "starts_with":
 		s := f.Value.(string)
 		hi := prefixEnd([]byte(s))
@@ -772,6 +783,13 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 			}
 			for _, name := range f.Fields {
 				wanted[name] = true
+			}
+			for _, clause := range []*ExistsClause{f.Exists, f.NotExists} {
+				if clause != nil {
+					for _, on := range clause.On {
+						wanted[on.LocalField] = true
+					}
+				}
 			}
 			for i := range f.And {
 				visit(&f.And[i])

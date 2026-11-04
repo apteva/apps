@@ -448,6 +448,9 @@ func plan(c Collection, q Query) accessPlan {
 	best := accessPlan{Sort: true}
 	score := -1
 	for _, idx := range indexes(c) {
+		if q.hint != "" && idx.Name != q.hint {
+			continue
+		}
 		prefix := indexPrefix(c, idx, false)
 		eq := map[string]bool{}
 		n := 0
@@ -754,6 +757,10 @@ func (t *pebbleTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 	return aggregateRecords(t.ctx, c, r, outSchema, func(q Query, fields []string, consume func(Record, []byte) bool) error {
 		return t.scanFields(c, q, true, fields, consume)
 	})
+}
+
+func (t *pebbleTx) scanRecords(c Collection, q Query, fields []string, consume func(Record) bool) error {
+	return t.scanFields(c, q, true, fields, func(r Record, _ []byte) bool { return consume(r) })
 }
 
 func (b *pebbleBackend) pointGet(ctx context.Context, c Collection, key Record, pk string) (Record, error) {

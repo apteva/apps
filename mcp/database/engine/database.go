@@ -568,6 +568,10 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e := validateQuery(c, &r.Query); e != nil {
 			return nil, e
 		}
+		exists, e := prepareExists(tx, c, r.Where)
+		if e != nil {
+			return nil, e
+		}
 		if op == "explain" {
 			return tx.explain(c, r.Query)
 		}
@@ -593,6 +597,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			q.Where = and(q.Where, after)
 		}
 		rows, e := tx.find(c, q, q.Limit+1)
+		if e == nil {
+			e = exists.failure()
+		}
 		if e != nil {
 			return nil, e
 		}
@@ -629,7 +636,14 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if r.analytics != nil {
 			r.analytics.finish(c, r)
 		}
+		exists, e := prepareExists(tx, c, r.Where)
+		if e != nil {
+			return nil, e
+		}
 		rows, e := tx.aggregate(c, r, outSchema)
+		if e == nil {
+			e = exists.failure()
+		}
 		if e != nil {
 			return nil, e
 		}
@@ -779,6 +793,9 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 		}
 		if r.Where != nil && r.All {
 			return nil, Invalid("all and where cannot be combined")
+		}
+		if hasExists(r.Where) {
+			return nil, Invalid("update and delete cannot use exists")
 		}
 		n := 0
 		if e := validateFilter(c, r.Where, 0, &n); e != nil {

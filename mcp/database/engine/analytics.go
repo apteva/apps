@@ -260,6 +260,13 @@ func visitFilterFields(f *Filter, visit func(string)) {
 	for _, name := range f.Fields {
 		visit(name)
 	}
+	for _, clause := range []*ExistsClause{f.Exists, f.NotExists} {
+		if clause != nil {
+			for _, on := range clause.On {
+				visit(on.LocalField)
+			}
+		}
+	}
 	for i := range f.And {
 		visitFilterFields(&f.And[i], visit)
 	}

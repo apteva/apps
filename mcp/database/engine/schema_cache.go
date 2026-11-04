@@ -51,6 +51,15 @@ func cloneCollection(c Collection) Collection {
 	return c
 }
 
+// scanRecords forwards the optional streaming scan; embedding hides it.
+func (t cachedSchemaTx) scanRecords(c Collection, q Query, fields []string, consume func(Record) bool) error {
+	scanner, ok := t.transaction.(recordScanner)
+	if !ok {
+		return fail("internal", "adapter cannot stream records")
+	}
+	return scanner.scanRecords(c, q, fields, consume)
+}
+
 type cachedSchemaTx struct {
 	transaction
 	cache    *schemaCache

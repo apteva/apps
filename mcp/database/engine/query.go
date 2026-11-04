@@ -33,8 +33,20 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 	if f.Fields != nil {
 		branches++
 	}
+	if f.Exists != nil {
+		branches++
+	}
+	if f.NotExists != nil {
+		branches++
+	}
 	if branches != 1 {
-		return Invalid("filter requires exactly one of field, fields, and, or")
+		return Invalid("filter requires exactly one of field, fields, and, or, exists, not_exists")
+	}
+	if f.Exists != nil || f.NotExists != nil {
+		if f.Op != "" || f.Value != nil {
+			return Invalid("exists filter cannot have op/value")
+		}
+		return nil
 	}
 	if f.Fields != nil || f.Op == opLikeContainsASCII {
 		return validateSearch(c, f)
@@ -74,10 +86,10 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 		return Invalid("use is_null to test null")
 	}
 	fld.Nullable = false
-	if f.Op == "in" {
+	if f.Op == "in" || f.Op == "not_in" {
 		a, ok := f.Value.([]any)
 		if !ok || len(a) == 0 || len(a) > 100 {
-			return Invalid("in requires 1–100 values")
+			return Invalid("%s requires 1–100 values", f.Op)
 		}
 		for i, v := range a {
 			n, e := normalize(fld, v)
@@ -89,7 +101,7 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 		// A one-value list is equality: planners bind an index prefix only
 		// on equality (a caller's single scope arrives as a list).
 		if len(a) == 1 {
-			f.Op, f.Value = "eq", a[0]
+			f.Op, f.Value = map[string]string{"in": "eq", "not_in": "ne"}[f.Op], a[0]
 		}
 		return nil
 	}
@@ -228,6 +240,9 @@ func matches(c Collection, r Record, f *Filter) bool {
 	if f.Fields != nil {
 		return matchesSearch(r, f)
 	}
+	if f.Exists != nil || f.NotExists != nil {
+		return matchesExists(r, f)
+	}
 	v := r[f.Field]
 	if f.Op == "is_null" {
 		return v == nil
@@ -246,6 +261,14 @@ func matches(c Collection, r Record, f *Filter) bool {
 			}
 		}
 		return false
+	}
+	if f.Op == "not_in" {
+		for _, w := range f.Value.([]any) {
+			if compare(fld, v, w) == 0 {
+				return false
+			}
+		}
+		return true
 	}
 	if f.Op == "starts_with" {
 		return strings.HasPrefix(v.(string), f.Value.(string))
@@ -438,6 +461,9 @@ func validateAggregate(c Collection, r *Request) (Collection, error) {
 		}
 		seen[m.Name] = true
 		f := Field{Name: m.Name, Type: "integer"}
+		if hasExists(m.Where) {
+			return Collection{}, Invalid("metric where cannot use exists; put it in the aggregate's where")
+		}
 		if e := validateFilter(c, m.Where, 0, &n); e != nil {
 			return c, e
 		}

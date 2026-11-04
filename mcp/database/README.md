@@ -232,9 +232,32 @@ In the portable path, filters on stored fields are pushed to the adapter's scan 
 
 ## Query and mutation rules
 
-Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `is_null`, `is_not_null`, `starts_with`. Null predicates omit `value`. `in` takes 1–100 non-null values; a one-value list is treated as `eq`, so it binds index prefixes on every adapter. String matching is literal, case-sensitive UTF-8 byte comparison.
+Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `is_null`, `is_not_null`, `starts_with`. Null predicates omit `value`. `in` takes 1–100 non-null values; a one-value list is treated as `eq`, so it binds index prefixes on every adapter. `not_in` takes the same list with SQL's null behaviour: a null value does not satisfy it. String matching is literal, case-sensitive UTF-8 byte comparison.
 
 Text search is one filter node over several text fields: `{fields:["resource_key","opportunity_key","commercial_id"], op:"like_contains_ascii", value:"23 op"}`. Nulls read as `""` and the fields are joined in the given order with one space; the result matches `"%" + value + "%"` with SQLite's default `LIKE`: `%` and `_` stay wildcards (`_` is one UTF-8 character), ASCII letters compare case-insensitively (other letters exactly), backslash has no escape meaning, and whitespace is kept. An empty value matches every record and is dropped from the plan, so it costs nothing. 1–16 existing `text` fields, a string value of at most 1024 bytes. It combines with `and`/`or` and works in `find`, `count`, `aggregate`, metric `where` and read batches, before pagination and aggregation. Every adapter evaluates it natively (AptevaDB `$like`, SQLite `LIKE`) and none can use an index for it, so keep the indexed scope (centre, date range) beside it: the planner still narrows through those, and the search reads only the records in that range.
+
+`exists` and `not_exists` test related records of another collection in the same database without returning them:
+
+```json
+{"and": [
+  {"field": "centre_id", "op": "eq", "value": "centre-a"},
+  {"exists": {"collection": "ventes",
+    "on": [{"localField": "vente_id", "foreignField": "id", "comparison": "text"},
+           {"localField": "local_id", "foreignField": "appel_id"}],
+    "where": {"field": "offre_id", "op": "in", "value": ["offer-a"]}}},
+  {"not_exists": {"collection": "ventes",
+    "on": [{"localField": "vente_id", "foreignField": "id", "comparison": "text"},
+           {"localField": "local_id", "foreignField": "appel_id"}],
+    "where": {"field": "offre_id", "op": "not_in", "value": ["offer-a"]}}}
+]}
+```
+
+- `on` lists alternatives (OR, up to 16): a record is related if any pair matches. Composite keys are not supported.
+- A null local or foreign value never matches; empty strings do, as in SQL. Without `comparison` both fields must have one type. `comparison: "text"` compares text and integer fields by decimal text with no trimming or other coercion, so `"007"` does not match the integer 7.
+- `where` applies to the related record; the same related record must satisfy it and an `on` pair. Nodes combine with `and`/`or` (at most 8 in a filter) and cannot nest.
+- Every `foreignField` needs an index that starts with it (or the primary key); otherwise the request fails with `query_too_expensive` naming the field. Add indexes before relying on a relationship.
+- Supported in `where` for `find`, `count`, `aggregate`, `explain` and read batches, evaluated before sorting, pagination and aggregation, on the operation's snapshot. Each record counts once. Metric `where`, `update` and `delete` reject them. Any evaluation failure fails the request; no partial result is returned.
+- SQLite compiles a correlated subquery. Pebble and AptevaDB start with index probes and, on wide scans, switch to one bounded pass over the related collection that builds key sets (up to the 16 MiB work budget, else they keep probing). On AptevaDB aggregates with these filters run in one stream rather than the parallel pipeline, so keep an indexed equality scope beside them.
 
 `find` accepts `select`, `orderBy`, `limit`, and `cursor`, returning `records`, `hasMore`, and `nextCursor`. Repeat the same query with the returned cursor. Primary-key fields are appended to the sort as tie-breakers. `requireIndex` rejects plans that cannot narrow candidates through an index. `explain` reports adapter-specific plan details. Pebble handles primary/unique lookups, leading compound equality/range/prefix predicates, and compatible index ordering; complex OR/IN combinations may require bounded scans and sorting.
 
