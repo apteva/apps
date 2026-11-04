@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.17.0
+version: 0.17.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -410,7 +410,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.17.0
+    ref: telephony/v0.17.1
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -534,7 +534,12 @@ const (
 	inboundTransportSIPDirect    = "sip_direct"
 )
 
-func main() { sdk.Run(&App{}) }
+func main() {
+	if isRecordingMP3Worker(os.Args) {
+		os.Exit(recordingMP3WorkerMain(os.Stdin, os.Stdout))
+	}
+	sdk.Run(&App{})
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))

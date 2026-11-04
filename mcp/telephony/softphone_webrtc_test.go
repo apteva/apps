@@ -760,26 +760,40 @@ func TestRTPLiveClockCannotAccumulateEncoderSchedulingDelay(t *testing.T) {
 	steady := rtcRTPClock{base: start}
 	for i := 1; i <= 100; i++ {
 		tick := start.Add(time.Duration(i) * 20 * time.Millisecond)
-		if steady.sent && steady.slot(tick) <= steady.lastSlot {
-			t.Fatal("encoder phase suppressed a normal tick")
+		if slots, fill, skipped := steady.plan(tick, 0); slots != 1 || !fill || skipped != 0 {
+			t.Fatal("encoder phase suppressed a normal tick", i, slots, fill, skipped)
 		}
-		ts, skipped := steady.next(tick.Add(4 * time.Millisecond))
-		if ts != uint32(i*960) || skipped != 0 {
-			t.Fatal("steady RTP clock drift", ts, skipped)
+		// Encoding finishing later in the slot cannot move the media time.
+		if ts := steady.take(tick.Add(4 * time.Millisecond)); ts != uint32(i*960) {
+			t.Fatal("steady RTP clock drift", ts)
 		}
 	}
 	clock := rtcRTPClock{baseTS: 0xfffffe00}
-	first, _ := clock.next(start)
+	first := clock.take(start)
+	last := first
 	for i := 1; i <= 200; i++ {
 		now := start.Add(time.Duration(i) * 30 * time.Millisecond) // slower than 20ms encoder cadence
-		ts, _ := clock.next(now)
-		elapsed := time.Duration(uint32(ts-first)) * time.Second / 48000
+		slots, _, skipped := clock.plan(now, 6)
+		if skipped != 0 {
+			t.Fatal("slow cadence opened a hole", skipped)
+		}
+		for range slots {
+			ts := clock.take(now)
+			if uint32(ts-last) != 960 {
+				t.Fatal("media time not continuous", ts, last)
+			}
+			last = ts
+		}
+		elapsed := time.Duration(uint32(last-first)) * time.Second / 48000
 		if gap := now.Sub(start) - elapsed; gap < 0 || gap >= 20*time.Millisecond {
 			t.Fatal("RTP clock accumulated delay", gap)
 		}
 	}
-	before, _ := clock.next(start.Add(7 * time.Second))
-	after, skipped := clock.next(start.Add(12 * time.Second))
+	// Pauses past the catch-up limit jump the timeline instead.
+	clock.plan(start.Add(7*time.Second), 0)
+	before := clock.take(start.Add(7 * time.Second))
+	_, _, skipped := clock.plan(start.Add(12*time.Second), 0)
+	after := clock.take(start.Add(12 * time.Second))
 	if uint32(after-before) != 48000*5 || skipped != 4980 {
 		t.Fatal("process pause did not advance live RTP timeline", before, after, skipped)
 	}

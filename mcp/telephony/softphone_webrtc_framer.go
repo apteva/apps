@@ -14,19 +14,24 @@ type rtcPCMFramer struct {
 	lastChunk int
 	// Consecutive playback ticks with the queue above its latency target.
 	backlogTicks int
+	// Consecutive speech frames older than the budget with a backlog behind them.
+	overBudgetTicks int
+	// Lifetime given to arriving audio. Zero means liveAudioMaxAge.
+	maxAge time.Duration
 }
 
 const (
 	// Frames still queued after this tick's frame which are not excess latency.
 	// ±1 ms arrival jitter alone holds two for runs of up to ~100 ms.
 	rtcPlaybackTargetFrames = 1
-	// A backlog persisting this long is trimmed at a silent frame (200 ms) or,
-	// failing that, by crossfading speech (400 ms, then at most every 100 ms).
+	// A backlog persisting this long is trimmed at a silent frame (200 ms).
 	rtcBacklogSilenceTicks = 10
-	rtcBacklogSpeechTicks  = 20
-	rtcBacklogSpeechEvery  = 5
-	rtcSilencePeak         = 64 // about -54 dBFS
-	rtcTrimCrossfade       = 120
+	// Speech is shortened only when it stays this old for 100 ms, and at most
+	// every 100 ms after that. Below the 120 ms queue bound.
+	rtcPlaybackSpeechBudget = 80 * time.Millisecond
+	rtcBacklogSpeechEvery   = 5
+	rtcSilencePeak          = 64 // about -54 dBFS
+	rtcTrimCrossfade        = 120
 )
 
 type rtcPCMSegment struct {
@@ -174,31 +179,53 @@ func nextRTCPlaybackFrame(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, last
 	return frame, true
 }
 
-// A stall delivers its backlog at once and the paced consumer cannot catch up,
-// so without trimming the added latency lasts for the rest of the call. Once a
-// backlog persists, drop silent frames first; continuous speech is shortened
-// by one frame with a short crossfade into its successor, never with a jump.
+// The sender repays its own stalls, so a backlog that remains came from the
+// source: late audio arriving after silence already took its slots. Silent
+// frames are free to drop. Speech is valid audio and stays while it is within
+// the latency budget; beyond it, one frame is shortened with a short crossfade
+// into its successor, never with a jump.
 func (f *rtcPCMFramer) trimBacklog(frames <-chan rtcPCMFrame, frame rtcPCMFrame, now time.Time, stats *rtcMediaStats) rtcPCMFrame {
 	if frame.pcm == nil || len(frames) <= rtcPlaybackTargetFrames {
-		f.backlogTicks = 0
+		f.backlogTicks, f.overBudgetTicks = 0, 0
 		return frame
 	}
 	f.backlogTicks++
 	silent := rtcPCMSilent(frame.pcm)
-	if f.backlogTicks < rtcBacklogSilenceTicks || !silent && f.backlogTicks < rtcBacklogSpeechTicks {
+	if silent {
+		if f.backlogTicks < rtcBacklogSilenceTicks {
+			return frame
+		}
+		next, _ := nextRTCFrame(frames, now, stats)
+		if next.pcm == nil {
+			return frame
+		}
+		stats.drop("webrtc_playback_backlog_silence", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
+		return next
+	}
+	if f.frameAge(frame, now) < rtcPlaybackSpeechBudget {
+		f.overBudgetTicks = 0
+		return frame
+	}
+	if f.overBudgetTicks++; f.overBudgetTicks < rtcBacklogSpeechEvery {
 		return frame
 	}
 	next, _ := nextRTCFrame(frames, now, stats)
 	if next.pcm == nil {
 		return frame
 	}
-	if silent {
-		stats.drop("webrtc_playback_backlog_silence", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
-		return next
-	}
 	stats.drop("webrtc_playback_backlog_speech", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
-	f.backlogTicks = rtcBacklogSpeechTicks - rtcBacklogSpeechEvery
+	f.overBudgetTicks = 0
 	return rtcPCMFrame{pcm: rtcCrossfadeFrames(frame.pcm, next.pcm), expires: frame.expires}
+}
+
+// The part of the frame's live lifetime already used. Audio that arrived old
+// starts with a shorter lifetime, so this covers more than its time queued here.
+func (f *rtcPCMFramer) frameAge(frame rtcPCMFrame, now time.Time) time.Duration {
+	maxAge := f.maxAge
+	if maxAge == 0 {
+		maxAge = liveAudioMaxAge
+	}
+	return maxAge - frame.expires.Sub(now)
 }
 
 func rtcPCMSilent(pcm []int16) bool {

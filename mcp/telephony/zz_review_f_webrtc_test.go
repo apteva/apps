@@ -15,6 +15,34 @@ import (
 
 type reviewRTCTick func(<-chan rtcPCMFrame, *rtcPCMFramer, time.Time, time.Time, *rtcMediaStats) (rtcPCMFrame, bool)
 
+// Sends what one tick owes; v0.12.61 sends one frame, the current sender repays.
+type reviewRTCSend func(<-chan rtcPCMFrame, *rtcPCMFramer, time.Time, time.Time, *rtcMediaStats) []rtcPCMFrame
+
+func reviewOneFramePerTick(tick reviewRTCTick) reviewRTCSend {
+	return func(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, last, now time.Time, stats *rtcMediaStats) []rtcPCMFrame {
+		frame, _ := tick(frames, pending, last, now, stats)
+		if frame.pcm == nil {
+			return nil
+		}
+		return []rtcPCMFrame{frame}
+	}
+}
+
+func reviewCurrentSender(start time.Time) reviewRTCSend {
+	clock := rtcRTPClock{base: start}
+	return func(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, last, now time.Time, stats *rtcMediaStats) []rtcPCMFrame {
+		var sent []rtcPCMFrame
+		playRTCTick(&clock, now, frames, pending, last, nil, liveAudioMaxAge, stats, func(frame rtcPCMFrame, now time.Time, _ bool) (time.Time, bool) {
+			clock.take(now)
+			if frame.pcm != nil {
+				sent = append(sent, frame)
+			}
+			return now, true
+		})
+		return sent
+	}
+}
+
 // Frozen tick selection from telephony/v0.12.61 nextRTCPlaybackFrame: no
 // backlog trimming and a partial flush 20 ms after the last chunk.
 func review61RTCPlaybackTick(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, lastChunkAt, now time.Time, stats *rtcMediaStats) (rtcPCMFrame, bool) {
@@ -52,7 +80,7 @@ type reviewStallResult struct {
 // ticks run 10 ms later. A sender-loop stall suspends both, then delivers the
 // held chunks at once (the intake channel is unbuffered). Stalls: 60 ms at
 // 1.0 s and 80 ms at 2.0 s.
-func replayRTCStalls(tick reviewRTCTick, gaps bool) reviewStallResult {
+func replayRTCStalls(send reviewRTCSend, gaps bool) reviewStallResult {
 	start := time.Unix(1700000000, 0)
 	stalls := [][2]int{{1000, 1060}, {2000, 2080}}
 	sample := 0
@@ -110,12 +138,11 @@ func replayRTCStalls(tick reviewRTCTick, gaps bool) reviewStallResult {
 			deliver(source(), now)
 			continue
 		}
-		frame, _ := tick(frames, &pending, last, now, stats)
-		collect()
-		if frame.pcm != nil {
+		for _, frame := range send(frames, &pending, last, now, stats) {
 			out = append(out, frame.pcm...)
 			r.Played++
 		}
+		collect()
 		for k, s := range stalls {
 			since := time.Duration(ms-s[1]) * time.Millisecond
 			if since >= 0 && r.Recovered[k] < 0 && len(frames) <= rtcPlaybackTargetFrames && (k == 1 || ms < stalls[1][0]) {
@@ -141,8 +168,8 @@ func replayRTCStalls(tick reviewRTCTick, gaps bool) reviewStallResult {
 func TestReviewFRTCBacklogReturnsToTargetAfterStalls(t *testing.T) {
 	for _, gaps := range []bool{false, true} {
 		t.Run(map[bool]string{false: "continuous_speech", true: "speech_with_pauses"}[gaps], func(t *testing.T) {
-			old := replayRTCStalls(review61RTCPlaybackTick, gaps)
-			fixed := replayRTCStalls(nextRTCPlaybackFrame, gaps)
+			old := replayRTCStalls(reviewOneFramePerTick(review61RTCPlaybackTick), gaps)
+			fixed := replayRTCStalls(reviewCurrentSender(time.Unix(1700000000, 0)), gaps)
 			t.Logf("v0.12.61: %+v", old)
 			t.Logf("fixed:    %+v", fixed)
 			if old.DepthAfter[0] <= rtcPlaybackTargetFrames || old.DropMS["webrtc_playback_overflow"] == 0 {
@@ -153,16 +180,15 @@ func TestReviewFRTCBacklogReturnsToTargetAfterStalls(t *testing.T) {
 			}
 			for k, d := range fixed.Recovered {
 				if d < 0 || d > 800*time.Millisecond || fixed.DepthAfter[k] > rtcPlaybackTargetFrames {
-					t.Fatal("backlog not trimmed within a bounded time", k, fixed)
+					t.Fatal("backlog not repaid within a bounded time", k, fixed)
 				}
 			}
-			// The 440 Hz source changes by at most ~920 per sample; a trim must not
-			// add a step discontinuity (a click).
+			// The 440 Hz source changes by at most ~920 per sample: a step would be a click.
 			if fixed.MaxJump > 1500 {
-				t.Fatal("trim introduced a discontinuity", fixed.MaxJump)
+				t.Fatal("playback introduced a discontinuity", fixed.MaxJump)
 			}
-			if gaps && fixed.DropMS["webrtc_playback_backlog_speech"] >= fixed.DropMS["webrtc_playback_backlog_silence"] {
-				t.Fatal("speech trimmed in preference to available silence", fixed)
+			if fixed.DropMS["webrtc_playback_backlog_speech"] != 0 {
+				t.Fatal("speech removed although the sender repaid the stall", fixed)
 			}
 		})
 	}

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"runtime"
 	"sync"
 
 	mp3 "github.com/hajimehoshi/go-mp3"
@@ -16,8 +18,9 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-// LAME is bundled as a WASI reactor: no host library, subprocess, network,
-// filesystem access or runtime download. Each conversion has isolated memory.
+// LAME is bundled as a WASI reactor: no host library, network, filesystem access
+// or runtime download. Each conversion has isolated memory, and normally runs in
+// its own low-priority process (recording_mp3_worker.go).
 //
 //go:embed native/lame/encoder.wasm.gz
 var recordingMP3WASM []byte
@@ -85,32 +88,78 @@ func encodeRecordingMP3(ctx context.Context, path string, expectedChannels ...in
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	source, err := os.Open(path)
+	channels := 0
+	if len(expectedChannels) > 0 {
+		channels = expectedChannels[0]
+	}
+	dest, err := newRecordingTemporaryFile("telephony-storage-*.mp3")
 	if err != nil {
 		return "", err
+	}
+	dest.Close()
+	good := false
+	defer func() {
+		if !good {
+			os.Remove(dest.Name())
+		}
+	}()
+	limit := recordingDownloadLimit(ctx)
+	err = convertRecordingMP3InWorker(ctx, path, dest.Name(), channels, limit)
+	if errors.Is(err, errRecordingMP3WorkerUnavailable) {
+		log.Printf("recording conversion runs in the Telephony process: %v", err)
+		_, err = convertRecordingMP3(ctx, path, dest.Name(), channels, limit)
+	}
+	if err != nil {
+		return "", err
+	}
+	good = true
+	return dest.Name(), nil
+}
+
+// A goroutine inside LAME cannot be preempted, so each call stops at about one
+// MP3 frame of input, and the loop yields between calls. Short calls alone do not
+// help: without the yield the next call starts before other goroutines get a turn.
+func recordingMP3BatchSamples(sampleRate int) int {
+	switch {
+	case sampleRate < 16000: // encoded at 16 kHz, so a frame is under 288 input samples
+		return 288
+	case sampleRate < 32000:
+		return 576
+	}
+	return 1152
+}
+
+// convertRecordingMP3 writes the MP3 for a PCM16 WAV into an existing file.
+func convertRecordingMP3(ctx context.Context, sourcePath, destPath string, expectedChannels int, limit int64) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return 0, err
 	}
 	defer source.Close()
 	info, err := inspectPCM16WAV(source)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
-	if len(expectedChannels) > 0 && info.Channels != expectedChannels[0] {
-		return "", errors.New("recording channel metadata does not match source WAV; original retained")
+	if expectedChannels > 0 && info.Channels != expectedChannels {
+		return 0, errors.New("recording channel metadata does not match source WAV; original retained")
 	}
 	stat, err := source.Stat()
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	if info.DataOffset+info.DataSize > stat.Size() {
-		return "", io.ErrUnexpectedEOF
+		return 0, io.ErrUnexpectedEOF
 	}
 	recordingMP3Runtime.Do(initRecordingMP3)
 	if recordingMP3Runtime.err != nil {
-		return "", recordingMP3Runtime.err
+		return 0, recordingMP3Runtime.err
 	}
 	module, err := recordingMP3Runtime.runtime.InstantiateModule(ctx, recordingMP3Runtime.compiled, wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize"))
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	defer module.Close(context.Background())
 	call := func(name string, args ...uint64) (int32, error) {
@@ -125,35 +174,29 @@ func encodeRecordingMP3(ctx context.Context, path string, expectedChannels ...in
 		return n, nil
 	}
 	if _, err = call("start", uint64(info.SampleRate), uint64(info.Channels)); err != nil {
-		return "", err
+		return 0, err
 	}
 	in, err := call("input_ptr")
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	out, err := call("output_ptr")
 	if err != nil {
-		return "", err
+		return 0, err
 	}
-	dest, err := newRecordingTemporaryFile("telephony-storage-*.mp3")
+	dest, err := os.OpenFile(destPath, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
-	good := false
-	defer func() {
-		dest.Close()
-		if !good {
-			os.Remove(dest.Name())
-		}
-	}()
+	defer dest.Close()
 	var written int64
 	write := func(n int32) error {
 		if n > 65536 {
 			return errors.New("MP3 encoder output exceeds buffer")
 		}
 		written += int64(n)
-		if written > recordingDownloadLimit(ctx) {
-			return &recordingSizeLimitError{recordingDownloadLimit(ctx)}
+		if written > limit {
+			return &recordingSizeLimitError{limit}
 		}
 		data, ok := module.Memory().Read(uint32(out), uint32(n))
 		if !ok {
@@ -162,59 +205,63 @@ func encodeRecordingMP3(ctx context.Context, path string, expectedChannels ...in
 		_, err := dest.Write(data)
 		return err
 	}
-	buffer := make([]byte, 16384)
+	buffer := make([]byte, recordingMP3BatchSamples(info.SampleRate)*info.Channels*2)
 	for remaining := info.DataSize; remaining > 0; {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return 0, err
 		}
 		n := min(int64(len(buffer)), remaining)
 		if _, err := io.ReadFull(source, buffer[:n]); err != nil {
-			return "", err
+			return 0, err
 		}
 		if !module.Memory().Write(uint32(in), buffer[:n]) {
-			return "", errors.New("invalid MP3 input")
+			return 0, errors.New("invalid MP3 input")
 		}
 		produced, err := call("encode", uint64(n/int64(info.Channels*2)), uint64(info.Channels))
 		if err != nil {
-			return "", err
+			return 0, err
 		}
 		if err := write(produced); err != nil {
-			return "", err
+			return 0, err
 		}
 		remaining -= n
+		runtime.Gosched()
 	}
 	n, err := call("finish")
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	if err := write(n); err != nil {
-		return "", err
+		return 0, err
 	}
 	// Replace the reserved first frame with LAME's final duration/seek/delay tag.
 	n, err = call("tag")
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	if n > 0 {
 		if int64(n) > written {
-			return "", errors.New("invalid MP3 seek tag")
+			return 0, errors.New("invalid MP3 seek tag")
 		}
 		if _, err := dest.Seek(0, io.SeekStart); err != nil {
-			return "", err
+			return 0, err
 		}
 		written -= int64(n) // tag replaces bytes; it does not grow the file
 		if err := write(n); err != nil {
-			return "", err
+			return 0, err
 		}
 	}
 	if err := dest.Sync(); err != nil {
-		return "", err
+		return 0, err
+	}
+	end, err := dest.Stat()
+	if err != nil {
+		return 0, err
 	}
 	if err := dest.Close(); err != nil {
-		return "", err
+		return 0, err
 	}
-	good = true
-	return dest.Name(), nil
+	return end.Size(), nil
 }
 
 // Decode incrementally to disk, retaining left/right identity. go-mp3 always

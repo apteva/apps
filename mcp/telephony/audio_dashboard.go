@@ -165,6 +165,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		}
 		add("dropped_audio", "browser_to_telephony", v.WebRTC.IngressDiscardedMS > 0)
 		m["server_webrtc_pacing_skipped_ms"] = float64(v.WebRTC.PacingSkippedMS)
+		m["server_webrtc_pacing_catchup_frames"] = float64(v.WebRTC.PacingCatchupFrames)
 		add("audio_degraded", "telephony_to_browser", v.WebRTC.PacingSkippedMS > 0)
 		m["server_webrtc_ingress_rejected_packets"] = float64(v.WebRTC.IngressRejectedPackets + v.WebRTC.IngressQueueDrops + v.WebRTC.DecodeErrors)
 		m["server_webrtc_ingress_concealed_ms"] = float64(v.WebRTC.IngressConcealedMS)

@@ -192,6 +192,7 @@ type rtcMediaSnapshot struct {
 	DecodeErrors           int64               `json:"decode_errors"`
 	OutboundDroppedMS      int64               `json:"outbound_dropped_ms"`
 	PacingSkippedMS        int64               `json:"pacing_skipped_ms"`
+	PacingCatchupFrames    uint64              `json:"pacing_catchup_frames"`
 	PartialFlushedFrames   uint64              `json:"partial_flushed_frames"`
 	PartialPaddedMS        float64             `json:"partial_padded_ms"`
 	MaxQueueMS             int                 `json:"max_queue_ms"`
@@ -298,6 +299,7 @@ func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
 	a.DecodeErrors += b.DecodeErrors
 	a.OutboundDroppedMS += b.OutboundDroppedMS
 	a.PacingSkippedMS += b.PacingSkippedMS
+	a.PacingCatchupFrames += b.PacingCatchupFrames
 	a.PartialFlushedFrames += b.PartialFlushedFrames
 	a.PartialPaddedMS += b.PartialPaddedMS
 	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)
@@ -962,25 +964,78 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 	sequence := rtp.NewRandomSequencer()
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
-	var pending rtcPCMFramer
+	pending := rtcPCMFramer{maxAge: maxAge}
 	var lastChunkAt time.Time
 	var writeFailures rtcWriteFailures
+	acceptChunk := func(chunk pcmChunk) bool {
+		now := time.Now()
+		if dropped := pending.discardExpired(now); dropped > 0 {
+			stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
+		}
+		lastChunkAt = now
+		return pending.push(chunk.data, chunk.expires, func(frame rtcPCMFrame) bool {
+			return queueRTCFrame(frames, frame, done, stats)
+		})
+	}
+	play := func(frame rtcPCMFrame, now time.Time, catchup bool) (time.Time, bool) {
+		if inputRate == 24000 {
+			converted = append(converted[:0], frame.pcm...)
+		} else {
+			converted = resampler.ProcessInto(frame.pcm, converted)
+		}
+		for _, v := range converted {
+			samples = append(samples, float32(v)/32768)
+		}
+		if len(samples) < frameSamples {
+			return now, true
+		}
+		voice := nextRTCWhisper(whispers, now)
+		if voice != nil {
+			if voice.epoch != whisperEpoch {
+				whisperResampler = newPCMResampler(8000, inputRate)
+				whisperEpoch = voice.epoch
+			}
+			overlay = whisperResampler.ProcessInto(voice.pcm, overlay)
+		}
+		n, mixed, err := encodeRTCSlot(encoder, samples[:frameSamples], voice, overlay, mixedSamples, out)
+		samples = samples[:copy(samples, samples[frameSamples:])]
+		if err != nil {
+			stop()
+			return now, false
+		}
+		now = time.Now()
+		if !frame.expires.After(now) {
+			stats.drop("webrtc_playback_encode_age", direction, 0, 20)
+			return now, true
+		}
+		timestamp := clock.take(now)
+		if catchup {
+			stats.mu.Lock()
+			stats.value.PacingCatchupFrames++
+			stats.mu.Unlock()
+		}
+		if err := writeObservedRTP(track.WriteRTP, &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}, &stats.rtp); err != nil {
+			if writeFailures.fatal(err) {
+				stop()
+				return now, false
+			}
+			stats.drop("webrtc_rtp_write_error", direction, 0, 20)
+			return now, true
+		}
+		writeFailures.fatal(nil)
+		if mixed {
+			stats.mu.Lock()
+			stats.value.CoachingMixedMS += int64(len(voice.pcm) * 1000 / 8000)
+			stats.mu.Unlock()
+		}
+		return now, true
+	}
 	for {
 		select {
 		case <-done:
 			return
 		case chunk, open := <-chunks:
-			if !open {
-				return
-			}
-			now := time.Now()
-			if dropped := pending.discardExpired(now); dropped > 0 {
-				stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
-			}
-			lastChunkAt = now
-			if !pending.push(chunk.data, chunk.expires, func(frame rtcPCMFrame) bool {
-				return queueRTCFrame(frames, frame, done, stats)
-			}) {
+			if !open || !acceptChunk(chunk) {
 				return
 			}
 		case <-tick.C:
@@ -992,66 +1047,48 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 					stats.voice.codec.Store(rtcOpusEncoderState(encoder, fec, rate, loss, now))
 				}
 			}
-			if clock.sent && clock.slot(now) <= clock.lastSlot {
-				continue
-			}
-			frame, open := nextRTCPlaybackFrame(frames, &pending, lastChunkAt, now, stats)
-			if !open {
-				return
-			}
-			if frame.pcm == nil {
-				frame = rtcPCMFrame{pcm: silence, expires: now.Add(maxAge)}
-			}
-			if inputRate == 24000 {
-				converted = append(converted[:0], frame.pcm...)
-			} else {
-				converted = resampler.ProcessInto(frame.pcm, converted)
-			}
-			for _, v := range converted {
-				samples = append(samples, float32(v)/32768)
-			}
-			if len(samples) < frameSamples {
-				continue
-			}
-			voice := nextRTCWhisper(whispers, now)
-			if voice != nil {
-				if voice.epoch != whisperEpoch {
-					whisperResampler = newPCMResampler(8000, inputRate)
-					whisperEpoch = voice.epoch
+			// Audio a stall left waiting belongs to this tick, not to a silent slot.
+			for waiting := true; waiting; {
+				select {
+				case chunk, open := <-chunks:
+					if !open || !acceptChunk(chunk) {
+						return
+					}
+				default:
+					waiting = false
 				}
-				overlay = whisperResampler.ProcessInto(voice.pcm, overlay)
 			}
-			n, mixed, err := encodeRTCSlot(encoder, samples[:frameSamples], voice, overlay, mixedSamples, out)
-			samples = samples[:copy(samples, samples[frameSamples:])]
-			if err != nil {
-				stop()
+			if !playRTCTick(&clock, now, frames, &pending, lastChunkAt, silence, maxAge, stats, play) {
 				return
-			}
-			now = time.Now()
-			if !frame.expires.After(now) {
-				stats.drop("webrtc_playback_encode_age", direction, 0, 20)
-				continue
-			}
-			timestamp, skipped := clock.next(now)
-			if skipped > 0 {
-				stats.drop("webrtc_pacing_gap", direction, 0, skipped)
-			}
-			if err := writeObservedRTP(track.WriteRTP, &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}, &stats.rtp); err != nil {
-				if writeFailures.fatal(err) {
-					stop()
-					return
-				}
-				stats.drop("webrtc_rtp_write_error", direction, 0, 20)
-				continue
-			}
-			writeFailures.fatal(nil)
-			if mixed {
-				stats.mu.Lock()
-				stats.value.CoachingMixedMS += int64(len(voice.pcm) * 1000 / 8000)
-				stats.mu.Unlock()
 			}
 		}
 	}
+}
+
+// playRTCTick hands play each frame this tick owes the live timeline. play
+// returns the time after its work, and false when the sender must stop.
+func playRTCTick(clock *rtcRTPClock, now time.Time, frames <-chan rtcPCMFrame, pending *rtcPCMFramer, lastChunkAt time.Time, silence []int16, maxAge time.Duration, stats *rtcMediaStats, play func(frame rtcPCMFrame, now time.Time, catchup bool) (time.Time, bool)) bool {
+	slots, fill, skipped := clock.plan(now, len(frames))
+	if skipped > 0 {
+		stats.drop("webrtc_pacing_gap", stats.mediaDirection(), 0, skipped)
+	}
+	for slot := range slots {
+		frame, open := nextRTCPlaybackFrame(frames, pending, lastChunkAt, now, stats)
+		if !open {
+			return false
+		}
+		if frame.pcm == nil {
+			if !fill {
+				break
+			}
+			frame = rtcPCMFrame{pcm: silence, expires: now.Add(maxAge)}
+		}
+		var ok bool
+		if now, ok = play(frame, now, slot > 0); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Each 20 ms slot is encoded exactly once, so the encoder history is always
@@ -1106,15 +1143,26 @@ func nextRTCFrame(frames <-chan rtcPCMFrame, now time.Time, stats *rtcMediaStats
 	}
 }
 
-// RTP media time follows the monotonic live clock, even when the encoder or
-// scheduler misses ticks. Sequence numbers advance only for packets sent;
-// omitted source slots must not manufacture transport packet-loss counters.
+// RTP timestamps number the audio frames, one 20 ms slot each, and stay aligned
+// with the monotonic live clock. A late tick is repaid: the frames it delayed
+// follow within the catch-up limit, so the browser sees jitter rather than a
+// hole, and no queue is left for later trimming. Only a pause beyond that limit
+// jumps the timeline. Sequence numbers advance only for packets sent; omitted
+// source slots must not manufacture transport packet-loss counters.
 type rtcRTPClock struct {
 	base     time.Time
 	baseTS   uint32
-	lastSlot int64
-	sent     bool
+	nextSlot int64
+	started  bool
+	// A tick already waited for audio that a stall was still delivering.
+	waited bool
 }
+
+const (
+	// Matches the outgoing queue bound: a longer pause cannot be repaid from it.
+	rtcCatchupMaxSlots      = 6
+	rtcCatchupFramesPerTick = 3
+)
 
 func (c *rtcRTPClock) slot(now time.Time) int64 {
 	if c.base.IsZero() {
@@ -1122,18 +1170,47 @@ func (c *rtcRTPClock) slot(now time.Time) int64 {
 	}
 	return int64(now.Sub(c.base) / (20 * time.Millisecond))
 }
-func (c *rtcRTPClock) next(now time.Time) (uint32, int) {
+
+// plan decides what one tick may send: up to slots frames, with fill allowing
+// silence in a slot that has no audio. While behind, silence takes those slots
+// only after a whole tick in which what the stall delayed still did not arrive.
+func (c *rtcRTPClock) plan(now time.Time, queued int) (slots int, fill bool, skippedMS int) {
+	due := int64(1)
+	if c.started {
+		due = c.slot(now) - c.nextSlot + 1
+	}
+	if due <= 0 {
+		return 0, false, 0
+	}
+	if due-1 > rtcCatchupMaxSlots {
+		// Too late to repay in full: keep only the slots queued audio can fill, so
+		// the queue drains now instead of adding its age to the rest of the call.
+		keep := int64(max(queued, 1))
+		skippedMS = int((due - keep) * 20)
+		c.nextSlot += due - keep
+		due = keep
+	}
+	if due > 1 && queued == 0 && !c.waited {
+		c.waited = true
+		return 0, false, skippedMS
+	}
+	fill = due == 1 || c.waited && queued == 0
+	c.waited = false
+	return int(min(due, rtcCatchupFramesPerTick)), fill, skippedMS
+}
+
+// take assigns the next frame's media time.
+func (c *rtcRTPClock) take(now time.Time) uint32 {
 	if c.base.IsZero() {
 		c.base = now
 	}
-	slot := c.slot(now)
-	skipped := 0
-	if c.sent && slot > c.lastSlot+1 {
-		skipped = int((slot - c.lastSlot - 1) * 20)
+	if !c.started {
+		c.started = true
+		c.nextSlot = c.slot(now)
 	}
-	c.lastSlot = slot
-	c.sent = true
-	return c.baseTS + uint32(slot*960), skipped
+	timestamp := c.baseTS + uint32(c.nextSlot*960)
+	c.nextSlot++
+	return timestamp
 }
 
 func mathFloat64(b []byte) float64 { return math.Float64frombits(binary.LittleEndian.Uint64(b)) }

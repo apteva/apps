@@ -274,8 +274,9 @@ func TestRTCOutgoingTailSpeechOpusRTP(t *testing.T) {
 					t.Fatal(e)
 				}
 				samples = samples[:copy(samples, samples[size:])]
-				ts, gaps := clock.next(now)
+				_, _, gaps := clock.plan(now, 0)
 				skipped += gaps
+				ts := clock.take(now)
 				packet := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 111, SequenceNumber: seq, Timestamp: ts, SSRC: 42}, Payload: append([]byte(nil), out[:n]...)}
 				wire, e := packet.Marshal()
 				if e != nil {
