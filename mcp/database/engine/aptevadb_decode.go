@@ -195,9 +195,13 @@ func (d *nativeScanDecoder) decodeFlat(data []byte) (bool, error) {
 				}
 				if d.wanted[i] {
 					if f.Type == "json" {
-						if e := decode(data[p:finish], &value); e != nil {
+						// Its own variable: taking value's address would allocate it
+						// for every field of every row.
+						var parsed any
+						if e := decode(data[p:finish], &parsed); e != nil {
 							return true, e
 						}
+						value = parsed
 					} else {
 						value = string(data[p:finish])
 					}
