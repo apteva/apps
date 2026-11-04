@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.3
+version: 0.3.4
 description: |
+  v0.3.4 stages exact upload bytes before destructive replacement, forwards
+  require_prepared to Computer, supports excluded-pattern assertions and
+  reveals fully visible controls before guarded saves. Requires Computer 0.7.98.
   v0.3.3 permits native image URLs as explicit read-view identity evidence for
   full-screen reports without navigation links. Identity selectors remain unique,
   URLs must be present and match the declared host/profile pattern on every page.
@@ -68,7 +71,7 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.97"
+      version: ">=0.7.98"
       reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
@@ -146,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.3
+    ref: actors/v0.3.4
     entry: mcp/actors
   port: 8080
   health_check: /health

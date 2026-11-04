@@ -243,14 +243,38 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	return e.finishInteraction(out)
 }
 
+// prepareUpload stages and hashes exact bytes in the existing Computer session.
+// This must precede destructive replacement; it never switches login contexts.
+func (e *actorExecution) prepareUpload(step actorStep) error {
+	if e.session == nil {
+		return errors.New("prepare_upload requires an open browser")
+	}
+	args := withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "prepare_upload"})
+	for key, value := range map[string]string{"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath, "filename": step.Filename, "mime_type": step.MIMEType, "expected_sha256": step.ExpectedSHA256} {
+		if value != "" {
+			args[key] = value
+		}
+	}
+	var out map[string]any
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", args, &out); err != nil {
+		return err
+	}
+	backend := firstNonEmpty(e.session.EffectiveBackend, e.session.Backend)
+	if (step.ExpectedSHA256 != "" && out["sha256"] != step.ExpectedSHA256) || out["prepared"] != true || out["uploaded"] != false || stringFromAny(out["backend"]) != backend || len(stringFromAny(out["sha256"])) != 64 {
+		return errors.New("Computer did not prove a staged upload for the current backend; replacement blocked")
+	}
+	e.addTrace("prepare_upload", "prepared", "", map[string]any{"filename": out["filename"], "size_bytes": out["size_bytes"], "sha256": out["sha256"], "backend": backend, "site_upload_dispatched": false})
+	return nil
+}
+
 func (e *actorExecution) upload(step actorStep) error {
 	if e.session == nil {
 		return errors.New("upload_file requires an open browser")
 	}
-	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file"}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file", "require_prepared": step.RequirePrepared}
 	for key, value := range map[string]string{
 		"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath,
-		"filename": step.Filename, "mime_type": step.MIMEType,
+		"filename": step.Filename, "mime_type": step.MIMEType, "expected_sha256": step.ExpectedSHA256,
 	} {
 		if strings.TrimSpace(value) != "" {
 			args[key] = value

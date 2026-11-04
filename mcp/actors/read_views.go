@@ -107,7 +107,7 @@ type actorViewCoverage struct {
 
 func readOnlyActorAction(action string) bool {
 	switch action {
-	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "observe_json", "inspect_control", "dismiss_inspection", "select_record", "reveal_control", "assert_inputs", "assert_no_record", "goto_record", "read_navigation":
+	case "prepare_upload", "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "observe_json", "inspect_control", "dismiss_inspection", "select_record", "reveal_control", "assert_inputs", "assert_no_record", "goto_record", "read_navigation":
 		return true
 	}
 	return false
@@ -837,6 +837,8 @@ type readScrollRegion struct {
 	Height float64 `json:"h"`
 }
 type readScrollShot struct {
+	Width              int                `json:"width"`
+	Height             int                `json:"height"`
 	MediaIframeSrc     string             `json:"media_iframe_src"`
 	MediaEmbedStatus   string             `json:"media_embed_status"`
 	MediaProvider      string             `json:"media_provider"`
