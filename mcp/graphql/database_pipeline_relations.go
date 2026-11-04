@@ -21,6 +21,11 @@ import (
 // bound at run time, so a permission over a large relationship no longer has to
 // list its matching ids in an access value.
 //
+// On Database 0.10.0 or later a clause's where can hold further clauses, so a
+// filter can follow a chain of relationships. A nested clause's localField is
+// read from its immediate parent, which makes the node meaningless on its own:
+// it is only ever planned as part of the clause that holds it.
+//
 // An access_when node selects policy with trusted values only:
 //
 //	{"access_when": {"op": "gt", "args": [{"op": "length", "args": ["$scope.grants"]}, {"const": 0}]},
@@ -37,6 +42,7 @@ const (
 
 	// Database's limits for one filter.
 	maxRelationNodes        = 8
+	maxRelationDepth        = 4
 	maxRelationAlternatives = 16
 	maxRelationPairs        = 8
 )
@@ -73,6 +79,17 @@ func isAccessWhenFilter(raw any) bool {
 // walkFilter visits every node of a filter: groups, optional filters and the
 // where of relational nodes.
 func walkFilter(raw any, visit func(node map[string]any)) {
+	walkOwnFilter(raw, func(node map[string]any) {
+		visit(node)
+		if _, clause := relationClause(node); clause != nil {
+			walkFilter(clause["where"], visit)
+		}
+	})
+}
+
+// walkOwnFilter is walkFilter without the where of relational nodes, whose fields
+// belong to another collection. A relational node itself is still visited.
+func walkOwnFilter(raw any, visit func(node map[string]any)) {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return
@@ -80,15 +97,23 @@ func walkFilter(raw any, visit func(node map[string]any)) {
 	visit(node)
 	for _, group := range []string{"and", "or"} {
 		for _, child := range asAnyList(node[group]) {
-			walkFilter(child, visit)
+			walkOwnFilter(child, visit)
 		}
 	}
 	if isAccessWhenFilter(node) || isConditionalFilter(node) {
-		walkFilter(node["filter"], visit)
+		walkOwnFilter(node["filter"], visit)
 	}
-	if _, clause := relationClause(node); clause != nil {
-		walkFilter(clause["where"], visit)
-	}
+}
+
+// relationDepth is how many relational nodes the deepest chain in a filter has.
+func relationDepth(raw any) int {
+	deepest := 0
+	walkOwnFilter(raw, func(node map[string]any) {
+		if _, clause := relationClause(node); clause != nil {
+			deepest = max(deepest, 1+relationDepth(clause["where"]))
+		}
+	})
+	return deepest
 }
 
 func filterHasRelation(raw any) bool {
@@ -124,10 +149,22 @@ func filterHasDirectOptional(raw any) bool {
 	return false
 }
 
-// relations lists a step's relational nodes.
+// relations lists a step's relational nodes at every depth.
 func (step databasePipelineStep) relations() []map[string]any {
 	found := []map[string]any{}
 	walkFilter(step.Args["where"], func(node map[string]any) {
+		if isRelationFilter(node) {
+			found = append(found, node)
+		}
+	})
+	return found
+}
+
+// ownRelations lists the relational nodes that test the step's own collection.
+// Each carries any nodes nested in it.
+func (step databasePipelineStep) ownRelations() []map[string]any {
+	found := []map[string]any{}
+	walkOwnFilter(step.Args["where"], func(node map[string]any) {
 		if isRelationFilter(node) {
 			found = append(found, node)
 		}
@@ -204,9 +241,6 @@ func (plan *databasePipelinePlan) validateRelation(node map[string]any, allowSco
 	where, hasWhere := clause["where"]
 	if !hasWhere {
 		return nil
-	}
-	if filterHasRelation(where) {
-		return invalid("%s.where cannot hold another exists or not_exists", label)
 	}
 	found := false
 	walkFilter(where, func(node map[string]any) { found = found || isConditionalFilter(node) })
@@ -317,6 +351,9 @@ func probeFilter(raw any) any {
 	if isAccessWhenFilter(node) {
 		return probeFilter(node["filter"])
 	}
+	if isRelationFilter(node) {
+		return probeRelation(node)
+	}
 	for _, group := range []string{"and", "or"} {
 		if children, found := node[group].([]any); found {
 			kept := []any{}
@@ -362,16 +399,17 @@ func (run *databasePipelineRun) explainRelation(ctx context.Context, collection 
 	}, &out)
 }
 
-// verifyRelations checks each relational node of a validated plan on Database.
+// verifyRelations checks each relational node of a validated plan on Database:
+// nested nodes within the clause that holds them, against its collection.
 func (run *databasePipelineRun) verifyRelations(ctx context.Context) error {
 	for _, step := range run.plan.Steps {
-		for _, node := range step.relations() {
+		for _, node := range step.ownRelations() {
 			key, clause := relationClause(node)
 			probe, cancel := context.WithTimeout(ctx, 15*time.Second)
 			err := run.explainRelation(probe, step.Args["collection"], node)
 			cancel()
 			if err != nil {
-				return fmt.Errorf("Database cannot plan its %s on %v (requires Database 0.8.0 or later, existing fields and an index on a related field of each match): %w", key, clause["collection"], err)
+				return fmt.Errorf("Database cannot plan its %s on %v (requires Database 0.8.0 or later, 0.10.0 for nested relationships, existing fields and an index on a related field of each match): %w", key, clause["collection"], err)
 			}
 		}
 	}

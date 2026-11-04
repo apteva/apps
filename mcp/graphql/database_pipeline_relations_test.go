@@ -57,8 +57,6 @@ func TestRelationalFilterValidationRefuses(t *testing.T) {
 		"placeholder field":      {relation(`"on":[{"localField":"$param.status","foreignField":"b"}]`), "literal localField"},
 		"placeholder related":    {relation(`"on":[{"localField":"a","foreignField":"$scope.allowed"}]`), "literal localField"},
 		"comparison":             {relation(`"on":[{"localField":"a","foreignField":"b","comparison":"loose"}]`), "comparison"},
-		"nested":                 {relation(relationOn + `,"where":` + relatedOther), "another exists"},
-		"nested in a group":      {relation(relationOn + `,"where":{"and":[` + relatedOther + `]}`), "another exists"},
 		"client when in where":   {relation(relationOn + `,"where":{"and":[` + selectedCentres + `]}`), "client when"},
 		"search in where":        {relation(relationOn + `,"where":{"fields":["a"],"op":"like_contains_ascii","value":"$param.status"}`), "like_contains_ascii"},
 		"bad operator in where":  {relation(relationOn + `,"where":{"field":"a","op":"contains","value":"x"}`), "unsupported op"},

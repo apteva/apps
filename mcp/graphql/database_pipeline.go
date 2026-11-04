@@ -908,6 +908,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				if relations > maxRelationNodes {
 					return invalid("database_pipeline step %s.where holds %d exists or not_exists filters; Database takes at most %d", step.ID, relations, maxRelationNodes)
 				}
+				if depth := relationDepth(value); depth > maxRelationDepth {
+					return invalid("database_pipeline step %s.where nests exists and not_exists %d levels deep; Database takes at most %d", step.ID, depth, maxRelationDepth)
+				}
 			case "key":
 				if err := plan.validatePlaceholders(value, true, "step "+step.ID+".key"); err != nil {
 					return err

@@ -720,20 +720,37 @@ Rules:
   integer one; it is the only comparison mode. Collections and fields are
   configuration: placeholders are refused, and a client can only supply values.
   - `where` binds params and access values like any filter, with long `in` and
-    `not_in` lists chunked. It can't hold a nested relationship, a client `when`
-    or a text search. In `not_exists`, it can't hold client values either,
-    because negating a client filter would widen the result.
-  - A filter holds at most 8 relationships, counting every branch of it, and
-    they are rejected in metric filters, access reads, client `when` filters and
-    plain `find`, `count` and `aggregate` resolvers. A plain resolver's client
-    `where` argument can't hold them, in any letter case.
+    `not_in` lists chunked. It can't hold a client `when` or a text search, at
+    any depth. Under a `not_exists`, at any depth, it can't hold client values
+    either, because negating a client filter would widen the result.
+  - With Database 0.10.0+, `where` can hold further relationships, up to 4
+    levels. A nested `localField` reads from the record of the clause holding
+    it, so a chain goes report to call to sale:
+
+    ```json
+    {"exists": {"collection": "calls",
+                "on": [{"localField": "call_ref", "foreignField": "local_id"}],
+                "where": {"exists": {"collection": "sales",
+                                     "on": [{"localField": "local_id", "foreignField": "call_id"}],
+                                     "where": {"field": "offer_id", "op": "in", "value": "$scope.offerRefs"}}}}}
+    ```
+
+    Every level needs an index on a related field, and each record still counts
+    once. A page and its total each resolve the chain, inside the batch's one
+    snapshot. Database gives nested filters about 30 s of read work and fails the
+    query past it, under `not_exists` too.
+  - A filter holds at most 8 relationships, counting every branch and level of
+    it, and they are rejected in metric filters, access reads, client `when`
+    filters and plain `find`, `count` and `aggregate` resolvers. A plain
+    resolver's client `where` argument can't hold them, in any letter case.
   - Publishing asks Database to plan each relationship with its values removed,
-    whichever way a selection would go. An unknown collection or field, field
-    types that can't be compared, a related field with no index and a Database
-    older than 0.8.0 all refuse the release.
+    whichever way a selection would go, and a nested relationship is planned as
+    part of the one holding it. An unknown collection or field, field types that
+    can't be compared, a related field with no index and a Database that's too
+    old all refuse the release: 0.8.0 for relationships, 0.10.0 for nested ones.
   - A `count_of` total uses the page's whole resolved filter in the page's
-    snapshot. Subscriptions watch every collection a relationship names, so a
-    change to a related record re-evaluates visibility. A cursor belongs to the
+    snapshot. Subscriptions watch every collection a relationship names, at any
+    level, so a change to a related record re-evaluates visibility. A cursor belongs to the
     resolved filter: if it changes, the cursor is refused, and every page is
     authorised again.
 

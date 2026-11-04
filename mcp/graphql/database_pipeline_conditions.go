@@ -625,7 +625,9 @@ func (step databasePipelineStep) conditionalFields() []any {
 	for _, conditional := range step.conditionals() {
 		visit(conditional["filter"])
 	}
-	walkFilter(step.Args["where"], func(node map[string]any) {
+	// Inside a relational node the fields are the related collection's, and are
+	// planned with that node.
+	walkOwnFilter(step.Args["where"], func(node map[string]any) {
 		if isAccessWhenFilter(node) {
 			visit(node["filter"])
 		}
