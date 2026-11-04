@@ -113,8 +113,8 @@ func readOnlyActorAction(action string) bool {
 	return false
 }
 func validateReadViews(c *actorReadViews) error {
-	if c == nil || c.EntryURL == "" || c.IdentityURL == "" || c.Identity.Selector == "" || c.Identity.Attribute != "href" || !c.Identity.Required {
-		return errors.New("read_views requires entry_url, identity_url and a required identity href field")
+	if c == nil || c.EntryURL == "" || c.IdentityURL == "" || c.Identity.Selector == "" || (c.Identity.Attribute != "href" && c.Identity.Attribute != "src") || !c.Identity.Required {
+		return errors.New("read_views requires entry_url, identity_url and a required identity href or src field")
 	}
 	if c.Identity.Pattern != "" {
 		if _, err := regexp.Compile(c.Identity.Pattern); err != nil {
@@ -315,9 +315,15 @@ func verifyReadIdentity(c actorReadViews, root *html.Node, base string) (string,
 	selector, _ := cascadia.Compile(c.Identity.Selector)
 	nodes := cascadia.QueryAll(root, selector)
 	if len(nodes) != 1 {
-		return "", fmt.Errorf("creator identity selector matched %d links", len(nodes))
+		return "", fmt.Errorf("creator identity selector matched %d elements", len(nodes))
 	}
-	raw, _ := htmlAttribute(nodes[0], "href")
+	if c.Identity.Attribute == "src" && nodes[0].Data != "img" {
+		return "", errors.New("creator src identity must be a native image")
+	}
+	raw, present := htmlAttribute(nodes[0], c.Identity.Attribute)
+	if !present || strings.TrimSpace(raw) == "" {
+		return "", errors.New("creator identity URL attribute is missing")
+	}
 	got, err := identityToken(raw, c.Identity.Pattern, base)
 	if err != nil {
 		return "", err

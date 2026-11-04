@@ -1,8 +1,12 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.2
+version: 0.3.3
 description: |
+  v0.3.3 permits native image URLs as explicit read-view identity evidence for
+  full-screen reports without navigation links. Identity selectors remain unique,
+  URLs must be present and match the declared host/profile pattern on every page.
+  Existing href identity, full-collection coverage and action guards are preserved.
   v0.3.2 parses whole-number extraction with exact signed integers and validated
   thousands grouping. Rejects fractional, malformed and overflowing counts;
   money and decimal parsing keep their existing locale behavior.
@@ -142,7 +146,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.2
+    ref: actors/v0.3.3
     entry: mcp/actors
   port: 8080
   health_check: /health

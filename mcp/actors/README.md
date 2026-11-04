@@ -121,7 +121,9 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.100.0`, derived from fetched tag ancestry (`v0.99.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.115.0`, derived from fetched tag ancestry (`v0.110.0` and `v0.114.0` are its ancestors). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+
+Read-view identity can use a unique native link (`href`) or image (`src`). Image identity is useful for full-screen tables that hide navigation; declare an anchored URL pattern containing the expected account/profile identity. Every page must contain exactly one matching image with a nonempty source URL on the declared identity host. Empty or ambiguous identity evidence fails the read. Existing URL, loading, filter, total-count and pagination guards continue to apply.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
