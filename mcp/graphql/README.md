@@ -598,6 +598,23 @@ Rules:
   the request before anything that depends on it is read, unless the value is
   `optional: true`: then it stays an empty scope, and any filter using it
   matches nothing (an empty `in` is sent as a contradiction, never dropped).
+- Access values trim identifiers, drop blanks and remove duplicates by default,
+  at every stage. `"type": "exact_string_list"` on a value keeps identifiers as
+  stored and only removes exact duplicates, so `[]`, `[""]` and `["   "]` stay
+  different and `" a "` doesn't match `"a"`. A blank or padded identifier still
+  matches a record that really holds it, and numbers still become strings. The
+  type is resolver configuration; clients can't set it.
+  - Set it on each read, `union`, `intersect` and `expr` that must keep
+    identifiers. A derived value reading an exact one must be exact too, or
+    publishing is refused, because it would normalise them again. An exact value
+    can read a normalised one, which stays normalised, and a normalised read can
+    filter on an exact value.
+  - `requested` on an exact value must name an `exact_string_list` param. Each
+    requested identifier must be in the caller's access exactly as sent, and `""`
+    is a request for that identifier, not an empty request.
+  - `intersect` and `requested` compare strings exactly. Inside an `expr`, `eq`
+    and `in` still compare numeric-looking strings as numbers, so `"01"` equals
+    `"1"` there.
   Read failures (truncation past `max`, `single`/`single_record`,
   `require_any_permission`, Database errors) still refuse an optional value.
 - `{"expr": ...}` derives a value from verified params and earlier values

@@ -62,11 +62,37 @@ type databasePipelineAccessValue struct {
 	Intersect              []string
 	Expr                   any  // derived: a server-owned expression returning a list
 	Optional               bool // may resolve to an empty list instead of refusing
+	Exact                  bool // type exact_string_list: identifiers stay as stored
 	deps                   []string
 }
 
 func (value databasePipelineAccessValue) derived() bool {
 	return value.Union != nil || value.Intersect != nil || value.Expr != nil
+}
+
+// accessList collects an access value's identifiers without duplicates. By
+// default they are trimmed and blanks dropped. An exact list keeps them as
+// stored, so [""] stays distinct from [] and " a " from "a".
+type accessList struct {
+	exact  bool
+	values []string
+	seen   map[string]bool
+}
+
+func newAccessList(exact bool) *accessList {
+	return &accessList{exact: exact, values: []string{}, seen: map[string]bool{}}
+}
+
+func (list *accessList) add(item string) {
+	if !list.exact {
+		if item = strings.TrimSpace(item); item == "" {
+			return
+		}
+	}
+	if !list.seen[item] {
+		list.seen[item] = true
+		list.values = append(list.values, item)
+	}
 }
 
 // Access values form a dependency graph: a read may filter on an earlier
@@ -436,7 +462,7 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		if !ok {
 			return invalid("database_pipeline access value %s must be an object", name)
 		}
-		if err := onlyKeys(spec, "database_pipeline access value "+name, "requested", "unrestricted_if_permission", "require_any_permission", "single", "single_record", "default", "otherwise", "union", "intersect", "expr", "optional"); err != nil {
+		if err := onlyKeys(spec, "database_pipeline access value "+name, "requested", "unrestricted_if_permission", "require_any_permission", "single", "single_record", "default", "otherwise", "union", "intersect", "expr", "optional", "type"); err != nil {
 			return err
 		}
 		for _, key := range []string{"requested", "unrestricted_if_permission"} {
@@ -445,11 +471,21 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 			}
 		}
 		value := databasePipelineAccessValue{Name: name}
+		requestedType := "string_list"
+		if raw, exists := spec["type"]; exists {
+			switch raw {
+			case "string_list":
+			case "exact_string_list":
+				value.Exact, requestedType = true, "exact_string_list"
+			default:
+				return invalid("database_pipeline access value %s type must be string_list or exact_string_list", name)
+			}
+		}
 		value.Requested, _ = spec["requested"].(string)
 		if value.Requested != "" {
 			p, ok := plan.Params[strings.TrimPrefix(value.Requested, "$param.")]
-			if !strings.HasPrefix(value.Requested, "$param.") || !ok || p.Type != "string_list" {
-				return invalid("database_pipeline access value %s requested must name a string_list $param", name)
+			if !strings.HasPrefix(value.Requested, "$param.") || !ok || p.Type != requestedType {
+				return invalid("database_pipeline access value %s requested must name a %s $param", name, requestedType)
 			}
 		}
 		value.UnrestrictedPermission, _ = spec["unrestricted_if_permission"].(string)
@@ -532,6 +568,23 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 		}
 		sort.Strings(value.deps)
 		plan.Access = append(plan.Access, value)
+	}
+	// A normalised value derived from an exact one would normalise it again,
+	// which can turn [""] into [] and select a fallback. A normalised read may
+	// still filter on an exact value: filter values aren't changed.
+	exact := map[string]bool{}
+	for _, value := range plan.Access {
+		exact[value.Name] = value.Exact
+	}
+	for _, value := range plan.Access {
+		if !value.derived() || value.Exact {
+			continue
+		}
+		for _, dep := range value.deps {
+			if exact[dep] {
+				return invalid("database_pipeline access value %s reads exact value %s, so it must also be type exact_string_list", value.Name, dep)
+			}
+		}
 	}
 	return plan.orderAccess()
 }
@@ -1805,13 +1858,8 @@ type databasePipelinePendingRead struct {
 // deriveAccessValue computes union, intersect and expr values in memory from
 // values already resolved.
 func (run *databasePipelineRun) deriveAccessValue(value databasePipelineAccessValue) error {
-	values, seen := []string{}, map[string]bool{}
-	add := func(item string) {
-		if item = strings.TrimSpace(item); item != "" && !seen[item] {
-			seen[item] = true
-			values = append(values, item)
-		}
-	}
+	list := newAccessList(value.Exact)
+	add := list.add
 	switch {
 	case value.Union != nil:
 		for _, ref := range value.Union {
@@ -1845,10 +1893,10 @@ func (run *databasePipelineRun) deriveAccessValue(value databasePipelineAccessVa
 		if err != nil {
 			return runtimeError("invalid_result", "database pipeline access value "+value.Name+": "+err.Error())
 		}
-		switch list := result.(type) {
+		switch items := result.(type) {
 		case nil:
 		case []any:
-			for _, item := range list {
+			for _, item := range items {
 				if item == nil {
 					continue
 				}
@@ -1859,14 +1907,14 @@ func (run *databasePipelineRun) deriveAccessValue(value databasePipelineAccessVa
 				add(fmt.Sprint(item))
 			}
 		case []string:
-			for _, item := range list {
+			for _, item := range items {
 				add(item)
 			}
 		default:
 			return runtimeError("invalid_result", "database pipeline access value "+value.Name+" must evaluate to a list")
 		}
 	}
-	run.scope[value.Name] = values
+	run.scope[value.Name] = list.values
 	return nil
 }
 
@@ -1960,16 +2008,10 @@ func (run *databasePipelineRun) applyAccessReads(reads []databasePipelinePending
 		if restricted && p.value.SingleRecord && len(records) != 1 {
 			return forbidden("caller does not resolve to exactly one " + p.value.Name + " record")
 		}
-		values := []string{}
-		seen := map[string]bool{}
+		collected := newAccessList(p.value.Exact)
 		add := func(raw any) {
-			if raw == nil {
-				return
-			}
-			text := strings.TrimSpace(fmt.Sprint(raw))
-			if text != "" && !seen[text] {
-				seen[text] = true
-				values = append(values, text)
+			if raw != nil {
+				collected.add(fmt.Sprint(raw))
 			}
 		}
 		for _, raw := range records {
@@ -1983,12 +2025,13 @@ func (run *databasePipelineRun) applyAccessReads(reads []databasePipelinePending
 			}
 			add(record[p.read.Field])
 		}
+		values := collected.values
 		if restricted && p.value.Single && len(values) != 1 {
 			return forbidden("caller does not resolve to exactly one " + p.value.Name)
 		}
 		if restricted && len(requested[p.value.Name]) > 0 {
 			for _, want := range requested[p.value.Name] {
-				if !seen[want] {
+				if !collected.seen[want] {
 					return forbidden("requested " + p.value.Name + " are outside the caller's access")
 				}
 			}
