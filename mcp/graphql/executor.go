@@ -936,6 +936,10 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 		return nil, err
 	}
 	args := resolverArgs(config)
+	// Relationships read other collections, so they are resolver configuration.
+	if untrustedFilterHasRelation(args["where"]) {
+		return nil, invalid("where cannot hold exists or not_exists")
+	}
 	input := sourceInput(config, args, "database", "collection", "select", "orderBy", "cursor", "key", "metrics", "groupBy", "order_by", "group_by", "timeoutMs", "records", "set", "increment", "ifVersion")
 	// A resolver's where is a server-side constraint: client filters narrow it.
 	switch server, client := config["where"], args["where"]; {

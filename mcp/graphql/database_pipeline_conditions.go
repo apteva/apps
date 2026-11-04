@@ -31,7 +31,7 @@ const (
 // isConditionalFilter reports whether a filter node has the {when, filter} shape.
 func isConditionalFilter(raw any) bool {
 	node, ok := raw.(map[string]any)
-	if !ok {
+	if !ok || isAccessWhenFilter(node) {
 		return false
 	}
 	_, hasWhen := node["when"]
@@ -39,26 +39,14 @@ func isConditionalFilter(raw any) bool {
 	return hasWhen || hasFilter
 }
 
-// filterHasConditional reports whether a filter contains a conditional node.
-func filterHasConditional(raw any) bool {
-	return len(filterConditionals(raw)) > 0
-}
-
-// filterConditionals lists the conditional nodes of a filter.
+// filterConditionals lists the client conditional nodes of a filter.
 func filterConditionals(raw any) []map[string]any {
-	node, ok := raw.(map[string]any)
-	if !ok {
-		return nil
-	}
-	if isConditionalFilter(node) {
-		return []map[string]any{node}
-	}
 	found := []map[string]any{}
-	for _, group := range []string{"and", "or"} {
-		for _, child := range asAnyList(node[group]) {
-			found = append(found, filterConditionals(child)...)
+	walkFilter(raw, func(node map[string]any) {
+		if isConditionalFilter(node) {
+			found = append(found, node)
 		}
-	}
+	})
 	return found
 }
 
@@ -82,15 +70,18 @@ func (plan *databasePipelinePlan) validateConditional(node map[string]any, path 
 	if node["when"] == nil || node["filter"] == nil {
 		return invalid("%s requires both when and filter", label)
 	}
-	kind, err := plan.conditionType(node["when"], 0)
+	kind, err := plan.conditionType(node["when"], 0, false)
 	if err != nil {
 		return invalid("%s.when: %s", label, err)
 	}
 	if kind != conditionBoolean {
 		return invalid("%s.when must be Boolean, not %s", label, kind)
 	}
-	if filterHasConditional(node["filter"]) {
+	if filterHasOptional(node["filter"]) {
 		return invalid("%s.filter cannot contain another conditional filter", label)
+	}
+	if filterHasRelation(node["filter"]) {
+		return invalid("%s.filter cannot hold exists or not_exists; relationships are policy, so use access_when if one needs selecting", label)
 	}
 	if err := plan.validateConditionalValues(node["filter"], label+".filter"); err != nil {
 		return err
@@ -177,28 +168,62 @@ func (plan *databasePipelinePlan) validateConditionalValues(raw any, label strin
 			list = true
 		}
 	}
-	if op == "in" && !list {
-		return invalid("%s: in requires a list or an exact_string_list $param", label)
+	if (op == "in" || op == "not_in") && !list {
+		return invalid("%s: %s requires a list or an exact_string_list $param", label, op)
 	}
-	if op != "in" && list {
+	if op != "in" && op != "not_in" && list {
 		return invalid("%s: %s does not take a list", label, op)
 	}
 	return nil
 }
 
+// trustedConditionParam resolves a param an access_when may read: a verified
+// identity value or a fixed value, never client input.
+func (plan *databasePipelinePlan) trustedConditionParam(reference string) (databasePipelineParam, error) {
+	param, declared := plan.Params[strings.TrimPrefix(reference, "$param.")]
+	if !declared {
+		return param, fmt.Errorf("references undeclared %s", reference)
+	}
+	if !param.HasValue && !strings.HasPrefix(param.From, "$identity.") {
+		return param, fmt.Errorf("%s comes from client input; use $scope values, identity params or fixed values", reference)
+	}
+	return param, nil
+}
+
 // conditionType returns the type an expression produces. Types are checked
 // here so a mismatch refuses the release instead of depending on the data.
-func (plan *databasePipelinePlan) conditionType(raw any, depth int) (string, error) {
+// A trusted expression (access_when) reads access values and identity params; a
+// client condition (when) reads client arguments and neither of those.
+func (plan *databasePipelinePlan) conditionType(raw any, depth int, trusted bool) (string, error) {
 	if depth > maxConditionDepth {
 		return "", fmt.Errorf("expression is too deep")
 	}
 	switch node := raw.(type) {
 	case string:
-		if strings.HasPrefix(node, "$scope.") {
-			return "", fmt.Errorf("cannot read %s; a condition must not depend on authorization", node)
+		if name, isScope := strings.CutPrefix(node, "$scope."); isScope {
+			if !trusted {
+				return "", fmt.Errorf("cannot read %s; a condition must not depend on authorization", node)
+			}
+			if !plan.accessIndex[name] {
+				return "", fmt.Errorf("references unknown %s", node)
+			}
+			return conditionList, nil
 		}
 		if !strings.HasPrefix(node, "$param.") {
 			return "", fmt.Errorf("%q is not a $param reference; write constants as {\"const\": ...}", node)
+		}
+		if trusted {
+			param, err := plan.trustedConditionParam(node)
+			if err != nil {
+				return "", err
+			}
+			switch param.Type {
+			case conditionString, conditionNumber, conditionBoolean:
+				return param.Type, nil
+			case "string_list", "exact_string_list":
+				return conditionList, nil
+			}
+			return "", fmt.Errorf("%s has type %s, which conditions cannot use", node, param.Type)
 		}
 		param, err := plan.conditionalParam(node)
 		if err != nil {
@@ -220,7 +245,7 @@ func (plan *databasePipelinePlan) conditionType(raw any, depth int) (string, err
 			}
 			return conditionConstType(value)
 		}
-		return plan.conditionOpType(node, depth)
+		return plan.conditionOpType(node, depth, trusted)
 	}
 	return "", fmt.Errorf("a condition is a $param reference, {\"const\": ...} or {\"op\": ..., \"args\": [...]}")
 }
@@ -247,7 +272,7 @@ func conditionConstType(value any) (string, error) {
 	return conditionNumber, nil
 }
 
-func (plan *databasePipelinePlan) conditionOpType(node map[string]any, depth int) (string, error) {
+func (plan *databasePipelinePlan) conditionOpType(node map[string]any, depth int, trusted bool) (string, error) {
 	if err := onlyKeys(node, "condition", "op", "args"); err != nil {
 		return "", err
 	}
@@ -257,19 +282,25 @@ func (plan *databasePipelinePlan) conditionOpType(node map[string]any, depth int
 		return "", fmt.Errorf("op %q requires an args list", op)
 	}
 	kinds := make([]string, len(args))
-	switch op {
-	case "length", "not", "and", "or", "coalesce", "eq", "neq", "lt", "lte", "gt", "gte":
+	switch {
+	case op == "in" && trusted:
+	case op == "length", op == "not", op == "and", op == "or", op == "coalesce", op == "eq", op == "neq", op == "lt", op == "lte", op == "gt", op == "gte":
 	default:
 		return "", fmt.Errorf("op %q is not allowed in a condition", op)
 	}
 	for i, arg := range args {
-		kind, err := plan.conditionType(arg, depth+1)
+		kind, err := plan.conditionType(arg, depth+1, trusted)
 		if err != nil {
 			return "", err
 		}
 		kinds[i] = kind
 	}
 	switch op {
+	case "in":
+		if len(kinds) != 2 || kinds[1] != conditionList || (kinds[0] != conditionString && kinds[0] != conditionNumber) {
+			return "", fmt.Errorf("in requires a value and a list")
+		}
+		return conditionBoolean, nil
 	case "length":
 		if len(kinds) != 1 || (kinds[0] != conditionList && kinds[0] != conditionString) {
 			return "", fmt.Errorf("length requires one list or string")
@@ -312,9 +343,17 @@ func (plan *databasePipelinePlan) conditionOpType(node map[string]any, depth int
 
 // evalCondition evaluates a validated expression. Every operand is evaluated,
 // so a missing value fails the request whichever way the others came out.
-func evalCondition(raw any, params map[string]any) (any, error) {
+// Access values are lists, and an empty one is not a missing value.
+func evalCondition(raw any, params map[string]any, scope map[string][]string) (any, error) {
 	switch node := raw.(type) {
 	case string:
+		if name, isScope := strings.CutPrefix(node, "$scope."); isScope {
+			list := make([]any, len(scope[name]))
+			for i, item := range scope[name] {
+				list[i] = item
+			}
+			return list, nil
+		}
 		return params[strings.TrimPrefix(node, "$param.")], nil
 	case map[string]any:
 		if value, ok := node["const"]; ok {
@@ -324,7 +363,7 @@ func evalCondition(raw any, params map[string]any) (any, error) {
 		args := asAnyList(node["args"])
 		values := make([]any, len(args))
 		for i, arg := range args {
-			value, err := evalCondition(arg, params)
+			value, err := evalCondition(arg, params, scope)
 			if err != nil {
 				return nil, err
 			}
@@ -353,6 +392,17 @@ func evalCondition(raw any, params map[string]any) (any, error) {
 
 func applyConditionOp(op string, values []any) (any, error) {
 	switch op {
+	case "in":
+		list, ok := values[1].([]any)
+		if !ok {
+			return nil, invalid("database_pipeline condition: in requires a list")
+		}
+		for _, item := range list {
+			if fmt.Sprint(item) == fmt.Sprint(values[0]) {
+				return true, nil
+			}
+		}
+		return false, nil
 	case "length":
 		switch value := values[0].(type) {
 		case string:
@@ -436,13 +486,46 @@ func compareConditionValues(left, right any) (int, error) {
 	return l.Cmp(r), nil
 }
 
+// conditionHolds evaluates a condition that must produce a Boolean.
+func (run *databasePipelineRun) conditionHolds(condition any) (bool, error) {
+	value, err := evalCondition(condition, run.params, run.scope)
+	if err != nil {
+		return false, err
+	}
+	holds, ok := value.(bool)
+	if !ok {
+		return false, invalid("database_pipeline condition must evaluate to a Boolean")
+	}
+	return holds, nil
+}
+
 // resolveConditions removes false conditional children and replaces true ones
-// with their filter. It returns nil only when conditions emptied the group; an
-// empty group written in the config is left for Database to refuse.
+// with their filter, including in the where of a relational node. It returns nil
+// only when conditions emptied the group; an empty group written in the config
+// is left for Database to refuse.
 func (run *databasePipelineRun) resolveConditions(raw any) (any, error) {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return raw, nil
+	}
+	if key, clause := relationClause(node); clause != nil {
+		where, found := clause["where"]
+		if !found {
+			return raw, nil
+		}
+		resolved, err := run.resolveConditions(where)
+		if err != nil {
+			return nil, err
+		}
+		copied := make(map[string]any, len(clause))
+		for name, value := range clause {
+			copied[name] = value
+		}
+		copied["where"] = resolved
+		if resolved == nil {
+			delete(copied, "where")
+		}
+		return map[string]any{key: copied}, nil
 	}
 	children, isAnd := node["and"].([]any)
 	if !isAnd || len(children) == 0 {
@@ -450,20 +533,20 @@ func (run *databasePipelineRun) resolveConditions(raw any) (any, error) {
 	}
 	kept := make([]any, 0, len(children))
 	for _, child := range children {
-		if isConditionalFilter(child) {
-			conditional := child.(map[string]any)
-			value, err := evalCondition(conditional["when"], run.params)
+		optional, _ := child.(map[string]any)
+		if isConditionalFilter(child) || isAccessWhenFilter(child) {
+			condition := optional["when"]
+			if isAccessWhenFilter(child) {
+				condition = optional[accessWhenKey]
+			}
+			holds, err := run.conditionHolds(condition)
 			if err != nil {
 				return nil, err
 			}
-			include, ok := value.(bool)
-			if !ok {
-				return nil, invalid("database_pipeline condition must evaluate to a Boolean")
+			if !holds {
+				continue
 			}
-			if include {
-				kept = append(kept, conditional["filter"])
-			}
-			continue
+			child = optional["filter"]
 		}
 		resolved, err := run.resolveConditions(child)
 		if err != nil {
@@ -523,7 +606,8 @@ func (plan *databasePipelinePlan) conditionalArguments() map[string]bool {
 }
 
 // conditionalFields lists the fields a step's conditional filters use, without
-// searches, which are probed on their own.
+// searches, which are probed on their own, or relational nodes, which are
+// planned on their own. A false condition never sends these to Database.
 func (step databasePipelineStep) conditionalFields() []any {
 	seen := map[string]bool{}
 	var visit func(raw any)
@@ -541,6 +625,11 @@ func (step databasePipelineStep) conditionalFields() []any {
 	for _, conditional := range step.conditionals() {
 		visit(conditional["filter"])
 	}
+	walkFilter(step.Args["where"], func(node map[string]any) {
+		if isAccessWhenFilter(node) {
+			visit(node["filter"])
+		}
+	})
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)

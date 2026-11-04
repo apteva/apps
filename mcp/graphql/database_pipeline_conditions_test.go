@@ -210,7 +210,7 @@ func TestConditionEvaluation(t *testing.T) {
 		if err := decoder.Decode(&raw); err != nil {
 			t.Fatal(err)
 		}
-		got, err := evalCondition(raw, params)
+		got, err := evalCondition(raw, params, nil)
 		if err != nil || fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("%s: got %v (%v), want %v", expression, got, err, want)
 		}
@@ -234,7 +234,7 @@ func TestConditionEvaluation(t *testing.T) {
 		if err := json.Unmarshal([]byte(expression), &raw); err != nil {
 			t.Fatal(err)
 		}
-		if got, err := evalCondition(raw, params); pipelineErrorCode(err) != "invalid_request" {
+		if got, err := evalCondition(raw, params, nil); pipelineErrorCode(err) != "invalid_request" {
 			t.Errorf("%s: got %v (%v), want an error", expression, got, err)
 		}
 	}

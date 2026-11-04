@@ -280,8 +280,11 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 		}
 	}
 	if where, ok := spec["where"]; ok {
-		if filterHasConditional(where) {
-			return nil, invalid("database_pipeline access %s cannot use a conditional filter: client input must not decide authorization", label)
+		if filterHasOptional(where) {
+			return nil, invalid("database_pipeline access %s cannot use a conditional filter: access reads are resolved before filters are selected", label)
+		}
+		if filterHasRelation(where) {
+			return nil, invalid("database_pipeline access %s cannot use exists or not_exists; put the relationship in the step's filter", label)
 		}
 		if err := plan.validateFilter(where, true, "access "+label+".where"); err != nil {
 			return nil, err
@@ -617,8 +620,14 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 			}
 			for i, child := range list {
 				childPath := fmt.Sprintf("%s.%s[%d]", path, group, i)
-				if group == "or" && filterHasConditional(child) {
+				if group == "or" && filterHasOptional(child) {
 					return invalid("database_pipeline %s cannot hold a conditional filter inside or; removing a branch of an or would change what the others match", childPath)
+				}
+				if group == "and" && isAccessWhenFilter(child) {
+					if err := plan.validateAccessWhen(child.(map[string]any), childPath); err != nil {
+						return err
+					}
+					continue
 				}
 				if group == "and" && isConditionalFilter(child) {
 					if err := plan.validateConditional(child.(map[string]any), childPath); err != nil {
@@ -636,8 +645,11 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 			return nil
 		}
 	}
-	if isConditionalFilter(node) {
+	if isConditionalFilter(node) || isAccessWhenFilter(node) {
 		return invalid("database_pipeline %s: a conditional filter must be a child of an and group", path)
+	}
+	if isRelationFilter(node) {
+		return plan.validateRelation(node, allowScope, path)
 	}
 	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
 		return plan.validateSearch(node, path)
@@ -663,7 +675,7 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 // databaseFilterOps are the field operators Database accepts; like_contains_ascii
 // has its own node shape.
 var databaseFilterOps = map[string]bool{"eq": true, "ne": true, "gt": true, "gte": true, "lt": true, "lte": true,
-	"in": true, "starts_with": true, "is_null": true, "is_not_null": true}
+	"in": true, "not_in": true, "starts_with": true, "is_null": true, "is_not_null": true}
 
 const (
 	databaseSearchOp        = "like_contains_ascii"
@@ -736,7 +748,7 @@ func filterSearches(raw any) []map[string]any {
 	if !ok {
 		return nil
 	}
-	if isConditionalFilter(node) {
+	if isConditionalFilter(node) || isAccessWhenFilter(node) {
 		return filterSearches(node["filter"])
 	}
 	found := []map[string]any{}
@@ -887,6 +899,15 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				if err := plan.validateFilter(value, true, "step "+step.ID+".where"); err != nil {
 					return err
 				}
+				relations := 0
+				walkFilter(value, func(node map[string]any) {
+					if isRelationFilter(node) {
+						relations++
+					}
+				})
+				if relations > maxRelationNodes {
+					return invalid("database_pipeline step %s.where holds %d exists or not_exists filters; Database takes at most %d", step.ID, relations, maxRelationNodes)
+				}
 			case "key":
 				if err := plan.validatePlaceholders(value, true, "step "+step.ID+".key"); err != nil {
 					return err
@@ -925,6 +946,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 						var err error
 						if metricKey == "where" {
 							// Metric filters are Database filters: they may take values.
+							if filterHasRelation(metricValue) {
+								return invalid("database_pipeline step %s metric %s: Database does not accept exists or not_exists in a metric filter", step.ID, name)
+							}
 							err = plan.validateFilter(metricValue, true, "step "+step.ID+".metric "+name+".where")
 						} else {
 							err = noPlaceholders(metricValue, "step "+step.ID+".metric "+name+"."+metricKey)
@@ -1289,6 +1313,11 @@ func (plan *databasePipelinePlan) Collections() []string {
 				add(lookup["collection"])
 			}
 		}
+		// A related record can change what a filter matches.
+		for _, node := range step.relations() {
+			_, clause := relationClause(node)
+			add(clause["collection"])
+		}
 	}
 	for _, value := range plan.Access {
 		for _, read := range []*databasePipelineRead{value.Default, value.Otherwise} {
@@ -1467,6 +1496,16 @@ func (run *databasePipelineRun) filter(raw any) any {
 			out[key] = children
 		case "value":
 			out[key] = run.substitute(item)
+		case relationExists, relationNotExists:
+			clause, _ := item.(map[string]any)
+			copied := make(map[string]any, len(clause))
+			for name, value := range clause {
+				copied[name] = value
+			}
+			if where, found := clause["where"]; found {
+				copied["where"] = run.filter(where)
+			}
+			out[key] = copied
 		default:
 			out[key] = item
 		}
@@ -1481,7 +1520,8 @@ func (run *databasePipelineRun) filter(raw any) any {
 const maxDatabaseInValues = 100
 
 func normalizeInLeaf(leaf map[string]any) map[string]any {
-	if leaf["op"] != "in" {
+	op := leaf["op"]
+	if op != "in" && op != "not_in" {
 		return leaf
 	}
 	values, ok := leaf["value"].([]any)
@@ -1490,7 +1530,11 @@ func normalizeInLeaf(leaf map[string]any) map[string]any {
 	}
 	field := leaf["field"]
 	if len(values) == 0 {
-		return matchNothing(field)
+		if op == "in" {
+			return matchNothing(field)
+		}
+		// A null never satisfies not_in, whatever the list holds.
+		return map[string]any{"field": field, "op": "is_not_null"}
 	}
 	if len(values) <= maxDatabaseInValues {
 		return leaf
@@ -1498,9 +1542,12 @@ func normalizeInLeaf(leaf map[string]any) map[string]any {
 	chunks := []any{}
 	for start := 0; start < len(values); start += maxDatabaseInValues {
 		end := min(start+maxDatabaseInValues, len(values))
-		chunks = append(chunks, map[string]any{"field": field, "op": "in", "value": values[start:end]})
+		chunks = append(chunks, map[string]any{"field": field, "op": op, "value": values[start:end]})
 	}
-	return map[string]any{"or": chunks}
+	if op == "in" {
+		return map[string]any{"or": chunks}
+	}
+	return map[string]any{"and": chunks}
 }
 
 func matchNothing(field any) map[string]any {
@@ -1516,6 +1563,10 @@ func filterMatchesNothing(raw any) bool {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return false
+	}
+	// No related record can match, so the clause can't hold.
+	if key, clause := relationClause(node); key == relationExists && clause != nil {
+		return filterMatchesNothing(clause["where"])
 	}
 	if children, ok := node["and"].([]any); ok {
 		if len(children) == 2 {

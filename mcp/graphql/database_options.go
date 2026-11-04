@@ -145,8 +145,8 @@ func validateDatabaseResolverOptions(operation string, config map[string]any) er
 	if err != nil {
 		return nil // reported when the resolver runs
 	}
-	if filterHasConditional(config["where"]) {
-		return invalid("database %s does not accept conditional filters; use database_pipeline", operation)
+	if filterHasOptional(config["where"]) || untrustedFilterHasRelation(config["where"]) {
+		return invalid("database %s does not accept conditional or relational filters; use database_pipeline", operation)
 	}
 	if value, ok := config["lookups"]; ok {
 		if tool != "db_find" && tool != "db_aggregate" {
@@ -217,6 +217,9 @@ const maxDatabaseBatchOperations = 100
 // Conditional filters: their fields must exist, because a false condition means
 // Database never sees them. Selecting them reads one record.
 //
+// Relational filters: Database plans each one without running it, whichever
+// access_when selects it.
+//
 // Aggregates with lookups or buckets may filter on derived fields a plain find
 // cannot see, so those fail at run time instead, closed.
 func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api string) error {
@@ -275,6 +278,9 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 					return invalid("resolver %s.%s: %s: %s", resolver.ParentType, resolver.FieldName, check.problem, err)
 				}
 			}
+		}
+		if err := run.verifyRelations(ctx); err != nil {
+			return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
 		}
 	}
 	return nil

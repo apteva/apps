@@ -704,6 +704,74 @@ Rules:
 
   An `exact_string_list` over an integer field fails with `invalid_argument` on
   a non-numeric value; nothing is dropped to make it fit.
+- Relational filters (Database 0.8.0+): a step filter may hold Database's
+  correlated `exists` and `not_exists`, so a permission that depends on related
+  records is enforced by Database, with no list of eligible ids:
+
+  ```json
+  {"exists": {"collection": "sales",
+              "anyOf": [{"on": [{"localField": "sale_ref", "foreignField": "id", "comparison": "text"}]},
+                        {"on": [{"localField": "local_id", "foreignField": "call_id"}]}],
+              "where": {"field": "offer_id", "op": "in", "value": "$scope.offerRefs"}}}
+  ```
+
+  `on` holds 1 to 8 pairs that must all match. `anyOf` holds 1 to 16 such lists,
+  any of which may match. `comparison: "text"` compares a text field with an
+  integer one; it is the only comparison mode. Collections and fields are
+  configuration: placeholders are refused, and a client can only supply values.
+  - `where` binds params and access values like any filter, with long `in` and
+    `not_in` lists chunked. It can't hold a nested relationship, a client `when`
+    or a text search. In `not_exists`, it can't hold client values either,
+    because negating a client filter would widen the result.
+  - A filter holds at most 8 relationships, counting every branch of it, and
+    they are rejected in metric filters, access reads, client `when` filters and
+    plain `find`, `count` and `aggregate` resolvers. A plain resolver's client
+    `where` argument can't hold them, in any letter case.
+  - Publishing asks Database to plan each relationship with its values removed,
+    whichever way a selection would go. An unknown collection or field, field
+    types that can't be compared, a related field with no index and a Database
+    older than 0.8.0 all refuse the release.
+  - A `count_of` total uses the page's whole resolved filter in the page's
+    snapshot. Subscriptions watch every collection a relationship names, so a
+    change to a related record re-evaluates visibility. A cursor belongs to the
+    resolved filter: if it changes, the cursor is refused, and every page is
+    authorised again.
+
+  Relationships cost far more than an indexed scope, so keep a selective
+  `centre_id`-style scope beside them.
+- Policy selection: when a permission applies only to some users, a child of an
+  `and` group may be `{"access_when": <condition>, "filter": <filter>}`. It is
+  built from verified values only, and it is separate from `when`:
+
+  ```json
+  "where": {"and": [
+    {"field": "centre_id", "op": "in", "value": "$scope.authorised"},
+    {"access_when": {"op": "and", "args": [
+        {"op": "gt", "args": [{"op": "length", "args": ["$scope.grantOffers"]}, {"const": 0}]},
+        {"op": "not", "args": [{"op": "in", "args": [{"const": "calls:all_centres"}, "$param.permissions"]}]}]},
+     "filter": {"and": [
+       {"exists": {"collection": "sales", "on": [{"localField": "local_id", "foreignField": "call_id"}],
+                   "where": {"field": "offer_id", "op": "in", "value": "$scope.offerRefs"}}},
+       {"not_exists": {"collection": "sales", "on": [{"localField": "local_id", "foreignField": "call_id"}],
+                       "where": {"field": "offer_id", "op": "not_in", "value": "$scope.offerRefs"}}}]}},
+    {"when": {"op": "gt", "args": [{"op": "length", "args": ["$param.centres"]}, {"const": 0}]},
+     "filter": {"field": "centre_id", "op": "in", "value": "$param.centres"}}]}
+  ```
+
+  The condition decides on the grant itself, so a grant naming only unknown
+  offers still selects the restriction and matches nothing, rather than falling
+  back to the normal scope.
+  - Conditions read `$scope.<name>`, `{"const": ...}` and params that are fixed
+    or come from `$identity`, with the ops `when` allows plus `in` (a value and a
+    list). Client params and `$args` are refused. Types are checked when the
+    resolver is set, and a missing identity list fails the request rather than
+    reading as "not listed".
+  - `filter` takes only those same trusted values, including inside
+    relationships. It can't hold `when`, a text search or another `access_when`,
+    except inside a relationship's `where`, where a nested `access_when` can make
+    one predicate optional.
+  - `access_when` is rejected inside `or` and at the root of a filter. A
+    selection that leaves nothing out of an `and` group behaves as `when` does.
 - Text search (Database 0.7.0+): a step or metric filter may hold
   `{"fields": ["resource_key", "opportunity_key"], "op":
   "like_contains_ascii", "value": "$param.q"}`, which matches the fields joined
@@ -728,7 +796,10 @@ Rules:
   derived fields, so they skip that probe and any error surfaces when they
   run. A `count_of` total uses the page's filter in the page's snapshot.
 - Filter operators are checked on publish: `eq`, `ne`, `gt`, `gte`, `lt`,
-  `lte`, `in`, `starts_with`, `is_null`, `is_not_null`, `like_contains_ascii`.
+  `lte`, `in`, `not_in`, `starts_with`, `is_null`, `is_not_null`,
+  `like_contains_ascii`. An empty `not_in` matches every non-null value, because
+  Database's `not_in` never matches a null field. Past 100 values it is sent as
+  an `and` of chunks, as `in` is sent as an `or` of chunks.
 - Paging: a `find` step with `"page": {"size": "$param.first", "cursor":
   "$param.after"}` reads one page (size defaults to `max_rows`, and larger
   requests are capped at it) and never fails on `hasMore`. Results can select
