@@ -786,7 +786,7 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 			}
 			for _, clause := range []*ExistsClause{f.Exists, f.NotExists} {
 				if clause != nil {
-					for _, on := range clause.On {
+					for _, on := range clause.pairs() {
 						wanted[on.LocalField] = true
 					}
 				}

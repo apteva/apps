@@ -262,7 +262,7 @@ func visitFilterFields(f *Filter, visit func(string)) {
 	}
 	for _, clause := range []*ExistsClause{f.Exists, f.NotExists} {
 		if clause != nil {
-			for _, on := range clause.On {
+			for _, on := range clause.pairs() {
 				visit(on.LocalField)
 			}
 		}

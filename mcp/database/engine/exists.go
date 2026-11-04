@@ -1,22 +1,51 @@
 package engine
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 )
 
 // An exists or not_exists filter node tests related records of another
-// collection in the same database without returning them. Each On entry is one
-// way a related record can match, so the clause holds when any alternative
-// finds a record that also satisfies Where. Local nulls never match. The
-// filter tree has no general negation, so a failed evaluation can always read
-// as "no match" and the operation then returns the recorded error.
+// collection in the same database without returning them. A record is related
+// when every On pair matches, as in SQL's ON ... AND ...; AnyOf instead lists
+// alternative On lists, any of which may match. The clause holds when a related
+// record also satisfies Where. Nulls never match. The filter tree has no general
+// negation, so a failed evaluation can always read as "no match" and the
+// operation then returns the recorded error.
 type ExistsClause struct {
-	Collection string     `json:"collection"`
-	On         []ExistsOn `json:"on"`
-	Where      *Filter    `json:"where,omitempty"`
+	Collection string        `json:"collection"`
+	On         []ExistsOn    `json:"on,omitempty"`
+	AnyOf      []ExistsMatch `json:"anyOf,omitempty"`
+	Where      *Filter       `json:"where,omitempty"`
 	plan       *existsPlan
+}
+
+// ExistsMatch is one alternative of AnyOf.
+type ExistsMatch struct {
+	On []ExistsOn `json:"on"`
+}
+
+// alternatives lists the On lists, one of which must match.
+func (c *ExistsClause) alternatives() [][]ExistsOn {
+	if c.AnyOf == nil {
+		return [][]ExistsOn{c.On}
+	}
+	out := make([][]ExistsOn, len(c.AnyOf))
+	for i, m := range c.AnyOf {
+		out[i] = m.On
+	}
+	return out
+}
+
+// pairs lists every pair of every alternative.
+func (c *ExistsClause) pairs() []ExistsOn {
+	out := []ExistsOn{}
+	for _, on := range c.alternatives() {
+		out = append(out, on...)
+	}
+	return out
 }
 
 // ExistsOn pairs a local field with a related field. Comparison "text" compares
@@ -31,6 +60,7 @@ type ExistsOn struct {
 const (
 	maxExistsNodes        = 8
 	maxExistsAlternatives = 16
+	maxExistsPairs        = 8
 	// A build reads a related row in about 2 µs and a probe costs about 25 µs,
 	// so an abandoned build wastes at most about 2.5 times what the probes spent,
 	// and the attempts double.
@@ -50,11 +80,16 @@ type recordScanner interface {
 	scanRecords(c Collection, q Query, fields []string, consume func(r Record) bool) error
 }
 
-type existsAlternative struct {
+type existsPair struct {
 	on      ExistsOn
 	local   Field
 	foreign Field
-	index   string
+}
+
+type existsAlternative struct {
+	pairs []existsPair
+	index string // an index a probe seeks through
+	set   string // key set name: the related fields, in order
 }
 
 type existsPlan struct {
@@ -185,8 +220,11 @@ func planExists(tx transaction, c Collection, clause *ExistsClause, state *exist
 	if clause.Collection == "" {
 		return nil, Invalid("exists requires collection")
 	}
-	if len(clause.On) == 0 || len(clause.On) > maxExistsAlternatives {
-		return nil, Invalid("exists requires 1–%d on pairs", maxExistsAlternatives)
+	if (clause.On == nil) == (clause.AnyOf == nil) {
+		return nil, Invalid("exists requires exactly one of on, anyOf")
+	}
+	if clause.AnyOf != nil && (len(clause.AnyOf) == 0 || len(clause.AnyOf) > maxExistsAlternatives) {
+		return nil, Invalid("anyOf requires 1–%d alternatives", maxExistsAlternatives)
 	}
 	foreign, e := tx.collection(clause.Collection)
 	if e != nil {
@@ -200,35 +238,47 @@ func planExists(tx transaction, c Collection, clause *ExistsClause, state *exist
 		return nil, e
 	}
 	p := &existsPlan{tx: tx, foreign: foreign, where: clause.Where, state: state, nextBuild: existsBuildAfter}
-	for _, on := range clause.On {
-		local, e := storedField(c, on.LocalField)
-		if e != nil {
-			return nil, e
+	for _, list := range clause.alternatives() {
+		if len(list) == 0 || len(list) > maxExistsPairs {
+			return nil, Invalid("exists on requires 1–%d pairs", maxExistsPairs)
 		}
-		remote, e := foreign.field(on.ForeignField)
-		if e != nil {
-			return nil, e
-		}
-		if remote.Type == "json" || local.Type == "json" {
-			return nil, Invalid("exists cannot compare JSON fields")
-		}
-		switch on.Comparison {
-		case "":
-			if local.Type != remote.Type {
-				return nil, Invalid("exists compares %s (%s) with %s (%s); use comparison text or fields of one type", on.LocalField, local.Type, on.ForeignField, remote.Type)
+		alt := existsAlternative{}
+		foreignFields := make([]string, len(list))
+		for i, on := range list {
+			local, e := storedField(c, on.LocalField)
+			if e != nil {
+				return nil, e
 			}
-		case "text":
-			if !textComparable(local) || !textComparable(remote) {
-				return nil, Invalid("comparison text requires text or integer fields")
+			remote, e := foreign.field(on.ForeignField)
+			if e != nil {
+				return nil, e
 			}
-		default:
-			return nil, Invalid("unknown exists comparison %s", on.Comparison)
+			if remote.Type == "json" || local.Type == "json" {
+				return nil, Invalid("exists cannot compare JSON fields")
+			}
+			switch on.Comparison {
+			case "":
+				if local.Type != remote.Type {
+					return nil, Invalid("exists compares %s (%s) with %s (%s); use comparison text or fields of one type", on.LocalField, local.Type, on.ForeignField, remote.Type)
+				}
+			case "text":
+				if !textComparable(local) || !textComparable(remote) {
+					return nil, Invalid("comparison text requires text or integer fields")
+				}
+			default:
+				return nil, Invalid("unknown exists comparison %s", on.Comparison)
+			}
+			if alt.index == "" {
+				alt.index = leadingIndex(foreign, on.ForeignField)
+			}
+			foreignFields[i] = on.ForeignField
+			alt.pairs = append(alt.pairs, existsPair{on: on, local: local, foreign: remote})
 		}
-		index := leadingIndex(foreign, on.ForeignField)
-		if index == "" {
-			return nil, fail("query_too_expensive", "exists needs an index on %s.%s", foreign.Name, on.ForeignField)
+		if alt.index == "" {
+			return nil, fail("query_too_expensive", "exists needs an index on %s starting with one of: %s", foreign.Name, strings.Join(foreignFields, ", "))
 		}
-		p.alts = append(p.alts, existsAlternative{on: on, local: local, foreign: remote, index: index})
+		alt.set = strings.Join(foreignFields, "\x00")
+		p.alts = append(p.alts, alt)
 	}
 	return p, nil
 }
@@ -254,7 +304,7 @@ func leadingIndex(c Collection, field string) string {
 
 // probeKey converts a local value to the related field's stored form. A text
 // value that is not exactly an integer's decimal text matches no integer.
-func (a existsAlternative) probeKey(v any) (any, bool) {
+func (a existsPair) probeKey(v any) (any, bool) {
 	if a.on.Comparison == "text" && a.local.Type == "text" && a.foreign.Type == "integer" {
 		n, e := strconv.ParseInt(v.(string), 10, 64)
 		if e != nil || strconv.FormatInt(n, 10) != v.(string) {
@@ -271,26 +321,25 @@ func (p *existsPlan) related(r Record) (bool, error) {
 		}
 	}
 	for _, alt := range p.alts {
-		v := r[alt.on.LocalField]
-		if v == nil {
-			continue
-		}
-		key, ok := alt.probeKey(v)
+		keys, ok := alt.keys(r)
 		if !ok {
 			continue
 		}
 		if p.sets != nil {
-			if _, hit := p.sets[alt.on.ForeignField][key.(string)]; hit {
+			if _, hit := p.sets[alt.set][tupleKey(keys)]; hit {
 				return true, nil
 			}
 			continue
 		}
 		p.probes++
-		where := &Filter{Field: alt.on.ForeignField, Op: "eq", Value: key}
-		if p.where != nil {
-			where = &Filter{And: []Filter{*where, *p.where}}
+		terms := make([]Filter, 0, len(keys)+1)
+		for i, key := range keys {
+			terms = append(terms, Filter{Field: alt.pairs[i].on.ForeignField, Op: "eq", Value: key})
 		}
-		rows, e := p.tx.find(p.foreign, Query{Where: where, Select: []string{alt.on.ForeignField}, hint: alt.index}, 1)
+		if p.where != nil {
+			terms = append(terms, *p.where)
+		}
+		rows, e := p.tx.find(p.foreign, Query{Where: conjunction(terms), Select: []string{alt.pairs[0].on.ForeignField}, hint: alt.index}, 1)
 		if e != nil {
 			return false, e
 		}
@@ -301,8 +350,48 @@ func (p *existsPlan) related(r Record) (bool, error) {
 	return false, nil
 }
 
+// keys reads the probe values of one alternative. A null, or a value no related
+// field can equal, rules the alternative out.
+func (a existsAlternative) keys(r Record) ([]any, bool) {
+	out := make([]any, len(a.pairs))
+	for i, pair := range a.pairs {
+		v := r[pair.on.LocalField]
+		if v == nil {
+			return nil, false
+		}
+		key, ok := pair.probeKey(v)
+		if !ok {
+			return nil, false
+		}
+		out[i] = key
+	}
+	return out, true
+}
+
+// tupleKey is unambiguous: ("ab","c") and ("a","bc") differ.
+func tupleKey(values []any) string {
+	if len(values) == 1 {
+		return keyText(values[0])
+	}
+	var b strings.Builder
+	for _, v := range values {
+		text := keyText(v)
+		b.WriteString(strconv.Itoa(len(text)))
+		b.WriteByte(':')
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+func keyText(v any) string {
+	if text, ok := v.(string); ok {
+		return text
+	}
+	return fmt.Sprint(v)
+}
+
 // buildSets reads the related records satisfying Where once and keeps their key
-// values per related field. It gives up, keeping probes, when the pass exceeds
+// tuples per list of related fields. It gives up, keeping probes, when the pass exceeds
 // its row allowance (retrying after twice the probes) or the memory budget.
 func (p *existsPlan) buildSets() error {
 	scanner, ok := p.tx.(recordScanner)
@@ -312,14 +401,20 @@ func (p *existsPlan) buildSets() error {
 	}
 	fields := []string{}
 	sets := map[string]map[string]struct{}{}
+	builds := []existsAlternative{}
 	for _, alt := range p.alts {
-		if alt.foreign.Type != "text" && alt.foreign.Type != "integer" || alt.local.Type != "text" && alt.local.Type != "integer" {
-			p.noSets = true
-			return nil
+		for _, pair := range alt.pairs {
+			if !textComparable(pair.foreign) || !textComparable(pair.local) {
+				p.noSets = true
+				return nil
+			}
 		}
-		if sets[alt.on.ForeignField] == nil {
-			sets[alt.on.ForeignField] = map[string]struct{}{}
-			fields = append(fields, alt.on.ForeignField)
+		if sets[alt.set] == nil {
+			sets[alt.set] = map[string]struct{}{}
+			builds = append(builds, alt)
+			for _, pair := range alt.pairs {
+				fields = append(fields, pair.on.ForeignField)
+			}
 		}
 	}
 	// Every row read counts against the allowance, so Where is applied here.
@@ -336,12 +431,18 @@ func (p *existsPlan) buildSets() error {
 		if !matches(p.foreign, r, p.where) {
 			return true
 		}
-		for _, name := range fields {
-			key, isText := r[name].(string)
-			if !isText {
+		for _, alt := range builds {
+			values := make([]any, len(alt.pairs))
+			complete := true
+			for k, pair := range alt.pairs {
+				values[k] = r[pair.on.ForeignField]
+				complete = complete && values[k] != nil
+			}
+			if !complete {
 				continue
 			}
-			set := sets[name]
+			key := tupleKey(values)
+			set := sets[alt.set]
 			if _, seen := set[key]; seen {
 				continue
 			}
@@ -403,20 +504,26 @@ func compileExists(c Collection, f *Filter) (string, []any) {
 	}
 	alternatives := make([]string, len(clause.plan.alts))
 	for i, alt := range clause.plan.alts {
-		local := table(c) + "." + quote(alt.on.LocalField)
-		foreign := existsAlias + "." + quote(alt.on.ForeignField)
-		switch {
-		case alt.on.Comparison == "text" && alt.local.Type == "text" && alt.foreign.Type == "integer":
-			// Seek by the integer, then require the exact decimal text.
-			number := "CAST(" + local + " AS INTEGER)"
-			alternatives[i] = foreign + "=" + number + " AND CAST(" + number + " AS TEXT)=" + local
-		case alt.on.Comparison == "text" && alt.local.Type == "integer" && alt.foreign.Type == "text":
-			alternatives[i] = foreign + "=CAST(" + local + " AS TEXT)"
-		default:
-			alternatives[i] = foreign + "=" + local
+		pairs := make([]string, len(alt.pairs))
+		for k, pair := range alt.pairs {
+			pairs[k] = compileExistsPair(c, pair)
 		}
-		alternatives[i] = "(" + alternatives[i] + ")"
+		alternatives[i] = "(" + strings.Join(pairs, " AND ") + ")"
 	}
 	where, args := compileFilter(clause.plan.foreign, clause.Where)
 	return prefix + " (SELECT 1 FROM " + table(clause.plan.foreign) + " AS " + existsAlias + " WHERE (" + strings.Join(alternatives, " OR ") + ") AND (" + where + "))", args
+}
+
+func compileExistsPair(c Collection, pair existsPair) string {
+	local := table(c) + "." + quote(pair.on.LocalField)
+	foreign := existsAlias + "." + quote(pair.on.ForeignField)
+	switch {
+	case pair.on.Comparison == "text" && pair.local.Type == "text" && pair.foreign.Type == "integer":
+		// Seek by the integer, then require the exact decimal text.
+		number := "CAST(" + local + " AS INTEGER)"
+		return foreign + "=" + number + " AND CAST(" + number + " AS TEXT)=" + local
+	case pair.on.Comparison == "text" && pair.local.Type == "integer" && pair.foreign.Type == "text":
+		return foreign + "=CAST(" + local + " AS TEXT)"
+	}
+	return foreign + "=" + local
 }
