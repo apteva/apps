@@ -56,8 +56,9 @@ type Metric struct {
 	Where *Filter `json:"where,omitempty"`
 }
 type Query struct {
-	after        Record   // authenticated cursor values, never accepted from JSON
-	hint         string   // index an exists probe seeks through
+	after        Record // authenticated cursor values, never accepted from JSON
+	hint         string // index an exists probe seeks through
+	diag         *countDiagnostics
 	Where        *Filter  `json:"where,omitempty"`
 	Select       []string `json:"select,omitempty"`
 	OrderBy      []Order  `json:"orderBy,omitempty"`
@@ -75,6 +76,7 @@ type Request struct {
 	WaitMS           int        `json:"waitMs,omitempty"`
 	WatchCaller      string     `json:"-"`
 	TimeoutMS        int        `json:"timeoutMs,omitempty"`
+	Diagnostics      bool       `json:"diagnostics,omitempty"`
 	Database         string     `json:"database,omitempty"`
 	Collection       string     `json:"collection,omitempty"`
 	Name             string     `json:"name,omitempty"`

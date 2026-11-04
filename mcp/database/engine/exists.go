@@ -108,9 +108,13 @@ type existsPlan struct {
 
 // existsState keeps the first probe failure of one operation.
 type existsState struct {
-	mu       sync.Mutex
-	err      error
-	setBytes int // key set memory of this operation; exists runs on its scan's goroutine
+	mu  sync.Mutex
+	err error
+	// Key set memory and work of this operation; exists runs on its scan's goroutine.
+	setBytes  int
+	probes    int64
+	setsBuilt int64
+	rowsRead  int64
 }
 
 func (s *existsState) fail(e error) {
@@ -332,6 +336,7 @@ func (p *existsPlan) related(r Record) (bool, error) {
 			continue
 		}
 		p.probes++
+		p.state.probes++
 		terms := make([]Filter, 0, len(keys)+1)
 		for i, key := range keys {
 			terms = append(terms, Filter{Field: alt.pairs[i].on.ForeignField, Op: "eq", Value: key})
@@ -424,6 +429,7 @@ func (p *existsPlan) buildSets() error {
 	rows, bytes := 0, 0
 	tooMany, tooLarge := false, false
 	e := scanner.scanRecords(p.foreign, Query{}, read, func(r Record) bool {
+		p.state.rowsRead++
 		if rows++; rows > allowance {
 			tooMany = true
 			return false
@@ -465,6 +471,7 @@ func (p *existsPlan) buildSets() error {
 	default:
 		p.sets = sets
 		p.state.setBytes += bytes
+		p.state.setsBuilt++
 		if existsSetsBuilt != nil {
 			existsSetsBuilt()
 		}
