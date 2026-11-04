@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vektah/gqlparser/v2/ast"
 )
 
 type releaseLimits struct {
@@ -200,6 +202,15 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 			}
 			if err := plan.validateLimits(limits); err != nil {
 				return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+			}
+			for _, name := range plan.searchArguments() {
+				argument := definition.Fields.ForName(resolver.FieldName).Arguments.ForName(name)
+				if argument == nil || argument.Type.NamedType != "String" {
+					return invalid("resolver %s.%s: %s searches on argument %s, which must be a String argument of the field", resolver.ParentType, resolver.FieldName, databaseSearchOp, name)
+				}
+				if !argument.Type.NonNull && (argument.DefaultValue == nil || argument.DefaultValue.Kind == ast.NullValue) {
+					return invalid("resolver %s.%s: search argument %s must be String! or have a default such as %s: String = \"\", because a missing value cannot be searched", resolver.ParentType, resolver.FieldName, name, name)
+				}
 			}
 		}
 		if source.Kind == "tables" {

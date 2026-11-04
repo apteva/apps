@@ -658,6 +658,31 @@ Rules:
   (setting one on another source is rejected): access values are the Database
   authorization mechanism, and client params can only narrow them because they
   appear only as filter values.
+- Text search (Database 0.7.0+): a step or metric filter may hold
+  `{"fields": ["resource_key", "opportunity_key"], "op":
+  "like_contains_ascii", "value": "$param.q"}`, which matches the fields joined
+  by one space with SQLite's default `LIKE` (`%` and `_` stay wildcards, ASCII
+  case folds, an empty value matches everything). Fields and op are
+  configuration; the value is a literal, a fixed string param, or a top-level
+  string `$args.<name>`. Because an empty search matches every record, it can
+  only narrow: it is rejected inside `or` and in access reads, so it always
+  sits beside the resolved scope:
+
+  ```json
+  "where": {"and": [{"field": "centre_id", "op": "in", "value": "$scope.centres"},
+                    {"field": "status", "op": "eq", "value": "$param.status"},
+                    {"fields": ["resource_key", "opportunity_key", "commercial_id"],
+                     "op": "like_contains_ascii", "value": "$param.q"}]}
+  ```
+
+  Publishing also requires the argument to be `String!` or to have a default
+  (`q: String = ""`) and asks Database to validate the search, so a missing
+  field, a non-text field or an older Database refuses the release instead of
+  failing at query time. Aggregates with `lookups` or `buckets` may search
+  derived fields, so they skip that probe and any error surfaces when they
+  run. A `count_of` total uses the page's filter in the page's snapshot.
+- Filter operators are checked on publish: `eq`, `ne`, `gt`, `gte`, `lt`,
+  `lte`, `in`, `starts_with`, `is_null`, `is_not_null`, `like_contains_ascii`.
 - Paging: a `find` step with `"page": {"size": "$param.first", "cursor":
   "$param.after"}` reads one page (size defaults to `max_rows`, and larger
   requests are capped at it) and never fails on `hasMore`. Results can select

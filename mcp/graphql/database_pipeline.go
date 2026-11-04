@@ -283,6 +283,9 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 		if err := plan.validateFilter(where, true, "access "+label+".where"); err != nil {
 			return nil, err
 		}
+		if filterHasSearch(where) {
+			return nil, invalid("database_pipeline access %s cannot use %s: a search narrows results, it never decides authorization", label, databaseSearchOp)
+		}
 		read.Where = where
 	}
 	return read, nil
@@ -613,9 +616,15 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 				if err := plan.validateFilter(child, allowScope, fmt.Sprintf("%s.%s[%d]", path, group, i)); err != nil {
 					return err
 				}
+				if group == "or" && filterHasSearch(child) {
+					return invalid("database_pipeline %s: %s cannot be inside or; an empty search matches every record, so it must be ANDed with the other filters", path, databaseSearchOp)
+				}
 			}
 			return nil
 		}
+	}
+	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
+		return plan.validateSearch(node, path)
 	}
 	for key := range node {
 		if key != "field" && key != "op" && key != "value" {
@@ -625,10 +634,133 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 	if field, _ := node["field"].(string); strings.TrimSpace(field) == "" || strings.HasPrefix(field, "$") {
 		return invalid("database_pipeline %s requires a literal field", path)
 	}
-	if op, _ := node["op"].(string); strings.TrimSpace(op) == "" {
+	op, _ := node["op"].(string)
+	if strings.TrimSpace(op) == "" {
 		return invalid("database_pipeline %s requires op", path)
 	}
+	if !databaseFilterOps[op] {
+		return invalid("database_pipeline %s has unsupported op %q", path, op)
+	}
 	return plan.validatePlaceholders(node["value"], allowScope, path+".value")
+}
+
+// databaseFilterOps are the field operators Database accepts; like_contains_ascii
+// has its own node shape.
+var databaseFilterOps = map[string]bool{"eq": true, "ne": true, "gt": true, "gte": true, "lt": true, "lte": true,
+	"in": true, "starts_with": true, "is_null": true, "is_not_null": true}
+
+const (
+	databaseSearchOp        = "like_contains_ascii"
+	maxDatabaseSearchFields = 16
+	maxDatabaseSearchValue  = 1024
+)
+
+// validateSearch checks a {fields, op, value} text search. Fields and op are
+// resolver configuration; only the value may come from the client, and only as
+// a top-level string argument.
+func (plan *databasePipelinePlan) validateSearch(node map[string]any, path string) error {
+	for key := range node {
+		if key != "fields" && key != "op" && key != "value" {
+			return invalid("database_pipeline %s has unknown key %q", path, key)
+		}
+	}
+	if node["op"] != databaseSearchOp {
+		return invalid("database_pipeline %s: fields requires op %s", path, databaseSearchOp)
+	}
+	fields, ok := node["fields"].([]any)
+	if !ok || len(fields) == 0 || len(fields) > maxDatabaseSearchFields {
+		return invalid("database_pipeline %s: %s requires 1 to %d fields", path, databaseSearchOp, maxDatabaseSearchFields)
+	}
+	for _, raw := range fields {
+		if field, _ := raw.(string); strings.TrimSpace(field) == "" || strings.HasPrefix(field, "$") {
+			return invalid("database_pipeline %s: %s fields must be literal names", path, databaseSearchOp)
+		}
+	}
+	value, ok := node["value"].(string)
+	if !ok {
+		return invalid("database_pipeline %s: %s requires a string value", path, databaseSearchOp)
+	}
+	name, isParam := strings.CutPrefix(value, "$param.")
+	if !isParam {
+		if strings.HasPrefix(value, "$") {
+			return invalid("database_pipeline %s: %s value must be a string or a string $param", path, databaseSearchOp)
+		}
+		if len(value) > maxDatabaseSearchValue {
+			return invalid("database_pipeline %s: %s value is limited to %d bytes", path, databaseSearchOp, maxDatabaseSearchValue)
+		}
+		return nil
+	}
+	param, ok := plan.Params[name]
+	if !ok {
+		return invalid("database_pipeline %s references unknown %s", path, value)
+	}
+	if param.Type != "string" {
+		return invalid("database_pipeline %s: %s must be a string param", path, value)
+	}
+	if param.HasValue {
+		if fixed, isString := param.Value.(string); !isString || len(fixed) > maxDatabaseSearchValue {
+			return invalid("database_pipeline %s: %s must be a string of at most %d bytes", path, value, maxDatabaseSearchValue)
+		}
+		return nil
+	}
+	if argument, ok := strings.CutPrefix(param.From, "$args."); !ok || !graphqlName(argument) {
+		return invalid("database_pipeline %s: %s must come from a top-level $args value or a fixed value", path, value)
+	}
+	return nil
+}
+
+// filterHasSearch reports whether a filter contains a text search.
+func filterHasSearch(raw any) bool {
+	return len(filterSearches(raw)) > 0
+}
+
+// filterSearches lists the text-search leaves of a filter.
+func filterSearches(raw any) []map[string]any {
+	node, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	found := []map[string]any{}
+	for _, group := range []string{"and", "or"} {
+		for _, child := range asAnyList(node[group]) {
+			found = append(found, filterSearches(child)...)
+		}
+	}
+	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
+		found = append(found, node)
+	}
+	return found
+}
+
+// searchArguments lists the GraphQL arguments that supply text-search values.
+func (plan *databasePipelinePlan) searchArguments() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, step := range plan.Steps {
+		for _, search := range step.searches() {
+			value, _ := search["value"].(string)
+			name, isParam := strings.CutPrefix(value, "$param.")
+			if !isParam {
+				continue
+			}
+			if argument, ok := strings.CutPrefix(plan.Params[name].From, "$args."); ok && !seen[argument] {
+				seen[argument] = true
+				out = append(out, argument)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// searches lists a step's text searches, in where and in metric filters.
+func (step databasePipelineStep) searches() []map[string]any {
+	found := filterSearches(step.Args["where"])
+	for _, raw := range asAnyList(step.Args["metrics"]) {
+		metric, _ := raw.(map[string]any)
+		found = append(found, filterSearches(metric["where"])...)
+	}
+	return found
 }
 
 func (plan *databasePipelinePlan) validatePlaceholders(raw any, allowScope bool, path string) error {

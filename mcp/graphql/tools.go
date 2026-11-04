@@ -188,6 +188,9 @@ func (a *App) toolReleasePublish(callCtx context.Context, ctx *sdk.AppCtx, args 
 	if err := a.verifyPublishSecurity(callCtx, project, apiSlugArg(args)); err != nil {
 		return nil, err
 	}
+	if err := a.verifyPublishDatabaseSearches(callCtx, project, apiSlugArg(args)); err != nil {
+		return nil, err
+	}
 	row, err := publishAPIRelease(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "schema_version", intArg(args, "version", 0)), args["limits"])
 	if err != nil {
 		return nil, err

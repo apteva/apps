@@ -613,6 +613,10 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
+		if err := a.verifyPublishDatabaseSearches(r.Context(), project, api.Slug); err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
 		row, err := publishAPIRelease(a.ctx.AppDB(), project, api.Slug, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version, body.Limits)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))

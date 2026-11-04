@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Database query options that only resolver configuration may set: lookups
@@ -194,6 +196,63 @@ func validateDatabaseOrderBy(value any, path string) error {
 		}
 		if direction, exists := order["direction"]; exists && direction != "asc" && direction != "desc" {
 			return invalid("%s direction must be asc or desc", path)
+		}
+	}
+	return nil
+}
+
+// maxDatabaseBatchOperations is Database's limit per db_batch.
+const maxDatabaseBatchOperations = 100
+
+// verifyPublishDatabaseSearches asks Database to validate each text search
+// before a release can publish it: the Database version must support the
+// predicate and its fields must exist and be text. An empty value is checked
+// like any other and then dropped from the plan, so the probe reads almost
+// nothing. Aggregates with lookups or buckets may search derived fields a plain
+// find cannot see, so those fail at run time instead, closed.
+func (a *App) verifyPublishDatabaseSearches(ctx context.Context, project, api string) error {
+	sources, err := listSourcesForAPI(a.ctx.AppDB(), project, api)
+	if err != nil {
+		return err
+	}
+	resolvers, err := listResolversForAPI(a.ctx.AppDB(), project, api)
+	if err != nil {
+		return err
+	}
+	sourceByID := map[int64]sourceRecord{}
+	for _, source := range sources {
+		sourceByID[source.ID] = source
+	}
+	for _, resolver := range resolvers {
+		source := sourceByID[resolver.SourceID]
+		if source.Kind != "database" || resolver.Operation != databasePipelineOperation {
+			continue
+		}
+		plan, err := validateDatabasePipeline(mergeMaps(source.Config, resolver.Config))
+		if err != nil {
+			continue // publishing reports it with the release checks
+		}
+		operations := []any{}
+		for _, step := range plan.Steps {
+			if step.Args["lookups"] != nil || step.Args["buckets"] != nil {
+				continue
+			}
+			for _, search := range step.searches() {
+				fields := asAnyList(search["fields"])
+				operations = append(operations, map[string]any{"op": "find", "args": map[string]any{
+					"collection": step.Args["collection"], "select": []any{fields[0]}, "limit": 1,
+					"where": map[string]any{"fields": fields, "op": databaseSearchOp, "value": ""},
+				}})
+			}
+		}
+		run := &databasePipelineRun{app: a, plan: plan, project: project}
+		for start := 0; start < len(operations); start += maxDatabaseBatchOperations {
+			probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+			_, err := run.send(probe, operations[start:min(start+maxDatabaseBatchOperations, len(operations))])
+			cancel()
+			if err != nil {
+				return invalid("resolver %s.%s: Database cannot run its %s search (requires Database 0.7.0 or later and existing text fields): %s", resolver.ParentType, resolver.FieldName, databaseSearchOp, err)
+			}
 		}
 	}
 	return nil
