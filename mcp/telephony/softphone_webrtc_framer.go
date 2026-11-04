@@ -18,13 +18,14 @@ type rtcPCMFramer struct {
 	overBudgetTicks int
 	// Lifetime given to arriving audio. Zero means liveAudioMaxAge.
 	maxAge time.Duration
+	pause  rtcPauseDetector
 }
 
 const (
 	// Frames still queued after this tick's frame which are not excess latency.
 	// ±1 ms arrival jitter alone holds two for runs of up to ~100 ms.
 	rtcPlaybackTargetFrames = 1
-	// A backlog persisting this long is trimmed at a silent frame (200 ms).
+	// A backlog persisting this long is trimmed at a pause (200 ms).
 	rtcBacklogSilenceTicks = 10
 	// Speech is shortened only when it stays this old for 100 ms, and at most
 	// every 100 ms after that. Below the 120 ms queue bound.
@@ -32,7 +33,54 @@ const (
 	rtcBacklogSpeechEvery   = 5
 	rtcSilencePeak          = 64 // about -54 dBFS
 	rtcTrimCrossfade        = 120
+	// On a line with background noise a pause never reaches rtcSilencePeak. It
+	// is a run of frames within 6 dB (energy x4) of the stream's quietest recent
+	// frame, and below about -34 dBFS so that a steady tone never qualifies.
+	rtcPauseAboveFloor   = 4
+	rtcPauseMaxEnergy    = 650 * 650
+	rtcPauseRunFrames    = 3  // 60 ms of quiet before the first frame is dropped
+	rtcFloorWindowFrames = 75 // 1.5 s; the floor covers one to two windows
 )
+
+// Tracks the quietest recent frame of one stream. Silent frames say nothing
+// about the line's noise, so a dropout cannot pull the floor down to zero.
+type rtcPauseDetector struct {
+	floor, nextFloor float64
+	frames           int
+	ready            bool // floor covers a complete window
+	quiet            int  // consecutive quiet frames, this one included
+}
+
+// Reports whether the frame is silent.
+func (d *rtcPauseDetector) observe(pcm []int16) bool {
+	if rtcPCMSilent(pcm) {
+		d.quiet++
+		return true
+	}
+	var energy float64
+	for _, v := range pcm {
+		energy += float64(v) * float64(v)
+	}
+	energy /= float64(max(len(pcm), 1))
+	if d.frames == 0 || energy < d.nextFloor {
+		d.nextFloor = energy
+	}
+	floor := d.nextFloor
+	if d.ready {
+		floor = min(floor, d.floor)
+	}
+	if d.frames++; d.frames == rtcFloorWindowFrames {
+		d.floor, d.frames, d.ready = d.nextFloor, 0, true
+	}
+	if d.ready && energy <= floor*rtcPauseAboveFloor && energy <= rtcPauseMaxEnergy {
+		d.quiet++
+	} else {
+		d.quiet = 0
+	}
+	return false
+}
+
+func (d *rtcPauseDetector) active() bool { return d.quiet > rtcPauseRunFrames }
 
 type rtcPCMSegment struct {
 	samples int
@@ -180,18 +228,18 @@ func nextRTCPlaybackFrame(frames <-chan rtcPCMFrame, pending *rtcPCMFramer, last
 }
 
 // The sender repays its own stalls, so a backlog that remains came from the
-// source: late audio arriving after silence already took its slots. Silent
-// frames are free to drop. Speech is valid audio and stays while it is within
-// the latency budget; beyond it, one frame is shortened with a short crossfade
-// into its successor, never with a jump.
+// source: late audio arriving after silence already took its slots. Frames in a
+// pause are free to drop, background noise included. Speech is valid audio and
+// stays while it is within the latency budget; beyond it, one frame is shortened
+// with a short crossfade into its successor, never with a jump.
 func (f *rtcPCMFramer) trimBacklog(frames <-chan rtcPCMFrame, frame rtcPCMFrame, now time.Time, stats *rtcMediaStats) rtcPCMFrame {
+	silent := frame.pcm != nil && f.pause.observe(frame.pcm)
 	if frame.pcm == nil || len(frames) <= rtcPlaybackTargetFrames {
 		f.backlogTicks, f.overBudgetTicks = 0, 0
 		return frame
 	}
 	f.backlogTicks++
-	silent := rtcPCMSilent(frame.pcm)
-	if silent {
+	if silent || f.pause.active() {
 		if f.backlogTicks < rtcBacklogSilenceTicks {
 			return frame
 		}
@@ -199,8 +247,12 @@ func (f *rtcPCMFramer) trimBacklog(frames <-chan rtcPCMFrame, frame rtcPCMFrame,
 		if next.pcm == nil {
 			return frame
 		}
+		f.pause.observe(next.pcm)
 		stats.drop("webrtc_playback_backlog_silence", stats.mediaDirection(), 0, len(frame.pcm)*1000/24000)
-		return next
+		if silent {
+			return next
+		}
+		return rtcPCMFrame{pcm: rtcCrossfadeFrames(frame.pcm, next.pcm), expires: frame.expires}
 	}
 	if f.frameAge(frame, now) < rtcPlaybackSpeechBudget {
 		f.overBudgetTicks = 0

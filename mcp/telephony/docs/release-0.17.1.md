@@ -18,7 +18,9 @@ recording conversion no longer competes with live calls for CPU.
   however young the audio was. Silence trimming and the queue and expiry limits
   are unchanged.
 - Trade-off: audio that arrives late from the source can now add up to about
-  80 ms until the next pause, where it used to be trimmed sooner.
+  80 ms until the next pause, where it used to be trimmed sooner. Correction: on
+  lines with background noise at about -60 dBFS or louder no pause qualified, so
+  the delay stayed for the rest of the stream. Fixed in 0.17.2.
 - New counter `pacing_catchup_frames`, also on the audio dashboard as
   `server_webrtc_pacing_catchup_frames`. Catching up is not reported as degraded
   audio.
