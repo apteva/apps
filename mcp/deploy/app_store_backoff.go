@@ -22,7 +22,11 @@ const appStoreBackoffMax = time.Hour
 // Per-release retry schedule after consecutive sync failures.
 var releaseSyncSchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour}
 
-// A release whose build Apple has processed must reach testers within this window.
+// Checks for an assigned build while Apple's answer stays the same. Any change
+// in that answer goes back to the start of the schedule.
+var releaseAwaitingAppleSchedule = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// A processed build must be accepted into a TestFlight group within this window.
 const testFlightAssignmentTimeout = 48 * time.Hour
 
 var appStoreNow = time.Now
@@ -189,8 +193,37 @@ func deferReleaseSync(db *sql.DB, releaseID int64, until time.Time) {
 		ON CONFLICT(release_id) DO UPDATE SET next_sync_at=excluded.next_sync_at`, releaseID, until.UTC().Format(googlePlayTimeFormat))
 }
 
-func clearReleaseSyncFailures(db *sql.DB, releaseID int64) {
+// recordReleaseSyncSuccess resets failures. A build that is assigned and still
+// waiting on Apple keeps a growing interval; anything else is due again next run.
+func recordReleaseSyncSuccess(db *sql.DB, releaseID int64) {
+	if rel, err := dbGetRelease(db, releaseID); err == nil && rel != nil && releaseAwaitingApple(rel) {
+		recordReleaseAwaitingApple(db, releaseID, rel.ExternalStatus)
+		return
+	}
 	_, _ = db.Exec(`DELETE FROM release_sync_state WHERE release_id=?`, releaseID)
+}
+
+func releaseAwaitingApple(rel *Release) bool {
+	if rel.Provider != "app_store_connect" || rel.Status != "starting" || (rel.Channel != "internal" && rel.Channel != "external") {
+		return false
+	}
+	var meta mobileReleaseMeta
+	return json.Unmarshal([]byte(rel.ReleaseMetaJSON), &meta) == nil && meta.BetaGroupAssigned != ""
+}
+
+func recordReleaseAwaitingApple(db *sql.DB, releaseID int64, status string) {
+	var checks int
+	var observed string
+	if err := db.QueryRow(`SELECT idle_checks,observed_status FROM release_sync_state WHERE release_id=?`, releaseID).Scan(&checks, &observed); err != nil || observed != status {
+		checks = 0
+	}
+	delay := releaseAwaitingAppleSchedule[len(releaseAwaitingAppleSchedule)-1]
+	if checks < len(releaseAwaitingAppleSchedule) {
+		delay = releaseAwaitingAppleSchedule[checks]
+	}
+	_, _ = db.Exec(`INSERT INTO release_sync_state(release_id,failures,next_sync_at,last_error,idle_checks,observed_status) VALUES (?,0,?,'',?,?)
+		ON CONFLICT(release_id) DO UPDATE SET failures=0, next_sync_at=excluded.next_sync_at, last_error='', idle_checks=excluded.idle_checks, observed_status=excluded.observed_status`,
+		releaseID, appStoreNow().Add(delay).UTC().Format(googlePlayTimeFormat), checks+1, status)
 }
 
 // dbStopSupersededAppStoreReleases stops older TestFlight releases that are

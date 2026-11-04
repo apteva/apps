@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"testing"
 	"time"
@@ -10,11 +11,11 @@ import (
 )
 
 // appStoreSyncPlatform wraps testFlightPlatform with forced provider failures
-// and a build that never reaches TestFlight testers.
+// and a chosen TestFlight build state.
 type appStoreSyncPlatform struct {
 	*testFlightPlatform
-	fail  map[string]*sdk.ExecuteResult
-	stuck bool
+	fail       map[string]*sdk.ExecuteResult
+	buildState string
 }
 
 func (p *appStoreSyncPlatform) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
@@ -22,9 +23,9 @@ func (p *appStoreSyncPlatform) ExecuteIntegrationTool(id int64, tool string, inp
 		p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
 		return reply, nil
 	}
-	if tool == "get_build" && p.stuck {
+	if tool == "get_build" && p.buildState != "" {
 		p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
-		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":{"id":"build-42"},"included":[{"type":"buildBetaDetails","attributes":{"internalBuildState":"READY_FOR_BETA_TESTING"}}]}`)}, nil
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":{"id":"build-42"},"included":[{"type":"buildBetaDetails","attributes":{"internalBuildState":"` + p.buildState + `"}}]}`)}, nil
 	}
 	return p.testFlightPlatform.ExecuteIntegrationTool(id, tool, input)
 }
@@ -186,12 +187,9 @@ func TestSupersededTestFlightReleaseStopsSyncing(t *testing.T) {
 	}
 }
 
-func TestStuckReleasesStayWithinCallBudget(t *testing.T) {
-	p, first, now := setupAppStoreSync(t)
+func addStuckReleases(t *testing.T, first *Release) {
+	t.Helper()
 	db := globalCtx.AppDB()
-	// Four releases on separate deployments: two failing with Apple 500s and
-	// two whose processed build never reaches testers.
-	releases := []*Release{first}
 	for _, name := range []string{"ios-b", "ios-c", "ios-d"} {
 		d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{Name: name, TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios"})
 		if err != nil {
@@ -203,30 +201,204 @@ func TestStuckReleasesStayWithinCallBudget(t *testing.T) {
 		if err := dbUpdateRelease(db, rel.ID, map[string]any{"status": "starting", "provider": "app_store_connect", "channel": "internal", "release_meta_json": first.ReleaseMetaJSON}); err != nil {
 			t.Fatal(err)
 		}
-		releases = append(releases, rel)
 	}
-	p.stuck = true
-	runs := 10
-	for i := 0; i < runs; i++ {
+}
+
+func runWorkerMinutes(t *testing.T, now *time.Time, minutes int) {
+	t.Helper()
+	for i := 0; i < minutes; i++ {
 		runMobileWorker(t)
 		*now = now.Add(time.Minute)
 	}
+}
+
+func TestStuckReleasesStayWithinCallBudget(t *testing.T) {
+	p, first, now := setupAppStoreSync(t)
+	addStuckReleases(t, first)
+	p.buildState = "READY_FOR_BETA_TESTING"
+	runWorkerMinutes(t, now, 10)
 	// Unbounded, four releases would cost about 4 calls each per minute (160).
-	// Stuck builds reuse the processed build and cached group: one get_build
-	// per run after the first. Budget: first run 4×4 plus 4 per later run.
-	if budget := 16 + 4*(runs-1); len(p.calls) > budget {
-		t.Fatalf("calls=%d exceed budget %d", len(p.calls), budget)
+	// The first run lists, looks up and assigns. Availability checks then run
+	// at minutes 0, 1 and 6.
+	if got := countIntegrationCalls(p.calls, "get_build"); got != 12 {
+		t.Fatalf("get_build calls=%d, want 12", got)
+	}
+	if len(p.calls) > 21 {
+		t.Fatalf("calls=%d exceed budget 21: %+v", len(p.calls), p.calls)
+	}
+}
+
+func TestFailingReleasesBackOffOnRetrySchedule(t *testing.T) {
+	p, first, now := setupAppStoreSync(t)
+	addStuckReleases(t, first)
+	p.fail["get_build"] = &sdk.ExecuteResult{Status: 500, Data: json.RawMessage(`{"errors":[{"code":"UNEXPECTED_ERROR"}]}`)}
+	runWorkerMinutes(t, now, 10)
+	// Schedule 1m, 2m, 5m: attempts at minutes 0, 1, 3 and 8 for each release.
+	if got := countIntegrationCalls(p.calls, "get_build"); got != 16 {
+		t.Fatalf("get_build calls=%d, want 16", got)
+	}
+	// The assignment was saved despite the failing availability check.
+	if got := countIntegrationCalls(p.calls, "add_builds_to_beta_group"); got != 4 {
+		t.Fatalf("assignment calls=%d, want one per release", got)
+	}
+}
+
+func TestAppStoreAwaitingAppleSlowsUntilStateChanges(t *testing.T) {
+	p, release, now := setupAppStoreSync(t)
+	db := globalCtx.AppDB()
+	p.buildState = "READY_FOR_BETA_TESTING"
+	start := *now
+	var checkedAt []time.Duration
+	seen := 0
+	step := func(minutes int) {
+		t.Helper()
+		for i := 0; i < minutes; i++ {
+			runMobileWorker(t)
+			if got := countIntegrationCalls(p.calls, "get_build"); got != seen {
+				seen = got
+				checkedAt = append(checkedAt, now.Sub(start))
+			}
+			*now = now.Add(time.Minute)
+		}
+	}
+	step(172)
+	// The last two checks are an hour apart: the schedule stays at its cap.
+	want := []time.Duration{0, time.Minute, 6 * time.Minute, 21 * time.Minute, 51 * time.Minute, 111 * time.Minute, 171 * time.Minute}
+	if len(checkedAt) != len(want) {
+		t.Fatalf("checks at %v, want %v", checkedAt, want)
+	}
+	for i, at := range want {
+		if checkedAt[i] != at {
+			t.Fatalf("checks at %v, want %v", checkedAt, want)
+		}
 	}
 
-	// Apple errors on every release back off on the per-release schedule.
-	p.calls = nil
-	p.fail["get_build"] = &sdk.ExecuteResult{Status: 500, Data: json.RawMessage(`{"errors":[{"code":"UNEXPECTED_ERROR"}]}`)}
-	for i := 0; i < runs; i++ {
-		runMobileWorker(t)
-		*now = now.Add(time.Minute)
+	// A failed check retries soon, and success returns to the slow interval.
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
 	}
-	// Schedule 1m, 2m, 5m: at most 4 attempts per release in ten minutes.
-	if len(p.calls) > 4*len(releases) {
-		t.Fatalf("failing releases made %d calls in %d runs", len(p.calls), runs)
+	p.fail["get_build"] = &sdk.ExecuteResult{Status: 500, Data: json.RawMessage(`{"errors":[{"code":"UNEXPECTED_ERROR"}]}`)}
+	runMobileWorker(t)
+	delete(p.fail, "get_build")
+	*now = now.Add(time.Minute)
+	runMobileWorker(t)
+	var checks, failures int
+	if err := db.QueryRow(`SELECT idle_checks,failures FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks, &failures); err != nil {
+		t.Fatal(err)
+	}
+	if checks <= len(releaseAwaitingAppleSchedule) || failures != 0 {
+		t.Fatalf("failure reset the slow interval: idle_checks=%d failures=%d", checks, failures)
+	}
+	if releaseSyncDue(db, release.ID) {
+		t.Fatal("release due immediately after a successful unchanged check")
+	}
+
+	// A changed answer from Apple goes back to the start of the schedule.
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.buildState = "MISSING_EXPORT_COMPLIANCE"
+	runMobileWorker(t)
+	if err := db.QueryRow(`SELECT idle_checks FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks); err != nil || checks != 1 {
+		t.Fatalf("state change kept the slow interval: idle_checks=%d err=%v", checks, err)
+	}
+
+	// Availability ends the wait and removes the schedule.
+	if err := makeReleaseSyncDue(db, release.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.buildState = "IN_BETA_TESTING"
+	runMobileWorker(t)
+	fresh, _ := dbGetRelease(db, release.ID)
+	if fresh.Status != "live" || fresh.ExternalStatus != "testflight_available" {
+		t.Fatalf("release=%+v", fresh)
+	}
+	if err := db.QueryRow(`SELECT idle_checks FROM release_sync_state WHERE release_id=?`, release.ID).Scan(&checks); err == nil {
+		t.Fatal("finished release kept a sync schedule")
+	}
+}
+
+// makeReleaseSyncDue makes a waiting release due now, keeping its counters.
+func makeReleaseSyncDue(db *sql.DB, releaseID int64) error {
+	_, err := db.Exec(`UPDATE release_sync_state SET next_sync_at='' WHERE release_id=?`, releaseID)
+	return err
+}
+
+func TestAppStoreAssignedBuildSurvivesAssignmentTimeout(t *testing.T) {
+	p, release, _ := setupAppStoreSync(t)
+	p.buildState = "READY_FOR_BETA_TESTING"
+	meta := mobileReleaseMeta{Platform: "ios", AppID: "app-1", BuildNumber: "42", BetaGroupID: "group-1", BetaGroupAssigned: "group-1",
+		BuildProcessed: true, BuildProcessedAt: time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)}
+	if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"external_id": "build-42", "release_meta_json": mustJSON(meta)}); err != nil {
+		t.Fatal(err)
+	}
+	runMobileWorker(t)
+	fresh, _ := dbGetRelease(globalCtx.AppDB(), release.ID)
+	if fresh.Status != "starting" || fresh.ExternalStatus != "ready_for_beta_testing" {
+		t.Fatalf("assigned build was marked failed: %+v", fresh)
+	}
+	if countIntegrationCalls(p.calls, "get_build") != 1 || countIntegrationCalls(p.calls, "add_builds_to_beta_group") != 0 {
+		t.Fatalf("calls=%+v", p.calls)
+	}
+}
+
+func TestAppStoreExpiredBuildStillFailsWhileAwaitingApple(t *testing.T) {
+	p, release, _ := setupAppStoreSync(t)
+	p.buildState = "EXPIRED"
+	meta := mobileReleaseMeta{Platform: "ios", AppID: "app-1", BuildNumber: "42", BetaGroupID: "group-1", BetaGroupAssigned: "group-1", BuildProcessed: true}
+	if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"external_id": "build-42", "release_meta_json": mustJSON(meta)}); err != nil {
+		t.Fatal(err)
+	}
+	runMobileWorker(t)
+	fresh, _ := dbGetRelease(globalCtx.AppDB(), release.ID)
+	if fresh.Status != "failed" || fresh.ExternalStatus != "expired" || fresh.Error == "" {
+		t.Fatalf("release=%+v", fresh)
+	}
+}
+
+func TestAppStoreAllBuildsGroupCountsAsAssigned(t *testing.T) {
+	p, release, _ := setupAppStoreSync(t)
+	p.groups = []appleBetaGroup{{ID: "group-1", Name: "Deploy Internal", IsInternal: true, HasAccessToAllBuilds: true}}
+	p.buildState = "READY_FOR_BETA_TESTING"
+	runMobileWorker(t)
+	fresh, _ := dbGetRelease(globalCtx.AppDB(), release.ID)
+	var meta mobileReleaseMeta
+	if err := json.Unmarshal([]byte(fresh.ReleaseMetaJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.BetaGroupAssigned != "group-1" || countIntegrationCalls(p.calls, "add_builds_to_beta_group") != 0 {
+		t.Fatalf("meta=%+v calls=%+v", meta, p.calls)
+	}
+	if testFlightAssignmentExpired(fresh, mobileReleaseMeta{BuildProcessed: true, BetaGroupAssigned: meta.BetaGroupAssigned}) {
+		t.Fatal("all-builds group would be marked failed after 48 hours")
+	}
+}
+
+func TestAppStoreSuccessfulCheckClearsStaleError(t *testing.T) {
+	p, release, now := setupAppStoreSync(t)
+	db := globalCtx.AppDB()
+	p.buildState = "READY_FOR_BETA_TESTING"
+	if err := dbUpdateRelease(db, release.ID, map[string]any{"error": "app-store-connect.get_build returned HTTP 500"}); err != nil {
+		t.Fatal(err)
+	}
+	runMobileWorker(t)
+	fresh, _ := dbGetRelease(db, release.ID)
+	if fresh.Error != "" {
+		t.Fatalf("stale error kept: %q", fresh.Error)
+	}
+	// A failed check records its error again until the next success.
+	p.fail["get_build"] = &sdk.ExecuteResult{Status: 500, Data: json.RawMessage(`{"errors":[{"code":"UNEXPECTED_ERROR"}]}`)}
+	*now = now.Add(2 * time.Minute)
+	runMobileWorker(t)
+	fresh, _ = dbGetRelease(db, release.ID)
+	if fresh.Error == "" || fresh.ExternalStatus != "sync_error" {
+		t.Fatalf("failed check not recorded: %+v", fresh)
+	}
+	delete(p.fail, "get_build")
+	*now = now.Add(2 * time.Minute)
+	runMobileWorker(t)
+	fresh, _ = dbGetRelease(db, release.ID)
+	if fresh.Error != "" || fresh.ExternalStatus != "ready_for_beta_testing" {
+		t.Fatalf("recovered check did not clear error: %+v", fresh)
 	}
 }

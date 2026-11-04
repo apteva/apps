@@ -760,7 +760,7 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 			continue
 		}
 		if releases[i].Provider == "app_store_connect" && testFlightAssignmentExpired(&releases[i], phase) {
-			errText := "Processed build did not reach TestFlight testers within 48 hours"
+			errText := "Processed build was not accepted into a TestFlight group within 48 hours"
 			if releases[i].Error != "" {
 				errText += ": " + releases[i].Error
 			}
@@ -796,7 +796,7 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, fields)
 			continue
 		}
-		clearReleaseSyncFailures(globalCtx.AppDB(), releases[i].ID)
+		recordReleaseSyncSuccess(globalCtx.AppDB(), releases[i].ID)
 	}
 	return nil
 }
@@ -836,7 +836,7 @@ func (a *App) syncIOSRelease(rel *Release) error {
 			return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "error": processingErr.Error(), "external_status": strings.ToLower(processingState), "stopped_at": nowUTC()})
 		}
 		if buildID == "" {
-			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_status": "processing"})
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_status": "processing", "error": ""})
 			return nil
 		}
 	}
@@ -855,21 +855,25 @@ func (a *App) syncIOSRelease(rel *Release) error {
 		if group.ID == "" {
 			return errors.New("App Store Connect beta group response missing id")
 		}
-		if !group.HasAccessToAllBuilds && meta.BetaGroupAssigned != group.ID {
-			if err := addIOSBuildToBetaGroup(bound, group.ID, buildID); err != nil {
-				if !isRedundantIOSBuildAssignment(err) {
-					return err
-				}
-				present, verifyErr := iosBuildHasBetaGroup(bound, buildID, group.ID)
-				if verifyErr != nil {
-					return fmt.Errorf("%w; verify beta group relationship: %v", err, verifyErr)
-				}
-				if !present {
-					return err
+		if meta.BetaGroupAssigned != group.ID {
+			if !group.HasAccessToAllBuilds {
+				if err := addIOSBuildToBetaGroup(bound, group.ID, buildID); err != nil {
+					if !isRedundantIOSBuildAssignment(err) {
+						return err
+					}
+					present, verifyErr := iosBuildHasBetaGroup(bound, buildID, group.ID)
+					if verifyErr != nil {
+						return fmt.Errorf("%w; verify beta group relationship: %v", err, verifyErr)
+					}
+					if !present {
+						return err
+					}
 				}
 			}
-			// Apple accepted the assignment; later syncs only check availability.
+			// The group covers this build; later syncs only check availability.
+			// Saved now so a failing availability check cannot lose it.
 			meta.BetaGroupAssigned = group.ID
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"release_meta_json": mustJSON(meta)})
 		}
 		err = a.syncTestFlightAvailability(bound, rel, buildID, group.ID, &meta)
 		if isFinalProviderError(err) {
@@ -943,7 +947,7 @@ func iosBuildHasBetaGroup(bound *sdk.BoundIntegration, buildID, groupID string) 
 func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
 	meta.BetaGroupID = groupID
 	if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
+		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta), "error": "",
 	}); err != nil {
 		return err
 	}
@@ -1935,9 +1939,11 @@ func truncateString(value string, max int) string {
 }
 
 // testFlightAssignmentExpired reports a TestFlight release whose build Apple
-// processed more than 48 hours ago but which never reached its tester group.
+// processed more than 48 hours ago but which no group has accepted. An accepted
+// build only waits on Apple, so it stays in progress until Apple reports it
+// available or expired, or a newer release supersedes it.
 func testFlightAssignmentExpired(rel *Release, phase mobileReleaseMeta) bool {
-	if rel.Status != "starting" || !phase.BuildProcessed || phase.Prepared || (rel.Channel != "internal" && rel.Channel != "external") {
+	if rel.Status != "starting" || !phase.BuildProcessed || phase.Prepared || phase.BetaGroupAssigned != "" || (rel.Channel != "internal" && rel.Channel != "external") {
 		return false
 	}
 	since := phase.BuildProcessedAt
