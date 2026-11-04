@@ -45,6 +45,9 @@ type Filter struct {
 	Fields []string `json:"fields,omitempty"`
 	Op     string   `json:"op,omitempty"`
 	Value  any      `json:"value,omitempty"`
+	// Exists and NotExists test related records of another collection.
+	Exists    *ExistsClause `json:"exists,omitempty"`
+	NotExists *ExistsClause `json:"not_exists,omitempty"`
 }
 type Metric struct {
 	Name  string  `json:"name"`
@@ -54,6 +57,7 @@ type Metric struct {
 }
 type Query struct {
 	after        Record   // authenticated cursor values, never accepted from JSON
+	hint         string   // index an exists probe seeks through
 	Where        *Filter  `json:"where,omitempty"`
 	Select       []string `json:"select,omitempty"`
 	OrderBy      []Order  `json:"orderBy,omitempty"`

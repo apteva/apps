@@ -38,6 +38,13 @@ func newNativeScanDecoder(c Collection, names []string, where *Filter) *nativeSc
 		for _, name := range f.Fields {
 			wanted[name] = true
 		}
+		for _, clause := range []*ExistsClause{f.Exists, f.NotExists} {
+			if clause != nil {
+				for _, on := range clause.pairs() {
+					wanted[on.LocalField] = true
+				}
+			}
+		}
 		for i := range f.And {
 			visit(&f.And[i])
 		}

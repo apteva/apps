@@ -29,6 +29,11 @@ func nativeFilter(c Collection, f *Filter) any {
 		}
 		return map[string]any{"$like": map[string]any{"fields": f.Fields, "separator": " ", "pattern": searchPattern(f.Value.(string))}}
 	}
+	if f.Exists != nil || f.NotExists != nil {
+		// Native engines reject this key: a path that forgets stripExists fails
+		// instead of dropping a permission filter.
+		return map[string]any{"$exists_needs_evaluation": true}
+	}
 	if f.Op == "is_null" {
 		return map[string]any{f.Field: map[string]any{"$eq": nil}}
 	}
@@ -42,6 +47,13 @@ func nativeFilter(c Collection, f *Filter) any {
 			return n
 		}
 		return v
+	}
+	if f.Op == "not_in" {
+		terms := []any{map[string]any{f.Field: map[string]any{"$ne": nil}}}
+		for _, v := range f.Value.([]any) {
+			terms = append(terms, map[string]any{f.Field: map[string]any{"$ne": convert(v)}})
+		}
+		return map[string]any{"$and": terms}
 	}
 	var value any
 	if f.Op == "in" {
@@ -162,6 +174,7 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	if q.RequireIndex && !plan(c, q).IndexedLookup {
 		return nil, fail("query_too_expensive", "query requires a selective index")
 	}
+	evaluate := hasExists(q.Where)
 	if len(t.pending) > 0 || plan(c, q).Sort {
 		// Project before retaining a bounded top page; do not keep a second
 		// native heap of complete documents alongside the adapter's results.
@@ -172,6 +185,12 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 		return nil, e
 	}
 	opts := nativeQueryOptions(c, q, limit)
+	bound := q
+	if evaluate {
+		// The native limit would count candidates that the exists nodes reject.
+		opts.Limit = 0
+		bound.Where = stripExists(q.Where)
+	}
 	workLimit := t.backend.options.QueryWorkBytes
 	opts.MaxMemoryBytes = int64(workLimit)
 	var stats native.QueryStats
@@ -187,12 +206,22 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 			names = append(names, o.Field)
 		}
 	}
-	decoder := newNativeScanDecoder(c, names, nil)
-	e = h.Query(t.ctx, marshal(nativeQueryFilter(c, q)), opts, func(_, data []byte) bool {
+	var filterFields *Filter
+	if evaluate {
+		filterFields = q.Where
+	}
+	decoder := newNativeScanDecoder(c, names, filterFields)
+	e = h.Query(t.ctx, marshal(nativeQueryFilter(c, bound)), opts, func(_, data []byte) bool {
+		if readErr = t.ctx.Err(); readErr != nil {
+			return false
+		}
 		var r Record
 		r, readErr = decoder.decode(data)
 		if readErr != nil {
 			return false
+		}
+		if evaluate && !matches(c, r, q.Where) {
+			return true
 		}
 		r = retainSelected(r, q)
 		retained += retainedBytes(r)
@@ -269,7 +298,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 		stopped = !consume(r, data)
 		return !stopped
 	}
-	e = h.Query(t.ctx, marshal(nativeFilter(c, q.Where)), opts, func(key, data []byte) bool {
+	e = h.Query(t.ctx, marshal(nativeFilter(c, stripExists(q.Where))), opts, func(key, data []byte) bool {
 		if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
 			return true
 		}
@@ -302,7 +331,9 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	}
 	opts := nativeQueryOptions(c, q, 1)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
-	np, e := h.ExplainQuery(t.ctx, marshal(nativeQueryFilter(c, q)), opts)
+	bound := q
+	bound.Where = stripExists(q.Where)
+	np, e := h.ExplainQuery(t.ctx, marshal(nativeQueryFilter(c, bound)), opts)
 	if e != nil {
 		return nil, nativeError(e)
 	}
@@ -313,6 +344,10 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "mappedCacheBytes": t.backend.options.MappedCacheBytes, "managedMemoryBytes": t.backend.options.ManagedMemoryBytes, "aggregateDiskBytes": t.backend.options.AggregateDiskBytes, "aggregateMaxGroups": t.backend.options.AggregateMaxGroups, "aggregateStrategy": "parallel-then-bounded-stream", "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
+	if hasExists(r.Where) {
+		// Exists nodes probe from each candidate on this snapshot.
+		return t.aggregatePortable(c, r, outSchema)
+	}
 	if r.analytics != nil {
 		// Alpha.11 evaluates lookups, date buckets, distinct counts and
 		// filtered metrics natively. Staged writes and buckets used outside
@@ -379,6 +414,9 @@ func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 	return t.aggregatePortable(c, r, outSchema)
 }
 
+func (t *aptevaTx) scanRecords(c Collection, q Query, fields []string, consume func(Record) bool) error {
+	return t.scanFields(c, q, fields, func(r Record, _ []byte) bool { return consume(r) }, nil)
+}
 func (t *aptevaTx) aggregatePortable(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	return aggregateRecordsWithBudget(t.ctx, c, r, outSchema, t.backend.options.QueryWorkBytes, func(q Query, fields []string, consume func(Record, []byte) bool) error {
 		return t.scanFields(c, q, fields, consume, nil)
