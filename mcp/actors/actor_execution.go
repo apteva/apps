@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/andybalholm/cascadia"
 	sdk "github.com/apteva/app-sdk"
@@ -26,6 +27,8 @@ import (
 )
 
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
+var actorIntegerPattern = regexp.MustCompile(`[-+]?[0-9][0-9.,\p{Zs}\t]*`)
+var actorExponentSuffix = regexp.MustCompile(`^[eE][-+]?[0-9]`)
 
 type actorExecution struct {
 	secretNavigation     bool
@@ -55,6 +58,7 @@ type actorExecution struct {
 	maxItems             int
 	retries              int
 	session              *browserSession
+	collectionItems      []map[string]any
 	items                []map[string]any
 	pageCount            int
 	trace                []map[string]any
@@ -702,6 +706,10 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.revealControl(step)
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
+	case "goto_record":
+		return e.gotoRecord(step)
+	case "read_navigation":
+		return e.clickReadNavigation(step.Locator)
 	case "inspect_control":
 		return e.inspectControl(step)
 	case "dismiss_inspection":
@@ -785,7 +793,14 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.extractPage(step)
 	case "select_record":
 		return e.selectRecord(step)
+	case "assert_no_record":
+		return e.assertNoRecord(step)
 	case "assert_values":
+		return e.assertValues(step)
+	case "assert_inputs":
+		previous := e.lastValues
+		e.lastValues = e.variables
+		defer func() { e.lastValues = previous }()
 		return e.assertValues(step)
 	case "paginate":
 		return e.paginate(step)
@@ -1687,8 +1702,7 @@ func coerceActorValue(raw, typ, baseURL string) (any, error) {
 	case "money", "number":
 		return parseActorNumber(raw)
 	case "integer":
-		n, err := parseActorNumber(raw)
-		return int64(n), err
+		return parseActorInteger(raw)
 	case "boolean":
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "true", "yes", "1", "on":
@@ -1704,6 +1718,48 @@ func coerceActorValue(raw, typ, baseURL string) (any, error) {
 		}
 		return nil, fmt.Errorf("unsupported type %q", typ)
 	}
+}
+
+// Integer extraction accepts whole numbers and consistent three-digit grouping
+// (comma, dot or a Unicode space). It never truncates a decimal or round-trips
+// counts through float64: audience limits and record IDs must remain exact.
+func parseActorInteger(raw string) (int64, error) {
+	loc := actorIntegerPattern.FindStringIndex(raw)
+	if loc == nil {
+		return 0, fmt.Errorf("%q contains no integer", raw)
+	}
+	if (loc[0] > 0 && strings.ContainsRune(".,", rune(raw[loc[0]-1]))) || actorExponentSuffix.MatchString(raw[loc[1]:]) {
+		return 0, fmt.Errorf("%q is not a whole integer", raw)
+	}
+	s := strings.TrimSpace(raw[loc[0]:loc[1]])
+	sign := ""
+	if s[0] == '+' || s[0] == '-' {
+		sign, s = s[:1], s[1:]
+	}
+	var digits strings.Builder
+	separator, groupLength, grouped := rune(0), 0, false
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+			groupLength++
+			continue
+		}
+		if unicode.IsSpace(r) {
+			r = ' '
+		}
+		if (r != ',' && r != '.' && r != ' ') || (separator != 0 && separator != r) || (!grouped && (groupLength < 1 || groupLength > 3)) || (grouped && groupLength != 3) {
+			return 0, fmt.Errorf("%q has invalid integer grouping", raw)
+		}
+		separator, groupLength, grouped = r, 0, true
+	}
+	if grouped && groupLength != 3 {
+		return 0, fmt.Errorf("%q has invalid integer grouping", raw)
+	}
+	n, err := strconv.ParseInt(sign+digits.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is outside the integer range: %w", raw, err)
+	}
+	return n, nil
 }
 
 func parseActorNumber(raw string) (float64, error) {

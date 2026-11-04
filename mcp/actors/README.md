@@ -41,6 +41,12 @@ Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a
 
 ## Verify saved copy
 
+Whole-number fields (`type: integer`) use exact signed 64-bit parsing. Comma,
+dot and Unicode-space thousands separators must form consistent three-digit
+groups (for example, `1,041` becomes `1041`). Fractional values, malformed groups
+and overflow fail extraction instead of truncating or rounding audience counts
+and IDs. Money and decimal fields keep their existing locale-aware parsing.
+
 Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Use an explicit `separator` when the editor represents paragraph boundaries differently from inline line breaks (for example, `"\n\n"` for ProseMirror paragraphs). Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
 
 For saved plain-text messages whose renderer adds indentation around line breaks,
@@ -115,7 +121,9 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.100.0`, derived from fetched tag ancestry (`v0.99.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.115.0`, derived from fetched tag ancestry (`v0.110.0` and `v0.114.0` are its ancestors). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+
+Read-view identity can use a unique native link (`href`) or image (`src`). Image identity is useful for full-screen tables that hide navigation; declare an anchored URL pattern containing the expected account/profile identity. Every page must contain exactly one matching image with a nonempty source URL on the declared identity host. Empty or ambiguous identity evidence fails the read. Existing URL, loading, filter, total-count and pagination guards continue to apply.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
@@ -406,3 +414,34 @@ Rendered HTML reads grow from 200,000 through 400,000, 800,000, 1,000,000 and 2,
 A reviewed `goto` step can opt into `read_only: true, read_retries: 1` (maximum2). This overrides the legacy operation-wide retry limit only for that navigation. Transport timeouts may reopen the same saved browser context and repeat that read, within the original run deadline. It never replays earlier fills/uploads or subsequent clicks, and non-transient errors still stop. The field is rejected on writes, secret operations and consequential/effect-bearing steps. Existing definitions and global retry defaults are unchanged.
 
 The optional `examples/flights/` definitions and transaction fixtures document local checkout preparation and synthetic payment guards. They do not enable live ticket purchasing or install any site-specific actor automatically.
+## Native navigation and Clips4Sale example
+
+Read views may use `navigation` with one to five exact SOM-only native tab/button
+locators, mutually exclusive with `link_selector` and `use_entry_page`. Each hop
+requires a fresh control whose effect is `navigation_only`. `read_navigation`
+provides the same check for non-optional read-only steps.
+
+`assert_no_record` rejects an exact field/value duplicate only after complete
+collection coverage with no remaining results. `assert_inputs` checks execution
+variables before writes while preserving the previous extraction evidence.
+For searchable or controlled dropdowns, use the observed native control and
+an exact SOM option, then verify the saved label. `select_option` uses internal
+`value`/`values`.
+
+The [Clips4Sale Creator example](examples/clips4sale-control.md) covers account,
+current-month statistics, catalog coverage, draft preparation, read-only preflight
+and guarded submission for review. It is caller-configured and currently gates
+publication to explicitly declared no-real-person footage.
+
+A `navigation_only` opener can reserve a `once_key` without
+`confirm_consequence`. Navigation is not an irreversible acknowledgement class;
+consequential clicks continue to require a matching acknowledgement.
+
+`goto_record` follows an absolute HTTP URL selected from a complete verified
+collection. It requires a unique collected record, read-only non-optional
+navigation and the usual host checks. This supports reopening a persisted draft
+whose ID was assigned by the site during upload.
+
+Record selection and duplicate assertions use only the latest verified
+collection. Prior composer extractions and older catalog snapshots remain in
+the audit dataset but cannot satisfy those checks.
