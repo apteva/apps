@@ -60,8 +60,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.97
+version: 0.7.98
 description: |
+  v0.7.98 stages and hashes session-bound uploads before destructive site changes.
+  Cloud uploads keep their size cap; explicit local sessions stream large files.
   v0.7.97 supports bounded rendered DOM extraction up to a 5 MB serialized
   response while retaining live form state, navigation and response limits.
   v0.7.96 serializes live form values, selections and checked state in DOM
@@ -315,6 +317,7 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 // session is one open browser, owned by this sidecar.
 type session struct {
 	actionMu             sessionLock
+	preparedUpload       *preparedUpload
 	comp                 backends.Computer
 	backend              string
 	presentation         backends.PresentationOptions
@@ -660,7 +663,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "computer_use",
-			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
+			Description: "Use action=prepare_upload before a destructive file replacement: it stages and hashes the exact source in this session without sending it to the website. Then upload_file with the identical source arguments and require_prepared=true. Default cloud uploads retain a 100 MiB cap; explicitly configured local sessions can stream up to 5 GiB. No login context migration occurs. Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. Operator-owned workflow constraints independently restrict the resource, commit effect and scheduled time; acknowledgements cannot override them. For a scheduling task, do not click an immediate Publish control to look for scheduling afterward. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, semantic-target, or media conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. For an embed, use media_present and media_error together with match=any to wait for a terminal rendered-player-or-error outcome. Computer reports the visible provider/source and player state but does not decide whether the media is the intended asset. Use action=wait_for_stable only when the whole page must become quiet. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with a fresh label or target_id and its som_revision, plus source_url/base64/file_path. Optional expected_name and expected_role must copy accessible_name and role from the current semantic target; omit an expectation when that field is absent, and never infer role from tag/type; omit expected_text, expected_effect, and confirm_consequence, which are click/double_click-only. A compatibility selector must match exactly one element. After a stale-target rejection, take action=screenshot with include_som=true and retry upload_file with the new target and original file source; do not click Browse or operate the native OS file picker. For native image uploads, verify the visible image preview and draft-save state afterward; media_present checks an audio/video player, not a still-image preview. " +
@@ -676,7 +679,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -699,6 +702,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"base64":              map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
 				"filename":            map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
 				"mime_type":           map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
+				"expected_sha256":     map[string]any{"type": "string", "description": "Optional lowercase SHA-256 required by prepare_upload."},
+				"require_prepared":    map[string]any{"type": "boolean", "description": "Require the exact source staged by prepare_upload in this session; never fetch again after a destructive replacement."},
 				"file_path":           map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
 				"text":                map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
 				"value":               map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, prefer an ISO date such as 2026-07-01; Computer converts it for confidently detected masked date fields and returns requested, normalized, and actual values plus format/validity diagnostics. Use 11:00 AM for a time field, or a combined value only when the target is one datetime field."},
@@ -2457,6 +2462,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	if bound, ok := sess.comp.(interface{ BindRequest(context.Context) func() }); ok {
 		defer bound.BindRequest(requestCtx)()
 	}
+	if action == "prepare_upload" {
+		return sess.prepareUpload(args)
+	}
 	if action == "navigate" {
 		if !validToolNavigationURL(stringArg(args, "url")) {
 			return nil, computerUseFailure("invalid_navigation", id, sess, action,
@@ -2655,7 +2663,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				"Use local or Browserbase for file uploads, or ask the user to upload manually.",
 				nil)
 		}
-		files, meta, cleanup, err := prepareUploadFiles(args)
+		files, meta, cleanup, err := sess.takeUpload(args)
 		if err != nil {
 			return nil, computerUseFailure("invalid_file_source", id, sess, action,
 				err.Error(),
@@ -4451,6 +4459,7 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 		_, err := ctx.AppDB().Exec(`UPDATE computer_provider_leases SET pending=1,terminal_status=? WHERE session_id=?`, status, id)
 		persistErr = errors.Join(persistErr, err)
 	}
+	s.clearPreparedUpload()
 	closeErr := s.comp.Close()
 	if closeErr != nil {
 		persistErr = errors.Join(persistErr, fmt.Errorf("cleanup_pending: %w", closeErr))
@@ -5593,11 +5602,15 @@ func prepareUploadFiles(args map[string]any) ([]string, map[string]any, func(), 
 }
 
 func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map[string]any, func(), error) {
+	return prepareUploadFileFromURLLimit(rawURL, args, maxUploadBytes, 45*time.Second)
+}
+
+func prepareUploadFileFromURLLimit(rawURL string, args map[string]any, limit int64, timeout time.Duration) ([]string, map[string]any, func(), error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, nil, func() {}, fmt.Errorf("source_url must be http or https")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	resp, err := fetchUploadSourceURL(ctx, rawURL)
 	if err != nil {
@@ -5606,6 +5619,9 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, func() {}, fmt.Errorf("source_url HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > limit {
+		return nil, nil, func() {}, fmt.Errorf("source file exceeds browser transport limit of %d bytes; use an explicitly configured local browser for larger files", limit)
 	}
 	filename := firstNonEmpty(stringArg(args, "filename"), filenameFromContentDisposition(resp.Header.Get("Content-Disposition")), filepath.Base(u.Path), "upload.bin")
 	filename = safeUploadFilename(filename)
@@ -5618,7 +5634,7 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 		cleanup()
 		return nil, nil, func() {}, err
 	}
-	limited := io.LimitReader(resp.Body, maxUploadBytes+1)
+	limited := io.LimitReader(resp.Body, limit+1)
 	n, copyErr := io.Copy(tmp, limited)
 	closeErr := tmp.Close()
 	if copyErr != nil {
@@ -5629,9 +5645,9 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 		cleanup()
 		return nil, nil, func() {}, closeErr
 	}
-	if n > maxUploadBytes {
+	if n > limit {
 		cleanup()
-		return nil, nil, func() {}, fmt.Errorf("source_url file exceeds %d bytes", maxUploadBytes)
+		return nil, nil, func() {}, fmt.Errorf("source file exceeds browser transport limit of %d bytes", limit)
 	}
 	mimeType := firstNonEmpty(stringArg(args, "mime_type"), resp.Header.Get("Content-Type"))
 	return []string{tmpPath}, uploadFileMeta(filename, n, mimeType, "source_url"), cleanup, nil
