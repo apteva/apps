@@ -258,6 +258,19 @@ Text search is one filter node over several text fields: `{fields:["resource_key
 - Supported in `where` for `find`, `count`, `aggregate`, `explain` and read batches, evaluated before sorting, pagination and aggregation, on the operation's snapshot. Each record counts once. Metric `where`, `update` and `delete` reject them. Any evaluation failure fails the request; no partial result is returned.
 - SQLite compiles a correlated subquery. Pebble and AptevaDB start with index probes and, on wide scans, switch to one bounded pass over the related collection that builds key sets (up to the 16 MiB work budget, else they keep probing). On AptevaDB aggregates with these filters run in one stream rather than the parallel pipeline, so keep an indexed equality scope beside them.
 
+A multi-value `in` on the leading fields of an index, with an optional range on the next field, reads a union of index ranges: at most 64 value combinations and 1 MiB of bounds, past which the filter still applies over a scan. Each record counts once. On AptevaDB, a count covered by one index reads index entries alone, without fetching documents; filters that need documents, such as text search or `exists`, read only the records in those ranges when they name at most an eighth of the collection. A paged `find` chooses between the union and an ordered stream by counting matches from the index. Pebble keeps an ordered stream when one exists, unless `requireIndex` needs the union.
+
+`count` takes `diagnostics: true` to report what actually ran:
+
+```json
+{"count": "3356", "diagnostics": {"executed": true, "planSource": "execution", "strategy": "native-count",
+  "plan": {"access": "index-count", "index": "by_region_at", "indexOnly": true, "equalityPrefix": 1, "ranges": 2},
+  "indexOnly": true, "documentFetches": 0, "indexEntriesExamined": 3356, "examined": 3356, "returned": 3356,
+  "peakMemoryBytes": 212, "queueMs": 0.01, "snapshotMs": 0.02, "executionMs": 0.03}}
+```
+
+`exists` and `not_exists` add `{"probes", "keySetsBuilt", "relatedRowsRead", "keySetBytes"}`. Only AptevaDB reports engine statistics; Pebble and SQLite give timings and the planned access, marked `"planSource": "explain"`. A count inside a read batch omits `queueMs` and `snapshotMs`, which the batch shares. `explain` plans a `find` without running it and says `"executed": false`, so it is not evidence of what a count did. `find` and `aggregate` reject `diagnostics`.
+
 `find` accepts `select`, `orderBy`, `limit`, and `cursor`, returning `records`, `hasMore`, and `nextCursor`. Repeat the same query with the returned cursor. Primary-key fields are appended to the sort as tie-breakers. `requireIndex` rejects plans that cannot narrow candidates through an index. `explain` reports adapter-specific plan details. Pebble handles primary/unique lookups, leading compound equality/range/prefix predicates, and compatible index ordering; complex OR/IN combinations may require bounded scans and sorting.
 
 `update` accepts `set` and `increment`. `delete` accepts the same selection rules. Use an exact `key`, a `where` filter, or both; full-collection mutation requires `all:true`. With a `key`, `where` is a guard: the record changes only if it also matches, checked in the same write transaction. A failed guard reads like an absent record: `affected: 0`, or `version_conflict` with `ifVersion`, so it does not reveal whether the record exists. `maxAffected` defaults to 1. Exceeding the bound aborts all changes. `ifVersion` requires an exact key. Metadata and primary keys cannot be patched.

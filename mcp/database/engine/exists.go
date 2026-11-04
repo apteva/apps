@@ -108,8 +108,8 @@ type existsPlan struct {
 
 // existsState keeps the first probe failure of one operation.
 type existsState struct {
-	mu       sync.Mutex
-	err      error
+	mu  sync.Mutex
+	err error
 	// Key set memory and work of this operation; exists runs on its scan's goroutine.
 	setBytes  int
 	probes    int64
