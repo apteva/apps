@@ -145,6 +145,9 @@ func validateDatabaseResolverOptions(operation string, config map[string]any) er
 	if err != nil {
 		return nil // reported when the resolver runs
 	}
+	if filterHasConditional(config["where"]) {
+		return invalid("database %s does not accept conditional filters; use database_pipeline", operation)
+	}
 	if value, ok := config["lookups"]; ok {
 		if tool != "db_find" && tool != "db_aggregate" {
 			return invalid("database %s does not accept lookups", operation)
@@ -204,13 +207,19 @@ func validateDatabaseOrderBy(value any, path string) error {
 // maxDatabaseBatchOperations is Database's limit per db_batch.
 const maxDatabaseBatchOperations = 100
 
-// verifyPublishDatabaseSearches asks Database to validate each text search
-// before a release can publish it: the Database version must support the
-// predicate and its fields must exist and be text. An empty value is checked
-// like any other and then dropped from the plan, so the probe reads almost
-// nothing. Aggregates with lookups or buckets may search derived fields a plain
-// find cannot see, so those fail at run time instead, closed.
-func (a *App) verifyPublishDatabaseSearches(ctx context.Context, project, api string) error {
+// verifyPublishDatabaseFilters asks Database to validate what could otherwise
+// only fail once a user reaches it, before a release can publish it.
+//
+// Text searches: the Database version must support the predicate and its fields
+// must exist and be text. An empty value is checked like any other and then
+// dropped from the plan, so the probe reads almost nothing.
+//
+// Conditional filters: their fields must exist, because a false condition means
+// Database never sees them. Selecting them reads one record.
+//
+// Aggregates with lookups or buckets may filter on derived fields a plain find
+// cannot see, so those fail at run time instead, closed.
+func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api string) error {
 	sources, err := listSourcesForAPI(a.ctx.AppDB(), project, api)
 	if err != nil {
 		return err
@@ -232,26 +241,39 @@ func (a *App) verifyPublishDatabaseSearches(ctx context.Context, project, api st
 		if err != nil {
 			continue // publishing reports it with the release checks
 		}
-		operations := []any{}
+		searches, conditionals := []any{}, []any{}
 		for _, step := range plan.Steps {
 			if step.Args["lookups"] != nil || step.Args["buckets"] != nil {
 				continue
 			}
 			for _, search := range step.searches() {
 				fields := asAnyList(search["fields"])
-				operations = append(operations, map[string]any{"op": "find", "args": map[string]any{
+				searches = append(searches, map[string]any{"op": "find", "args": map[string]any{
 					"collection": step.Args["collection"], "select": []any{fields[0]}, "limit": 1,
 					"where": map[string]any{"fields": fields, "op": databaseSearchOp, "value": ""},
 				}})
 			}
+			if fields := step.conditionalFields(); len(fields) > 0 {
+				conditionals = append(conditionals, map[string]any{"op": "find", "args": map[string]any{
+					"collection": step.Args["collection"], "select": fields, "limit": 1,
+				}})
+			}
 		}
 		run := &databasePipelineRun{app: a, plan: plan, project: project}
-		for start := 0; start < len(operations); start += maxDatabaseBatchOperations {
-			probe, cancel := context.WithTimeout(ctx, 15*time.Second)
-			_, err := run.send(probe, operations[start:min(start+maxDatabaseBatchOperations, len(operations))])
-			cancel()
-			if err != nil {
-				return invalid("resolver %s.%s: Database cannot run its %s search (requires Database 0.7.0 or later and existing text fields): %s", resolver.ParentType, resolver.FieldName, databaseSearchOp, err)
+		for _, check := range []struct {
+			operations []any
+			problem    string
+		}{
+			{searches, "Database cannot run its " + databaseSearchOp + " search (requires Database 0.7.0 or later and existing text fields)"},
+			{conditionals, "Database cannot read the fields of its conditional filters"},
+		} {
+			for start := 0; start < len(check.operations); start += maxDatabaseBatchOperations {
+				probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+				_, err := run.send(probe, check.operations[start:min(start+maxDatabaseBatchOperations, len(check.operations))])
+				cancel()
+				if err != nil {
+					return invalid("resolver %s.%s: %s: %s", resolver.ParentType, resolver.FieldName, check.problem, err)
+				}
 			}
 		}
 	}

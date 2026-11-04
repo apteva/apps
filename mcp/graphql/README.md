@@ -577,9 +577,11 @@ Rules:
 - Collections, fields, metrics, groupings, lookups, buckets and ordering are
   resolver configuration. Clients reach a plan only through declared `params`
   (`$args`, `$parent`, verified `$identity`, or fixed values; types `string`,
-  `number`, `boolean`, `datetime`, `json`, `string_list`). `$param.<name>` and
-  `$scope.<name>` are accepted only as filter values, metric-filter values and
-  `get` keys.
+  `number`, `boolean`, `datetime`, `json`, `string_list`, `exact_string_list`).
+  `$param.<name>` and `$scope.<name>` are accepted only as filter values,
+  metric-filter values and `get` keys. `string_list` trims values and drops
+  blanks, which suits authorization lists; `exact_string_list` keeps identifiers
+  as sent and only removes exact duplicates.
 - Access values: an unrestricted caller (`unrestricted_if_permission`) gets
   exactly the values it requested, or the `default` read when it requested
   none. Every other caller gets the `otherwise` read (`single: true` requires
@@ -658,6 +660,50 @@ Rules:
   (setting one on another source is rejected): access values are the Database
   authorization mechanism, and client params can only narrow them because they
   appear only as filter values.
+- Conditional filters: a child of a step or metric filter's `and` group may be
+  `{"when": <condition>, "filter": <filter>}`, which lets an empty client value
+  mean "no filter" without changing what an empty `in` means:
+
+  ```json
+  "where": {"and": [
+    {"field": "centre_id", "op": "in", "value": "$scope.authorisedCentres"},
+    {"when": {"op": "gt", "args": [{"op": "length", "args": ["$param.centres"]}, {"const": 0}]},
+     "filter": {"field": "centre_id", "op": "in", "value": "$param.centres"}},
+    {"when": {"op": "neq", "args": ["$param.status", {"const": ""}]},
+     "filter": {"field": "status", "op": "eq", "value": "$param.status"}}]}
+  ```
+
+  A false condition removes the child; a true one replaces it with its filter.
+  If nothing is left the read has no `where`. The page and its `count_of` total
+  resolve the same conditions, and subscriptions evaluate them again, with the
+  access values, on every refresh.
+
+  They exist to make client filters optional, never authorization:
+  - `$scope` and identity-sourced params are rejected in both `when` and
+    `filter`, so a permission predicate is always an unconditional sibling.
+    Conditional filters are also rejected inside `or`, inside each other, at the
+    root of a filter, in access reads and in plain `find` resolvers.
+  - Conditions read `$param.<name>` and `{"const": ...}` with `length`, `eq`,
+    `neq`, `lt`, `lte`, `gt`, `gte`, `and`, `or`, `not` and `coalesce`. Params
+    must be fixed or a top-level `$args.<name>`, of type `string`, `number`,
+    `boolean` or `exact_string_list`; for an optional date, use a `string`
+    param, because `datetime` refuses `""`. `string_list` is refused, because
+    dropping a blank could switch the filter off.
+  - Types are checked when the resolver is set: the result must be Boolean,
+    comparisons need matching types, and nothing is decided by truthiness. A
+    value that is null at run time fails the request unless `coalesce` handles
+    it. Every operand is evaluated, so the failure doesn't depend on the others.
+  - Inside `filter`, `in` needs a list or an `exact_string_list` param. The
+    filter is validated in full whatever the condition would evaluate to, and
+    the text search rules below still apply.
+  - Publishing requires each argument used to exist with the matching shape and
+    to be non-null or have a default (`centres: [String!]! = []`,
+    `status: String = ""`), and reads one record selecting the conditional
+    fields, so a mistyped field refuses the release. Aggregates with `lookups`
+    or `buckets` skip that probe.
+
+  An `exact_string_list` over an integer field fails with `invalid_argument` on
+  a non-numeric value; nothing is dropped to make it fit.
 - Text search (Database 0.7.0+): a step or metric filter may hold
   `{"fields": ["resource_key", "opportunity_key"], "op":
   "like_contains_ascii", "value": "$param.q"}`, which matches the fields joined

@@ -212,6 +212,18 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 					return invalid("resolver %s.%s: search argument %s must be String! or have a default such as %s: String = \"\", because a missing value cannot be searched", resolver.ParentType, resolver.FieldName, name, name)
 				}
 			}
+			for name, wantsList := range plan.conditionalArguments() {
+				argument := definition.Fields.ForName(resolver.FieldName).Arguments.ForName(name)
+				if argument == nil {
+					return invalid("resolver %s.%s: a conditional filter reads argument %s, which the field does not declare", resolver.ParentType, resolver.FieldName, name)
+				}
+				if (argument.Type.Elem != nil) != wantsList {
+					return invalid("resolver %s.%s: conditional filter argument %s does not match its param: list params need a list argument, other params a single value", resolver.ParentType, resolver.FieldName, name)
+				}
+				if !argument.Type.NonNull && (argument.DefaultValue == nil || argument.DefaultValue.Kind == ast.NullValue) {
+					return invalid("resolver %s.%s: conditional filter argument %s must be non-null or have a default, because an omitted value would fail the request", resolver.ParentType, resolver.FieldName, name)
+				}
+			}
 		}
 		if source.Kind == "tables" {
 			merged := mergeMaps(source.Config, resolver.Config)

@@ -613,7 +613,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
-		if err := a.verifyPublishDatabaseSearches(r.Context(), project, api.Slug); err != nil {
+		if err := a.verifyPublishDatabaseFilters(r.Context(), project, api.Slug); err != nil {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}

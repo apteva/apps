@@ -199,9 +199,9 @@ func (plan *databasePipelinePlan) parseParams(raw any) error {
 		}
 		p := databasePipelineParam{Type: stringValue(spec["type"], "string")}
 		switch p.Type {
-		case "string", "number", "boolean", "datetime", "json", "string_list":
+		case "string", "number", "boolean", "datetime", "json", "string_list", "exact_string_list":
 		default:
-			return invalid("database_pipeline param %s type must be string, number, boolean, datetime, json or string_list", name)
+			return invalid("database_pipeline param %s type must be string, number, boolean, datetime, json, string_list or exact_string_list", name)
 		}
 		if required, exists := spec["required"]; exists {
 			value, ok := required.(bool)
@@ -280,6 +280,9 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 		}
 	}
 	if where, ok := spec["where"]; ok {
+		if filterHasConditional(where) {
+			return nil, invalid("database_pipeline access %s cannot use a conditional filter: client input must not decide authorization", label)
+		}
 		if err := plan.validateFilter(where, true, "access "+label+".where"); err != nil {
 			return nil, err
 		}
@@ -613,7 +616,17 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 				return invalid("database_pipeline %s.%s must be the only key and a list", path, group)
 			}
 			for i, child := range list {
-				if err := plan.validateFilter(child, allowScope, fmt.Sprintf("%s.%s[%d]", path, group, i)); err != nil {
+				childPath := fmt.Sprintf("%s.%s[%d]", path, group, i)
+				if group == "or" && filterHasConditional(child) {
+					return invalid("database_pipeline %s cannot hold a conditional filter inside or; removing a branch of an or would change what the others match", childPath)
+				}
+				if group == "and" && isConditionalFilter(child) {
+					if err := plan.validateConditional(child.(map[string]any), childPath); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := plan.validateFilter(child, allowScope, childPath); err != nil {
 					return err
 				}
 				if group == "or" && filterHasSearch(child) {
@@ -622,6 +635,9 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 			}
 			return nil
 		}
+	}
+	if isConditionalFilter(node) {
+		return invalid("database_pipeline %s: a conditional filter must be a child of an and group", path)
 	}
 	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
 		return plan.validateSearch(node, path)
@@ -719,6 +735,9 @@ func filterSearches(raw any) []map[string]any {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return nil
+	}
+	if isConditionalFilter(node) {
+		return filterSearches(node["filter"])
 	}
 	found := []map[string]any{}
 	for _, group := range []string{"and", "or"} {
@@ -1352,7 +1371,7 @@ func (plan *databasePipelinePlan) bindParams(ctx context.Context, args map[strin
 			out[name] = nil
 			continue
 		}
-		if p.Type == "string_list" {
+		if p.Type == "string_list" || p.Type == "exact_string_list" {
 			list, ok := value.([]any)
 			if !ok {
 				if typed, isStrings := value.([]string); isStrings {
@@ -1372,7 +1391,14 @@ func (plan *databasePipelinePlan) bindParams(ctx context.Context, args map[strin
 				if !isString {
 					return nil, invalid("database_pipeline param %s must contain strings", name)
 				}
-				if text = strings.TrimSpace(text); text != "" && !seen[text] {
+				// Authorization lists are normalised; an exact list keeps
+				// identifiers as sent, blanks included.
+				if p.Type == "string_list" {
+					if text = strings.TrimSpace(text); text == "" {
+						continue
+					}
+				}
+				if !seen[text] {
 					seen[text] = true
 					values = append(values, text)
 				}
@@ -1912,7 +1938,13 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 		for key, value := range step.Args {
 			switch key {
 			case "where":
-				args[key] = run.filter(value)
+				where, err := run.where(value)
+				if err != nil {
+					return nil, err
+				}
+				if where != nil {
+					args[key] = where
+				}
 			case "key":
 				args[key] = run.substitute(value)
 			case "metrics":
@@ -1925,7 +1957,14 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 						copied[k] = v
 					}
 					if metric["where"] != nil {
-						copied["where"] = run.filter(metric["where"])
+						where, err := run.where(metric["where"])
+						if err != nil {
+							return nil, err
+						}
+						copied["where"] = where
+						if where == nil {
+							delete(copied, "where")
+						}
 					}
 					bound[j] = copied
 				}
