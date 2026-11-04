@@ -550,6 +550,13 @@ TestFlight is reported available only after Apple reports `IN_BETA_TESTING`;
 assignment to a beta group alone is insufficient. Failed processing and modern
 App Store states are visible, and interrupted review preparation is retried.
 
+An assigned build waiting on Apple stays in progress. Deploy checks it after 1,
+5, 15 and 30 minutes and then hourly, returning to the start of that schedule
+when Apple's answer changes. `deploy_release_sync` checks immediately. Waiting
+ends when Apple reports the build available or expired, or a newer release
+supersedes it. Only a processed build that no group accepted within 48 hours
+fails, as `testflight_assignment_timeout`.
+
 Artifact reads and release starts hold a retention lock. Retention also pins
 requested releases and recovery artifacts; newly discovered orphan directories
 receive a grace period. ZIP extraction is limited to 100,000 entries and 2 GiB

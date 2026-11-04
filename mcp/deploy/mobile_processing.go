@@ -42,7 +42,7 @@ func (a *App) syncTestFlightAvailability(bound *sdk.BoundIntegration, rel *Relea
 		if state == "" {
 			state = "AVAILABILITY_UNCONFIRMED"
 		}
-		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "starting", "external_id": buildID, "external_status": strings.ToLower(state), "release_meta_json": mustJSON(meta)})
+		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "starting", "external_id": buildID, "external_status": strings.ToLower(state), "release_meta_json": mustJSON(meta), "error": ""})
 	}
 }
 func appleProcessingBuild(raw json.RawMessage, buildNumber string) (string, string, error) {
