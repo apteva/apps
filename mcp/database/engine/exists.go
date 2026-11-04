@@ -11,9 +11,10 @@ import (
 // collection in the same database without returning them. A record is related
 // when every On pair matches, as in SQL's ON ... AND ...; AnyOf instead lists
 // alternative On lists, any of which may match. The clause holds when a related
-// record also satisfies Where. Nulls never match. The filter tree has no general
-// negation, so a failed evaluation can always read as "no match" and the
-// operation then returns the recorded error.
+// record also satisfies Where, which may hold further exists nodes; their local
+// fields belong to this clause's collection. Nulls never match. A failed
+// evaluation reads as "no match", which a parent not_exists turns into a match,
+// so the operation must return the recorded error instead of any result.
 type ExistsClause struct {
 	Collection string        `json:"collection"`
 	On         []ExistsOn    `json:"on,omitempty"`
@@ -58,13 +59,16 @@ type ExistsOn struct {
 }
 
 const (
-	maxExistsNodes        = 8
+	maxExistsNodes        = 8 // across the whole tree
+	maxExistsDepth        = 4
 	maxExistsAlternatives = 16
 	maxExistsPairs        = 8
 	// A build reads a related row in about 2 µs and a probe costs about 25 µs,
 	// so an abandoned build wastes at most about 2.5 times what the probes spent,
 	// and the attempts double.
 	existsRowsPerProbe = 32
+	// Work is counted in related rows read; a probe costs about this many.
+	existsProbeWork = 12
 )
 
 // Variables so tests can force each strategy.
@@ -72,6 +76,9 @@ var (
 	existsBuildAfter = 128 // probes before the first attempt to build key sets
 	existsSetBytes   = MaxQueryWorkBytes
 	existsSetsBuilt  func() // test hook
+	// Nested relationships multiply work, so they get a budget of about 30 s of
+	// reads on top of the operation's deadline.
+	existsNestedWork = int64(16 << 20)
 )
 
 // recordScanner streams records of a collection matching a filter. Adapters
@@ -98,6 +105,10 @@ type existsPlan struct {
 	alts    []existsAlternative
 	where   *Filter
 	state   *existsState
+	// SQL names for the related table and the record the pairs read local fields
+	// from; an empty parent is the query's own table.
+	alias  string
+	parent string
 	// Probes run until a one-pass build of the matching related keys is likely
 	// to be cheaper. sets is nil until a build succeeds; noSets ends the attempts.
 	probes    int
@@ -106,7 +117,8 @@ type existsPlan struct {
 	noSets    bool
 }
 
-// existsState keeps the first probe failure of one operation.
+// existsState keeps the first probe failure and the limits of one operation,
+// shared by every node of its filter tree.
 type existsState struct {
 	mu  sync.Mutex
 	err error
@@ -115,6 +127,20 @@ type existsState struct {
 	probes    int64
 	setsBuilt int64
 	rowsRead  int64
+	nodes     int
+	nested    bool
+}
+
+func (s *existsState) work() int64 { return s.rowsRead + s.probes*existsProbeWork }
+
+// overBudget fails a nested operation past its work budget.
+func (s *existsState) overBudget() error {
+	if !s.nested || s.work() <= existsNestedWork {
+		return nil
+	}
+	e := fail("query_too_expensive", "nested exists exceeded its work budget; narrow the filter or the related collections")
+	s.fail(e)
+	return e
 }
 
 func (s *existsState) fail(e error) {
@@ -175,49 +201,54 @@ func stripExists(f *Filter) *Filter {
 }
 
 // prepareExists binds every exists node of an already validated filter to this
-// transaction. Probes read through tx, so they share the operation's snapshot.
+// transaction, each nested node to its immediate parent. Probes read through tx,
+// so the whole tree shares the operation's snapshot.
 func prepareExists(tx transaction, c Collection, where *Filter) (*existsState, error) {
 	if !hasExists(where) {
 		return nil, nil
 	}
 	state := &existsState{}
-	nodes := 0
-	var walk func(*Filter) error
-	walk = func(f *Filter) error {
-		if f == nil {
-			return nil
-		}
-		for i := range f.And {
-			if e := walk(&f.And[i]); e != nil {
-				return e
-			}
-		}
-		for i := range f.Or {
-			if e := walk(&f.Or[i]); e != nil {
-				return e
-			}
-		}
-		clause := f.Exists
-		if clause == nil {
-			clause = f.NotExists
-		}
-		if clause == nil {
-			return nil
-		}
-		if nodes++; nodes > maxExistsNodes {
-			return Invalid("at most %d exists filters", maxExistsNodes)
-		}
-		p, e := planExists(tx, c, clause, state)
-		if e != nil {
-			return e
-		}
-		clause.plan = p
-		return nil
-	}
-	if e := walk(where); e != nil {
+	if e := state.bind(tx, c, where, "", 1); e != nil {
 		return nil, e
 	}
 	return state, nil
+}
+
+func (s *existsState) bind(tx transaction, c Collection, f *Filter, parent string, depth int) error {
+	if f == nil {
+		return nil
+	}
+	for i := range f.And {
+		if e := s.bind(tx, c, &f.And[i], parent, depth); e != nil {
+			return e
+		}
+	}
+	for i := range f.Or {
+		if e := s.bind(tx, c, &f.Or[i], parent, depth); e != nil {
+			return e
+		}
+	}
+	clause := f.Exists
+	if clause == nil {
+		clause = f.NotExists
+	}
+	if clause == nil {
+		return nil
+	}
+	if s.nodes++; s.nodes > maxExistsNodes {
+		return Invalid("at most %d exists filters", maxExistsNodes)
+	}
+	if depth > maxExistsDepth {
+		return Invalid("exists filters nest at most %d levels", maxExistsDepth)
+	}
+	s.nested = s.nested || depth > 1
+	p, e := planExists(tx, c, clause, s)
+	if e != nil {
+		return e
+	}
+	p.alias, p.parent = existsAlias+strconv.Itoa(s.nodes), parent
+	clause.plan = p
+	return s.bind(tx, p.foreign, clause.Where, p.alias, depth+1)
 }
 
 func planExists(tx transaction, c Collection, clause *ExistsClause, state *existsState) (*existsPlan, error) {
@@ -233,9 +264,6 @@ func planExists(tx transaction, c Collection, clause *ExistsClause, state *exist
 	foreign, e := tx.collection(clause.Collection)
 	if e != nil {
 		return nil, e
-	}
-	if hasExists(clause.Where) {
-		return nil, Invalid("exists filters cannot be nested")
 	}
 	terms := 0
 	if e := validateFilter(foreign, clause.Where, 0, &terms); e != nil {
@@ -337,6 +365,9 @@ func (p *existsPlan) related(r Record) (bool, error) {
 		}
 		p.probes++
 		p.state.probes++
+		if e := p.state.overBudget(); e != nil {
+			return false, e
+		}
 		terms := make([]Filter, 0, len(keys)+1)
 		for i, key := range keys {
 			terms = append(terms, Filter{Field: alt.pairs[i].on.ForeignField, Op: "eq", Value: key})
@@ -425,16 +456,25 @@ func (p *existsPlan) buildSets() error {
 	// Every row read counts against the allowance, so Where is applied here.
 	read := append([]string{}, fields...)
 	visitFilterFields(p.where, func(name string) { read = append(read, name) })
-	allowance := p.probes * existsRowsPerProbe
-	rows, bytes := 0, 0
+	// A nested Where spends work on each row, and that counts too.
+	allowance := int64(p.probes) * existsRowsPerProbe
+	spent := p.state.work()
+	bytes := 0
 	tooMany, tooLarge := false, false
 	e := scanner.scanRecords(p.foreign, Query{}, read, func(r Record) bool {
 		p.state.rowsRead++
-		if rows++; rows > allowance {
+		if p.state.work()-spent > allowance {
 			tooMany = true
 			return false
 		}
-		if !matches(p.foreign, r, p.where) {
+		if p.state.overBudget() != nil {
+			return false
+		}
+		matched := matches(p.foreign, r, p.where)
+		if p.state.failure() != nil {
+			return false
+		}
+		if !matched {
 			return true
 		}
 		for _, alt := range builds {
@@ -454,13 +494,21 @@ func (p *existsPlan) buildSets() error {
 			}
 			set[strings.Clone(key)] = struct{}{}
 			bytes += len(key) + 64
-			if p.state.setBytes+bytes > existsSetBytes {
+			p.state.setBytes += len(key) + 64
+			if p.state.setBytes > existsSetBytes {
 				tooLarge = true
 				return false
 			}
 		}
 		return true
 	})
+	if e == nil {
+		// A set read past a failure is missing keys; it must never be kept.
+		e = p.state.failure()
+	}
+	if e != nil || tooLarge || tooMany {
+		p.state.setBytes -= bytes
+	}
 	switch {
 	case e != nil:
 		return e
@@ -470,7 +518,6 @@ func (p *existsPlan) buildSets() error {
 		p.nextBuild = p.probes * 2
 	default:
 		p.sets = sets
-		p.state.setBytes += bytes
 		p.state.setsBuilt++
 		if existsSetsBuilt != nil {
 			existsSetsBuilt()
@@ -499,8 +546,8 @@ func matchesExists(r Record, f *Filter) bool {
 
 const existsAlias = "__exists"
 
-// compileExists writes the node as a correlated subquery. An unprepared clause
-// matches nothing.
+// compileExists writes the node as a correlated subquery over its own alias,
+// reading local fields from its parent's. An unprepared clause matches nothing.
 func compileExists(c Collection, f *Filter) (string, []any) {
 	clause, prefix := f.Exists, "EXISTS"
 	if clause == nil {
@@ -513,17 +560,21 @@ func compileExists(c Collection, f *Filter) (string, []any) {
 	for i, alt := range clause.plan.alts {
 		pairs := make([]string, len(alt.pairs))
 		for k, pair := range alt.pairs {
-			pairs[k] = compileExistsPair(c, pair)
+			pairs[k] = compileExistsPair(c, clause.plan, pair)
 		}
 		alternatives[i] = "(" + strings.Join(pairs, " AND ") + ")"
 	}
 	where, args := compileFilter(clause.plan.foreign, clause.Where)
-	return prefix + " (SELECT 1 FROM " + table(clause.plan.foreign) + " AS " + existsAlias + " WHERE (" + strings.Join(alternatives, " OR ") + ") AND (" + where + "))", args
+	return prefix + " (SELECT 1 FROM " + table(clause.plan.foreign) + " AS " + clause.plan.alias + " WHERE (" + strings.Join(alternatives, " OR ") + ") AND (" + where + "))", args
 }
 
-func compileExistsPair(c Collection, pair existsPair) string {
-	local := table(c) + "." + quote(pair.on.LocalField)
-	foreign := existsAlias + "." + quote(pair.on.ForeignField)
+func compileExistsPair(c Collection, p *existsPlan, pair existsPair) string {
+	parent := p.parent
+	if parent == "" {
+		parent = table(c)
+	}
+	local := parent + "." + quote(pair.on.LocalField)
+	foreign := p.alias + "." + quote(pair.on.ForeignField)
 	switch {
 	case pair.on.Comparison == "text" && pair.local.Type == "text" && pair.foreign.Type == "integer":
 		// Seek by the integer, then require the exact decimal text.
