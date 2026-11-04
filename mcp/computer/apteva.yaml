@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.98
+version: 0.7.99
 description: |
+  v0.7.99 stages large uploads in private disk cache instead of memory-backed /tmp.
+  Operators can pin APTEVA_UPLOAD_STAGING_DIR to a mounted disk volume.
   v0.7.98 stages and hashes uploads before site changes. Prepared uploads are
   session-bound, expire after 15 minutes, and never refetch after replacement.
   Cloud files retain a 100 MiB cap; explicit local sessions stream up to 5 GiB.
@@ -531,7 +533,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.7.98
+    ref: computer/v0.7.99
     entry: mcp/computer
   port: 8080
   health_check: /health

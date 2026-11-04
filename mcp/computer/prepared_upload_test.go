@@ -179,3 +179,40 @@ func TestPreparedLargeUploadNativeBrowser(t *testing.T) {
 		t.Fatal(verified)
 	}
 }
+
+func TestPreparedUploadUsesPrivateCacheAndReapsOnlyExpiredOwnFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "staging")
+	t.Setenv("APTEVA_UPLOAD_STAGING_DIR", root)
+	if _, err := preparedUploadRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatal("cache not private", err)
+	}
+	old := filepath.Join(root, "prepared-old")
+	other := filepath.Join(root, "keep-other")
+	fresh := filepath.Join(root, "prepared-live")
+	for _, p := range []string{old, other, fresh} {
+		if err := os.Mkdir(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ago := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(old, ago, ago)
+	os.Chtimes(other, ago, ago)
+	if _, err := preparedUploadRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("expired staging not reaped")
+	}
+	for _, p := range []string{other, fresh} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal("unrelated or live files removed")
+		}
+	}
+	t.Setenv("APTEVA_UPLOAD_STAGING_DIR", "relative")
+	if _, err := preparedUploadRoot(); err == nil {
+		t.Fatal("relative staging accepted")
+	}
+}

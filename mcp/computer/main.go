@@ -60,8 +60,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.98
+version: 0.7.99
 description: |
+  v0.7.99 stages large sources in private disk cache rather than memory-backed /tmp.
   v0.7.98 stages and hashes session-bound uploads before destructive site changes.
   Cloud uploads keep their size cap; explicit local sessions stream large files.
   v0.7.97 supports bounded rendered DOM extraction up to a 5 MB serialized
@@ -5605,7 +5606,7 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 	return prepareUploadFileFromURLLimit(rawURL, args, maxUploadBytes, 45*time.Second)
 }
 
-func prepareUploadFileFromURLLimit(rawURL string, args map[string]any, limit int64, timeout time.Duration) ([]string, map[string]any, func(), error) {
+func prepareUploadFileFromURLLimit(rawURL string, args map[string]any, limit int64, timeout time.Duration, stagingRoot ...string) ([]string, map[string]any, func(), error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, nil, func() {}, fmt.Errorf("source_url must be http or https")
@@ -5625,7 +5626,13 @@ func prepareUploadFileFromURLLimit(rawURL string, args map[string]any, limit int
 	}
 	filename := firstNonEmpty(stringArg(args, "filename"), filenameFromContentDisposition(resp.Header.Get("Content-Disposition")), filepath.Base(u.Path), "upload.bin")
 	filename = safeUploadFilename(filename)
-	tmpPath, cleanup, err := createUploadTempPath(filename)
+	var tmpPath string
+	var cleanup func()
+	if len(stagingRoot) > 0 {
+		tmpPath, cleanup, err = createUploadTempPathAt(stagingRoot[0], filename)
+	} else {
+		tmpPath, cleanup, err = createUploadTempPath(filename)
+	}
 	if err != nil {
 		return nil, nil, func() {}, err
 	}

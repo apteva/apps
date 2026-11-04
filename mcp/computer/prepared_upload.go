@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,7 +57,11 @@ func (s *session) prepareUpload(args map[string]any) (map[string]any, error) {
 	var cleanup func()
 	var err error
 	if raw := stringArg(args, "source_url"); raw != "" && stringArg(args, "base64") == "" && stringArg(args, "file_path") == "" {
-		files, meta, cleanup, err = prepareUploadFileFromURLLimit(raw, args, limit, 110*time.Second)
+		root, e := preparedUploadRoot()
+		if e != nil {
+			return nil, e
+		}
+		files, meta, cleanup, err = prepareUploadFileFromURLLimit(raw, args, limit, 110*time.Second, root)
 	} else {
 		files, meta, cleanup, err = prepareUploadFiles(args)
 	}
@@ -75,7 +81,11 @@ func (s *session) prepareUpload(args map[string]any) (map[string]any, error) {
 	}
 	// Freeze caller-owned file_path sources so preflight and upload use identical bytes.
 	if stringArg(args, "file_path") != "" {
-		path, remove, e := createUploadTempPath(safeUploadFilename(firstNonEmpty(stringArg(args, "filename"), info.Name())))
+		root, e := preparedUploadRoot()
+		if e != nil {
+			return nil, e
+		}
+		path, remove, e := createUploadTempPathAt(root, safeUploadFilename(firstNonEmpty(stringArg(args, "filename"), info.Name())))
 		if e != nil {
 			return nil, e
 		}
@@ -163,4 +173,54 @@ func (s *session) takeUpload(args map[string]any) ([]string, map[string]any, fun
 		}
 	}
 	return files, meta, cleanup, err
+}
+
+// The production host may mount /tmp as tmpfs. Large files belong on private
+// disk cache, not RAM. Operators can pin a mounted volume with this environment
+// variable; it is not accepted from an untrusted tool argument.
+func preparedUploadRoot() (string, error) {
+	root := os.Getenv("APTEVA_UPLOAD_STAGING_DIR")
+	if root == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(cache, "apteva", "computer-uploads")
+	}
+	if !filepath.IsAbs(root) {
+		return "", errors.New("upload staging directory must be absolute")
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		return "", err
+	}
+	// Expired crash leftovers are only our own prepared-* directories. A live
+	// preparation expires in 15 minutes, so one-hour-old files cannot be reused.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	for i, entry := range entries {
+		if i >= 100 {
+			break
+		}
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "prepared-") {
+			continue
+		}
+		info, e := entry.Info()
+		if e == nil && time.Since(info.ModTime()) > time.Hour {
+			_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+		}
+	}
+	return root, nil
+}
+
+func createUploadTempPathAt(root, filename string) (string, func(), error) {
+	dir, err := os.MkdirTemp(root, "prepared-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	return filepath.Join(dir, filename), func() { _ = os.RemoveAll(dir) }, nil
 }
