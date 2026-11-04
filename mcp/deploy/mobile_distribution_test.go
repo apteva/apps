@@ -155,6 +155,103 @@ func TestIOSDistributionAddsExistingTesterToGroupIdempotently(t *testing.T) {
 	}
 }
 
+func iosDistributionDeployment(t *testing.T, ctx *sdk.AppCtx) *Deployment {
+	t.Helper()
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+		TargetConfigJSON: `{"app_store_app_id":"app-1","bundle_id":"com.example.ios"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	return effectiveDeploymentForEnvironment(d, env)
+}
+
+func TestIOSDistributionRefusedByAppleSavesNothing(t *testing.T) {
+	platform := &distributionPlatform{failTool: "add_beta_testers_to_beta_group", appleMembers: map[string]distributionAudienceMember{
+		"tester@example.com": {Kind: "individual", Email: "tester@example.com", State: "not-in-group", ExternalID: "tester-1"},
+	}}
+	ctx := withDistributionContext(t, platform)
+	d := iosDistributionDeployment(t, ctx)
+	app := &App{}
+	args := map[string]any{
+		"channel":  "internal",
+		"audience": []any{map[string]any{"kind": "individual", "email": "tester@example.com"}},
+	}
+	if _, err := app.updateMobileDistribution(d, args); err == nil {
+		t.Fatal("refused update returned no error")
+	}
+	// No row, so production releases don't treat the listing as configured.
+	cfg, _, err := app.mobileStoreConfig(d)
+	if err != nil || cfg != nil {
+		t.Fatalf("refused update saved a store config: cfg=%+v err=%v", cfg, err)
+	}
+
+	platform.failTool = ""
+	if _, err := app.updateMobileDistribution(d, args); err != nil {
+		t.Fatal(err)
+	}
+	_, doc, err := app.mobileStoreConfig(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := distributionAudienceFromStore(doc.Testing.Channels["internal"])
+	if len(saved) != 1 || saved[0].Email != "tester@example.com" {
+		t.Fatalf("accepted audience not saved: %+v", saved)
+	}
+}
+
+func TestIOSDistributionRefusedKeepsExistingAudienceAndRecordsFailure(t *testing.T) {
+	platform := &distributionPlatform{appleMembers: map[string]distributionAudienceMember{
+		"first@example.com":  {Kind: "individual", Email: "first@example.com", State: "not-in-group", ExternalID: "tester-1"},
+		"second@example.com": {Kind: "individual", Email: "second@example.com", State: "not-in-group", ExternalID: "tester-2"},
+	}}
+	ctx := withDistributionContext(t, platform)
+	d := iosDistributionDeployment(t, ctx)
+	app := &App{}
+	audience := func(email string) map[string]any {
+		return map[string]any{"channel": "internal", "audience": []any{map[string]any{"kind": "individual", "email": email}}}
+	}
+	if _, err := app.updateMobileDistribution(d, audience("first@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := app.mobileStoreConfig(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform.failTool = "add_beta_testers_to_beta_group"
+	if _, err := app.updateMobileDistribution(d, audience("second@example.com")); err == nil {
+		t.Fatal("refused update returned no error")
+	}
+	after, doc, err := app.mobileStoreConfig(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := distributionAudienceFromStore(doc.Testing.Channels["internal"])
+	if len(saved) != 1 || saved[0].Email != "first@example.com" {
+		t.Fatalf("refused update changed the saved audience: %+v", saved)
+	}
+	if after.DesiredHash != before.DesiredHash || after.Status != before.Status {
+		t.Fatalf("refused update changed the store config: before=%+v after=%+v", before, after)
+	}
+	var observed struct {
+		Testing struct {
+			Channels map[string]struct {
+				Access    string `json:"tester_access"`
+				LastError string `json:"last_error"`
+			} `json:"channels"`
+		} `json:"testing"`
+	}
+	if err := json.Unmarshal([]byte(after.ObservedJSON), &observed); err != nil {
+		t.Fatal(err)
+	}
+	if got := observed.Testing.Channels["internal"]; got.Access != "sync_error" || got.LastError == "" {
+		t.Fatalf("failure not recorded: %+v", got)
+	}
+}
+
 func TestAndroidDistributionReplacesGroupsAndVerifies(t *testing.T) {
 	platform := &distributionPlatform{playGroups: []string{"existing@example.com"}}
 	ctx := withDistributionContext(t, platform)
@@ -256,6 +353,9 @@ func TestAndroidDistributionCleansUpFailedEdit(t *testing.T) {
 	}
 	if countIntegrationCalls(platform.calls, "delete_edit") != 1 || countIntegrationCalls(platform.calls, "commit_edit") != 0 {
 		t.Fatalf("calls=%+v", platform.calls)
+	}
+	if cfg, _, err := (&App{}).mobileStoreConfig(d); err != nil || cfg != nil {
+		t.Fatalf("refused update saved a store config: cfg=%+v err=%v", cfg, err)
 	}
 }
 

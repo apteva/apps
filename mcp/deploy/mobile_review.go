@@ -432,6 +432,10 @@ func (a *App) toolReleaseSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	response := map[string]any{"release": fresh, "review_outcome": releaseReviewOutcome(fresh)}
+	var freshMeta mobileReleaseMeta
+	if json.Unmarshal([]byte(defaultStr(fresh.ReleaseMetaJSON, "{}")), &freshMeta) == nil && freshMeta.TesterWarning != "" {
+		response["tester_warning"] = freshMeta.TesterWarning
+	}
 	base, deploymentErr := dbGetDeploymentByID(ctx.AppDB(), rel.DeploymentID)
 	if deploymentErr != nil {
 		response["store_sync_error"] = deploymentErr.Error()

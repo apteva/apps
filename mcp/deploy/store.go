@@ -825,9 +825,33 @@ func dbCreateReleaseForEnv(db *sql.DB, deploymentID, environmentID, buildID int6
 }
 
 func dbUpdateRelease(db *sql.DB, id int64, fields map[string]any) error {
-	if len(fields) == 0 {
+	cols, args := releaseUpdateColumns(fields)
+	if len(cols) == 0 {
 		return nil
 	}
+	args = append(args, id)
+	_, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
+	return err
+}
+
+// dbUpdateReleaseIfStatus applies fields only while the release still has the
+// status the caller read, so the result of a slow provider call cannot undo a
+// change made in the meantime. It reports whether the release was updated.
+func dbUpdateReleaseIfStatus(db *sql.DB, id int64, status string, fields map[string]any) (bool, error) {
+	cols, args := releaseUpdateColumns(fields)
+	if len(cols) == 0 {
+		return false, nil
+	}
+	args = append(args, id, status)
+	res, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ? AND status = ?`, args...)
+	if err != nil {
+		return false, err
+	}
+	updated, err := res.RowsAffected()
+	return updated > 0, err
+}
+
+func releaseUpdateColumns(fields map[string]any) ([]string, []any) {
 	cols := []string{}
 	args := []any{}
 	for _, k := range []string{"status", "port", "pid", "started_at", "stopped_at", "restart_count", "last_health_at", "log_path", "error", "channel", "provider", "external_id", "external_status", "release_meta_json"} {
@@ -836,12 +860,7 @@ func dbUpdateRelease(db *sql.DB, id int64, fields map[string]any) error {
 			args = append(args, v)
 		}
 	}
-	if len(cols) == 0 {
-		return nil
-	}
-	args = append(args, id)
-	_, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
-	return err
+	return cols, args
 }
 
 func dbGetRelease(db *sql.DB, id int64) (*Release, error) {

@@ -85,6 +85,7 @@ type mobileReleaseMeta struct {
 	SubmitForReview     bool                                  `json:"submit_for_review,omitempty"`
 	TesterAccess        string                                `json:"tester_access,omitempty"`
 	TesterCount         int                                   `json:"tester_count,omitempty"`
+	TesterWarning       string                                `json:"tester_warning,omitempty"`
 	TesterGroups        []string                              `json:"tester_groups,omitempty"`
 	InstallURL          string                                `json:"install_url,omitempty"`
 	TesterSyncedAt      string                                `json:"tester_synced_at,omitempty"`
@@ -946,9 +947,10 @@ func iosBuildHasBetaGroup(bound *sdk.BoundIntegration, buildID, groupID string) 
 
 func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
 	meta.BetaGroupID = groupID
-	if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+	updated, err := dbUpdateReleaseIfStatus(globalCtx.AppDB(), rel.ID, rel.Status, map[string]any{
 		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta), "error": "",
-	}); err != nil {
+	})
+	if err != nil || !updated {
 		return err
 	}
 	return dbReconcileFinishedMobileWorkflows(globalCtx.AppDB(), rel.ID)
