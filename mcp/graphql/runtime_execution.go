@@ -35,6 +35,9 @@ type runtimeMetrics struct {
 	Consistency     string                    `json:"consistency"`
 	ResolverTimings map[string]resolverMetric `json:"resolver_timings,omitempty"`
 	Sources         []any                     `json:"sources,omitempty"`
+	// Pipelines holds up to maxPipelineTraces database pipeline traces.
+	Pipelines        []pipelineTrace `json:"pipelines,omitempty"`
+	PipelinesOmitted int             `json:"pipelines_omitted,omitempty"`
 }
 type admissionLane struct {
 	running, queued int

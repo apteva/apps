@@ -1352,9 +1352,12 @@ type databasePipelineRun struct {
 	params  map[string]any
 	scope   map[string][]string
 	pages   map[string]map[string]any // paged find steps: hasMore, nextCursor
+	trace   *pipelineTraceRecorder
 }
 
-func (a *App) callDatabasePipeline(ctx context.Context, config map[string]any) (any, error) {
+func (a *App) callDatabasePipeline(ctx context.Context, config map[string]any) (value any, err error) {
+	trace := startPipelineTrace(ctx)
+	defer func() { trace.finish(err) }()
 	plan, err := validateDatabasePipeline(config)
 	if err != nil {
 		return nil, err
@@ -1367,7 +1370,7 @@ func (a *App) callDatabasePipeline(ctx context.Context, config map[string]any) (
 		return nil, err
 	}
 	project, _ := config["_project_id"].(string)
-	run := &databasePipelineRun{app: a, plan: plan, project: project, scope: map[string][]string{}}
+	run := &databasePipelineRun{app: a, plan: plan, project: project, scope: map[string][]string{}, trace: trace}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(plan.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	if run.params, err = plan.bindParams(ctx, resolverArgs(config), config["parent"]); err != nil {
@@ -1597,7 +1600,8 @@ func filterMatchesNothing(raw any) bool {
 // batch sends one read batch. Finds and counts whose filter matches nothing
 // are answered locally with Database's empty shapes; aggregates are always
 // sent so their summary-row semantics stay Database's.
-func (run *databasePipelineRun) batch(ctx context.Context, operations []any) ([]any, error) {
+func (run *databasePipelineRun) batch(ctx context.Context, stage string, operations []any) ([]any, error) {
+	run.trace.beginBatch(stage, run.plan.Steps, operations)
 	results := make([]any, len(operations))
 	sent := []any{}
 	positions := []int{}
@@ -1608,9 +1612,11 @@ func (run *databasePipelineRun) batch(ctx context.Context, operations []any) ([]
 			switch op["op"] {
 			case "find":
 				results[i] = map[string]any{"records": []any{}, "hasMore": false}
+				run.trace.answeredLocally(i)
 				continue
 			case "count":
 				results[i] = map[string]any{"count": "0"}
+				run.trace.answeredLocally(i)
 				continue
 			}
 		}
@@ -1618,19 +1624,41 @@ func (run *databasePipelineRun) batch(ctx context.Context, operations []any) ([]
 		positions = append(positions, i)
 	}
 	if len(sent) == 0 {
+		run.trace.endBatch(results, nil)
 		return results, nil
 	}
 	answered, err := run.send(ctx, sent)
 	if err != nil {
+		run.trace.endBatch(nil, nil)
 		return nil, err
 	}
+	taken := takeDatabaseStatistics(answered)
+	statistics := make([]map[string]any, len(operations))
 	for j, i := range positions {
 		results[i] = answered[j]
+		if taken != nil {
+			statistics[i] = taken[j]
+		}
 	}
+	run.trace.endBatch(results, statistics)
 	return results, nil
 }
 
+// send makes one logical request. A Database that doesn't know the statistics
+// option refuses the batch while decoding it, before any read has run, and gets
+// the same batch again without the option.
 func (run *databasePipelineRun) send(ctx context.Context, operations []any) ([]any, error) {
+	run.trace.noteStatistics(operations)
+	results, err := run.sendOnce(ctx, operations)
+	if databaseRefusedStatistics(err) && operationsRequestStatistics(operations) {
+		run.app.rememberStatisticsRefused(run.project)
+		run.trace.statisticsRefused()
+		return run.sendOnce(ctx, withoutStatistics(operations))
+	}
+	return results, err
+}
+
+func (run *databasePipelineRun) sendOnce(ctx context.Context, operations []any) ([]any, error) {
 	input := map[string]any{
 		"database":    run.plan.Database,
 		"scope":       run.plan.Scope,
@@ -1647,10 +1675,10 @@ func (run *databasePipelineRun) send(ctx context.Context, operations []any) ([]a
 		}
 		input["timeoutMs"] = remaining
 	}
-	var out struct {
-		Results []any `json:"results"`
-	}
-	err := sdk.CallAppResultContext(ctx, run.app.ctx.WithProject(run.project).PlatformAPI(), "database", "db_batch", input, &out)
+	callCtx, wire := run.trace.attachWire(ctx)
+	out := databaseBatchResponse{wire: wire}
+	err := sdk.CallAppResultContext(callCtx, run.app.ctx.WithProject(run.project).PlatformAPI(), "database", "db_batch", input, &out)
+	wire.returned()
 	if err != nil {
 		return nil, databasePipelineError(ctx, err)
 	}
@@ -1892,7 +1920,7 @@ func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []
 		operations = append(operations, map[string]any{"op": "find", "args": args})
 	}
 	if len(operations) > 0 {
-		results, err := run.batch(ctx, operations)
+		results, err := run.batch(ctx, pipelineStageAccess, operations)
 		if err != nil {
 			return err
 		}
@@ -1984,6 +2012,7 @@ func asAnyList(value any) []any {
 
 func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, error) {
 	operations := make([]any, len(run.plan.Steps))
+	statistics := run.app.wantsDatabaseStatistics(run.project)
 	for i, step := range run.plan.Steps {
 		args := make(map[string]any, len(step.Args)+1)
 		for key, value := range step.Args {
@@ -2037,9 +2066,12 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 				args["cursor"] = cursor
 			}
 		}
+		if step.Op == "count" && statistics {
+			args["diagnostics"] = true
+		}
 		operations[i] = map[string]any{"op": step.Op, "args": args}
 	}
-	results, err := run.batch(ctx, operations)
+	results, err := run.batch(ctx, pipelineStageBatch, operations)
 	if err != nil {
 		return nil, err
 	}

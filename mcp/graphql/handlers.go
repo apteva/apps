@@ -166,7 +166,9 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if len(result.Extensions) > 0 {
 		response["extensions"] = result.Extensions
 	}
+	serialiseStarted := time.Now()
 	encoded, _ := json.Marshal(response)
+	serialise := time.Since(serialiseStarted)
 	limits := defaultReleaseLimits()
 	if release, _ := a.cachedActiveRelease(project, api.Slug, environment); release != nil {
 		limits = release.Limits
@@ -175,7 +177,9 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusRequestEntityTooLarge
 		result.Errors = []map[string]any{{"message": "response exceeds configured size limit", "extensions": map[string]any{"code": "response_size_exceeded"}}}
 		response = map[string]any{"errors": result.Errors}
+		serialiseStarted = time.Now()
 		encoded, _ = json.Marshal(response)
+		serialise += time.Since(serialiseStarted)
 	}
 	if identity := securityIdentity(r.Context()); identity != nil && identity.RequestID != "" {
 		w.Header().Set("X-Request-ID", identity.RequestID)
@@ -190,9 +194,12 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	telemetry.phases["execute"] = milliseconds(result.Timings.Execute)
 	telemetry.phases["queue"] = result.Runtime.QueueMS
 	telemetry.phases["snapshot"] = result.Runtime.SnapshotMS
+	telemetry.phases["serialise"] = milliseconds(serialise)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	writeStarted := time.Now()
 	_, _ = w.Write(append(encoded, '\n'))
+	telemetry.phases["write"] = milliseconds(time.Since(writeStarted))
 }
 
 func milliseconds(duration time.Duration) float64 {

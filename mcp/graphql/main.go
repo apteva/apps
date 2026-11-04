@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	gql "github.com/graphql-go/graphql"
@@ -23,6 +24,8 @@ type App struct {
 	hub              *subscriptionHub
 	ctx              *sdk.AppCtx
 	cacheMu          sync.RWMutex
+	statsMu          sync.Mutex
+	statsRefused     map[string]time.Time
 	cacheGeneration  map[string]uint64
 	apiCache         map[string]*graphqlAPI
 	securityCache    map[string]securityPolicy

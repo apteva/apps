@@ -24,6 +24,7 @@ type standardRequest struct {
 	policy             securityPolicy
 	reads              requestReads
 	metrics            runtimeMetrics
+	pipelineTraces     []*pipelineTraceRecorder
 	metadata           map[string]any
 	metadataBytes      int
 	loader             *resolverLoader
@@ -106,6 +107,9 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 		out.Errors = append(out.Errors, map[string]any{"message": "upstream snapshot cleanup failed", "extensions": map[string]any{"code": "snapshot_cleanup_failed"}})
 	}
 	state.timingMu.Lock()
+	for _, trace := range state.pipelineTraces {
+		state.metrics.Pipelines = append(state.metrics.Pipelines, trace.snapshot())
+	}
 	metricsJSON, _ := json.Marshal(state.metrics)
 	_ = json.Unmarshal(metricsJSON, &out.Runtime)
 	out.Runtime.Consistency = "none"
@@ -451,7 +455,7 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		case "tables":
 			value, err = a.callTables(p.Context, r.Operation, config)
 		case "database":
-			value, err = a.callDatabase(p.Context, r.Operation, config)
+			value, err = a.callDatabase(withPipelineField(p.Context, p), r.Operation, config)
 		case "function":
 			value, err = a.callFunction(p.Context, config, p.Args)
 		case "http":

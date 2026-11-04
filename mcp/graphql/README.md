@@ -850,6 +850,68 @@ with one batch. Batch cost equals the sum of its steps: there, a chained lookup
 (about 410 ms) and an unindexed latest-5 sort (about 78 ms) dominated; the
 other steps took 1 to 17 ms each.
 
+#### Measuring a pipeline
+
+Each pipeline call leaves a trace on its request log, in `runtime.pipelines`
+(`graphql_logs`, `/admin/logs`, or `runtime_metrics_json` by `request_id`). The
+trace is for operators: it never appears in a response or in `Server-Timing`.
+It only observes, so filters, totals, cursors and subscriptions behave the same
+with or without it.
+
+```json
+{"field": "Query.calls", "outcome": "ok", "total_ms": 7.4, "filter_hash": "7fc948d66fa5cf1b",
+ "access": {"ms": 3.2, "batches": 3, "reads": 6, "wire": {"server_wait_ms": 2.6}},
+ "resolution_ms": 0.4,
+ "database_batch": {
+   "wall_ms": 3.7,
+   "wire": {"prepare_ms": 0.07, "connection_wait_ms": 0, "request_write_ms": 0.02,
+            "server_wait_ms": 3.55, "response_read_ms": 0.07, "decode_ms": 0.02, "response_bytes": 1055},
+   "database_reported_ms": 1.46, "unattributed_server_wait_ms": 2.09, "statistics": "reported",
+   "operations": [
+     {"step": "rows", "op": "find", "filter_hash": "7fc948d66fa5cf1b", "rows": 2, "has_more": true},
+     {"step": "total", "op": "count", "count_of": "rows", "filter_hash": "7fc948d66fa5cf1b", "count": "6",
+      "execution_ms": 1.46, "statistics": {"strategy": "documents", "documentFetches": 12, "exists": {"probes": 52}}}]},
+ "assemble_ms": 0.04}
+```
+
+| Field | Covers |
+| --- | --- |
+| `access` | Every access read batch: wall time, batches, reads |
+| `resolution_ms` | Validation, params, permission checks, derived values, conditions and filter binding |
+| `database_batch.wall_ms` | The batch holding the page and its count, including any resend |
+| `wire.server_wait_ms` | Request written to first response byte: the gateway and Database together |
+| other `wire` fields | This process: the SDK encoding the request, getting a connection, reading and decoding the response |
+| `execution_ms`, `statistics` | What Database reported for a count, kept beside that count's `filter_hash` |
+| `assemble_ms` | Decoding the steps and building the resolver's result |
+| log `timings.serialise`, `timings.write` | Encoding the GraphQL response and writing it to the client |
+
+- **`filter_hash`** is a truncated SHA-256 of the resolved filter as sent, scope
+  values included. A page and its `count_of` must carry the same hash. Requests
+  with the same hash asked Database the same question, and a permission change
+  shows up as a new hash.
+- **`count_of` stays one operation.** The trace adds `diagnostics: true` to count
+  steps only, so the count is still one logical request in the page's batch and
+  snapshot. Index ranges Database expands it into stay inside that request.
+- **`outcome`** is `ok`, `error` or `in_flight`, and `stage` says where a call
+  stopped (`access`, `resolution`, `database_batch`, `assemble`). `in_flight`
+  means the execution deadline passed while the call was still running: the
+  stage it was stuck in keeps counting until the log entry is taken.
+- **`statistics`** is `reported`, `unavailable` (this Database refuses the option),
+  `missing` (asked, but nothing came back, as on a failed batch), `requested`
+  (still running) or `not_requested` (nothing was counted in Database). A
+  Database that refuses the option rejects the batch while decoding it, before
+  any read runs, so the same batch is resent once without it
+  (`retried_without_statistics`). That project isn't asked again for 5 minutes.
+
+What the trace can't separate yet: Database reports execution time for counts
+only. It reports nothing for a `find`, and nothing for a batch's queue or
+snapshot. So `unattributed_server_wait_ms` holds the gateway, those Database
+stages and the page's execution together, and it isn't a measure of the gateway
+alone. `database_reported_ms` is the longest reported read rather than a sum,
+because reads in a batch can overlap. Each request keeps up to 32 traces, each
+up to 16 operations (`pipelines_omitted`, `operations_omitted` count the rest),
+and statistics keep only numbers, booleans and short names.
+
 ## Execution performance
 
 Independent root query fields execute concurrently (up to eight); mutation
