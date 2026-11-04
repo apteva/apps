@@ -579,3 +579,25 @@ the first attempt in 29 iterations (134 s). The coordinator's self-rating was
 refused, both requests reached the reviewer, and the reviewer saved both ratings,
 resolved both review items and read quality last. Report:
 `/private/tmp/processes-run-ratings-tier3/run-ZxsrTi`.
+
+## Worker provider
+
+```sh
+APTEVA_TEST_PROVIDER=openai-codex APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/19-worker-provider.yaml
+```
+
+Needs `OPENCODE_GO_API_KEY`, a CLI with `--extra-provider`, and Server and Core
+builds with thread provider selection, through `APTEVA_TEST_CLI`,
+`APTEVA_SERVER_BIN` and `APTEVA_CORE_BIN`. It only runs when named. The agent
+defaults to `openai-codex` and `opencode-go` joins its pool. One procedure has three
+assignments: `provider` on the whole process, nothing set, and `step_providers` on
+one step. The verifier reads the provider of each worker thread from Core's
+`llm.start` telemetry, and requires pinned workers on `opencode-go` only and every
+other thread, the coordinator included, on `openai-codex` only. A mixed `per_executor`
+assignment must be refused. A Core fallback after a failed request fails this test.
+The runner sets `kimi-k3` on the `opencode-go` connection, because Server otherwise
+gives every tier the first model upstream lists, which may be unavailable.
+
+Live run on 2026-11-04, with Server `f4d517c` and Core `c64942a` from their provider
+branches: 32 iterations, 820,001 tokens, 112 s. Reported cost is $0.0000, which
+reflects provider telemetry, not billing.

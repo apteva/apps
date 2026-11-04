@@ -77,6 +77,29 @@ procedure instructions and obtain required approvals before external actions.
 Never place credentials in procedures, parameters, or run inputs; use
 authorized connection references instead.
 
+## Worker provider
+
+By default a worker runs on its agent's own default provider, so set nothing
+unless a run needs another one. Provider belongs to the assignment, so one
+procedure can run differently per assignment:
+
+- `provider`: every worker in this assignment's runs.
+- `step_providers`: `{step_key: provider}`, overriding `provider` for those steps.
+
+Each step uses `step_providers`, then `provider`, then the agent's default. The
+choice is frozen in each run, and only agent steps in procedures with structured
+steps can have one. It selects a provider, not a model: Core picks the model from
+that provider's settings. It's a preference, not a guarantee: if a request fails,
+Core may retry that call on another provider, so don't rely on it for compliance.
+
+A worker can't change provider. With `worker_continuity` `auto`, steps with
+different providers get separate workers and don't share context. `per_executor`
+refuses different providers for one agent. If the agent doesn't have the provider,
+the step stays undelivered with a `delivery_warning` and keeps retrying with that
+provider, never without it; connect the provider and it starts. A step's `provider`
+field reports `pin`, `active` and `missing`: `missing` means the provider was
+removed and the worker uses the agent's default until it returns.
+
 ## Worker thread continuity
 
 Set assignment `worker_continuity` to `per_executor` to retain one worker thread

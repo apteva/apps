@@ -15,9 +15,15 @@ type directPlatform struct {
 	fakeTasks
 	events []sdk.AgentEventRequest
 	lose   bool
+	// spawnErr refuses new workers; missing reports a pinned provider as gone.
+	spawnErr error
+	missing  bool
 }
 
 func (f *directPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
+	if f.spawnErr != nil {
+		return nil, f.spawnErr
+	}
 	f.threads = append(f.threads, req)
 	for _, event := range req.Events {
 		f.events = append(f.events, sdk.AgentEventRequest{AgentID: req.AgentID, ThreadID: req.ThreadID, SourceEventID: event.ID, Message: event.Message})
@@ -30,7 +36,14 @@ func (f *directPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpa
 	for _, event := range req.Events {
 		accepted = append(accepted, event.ID)
 	}
-	return &sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, Events: sdk.ThreadEventReceipt{Accepted: accepted}}, nil
+	result := &sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, Events: sdk.ThreadEventReceipt{Accepted: accepted}}
+	if req.Provider != "" {
+		result.Provider = &sdk.ThreadProviderStatus{Pin: req.Provider, Active: req.Provider, Missing: f.missing}
+		if f.missing {
+			result.Provider.Active = "openai-codex"
+		}
+	}
+	return result, nil
 }
 
 func (f *directPlatform) SendTrackedAgentEvent(r sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {

@@ -113,7 +113,7 @@ func TestLegacyProvisionedWorkerRepairsScopesBeforeNextStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A retry of an acknowledged spawn repairs its old capability ceiling.
-	if err := a.ensureProcessThread(p.ProjectID, s.DeliveryEventID, request); err != nil {
+	if err := a.ensureProcessThread(p.ProjectID, s.RunID, s.DeliveryEventID, request); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.profiles) != 1 || f.profiles[0].MCP != nil || len(f.threads) != 1 {

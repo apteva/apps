@@ -1,0 +1,52 @@
+name: processes-worker-provider
+description: One procedure, three assignments. A whole-process pin and a single-step pin run those workers on a provider other than the agent's default; the assignment with neither stays on the default.
+timeout: 14m
+settle_for: 30s
+max_iterations: 120
+setup:
+  mode: autonomous
+  app: {path: ./, spawnable: true}
+directive: |
+  Test Processes worker providers in this isolated project. Your agent ID is
+  ${APTEVA_TEST_AGENT_ID}. Use only Processes and Core tools. No external actions;
+  receipts are simulated.
+  Create exactly ONE procedure named Provider digest with no parameters and TWO
+  required steps in order, both role executor:
+  - draft, name Draft, depends_on [], instructions: Complete with output exactly
+    DIGEST-DRAFT. Expected output: DIGEST-DRAFT.
+  - check, name Check, depends_on [draft], instructions: Complete with output exactly
+    DIGEST-OK. Expected output: DIGEST-OK.
+  Shared instructions: Follow the Processes execution contract. Completion criteria:
+  both steps complete with their exact receipts.
+  Create exactly these THREE assignments, each owned by yourself with
+  follow_latest=true and no schedule, using these exact settings and no others:
+  - name Whole process: worker_continuity=isolated, provider=opencode-go.
+  - name Agent default: worker_continuity=isolated. Do not set provider or step_providers.
+  - name One step: worker_continuity=auto, step_providers={check: opencode-go}. Do not set provider.
+  Then try ONCE to create a fourth assignment named Refused with
+  worker_continuity=per_executor and step_providers={check: opencode-go}. Processes
+  must refuse it because one worker can't change provider; do not retry or adjust it.
+  Activate the process and the three assignments. You are authorized to execute this
+  isolated test. Start exactly THREE runs without waiting between starts, one for each
+  assignment, with idempotency_key pin-whole for Whole process, stay-default for Agent
+  default, and pin-step for One step.
+  Processes provisions workers; main must not claim or execute steps, spawn or kill
+  threads, or cancel runs. Do not poll; wait with pace(clear_wake=true) until the
+  session ends. Do not start more runs or edit the procedure.
+assert:
+  # Six steps in three runs: holds the session open until every worker has finished.
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: completed}
+      min_count: 6
+      success: true
+  - tool_called_with:
+      tool: processes_assignment_create
+      count: 1
+      success: false
+      result_contains: per_executor
+  - tool_not_called: kill
+  - tool_not_called: processes_run_cancel
+budget:
+  total_tokens: 4000000
+  cost_usd: 7.50

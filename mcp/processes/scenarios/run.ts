@@ -3,6 +3,7 @@ import { COMPACT_HANDOFFS, verifyCompactHandoffs } from "./compact-handoffs";
 import { PROCESS_PATCH, verifyProcessPatch } from "./process-patch";
 import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
 import { RUN_RATINGS, verifyRunRatings } from "./run-ratings";
+import { PINNED_MODEL, PINNED_PROVIDER, WORKER_PROVIDER, verifyWorkerProvider } from "./worker-provider";
 import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
 import { AI_PARALLEL, PARALLEL_APPROVAL, verifyAIParallel } from "./ai-parallel-steps";
@@ -50,7 +51,8 @@ await mkdir(scenarioDir);
 const files = process.argv[2]
   ? [resolve(appDir, process.argv[2])]
   : (await readdir(import.meta.dir))
-      .filter((f) => f.endsWith(".yaml"))
+      // Needs a second provider and a CLI with --extra-provider, so it runs by name.
+      .filter((f) => f.endsWith(".yaml") && !f.startsWith("19-"))
       .sort()
       .map((f) => resolve(import.meta.dir, f));
 const databases = new Map<string, string>();
@@ -123,6 +125,7 @@ const child = Bun.spawn(
     MODEL,
     "--max-budget-usd",
     "7.50",
+    ...(process.argv[2]?.includes("19-worker-provider") ? ["--extra-provider", `${PINNED_PROVIDER}=${PINNED_MODEL}`] : []),
     "--app-dir",
     appDir,
     "--artifacts-dir",
@@ -300,6 +303,18 @@ for (const scenario of report.results) {
       verifyRunMemory(scenario.tool_calls,runs,summaries,entries,memoryConfirmed as ConfirmationReport[]);
       observed[scenario.scenario]=evidence;
       console.log(`PASS ${scenario.scenario}: two worker runs recovered checkpoint/ledger, distinct exact receipts, bounded reads and HTTP approval (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
+    if (scenario.scenario === WORKER_PROVIDER) {
+      check(PROVIDER === "openai-codex" && scenario.observed_models?.includes(MODEL), "Provider tier 3 must default to OpenAI Codex and observe the selected model");
+      check(scenario.observed_models?.includes(PINNED_MODEL), `Pinned workers never ran ${PINNED_MODEL}`);
+      const rows = db.query("SELECT * FROM process_worker_providers ORDER BY thread_id").all() as any[];
+      const envelopes = db.query("SELECT event_id,spawn_json,spawned FROM process_delivery_envelopes WHERE spawn_json<>''").all() as any[];
+      const evidence = {...history, rows, envelopes, thread_providers: scenario.observed_thread_providers, observed_models: scenario.observed_models};
+      await Bun.write(resolve(outputDir, "provider-evidence.json"), JSON.stringify(evidence, null, 2));
+      verifyWorkerProvider(runs, rows, envelopes, scenario.observed_thread_providers || {}, scenario.tool_calls);
+      observed[scenario.scenario] = evidence;
+      console.log(`PASS ${scenario.scenario}: Core telemetry shows each worker on its assignment's provider (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     if (scenario.scenario === RUN_RATINGS) {

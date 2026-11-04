@@ -22,6 +22,8 @@ type AssignmentConfig struct {
 	ParallelExecution string              `json:"parallel_execution,omitempty"` // sequential (default), auto
 	MaxParallelSteps  int                 `json:"max_parallel_steps,omitempty"` // default 4, maximum 8
 	WorkerContinuity  string              `json:"worker_continuity,omitempty"`  // auto, per_executor, isolated
+	Provider          string              `json:"provider,omitempty"`           // empty: workers follow their agent
+	StepProviders     map[string]string   `json:"step_providers,omitempty"`     // step key to provider, overrides Provider
 	Roles             map[string]Executor `json:"roles,omitempty"`
 	FollowLatest      bool                `json:"follow_latest"`
 	Name              string              `json:"name"`
@@ -244,6 +246,9 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 		return nil, errors.New("owner is outside this project")
 	}
 	if e = a.validateRoles(project, d, c); e != nil {
+		return nil, e
+	}
+	if e = validateWorkerProviders(d, c); e != nil {
 		return nil, e
 	}
 	c.Parameters, e = validateParameters(d.Parameters, c.Parameters, false)

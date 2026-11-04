@@ -16,6 +16,7 @@ func sequentialAgent(r Run, all []StepRun) int64 {
 	}
 	var agent int64
 	previous := ""
+	provider := ""
 	count := 0
 	for _, s := range all {
 		if s.Origin != "process_step" {
@@ -36,6 +37,11 @@ func sequentialAgent(r Run, all []StepRun) int64 {
 		if agent != 0 && agent != s.Executor.AgentID {
 			return 0
 		}
+		// A thread can't change provider, so differing steps need their own worker.
+		if count > 0 && provider != r.Binding.stepProvider(s.Key) {
+			return 0
+		}
+		provider = r.Binding.stepProvider(s.Key)
 		agent = s.Executor.AgentID
 		count++
 	}

@@ -3,6 +3,71 @@ import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import parameterStyles from "./parameter-editor.css" with { type: "text" };
 import { RolesEditor, type Step, type Executor } from "./Workflow";
+// The names Core accepts; the platform can't yet list what one agent has.
+const PROVIDERS = ["anthropic", "fireworks", "google", "grok-build", "managed", "nvidia", "ollama", "openai", "openai-codex", "opencode-go", "venice", "xai"];
+export function WorkerProviders({
+  steps,
+  roles,
+  continuity,
+  provider,
+  stepProviders,
+  onChange,
+}: {
+  steps: Step[];
+  roles: Record<string, Executor>;
+  continuity: string;
+  provider: string;
+  stepProviders: Record<string, string>;
+  onChange: (provider: string, stepProviders: Record<string, string>) => void;
+}) {
+  if (!steps.length) return null;
+  const options = (empty: string) => (
+    <>
+      <option value="">{empty}</option>
+      {PROVIDERS.map((name) => <option key={name} value={name}>{name}</option>)}
+    </>
+  );
+  const agentSteps = steps.filter((s) => roles[s.role]?.kind !== "human");
+  return (
+    <div className="field">
+      <label htmlFor="assignment-provider">Worker provider</label>
+      <select id="assignment-provider" value={provider} onChange={(e) => onChange(e.target.value, stepProviders)}>
+        {options("Agent default")}
+      </select>
+      <p className="small muted">
+        Agent default uses whatever each agent normally runs on. The agent must have the provider you pick,
+        or the step waits until it does. The model comes from that provider's settings.
+        This choice applies to new runs; running work keeps its original setting.
+      </p>
+      {agentSteps.length > 1 && (
+        <details open={Object.keys(stepProviders).length > 0}>
+          <summary>Set a provider for specific steps</summary>
+          {agentSteps.map((s) => (
+            <div className="field" key={s.key}>
+              <label htmlFor={`step-provider-${s.key}`}>{s.name || s.key}</label>
+              <select
+                id={`step-provider-${s.key}`}
+                value={stepProviders[s.key] || ""}
+                onChange={(e) => {
+                  const next = { ...stepProviders };
+                  if (e.target.value) next[s.key] = e.target.value;
+                  else delete next[s.key];
+                  onChange(provider, next);
+                }}
+              >
+                {options(provider ? `Same as above (${provider})` : "Agent default")}
+              </select>
+            </div>
+          ))}
+          <p className="small muted">
+            A worker can't change provider, so steps with different providers get separate workers and don't share context.
+            {continuity === "per_executor" && " \"Reuse one worker per agent\" can't do that, so saving refuses different providers for one agent."}
+          </p>
+        </details>
+      )}
+    </div>
+  );
+}
 export type Parameter = {
   key: string;
   label?: string;
@@ -20,6 +85,8 @@ export type Schedule = {
 export type Assignment = {
   control_mode?: "automatic" | "step_by_step";
   worker_continuity?: "auto" | "per_executor" | "isolated";
+  provider?: string;
+  step_providers?: Record<string, string>;
   roles?: Record<string, Executor>;
   id: string;
   process_id: string;
@@ -451,6 +518,14 @@ export default function Assignments({
                   This choice applies to new runs; running work keeps its original setting.
                 </p>
               </div>
+              <WorkerProviders
+                steps={workflow}
+                roles={draft.roles || {}}
+                continuity={draft.worker_continuity || "auto"}
+                provider={draft.provider || ""}
+                stepProviders={draft.step_providers || {}}
+                onChange={(provider, step_providers) => set({ provider, step_providers })}
+              />
               <RolesEditor
                 steps={workflow}
                 roles={draft.roles || {}}

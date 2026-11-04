@@ -580,3 +580,46 @@ test("assignment offers step-by-step run and freezes the selected mode in start"
   expect(payload.control_mode).toBe("step_by_step");
   expect(payload.assignment_id).toBe(assignment.id);
 });
+
+test("assignment provider controls default to the agent and send only what was chosen", async () => {
+  const { WorkerProviders } = await import("./Assignments");
+  const changes: any[] = [];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const steps = [
+    { key: "draft", name: "Draft", role: "writer" },
+    { key: "check", name: "Check", role: "writer" },
+    { key: "approve", name: "Approve", role: "operator" },
+  ] as any[];
+  const view = createRoot(container as unknown as Element);
+  await act(async () =>
+    view.render(
+      <WorkerProviders steps={steps} roles={{ operator: { kind: "human" } } as any} continuity="auto" provider="" stepProviders={{}} onChange={(p, s) => changes.push([p, s])} />,
+    ),
+  );
+  const whole = container.querySelector<HTMLSelectElement>("#assignment-provider")!;
+  expect(whole.value).toBe("");
+  expect(whole.options[0].textContent).toBe("Agent default");
+  expect(container.querySelector("#step-provider-approve")).toBeNull();
+  const change = async (el: HTMLSelectElement, value: string) => {
+    await act(async () => {
+      el.value = value;
+      el.dispatchEvent(new window.Event("change", { bubbles: true }) as unknown as Event);
+    });
+  };
+  await change(whole, "opencode-go");
+  expect(changes.at(-1)).toEqual(["opencode-go", {}]);
+  await change(container.querySelector<HTMLSelectElement>("#step-provider-check")!, "anthropic");
+  expect(changes.at(-1)).toEqual(["", { check: "anthropic" }]);
+  await act(async () =>
+    view.render(
+      <WorkerProviders steps={steps} roles={{}} continuity="per_executor" provider="anthropic" stepProviders={{ check: "openai" }} onChange={(p, s) => changes.push([p, s])} />,
+    ),
+  );
+  expect(container.textContent).toContain("Same as above (anthropic)");
+  expect(container.textContent).toContain("can't do that");
+  await change(container.querySelector<HTMLSelectElement>("#step-provider-check")!, "");
+  expect(changes.at(-1)).toEqual(["anthropic", {}]);
+  await act(async () => view.unmount());
+  container.remove();
+});

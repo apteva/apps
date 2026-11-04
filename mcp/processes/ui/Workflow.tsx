@@ -35,6 +35,7 @@ export type StepRun = {
   delivery_suspended?: boolean;
   target_thread_id?: string;
   execution_id?: string;
+  provider?: { pin?: string; active?: string; missing?: boolean };
 };
 const examples: Step[] = [
   {
@@ -249,6 +250,12 @@ export function RunSteps({
         <progress aria-label="Step progress" max={100} value={s.progress} />
       </div>}
       <TimingDetails step={s} />
+      {s.provider?.pin && <p className="small muted">Worker provider: {s.provider.pin}</p>}
+      {s.provider?.missing && (
+        <div className="notice">
+          {s.provider.pin} is no longer available to this agent, so this worker is using {s.provider.active || "the agent's default"} until it returns.
+        </div>
+      )}
       {s.delivery_warning && (
         <div className="notice">
           {s.delivery_suspended

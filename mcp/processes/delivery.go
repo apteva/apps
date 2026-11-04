@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -52,7 +53,7 @@ func (a *App) immutableDelivery(project string, candidate sdk.AgentEventRequest)
 // Provisioning can also lose its acknowledgement. Retry the identical spawn
 // request, using the same worker id; never confuse a planned worker with a
 // confirmed worker or create another session after an ambiguous response.
-func (a *App) ensureProcessThread(project, eventID string, candidate sdk.ThreadSpawnRequest) error {
+func (a *App) ensureProcessThread(project, run, eventID string, candidate sdk.ThreadSpawnRequest) error {
 	var raw string
 	var spawned bool
 	if err := a.db.QueryRow(`SELECT spawn_json,spawned FROM process_delivery_envelopes WHERE event_id=? AND project_id=?`, eventID, project).Scan(&raw, &spawned); err != nil {
@@ -75,11 +76,17 @@ func (a *App) ensureProcessThread(project, eventID string, candidate sdk.ThreadS
 	if err := json.Unmarshal([]byte(raw), &request); err != nil {
 		return err
 	}
-	if err := a.spawnProcessThread(project, request); err != nil {
+	provider, err := a.spawnProcessThread(project, request)
+	if err != nil {
+		if request.Provider != "" && errors.Is(err, sdk.ErrThreadProviderUnavailable) {
+			return fmt.Errorf("worker can't start on provider %s, so this step is waiting for it: %w", request.Provider, err)
+		}
 		return err
 	}
-	_, err := a.db.Exec(`UPDATE process_delivery_envelopes SET spawned=1 WHERE event_id=? AND spawned=0`, eventID)
-	if err != nil {
+	if _, err = a.db.Exec(`UPDATE process_delivery_envelopes SET spawned=1 WHERE event_id=? AND spawned=0`, eventID); err != nil {
+		return err
+	}
+	if err = a.recordWorkerProvider(run, request.ThreadID, request.Provider, provider); err != nil {
 		return err
 	}
 	// An old immutable request may restrict MCP to Processes. Preserve the
@@ -117,6 +124,12 @@ func (a *App) persistentThreadProvisioned(worker string, agent int64, all []Step
 func permanentDeliveryError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A running thread never moves provider, so retrying can't help. Unavailable
+	// and Unsupported can clear by themselves, so they stay on the normal retry,
+	// which keeps the pin and never starts the worker without it.
+	if errors.Is(err, sdk.ErrThreadProviderConflict) {
+		return true
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "source event id already exists with different content") ||

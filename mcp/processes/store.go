@@ -212,6 +212,9 @@ func validateExecution(c AssignmentConfig) error {
 	default:
 		return errors.New("worker_continuity must be auto, per_executor, or isolated")
 	}
+	if e := validateProviderNames(c); e != nil {
+		return e
+	}
 	if c.OwnerAgentID <= 0 {
 		return errors.New("choose an owner agent for this assignment")
 	}
@@ -464,6 +467,10 @@ func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides
 		return r, nil
 	}
 	if !errors.Is(e, sql.ErrNoRows) {
+		return Run{}, e
+	}
+	// A follow_latest assignment may have adopted a version its provider settings no longer fit.
+	if e = validateWorkerProviders(p.Definition, p.Assignment.AssignmentConfig); e != nil {
 		return Run{}, e
 	}
 	r, e = a.prepareAssignedRun(p, kind, key, inputs, overrides)

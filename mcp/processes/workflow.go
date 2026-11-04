@@ -76,6 +76,9 @@ type StepRun struct {
 	NextAttemptAt     string   `json:"next_attempt_at,omitempty"`
 	LifecycleSequence int64    `json:"-"`
 	ExecutionState    string   `json:"execution_state,omitempty"`
+
+	// Provider is set only when the assignment pinned this step's worker.
+	Provider *sdk.ThreadProviderStatus `json:"provider,omitempty"`
 }
 
 type Task = StepRun
@@ -214,7 +217,11 @@ func (a *App) steps(run string) ([]StepRun, error) {
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	rows.Close()
+	return out, a.attachWorkerProviders(run, out)
 }
 func (a *App) initWorkflow(r *Run, d Definition) error {
 	// This marker is committed in the same transaction as every frozen step.
@@ -538,16 +545,19 @@ func deliveryEventID(step StepRun, worker string) string {
 	return "process-step:" + step.ID + ":assignment:" + worker
 }
 
-func (a *App) spawnProcessThread(project string, request sdk.ThreadSpawnRequest) error {
+func (a *App) spawnProcessThread(project string, request sdk.ThreadSpawnRequest) (*sdk.ThreadProviderStatus, error) {
 	threads := a.ctx.WithProject(project).ThreadAPI()
 	if threads == nil {
-		return errors.New("platform thread API unavailable")
+		return nil, errors.New("platform thread API unavailable")
 	}
-	_, err := threads.SpawnThread(request)
+	result, err := threads.SpawnThread(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	if result == nil {
+		return nil, nil
+	}
+	return result.Provider, nil
 }
 
 func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {
@@ -582,10 +592,11 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: envelope.Message.(string),
 		Tools:           processWorkerToolList(false),
+		Provider:        r.Binding.stepProvider(s.Key),
 		// Inherit the executor's spawnable domain tools after ensuring the
 		// current Processes installation is attached.
 	}
-	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
+	if err := a.ensureProcessThread(p.ProjectID, r.ID, eventID, request); err != nil {
 		return err
 	}
 	return a.deliverStepToThread(p, *r, s, all)
@@ -628,8 +639,9 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
 		Tools:           processRunWorkerTools(*r),
+		Provider:        r.Binding.stepProvider(s.Key),
 	}
-	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
+	if err := a.ensureProcessThread(p.ProjectID, r.ID, eventID, request); err != nil {
 		return err
 	}
 	return a.deliverStepToThread(p, *r, s, all)
