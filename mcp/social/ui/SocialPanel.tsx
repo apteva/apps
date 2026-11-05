@@ -264,7 +264,7 @@ interface PlatformInfo {
 interface OptionField {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean";
+  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean" | "datetime";
   options?: string[];
   help?: string;
 }
