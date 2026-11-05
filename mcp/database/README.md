@@ -252,13 +252,13 @@ Joins name earlier fields as `alias.field`; the root's alias is `as`, default `r
 
 **`related_read`** returns parents with their related rows. `relation {as,limit,sources}` fills one shared `limit`, source by source. Each source applies eligibility, orders its rows with the physical key as tie-break, and takes what still fits; `match` then tests only those rows. A row past the limit can never match. Each parent returns the exact rows under `as`, with a `source` field, and `count:true` adds an exact `total`.
 
-**`joined_page`** returns `total`, `hasMore`, `nextCursor` and either `records` or, with `group {by,orderBy:[{field,direction,agg}]}`, `groups:[{key,rows}]`. One row or one group is one item, and `total` counts items before paging. It reads the whole joined input for each page, so bound it with `where`. Use `cursor`, or `offset` up to 100000.
+**`joined_page`** returns `total`, `hasMore`, `nextCursor` and either `records` or, with `group {by,orderBy:[{field,direction,agg}]}`, `groups:[{key,rows}]`. One row or one group is one item, and `total` counts items before paging. It reads the whole joined input for each page, so bound it with `where`. Use `cursor`, or `offset` up to 100000. Until the page is chosen it keeps only each item's order values and which rows belong to it. It then reads just the page's rows on the same snapshot, so memory follows how many items match and how many rows the page shows, not how wide the rows are.
 
 **`joined_aggregate`** takes the `groupBy` and `metrics` of `aggregate` and returns `rows` and `truncated`. Integer sums stay exact, `count` is `"0"` over no rows, and `sum` is null. `derived [{name,op:"divide",numerator,denominator,round?}]` is null on a null side or a zero denominator.
 
 Two more stages answer questions one grouping cannot. `branches [{collection,as,where,joins,computed,filter,distinct,pick,select}]` replaces `collection` and concatenates inputs that select the same names and types; a top-level `distinct` of those names removes what several branches found. `rollup {by,metrics,computed,filter}` aggregates per key first, and the outer `groupBy` and `metrics` then read one row per key. For example, roll up per sale with `count_distinct` and `min` of its campaign, compute `if` one campaign `then` that campaign `else` a constant, then count sales per computed campaign.
 
-Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows.
+Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows. The memory budget is an accounting estimate, not a cap on process memory. In `joined_page` an item costs about 500 bytes plus its share of what else the read holds: each join can cache up to 16 MiB, a `distinct` remembers each key it has seen, and `pick` keeps each winner's order values until the page is chosen. A page's own rows count too, so one group with too many rows fails even when the page holds only that group.
 
 ## Query and mutation rules
 
