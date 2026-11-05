@@ -1,7 +1,7 @@
 # GraphQL v0.21.1
 
-The first release with literal search. The `graphql/v0.21.0` tag points at the
-code of 0.20.0 by mistake and holds none of this, so use this version.
+The first release with literal search. Version 0.21.0 was withdrawn: it was
+published on the wrong commit and removed before anything installed it.
 
 Pipelines can now search with `contains_ascii`, Database's literal substring
 filter, so a search for `100%` finds a real percent sign. It can also run where
