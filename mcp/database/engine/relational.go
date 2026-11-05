@@ -712,9 +712,12 @@ func relTyped(f Field, v any) (any, error) {
 }
 
 // rowTie orders rows that every sort key ties, by the physical records in them.
-func (p *relChain) rowTie(row Record) string {
+func (p *relChain) rowTie(row Record) string { return p.tieFrom(row, 0) }
+
+// tieFrom is rowTie from one alias on, so a row's root can be kept apart from it.
+func (p *relChain) tieFrom(row Record, first int) string {
 	var b strings.Builder
-	for _, alias := range p.aliases {
+	for _, alias := range p.aliases[first:] {
 		if v, ok := row[relHiddenPrefix+alias].(string); ok {
 			b.WriteString(strconv.Itoa(len(v)))
 			b.WriteByte(':')
@@ -1139,14 +1142,17 @@ func relInput(tx transaction, c Collection, r *Request, budget *relBudget) (*rel
 }
 
 // relStream runs the whole input, sending each surviving row to yield: rows pass
-// through pick last, so it sees joined, filtered, deduplicated rows.
-func relStream(tx transaction, c Collection, r Request, alias string, state *existsState, p *relChain, budget *relBudget, yield func(Record) (bool, error)) error {
+// through pick last, so it sees joined, filtered, deduplicated rows. With keep, a
+// picked row holds only those fields until it is yielded; pick's own order fields and
+// the row's identity must be among them.
+func relStream(tx transaction, c Collection, r Request, alias string, state *existsState, p *relChain, budget *relBudget, keep []string, yield func(Record) (bool, error)) error {
 	order := []Order{}
 	for _, pk := range c.PrimaryKey {
 		order = append(order, Order{pk, "asc"})
 	}
 	sink := yield
 	var best map[string]Record
+	bestBytes := 0
 	if r.Pick != nil {
 		best = map[string]Record{}
 		sink = func(row Record) (bool, error) {
@@ -1159,13 +1165,21 @@ func relStream(tx transaction, c Collection, r Request, alias string, state *exi
 				return true, nil
 			}
 			if !ok {
+				bestBytes += len(key)
 				if e := budget.retain(len(key)); e != nil {
 					return false, e
 				}
 			} else {
-				budget.retained -= retainedBytes(old)
+				n := retainedBytes(old)
+				bestBytes -= n
+				budget.retained -= n
 			}
-			if e := budget.retain(retainedBytes(row)); e != nil {
+			if keep != nil {
+				row = project(row, keep)
+			}
+			n := retainedBytes(row)
+			bestBytes += n
+			if e := budget.retain(n); e != nil {
 				return false, e
 			}
 			best[key] = row
@@ -1178,6 +1192,7 @@ func relStream(tx transaction, c Collection, r Request, alias string, state *exi
 	if e != nil || best == nil {
 		return e
 	}
+	defer func() { budget.retained -= bestBytes }()
 	keys := make([]string, 0, len(best))
 	for key := range best {
 		keys = append(keys, key)
@@ -1205,11 +1220,102 @@ func relLess(p *relChain, a, b Record, order []Order) bool {
 	return p.rowTie(a) < p.rowTie(b)
 }
 
+// A page item holds only what paging needs until the page is known: its sort values,
+// its tie and which rows are its legs. relItemBytes and relLegBytes estimate the
+// overhead of keeping one, including their places in the map and slices.
+const (
+	relItemBytes = 160
+	relLegBytes  = 64
+)
+
 type relItem struct {
 	sort []any
 	tie  string
 	key  Record
+	legs []relLeg
 	rows []Record
+}
+
+// relLeg identifies one row of an item: its root record's primary key, and the joined
+// records it came from.
+type relLeg struct{ root, joined string }
+
+func (p *relChain) leg(c Collection, alias string, row Record) (relLeg, error) {
+	key := make(Record, len(c.PrimaryKey))
+	for _, name := range c.PrimaryKey {
+		key[name] = row[alias+"."+name]
+	}
+	root, e := primary(c, key)
+	return relLeg{root, p.tieFrom(row, 1)}, e
+}
+
+// relReadLegs fills a page's items with their rows, on the snapshot the first pass
+// read. That pass already decided which rows survive distinct and pick, so neither runs
+// again: only the page's root records are read and joined, and only their legs are kept.
+func relReadLegs(tx transaction, c Collection, alias string, p *relChain, budget *relBudget, page []*relItem, groupFields []string) error {
+	p.forget()
+	p.distinct = nil
+	wanted := map[string]*relItem{}
+	roots := []string{}
+	seen := map[string]bool{}
+	legs := 0
+	for _, item := range page {
+		for _, leg := range item.legs {
+			id := leg.root + "\x00" + leg.joined
+			if e := budget.retain(relLegBytes + len(id)); e != nil {
+				return e
+			}
+			wanted[id] = item
+			legs++
+			if !seen[leg.root] {
+				seen[leg.root] = true
+				roots = append(roots, leg.root)
+			}
+		}
+		item.legs = nil
+	}
+	fields := rootFields(c, alias, p)
+	found := 0
+	for _, root := range roots {
+		if e := budget.spend(1); e != nil {
+			return e
+		}
+		rec, e := tx.get(c, root)
+		if e != nil {
+			return e
+		}
+		if rec == nil {
+			return fail("internal", "joined page lost a record within one snapshot")
+		}
+		used := make(Record, len(fields))
+		for _, name := range fields {
+			if v, ok := rec[name]; ok {
+				used[name] = v
+			}
+		}
+		_, e = p.run(rootRow(c, alias, used), func(row Record) (bool, error) {
+			item := wanted[root+"\x00"+p.tieFrom(row, 1)]
+			if item == nil {
+				return true, nil
+			}
+			if e := budget.retain(retainedBytes(row)); e != nil {
+				return false, e
+			}
+			if item.key == nil {
+				item.key = project(row, groupFields)
+			}
+			item.rows = append(item.rows, row)
+			found++
+			return true, nil
+		})
+		if e != nil {
+			return e
+		}
+	}
+	if found != legs {
+		return fail("internal", "joined page found %d of its %d rows within one snapshot", found, legs)
+	}
+	return nil
 }
 
 func relItemCompare(p *relChain, order []Order, a, b *relItem) int {
@@ -1276,10 +1382,37 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		return nil, e
 	}
 	p.finish()
+	var keep []string
+	if r.Pick != nil {
+		keep = append(keep, groupFields...)
+		for _, o := range r.Pick.OrderBy {
+			keep = append(keep, o.Field)
+		}
+		for _, o := range itemOrder {
+			keep = append(keep, o.Field)
+		}
+		for _, name := range c.PrimaryKey {
+			keep = append(keep, alias+"."+name)
+		}
+		for _, name := range p.aliases {
+			keep = append(keep, relHiddenPrefix+name)
+		}
+	}
+	// The first pass keeps each item's order and identity, never its rows, however
+	// narrow or wide the rows are.
 	groups := map[string]*relItem{}
 	items := []*relItem{}
-	e = relStream(tx, c, r, alias, state, p, budget, func(row Record) (bool, error) {
-		if e := budget.retain(retainedBytes(row)); e != nil {
+	itemBytes := 0
+	hold := func(n int) error {
+		itemBytes += n
+		return budget.retain(n)
+	}
+	e = relStream(tx, c, r, alias, state, p, budget, keep, func(row Record) (bool, error) {
+		leg, e := p.leg(c, alias, row)
+		if e != nil {
+			return false, e
+		}
+		if e := hold(relLegBytes + len(leg.root) + len(leg.joined)); e != nil {
 			return false, e
 		}
 		if r.Group == nil {
@@ -1287,25 +1420,34 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 			for i, o := range itemOrder {
 				s[i] = row[o.Field]
 			}
-			items = append(items, &relItem{sort: s, tie: p.rowTie(row), rows: []Record{row}})
+			tie := p.rowTie(row)
+			if e := hold(relItemBytes + len(tie) + retainedBytes(s)); e != nil {
+				return false, e
+			}
+			items = append(items, &relItem{sort: s, tie: tie, legs: []relLeg{leg}})
 			return true, nil
 		}
-		k := project(row, groupFields)
-		tie := string(marshal(k))
+		tie := string(marshal(project(row, groupFields)))
 		g := groups[tie]
 		if g == nil {
-			g = &relItem{sort: make([]any, len(r.Group.OrderBy)), tie: tie, key: k}
+			g = &relItem{sort: make([]any, len(r.Group.OrderBy)), tie: tie}
 			for i, o := range r.Group.OrderBy {
 				g.sort[i] = row[o.Field]
+			}
+			if e := hold(relItemBytes + len(tie) + retainedBytes(g.sort)); e != nil {
+				return false, e
 			}
 			groups[tie] = g
 			items = append(items, g)
 		}
-		g.rows = append(g.rows, row)
+		g.legs = append(g.legs, leg)
 		for i, o := range r.Group.OrderBy {
 			f, _ := p.view.field(o.Field)
 			d := compare(f, row[o.Field], g.sort[i])
 			if o.Agg == "min" && d < 0 || o.Agg == "max" && d > 0 {
+				if e := hold(retainedBytes(row[o.Field]) - retainedBytes(g.sort[i])); e != nil {
+					return false, e
+				}
 				g.sort[i] = row[o.Field]
 			}
 		}
@@ -1335,6 +1477,14 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 	if more {
 		selected = selected[:r.Limit]
 	}
+	// Past here only the page matters, so everything else stops counting.
+	total := len(items)
+	selected = append([]*relItem{}, selected...)
+	items, groups = nil, nil
+	budget.retained -= itemBytes
+	if e := relReadLegs(tx, c, alias, p, budget, selected, groupFields); e != nil {
+		return nil, e
+	}
 	out := []any{}
 	size := 0
 	var last *relItem
@@ -1360,7 +1510,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		out = append(out, entry)
 		last = item
 	}
-	result := map[string]any{"total": strconv.Itoa(len(items)), "hasMore": more}
+	result := map[string]any{"total": strconv.Itoa(total), "hasMore": more}
 	if r.Group != nil {
 		result["groups"] = out
 	} else {
@@ -1774,7 +1924,7 @@ func relAggregateInput(tx transaction, c Collection, r *Request, budget *relBudg
 		},
 		finish: p.finish,
 		stream: func(yield func(Record) (bool, error)) error {
-			return relStream(tx, c, req, alias, state, p, budget, yield)
+			return relStream(tx, c, req, alias, state, p, budget, nil, yield)
 		},
 	}, nil
 }
@@ -1853,7 +2003,7 @@ func relBranches(tx transaction, r *Request, budget *relBudget) (*relAggInput, e
 				if stopped {
 					return nil
 				}
-				e := relStream(tx, b.c, b.req, b.alias, b.state, b.p, budget, func(row Record) (bool, error) {
+				e := relStream(tx, b.c, b.req, b.alias, b.state, b.p, budget, nil, func(row Record) (bool, error) {
 					out := project(row, b.names)
 					if len(r.Distinct) > 0 {
 						key := string(marshal(project(out, r.Distinct)))
