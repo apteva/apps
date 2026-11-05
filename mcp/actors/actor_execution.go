@@ -702,6 +702,8 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return errors.New("write action rejected in read_only operation")
 	}
 	switch step.Action {
+	case "prepare_upload":
+		return e.prepareUpload(step)
 	case "reveal_control":
 		return e.revealControl(step)
 	case "inspect_views":
@@ -870,6 +872,24 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if assertion.EqualsURL != nil {
 			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
 				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
+		if assertion.NotMatches != "" {
+			values := []any{actual}
+			switch v := actual.(type) {
+			case []any:
+				values = v
+			case []string:
+				values = nil
+				for _, item := range v {
+					values = append(values, item)
+				}
+			}
+			for _, value := range values {
+				text, ok := value.(string)
+				if !ok || regexp.MustCompile(assertion.NotMatches).MatchString(text) {
+					return fmt.Errorf("excluded pattern matched or unsupported value for %q", field)
+				}
 			}
 		}
 		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {

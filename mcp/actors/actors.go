@@ -108,24 +108,26 @@ type actorStep struct {
 	PathPrefix         string                `json:"path_prefix,omitempty"`
 	// Media inputs are generic; Computer resolves the source and attaches it
 	// to the semantic target selected by locator.
-	SourceURL   string               `json:"source_url,omitempty"`
-	Base64      string               `json:"base64,omitempty"`
-	FilePath    string               `json:"file_path,omitempty"`
-	Filename    string               `json:"filename,omitempty"`
-	MIMEType    string               `json:"mime_type,omitempty"`
-	Mode        string               `json:"mode,omitempty"`
-	NewlineMode string               `json:"newline_mode,omitempty"`
-	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
-	Match       string               `json:"match,omitempty"`
-	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
-	Checked     any                  `json:"checked,omitempty"`
-	Labels      any                  `json:"labels,omitempty"`
-	Value       string               `json:"value,omitempty"`
-	Values      []string             `json:"values,omitempty"`
-	Texts       []string             `json:"texts,omitempty"`
-	Readability *bool                `json:"readability,omitempty"`
-	OnceKey     string               `json:"once_key,omitempty"`
-	OnceScope   string               `json:"once_scope,omitempty"`
+	ExpectedSHA256  string               `json:"expected_sha256,omitempty"`
+	RequirePrepared bool                 `json:"require_prepared,omitempty"`
+	SourceURL       string               `json:"source_url,omitempty"`
+	Base64          string               `json:"base64,omitempty"`
+	FilePath        string               `json:"file_path,omitempty"`
+	Filename        string               `json:"filename,omitempty"`
+	MIMEType        string               `json:"mime_type,omitempty"`
+	Mode            string               `json:"mode,omitempty"`
+	NewlineMode     string               `json:"newline_mode,omitempty"`
+	Conditions      []actorWaitCondition `json:"conditions,omitempty"`
+	Match           string               `json:"match,omitempty"`
+	TimeoutMS       any                  `json:"timeout_ms,omitempty"`
+	Checked         any                  `json:"checked,omitempty"`
+	Labels          any                  `json:"labels,omitempty"`
+	Value           string               `json:"value,omitempty"`
+	Values          []string             `json:"values,omitempty"`
+	Texts           []string             `json:"texts,omitempty"`
+	Readability     *bool                `json:"readability,omitempty"`
+	OnceKey         string               `json:"once_key,omitempty"`
+	OnceScope       string               `json:"once_scope,omitempty"`
 	// MinItems/MaxItems turn an extraction into a cardinality gate. They are
 	// especially useful before a consequential click: a missing or ambiguous
 	// target must fail closed instead of producing an empty successful extract.
@@ -146,6 +148,7 @@ type actorAssertion struct {
 	LessThanOrEqual    any                `json:"less_than_or_equal,omitempty"`
 	GreaterThanField   string             `json:"greater_than_field,omitempty"`
 	EqualsURL          *actorURLAssertion `json:"equals_url,omitempty"`
+	NotMatches         string             `json:"not_matches,omitempty"`
 	Matches            string             `json:"matches,omitempty"`
 	Equals             any                `json:"equals,omitempty"`
 	EqualsField        string             `json:"equals_field,omitempty"`
@@ -567,8 +570,11 @@ func validateActorDefinition(def actorDefinition) error {
 			} else if step.Value == "" {
 				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
 			}
-		case "upload_file":
-			if !locatorHasTarget(step.Locator) {
+		case "prepare_upload", "upload_file":
+			if step.Action == "prepare_upload" && (step.Optional || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" || step.EffectPhase != "") {
+				return errors.New("prepare_upload cannot be optional or dispatch a site effect")
+			}
+			if step.Action == "upload_file" && !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for upload_file", i)
 			}
 			sources := 0
@@ -651,12 +657,17 @@ func validateActorDefinition(def actorDefinition) error {
 				if err := validateCanonicalAssertion(assertion); err != nil {
 					return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
 				}
-				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && assertion.NotMatches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
 				}
 				if assertion.EqualsURL != nil {
 					if err := assertion.EqualsURL.validate(); err != nil {
 						return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+					}
+				}
+				if assertion.NotMatches != "" {
+					if _, err := regexp.Compile(assertion.NotMatches); err != nil {
+						return fmt.Errorf("steps[%d] invalid not_matches: %w", i, err)
 					}
 				}
 				if assertion.Matches != "" {
