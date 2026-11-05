@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.4
+version: 0.3.5
 description: |
+  v0.3.5 raises the actor definition limit to 2 MiB so larger workflows can
+  retain their operations in one actor.
   v0.3.4 stages exact upload bytes before destructive replacement, forwards
   require_prepared to Computer, supports excluded-pattern assertions and
   reveals fully visible controls before guarded saves. Requires Computer 0.7.98.
@@ -149,7 +151,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.4
+    ref: actors/v0.3.5
     entry: mcp/actors
   port: 8080
   health_check: /health
