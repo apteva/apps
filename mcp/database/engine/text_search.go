@@ -13,6 +13,12 @@ import (
 // conjuncts still choose the access path.
 const opLikeContainsASCII = "like_contains_ascii"
 
+// contains_ascii is a literal substring test on one text field:
+// instr(lower(coalesce(field,”)), lower(value)) > 0. Null reads as "", ASCII
+// letters fold case (other letters compare exactly) and %, _ and \ are ordinary
+// characters. An empty value matches every record. It never selects an index.
+const opContainsASCII = "contains_ascii"
+
 const (
 	maxSearchFields = 16
 	maxSearchValue  = 1024
@@ -43,6 +49,29 @@ func matchesSearch(r Record, f *Filter) bool {
 		return bytes.Contains(text, pattern)
 	}
 	return likeMatch(asciiLower(nil, searchPattern(f.Value.(string))), text)
+}
+
+func matchesContains(v any, f *Filter) bool {
+	if searchAll(f) {
+		return true
+	}
+	text, _ := v.(string)
+	var stack [256]byte
+	return bytes.Contains(asciiLower(stack[:0], text), asciiLower(nil, f.Value.(string)))
+}
+
+func validateContains(fld Field, f *Filter) error {
+	if fld.Type != "text" {
+		return Invalid("contains_ascii requires a text field; %s is %s", fld.Name, fld.Type)
+	}
+	s, ok := f.Value.(string)
+	if !ok {
+		return Invalid("contains_ascii requires a string value")
+	}
+	if len(s) > maxSearchValue {
+		return Invalid("contains_ascii value is limited to 1024 bytes")
+	}
+	return nil
 }
 
 func asciiLower(dst []byte, src string) []byte {

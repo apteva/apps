@@ -34,6 +34,12 @@ func nativeFilter(c Collection, f *Filter) any {
 		// instead of dropping a permission filter.
 		return map[string]any{"$exists_needs_evaluation": true}
 	}
+	if f.Op == opContainsASCII {
+		if searchAll(f) {
+			return map[string]any{}
+		}
+		return map[string]any{"$like": map[string]any{"fields": []string{f.Field}, "literal": f.Value}}
+	}
 	if f.Op == "is_null" {
 		return map[string]any{f.Field: map[string]any{"$eq": nil}}
 	}
