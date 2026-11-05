@@ -206,7 +206,7 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 			for _, name := range plan.searchArguments() {
 				argument := definition.Fields.ForName(resolver.FieldName).Arguments.ForName(name)
 				if argument == nil || argument.Type.NamedType != "String" {
-					return invalid("resolver %s.%s: %s searches on argument %s, which must be a String argument of the field", resolver.ParentType, resolver.FieldName, databaseSearchOp, name)
+					return invalid("resolver %s.%s: a text search reads argument %s, which must be a String argument of the field", resolver.ParentType, resolver.FieldName, name)
 				}
 				if !argument.Type.NonNull && (argument.DefaultValue == nil || argument.DefaultValue.Kind == ast.NullValue) {
 					return invalid("resolver %s.%s: search argument %s must be String! or have a default such as %s: String = \"\", because a missing value cannot be searched", resolver.ParentType, resolver.FieldName, name, name)

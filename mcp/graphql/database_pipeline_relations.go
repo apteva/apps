@@ -40,8 +40,9 @@ const (
 	relationNotExists = "not_exists"
 	accessWhenKey     = "access_when"
 
-	// Database's limits for one filter.
-	maxRelationNodes        = 8
+	// Database's limits for one filter. Before 0.11.1 it took 8 relationships.
+	maxRelationNodes        = 24
+	olderRelationNodes      = 8
 	maxRelationDepth        = 4
 	maxRelationAlternatives = 16
 	maxRelationPairs        = 8
@@ -194,7 +195,7 @@ func untrustedFilterHasRelation(raw any) bool {
 }
 
 // validateRelation checks an exists or not_exists node.
-func (plan *databasePipelinePlan) validateRelation(node map[string]any, allowScope bool, path string) error {
+func (plan *databasePipelinePlan) validateRelation(node map[string]any, place filterPlace, path string) error {
 	label := "database_pipeline " + path
 	if len(node) != 1 {
 		return invalid("%s: exists and not_exists must be the only key", label)
@@ -242,12 +243,17 @@ func (plan *databasePipelinePlan) validateRelation(node map[string]any, allowSco
 	if !hasWhere {
 		return nil
 	}
-	found := false
-	walkFilter(where, func(node map[string]any) { found = found || isConditionalFilter(node) })
-	if found {
-		return invalid("%s.where cannot hold a client when; client input must not change what counts as related", label)
+	// A clause a client when holds only narrows, so a condition may select a branch
+	// of an or in it. Anywhere else, client input must not decide what is related.
+	narrowing := place.underWhen && key == relationExists
+	if !narrowing {
+		found := false
+		walkFilter(where, func(node map[string]any) { found = found || isConditionalFilter(node) })
+		if found {
+			return invalid("%s.where cannot hold a client when; client input must not change what counts as related", label)
+		}
 	}
-	if filterHasSearch(where) {
+	if filterHasLikeSearch(where) {
 		return invalid("%s.where cannot hold %s; an empty search matches every related record", label, databaseSearchOp)
 	}
 	// Inside a negation a larger client value would remove more of the
@@ -257,7 +263,9 @@ func (plan *databasePipelinePlan) validateRelation(node map[string]any, allowSco
 			return err
 		}
 	}
-	return plan.validateFilter(where, allowScope, strings.TrimPrefix(label, "database_pipeline ")+".where")
+	// A check on the related records stays allowed inside a client when: it is
+	// ANDed with what the clause tests, so it can only exclude more.
+	return plan.validateFilterIn(where, filterPlace{allowScope: true, underWhen: narrowing}, strings.TrimPrefix(label, "database_pipeline ")+".where")
 }
 
 func validateRelationPairs(raw any, label string) error {
@@ -348,11 +356,16 @@ func probeFilter(raw any) any {
 	if !ok {
 		return nil
 	}
-	if isAccessWhenFilter(node) {
+	if isAccessWhenFilter(node) || isConditionalFilter(node) {
 		return probeFilter(node["filter"])
 	}
 	if isRelationFilter(node) {
 		return probeRelation(node)
+	}
+	// Keeps the operator, so Database checks it and the field's type against the
+	// collection the field belongs to.
+	if isLiteralSearch(node) {
+		return map[string]any{"field": node["field"], "op": databaseLiteralSearchOp, "value": ""}
 	}
 	for _, group := range []string{"and", "or"} {
 		if children, found := node[group].([]any); found {
@@ -389,12 +402,16 @@ func probeRelation(node map[string]any) map[string]any {
 // the related collection, every field, comparison types and the index a probe
 // needs are all checked there.
 func (run *databasePipelineRun) explainRelation(ctx context.Context, collection any, node map[string]any) error {
+	return run.explainFilter(ctx, collection, probeRelation(node))
+}
+
+func (run *databasePipelineRun) explainFilter(ctx context.Context, collection, where any) error {
 	var out map[string]any
 	return sdk.CallAppResultContext(ctx, run.app.ctx.WithProject(run.project).PlatformAPI(), "database", "db_explain", map[string]any{
 		"database":    run.plan.Database,
 		"scope":       run.plan.Scope,
 		"collection":  collection,
-		"where":       probeRelation(node),
+		"where":       where,
 		"_project_id": run.project,
 	}, &out)
 }
@@ -409,7 +426,22 @@ func (run *databasePipelineRun) verifyRelations(ctx context.Context) error {
 			err := run.explainRelation(probe, step.Args["collection"], node)
 			cancel()
 			if err != nil {
-				return fmt.Errorf("Database cannot plan its %s on %v (requires Database 0.8.0 or later, 0.10.0 for nested relationships, existing fields and an index on a related field of each match): %w", key, clause["collection"], err)
+				return fmt.Errorf("Database cannot plan its %s on %v (requires Database 0.8.0 or later, 0.10.0 for nested relationships, 0.11.0 for %s, existing fields of the right type and an index on a related field of each match): %w", key, clause["collection"], databaseLiteralSearchOp, err)
+			}
+		}
+		// A request can use every relationship at once, and an older Database takes
+		// fewer than this limit, so it is asked about them together. Plans within
+		// the older limit never needed this.
+		if count := len(step.relations()); count > olderRelationNodes {
+			whole := make([]any, 0, count)
+			for _, node := range step.ownRelations() {
+				whole = append(whole, probeRelation(node))
+			}
+			probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+			err := run.explainFilter(probe, step.Args["collection"], map[string]any{"and": whole})
+			cancel()
+			if err != nil {
+				return fmt.Errorf("Database cannot take the %d exists and not_exists filters one request can use (requires Database 0.11.1 or later): %w", count, err)
 			}
 		}
 	}

@@ -77,16 +77,22 @@ func (plan *databasePipelinePlan) validateConditional(node map[string]any, path 
 	if kind != conditionBoolean {
 		return invalid("%s.when must be Boolean, not %s", label, kind)
 	}
-	if filterHasOptional(node["filter"]) {
+	if isConditionalFilter(node["filter"]) || isAccessWhenFilter(node["filter"]) {
 		return invalid("%s.filter cannot contain another conditional filter", label)
 	}
-	if filterHasRelation(node["filter"]) {
-		return invalid("%s.filter cannot hold exists or not_exists; relationships are policy, so use access_when if one needs selecting", label)
+	// Relationships are policy, and a false condition would lift one. The exception
+	// is a positive clause that searches: a search only ever narrows.
+	policy := false
+	walkOwnFilter(node["filter"], func(child map[string]any) {
+		policy = policy || (isRelationFilter(child) && !isSearchClause(child))
+	})
+	if policy {
+		return invalid("%s.filter cannot hold exists or not_exists; relationships are policy, so use access_when if one needs selecting. Only a positive exists that searches related records with %s may sit in a client when", label, databaseLiteralSearchOp)
 	}
 	if err := plan.validateConditionalValues(node["filter"], label+".filter"); err != nil {
 		return err
 	}
-	return plan.validateFilter(node["filter"], false, path+".filter")
+	return plan.validateFilterIn(node["filter"], filterPlace{underWhen: true}, path+".filter")
 }
 
 // conditionalParam resolves a param a conditional node may read: a top-level
@@ -123,6 +129,10 @@ func (plan *databasePipelinePlan) validateConditionalValues(raw any, label strin
 			}
 			return nil
 		}
+	}
+	// These are validated on their own, with the rules of what they hold.
+	if isRelationFilter(node) || isConditionalFilter(node) || isAccessWhenFilter(node) {
+		return nil
 	}
 	op, _ := node["op"].(string)
 	list := false
@@ -527,6 +537,9 @@ func (run *databasePipelineRun) resolveConditions(raw any) (any, error) {
 		}
 		return map[string]any{key: copied}, nil
 	}
+	if children, isOr := node["or"].([]any); isOr && len(children) > 0 {
+		return run.resolveAlternatives(children)
+	}
 	children, isAnd := node["and"].([]any)
 	if !isAnd || len(children) == 0 {
 		return raw, nil
@@ -562,6 +575,38 @@ func (run *databasePipelineRun) resolveConditions(raw any) (any, error) {
 	return map[string]any{"and": kept}, nil
 }
 
+// resolveAlternatives resolves an or. A false conditional branch drops that
+// alternative, which only narrows. Nothing left means nothing matches, never
+// "no restriction", so it fails instead of returning nil; validation requires a
+// branch without a condition, so a published plan can't get here.
+func (run *databasePipelineRun) resolveAlternatives(children []any) (any, error) {
+	kept := make([]any, 0, len(children))
+	for _, child := range children {
+		if isConditionalFilter(child) {
+			optional := child.(map[string]any)
+			holds, err := run.conditionHolds(optional["when"])
+			if err != nil {
+				return nil, err
+			}
+			if !holds {
+				continue
+			}
+			child = optional["filter"]
+		}
+		resolved, err := run.resolveConditions(child)
+		if err != nil {
+			return nil, err
+		}
+		if resolved != nil {
+			kept = append(kept, resolved)
+		}
+	}
+	if len(kept) == 0 {
+		return nil, invalid("database_pipeline: conditions removed every branch of an or")
+	}
+	return map[string]any{"or": kept}, nil
+}
+
 // where binds a step or metric filter: conditions first, then values. It
 // returns nil when conditions removed every predicate.
 func (run *databasePipelineRun) where(raw any) (any, error) {
@@ -569,7 +614,11 @@ func (run *databasePipelineRun) where(raw any) (any, error) {
 	if err != nil || resolved == nil {
 		return nil, err
 	}
-	return run.filter(resolved), nil
+	bound := run.filter(resolved)
+	if filterExposesBlankSearch(bound, false) {
+		return nil, invalid("database_pipeline: an empty %s inside or or exists would match every record; its when must remove it when the value is blank", databaseLiteralSearchOp)
+	}
+	return bound, nil
 }
 
 // conditionalArguments lists the GraphQL arguments conditional filters read,
@@ -618,20 +667,26 @@ func (step databasePipelineStep) conditionalFields() []any {
 				visit(child)
 			}
 		}
-		if field, ok := node["field"].(string); ok {
+		if field, ok := node["field"].(string); ok && !isLiteralSearch(node) {
 			seen[field] = true
 		}
 	}
-	for _, conditional := range step.conditionals() {
-		visit(conditional["filter"])
-	}
 	// Inside a relational node the fields are the related collection's, and are
 	// planned with that node.
-	walkOwnFilter(step.Args["where"], func(node map[string]any) {
-		if isAccessWhenFilter(node) {
+	optional := func(node map[string]any) {
+		if isConditionalFilter(node) || isAccessWhenFilter(node) {
 			visit(node["filter"])
 		}
-	})
+	}
+	walkOwnFilter(step.Args["where"], optional)
+	for _, raw := range asAnyList(step.Args["metrics"]) {
+		metric, _ := raw.(map[string]any)
+		walkOwnFilter(metric["where"], func(node map[string]any) {
+			if isConditionalFilter(node) {
+				visit(node["filter"])
+			}
+		})
+	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)

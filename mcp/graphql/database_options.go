@@ -249,11 +249,17 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 			if step.Args["lookups"] != nil || step.Args["buckets"] != nil {
 				continue
 			}
-			for _, search := range step.searches() {
-				fields := asAnyList(search["fields"])
+			// A search on a related collection is planned with its relationship below.
+			for _, search := range step.ownSearches() {
+				where := map[string]any{"field": search["field"], "op": databaseLiteralSearchOp, "value": ""}
+				first := search["field"]
+				if !isLiteralSearch(search) {
+					fields := asAnyList(search["fields"])
+					where = map[string]any{"fields": fields, "op": databaseSearchOp, "value": ""}
+					first = fields[0]
+				}
 				searches = append(searches, map[string]any{"op": "find", "args": map[string]any{
-					"collection": step.Args["collection"], "select": []any{fields[0]}, "limit": 1,
-					"where": map[string]any{"fields": fields, "op": databaseSearchOp, "value": ""},
+					"collection": step.Args["collection"], "select": []any{first}, "limit": 1, "where": where,
 				}})
 			}
 			if fields := step.conditionalFields(); len(fields) > 0 {
@@ -267,7 +273,7 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 			operations []any
 			problem    string
 		}{
-			{searches, "Database cannot run its " + databaseSearchOp + " search (requires Database 0.7.0 or later and existing text fields)"},
+			{searches, "Database cannot run its text search (" + databaseSearchOp + " requires Database 0.7.0 or later, " + databaseLiteralSearchOp + " Database 0.11.0 or later, and both existing text fields)"},
 			{conditionals, "Database cannot read the fields of its conditional filters"},
 		} {
 			for start := 0; start < len(check.operations); start += maxDatabaseBatchOperations {

@@ -316,7 +316,7 @@ func (plan *databasePipelinePlan) parseRead(raw any, label string) (*databasePip
 			return nil, err
 		}
 		if filterHasSearch(where) {
-			return nil, invalid("database_pipeline access %s cannot use %s: a search narrows results, it never decides authorization", label, databaseSearchOp)
+			return nil, invalid("database_pipeline access %s cannot use %s or %s: a search narrows results, it never decides authorization", label, databaseSearchOp, databaseLiteralSearchOp)
 		}
 		read.Where = where
 	}
@@ -661,6 +661,21 @@ func (plan *databasePipelinePlan) orderAccess() error {
 // validateFilter accepts the Database filter language: {field,op,value} leaves
 // and {and:[...]}/{or:[...]} groups. Placeholders are permitted only as values.
 func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path string) error {
+	return plan.validateFilterIn(raw, filterPlace{allowScope: allowScope}, path)
+}
+
+// filterPlace is where in a filter a node sits.
+type filterPlace struct {
+	// allowScope lets the node read access values. It is false on the query's own
+	// fields inside a client when, whose removal must never lift authorization.
+	allowScope bool
+	// underWhen is true inside a client when, and in the positive relationships
+	// it holds. Only there can an or take conditional branches: the whole group
+	// already only narrows, so dropping one of its alternatives narrows further.
+	underWhen bool
+}
+
+func (plan *databasePipelinePlan) validateFilterIn(raw any, place filterPlace, path string) error {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return invalid("database_pipeline %s must be a filter object", path)
@@ -671,29 +686,51 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 			if !ok || len(node) != 1 {
 				return invalid("database_pipeline %s.%s must be the only key and a list", path, group)
 			}
+			branches := 0
 			for i, child := range list {
 				childPath := fmt.Sprintf("%s.%s[%d]", path, group, i)
-				if group == "or" && filterHasOptional(child) {
+				if group == "or" && place.underWhen && isConditionalFilter(child) {
+					if err := plan.validateConditional(child.(map[string]any), childPath); err != nil {
+						return err
+					}
+					branches++
+					continue
+				}
+				// An access_when in a search clause's where only selects a check on
+				// the related records being searched.
+				if group == "or" && (filterHasDirectOptional(child) || (filterHasOptional(child) && !filterHoldsLiteralSearch(child))) {
 					return invalid("database_pipeline %s cannot hold a conditional filter inside or; removing a branch of an or would change what the others match", childPath)
 				}
 				if group == "and" && isAccessWhenFilter(child) {
+					if place.underWhen && !place.allowScope {
+						return invalid("database_pipeline %s cannot contain another conditional filter", path)
+					}
 					if err := plan.validateAccessWhen(child.(map[string]any), childPath); err != nil {
 						return err
 					}
 					continue
 				}
 				if group == "and" && isConditionalFilter(child) {
+					if place.underWhen {
+						return invalid("database_pipeline %s cannot contain another conditional filter; inside a client when, a condition can only select a branch of an or", path)
+					}
 					if err := plan.validateConditional(child.(map[string]any), childPath); err != nil {
 						return err
 					}
 					continue
 				}
-				if err := plan.validateFilter(child, allowScope, childPath); err != nil {
+				if err := plan.validateFilterIn(child, place, childPath); err != nil {
 					return err
 				}
-				if group == "or" && filterHasSearch(child) {
+				if group == "or" && filterHasLikeSearch(child) {
 					return invalid("database_pipeline %s: %s cannot be inside or; an empty search matches every record, so it must be ANDed with the other filters", path, databaseSearchOp)
 				}
+			}
+			if branches > 0 && branches == len(list) {
+				return invalid("database_pipeline %s.or needs a branch without a condition; if every condition were false, nothing would be left to match", path)
+			}
+			if group == "or" {
+				return plan.validateSearchAlternatives(node, path)
 			}
 			return nil
 		}
@@ -702,7 +739,10 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 		return invalid("database_pipeline %s: a conditional filter must be a child of an and group", path)
 	}
 	if isRelationFilter(node) {
-		return plan.validateRelation(node, allowScope, path)
+		return plan.validateRelation(node, place, path)
+	}
+	if isLiteralSearch(node) {
+		return plan.validateLiteralSearch(node, path)
 	}
 	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
 		return plan.validateSearch(node, path)
@@ -722,16 +762,17 @@ func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path 
 	if !databaseFilterOps[op] {
 		return invalid("database_pipeline %s has unsupported op %q", path, op)
 	}
-	return plan.validatePlaceholders(node["value"], allowScope, path+".value")
+	return plan.validatePlaceholders(node["value"], place.allowScope, path+".value")
 }
 
-// databaseFilterOps are the field operators Database accepts; like_contains_ascii
-// has its own node shape.
+// databaseFilterOps are the field operators Database accepts; the text searches
+// are checked on their own.
 var databaseFilterOps = map[string]bool{"eq": true, "ne": true, "gt": true, "gte": true, "lt": true, "lte": true,
 	"in": true, "not_in": true, "starts_with": true, "is_null": true, "is_not_null": true}
 
 const (
 	databaseSearchOp        = "like_contains_ascii"
+	databaseLiteralSearchOp = "contains_ascii"
 	maxDatabaseSearchFields = 16
 	maxDatabaseSearchValue  = 1024
 )
@@ -757,17 +798,24 @@ func (plan *databasePipelinePlan) validateSearch(node map[string]any, path strin
 			return invalid("database_pipeline %s: %s fields must be literal names", path, databaseSearchOp)
 		}
 	}
-	value, ok := node["value"].(string)
+	return plan.validateSearchValue(node["value"], databaseSearchOp, path)
+}
+
+// validateSearchValue checks a text search's value: a literal string, or a
+// string param that is fixed or comes from a top-level argument. Identity and
+// access values never reach a search.
+func (plan *databasePipelinePlan) validateSearchValue(raw any, op, path string) error {
+	value, ok := raw.(string)
 	if !ok {
-		return invalid("database_pipeline %s: %s requires a string value", path, databaseSearchOp)
+		return invalid("database_pipeline %s: %s requires a string value", path, op)
 	}
 	name, isParam := strings.CutPrefix(value, "$param.")
 	if !isParam {
 		if strings.HasPrefix(value, "$") {
-			return invalid("database_pipeline %s: %s value must be a string or a string $param", path, databaseSearchOp)
+			return invalid("database_pipeline %s: %s value must be a string or a string $param", path, op)
 		}
 		if len(value) > maxDatabaseSearchValue {
-			return invalid("database_pipeline %s: %s value is limited to %d bytes", path, databaseSearchOp, maxDatabaseSearchValue)
+			return invalid("database_pipeline %s: %s value is limited to %d bytes", path, op, maxDatabaseSearchValue)
 		}
 		return nil
 	}
@@ -790,29 +838,204 @@ func (plan *databasePipelinePlan) validateSearch(node map[string]any, path strin
 	return nil
 }
 
-// filterHasSearch reports whether a filter contains a text search.
-func filterHasSearch(raw any) bool {
-	return len(filterSearches(raw)) > 0
+// validateLiteralSearch checks a {field, op: contains_ascii, value} search. The
+// resolver owns the field and the operator; only the value may come from the
+// client, and it is forwarded as sent.
+func (plan *databasePipelinePlan) validateLiteralSearch(node map[string]any, path string) error {
+	for key := range node {
+		if key != "field" && key != "op" && key != "value" {
+			return invalid("database_pipeline %s has unknown key %q; %s searches one field, so use one per field in an or", path, key, databaseLiteralSearchOp)
+		}
+	}
+	if !literalFieldName(node["field"]) {
+		return invalid("database_pipeline %s: %s requires a literal field", path, databaseLiteralSearchOp)
+	}
+	return plan.validateSearchValue(node["value"], databaseLiteralSearchOp, path)
 }
 
-// filterSearches lists the text-search leaves of a filter.
-func filterSearches(raw any) []map[string]any {
+// validateSearchAlternatives checks an or that holds a literal search. A match
+// on one alternative satisfies the whole or, so none of them may be an
+// authorization check: a client's search could then stand in for it. Checks on
+// related records stay inside the clause being searched, ANDed with its search.
+func (plan *databasePipelinePlan) validateSearchAlternatives(node map[string]any, path string) error {
+	if !filterHoldsLiteralSearch(node) {
+		return nil
+	}
+	var failure error
+	walkOwnFilter(node, func(child map[string]any) {
+		if failure != nil {
+			return
+		}
+		if isRelationFilter(child) {
+			if !isSearchClause(child) {
+				failure = invalid("database_pipeline %s.or holds %s beside a relationship that searches nothing; a search must not be an alternative to a policy, so put that relationship beside the or", path, databaseLiteralSearchOp)
+			}
+			return
+		}
+		value, isText := child["value"].(string)
+		if !isText {
+			return
+		}
+		name, isParam := strings.CutPrefix(value, "$param.")
+		if strings.HasPrefix(value, "$scope.") || (isParam && strings.HasPrefix(plan.Params[name].From, "$identity.")) {
+			failure = invalid("database_pipeline %s.or holds %s and reads %s; a search must not be an alternative to authorization, so put that check beside the or", path, databaseLiteralSearchOp, value)
+		}
+	})
+	return failure
+}
+
+// validateSearchGuards refuses a contains_ascii that a blank value could turn
+// into match-all where that would change the result. An empty value matches every
+// record, which is harmless beside other filters but not as an alternative in an
+// or, or as the test of an exists: blank has to bypass the whole search instead.
+// So a client value there must sit inside a when that reads it.
+func (plan *databasePipelinePlan) validateSearchGuards(raw any, path string) error {
+	return plan.checkSearchGuards(raw, nil, false, path)
+}
+
+func (plan *databasePipelinePlan) checkSearchGuards(raw any, guarded []string, exposed bool, path string) error {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return nil
 	}
-	if isConditionalFilter(node) || isAccessWhenFilter(node) {
-		return filterSearches(node["filter"])
+	if isConditionalFilter(node) {
+		return plan.checkSearchGuards(node["filter"], append(conditionParams(node["when"]), guarded...), exposed, path+".filter")
 	}
-	found := []map[string]any{}
+	if isAccessWhenFilter(node) {
+		return plan.checkSearchGuards(node["filter"], guarded, exposed, path+".filter")
+	}
+	if key, clause := relationClause(node); clause != nil {
+		return plan.checkSearchGuards(clause["where"], guarded, true, path+"."+key+".where")
+	}
 	for _, group := range []string{"and", "or"} {
-		for _, child := range asAnyList(node[group]) {
-			found = append(found, filterSearches(child)...)
+		for i, child := range asAnyList(node[group]) {
+			if err := plan.checkSearchGuards(child, guarded, exposed || group == "or", fmt.Sprintf("%s.%s[%d]", path, group, i)); err != nil {
+				return err
+			}
 		}
 	}
-	if _, hasFields := node["fields"]; hasFields || node["op"] == databaseSearchOp {
-		found = append(found, node)
+	if !exposed || !isLiteralSearch(node) {
+		return nil
 	}
+	value, _ := node["value"].(string)
+	name, isParam := strings.CutPrefix(value, "$param.")
+	blank := value == ""
+	if param := plan.Params[name]; isParam && param.HasValue {
+		blank = param.Value == ""
+	} else if isParam {
+		for _, read := range guarded {
+			if read == name {
+				return nil
+			}
+		}
+		return invalid("database_pipeline %s: %s inside or or exists must sit in a when that reads %s, such as {\"when\":{\"op\":\"neq\",\"args\":[\"%s\",{\"const\":\"\"}]},\"filter\":...}; an empty value matches every record", path, databaseLiteralSearchOp, value, value)
+	}
+	if blank {
+		return invalid("database_pipeline %s: an empty %s inside or or exists matches every record", path, databaseLiteralSearchOp)
+	}
+	return nil
+}
+
+// conditionParams lists the params a when expression reads.
+func conditionParams(raw any) []string {
+	switch node := raw.(type) {
+	case string:
+		if name, ok := strings.CutPrefix(node, "$param."); ok {
+			return []string{name}
+		}
+	case map[string]any:
+		found := []string{}
+		for _, arg := range asAnyList(node["args"]) {
+			found = append(found, conditionParams(arg)...)
+		}
+		return found
+	}
+	return nil
+}
+
+// filterExposesBlankSearch reports a bound contains_ascii with an empty value
+// inside an or or a relationship. Publishing requires a when that reads the
+// value, but can't prove what it tests, so a request also fails closed here.
+func filterExposesBlankSearch(raw any, exposed bool) bool {
+	node, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, clause := relationClause(node); clause != nil {
+		return filterExposesBlankSearch(clause["where"], true)
+	}
+	for _, group := range []string{"and", "or"} {
+		for _, child := range asAnyList(node[group]) {
+			if filterExposesBlankSearch(child, exposed || group == "or") {
+				return true
+			}
+		}
+	}
+	return exposed && isLiteralSearch(node) && node["value"] == ""
+}
+
+// isLiteralSearch reports a contains_ascii leaf.
+func isLiteralSearch(node map[string]any) bool {
+	return node["op"] == databaseLiteralSearchOp
+}
+
+// isLikeSearch reports a like_contains_ascii leaf.
+func isLikeSearch(node map[string]any) bool {
+	_, hasFields := node["fields"]
+	return hasFields || node["op"] == databaseSearchOp
+}
+
+// filterHasSearch reports whether a filter contains a text search of either kind.
+func filterHasSearch(raw any) bool {
+	return len(filterSearches(raw)) > 0
+}
+
+// filterHasLikeSearch reports whether a filter contains a like_contains_ascii.
+func filterHasLikeSearch(raw any) bool {
+	found := false
+	walkFilter(raw, func(node map[string]any) { found = found || isLikeSearch(node) })
+	return found
+}
+
+// filterHoldsLiteralSearch reports whether a filter tests contains_ascii itself:
+// an access_when selects checks rather than searches, and a not_exists excludes.
+func filterHoldsLiteralSearch(raw any) bool {
+	node, ok := raw.(map[string]any)
+	if !ok || isAccessWhenFilter(node) {
+		return false
+	}
+	if isConditionalFilter(node) {
+		return filterHoldsLiteralSearch(node["filter"])
+	}
+	if key, clause := relationClause(node); key != "" {
+		return key == relationExists && filterHoldsLiteralSearch(clause["where"])
+	}
+	for _, group := range []string{"and", "or"} {
+		for _, child := range asAnyList(node[group]) {
+			if filterHoldsLiteralSearch(child) {
+				return true
+			}
+		}
+	}
+	return isLiteralSearch(node)
+}
+
+// isSearchClause reports a positive relationship that searches related records.
+// It narrows results, so a client when may hold it. Every other relationship is
+// policy and must stay out of a client's reach.
+func isSearchClause(raw any) bool {
+	key, _ := relationClause(raw)
+	return key == relationExists && filterHoldsLiteralSearch(raw)
+}
+
+// filterSearches lists the text-search leaves of a filter at every depth.
+func filterSearches(raw any) []map[string]any {
+	found := []map[string]any{}
+	walkFilter(raw, func(node map[string]any) {
+		if isLiteralSearch(node) || isLikeSearch(node) {
+			found = append(found, node)
+		}
+	})
 	return found
 }
 
@@ -837,12 +1060,30 @@ func (plan *databasePipelinePlan) searchArguments() []string {
 	return out
 }
 
-// searches lists a step's text searches, in where and in metric filters.
+// searches lists a step's text searches, in where and in metric filters,
+// including those on related collections.
 func (step databasePipelineStep) searches() []map[string]any {
 	found := filterSearches(step.Args["where"])
 	for _, raw := range asAnyList(step.Args["metrics"]) {
 		metric, _ := raw.(map[string]any)
 		found = append(found, filterSearches(metric["where"])...)
+	}
+	return found
+}
+
+// ownSearches lists the text searches on the step's own collection. A search on
+// a related collection is planned with the relationship that holds it.
+func (step databasePipelineStep) ownSearches() []map[string]any {
+	found := []map[string]any{}
+	collect := func(node map[string]any) {
+		if isLiteralSearch(node) || isLikeSearch(node) {
+			found = append(found, node)
+		}
+	}
+	walkOwnFilter(step.Args["where"], collect)
+	for _, raw := range asAnyList(step.Args["metrics"]) {
+		metric, _ := raw.(map[string]any)
+		walkOwnFilter(metric["where"], collect)
 	}
 	return found
 }
@@ -952,6 +1193,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				if err := plan.validateFilter(value, true, "step "+step.ID+".where"); err != nil {
 					return err
 				}
+				if err := plan.validateSearchGuards(value, "step "+step.ID+".where"); err != nil {
+					return err
+				}
 				relations := 0
 				walkFilter(value, func(node map[string]any) {
 					if isRelationFilter(node) {
@@ -1006,6 +1250,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 								return invalid("database_pipeline step %s metric %s: Database does not accept exists or not_exists in a metric filter", step.ID, name)
 							}
 							err = plan.validateFilter(metricValue, true, "step "+step.ID+".metric "+name+".where")
+							if err == nil {
+								err = plan.validateSearchGuards(metricValue, "step "+step.ID+".metric "+name+".where")
+							}
 						} else {
 							err = noPlaceholders(metricValue, "step "+step.ID+".metric "+name+"."+metricKey)
 						}

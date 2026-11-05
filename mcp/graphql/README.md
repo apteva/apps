@@ -698,8 +698,9 @@ Rules:
   They exist to make client filters optional, never authorization:
   - `$scope` and identity-sourced params are rejected in both `when` and
     `filter`, so a permission predicate is always an unconditional sibling.
-    Conditional filters are also rejected inside `or`, inside each other, at the
-    root of a filter, in access reads and in plain `find` resolvers.
+    Conditional filters are also rejected inside `or` and inside each other, except
+    in a literal search group (see below), at the root of a filter, in access reads
+    and in plain `find` resolvers.
   - Conditions read `$param.<name>` and `{"const": ...}` with `length`, `eq`,
     `neq`, `lt`, `lte`, `gt`, `gte`, `and`, `or`, `not` and `coalesce`. Params
     must be fixed or a top-level `$args.<name>`, of type `string`, `number`,
@@ -737,9 +738,10 @@ Rules:
   integer one; it is the only comparison mode. Collections and fields are
   configuration: placeholders are refused, and a client can only supply values.
   - `where` binds params and access values like any filter, with long `in` and
-    `not_in` lists chunked. It can't hold a client `when` or a text search, at
-    any depth. Under a `not_exists`, at any depth, it can't hold client values
-    either, because negating a client filter would widen the result.
+    `not_in` lists chunked. It can't hold a client `when` or
+    `like_contains_ascii`, at any depth, apart from the search clauses described
+    under literal search below. Under a `not_exists`, at any depth, it can't hold
+    client values either, because negating a client filter would widen the result.
   - With Database 0.10.0+, `where` can hold further relationships, up to 4
     levels. A nested `localField` reads from the record of the clause holding
     it, so a chain goes report to call to sale:
@@ -756,9 +758,12 @@ Rules:
     once. A page and its total each resolve the chain, inside the batch's one
     snapshot. Database gives nested filters about 30 s of read work and fails the
     query past it, under `not_exists` too.
-  - A filter holds at most 8 relationships, counting every branch and level of
-    it, and they are rejected in metric filters, access reads, client `when`
-    filters and plain `find`, `count` and `aggregate` resolvers. A plain
+  - A filter holds at most 24 relationships on Database 0.11.1+ and 8 before it,
+    counting every branch and level of it, optional ones included, because one
+    request can use them all. Publishing refuses a plan past the installed
+    Database's limit. They are
+    rejected in metric filters, access reads and plain `find`, `count` and
+    `aggregate` resolvers, and in client `when` filters unless they search. A plain
     resolver's client `where` argument can't hold them, in any letter case.
   - Publishing asks Database to plan each relationship with its values removed,
     whichever way a selection would go, and a nested relationship is planned as
@@ -829,9 +834,61 @@ Rules:
   failing at query time. Aggregates with `lookups` or `buckets` may search
   derived fields, so they skip that probe and any error surfaces when they
   run. A `count_of` total uses the page's filter in the page's snapshot.
+- Literal search (Database 0.11.0+): a filter may hold `{"field": "label", "op":
+  "contains_ascii", "value": "$param.q"}`. It tests one text
+  field for a literal substring: `%`, `_` and `\` are ordinary characters, ASCII
+  letters fold case, other characters compare exactly, and null reads as an empty
+  string. The field and op are configuration. The value is a literal, a fixed
+  string param, or a top-level string `$args.<name>`, sent as the client wrote it.
+
+  An empty value matches every record. Beside other filters that changes nothing,
+  so no guard is needed there. Inside an `or` or a relationship it would match
+  everything, so the search must sit in a client `when` that reads its value, and
+  a request that still gets a blank there fails rather than running:
+
+  ```json
+  "where": {"and": [
+    {"field": "centre_id", "op": "in", "value": "$scope.centres"},
+    {"when": {"op": "neq", "args": ["$param.q", {"const": ""}]}, "filter": {"or": [
+      {"field": "source_name", "op": "contains_ascii", "value": "$param.q"},
+      {"exists": {"collection": "sales", "on": [{"localField": "sale_ref", "foreignField": "local_id"}],
+        "where": {"and": [
+          {"field": "centre_id", "op": "in", "value": "$scope.centres"},
+          {"access_when": {"op": "gt", "args": [{"op": "length", "args": ["$scope.offers"]}, {"const": 0}]},
+           "filter": {"field": "offer_id", "op": "in", "value": "$scope.offers"}},
+          {"or": [
+            {"field": "contract", "op": "contains_ascii", "value": "$param.q"},
+            {"when": {"op": "gte", "args": [{"op": "length", "args": ["$param.phone"]}, {"const": 6}]},
+             "filter": {"field": "phone_digits", "op": "contains_ascii", "value": "$param.phone"}}]}]}}}]}}]}
+  ```
+
+  A blank `q` removes the whole group, so a report with nothing to search still
+  appears under its scope. The rules keep a search from standing in for a
+  permission:
+  - A client `when` may hold a relationship only if it is a positive `exists` that
+    searches. Any other relationship is policy and is refused there, so a client
+    can't remove it.
+  - Inside such an `exists`, `$scope` values, identity params and `access_when`
+    still work, so linked records keep their own checks. A match on a linked
+    record that fails them doesn't count. `not_exists` works there with trusted
+    values only.
+  - An `or` holding a search can't also read `$scope` or an identity param at its
+    own level, or hold a relationship that doesn't search: one alternative matching
+    would satisfy the whole `or`. Put those checks beside it.
+  - Inside the search group, and only there, a branch of an `or` may be a client
+    `when`. A false one drops that alternative, and the `or` must keep one branch
+    without a condition.
+  - Access reads can't search at all, and client values stay out of `not_exists`.
+
+  The page and its `count_of` total send the same filter. Publishing checks the
+  argument as for `like_contains_ascii`, and asks Database to validate each search
+  on the collection that owns its field, through the relationship for related
+  fields. A missing or non-text field, or a Database without the operator, refuses
+  the release. `contains_ascii` never selects an index, so keep an indexed scope
+  beside it on large collections.
 - Filter operators are checked on publish: `eq`, `ne`, `gt`, `gte`, `lt`,
   `lte`, `in`, `not_in`, `starts_with`, `is_null`, `is_not_null`,
-  `like_contains_ascii`. An empty `not_in` matches every non-null value, because
+  `like_contains_ascii`, `contains_ascii`. An empty `not_in` matches every non-null value, because
   Database's `not_in` never matches a null field. Past 100 values it is sent as
   an `and` of chunks, as `in` is sent as an `or` of chunks.
 - Paging: a `find` step with `"page": {"size": "$param.first", "cursor":

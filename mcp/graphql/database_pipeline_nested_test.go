@@ -54,11 +54,11 @@ func TestNestedRelationsValidation(t *testing.T) {
 		})
 	}
 
-	nine := `{"and":[` + strings.Repeat(viaCalls(nestedAllowed)+`,`, 4) + nestedAllowed + `]}`
+	tooWide := `{"and":[` + strings.Repeat(viaCalls(nestedAllowed)+`,`, 12) + nestedAllowed + `]}`
 	for name, c := range map[string]struct{ where, want string }{
 		"five levels":                 {nestedChain(5, leaf), "at most 4"},
 		"five levels in a group":      {`{"and":[` + authorisedFilter + `,` + nestedChain(5, leaf) + `]}`, "at most 4"},
-		"nine across the tree":        {nine, "at most 8"},
+		"25 across the tree":          {tooWide, "at most 24"},
 		"client when nested":          {viaCalls(`{"exists":{"collection":"sales",` + nestedOn + `,"where":{"and":[` + selectedCentres + `]}}}`), "client when"},
 		"search nested":               {viaCalls(`{"exists":{"collection":"sales",` + nestedOn + `,"where":{"fields":["a"],"op":"like_contains_ascii","value":"$param.status"}}}`), "like_contains_ascii"},
 		"client value in not_exists":  {viaCalls(`{"not_exists":{"collection":"sales",` + nestedOn + `,"where":{"field":"offer","op":"eq","value":"$param.status"}}}`), "client input"},

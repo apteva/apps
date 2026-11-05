@@ -36,9 +36,9 @@ func TestRelationalFilterValidationRefuses(t *testing.T) {
 		}
 		return `[` + strings.Join(list, ",") + `]`
 	}
-	nine := []string{}
+	tooMany := []string{}
 	for i := 0; i < maxRelationNodes+1; i++ {
-		nine = append(nine, relatedAllowed)
+		tooMany = append(tooMany, relatedAllowed)
 	}
 	for name, c := range map[string]struct{ where, want string }{
 		"beside another key":     {`{"exists":{"collection":"sales",` + relationOn + `},"field":"a"}`, "only key"},
@@ -60,7 +60,7 @@ func TestRelationalFilterValidationRefuses(t *testing.T) {
 		"client when in where":   {relation(relationOn + `,"where":{"and":[` + selectedCentres + `]}`), "client when"},
 		"search in where":        {relation(relationOn + `,"where":{"fields":["a"],"op":"like_contains_ascii","value":"$param.status"}`), "like_contains_ascii"},
 		"bad operator in where":  {relation(relationOn + `,"where":{"field":"a","op":"contains","value":"x"}`), "unsupported op"},
-		"too many":               {`{"and":[` + strings.Join(nine, ",") + `]}`, "at most 8"},
+		"too many":               {`{"and":[` + strings.Join(tooMany, ",") + `]}`, "at most 24"},
 		"client value negated":   {`{"not_exists":{"collection":"sales",` + relationOn + `,"where":{"field":"offer","op":"eq","value":"$param.status"}}}`, "client input"},
 		"client list negated":    {`{"not_exists":{"collection":"sales",` + relationOn + `,"where":{"field":"offer","op":"not_in","value":"$param.centres"}}}`, "client input"},
 		"client value in group":  {`{"not_exists":{"collection":"sales",` + relationOn + `,"where":{"and":[{"or":[{"field":"offer","op":"in","value":["$param.status"]}]}]}}}`, "client input"},
