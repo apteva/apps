@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var validPatreonIntents = map[string]bool{"unset": true, "free": true, "paid": true}
@@ -132,11 +133,23 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	hasIntent := args["patreon_intent"] != nil
 	hasRole := args["role"] != nil
 	hasOutput := args["output_type"] != nil
-	if !hasTags && !hasTagEdits && !hasFav && !hasIntent && !hasRole && !hasOutput {
-		return nil, errors.New("provide purpose role, output_type, tags, tags_add, tags_remove, favorite, or patreon_intent")
+	hasTitle := args["title"] != nil
+	if !hasTags && !hasTagEdits && !hasFav && !hasIntent && !hasRole && !hasOutput && !hasTitle {
+		return nil, errors.New("provide title, purpose role, output_type, tags, tags_add, tags_remove, favorite, or patreon_intent")
 	}
 	if hasTags && hasTagEdits {
 		return nil, errors.New("use tags to replace the set, or tags_add/tags_remove to edit it, not both")
+	}
+	title := ""
+	if hasTitle {
+		raw, ok := args["title"].(string)
+		if !ok || !utf8.ValidString(raw) || utf8.RuneCountInString(strings.TrimSpace(raw)) > 300 {
+			return nil, errors.New("title must be a string of up to 300 characters")
+		}
+		if len(ids) != 1 || args["expected_revisions"] == nil {
+			return nil, errors.New("title edits require exactly one asset ID and expected_revisions")
+		}
+		title = strings.TrimSpace(raw)
 	}
 	role, output := "", ""
 	if hasRole {
@@ -199,8 +212,8 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	for _, id := range ids {
 		var rev int64
 		var current int
-		var currentIntent, currentRole, currentOutput string
-		if err = tx.QueryRow(`SELECT revision,favorite,patreon_intent,role,output_type FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&rev, &current, &currentIntent, &currentRole, &currentOutput); err != nil {
+		var currentIntent, currentRole, currentOutput, currentTitle string
+		if err = tx.QueryRow(`SELECT revision,favorite,patreon_intent,role,output_type,title FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&rev, &current, &currentIntent, &currentRole, &currentOutput, &currentTitle); err != nil {
 			return nil, err
 		}
 		if raw := args["expected_revisions"]; raw != nil {
@@ -267,14 +280,18 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 				return nil, err
 			}
 		}
-		res, updateErr := tx.Exec(`UPDATE assets SET favorite=?,patreon_intent=?,role=?,output_type=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=? AND revision=?`, f, in, nextRole, nextOutput, time.Now().UTC().Format(time.RFC3339Nano), pid, id, rev)
+		nextTitle := currentTitle
+		if hasTitle {
+			nextTitle = title
+		}
+		res, updateErr := tx.Exec(`UPDATE assets SET title=?,favorite=?,patreon_intent=?,role=?,output_type=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=? AND revision=?`, nextTitle, f, in, nextRole, nextOutput, time.Now().UTC().Format(time.RFC3339Nano), pid, id, rev)
 		if updateErr != nil {
 			return nil, updateErr
 		}
 		if n, e := res.RowsAffected(); e != nil || n != 1 {
 			return nil, errors.New("revision conflict; reload the assets")
 		}
-		asset := &Asset{ID: id}
+		asset := &Asset{ID: id, Title: nextTitle}
 		updated = append(updated, asset)
 		if hasTags || hasTagEdits {
 			if _, err = tx.Exec(`DELETE FROM asset_tags WHERE project_id=? AND asset_id=?`, pid, id); err != nil {
@@ -309,7 +326,8 @@ func decodeJSON(raw any, out any) error {
 func assetLabelsSchema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"asset_ids"}, "properties": map[string]any{
 		"asset_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 100, "description": "Catalog asset IDs. Supply a single ID to edit one asset. Storage file IDs are a different namespace."},
-		"expected_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "minimum": 1}, "description": "Map every asset ID to its revision from content_catalog_assets_get. A mismatch rejects the entire batch. Required for purpose edits; recommended for all label edits."},
+		"title":              map[string]any{"type": "string", "maxLength": 300, "description": "Optional human-readable Catalog display title. Requires exactly one asset ID and expected_revisions. Empty clears it, restoring the source filename heading. Omitting preserves it."},
+		"expected_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "minimum": 1}, "description": "Map every asset ID to its revision from content_catalog_assets_get. A mismatch rejects the entire batch. Required for title/purpose edits; recommended for all label edits."},
 		"tags":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 25, "description": "Replace the entire tag set. Empty clears all tags. Omit to keep existing tags. Cannot combine with tags_add/tags_remove."},
 		"tags_add":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 25, "description": "Add tags while preserving other tags. Existing tags are kept once. Can combine with tags_remove for a rename. Final set is limited to 25 tags."},
 		"tags_remove":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 25, "description": "Remove only these exact tags, preserving all others. Missing tags are harmless. Can combine with tags_add. Namespaced tags such as patreon-review:hold are supported."},

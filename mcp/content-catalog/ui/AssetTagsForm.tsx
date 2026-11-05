@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { assetTitle } from "./assetTitle";
 
-type TaggedAsset = { id: string; name: string; revision?: number; tags?: string[] };
+type TaggedAsset = { id: string; name: string; title?: string; revision?: number; tags?: string[] };
 
 export function AssetTagsForm({ asset, busy, onSubmit }: {
   asset: TaggedAsset;
@@ -49,7 +50,8 @@ export function AssetTagsForm({ asset, busy, onSubmit }: {
   }}>
     <div>
       <h3 className="text-lg font-semibold">Edit tags</h3>
-      <p className="mt-1 break-words text-sm">{asset.name}</p>
+      <p className="mt-1 break-words text-sm">{assetTitle(asset)}</p>
+      {asset.title?.trim() && <p className="break-all text-xs text-text-muted">{asset.name}</p>}
       <p className="text-xs text-text-muted">Asset tags are stored in Catalog.</p>
     </div>
     <fieldset disabled={busy} className="space-y-3">

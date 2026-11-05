@@ -115,7 +115,7 @@ func (a *App) searchAssetsLive(ctx *sdk.AppCtx, o searchOptions, cursor searchCu
 				return out, errors.New("Media descriptions unavailable; retry search: " + hit.MediaError)
 			}
 			q := strings.ToLower(o.Query)
-			if q != "" && !strings.Contains(strings.ToLower(hit.Name), q) && !strings.Contains(strings.ToLower(hit.SessionTitle), q) && !strings.Contains(strings.ToLower(hit.SessionNotes), q) && hit.StorageFileID != o.Query && !strings.Contains(strings.ToLower(hit.Description), q) {
+			if q != "" && !strings.Contains(strings.ToLower(hit.Title), q) && !strings.Contains(strings.ToLower(hit.Name), q) && !strings.Contains(strings.ToLower(hit.SessionTitle), q) && !strings.Contains(strings.ToLower(hit.SessionNotes), q) && hit.StorageFileID != o.Query && !strings.Contains(strings.ToLower(hit.Description), q) {
 				continue
 			}
 			out.Items = append(out.Items, hit)

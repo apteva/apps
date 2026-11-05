@@ -1,5 +1,24 @@
 # Content Catalog
 
+## Version 0.6.13 — Catalog display titles
+
+Assets support an optional human-readable `title` in Catalog. Cards, details,
+playback labels, tag editing and publication asset choices use it as the
+heading. Cards reserve two lines for the title and show the source filename
+underneath. An empty title uses the source filename as the heading.
+
+Edit a title through **Edit title / labels** in asset details, or call
+`content_catalog_assets_labels_update` with one `asset_ids` entry, `title`
+and `expected_revisions`. Titles are trimmed, limited to 300 characters and
+saved with a revision check. Empty `title` clears it. Omitting it preserves
+the current value, including during bulk tag edits.
+
+Asset detail, session list and search responses include `title`. The existing
+`name` field contains the source filename. Both fields are searchable,
+including title matches beyond the first candidate page. Session name sorting
+follows the displayed title. Titles live in Catalog and can be copied from an
+existing Media title through an explicit edit.
+
 ## Version 0.6.12: per-asset tag editing
 
 Asset cards in session grids, grouped outputs and search results expose **Edit
