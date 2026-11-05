@@ -102,7 +102,22 @@ type Request struct {
 	Lookups    []Lookup    `json:"lookups,omitempty"`
 	Buckets    []Bucket    `json:"buckets,omitempty"`
 	Operations []Operation `json:"operations,omitempty"`
-	analytics  *analyticsPlan
+	// Relational reads: related_read, joined_page and joined_aggregate.
+	As        string        `json:"as,omitempty"`
+	Joins     []RelJoin     `json:"joins,omitempty"`
+	Computed  []RelComputed `json:"computed,omitempty"`
+	Filter    *Filter       `json:"filter,omitempty"`
+	Distinct  []string      `json:"distinct,omitempty"`
+	Pick      *RelPick      `json:"pick,omitempty"`
+	Group     *RelGroup     `json:"group,omitempty"`
+	Relation  *RelRelation  `json:"relation,omitempty"`
+	Match     *Filter       `json:"match,omitempty"`
+	Derived   []RelDerived  `json:"derived,omitempty"`
+	Branches  []RelBranch   `json:"branches,omitempty"`
+	Rollup    *RelRollup    `json:"rollup,omitempty"`
+	Offset    int           `json:"offset,omitempty"`
+	Count     bool          `json:"count,omitempty"`
+	analytics *analyticsPlan
 }
 type Operation struct {
 	Op      string  `json:"op"`

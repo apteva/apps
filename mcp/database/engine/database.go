@@ -422,7 +422,7 @@ func batchReads(r Request) (bool, error) {
 	reads, writes := 0, 0
 	for _, o := range r.Operations {
 		switch o.Op {
-		case "get", "find", "count", "aggregate":
+		case "get", "find", "count", "aggregate", opRelatedRead, opJoinedPage, opJoinedAggregate:
 			reads++
 		case "insert", "update", "delete", "upsert":
 			writes++
@@ -439,6 +439,9 @@ func batchReads(r Request) (bool, error) {
 // QueryKind names the work an operation does: a batch of only reads is a
 // "read_batch", with read permissions and query deadlines.
 func QueryKind(op string, r Request) string {
+	if isRelationalRead(op) {
+		return "read_batch"
+	}
 	if op == "batch" {
 		if reads, _ := batchReads(r); reads {
 			return "read_batch"
@@ -455,7 +458,7 @@ func isRecordWrite(op string) bool {
 }
 func isWrite(op string) bool {
 	switch op {
-	case "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain":
+	case "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain", opRelatedRead, opJoinedPage, opJoinedAggregate:
 		return false
 	}
 	return true
@@ -517,6 +520,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 		}
 		return c, tx.createCollection(c)
+	}
+	if op == opJoinedAggregate && len(r.Branches) > 0 {
+		return executeJoinedAggregate(tx, Collection{}, r)
 	}
 	if e := nameOK(r.Collection); e != nil {
 		return nil, e
@@ -682,6 +688,12 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		return map[string]any{"rows": rows, "truncated": more}, nil
 	case "insert", "upsert", "update", "delete":
 		return mutate(tx, c, op, r)
+	case opRelatedRead:
+		return executeRelatedRead(tx, c, r, cursorKey)
+	case opJoinedPage:
+		return executeJoinedPage(tx, c, r, cursorKey)
+	case opJoinedAggregate:
+		return executeJoinedAggregate(tx, c, r)
 	default:
 		return nil, Invalid("unknown operation %s", op)
 	}

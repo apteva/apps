@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.11.1
+version: 0.12.0
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -46,6 +46,9 @@ provides:
     - {name: db_upsert, description: Atomically insert or patch by a unique key.}
     - {name: db_count, description: Count matching records exactly.}
     - {name: db_aggregate, description: "Group records and compute count, distinct count, sum, avg, min and max, with per-metric filters, lookups and timezone date buckets."}
+    - {name: db_related_read, description: "Read parents with ordered, bounded related rows; match tests only the rows kept."}
+    - {name: db_joined_page, description: "Join through indexes, deduplicate, group, and count and page at that grain."}
+    - {name: db_joined_aggregate, description: "Aggregate joined, deduplicated rows, with first or latest record per key and safe division."}
     - {name: db_batch, description: "Atomic writes, or reads from one snapshot, within one database."}
     - {name: db_explain, description: Inspect query index use and sorting.}
     - {name: db_access_grant, description: Let a calling app use a project database.}
@@ -62,7 +65,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.11.1, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.12.0, entry: mcp/database}
   port: 8080
   health_check: /health
 db:

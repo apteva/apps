@@ -89,6 +89,9 @@ var specs = []toolSpec{
 	{"count", "Count matching records exactly; returns a decimal string. Filters accept {field,op:\"contains_ascii\",value} literal substring search, {fields:[text fields],op:\"like_contains_ascii\",value} wildcard search and exists/not_exists tests of related records. Defaults to a 30-second deadline, configurable up to 60 seconds with timeoutMs. diagnostics:true also reports what actually ran: plan, index, whether it was index-only, documents and index entries read, peak memory and timings.", []string{"where", "requireIndex", "timeoutMs", "diagnostics"}, []string{"collection"}},
 	{"aggregate", "Group matching records and compute count, count_distinct, sum, avg, min or max. Metrics use {name,op,field?,where?}; a metric where counts only matching rows (conditional metrics in one pass). lookups [{as,collection,localField,select?}] join the record whose single-field primary key equals localField, so \"as.field\" works in where, groupBy and metrics without duplicating rows. buckets [{name,field,unit,timezone?,weekStart?}] derive hour/day/week/month/year keys from a datetime in an IANA timezone for groupBy. Integers/counts are decimal strings; no groups means one summary row. Defaults to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs", "lookups", "buckets"}, []string{"collection", "metrics"}},
 	{"batch", "Run operations {op,args} in ONE database: either record writes (insert, update, delete, upsert) applied atomically, at most 1000 affected records; or reads (get, find, count, aggregate) answered from one consistent snapshot, which only needs read access. At most 100 operations; reads and writes cannot mix. timeoutMs applies to read batches.", []string{"operations", "timeoutMs"}, []string{"operations"}},
+	{"related_read", "Read parents with their ordered, bounded related rows. relation {as,limit,sources:[{name,joins,computed,filter,distinct,orderBy,select}]} fills one shared limit source by source: filter decides which rows take a slot, rows are ordered, the first limit kept, and only then does match test them, so a row past the limit can never match. Each parent returns the exact rows under its as name. Database applies the filters it receives; access policy stays with the caller. count:true adds an exact total.", []string{"as", "where", "orderBy", "select", "limit", "cursor", "offset", "count", "relation", "match"}, []string{"collection", "relation"}},
+	{"joined_page", "Join through indexes, deduplicate, and count and page at the requested grain. joins [{as,collection,kind:inner|left|semi|anti,on|anyOf:[{on:[{local:\"alias.field\",foreign,comparison?}]}],where}]. comparison \"text\" compares exact decimal text, \"numeric\" reads the local text as a number. distinct collapses by aliases (physical records) or fields; group {by,orderBy:[{field,direction,agg:min|max}]} pages groups and returns their ordered rows. total is computed before paging at the same grain.", []string{"as", "where", "joins", "computed", "filter", "distinct", "pick", "group", "orderBy", "select", "limit", "cursor", "offset"}, []string{"collection"}},
+	{"joined_aggregate", "Run aggregate metrics over joined, deduplicated rows. Accepts the joins, computed, filter and distinct of joined_page, plus a join kind \"aggregate\" with metrics that adds per-row related metrics as as.metric. branches [{collection,as,where,joins,computed,filter,distinct,pick,select}] replaces collection and concatenates inputs selecting the same names; rollup {by,metrics,computed,filter} aggregates per key before the outer groupBy and metrics. pick {by,orderBy,where} keeps the first qualifying row per key under its order (use desc for latest). groupBy and metrics are those of aggregate: integer sums stay exact, count is \"0\" over no rows and sum is null. derived [{name,op:\"divide\",numerator,denominator,round?}] is null on a null side or zero denominator.", []string{"as", "where", "joins", "computed", "filter", "distinct", "pick", "branches", "rollup", "groupBy", "metrics", "orderBy", "limit", "derived"}, []string{"metrics"}},
 	{"explain", "Inspect the adapter's planned find access without executing it; not evidence of what a count did (use count with diagnostics:true).", []string{"where", "orderBy", "requireIndex"}, []string{"collection"}},
 	{"access_grant", "Let a calling app use one existing project database with read or write access. Calling apps reach it with scope=\"project\". Repeating changes the access level.", []string{"app", "access"}, []string{"database", "app", "access"}},
 	{"access_revoke", "Remove a calling app's access to a project database.", []string{"app"}, []string{"database", "app"}},
@@ -109,7 +112,7 @@ func permission(op string) string {
 		return "database.watch"
 	case "realtime_describe":
 		return "database.read"
-	case "databases_list", "database_describe", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain":
+	case "databases_list", "database_describe", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "related_read", "joined_page", "joined_aggregate", "explain":
 		return "database.read"
 	case "insert", "update", "delete", "upsert", "batch":
 		return "database.write"
@@ -380,6 +383,20 @@ func inputSchema(s toolSpec) map[string]any {
 	all["timeoutMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 60000, "description": "Query deadline in milliseconds; omitted or 0 defaults to 30000. An earlier caller deadline takes precedence."}
 	all["collections"] = map[string]any{"type": "array", "items": str(), "minItems": 1, "maxItems": 16}
 	all["after"] = str()
+	all["as"] = map[string]any{"type": "string", "description": "Alias of the root collection in joined names; default root."}
+	all["joins"] = arr(obj())
+	all["computed"] = map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "object", "description": "{name,type?,expr}; expr is one of field, const, coalesce, nullIfEmpty, trim, strip+chars, concat+separator, json+path, if+then+else."}}
+	all["filter"] = map[string]any{"type": "object", "description": "Filter over joined rows, using alias.field names and computed names."}
+	all["distinct"] = map[string]any{"type": "array", "items": str(), "description": "Aliases (physical records) or fields whose combination appears once."}
+	all["pick"] = obj()
+	all["group"] = obj()
+	all["relation"] = obj()
+	all["match"] = map[string]any{"type": "object", "description": "Tested against the kept related rows, after the limit."}
+	all["derived"] = arr(obj())
+	all["branches"] = map[string]any{"type": "array", "maxItems": 4, "items": obj()}
+	all["rollup"] = obj()
+	all["offset"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100000}
+	all["count"] = map[string]any{"type": "boolean"}
 	all["diagnostics"] = map[string]any{"type": "boolean", "description": "Count only: report what the count actually did."}
 	all["initial"] = map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"find", "count", "aggregate"}}, "args": obj()}, "required": []string{"op", "args"}, "additionalProperties": false}
 	all["enabled"] = map[string]any{"type": "boolean"}

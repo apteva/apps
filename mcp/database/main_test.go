@@ -325,15 +325,23 @@ func TestSidecar(t *testing.T) {
 			{"collection_create", map[string]any{"database": adapter, "collection": "sales", "fields": []any{map[string]any{"name": "amount", "type": "number"}}}},
 			{"insert", map[string]any{"database": adapter, "collection": "sales", "records": []any{map[string]any{"amount": 7}, map[string]any{"amount": 11}}}},
 			{"aggregate", map[string]any{"database": adapter, "collection": "sales", "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "amount"}}}},
+			{"joined_page", map[string]any{"database": adapter, "collection": "sales", "select": []any{"root.amount"}, "orderBy": []any{map[string]any{"field": "root.amount"}}, "limit": 1}},
+			{"joined_aggregate", map[string]any{"database": adapter, "collection": "sales", "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "root.amount"}}}},
+			{"related_read", map[string]any{"database": adapter, "collection": "sales", "count": true, "relation": map[string]any{"as": "context", "limit": 1, "sources": []any{map[string]any{"name": "self", "joins": []any{}, "select": []any{"root.amount"}}}}}},
 		} {
 			code, v := request("/operations/"+step.op, step.args, true, nil)
 			if code != 200 {
 				t.Fatalf("%s/%s: %d %v", adapter, step.op, code, v)
 			}
-			if step.op == "aggregate" {
+			if step.op == "aggregate" || step.op == "joined_aggregate" {
 				row := v.(map[string]any)["rows"].([]any)[0].(map[string]any)
 				if row["revenue"] != float64(18) {
 					t.Fatal(row)
+				}
+			}
+			if step.op == "joined_page" || step.op == "related_read" {
+				if total := v.(map[string]any)["total"]; total != "2" {
+					t.Fatalf("%s total: %v", step.op, v)
 				}
 			}
 		}
@@ -427,5 +435,13 @@ func TestSidecar(t *testing.T) {
 	}
 	if out := projectCount("tables"); !strings.Contains(out, "no access to project database sqlite") {
 		t.Fatal("grant leaked to another app", out)
+	}
+}
+
+func TestRelationalReadsNeedOnlyReadAccess(t *testing.T) {
+	for _, op := range []string{"related_read", "joined_page", "joined_aggregate"} {
+		if got := requestPermission(op, engine.Request{}); got != "database.read" {
+			t.Errorf("%s needs %s", op, got)
+		}
 	}
 }
