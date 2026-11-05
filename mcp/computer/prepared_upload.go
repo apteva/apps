@@ -43,7 +43,7 @@ func (s *session) clearPreparedUpload() {
 	}
 }
 
-func (s *session) prepareUpload(args map[string]any) (map[string]any, error) {
+func (s *session) prepareUpload(args map[string]any, dataDir string) (map[string]any, error) {
 	s.clearPreparedUpload()
 	limit := int64(maxUploadBytes)
 	if s.backend == "local" {
@@ -57,7 +57,7 @@ func (s *session) prepareUpload(args map[string]any) (map[string]any, error) {
 	var cleanup func()
 	var err error
 	if raw := stringArg(args, "source_url"); raw != "" && stringArg(args, "base64") == "" && stringArg(args, "file_path") == "" {
-		root, e := preparedUploadRoot()
+		root, e := preparedUploadRoot(dataDir)
 		if e != nil {
 			return nil, e
 		}
@@ -81,7 +81,7 @@ func (s *session) prepareUpload(args map[string]any) (map[string]any, error) {
 	}
 	// Freeze caller-owned file_path sources so preflight and upload use identical bytes.
 	if stringArg(args, "file_path") != "" {
-		root, e := preparedUploadRoot()
+		root, e := preparedUploadRoot(dataDir)
 		if e != nil {
 			return nil, e
 		}
@@ -176,31 +176,35 @@ func (s *session) takeUpload(args map[string]any) ([]string, map[string]any, fun
 }
 
 // The production host may mount /tmp as tmpfs. Large files belong on private
-// disk cache, not RAM. Operators can pin a mounted volume with this environment
-// variable; it is not accepted from an untrusted tool argument.
-func preparedUploadRoot() (string, error) {
+// disk, not RAM. Use the app's writable install directory on hosted workers,
+// with a user cache fallback for standalone sessions. A trusted environment
+// override can pin a separate mounted volume.
+func preparedUploadRoot(dataDir string) (string, error) {
 	root := os.Getenv("APTEVA_UPLOAD_STAGING_DIR")
+	if root == "" && dataDir != "" {
+		root = filepath.Join(dataDir, "computer-uploads")
+	}
 	if root == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("no upload staging directory available; set APTEVA_UPLOAD_STAGING_DIR to an absolute writable directory: %w", err)
 		}
 		root = filepath.Join(cache, "apteva", "computer-uploads")
 	}
 	if !filepath.IsAbs(root) {
-		return "", errors.New("upload staging directory must be absolute")
+		return "", errors.New("upload staging directory must be absolute; set APTEVA_UPLOAD_STAGING_DIR to an absolute writable directory")
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", err
+		return "", fmt.Errorf("create upload staging directory; check its permissions or set APTEVA_UPLOAD_STAGING_DIR: %w", err)
 	}
 	if err := os.Chmod(root, 0700); err != nil {
-		return "", err
+		return "", fmt.Errorf("secure upload staging directory; check its ownership or set APTEVA_UPLOAD_STAGING_DIR: %w", err)
 	}
 	// Expired crash leftovers are only our own prepared-* directories. A live
 	// preparation expires in 15 minutes, so one-hour-old files cannot be reused.
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read upload staging directory; check its permissions or set APTEVA_UPLOAD_STAGING_DIR: %w", err)
 	}
 	for i, entry := range entries {
 		if i >= 100 {

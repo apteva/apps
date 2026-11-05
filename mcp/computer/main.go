@@ -60,8 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.99
+version: 0.7.100
 description: |
+  v0.7.100 fixes upload preparation on hosted workers without a user cache.
+  Staging defaults to the app's private data directory unless an operator
+  sets APTEVA_UPLOAD_STAGING_DIR. Standalone sessions use the OS user cache.
   v0.7.99 stages large sources in private disk cache rather than memory-backed /tmp.
   v0.7.98 stages and hashes session-bound uploads before destructive site changes.
   Cloud uploads keep their size cap; explicit local sessions stream large files.
@@ -265,7 +268,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.7.93
+    ref: computer/v0.7.100
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -2464,7 +2467,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		defer bound.BindRequest(requestCtx)()
 	}
 	if action == "prepare_upload" {
-		return sess.prepareUpload(args)
+		return sess.prepareUpload(args, ctx.DataDir())
 	}
 	if action == "navigate" {
 		if !validToolNavigationURL(stringArg(args, "url")) {

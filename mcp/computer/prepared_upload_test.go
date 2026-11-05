@@ -21,7 +21,7 @@ func TestPreparedUploadFreezesSourceAndCleansUp(t *testing.T) {
 	h := sha256.Sum256([]byte("original video"))
 	args := map[string]any{"file_path": p, "filename": "replacement.mp4", "expected_sha256": hex.EncodeToString(h[:]), "require_prepared": true}
 	s := &session{backend: "local"}
-	meta, err := s.prepareUpload(args)
+	meta, err := s.prepareUpload(args, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +61,10 @@ func TestPreparedUploadRejectsMismatchExpiryAndUnsupportedBackend(t *testing.T) 
 	s := &session{backend: "local"}
 	defer s.clearPreparedUpload()
 	wrong := map[string]any{"file_path": p, "expected_sha256": strings.Repeat("0", 64)}
-	if _, err := s.prepareUpload(wrong); err == nil {
+	if _, err := s.prepareUpload(wrong, ""); err == nil {
 		t.Fatal("hash mismatch accepted")
 	}
-	if _, err := s.prepareUpload(args); err != nil {
+	if _, err := s.prepareUpload(args, ""); err != nil {
 		t.Fatal(err)
 	}
 	other := map[string]any{"file_path": p, "filename": "other.jpeg", "require_prepared": true}
@@ -77,7 +77,7 @@ func TestPreparedUploadRejectsMismatchExpiryAndUnsupportedBackend(t *testing.T) 
 	if _, _, _, err := s.takeUpload(args); err == nil {
 		t.Fatal("expired preparation accepted")
 	}
-	if _, err := (&session{backend: "steel"}).prepareUpload(args); err == nil {
+	if _, err := (&session{backend: "steel"}).prepareUpload(args, ""); err == nil {
 		t.Fatal("unsupported backend accepted")
 	}
 }
@@ -98,7 +98,7 @@ func TestPreparedUploadProviderLimitAndLargeLocalStreaming(t *testing.T) {
 	defer server.Close()
 	args := map[string]any{"source_url": server.URL + "/fixture.mp4", "filename": "fixture.mp4", "require_prepared": true}
 	cloud := &session{backend: "browserbase"}
-	if _, err := cloud.prepareUpload(args); err == nil {
+	if _, err := cloud.prepareUpload(args, ""); err == nil {
 		t.Fatal("cloud cap bypassed")
 	}
 	if cloud.preparedUpload != nil {
@@ -106,7 +106,7 @@ func TestPreparedUploadProviderLimitAndLargeLocalStreaming(t *testing.T) {
 	}
 	local := &session{backend: "local"}
 	defer local.clearPreparedUpload()
-	meta, err := local.prepareUpload(args)
+	meta, err := local.prepareUpload(args, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestPreparedLargeUploadNativeBrowser(t *testing.T) {
 func TestPreparedUploadUsesPrivateCacheAndReapsOnlyExpiredOwnFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "staging")
 	t.Setenv("APTEVA_UPLOAD_STAGING_DIR", root)
-	if _, err := preparedUploadRoot(); err != nil {
+	if _, err := preparedUploadRoot(""); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0700 {
@@ -200,7 +200,7 @@ func TestPreparedUploadUsesPrivateCacheAndReapsOnlyExpiredOwnFiles(t *testing.T)
 	ago := time.Now().Add(-2 * time.Hour)
 	os.Chtimes(old, ago, ago)
 	os.Chtimes(other, ago, ago)
-	if _, err := preparedUploadRoot(); err != nil {
+	if _, err := preparedUploadRoot(""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
@@ -212,7 +212,51 @@ func TestPreparedUploadUsesPrivateCacheAndReapsOnlyExpiredOwnFiles(t *testing.T)
 		}
 	}
 	t.Setenv("APTEVA_UPLOAD_STAGING_DIR", "relative")
-	if _, err := preparedUploadRoot(); err == nil {
+	if _, err := preparedUploadRoot(""); err == nil {
 		t.Fatal("relative staging accepted")
+	}
+}
+
+func TestPreparedUploadUsesInstallDirectoryWithoutUserCache(t *testing.T) {
+	t.Setenv("APTEVA_UPLOAD_STAGING_DIR", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "")
+	dataDir := t.TempDir()
+	t.Setenv("APTEVA_DATA_DIR", dataDir)
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	fixture := []byte("upload staging regression fixture")
+	hash := sha256.Sum256(fixture)
+	expected := hex.EncodeToString(hash[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(fixture)
+	}))
+	defer server.Close()
+
+	sess := &session{backend: "local"}
+	defer sess.clearPreparedUpload()
+	app := &App{reg: &registry{m: map[string]*session{"fixture": sess}}}
+	result, err := app.toolComputerUse(ctx, map[string]any{
+		"action":          "prepare_upload",
+		"session_id":      "fixture",
+		"source_url":      server.URL + "/fixture.txt",
+		"expected_sha256": expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := result.(map[string]any)
+	if meta["prepared"] != true || meta["uploaded"] != false || meta["sha256"] != expected {
+		t.Fatalf("unexpected prepare_upload metadata: %#v", meta)
+	}
+	root := filepath.Join(dataDir, "computer-uploads")
+	if got := filepath.Dir(filepath.Dir(sess.preparedUpload.files[0])); got != root {
+		t.Fatalf("staging root = %q, want %q", got, root)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("staging root must be private, got %s", info.Mode())
 	}
 }
