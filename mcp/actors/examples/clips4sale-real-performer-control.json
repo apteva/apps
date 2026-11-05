@@ -50512,15 +50512,24 @@
       ],
       "output_schema": {}
     },
-    "preflight_onedrive_import": {
+    "preflight_cloud_clip_import": {
       "required_explicit_inputs": [
         "context_id",
         "expected_store_id",
         "expected_store_name",
         "filename",
-        "filename_stem"
+        "filename_stem",
+        "cloud_provider"
       ],
       "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "cloud_provider": {
+              "matches": "^(OneDrive|Dropbox)$"
+            }
+          }
+        },
         {
           "action": "assert_inputs",
           "assertions": {
@@ -50643,8 +50652,9 @@
           "action": "wait_for",
           "conditions": [
             {
-              "type": "selector_present",
-              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+              "type": "text_present",
+              "value": "{{cloud_provider}}",
+              "case_sensitive": true
             }
           ],
           "timeout_ms": 30000,
@@ -50653,7 +50663,7 @@
         {
           "action": "inspect_control",
           "locator": {
-            "text": "OneDrive",
+            "text": "{{cloud_provider}}",
             "exact": true,
             "som_only": true
           }
@@ -50663,7 +50673,7 @@
           "conditions": [
             {
               "type": "text_present",
-              "value": "Import from OneDrive",
+              "value": "Import from {{cloud_provider}}",
               "case_sensitive": true
             }
           ],
@@ -50679,7 +50689,7 @@
             },
             {
               "type": "text_present",
-              "value": "Please authenticate with OneDrive to select files",
+              "value": "Please authenticate with {{cloud_provider}} to select files",
               "case_sensitive": true
             }
           ],
@@ -50693,7 +50703,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_connected_picker": {
+            "cloud_connected_picker": {
               "selector": "input.uppy-ProviderBrowser-searchFilterInput",
               "type": "text",
               "required": true,
@@ -50731,7 +50741,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
               "type": "text",
               "required": true,
@@ -50743,7 +50753,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "equals_set": [
                 "{{filename}}"
               ]
@@ -50753,7 +50763,7 @@
       ],
       "output_schema": {}
     },
-    "replace_clip_video_onedrive": {
+    "replace_clip_video_cloud": {
       "required_explicit_inputs": [
         "context_id",
         "clip_id",
@@ -50768,9 +50778,18 @@
         "filename_stem",
         "filename",
         "replacement_authorized",
-        "request_id"
+        "request_id",
+        "cloud_provider"
       ],
       "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "cloud_provider": {
+              "matches": "^(OneDrive|Dropbox)$"
+            }
+          }
+        },
         {
           "action": "assert_inputs",
           "assertions": {
@@ -50927,8 +50946,9 @@
           "action": "wait_for",
           "conditions": [
             {
-              "type": "selector_present",
-              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+              "type": "text_present",
+              "value": "{{cloud_provider}}",
+              "case_sensitive": true
             }
           ],
           "timeout_ms": 30000,
@@ -50937,7 +50957,7 @@
         {
           "action": "inspect_control",
           "locator": {
-            "text": "OneDrive",
+            "text": "{{cloud_provider}}",
             "exact": true,
             "som_only": true
           }
@@ -50947,7 +50967,7 @@
           "conditions": [
             {
               "type": "text_present",
-              "value": "Import from OneDrive",
+              "value": "Import from {{cloud_provider}}",
               "case_sensitive": true
             }
           ],
@@ -50963,7 +50983,7 @@
             },
             {
               "type": "text_present",
-              "value": "Please authenticate with OneDrive to select files",
+              "value": "Please authenticate with {{cloud_provider}} to select files",
               "case_sensitive": true
             }
           ],
@@ -50977,7 +50997,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_connected_picker": {
+            "cloud_connected_picker": {
               "selector": "input.uppy-ProviderBrowser-searchFilterInput",
               "type": "text",
               "required": true,
@@ -51015,7 +51035,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
               "type": "text",
               "required": true,
@@ -51027,7 +51047,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "equals_set": [
                 "{{filename}}"
               ]
@@ -51356,8 +51376,9 @@
           "action": "wait_for",
           "conditions": [
             {
-              "type": "selector_present",
-              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+              "type": "text_present",
+              "value": "{{cloud_provider}}",
+              "case_sensitive": true
             }
           ],
           "timeout_ms": 30000,
@@ -51366,7 +51387,7 @@
         {
           "action": "inspect_control",
           "locator": {
-            "text": "OneDrive",
+            "text": "{{cloud_provider}}",
             "exact": true,
             "som_only": true
           }
@@ -51376,7 +51397,7 @@
           "conditions": [
             {
               "type": "text_present",
-              "value": "Import from OneDrive",
+              "value": "Import from {{cloud_provider}}",
               "case_sensitive": true
             }
           ],
@@ -51392,7 +51413,7 @@
             },
             {
               "type": "text_present",
-              "value": "Please authenticate with OneDrive to select files",
+              "value": "Please authenticate with {{cloud_provider}} to select files",
               "case_sensitive": true
             }
           ],
@@ -51406,7 +51427,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_connected_picker": {
+            "cloud_connected_picker": {
               "selector": "input.uppy-ProviderBrowser-searchFilterInput",
               "type": "text",
               "required": true,
@@ -51444,7 +51465,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
               "type": "text",
               "required": true,
@@ -51456,7 +51477,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "equals_set": [
                 "{{filename}}"
               ]
@@ -51480,7 +51501,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_selected_files": {
+            "cloud_selected_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:checked + label",
               "type": "text",
               "required": true,
@@ -51491,7 +51512,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_selected_files": {
+            "cloud_selected_files": {
               "equals_set": [
                 "{{filename}}"
               ]
@@ -51518,7 +51539,7 @@
           "expected_text": "Select 1",
           "expected_effect": "immediate_external_commit",
           "confirm_consequence": "immediate_external_commit",
-          "once_key": "c4s:{{expected_store_id}}:clip:{{clip_id}}:replace-video:{{request_id}}:onedrive-import",
+          "once_key": "c4s:{{expected_store_id}}:clip:{{clip_id}}:replace-video:{{request_id}}:cloud-import",
           "once_scope": "context"
         },
         {
@@ -51798,7 +51819,7 @@
       ],
       "output_schema": {}
     },
-    "upload_performer_clip_draft_onedrive": {
+    "upload_performer_clip_draft_cloud": {
       "required_explicit_inputs": [
         "context_id",
         "expected_store_id",
@@ -51813,9 +51834,18 @@
         "filename",
         "filename_stem",
         "request_id",
-        "draft_upload_authorized"
+        "draft_upload_authorized",
+        "cloud_provider"
       ],
       "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "cloud_provider": {
+              "matches": "^(OneDrive|Dropbox)$"
+            }
+          }
+        },
         {
           "action": "assert_inputs",
           "assertions": {
@@ -52709,8 +52739,9 @@
           "action": "wait_for",
           "conditions": [
             {
-              "type": "selector_present",
-              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+              "type": "text_present",
+              "value": "{{cloud_provider}}",
+              "case_sensitive": true
             }
           ],
           "timeout_ms": 30000,
@@ -52719,7 +52750,7 @@
         {
           "action": "inspect_control",
           "locator": {
-            "text": "OneDrive",
+            "text": "{{cloud_provider}}",
             "exact": true,
             "som_only": true
           }
@@ -52729,7 +52760,7 @@
           "conditions": [
             {
               "type": "text_present",
-              "value": "Import from OneDrive",
+              "value": "Import from {{cloud_provider}}",
               "case_sensitive": true
             }
           ],
@@ -52745,7 +52776,7 @@
             },
             {
               "type": "text_present",
-              "value": "Please authenticate with OneDrive to select files",
+              "value": "Please authenticate with {{cloud_provider}} to select files",
               "case_sensitive": true
             }
           ],
@@ -52759,7 +52790,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_connected_picker": {
+            "cloud_connected_picker": {
               "selector": "input.uppy-ProviderBrowser-searchFilterInput",
               "type": "text",
               "required": true,
@@ -52797,7 +52828,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
               "type": "text",
               "required": true,
@@ -52809,7 +52840,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_matching_files": {
+            "cloud_matching_files": {
               "equals_set": [
                 "{{filename}}"
               ]
@@ -52833,7 +52864,7 @@
           "max_items": 1,
           "readability": false,
           "fields": {
-            "onedrive_selected_files": {
+            "cloud_selected_files": {
               "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:checked + label",
               "type": "text",
               "required": true,
@@ -52844,7 +52875,7 @@
         {
           "action": "assert_values",
           "assertions": {
-            "onedrive_selected_files": {
+            "cloud_selected_files": {
               "equals_set": [
                 "{{filename}}"
               ]

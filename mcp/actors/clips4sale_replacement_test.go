@@ -153,13 +153,20 @@ func TestReplacementDefinitionRequiresStagingPersistenceAndNoPublication(t *test
 }
 
 func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
-	for _, mode := range []string{"success", "source_rejected", "not_persisted", "performer_lost", "queued", "onedrive_success", "onedrive_disconnected", "onedrive_wrong_file", "onedrive_extra_selection"} {
+	for _, mode := range []string{"success", "source_rejected", "not_persisted", "performer_lost", "queued", "onedrive_success", "onedrive_disconnected", "onedrive_wrong_file", "onedrive_extra_selection", "dropbox_success", "dropbox_disconnected", "dropbox_wrong_file", "dropbox_extra_selection"} {
 		t.Run(mode, func(t *testing.T) {
 			d := realPerformerDefinition(t)
 			p := newFakePlatform()
 			current := ""
 			saved := false
-			cloud := strings.HasPrefix(mode, "onedrive_")
+			provider := ""
+			switch {
+			case strings.HasPrefix(mode, "onedrive_"):
+				provider = "OneDrive"
+			case strings.HasPrefix(mode, "dropbox_"):
+				provider = "Dropbox"
+			}
+			cloud := provider != ""
 			pickerOpen, selected := false, false
 			replacements, uploads, saves := 0, 0, 0
 			p.readViewsResponse = func(tool string, in map[string]any) map[string]any {
@@ -189,11 +196,11 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 						}
 					}
 					if pickerOpen {
-						if mode == "onedrive_disconnected" {
-							body = `<body>Please authenticate with OneDrive to select files</body>`
+						if strings.HasSuffix(mode, "_disconnected") {
+							body = `<body>Please authenticate with ` + provider + ` to select files</body>`
 						} else {
 							name := "new_video.mp4"
-							if mode == "onedrive_wrong_file" {
+							if strings.HasSuffix(mode, "_wrong_file") {
 								name = "new_video_other.mp4"
 							}
 							checked := ""
@@ -201,7 +208,7 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 								checked = "checked"
 							}
 							body = `<body><input class="uppy-ProviderBrowser-searchFilterInput"><ul class="uppy-ProviderBrowser-list"><li class="uppy-ProviderBrowserItem"><input type="checkbox" name="listitem" ` + checked + `><label>` + name + `</label></li>`
-							if selected && mode == "onedrive_extra_selection" {
+							if selected && strings.HasSuffix(mode, "_extra_selection") {
 								body += `<li class="uppy-ProviderBrowserItem"><input type="checkbox" name="listitem" checked><label>extra.mp4</label></li>`
 							}
 							body += `</ul><button>Select 1</button></body>`
@@ -218,18 +225,18 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 						return map[string]any{"matched": true, "current_url": current}
 					case "set_text":
 						if !pickerOpen || in["text"] != "new_video.mp4" {
-							t.Fatal("unexpected OneDrive filter")
+							t.Fatal("unexpected cloud picker filter")
 						}
 						return map[string]any{"current_url": current, "success": true}
 					case "set_checked":
 						if !pickerOpen || in["target_id"] != "new_video.mp4" || in["checked"] != true {
-							t.Fatal("unexpected OneDrive selection")
+							t.Fatal("unexpected cloud picker selection")
 						}
 						selected = true
 						return map[string]any{"current_url": current, "success": true}
 					case "prepare_upload":
 						if cloud {
-							t.Fatal("OneDrive transfer tried Computer staging")
+							t.Fatal("cloud import tried Computer staging")
 						}
 						return map[string]any{"prepared": mode != "source_rejected", "uploaded": false, "backend": "browserbase", "sha256": strings.Repeat("a", 64), "size_bytes": 22}
 					case "screenshot":
@@ -239,7 +246,7 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 						}
 						if cloud {
 							targets = append(targets,
-								map[string]any{"id": "OneDrive", "text": "OneDrive", "accessible_name": "OneDrive", "tag": "button", "role": "tab", "effect": "open_configuration"},
+								map[string]any{"id": provider, "text": provider, "accessible_name": provider, "tag": "button", "role": "tab", "effect": "open_configuration"},
 								map[string]any{"id": "new_video.mp4", "text": "new_video.mp4", "accessible_name": "new_video.mp4", "role": "checkbox"},
 							)
 						}
@@ -247,14 +254,14 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 					case "click":
 						if in["expected_text"] == "Select 1" {
 							if !pickerOpen || !selected || replacements != 1 {
-								t.Fatal("OneDrive transfer before exact selection or replacement confirmation")
+								t.Fatal("cloud import before exact selection or replacement confirmation")
 							}
 							uploads++
 							pickerOpen = false
 							return map[string]any{"current_url": current, "success": true}
 						}
 						switch in["target_id"] {
-						case "OneDrive":
+						case "OneDrive", "Dropbox":
 							pickerOpen, selected = true, false
 						case "Replace File":
 							replacements++
@@ -292,7 +299,8 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 			inputs["replacement_authorized"] = true
 			operation := "replace_clip_video"
 			if cloud {
-				operation = "replace_clip_video_onedrive"
+				operation = "replace_clip_video_cloud"
+				inputs["cloud_provider"] = provider
 				delete(inputs, "source_url")
 				delete(inputs, "source_sha256")
 			}
@@ -303,16 +311,16 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 			run, _ := claimActorRun(ctx)
 			app.executeActorRun(context.Background(), ctx, run)
 			result, _ := getActorRun(ctx, run.ID)
-			if (result["status"] == "completed") != (mode == "success" || mode == "onedrive_success") {
+			if (result["status"] == "completed") != (mode == "success" || strings.HasSuffix(mode, "_success")) {
 				t.Fatalf("status=%v error=%v replacement=%d", result["status"], result["error"], replacements)
 			}
-			if mode == "source_rejected" || mode == "queued" || mode == "onedrive_disconnected" || mode == "onedrive_wrong_file" {
+			if mode == "source_rejected" || mode == "queued" || strings.HasSuffix(mode, "_disconnected") || strings.HasSuffix(mode, "_wrong_file") {
 				if replacements+uploads+saves != 0 {
 					t.Fatal("clip mutated before successful preflight")
 				}
-			} else if mode == "onedrive_extra_selection" {
+			} else if strings.HasSuffix(mode, "_extra_selection") {
 				if replacements != 1 || uploads != 0 || saves != 0 {
-					t.Fatal("multiple OneDrive files reached import", replacements, uploads, saves)
+					t.Fatal("multiple cloud files reached import", replacements, uploads, saves)
 				}
 			} else if replacements != 1 || uploads != 1 || saves != 1 {
 				t.Fatal("duplicate or missing write", replacements, uploads, saves)

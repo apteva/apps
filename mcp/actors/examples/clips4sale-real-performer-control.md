@@ -120,17 +120,16 @@ saved document ID/type/filename before and after reload. Use the read-only
 uploading another copy or clicking Save again. Native `tbd`/Under Review is a
 saved receipt awaiting platform review, not approval.
 
-### OneDrive import
+### OneDrive and Dropbox imports
 
-Connect OneDrive in the Clips4Sale Creator Workspace and place the MP4 at the
-root of that drive with a unique filename. Use `preflight_onedrive_import` to
-check the store, connection, and exact filename before importing. Supply
-`filename_stem` without the `.mp4` suffix and `filename` with it.
+Connect the provider in Clips4Sale Creator Workspace and place a uniquely named
+MP4 at the root of the connected drive. Set `cloud_provider` to `OneDrive` or
+`Dropbox`. Supply `filename_stem` without the `.mp4` suffix and `filename` with it.
+Use `preflight_cloud_clip_import` to check the store, connection and exact filename.
 
-Use `replace_clip_video_onedrive` for an existing draft or
-`upload_performer_clip_draft_onedrive` for a new real-performer draft. These
-operations use Clips4Sale's picker to import the file and retain the existing
-authorization and duplicate-request checks. For a replacement, the actor
-checks the picker before confirming Replace File, then verifies the saved
-filename and performer cards after reloading the same draft. Publishing
-remains a separate operation.
+Use `replace_clip_video_cloud` for an existing draft or
+`upload_performer_clip_draft_cloud` for a new real-performer draft. The actor
+selects the exact file in Clips4Sale's picker and retains the authorization and
+duplicate-request checks. For a replacement it checks the picker before confirming
+Replace File, then verifies the saved filename and performer cards after
+reloading the same draft. Publishing remains separate.
