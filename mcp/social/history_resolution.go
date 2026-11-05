@@ -145,36 +145,28 @@ func facebookReadWithFieldFallback(ctx *sdk.AppCtx, b historyAccount, tool strin
 	return raw, []string{match[1]}, err
 }
 
-// facebookNativeObjectKind picks the read contract for a native ID from the
-// saved publishing format. Feed posts are always pageId_postId. /videos and
-// /photos both return a bare object ID; a video publish leaves upload
-// evidence on its target, a photo publish does not. The ID is never rewritten.
-func facebookNativeObjectKind(ctx *sdk.AppCtx, b historyAccount, id string) string {
-	if strings.Contains(id, "_") {
-		return "page_post"
-	}
-	var diagnostics string
-	err := ctx.AppDB().QueryRow(`SELECT COALESCE(t.delivery_diagnostics,'') FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.social_account_id=? AND t.platform_post_id=?`, b.Project, b.ID, id).Scan(&diagnostics)
-	if err == nil && (strings.TrimSpace(diagnostics) == "" || diagnostics == "{}" || diagnostics == "null") {
-		return "photo"
-	}
-	return "video"
-}
-
 func inspectFacebookNative(ctx *sdk.AppCtx, b historyAccount, run *historyRun, id, token string) ([]nativePost, error) {
-	kind := facebookNativeObjectKind(ctx, b, id)
+	target, err := loadFacebookPhotoTarget(ctx, b, id)
+	if err != nil {
+		return nil, err
+	}
+	if target.targetID != 0 {
+		return inspectFacebookPhoto(ctx, b, run, target, token)
+	}
+	if b.ExternalID == "" || token == "" {
+		return nil, errors.New("Facebook Page identity or access token unavailable")
+	}
+	kind := "video"
+	if strings.Contains(id, "_") {
+		kind = "page_post"
+	}
 	var raw map[string]any
 	var dropped []string
-	var err error
 	switch kind {
 	case "video":
 		raw, dropped, err = facebookReadWithFieldFallback(ctx, b, "facebook_get_video", map[string]any{"videoId": id, "access_token": token},
 			[]string{"id", "from", "description", "title", "created_time", "permalink_url", "published"},
 			map[string]bool{"description": true, "title": true, "permalink_url": true, "published": true})
-	case "photo":
-		raw, dropped, err = facebookReadWithFieldFallback(ctx, b, "facebook_get_post", map[string]any{"postId": id, "access_token": token},
-			[]string{"id", "from", "name", "created_time", "link"},
-			map[string]bool{"name": true, "link": true})
 	default:
 		raw, dropped, err = facebookReadWithFieldFallback(ctx, b, "facebook_get_post", map[string]any{"postId": id, "access_token": token},
 			[]string{"id", "from", "message", "created_time", "permalink_url", "is_published"},
@@ -188,8 +180,7 @@ func inspectFacebookNative(ctx *sdk.AppCtx, b historyAccount, run *historyRun, i
 	}
 	owner := historyString(historyMap(raw, "from"), "id")
 	if kind != "page_post" {
-		// Video and photo IDs carry no Page prefix, so the author is the only
-		// ownership evidence and is required.
+		// Bare video IDs carry no Page prefix, so the author is required.
 		if owner == "" || owner != b.ExternalID {
 			return nil, errors.New("Facebook video is not verified as owned by the selected Page")
 		}
@@ -205,8 +196,6 @@ func inspectFacebookNative(ctx *sdk.AppCtx, b historyAccount, run *historyRun, i
 	switch kind {
 	case "video":
 		body, published = historyString(raw, "description"), raw["published"]
-	case "photo":
-		body, link, published = historyString(raw, "name"), historyString(raw, "link"), nil
 	}
 	if p, ok := published.(bool); ok && !p {
 		at = nil

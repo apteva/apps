@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.0
+version: 0.24.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -230,7 +230,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.0
+    ref: social/v0.24.1
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -2965,7 +2965,8 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			failures++
 			continue
 		}
-		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
+		identity, err := a.runStrategy(ctx, def, j)
+		platformPostID, platformURL := identity.id, identity.url
 		if j.platform == "tiktok" {
 			var current int
 			if checkErr := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE id=? AND attempts=? AND status='publishing'`, j.targetID, j.deliveryAttempt).Scan(&current); checkErr != nil || current != 1 {
@@ -3018,11 +3019,11 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		})
 		_, _ = ctx.AppDB().Exec(
 			`UPDATE post_targets
-			    SET status='published', platform_post_id=?, platform_url=?,
+			    SET status='published', platform_post_id=?, platform_url=?, facebook_page_post_id=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
 			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueEventSQL+`
 			  WHERE id=? AND attempts=? AND status='publishing'`,
-			nullable(platformPostID), nullable(platformURL), topic, event, j.targetID, j.deliveryAttempt,
+			nullable(platformPostID), nullable(platformURL), nullable(identity.facebookPagePostID), topic, event, j.targetID, j.deliveryAttempt,
 		)
 		publishRowEvent(ctx, durablePostTargets, j.targetID)
 		successes++
@@ -3136,41 +3137,45 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 	return finalStatus
 }
 
-// runStrategy dispatches to the platform's publish flow. Returns the
-// platform-side post id + URL on success, or an error to record on the
-// target row.
-func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
-	id, link, err := a.runStrategyRaw(ctx, def, j)
-	return id, safePublicationURL(j.platform, link), err
+type publishIdentity struct {
+	id                 string
+	url                string
+	facebookPagePostID string
 }
-func (a *App) runStrategyRaw(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+
+// runStrategy dispatches to the platform's publish flow and returns its identity.
+func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (publishIdentity, error) {
 	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
 	defer unlock()
 	audience, err := parseAudience(j.options)
 	if err != nil {
-		return "", "", err
+		return publishIdentity{}, err
 	}
+	var result publishIdentity
 	if audience.Type == "members" {
 		adapter := adapterForAudience(j.platform, j.providerSlug)
 		if adapter.Publish == nil {
-			return "", "", errors.New("membership publishing is unsupported by this destination")
+			return publishIdentity{}, errors.New("membership publishing is unsupported by this destination")
 		}
-		return adapter.Publish(a, ctx, def, j, audience)
+		result.id, result.url, err = adapter.Publish(a, ctx, def, j, audience)
+	} else {
+		switch def.Strategy {
+		case "twitter":
+			result.id, result.url, err = a.publishTwitter(ctx, def, j)
+		case "instagram_two_step":
+			result.id, result.url, err = a.publishInstagram(ctx, def, j)
+		case "tiktok":
+			result.id, result.url, err = a.publishTikTok(ctx, def, j)
+		case "youtube":
+			result.id, result.url, err = a.publishYoutube(ctx, def, j)
+		case "pinterest":
+			result.id, result.url, err = a.publishPinterest(ctx, def, j)
+		default: // "single" or empty
+			result, err = a.publishSingle(ctx, def, j)
+		}
 	}
-	switch def.Strategy {
-	case "twitter":
-		return a.publishTwitter(ctx, def, j)
-	case "instagram_two_step":
-		return a.publishInstagram(ctx, def, j)
-	case "tiktok":
-		return a.publishTikTok(ctx, def, j)
-	case "youtube":
-		return a.publishYoutube(ctx, def, j)
-	case "pinterest":
-		return a.publishPinterest(ctx, def, j)
-	default: // "single" or empty
-		return a.publishSingle(ctx, def, j)
-	}
+	result.url = safePublicationURL(j.platform, result.url)
+	return result, err
 }
 
 const pinterestVideoMaxBytes int64 = 2 * 1024 * 1024 * 1024
@@ -3423,9 +3428,9 @@ func postPinterestMultipartUpload(uploadURL string, fields map[string]any, item 
 // the platform's image PostTool and VideoPostTool based on the first
 // media item's MIME (Facebook splits POST /feed for photos and POST
 // /videos for video; same token, different endpoint).
-func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (publishIdentity, error) {
 	if len(j.media) > 1 {
-		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
+		return publishIdentity{}, errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
 	}
 	bodyField := def.BodyField
 	if bodyField == "" {
@@ -3457,7 +3462,7 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if isVideo && mediaField != "" {
 		prepared, err := a.prepareVideoSource(ctx, j, j.media[0], "PULL_FROM_URL")
 		if err != nil {
-			return "", "", err
+			return publishIdentity{}, err
 		}
 		defer prepared.Close()
 		j.media = append([]mediaItem(nil), j.media...)
@@ -3473,7 +3478,7 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if isVideo && def.ThumbnailURLField != "" {
 		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
 		if err != nil {
-			return "", "", err
+			return publishIdentity{}, err
 		}
 		if thumb != nil {
 			input[def.ThumbnailURLField] = thumb.URL
@@ -3496,17 +3501,17 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 		d := loadDeliveryDiagnostics(ctx, j.targetID)
 		d.OperationState = "unknown"
 		if err := validatePreparedDestination(ctx, j); err != nil {
-			return "", "", err
+			return publishIdentity{}, err
 		}
 		if err := d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", Result: "provider_fetch_requested"}); err != nil {
-			return "", "", errors.New("could not persist upload initialization guard")
+			return publishIdentity{}, errors.New("could not persist upload initialization guard")
 		}
 	}
 	out, err := executePublicationWrite(ctx, j, tool, input)
 	if err != nil {
 		ctx.Logger().Error("publishSingle: ExecuteIntegrationTool err",
 			"platform", def.Platform, "tool", tool, "err", redactDeliverySecrets(err.Error()))
-		return "", "", err
+		return publishIdentity{}, err
 	}
 	if out == nil || !out.Success {
 		ue := upstreamError(out)
@@ -3520,11 +3525,15 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 			captureProviderDiagnostics(&d, out)
 			d.event(ctx, j.targetID, deliveryEvent{Stage: "initialization", HTTPStatus: executeStatus(out), Result: "provider_rejected"})
 		}
-		return "", "", ue
+		return publishIdentity{}, ue
 	}
-	id, url := extractPostIdentity(def.Platform, out.Data)
+	identity := readPublishIdentity(def.Platform, out.Data)
+	if def.Platform == "facebook" && tool != "post_photo_to_page" {
+		identity.facebookPagePostID = ""
+	}
+	id := identity.id
 	if isVideo && id == "" {
-		return "", "", errors.New("provider response has no video identity; verify the remote outcome before retrying")
+		return publishIdentity{}, errors.New("provider response has no video identity; verify the remote outcome before retrying")
 	}
 	if isVideo {
 		d := loadDeliveryDiagnostics(ctx, j.targetID)
@@ -3535,8 +3544,8 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 		d.event(ctx, j.targetID, deliveryEvent{Stage: "processing", Result: "provider_response_received"})
 	}
 	ctx.Logger().Info("publishSingle: published",
-		"platform", def.Platform, "platform_post_id", id, "platform_url", url)
-	return id, url, nil
+		"platform", def.Platform, "platform_post_id", id, "platform_url", identity.url)
+	return identity, nil
 }
 
 // publishTwitter uploads attached media through X's media API first,
@@ -11207,17 +11216,29 @@ func (a *App) handleAvatar(w http.ResponseWriter, r *http.Request) {
 // field can't be located. Different platforms use different shapes;
 // full coverage will land as we add platforms.
 func extractPostIdentity(platform string, raw json.RawMessage) (string, string) {
+	identity := readPublishIdentity(platform, raw)
+	return identity.id, identity.url
+}
+
+func readPublishIdentity(platform string, raw json.RawMessage) publishIdentity {
 	var obj map[string]any
-	if json.Unmarshal(raw, &obj) != nil {
-		return "", ""
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if !json.Valid(raw) || decoder.Decode(&obj) != nil {
+		return publishIdentity{}
 	}
 	item := obj
 	if data, ok := obj["data"].(map[string]any); ok {
 		item = data
 	}
-	id := toString(item["id"])
-	link := firstString(item, "permalink_url", "permalink", "share_url", "url", "platformPostUrl")
-	return id, safePublicationURL(platform, link)
+	result := publishIdentity{
+		id:  toString(item["id"]),
+		url: safePublicationURL(platform, firstString(item, "permalink_url", "permalink", "share_url", "url", "platformPostUrl")),
+	}
+	if platform == "facebook" && result.id != "" {
+		result.facebookPagePostID = historyString(item, "post_id")
+	}
+	return result
 }
 
 // walkPath supports dotted paths like "picture.data.url" so a single

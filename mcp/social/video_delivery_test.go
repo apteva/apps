@@ -88,7 +88,7 @@ func TestVideoSourceRejectsBeforeProviderInitialization(t *testing.T) {
 				case "tiktok":
 					_, _, err = (&App{}).publishTikTokVideo(ctx, platforms[platform], j)
 				default:
-					_, _, err = (&App{}).publishSingle(ctx, platforms[platform], j)
+					_, err = (&App{}).publishSingle(ctx, platforms[platform], j)
 				}
 				if err == nil || len(pf.executeCalls) != 0 {
 					t.Fatalf("%s initialized provider on invalid source: %v %+v", platform, err, pf.executeCalls)

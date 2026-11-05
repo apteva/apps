@@ -85,14 +85,7 @@ func (a *App) inspectNativeHistory(ctx *sdk.AppCtx, b historyAccount, run *histo
 
 		return []nativePost{{ID: id, URL: optionalText(historyString(raw, "permalink_url", "share_url")), Title: optionalText(historyString(raw, "title")), Body: optionalText(historyString(raw, "description")), PublishedAt: nativeTimestamp(historyString(raw, "created_at"))}}, nil
 	case "facebook":
-		if b.ExternalID == "" {
-			return nil, errors.New("Facebook native post ID does not match the selected Page")
-		}
-		token := extractPageToken(b.PageCredentials)
-		if token == "" {
-			return nil, errors.New("Page access token unavailable")
-		}
-		return inspectFacebookNative(ctx, b, run, id, token)
+		return inspectFacebookNative(ctx, b, run, id, extractPageToken(b.PageCredentials))
 	case "instagram":
 		token := extractPageToken(b.PageCredentials)
 		if token == "" || b.ExternalID == "" {

@@ -47,7 +47,7 @@ func normalizeNativeObservation(b historyAccount, n nativePost) nativePost {
 		} else if at, err := time.Parse(time.RFC3339Nano, *n.PublishedAt); err != nil || at.After(time.Now().UTC()) {
 			n.PublishedAt = nil
 			n.PublicationTimeSource = "unknown"
-		} else {
+		} else if n.PublicationTimeSource != facebookPagePostTimeSource {
 			n.PublicationTimeSource = map[string]string{"youtube": "youtube.snippet.publishedAt:public", "facebook": "facebook.created_time:published", "instagram": "instagram.timestamp", "twitter": "twitter.created_at", "pinterest": "pinterest.created_at", "tiktok": "tiktok.create_time", "linkedin": "linkedin.publishedAt"}[b.Platform]
 			if n.PublicationTimeSource == "" {
 				n.PublishedAt = nil
