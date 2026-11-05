@@ -33,7 +33,7 @@ const (
 	maxActorFields          = 100
 	maxActorDatasetBytes    = 32 * 1024 * 1024
 	maxActorItemBytes       = 256 * 1024
-	maxActorDefinitionBytes = 1024 * 1024
+	maxActorDefinitionBytes = 2 * 1024 * 1024
 	maxActorInputBytes      = 256 * 1024
 	maxActorPreviewBytes    = 32 * 1024
 )
@@ -1106,7 +1106,11 @@ func (a *App) handleActors(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeActorHTTPArgs(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+	return decodeActorHTTPArgsWithLimit(w, r, 2*1024*1024)
+}
+
+func decodeActorHTTPArgsWithLimit(w http.ResponseWriter, r *http.Request, limit int64) (map[string]any, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	defer r.Body.Close()
 	var args map[string]any
 	decoder := json.NewDecoder(r.Body)
@@ -1149,7 +1153,7 @@ func (a *App) handleActorSave(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	args, ok := decodeActorHTTPArgs(w, r)
+	args, ok := decodeActorHTTPArgsWithLimit(w, r, maxActorDefinitionBytes+1024*1024)
 	if !ok {
 		return
 	}
