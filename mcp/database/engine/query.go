@@ -82,6 +82,9 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 		}
 		return nil
 	}
+	if f.Op == opContainsASCII {
+		return validateContains(fld, f)
+	}
 	if f.Value == nil {
 		return Invalid("use is_null to test null")
 	}
@@ -244,6 +247,9 @@ func matches(c Collection, r Record, f *Filter) bool {
 		return matchesExists(r, f)
 	}
 	v := r[f.Field]
+	if f.Op == opContainsASCII {
+		return matchesContains(v, f)
+	}
 	if f.Op == "is_null" {
 		return v == nil
 	}

@@ -637,6 +637,11 @@ func compileFilter(c Collection, f *Filter) (string, []any) {
 	col := quote(f.Field)
 	fld, _ := c.field(f.Field)
 	switch f.Op {
+	case opContainsASCII:
+		if searchAll(f) {
+			return "1", nil
+		}
+		return "instr(lower(coalesce(" + col + ",'')),lower(?))>0", []any{f.Value}
 	case "is_null":
 		return col + " IS NULL", nil
 	case "is_not_null":
