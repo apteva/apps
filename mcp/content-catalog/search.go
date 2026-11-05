@@ -295,7 +295,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (searchPage[assetSearchHit], error) {
 	page := searchPage[assetSearchHit]{Items: []assetSearchHit{}}
-	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
+	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.title,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
 	q += lifecyclePredicate(o.Lifecycle, "a", "s") + o.Purpose.predicate("a")
 	values := []any{o.ProjectID}
@@ -327,9 +327,9 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		values = append(values, o.SessionID)
 	}
 	if o.Query != "" {
-		q += ` AND (a.name LIKE ? ESCAPE '\' OR s.title LIKE ? ESCAPE '\' OR s.notes LIKE ? ESCAPE '\' OR a.storage_file_id=?)`
+		q += ` AND (a.title LIKE ? ESCAPE '\' OR a.name LIKE ? ESCAPE '\' OR s.title LIKE ? ESCAPE '\' OR s.notes LIKE ? ESCAPE '\' OR a.storage_file_id=?)`
 		pattern := likePattern(o.Query)
-		values = append(values, pattern, pattern, pattern, o.Query)
+		values = append(values, pattern, pattern, pattern, pattern, o.Query)
 	}
 	if o.DateFrom != "" {
 		q += ` AND s.session_date>=?`
@@ -446,7 +446,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	defer rows.Close()
 	for rows.Next() {
 		var h assetSearchHit
-		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.Favorite, &h.PatreonIntent, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.SessionNotes, &h.IsDerivative); err != nil {
+		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Title, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.Favorite, &h.PatreonIntent, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.SessionNotes, &h.IsDerivative); err != nil {
 			return page, err
 		}
 		h.Uses = []searchUse{}

@@ -28,6 +28,7 @@ type Asset struct {
 	StorageInstallID     int64            `json:"storage_install_id"`
 	StorageFileID        string           `json:"storage_file_id"`
 	Name                 string           `json:"name"`
+	Title                string           `json:"title"`
 	Kind                 string           `json:"kind"`
 	ContentType          string           `json:"content_type"`
 	SHA256               string           `json:"sha256"`
@@ -47,7 +48,7 @@ type Asset struct {
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
 	a := &Asset{}
-	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating, &a.Favorite, &a.PatreonIntent)
+	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,title,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Title, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating, &a.Favorite, &a.PatreonIntent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("asset not found")
 	}
@@ -231,7 +232,7 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		filter = " AND a.id=?"
 		values = append(values, strings.TrimSpace(id))
 	}
-	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+filter+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, values...)
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.title,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+filter+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, values...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +240,7 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []Asset{}
 	for rows.Next() {
 		var item Asset
-		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating, &item.Favorite, &item.PatreonIntent); err != nil {
+		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Title, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating, &item.Favorite, &item.PatreonIntent); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

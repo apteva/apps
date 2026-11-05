@@ -1,6 +1,7 @@
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { buildAssetFamilies, assetInScope, lineageBadge, type AssetFamily } from "./lineage";
 import { hostingNotice, hostingPending, hostingStageLabel, transcodingMessages } from "./hosting";
+import { assetTitle } from "./assetTitle";
 import { AssetTagsForm } from "./AssetTagsForm";
 import { uploadResumable } from "../../storage/ui/uploadResumable";
 
@@ -12,7 +13,7 @@ type Lifecycle = { lifecycle?: "active" | "archived"; revision?: number; archive
 type Session = Lifecycle & { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = Audience & { revision: number; observed_at: string; historically_verified?: boolean; recorded_audiences?: Audience[]; verified_audiences?: Audience[]; id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
 type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string; encode_progress?: number | null; provider_stage?: string };
-type Asset = Lifecycle & { role?: string; output_type?: string; ancestors?: Asset[]; original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; hosting_intents?: HostingIntent[]; sources?: AssetSource[] };
+type Asset = Lifecycle & { role?: string; output_type?: string; ancestors?: Asset[]; original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; title?: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; hosting_intents?: HostingIntent[]; sources?: AssetSource[] };
 type Hosting = HostingSummary & { asset_id: string; embed_url: string; error: string; provider_status?: number | null; transcoding_messages?: unknown; check_error?: string; next_check_at?: string };
 type HostingIntent = { id: string; asset_id: string; title: string; status: string; checksum_status: string; error: string; hosting_id?: string };
 type HostingResponse = { hostings: Hosting[]; hosting_intents: HostingIntent[] };
@@ -156,7 +157,7 @@ const previewCardStyle: CSSProperties = { display: "flex", flexDirection: "colum
 
 function AssetCardPreview({ asset, projectId }: { asset: Asset; projectId: string }) {
   return <div style={{ position: "relative", width: "100%", flexShrink: 0 }}>
-    <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
+    <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${assetTitle(asset)}`} fallback={mediaGlyph(assetMediaKind(asset))} />
     {(!!asset.hostings?.length || asset.hosting_intents?.some(i=>i.status==="waiting_checksum")) && <div className="flex flex-wrap gap-1" style={{ position: "absolute", top: 8, left: 8, right: 8 }} aria-label="Cloud hosting status">{(asset.hostings||[]).map(hosting => {
       const status = hosting.status === "ready" && !hosting.remote_id ? "uncertain" : hosting.status;
       let label = ({ ready: "Ready", processing: "Processing", reserved: "Queued", uncertain: "Unverified", failed: "Failed" } as Record<string, string>)[status] || "Unverified";
@@ -181,16 +182,17 @@ function ParentLinks({ asset, projectId, onOpen, compact = false }: { asset: Ass
 }
 function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen, onToggleFavorite, onEditTags }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void; onToggleFavorite?: (asset: Asset) => void; onEditTags?: (asset: Asset) => void }) {
   return <article data-asset-id={asset.id} style={{ ...previewCardStyle, position: "relative" }} className="overflow-hidden rounded-xl border border-border text-sm">
-    {onToggleFavorite && <button type="button" className="absolute right-2 top-2 z-10 rounded-md border border-border bg-bg/90 px-1.5 py-1 text-sm shadow" aria-label={asset.favorite ? `Remove ${asset.name} from favorites` : `Favorite ${asset.name}`} aria-pressed={!!asset.favorite} title={asset.favorite ? "Remove favorite" : "Favorite"} onClick={event => { event.stopPropagation(); onToggleFavorite(asset); }}>{asset.favorite ? "⭐" : "☆"}</button>}
+    {onToggleFavorite && <button type="button" className="absolute right-2 top-2 z-10 rounded-md border border-border bg-bg/90 px-1.5 py-1 text-sm shadow" aria-label={asset.favorite ? `Remove ${assetTitle(asset)} from favorites` : `Favorite ${assetTitle(asset)}`} aria-pressed={!!asset.favorite} title={asset.favorite ? "Remove favorite" : "Favorite"} onClick={event => { event.stopPropagation(); onToggleFavorite(asset); }}>{asset.favorite ? "⭐" : "☆"}</button>}
     <div style={{ display: "flex", flexDirection: compact ? "row" : "column", alignItems: compact ? "center" : undefined }}>
-      <button type="button" style={{ display: "block", width: compact ? 92 : "100%", flexShrink: 0, textAlign: "left" }} onClick={() => onOpen(asset.id)} aria-label={`Open asset: ${asset.name}`}>
+      <button type="button" style={{ display: "block", width: compact ? 92 : "100%", flexShrink: 0, textAlign: "left" }} onClick={() => onOpen(asset.id)} aria-label={`Open asset: ${assetTitle(asset)}`}>
         <AssetCardPreview asset={asset} projectId={projectId} />
       </button>
       <div className="px-3 pt-2" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
-        <button type="button" className="font-medium truncate text-left hover:text-accent" style={{ height: 24, flexShrink: 0 }} title={asset.name} onClick={() => onOpen(asset.id)}>{asset.name}</button>
+        <button type="button" className="font-medium line-clamp-2 text-left hover:text-accent" style={{ height: 40, lineHeight: "20px", flexShrink: 0 }} title={assetTitle(asset)} onClick={() => onOpen(asset.id)}>{assetTitle(asset)}</button>
+        <p className="truncate text-xs text-text-muted" style={{ height: 18, flexShrink: 0 }} title={asset.name}>{asset.title?.trim() ? asset.name : ""}</p>
         <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }} title={`${assetMediaKind(asset)} · #${asset.storage_file_id} · ${asset.review_status}`}>{assetMediaKind(asset)}{duration ? ` · ${durationLabel(duration)}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
         <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{(asset.lifecycle === "archived" || asset.session_lifecycle === "archived") && <span className="rounded bg-yellow-500/10 px-1.5 text-yellow-400">Archived</span>}{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
-        <div className="flex items-start justify-between gap-2"><AssetLabels asset={asset} compact />{onEditTags && <button type="button" className="shrink-0 text-xs text-accent underline" aria-label={`Edit tags for ${asset.name}`} onClick={() => onEditTags(asset)}>Edit tags</button>}</div>
+        <div className="flex items-start justify-between gap-2"><AssetLabels asset={asset} compact />{onEditTags && <button type="button" className="shrink-0 text-xs text-accent underline" aria-label={`Edit tags for ${assetTitle(asset)}`} onClick={() => onEditTags(asset)}>Edit tags</button>}</div>
       </div>
     </div>
     <div className="px-3 pb-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
@@ -219,10 +221,10 @@ function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) 
   const poster = previewURL(projectId, "assets", asset.id);
   const kind = assetMediaKind(asset);
   return <div className="rounded-xl border border-border bg-black/90 overflow-hidden">
-    {kind === "image" ? <a href={src} target="_blank" rel="noreferrer" title="Open full image"><img src={src} alt={asset.name} className="max-h-[560px] w-full object-contain" /></a>
-      : kind === "video" ? <video key={src} src={src} poster={poster} controls preload="metadata" playsInline className="max-h-[560px] w-full bg-black" aria-label={`Play ${asset.name}`} />
-      : kind === "audio" ? <div className="p-6 space-y-4"><PreviewImage src={poster} alt={`Waveform for ${asset.name}`} fallback="♫" className="h-28 rounded-lg" /><audio key={src} src={src} controls preload="metadata" className="w-full" aria-label={`Play ${asset.name}`} /></div>
-      : asset.content_type === "application/pdf" ? <iframe src={src} title={`Preview ${asset.name}`} className="h-[560px] w-full bg-white" />
+    {kind === "image" ? <a href={src} target="_blank" rel="noreferrer" title="Open full image"><img src={src} alt={assetTitle(asset)} className="max-h-[560px] w-full object-contain" /></a>
+      : kind === "video" ? <video key={src} src={src} poster={poster} controls preload="metadata" playsInline className="max-h-[560px] w-full bg-black" aria-label={`Play ${assetTitle(asset)}`} />
+      : kind === "audio" ? <div className="p-6 space-y-4"><PreviewImage src={poster} alt={`Waveform for ${assetTitle(asset)}`} fallback="♫" className="h-28 rounded-lg" /><audio key={src} src={src} controls preload="metadata" className="w-full" aria-label={`Play ${assetTitle(asset)}`} /></div>
+      : asset.content_type === "application/pdf" ? <iframe src={src} title={`Preview ${assetTitle(asset)}`} className="h-[560px] w-full bg-white" />
       : <div className="flex h-40 items-center justify-center text-5xl text-text-muted" aria-label="No inline preview">{mediaGlyph(kind)}</div>}
     <div className="flex items-center justify-between gap-3 border-t border-border bg-bg p-3 text-xs"><span className="min-w-0 truncate text-text-muted">{asset.content_type || asset.kind}{asset.size_bytes ? ` · ${(asset.size_bytes / 1024 / 1024).toFixed(1)} MB` : ""}</span><a href={src} target="_blank" rel="noreferrer" className="shrink-0 text-accent underline">Open original ↗</a></div>
   </div>;
@@ -519,7 +521,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const scopedAssets = assets.filter(asset => assetInScope(asset,{ lifecycle:lifecycleScope, includeIntermediates:showIntermediates }));
   const filteredAssets = scopedAssets.filter(asset => {
     if (assetRole && asset.role !== assetRole) return false;
-    if (assetQuery && !`${asset.name} ${asset.storage_file_id} ${asset.description || ""}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
+    if (assetQuery && !`${assetTitle(asset)} ${asset.name} ${asset.storage_file_id} ${asset.description || ""}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
     if (assetLineage === "source" && asset.sources?.length) return false;
     if (assetLineage === "derivative" && !asset.sources?.length) return false;
     if (assetFavorite === "favorite" && !asset.favorite) return false;
@@ -531,7 +533,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength, assetLengthMin, lengthMaximum))) return false;
     return matchesPublicationState(asset.publications || [],assetSharing,publicationScope) && (assetSharing!=="ready" || asset.review_status==="approved");
   }).sort((a, b) => {
-    if (assetSort === "name") return a.name.localeCompare(b.name);
+    if (assetSort === "name") return assetTitle(a).localeCompare(assetTitle(b));
     if (assetSort === "shortest" || assetSort === "longest") {
       const aDuration = assetDurations[a.id]; const bDuration = assetDurations[b.id];
       if (!aDuration) return bDuration ? 1 : 0;
@@ -618,16 +620,16 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">{assetView === "grouped" ? `${families.length} groups · ${families.reduce((n,g)=>n+g.derivedCount,0)} selected outputs` : `Showing ${filteredAssets.length} of ${scopedAssets.length} files`}</span></div>
         <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
  <LifecycleSelect value={lifecycleScope} onChange={setLifecycleScope} />
- {checkedAssets.length > 0 && <><span className="text-xs">{checkedAssets.length} selected</span><button type="button" className="text-xs text-accent underline" onClick={() => setModal("labels")}>Edit purpose / labels</button>{(["archive","move","restore"] as const).map(operation => <button key={operation} type="button" className="text-xs text-accent underline" onClick={() => manageLifecycle("asset",operation,assets.filter(asset => checkedAssets.includes(asset.id)))}>{operation}</button>)}</>}
+ {checkedAssets.length > 0 && <><span className="text-xs">{checkedAssets.length} selected</span><button type="button" className="text-xs text-accent underline" onClick={() => setModal("labels")}>Edit title / labels</button>{(["archive","move","restore"] as const).map(operation => <button key={operation} type="button" className="text-xs text-accent underline" onClick={() => manageLifecycle("asset",operation,assets.filter(asset => checkedAssets.includes(asset.id)))}>{operation}</button>)}</>}
           <div className="inline-flex rounded-lg border border-border p-0.5" role="group" aria-label="Asset display">{([["grid", "Grid"], ["grouped", "Grouped by main"]] as const).map(([view, label]) => <button key={view} type="button" aria-pressed={assetView === view} className={`rounded px-2 py-1 text-xs ${assetView === view ? "bg-accent/15 text-accent" : "text-text-muted"}`} onClick={() => setAssetView(view)}>{label}</button>)}</div>
-          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find name, ID or description" aria-label="Find session file" />
+          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find title, filename, ID or description" aria-label="Find session file" />
           <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
           {assetFilterSummary && <span className="truncate text-xs text-text-muted" style={{ flex: "1 1 120px", minWidth: 0 }} title={assetFilterSummary}>{assetFilterSummary}</span>}
           {assetFiltersActive && <button type="button" className="text-xs text-accent underline" onClick={() => resetAssetFilters(true)}>Clear filters</button>}
         </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No assets in this lifecycle view. Choose All to inspect other linked files.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
-        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} onOpen={openLinkedAsset} /></div>)}</div>
+        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${assetTitle(asset)}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} onOpen={openLinkedAsset} /></div>)}</div>
           : <><p className="text-xs text-text-muted">Grouped using recorded source links, including hidden provenance. Outputs appear once under the nearest visible main asset.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} />)}</div></>}
 
       </section>
@@ -661,7 +663,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       </div>
     </Modal>}
 
-    {derivedFamily && selectedSession && !selectedAsset && !modal && <Modal title={`Derived assets · ${derivedFamily.asset.name}`} wide onClose={() => setDerivedFamilyId(null)}>
+    {derivedFamily && selectedSession && !selectedAsset && !modal && <Modal title={`Derived assets · ${assetTitle(derivedFamily.asset)}`} wide onClose={() => setDerivedFamilyId(null)}>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-sm">
         <button type="button" className="text-accent underline" onClick={() => openLinkedAsset(derivedFamily.asset.id)}>Open main asset</button>
         <span className="text-xs text-text-muted">{assetFiltersActive ? `${derivedAssets.length} matching of ${derivedFamily.derivedCount}` : derivedAssets.length} derived assets</span>
@@ -672,14 +674,15 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       {!derivedAssets.length && <p className="text-sm text-text-muted">No selected outputs match the current filters.</p>}
     </Modal>}
 
-    {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
+    {selectedAsset && !modal && <Modal title={assetTitle(selectedAsset)} wide onClose={closeAsset}>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
         <span className={selectedAsset.eligible === false ? "text-yellow-400" : "text-text-muted"}>{selectedAsset.eligible === false ? "Archived / unavailable for processing or new publication" : "Active"}</span>
         <AssetLabels asset={selectedAsset} />
         <button type="button" disabled={assetLoading || busy} className="rounded border border-border px-2 py-1" onClick={() => editAssetTags(selectedAsset)}>Edit tags</button>
-        <button type="button" className="rounded border border-border px-2 py-1" onClick={() => setModal("labels")}>Edit purpose / labels</button>
+        <button type="button" className="rounded border border-border px-2 py-1" onClick={() => setModal("labels")}>Edit title / labels</button>
         {(["archive", "move", "restore"] as const).filter(operation => operation === "move" || (operation === "restore" ? selectedAsset.eligible === false : selectedAsset.lifecycle !== "archived")).map(operation => <button key={operation} type="button" className="rounded border border-border px-2 py-1 capitalize" onClick={() => manageLifecycle("asset",operation)}>{operation}</button>)}
       </div>
+      {selectedAsset.title?.trim() && <p className="mb-3 break-all text-xs text-text-muted">Source file · {selectedAsset.name} · #{selectedAsset.storage_file_id}</p>}
       {selectedAsset.archive_reason && <p className="mb-3 text-xs text-text-muted">{selectedAsset.archive_reason} · {selectedAsset.archived_at}{selectedAsset.original_session_id ? ` · Original session ${short(selectedAsset.original_session_id)}` : ""}</p>}
       {derivedFamily && <button type="button" className="mb-3 text-sm text-accent underline" onClick={closeAsset}>← Derived assets</button>}
       {error && <p className="mb-3 rounded border border-red-500/50 p-3 text-sm text-red-400">{error}</p>}
@@ -737,7 +740,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       }}>Reload asset and discard edits</button></div>}
     </Modal>}
 
-    {modal === "labels" && (selectedAsset || checkedAssets.length > 0) && <Modal title="Edit purpose and labels" onClose={() => setModal(null)}>
+    {modal === "labels" && (selectedAsset || checkedAssets.length > 0) && <Modal title="Edit title and labels" onClose={() => setModal(null)}>
       <AssetLabelsForm assets={selectedAsset ? [selectedAsset] : assets.filter(asset => checkedAssets.includes(asset.id))} busy={busy} onSubmit={input => run(async () => {
         await action("content_catalog_assets_labels_update", input); setModal(null); setCheckedAssets([]);
         if (selectedSession) { const current = selectedAsset; await openSession(selectedSession); if (current) await openAsset(current); }
@@ -828,7 +831,7 @@ function PublicationForm({ busy, initial, assets, initialAssetId, onSubmit }: { 
     <h3 className="font-semibold">{initial ? `Edit ${initial.destination} post` : "Record a platform post"}</h3>
     <p className="text-xs text-text-muted">One post can include several files. This records Catalog evidence only; it does not publish externally.</p>
     <label className="block text-xs">Post title (optional)<input className={inputClass} value={title} onChange={e => setTitle(e.target.value)} /></label>
-    <fieldset className="space-y-1"><legend className="text-xs font-medium">Files in this post</legend>{assets.map(a => <label key={a.id} className="flex items-center gap-2 rounded border border-border px-2 py-1 text-xs"><input type="checkbox" checked={selected.includes(a.id)} onChange={e => setSelected(prev => e.target.checked ? [...prev, a.id] : prev.filter(x => x !== a.id))} /><span className="min-w-0 truncate" title={a.name}>{a.name}</span></label>)}{!selected.length && <p className="text-red-400 text-xs">Choose at least one file.</p>}</fieldset>
+    <fieldset className="space-y-1"><legend className="text-xs font-medium">Files in this post</legend>{assets.map(a => <label key={a.id} className="flex items-center gap-2 rounded border border-border px-2 py-1 text-xs"><input type="checkbox" checked={selected.includes(a.id)} onChange={e => setSelected(prev => e.target.checked ? [...prev, a.id] : prev.filter(x => x !== a.id))} /><span className="min-w-0 truncate" title={`${assetTitle(a)} · ${a.name}`}>{assetTitle(a)}</span></label>)}{!selected.length && <p className="text-red-400 text-xs">Choose at least one file.</p>}</fieldset>
     <label className="block text-xs">Platform<input className={inputClass} list="catalog-platforms" required disabled={!!initial} value={destination} onChange={e => setDestination(e.target.value)} placeholder="Instagram, YouTube, Patreon…" /></label>
     <datalist id="catalog-platforms">{["instagram", "youtube", "patreon", "tiktok", "facebook", "x", "linkedin", "threads", "pinterest", "reddit"].map(x => <option key={x} value={x} />)}</datalist>
     <label className="block text-xs">Account or channel (optional)<input className={inputClass} value={account} onChange={e => setAccount(e.target.value)} /></label><label className="block text-xs">Legacy audience note (optional)<input className={inputClass} value={audience} onChange={e => setAudience(e.target.value)} /></label>
@@ -848,11 +851,17 @@ function LifecycleSelect({value,onChange}:{value:string;onChange:(value:string)=
 }
 function AssetLabelsForm({ assets, busy, onSubmit }: { assets: Asset[]; busy: boolean; onSubmit: (input: Record<string, unknown>) => void }) {
  const single=assets.length===1; const first=assets[0];
+ const [title,setTitle]=useState(first?.title || "");
  const [role,setRole]=useState(single ? (first?.role || "unspecified") : ""); const [outputType,setOutputType]=useState(first?.output_type || ""); const [replaceOutput,setReplaceOutput]=useState(single);
  const [tags,setTags]=useState((first?.tags||[]).join(", ")); const [replaceTags,setReplaceTags]=useState(single);
  const [favorite,setFavorite]=useState(single ? (first?.favorite ? "on" : "off") : ""); const [intent,setIntent]=useState(single ? (first?.patreon_intent || "unset") : "");
- return <form className="space-y-3" onSubmit={e=>{e.preventDefault();const input:Record<string,unknown>={asset_ids:assets.map(a=>a.id),expected_revisions:Object.fromEntries(assets.map(a=>[a.id,a.revision]))};if(replaceTags)input.tags=tags.split(",").map(x=>x.trim()).filter(Boolean);if(favorite)input.favorite=favorite==="on";if(intent)input.patreon_intent=intent;if(role)input.role=role;if(replaceOutput)input.output_type=outputType;onSubmit(input);}}>
-   <div><h3 className="font-semibold">{single ? "Edit Catalog labels" : `Edit labels on ${assets.length} assets`}</h3><p className="text-xs text-text-muted">These labels live in Catalog. They do not alter Media or publish anything.</p></div>
+ return <form className="space-y-3" onSubmit={e=>{e.preventDefault();const input:Record<string,unknown>={asset_ids:assets.map(a=>a.id),expected_revisions:Object.fromEntries(assets.map(a=>[a.id,a.revision]))};if(single)input.title=title;if(replaceTags)input.tags=tags.split(",").map(x=>x.trim()).filter(Boolean);if(favorite)input.favorite=favorite==="on";if(intent)input.patreon_intent=intent;if(role)input.role=role;if(replaceOutput)input.output_type=outputType;onSubmit(input);}}>
+   <div><h3 className="font-semibold">{single ? "Edit Catalog title and labels" : `Edit labels on ${assets.length} assets`}</h3><p className="text-xs text-text-muted">These labels live in Catalog. They do not alter Media or publish anything.</p></div>
+   {single && <label className="block space-y-1 text-xs">
+     <span>Display title</span>
+     <input className={inputClass} aria-label="Display title" value={title} maxLength={300} onChange={e => setTitle(e.target.value)} placeholder={first.name} />
+     <span className="text-text-muted">Source file · {first.name}</span>
+   </label>}
    <label className="block text-xs">Purpose<select className={inputClass} value={role} onChange={e=>setRole(e.target.value)}><option value="">Leave unchanged</option><option value="unspecified">Unclassified</option><option value="main">Main</option><option value="derivative">Derivative</option><option value="intermediate">Intermediate (hidden by default)</option></select></label>
    <label className="block text-xs">Output category<input className={inputClass} value={outputType} onChange={e=>setOutputType(e.target.value)} placeholder="reel, screenshot, portrait, trailer…" /></label>
    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={replaceOutput} onChange={e=>setReplaceOutput(e.target.checked)} />Set or clear output category</label>
@@ -860,7 +869,7 @@ function AssetLabelsForm({ assets, busy, onSubmit }: { assets: Asset[]; busy: bo
    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={replaceTags} onChange={e=>setReplaceTags(e.target.checked)} />Replace the current tag set{!single && <span className="text-text-muted">(leave off to keep each asset’s tags)</span>}</label>
    <label className="block text-xs">Favorite<select className={inputClass} value={favorite} onChange={e=>setFavorite(e.target.value)}><option value="">{single ? "Leave unchanged" : "Leave each as-is"}</option><option value="on">⭐ Favorite</option><option value="off">Not favorite</option></select></label>
    <label className="block text-xs">Patreon intent<select className={inputClass} value={intent} onChange={e=>setIntent(e.target.value)}><option value="">{single ? "Leave unchanged" : "Leave each as-is"}</option><option value="unset">Unset</option><option value="free">Free</option><option value="paid">Paid</option></select></label>
-   <button className={buttonClass} disabled={busy || (!replaceTags && !favorite && !intent && !role && !replaceOutput)}>{busy ? "Saving…" : "Save labels"}</button>
+   <button className={buttonClass} disabled={busy || (!single && !replaceTags && !favorite && !intent && !role && !replaceOutput)}>{busy ? "Saving…" : "Save changes"}</button>
  </form>;
 }
 function LifecycleForm({target,sessions,busy,onSubmit}:{target:{entity:"asset"|"session";operation:"archive"|"move"|"restore";assets?:Asset[];session?:Session};sessions:Session[];busy:boolean;onSubmit:(input:Record<string,unknown>)=>void}) {
@@ -878,7 +887,7 @@ function LifecycleForm({target,sessions,busy,onSubmit}:{target:{entity:"asset"|"
  onSubmit(input);}}>
  <h3 className="font-semibold capitalize">{target.operation} {target.entity === "asset" ? `${files.length} asset(s)` : target.session?.title}</h3>
  <p className="text-xs text-text-muted">Updates Catalog membership and lifecycle. Asset IDs, Storage files, source links, hosting and publication history are preserved.</p>
- {target.entity === "asset" && <ul className="max-h-32 overflow-auto text-xs">{files.map(asset=><li key={asset.id}>{asset.name}</li>)}</ul>}
+ {target.entity === "asset" && <ul className="max-h-32 overflow-auto text-xs">{files.map(asset=><li key={asset.id}>{assetTitle(asset)}</li>)}</ul>}
  {target.operation === "archive" && <label className="block text-xs">Archive reason<textarea className={inputClass} required value={reason} onChange={e=>{setReason(e.target.value);change();}} /></label>}
  {target.entity === "asset" && <label className="block text-xs">{target.operation === "archive" ? "Move to session (optional)" : "Destination session"}<select className={inputClass} aria-label="Destination session" required={target.operation==="move"} value={destination} onChange={e=>{setDestination(e.target.value);change();}}><option value="">{target.operation === "restore" ? mixedOrigins ? "Each asset’s original session" : "Original session" : target.operation === "archive" ? "Keep current session" : "Choose session"}</option>{destinations.map(session=><option key={session.id} value={session.id}>{session.title}{session.lifecycle==="archived" ? " · Archived" : ""}</option>)}</select></label>}
  {target.entity === "session" && target.operation === "restore" && target.session?.status === "archived" && <label className="block text-xs">Production status<select className={inputClass} value={status} onChange={e=>{setStatus(e.target.value);change();}}>{["planned","active","completed"].map(value=><option key={value}>{value}</option>)}</select></label>}
