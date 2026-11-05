@@ -25,6 +25,9 @@ const (
 type databaseWatchSpec struct {
 	project, database, scope string
 	collections              []string
+	// authority names the grant and profile sources among the collections. A commit
+	// to one replaces a refresh still running, so its result is never delivered.
+	authority []string
 }
 
 // topic is the hub topic watchers publish to. Database and collection names
@@ -37,10 +40,12 @@ func (s databaseWatchSpec) key() string { return s.project + "\x00" + s.topic() 
 
 // databaseWatchFor derives the change-feed watch for a Subscription resolver.
 // watch_collections overrides the source collection, for example to re-run an
-// aggregate when a related collection changes.
+// aggregate when a related collection changes. On a pipeline it can only add: every
+// collection the plan reads stays watched, so a list can't hide a grant source.
 func databaseWatchFor(project string, source sourceRecord, resolver resolverRecord) (databaseWatchSpec, bool) {
 	config := mergeMaps(source.Config, resolver.Config)
-	var derived []string
+	var derived, authority []string
+	pipeline := false
 	switch strings.ToLower(strings.TrimSpace(resolver.Operation)) {
 	case "find", "list", "search", "get", "count", "aggregate":
 		// Lookup targets change the joined record, so they are watched too.
@@ -52,7 +57,7 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 		if err != nil {
 			return databaseWatchSpec{}, false
 		}
-		derived = plan.Collections()
+		derived, authority, pipeline = plan.Collections(), plan.AccessCollections(), true
 	default:
 		return databaseWatchSpec{}, false
 	}
@@ -69,7 +74,7 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 			add(value)
 		}
 	}
-	if len(collections) == 0 {
+	if len(collections) == 0 || pipeline {
 		for _, name := range derived {
 			add(name)
 		}
@@ -83,6 +88,7 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 		database:    stringValue(config["database"], "default"),
 		scope:       stringValue(config["scope"], "project"),
 		collections: collections,
+		authority:   authority,
 	}, true
 }
 
@@ -205,10 +211,24 @@ func (a *App) runDatabaseWatch(ctx context.Context, w *databaseWatcher) {
 			resync = false
 			a.publishDatabaseChange(spec, spec.collections)
 		}
+		// One poll is one invalidation, naming everything it touched: the hub drops
+		// what a full mailbox can't take, so separate sends could lose a grant change.
+		changed, seen := []string{}, map[string]bool{}
+		invalidated := false
 		for _, event := range out.Events {
-			if event.Type == "invalidate" {
-				a.publishDatabaseChange(spec, event.Collections)
+			if event.Type != "invalidate" {
+				continue
 			}
+			invalidated = true
+			for _, name := range event.Collections {
+				if !seen[name] {
+					seen[name] = true
+					changed = append(changed, name)
+				}
+			}
+		}
+		if invalidated {
+			a.publishDatabaseChange(spec, changed)
 		}
 	}
 }

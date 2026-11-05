@@ -589,6 +589,12 @@ Rules:
   record), narrowed to its request. `require_any_permission` on a value refuses
   callers holding none of the listed permissions. Permissions come from the
   verified Auth identity. Access reads run before the steps.
+- A client can narrow a value with `requested`, and anything derived from it. In a
+  positive filter that only returns fewer rows, so that's the only place it's allowed.
+  A plan is refused if such a value reaches an `access_when` condition or filter, a
+  result's `$if`, a relationship's `where`, `not_in`, `ne` or a `combine` input, or an
+  `expr` that decides on it, because a shorter list could return more rows or lift a mask.
+  An `expr` can still pass the list through as an `if` result.
 - Access values can chain. A read's `where` may use `$scope.<value>`, and
   `{"union": [...]}` or `{"intersect": [...]}` combines earlier values without
   a read. Values run in dependency order, one read batch per level, for at
@@ -799,7 +805,10 @@ Rules:
 
   The condition decides on the grant itself, so a grant naming only unknown
   offers still selects the restriction and matches nothing, rather than falling
-  back to the normal scope.
+  back to the normal scope. That holds for a value of type `exact_string_list`,
+  where a blank grant is still a grant. A grant row whose value is null, or no
+  row at all, counts as no grant, so removing the last row lifts a restriction
+  written this way.
   - Conditions read `$scope.<name>`, `{"const": ...}` and params that are fixed
     or come from `$identity`, with the ops `when` allows plus `in` (a value and a
     list). Client params and `$args` are refused. Types are checked when the
@@ -896,8 +905,8 @@ Rules:
   requests are capped at it) and never fails on `hasMore`. Results can select
   `$steps.<id>.hasMore` and `$steps.<id>.nextCursor` (null on the last page).
   A count step with `"count_of": "<find step>"` counts the same collection and
-  filter in the same snapshot. Paging uses Database cursors; offsets are not
-  supported.
+  filter in the same snapshot. A `find` page uses Database cursors; joined reads
+  also take offsets (see "Joined reads" below).
 - Field masking: params can bind `$identity.permissions` (a `string_list` of
   the verified permissions), and combine expressions can read `$param.<name>`
   and `$scope.<name>`. The `in` op tests membership. `keep` copies a joined
@@ -940,6 +949,127 @@ replaying the same `db_batch` directly; a sale commit reaches two subscribers
 with one batch. Batch cost equals the sum of its steps: there, a chained lookup
 (about 410 ms) and an unindexed latest-5 sort (about 78 ms) dominated; the
 other steps took 1 to 17 ms each.
+
+#### Joined reads (Database 0.12.0)
+
+Steps can use Database's relational reads: `related_read`, `joined_page` and
+`joined_aggregate`. Their `args` are Database's request, as its README describes
+under "Relational reads", so a plan reads like the request it sends. Older Database
+versions refuse them at publish.
+
+```json
+{"id": "page", "op": "related_read", "max_rows": 100, "args": {
+   "collection": "reports",
+   "where": {"and": [
+     {"field": "centre_id", "op": "in", "value": "$scope.centres"},
+     {"when": {"op": "neq", "args": ["$param.centre", {"const": ""}]},
+      "filter": {"field": "centre_id", "op": "eq", "value": "$param.centre"}}]},
+   "select": ["id", "local_id", "score_total"],
+   "orderBy": [{"field": "modified_time", "direction": "desc"}, {"field": "id", "direction": "desc"}],
+   "count": true,
+   "relation": {"as": "display_context", "limit": 40, "sources": [...]},
+   "match": {"and": [{"when": {"op": "neq", "args": ["$param.q", {"const": ""}]},
+                      "filter": {"field": "client_name", "op": "contains_ascii", "value": "$param.q"}}]}},
+ "page": {"size": "$param.limit", "offset": "$param.offset", "cursor": "$param.cursor"},
+ "shape": {"total_as": "total_count", "json_text": ["display_context"], "numbers": ["score_total"]}}
+```
+
+**What a client can reach.** Client arguments only reach filters that narrow a
+result: the root `where`, the joined-row `filter`, `match`, a branch's `where` and
+`filter`, and the `where` of an outer metric. An `or` that mixes client values with
+`$scope` or identity values is refused, because a client value could widen access
+there. So is an `or` where only some alternatives read client values, since they could
+add rows the fixed alternatives leave out; a client `when` around the whole `or` is
+fine, because that group is optional anyway. Everything else is fixed in the plan:
+
+- `collection`, join definitions and keys, `select`, `orderBy`, `group`, `groupBy`,
+  metric definitions, `computed`, `derived`, `distinct` and aliases hold no
+  placeholders at all.
+- A join's `where`, a source's `filter`, `pick.where`, `rollup`, a join metric's
+  `where` and a computed `if` decide eligibility. They can read identity and access
+  values, but no client values and no client `when`. Use `access_when` when one
+  applies only to some viewers.
+- A relation's `limit` is a literal from 1 to 1000. Database fills it source by
+  source, and a row past it can never match.
+
+Conditions have their own rules on joined reads:
+
+- A root or branch `where` holding an `access_when` needs a term that always applies.
+  With only conditional terms, a viewer none of them applies to would read every record.
+- An `access_when` condition and a result's `$if` can only decide on
+  `exact_string_list` values. A normal list drops blanks, so a blank grant would read
+  as no grant.
+- A computed `if` can't hold an `access_when`.
+
+**What decides a winner.** A `pick`, a `rollup` and a `distinct` by field choose rows,
+so a client value before them does more than narrow. It can change which row wins a
+pick, or make a mixed record look single to a rollup. Client params, including a value
+a client can narrow, are refused in the `where` and `filter` that feed them. A plan
+that means it, such as a report's date window, lists those params on the step:
+
+```json
+{"id": "facts", "op": "joined_aggregate", "stage_params": ["from", "to"], "args": {...}}
+```
+
+A `distinct` by alias only collapses the joined rows of one record, so it chooses nothing
+and needs no list.
+
+**Publish.** Publishing sends each joined step to Database once with a root that
+matches nothing, every conditional branch present and `limit` 1. Database then
+checks the operation, collections, fields, join keys, expressions, and indexes, and
+reads no rows. Values the plan fixes stay in the request, so Database also checks them
+against their fields' types. A refusal leaves the previous release active. Publish also
+checks that each `$args` param reads a declared field argument of a fitting type.
+
+Two things only fail at run time, with no partial rows: a read that exceeds its work
+budget on real data, and a param whose type doesn't suit its field. A sample value could
+refuse a good plan, so publish doesn't send one.
+
+**Paging.** `page.size` works as on `find`; a size of 0 returns no rows and keeps the
+total. `page.offset` passes up to 100000, past which the request fails. A negative
+offset starts at the first record, like SQL. A request takes a cursor or an offset,
+not both. Results can select `$steps.<id>.total` (a `joined_page`, or a
+`related_read` with `count: true`), `.hasMore`, `.nextCursor` and `.first`.
+
+**Cursors.** A joined page's `nextCursor` wraps Database's and is encrypted with a key
+kept per project, so a client can't read order values or record keys from it. It's
+bound to the project, the resolver's definition, the step, the viewer, the effective
+scope, and the request's filters and order, so it fails with `invalid_cursor` under
+any other. Changed grants end a held cursor. A refreshed token with the same permissions
+keeps it. Cursors on `find` steps are unchanged.
+
+**Shape.** `shape` turns Database's rows into a field's existing contract:
+
+- `rename` maps output keys, such as `root.id` to `id`. Two values can't end up with
+  one name, and `total_as` can't reuse one.
+- `total_as` adds the page's total to every row.
+- `json_text` turns a value into JSON text, for fields typed `String`.
+- `numbers` turns decimal text into numbers where that's exact.
+- `relation_source` keeps the reserved `source` field on related rows, which is
+  otherwise removed.
+
+A grouped `joined_page` flattens its groups into rows, so a page of 1 interaction
+can return two legs while `total` keeps counting interactions.
+
+`result` can also build a payload: `{"$json_text": <template>}` encodes a part as
+JSON text, `{"$const": <value>}` holds a literal, and `{"$if": <condition>, "then":
+..., "else": ...}` chooses on identity and access values only:
+
+```json
+"result": {"$if": {"op": "in", "args": [{"const": "admin"}, "$param.perms"]},
+           "then": [{"payload": {"$json_text": {"total": "$steps.calls.total", "items": "$steps.calls"}}}],
+           "else": []}
+```
+
+**Lists in a String argument.** A `string_list` param with `"encoding": "json"` reads
+a JSON list from a `String` argument, as in `centreIds: String = "[]"`. Numbers in it
+keep their decimal text, and anything else fails the request.
+
+**One view of grants and rows.** A plan with a joined read re-reads its access values
+in the batch that reads the rows. If they differ from what its scope was resolved
+from, it resolves the scope again and retries, up to 3 times, then fails with
+`access_changing` rather than return rows it can't confirm. Other plans keep their
+two batches.
 
 #### Measuring a pipeline
 
@@ -1037,7 +1167,12 @@ A `Subscription` field bound to a Database read (`find`, `list`, `search`,
 `get`, `count` or `aggregate`) follows Database's native change feed. GraphQL
 long-polls `db_changes` with `scope: "project"` and re-runs the field whenever
 a commit touches the source collection; `watch_collections` in the resolver
-config watches other or additional collections instead:
+config watches other or additional collections instead. A `database_pipeline`
+watches every collection it reads, including joins, relation sources, branches,
+`exists` targets and its access reads, and `watch_collections` can only add to those.
+Watches follow the active release's plan, and the draft only where nothing is published.
+Publishing refuses a subscription that depends on more than 16 collections, Database's
+limit for one watch:
 
 ```json
 {
@@ -1063,6 +1198,24 @@ result. Different callers or variables never share a result. Bursts collapse
 into one re-run per group, and each member keeps only the newest pending
 result, so a slow connection delays only itself. A re-run that fails is
 retried with backoff (250 ms up to 5 s) instead of waiting for the next commit.
+
+A result is only delivered while it's the newest run, so a revoked row can't come
+back, however late its read returns. A commit replaces a running refresh, so a result
+read before it is dropped. To keep constant writes from starving delivery, that stops
+after 3 replacements in a row, or 16 for a collection the plan reads its access values
+from, a dropped change event, or one that can't say what changed. The refresh then
+finishes and is delivered, and the next one starts at once to cover what arrived
+meanwhile. A refresh that finishes at the limit can predate the latest grant change, but
+no newer result has been delivered. Each refresh may only share a read that started
+after the last change it covers.
+
+A subscriber's first read gives way the same way: if a refresh started since it joined,
+that refresh's result is sent instead, and a member never receives a refresh older than
+its own first read. Every refresh and reconnect re-reads saved grants. Token permissions
+are read at connection and checked again when the token expires. A subscriber connected
+across a publish keeps watching what the old release read until it reconnects, though
+its refreshes run the new plan.
+
 One native watcher per database and collection set is shared by every
 subscriber, because Database admits at most 8 concurrent watches per calling
 app. When retained history expires the watcher reopens and every subscriber

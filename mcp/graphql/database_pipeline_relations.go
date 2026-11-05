@@ -153,6 +153,9 @@ func filterHasDirectOptional(raw any) bool {
 // relations lists a step's relational nodes at every depth.
 func (step databasePipelineStep) relations() []map[string]any {
 	found := []map[string]any{}
+	if isJoinedOp(step.Op) {
+		return found // Collections reads them with the joined request's other parts
+	}
 	walkFilter(step.Args["where"], func(node map[string]any) {
 		if isRelationFilter(node) {
 			found = append(found, node)
@@ -165,6 +168,9 @@ func (step databasePipelineStep) relations() []map[string]any {
 // Each carries any nodes nested in it.
 func (step databasePipelineStep) ownRelations() []map[string]any {
 	found := []map[string]any{}
+	if isJoinedOp(step.Op) {
+		return found // a joined read is checked as a whole, by joinedProbe
+	}
 	walkOwnFilter(step.Args["where"], func(node map[string]any) {
 		if isRelationFilter(node) {
 			found = append(found, node)
@@ -335,6 +341,9 @@ func (plan *databasePipelinePlan) requireTrustedValues(raw any, label string) er
 					failure = invalid("%s reads %s, which comes from client input; use access values, identity params or fixed values", label, typed)
 				}
 			}
+			if name, ok := strings.CutPrefix(typed, "$scope."); ok && failure == nil && len(plan.narrowedBy[name]) > 0 {
+				failure = invalid("%s reads %s, which a client can narrow; use an access value without requested", label, typed)
+			}
 		case []any:
 			for _, item := range typed {
 				check(item)
@@ -352,26 +361,35 @@ func (plan *databasePipelinePlan) requireTrustedValues(raw any, label string) er
 // probeFilter keeps a relational filter's structure and fields for validation,
 // with no values: those are only known once a request binds them.
 func probeFilter(raw any) any {
+	return probeFilterKeeping(raw, false)
+}
+
+// probeFilterKeeping can also keep a leaf whose value the plan fixes, so Database
+// checks that value and operator against the field's type.
+func probeFilterKeeping(raw any, literals bool) any {
 	node, ok := raw.(map[string]any)
 	if !ok {
 		return nil
 	}
 	if isAccessWhenFilter(node) || isConditionalFilter(node) {
-		return probeFilter(node["filter"])
+		return probeFilterKeeping(node["filter"], literals)
 	}
 	if isRelationFilter(node) {
-		return probeRelation(node)
+		return probeRelationKeeping(node, literals)
 	}
 	// Keeps the operator, so Database checks it and the field's type against the
 	// collection the field belongs to.
 	if isLiteralSearch(node) {
 		return map[string]any{"field": node["field"], "op": databaseLiteralSearchOp, "value": ""}
 	}
+	if isLikeSearch(node) {
+		return map[string]any{"fields": node["fields"], "op": databaseSearchOp, "value": ""}
+	}
 	for _, group := range []string{"and", "or"} {
 		if children, found := node[group].([]any); found {
 			kept := []any{}
 			for _, child := range children {
-				if probe := probeFilter(child); probe != nil {
+				if probe := probeFilterKeeping(child, literals); probe != nil {
 					kept = append(kept, probe)
 				}
 			}
@@ -381,18 +399,25 @@ func probeFilter(raw any) any {
 			return map[string]any{group: kept}
 		}
 	}
+	if literals && noPlaceholders(node["value"], "") == nil {
+		return node
+	}
 	return map[string]any{"field": node["field"], "op": "is_null"}
 }
 
 // probeRelation is a relational node without bound values.
 func probeRelation(node map[string]any) map[string]any {
+	return probeRelationKeeping(node, false)
+}
+
+func probeRelationKeeping(node map[string]any, literals bool) map[string]any {
 	key, clause := relationClause(node)
 	copied := make(map[string]any, len(clause))
 	for name, value := range clause {
 		copied[name] = value
 	}
 	delete(copied, "where")
-	if probe := probeFilter(clause["where"]); probe != nil {
+	if probe := probeFilterKeeping(clause["where"], literals); probe != nil {
 		copied["where"] = probe
 	}
 	return map[string]any{key: copied}

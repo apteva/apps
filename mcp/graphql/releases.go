@@ -203,6 +203,16 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 			if err := plan.validateLimits(limits); err != nil {
 				return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
 			}
+			if plan.hasJoinedReads() {
+				if err := plan.validateJoinedArguments(definition.Fields.ForName(resolver.FieldName)); err != nil {
+					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+				}
+			}
+			if resolver.ParentType == "Subscription" {
+				if watch, ok := databaseWatchFor("", source, resolver); ok && len(watch.collections) > maxDatabaseWatchCollections {
+					return invalid("resolver %s.%s: a subscription depends on %d collections and Database watches at most %d at once", resolver.ParentType, resolver.FieldName, len(watch.collections), maxDatabaseWatchCollections)
+				}
+			}
 			for _, name := range plan.searchArguments() {
 				argument := definition.Fields.ForName(resolver.FieldName).Arguments.ForName(name)
 				if argument == nil || argument.Type.NamedType != "String" {

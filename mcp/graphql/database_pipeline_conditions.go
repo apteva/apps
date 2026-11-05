@@ -52,6 +52,13 @@ func filterConditionals(raw any) []map[string]any {
 
 // conditionals lists a step's conditional nodes, in where and in metric filters.
 func (step databasePipelineStep) conditionals() []map[string]any {
+	if isJoinedOp(step.Op) {
+		found := []map[string]any{}
+		for _, filter := range step.joinedFilters() {
+			found = append(found, filterConditionals(filter.raw)...)
+		}
+		return found
+	}
 	found := filterConditionals(step.Args["where"])
 	for _, raw := range asAnyList(step.Args["metrics"]) {
 		metric, _ := raw.(map[string]any)
@@ -216,6 +223,9 @@ func (plan *databasePipelinePlan) conditionType(raw any, depth int, trusted bool
 			}
 			if !plan.accessIndex[name] {
 				return "", fmt.Errorf("references unknown %s", node)
+			}
+			if len(plan.narrowedBy[name]) > 0 {
+				return "", fmt.Errorf("cannot read %s, which a client can narrow; clients must not decide whether a restriction applies", node)
 			}
 			return conditionList, nil
 		}
@@ -631,7 +641,7 @@ func (plan *databasePipelinePlan) conditionalArguments() map[string]bool {
 		case string:
 			if param, ok := plan.Params[strings.TrimPrefix(value, "$param.")]; ok && strings.HasPrefix(value, "$param.") {
 				if argument, ok := strings.CutPrefix(param.From, "$args."); ok {
-					out[argument] = param.Type == "exact_string_list"
+					out[argument] = param.Type == "exact_string_list" && param.Encoding == ""
 				}
 			}
 		case []any:

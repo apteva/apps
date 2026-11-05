@@ -32,6 +32,9 @@ type databasePipelineParam struct {
 	Required bool
 	Value    any
 	HasValue bool
+	// Encoding "json" reads a list argument sent as JSON text, such as
+	// centreIds: String = "[]".
+	Encoding string
 }
 
 // databasePipelineRead is an access-phase lookup: the distinct values of one
@@ -110,6 +113,9 @@ type databasePipelineStep struct {
 	Metrics map[string]bool // aggregate metrics with integer results
 	Page    *databasePipelinePage
 	CountOf string // count: the find step whose collection and filter it counts
+	Shape   *databasePipelineShape
+	// StageParams names client params a joined step lets feed its pick or rollup.
+	StageParams []string
 }
 
 // databasePipelinePage pages a find step: size is a number or a number
@@ -118,6 +124,7 @@ type databasePipelineStep struct {
 type databasePipelinePage struct {
 	Size   any
 	Cursor string
+	Offset any // joined pages only: an integer or a number $param
 }
 
 type databasePipelineCombine struct {
@@ -143,17 +150,26 @@ type databasePipelinePlan struct {
 	Combines     []databasePipelineCombine
 	Result       map[string]string
 	ResultRoot   string // a single reference returned as the field value
-	TimeoutMS    int
-	stepIndex    map[string]int
-	accessIndex  map[string]bool
+	// ResultTemplate is a result whose envelope is part of its contract.
+	ResultTemplate any
+	TimeoutMS      int
+	stepIndex      map[string]int
+	accessIndex    map[string]bool
+	// narrowedBy names the client params that can narrow each access value.
+	narrowedBy   map[string][]string
 	combineIndex map[string]bool
 }
 
 var databasePipelineStepArgs = map[string]map[string]bool{
-	"aggregate": {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true},
-	"find":      {"collection": true, "where": true, "select": true, "orderBy": true, "lookups": true},
-	"count":     {"collection": true, "where": true},
-	"get":       {"collection": true, "key": true},
+	"aggregate":       {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true},
+	"find":            {"collection": true, "where": true, "select": true, "orderBy": true, "lookups": true},
+	"count":           {"collection": true, "where": true},
+	"get":             {"collection": true, "key": true},
+	joinedRelatedRead: {"collection": true, "as": true, "where": true, "select": true, "orderBy": true, "relation": true, "match": true, "count": true},
+	joinedPage: {"collection": true, "as": true, "where": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true,
+		"group": true, "select": true, "orderBy": true},
+	joinedAggregate: {"collection": true, "as": true, "where": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true,
+		"groupBy": true, "metrics": true, "derived": true, "branches": true, "rollup": true, "orderBy": true},
 }
 
 func validateDatabasePipeline(config map[string]any) (*databasePipelinePlan, error) {
@@ -198,6 +214,10 @@ func validateDatabasePipeline(config map[string]any) (*databasePipelinePlan, err
 	if err := plan.parseResult(config["result"]); err != nil {
 		return nil, err
 	}
+	// A joined plan re-reads its grants in the batch that reads its rows.
+	if plan.hasJoinedReads() && len(plan.Steps)+len(plan.Access) > maxDatabaseBatchOperations {
+		return nil, invalid("database_pipeline: %d steps and %d access values do not fit one Database batch of %d", len(plan.Steps), len(plan.Access), maxDatabaseBatchOperations)
+	}
 	return plan, nil
 }
 
@@ -217,7 +237,7 @@ func (plan *databasePipelinePlan) parseParams(raw any) error {
 		if !ok {
 			return invalid("database_pipeline param %s must be an object", name)
 		}
-		if err := onlyKeys(spec, "database_pipeline param "+name, "type", "required", "from", "value"); err != nil {
+		if err := onlyKeys(spec, "database_pipeline param "+name, "type", "required", "from", "value", "encoding"); err != nil {
 			return err
 		}
 		if raw, exists := spec["type"]; exists && !nonEmptyString(raw) {
@@ -251,6 +271,12 @@ func (plan *databasePipelinePlan) parseParams(raw any) error {
 			return invalid("database_pipeline param %s has an invalid source path", name)
 		}
 		p.From, p.Value, p.HasValue = from, value, hasValue
+		if raw, exists := spec["encoding"]; exists {
+			p.Encoding, _ = raw.(string)
+			if p.Encoding != "json" || (p.Type != "string_list" && p.Type != "exact_string_list") {
+				return invalid("database_pipeline param %s encoding must be json, on a string_list or exact_string_list", name)
+			}
+		}
 		plan.Params[name] = p
 	}
 	return nil
@@ -586,7 +612,10 @@ func (plan *databasePipelinePlan) parseAccess(raw any) error {
 			}
 		}
 	}
-	return plan.orderAccess()
+	if err := plan.orderAccess(); err != nil {
+		return err
+	}
+	return plan.markClientNarrowed()
 }
 
 // orderAccess groups access values into dependency levels, rejecting cycles
@@ -661,6 +690,9 @@ func (plan *databasePipelinePlan) orderAccess() error {
 // validateFilter accepts the Database filter language: {field,op,value} leaves
 // and {and:[...]}/{or:[...]} groups. Placeholders are permitted only as values.
 func (plan *databasePipelinePlan) validateFilter(raw any, allowScope bool, path string) error {
+	if err := plan.refuseNarrowedNegation(raw, "database_pipeline "+path); err != nil {
+		return err
+	}
 	return plan.validateFilterIn(raw, filterPlace{allowScope: allowScope}, path)
 }
 
@@ -1063,6 +1095,13 @@ func (plan *databasePipelinePlan) searchArguments() []string {
 // searches lists a step's text searches, in where and in metric filters,
 // including those on related collections.
 func (step databasePipelineStep) searches() []map[string]any {
+	if isJoinedOp(step.Op) {
+		found := []map[string]any{}
+		for _, filter := range step.joinedFilters() {
+			found = append(found, filterSearches(filter.raw)...)
+		}
+		return found
+	}
 	found := filterSearches(step.Args["where"])
 	for _, raw := range asAnyList(step.Args["metrics"]) {
 		metric, _ := raw.(map[string]any)
@@ -1156,7 +1195,7 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 		if !ok {
 			return invalid("database_pipeline step %d must be an object", i)
 		}
-		if err := onlyKeys(spec, fmt.Sprintf("database_pipeline step %d", i), "id", "op", "args", "max_rows", "top_n", "page", "count_of"); err != nil {
+		if err := onlyKeys(spec, fmt.Sprintf("database_pipeline step %d", i), "id", "op", "args", "max_rows", "top_n", "page", "count_of", "shape", "stage_params"); err != nil {
 			return err
 		}
 		step := databasePipelineStep{Metrics: map[string]bool{}}
@@ -1170,7 +1209,7 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 		}
 		allowed, ok := databasePipelineStepArgs[step.Op]
 		if !ok {
-			return invalid("database_pipeline step %s op must be aggregate, find, count or get", step.ID)
+			return invalid("database_pipeline step %s op must be aggregate, find, count, get, related_read, joined_page or joined_aggregate", step.ID)
 		}
 		args, _ := spec["args"].(map[string]any)
 		if raw, exists := spec["count_of"]; exists {
@@ -1184,9 +1223,29 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 		} else if args == nil {
 			return invalid("database_pipeline step %s requires args", step.ID)
 		}
-		for key, value := range args {
+		for key := range args {
 			if !allowed[key] {
 				return invalid("database_pipeline step %s (%s) does not accept %q", step.ID, step.Op, key)
+			}
+		}
+		if raw, exists := spec["stage_params"]; exists {
+			names, isList := raw.([]any)
+			if !isList || !isJoinedOp(step.Op) {
+				return invalid("database_pipeline step %s stage_params is a list on a joined read", step.ID)
+			}
+			for _, item := range names {
+				name, _ := item.(string)
+				step.StageParams = append(step.StageParams, name)
+			}
+		}
+		if isJoinedOp(step.Op) {
+			if err := plan.validateJoinedStep(&step, args); err != nil {
+				return err
+			}
+		}
+		for key, value := range args {
+			if isJoinedOp(step.Op) {
+				break
 			}
 			switch key {
 			case "where":
@@ -1271,7 +1330,7 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				}
 			}
 		}
-		if collection, _ := args["collection"].(string); strings.TrimSpace(collection) == "" && step.CountOf == "" {
+		if collection, _ := args["collection"].(string); strings.TrimSpace(collection) == "" && step.CountOf == "" && !isJoinedOp(step.Op) {
 			return invalid("database_pipeline step %s requires a collection", step.ID)
 		}
 		if step.Op == "get" && args["key"] == nil {
@@ -1295,12 +1354,17 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 			}
 			step.TopN = topN
 		}
+		step.Args = args
 		if raw, exists := spec["page"]; exists {
 			if err := plan.parsePage(&step, raw); err != nil {
 				return err
 			}
 		}
-		step.Args = args
+		if raw, exists := spec["shape"]; exists {
+			if err := parseJoinedShape(&step, raw); err != nil {
+				return err
+			}
+		}
 		plan.stepIndex[step.ID] = len(plan.Steps)
 		plan.Steps = append(plan.Steps, step)
 	}
@@ -1323,10 +1387,11 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 
 func (plan *databasePipelinePlan) parsePage(step *databasePipelineStep, raw any) error {
 	spec, ok := raw.(map[string]any)
-	if !ok || step.Op != "find" || step.TopN {
-		return invalid("database_pipeline step %s page applies to find steps without top_n and must be an object", step.ID)
+	joined := step.Op == joinedRelatedRead || step.Op == joinedPage
+	if !ok || (step.Op != "find" && !joined) || step.TopN {
+		return invalid("database_pipeline step %s page applies to find steps without top_n, related_read and joined_page, and must be an object", step.ID)
 	}
-	if err := onlyKeys(spec, "database_pipeline step "+step.ID+" page", "size", "cursor"); err != nil {
+	if err := onlyKeys(spec, "database_pipeline step "+step.ID+" page", "size", "cursor", "offset"); err != nil {
 		return err
 	}
 	page := &databasePipelinePage{Size: step.MaxRows}
@@ -1352,6 +1417,24 @@ func (plan *databasePipelinePlan) parsePage(step *databasePipelineStep, raw any)
 			return invalid("database_pipeline step %s page cursor must be a string $param", step.ID)
 		}
 		page.Cursor = cursor
+	}
+	if raw, exists := spec["offset"]; exists {
+		if !joined {
+			return invalid("database_pipeline step %s page offset applies to related_read and joined_page; find pages use cursors", step.ID)
+		}
+		switch offset := raw.(type) {
+		case string:
+			p, ok := plan.Params[strings.TrimPrefix(offset, "$param.")]
+			if !strings.HasPrefix(offset, "$param.") || !ok || p.Type != "number" {
+				return invalid("database_pipeline step %s page offset must be an integer or a number $param", step.ID)
+			}
+		default:
+			value, integral := strictInt(offset)
+			if !integral || value < 0 || value > maxJoinedOffset {
+				return invalid("database_pipeline step %s page offset must be between 0 and %d", step.ID, maxJoinedOffset)
+			}
+		}
+		page.Offset = raw
 	}
 	step.Page = page
 	return nil
@@ -1394,7 +1477,7 @@ func (plan *databasePipelinePlan) parseCombine(raw any) error {
 		}
 		for _, stepID := range c.Join {
 			index, ok := plan.stepIndex[stepID]
-			if !ok || (plan.Steps[index].Op != "aggregate" && plan.Steps[index].Op != "find") {
+			if !ok || (plan.Steps[index].Op != "aggregate" && plan.Steps[index].Op != "find" && !isJoinedOp(plan.Steps[index].Op)) {
 				return invalid("database_pipeline combine %s joins unknown or non-row step %s", id, stepID)
 			}
 		}
@@ -1515,6 +1598,9 @@ func (plan *databasePipelinePlan) validateCombineInput(ref string, join []string
 		if !plan.accessIndex[name] {
 			return fmt.Errorf("input %q is not an access value", ref)
 		}
+		if len(plan.narrowedBy[name]) > 0 {
+			return fmt.Errorf("input %q can be narrowed by a client, which could lift a mask", ref)
+		}
 		return nil
 	}
 	parts := strings.SplitN(ref, ".", 2)
@@ -1562,6 +1648,13 @@ func (plan *databasePipelinePlan) parseResult(raw any) error {
 		plan.ResultRoot = ref
 		return nil
 	}
+	if plan.resultIsTemplate(raw) {
+		if err := plan.parseResultTemplate(raw, 0); err != nil {
+			return err
+		}
+		plan.ResultTemplate = raw
+		return nil
+	}
 	result, ok := raw.(map[string]any)
 	if !ok || len(result) == 0 {
 		return invalid("database_pipeline result must be a $steps, $combine or $scope reference, or an object mapping output fields to them")
@@ -1579,15 +1672,43 @@ func (plan *databasePipelinePlan) parseResult(raw any) error {
 	return nil
 }
 
+// resultIsTemplate tells a result template from the flat form, whose values are
+// all references.
+func (plan *databasePipelinePlan) resultIsTemplate(raw any) bool {
+	switch node := raw.(type) {
+	case []any:
+		return true
+	case map[string]any:
+		for _, value := range node {
+			if _, isRef := value.(string); !isRef {
+				return true
+			}
+		}
+		for _, key := range []string{"$json_text", "$const", "$if"} {
+			if _, found := node[key]; found {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (plan *databasePipelinePlan) validResultRef(ref string) bool {
 	parts := strings.Split(ref, ".")
 	switch {
+	case len(parts) == 3 && parts[0] == "$steps" && parts[2] == "total":
+		index, ok := plan.stepIndex[parts[1]]
+		if !ok {
+			return false
+		}
+		step := plan.Steps[index]
+		return step.Op == joinedPage || (step.Op == joinedRelatedRead && step.Args["count"] == true)
 	case len(parts) == 2 && parts[0] == "$steps":
 		_, ok := plan.stepIndex[parts[1]]
 		return ok
 	case len(parts) == 3 && parts[0] == "$steps" && parts[2] == "first":
 		index, ok := plan.stepIndex[parts[1]]
-		return ok && (plan.Steps[index].Op == "aggregate" || plan.Steps[index].Op == "find")
+		return ok && (plan.Steps[index].Op == "aggregate" || plan.Steps[index].Op == "find" || isJoinedOp(plan.Steps[index].Op))
 	case len(parts) == 3 && parts[0] == "$steps" && (parts[2] == "hasMore" || parts[2] == "nextCursor"):
 		index, ok := plan.stepIndex[parts[1]]
 		return ok && plan.Steps[index].Page != nil
@@ -1621,17 +1742,48 @@ func (plan *databasePipelinePlan) Collections() []string {
 			_, clause := relationClause(node)
 			add(clause["collection"])
 		}
+		// Joins, sources and branches, and any relationship inside their filters: a
+		// linked record can change which rows a report returns and what they say.
+		_, _ = joinedVisitor{collection: add, filter: func(_ joinedSlot, raw any) (any, error) {
+			walkFilter(raw, func(node map[string]any) {
+				if _, clause := relationClause(node); clause != nil {
+					add(clause["collection"])
+				}
+			})
+			return raw, nil
+		}}.request(joinedArgsOf(step), "")
 	}
-	for _, value := range plan.Access {
-		for _, read := range []*databasePipelineRead{value.Default, value.Otherwise} {
-			if read != nil {
-				add(read.Collection)
-			}
-		}
+	for _, name := range plan.AccessCollections() {
+		add(name)
 	}
 	out := make([]string, 0, len(seen))
 	for name := range seen {
 		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// joinedArgsOf is a joined step's args, or nil for any other step.
+func joinedArgsOf(step databasePipelineStep) map[string]any {
+	if isJoinedOp(step.Op) {
+		return step.Args
+	}
+	return nil
+}
+
+// AccessCollections are the grant and profile sources a run resolves its scope
+// from. A change to one can revoke what an in-flight read was allowed to see.
+func (plan *databasePipelinePlan) AccessCollections() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, value := range plan.Access {
+		for _, read := range []*databasePipelineRead{value.Default, value.Otherwise} {
+			if read != nil && strings.TrimSpace(read.Collection) != "" && !seen[strings.TrimSpace(read.Collection)] {
+				seen[strings.TrimSpace(read.Collection)] = true
+				out = append(out, strings.TrimSpace(read.Collection))
+			}
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -1656,6 +1808,13 @@ type databasePipelineRun struct {
 	scope   map[string][]string
 	pages   map[string]map[string]any // paged find steps: hasMore, nextCursor
 	trace   *pipelineTraceRecorder
+	version string // what the resolver's definition hashes to, for cursors
+	// Joined plans: the access reads this run made and what they found, read again
+	// beside the rows so scope and rows come from one snapshot.
+	accessReads    []any
+	accessFound    []any
+	emptyPages     map[string]bool
+	cursorBindings map[string]string
 }
 
 func (a *App) callDatabasePipeline(ctx context.Context, config map[string]any) (value any, err error) {
@@ -1673,20 +1832,54 @@ func (a *App) callDatabasePipeline(ctx context.Context, config map[string]any) (
 		return nil, err
 	}
 	project, _ := config["_project_id"].(string)
-	run := &databasePipelineRun{app: a, plan: plan, project: project, scope: map[string][]string{}, trace: trace}
+	run := &databasePipelineRun{app: a, plan: plan, project: project, scope: map[string][]string{}, trace: trace, version: pipelineConfigVersion(config)}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(plan.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	if run.params, err = plan.bindParams(ctx, resolverArgs(config), config["parent"]); err != nil {
 		return nil, err
 	}
-	if err := run.resolveAccess(ctx); err != nil {
-		return nil, err
+	for attempt := 1; ; attempt++ {
+		if err := run.resolveAccess(ctx); err != nil {
+			return nil, err
+		}
+		results, err := run.readSteps(ctx)
+		if errors.Is(err, errAccessChanged) {
+			if attempt == maxAccessAttempts {
+				return nil, runtimeError("access_changing", "access kept changing during the read; retry")
+			}
+			run.scope, run.accessReads, run.accessFound = map[string][]string{}, nil, nil
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return run.assemble(results)
 	}
-	results, err := run.readSteps(ctx)
-	if err != nil {
-		return nil, err
+}
+
+// decodeJSONList reads a list sent as JSON text. Numbers keep their decimal form,
+// as SQL's json_each would give them; anything else is refused rather than guessed.
+func decodeJSONList(value any) (any, error) {
+	text, isText := value.(string)
+	if !isText {
+		return value, nil
 	}
-	return run.assemble(results)
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	var list []any
+	if err := decoder.Decode(&list); err != nil || decoder.More() || list == nil {
+		return nil, errors.New("not a JSON list")
+	}
+	for i, item := range list {
+		switch typed := item.(type) {
+		case string:
+		case json.Number:
+			list[i] = typed.String()
+		default:
+			return nil, errors.New("not a list of strings or numbers")
+		}
+	}
+	return list, nil
 }
 
 func (plan *databasePipelinePlan) bindParams(ctx context.Context, args map[string]any, parent any) (map[string]any, error) {
@@ -1707,6 +1900,12 @@ func (plan *databasePipelinePlan) bindParams(ctx context.Context, args map[strin
 			continue
 		}
 		if p.Type == "string_list" || p.Type == "exact_string_list" {
+			if p.Encoding == "json" {
+				var err error
+				if value, err = decodeJSONList(value); err != nil {
+					return nil, invalid("database_pipeline param %s must be a JSON list of strings or numbers", name)
+				}
+			}
 			list, ok := value.([]any)
 			if !ok {
 				if typed, isStrings := value.([]string); isStrings {
@@ -2225,6 +2424,10 @@ func (run *databasePipelineRun) resolveAccessLevel(ctx context.Context, level []
 		if err := run.applyAccessReads(reads, results, requested); err != nil {
 			return err
 		}
+		if run.plan.hasJoinedReads() {
+			run.accessReads = append(run.accessReads, operations...)
+			run.accessFound = append(run.accessFound, results...)
+		}
 	}
 	for _, i := range level {
 		if value := run.plan.Access[i]; value.derived() {
@@ -2304,9 +2507,21 @@ func asAnyList(value any) []any {
 }
 
 func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, error) {
-	operations := make([]any, len(run.plan.Steps))
+	operations := make([]any, len(run.plan.Steps), len(run.plan.Steps)+len(run.accessReads))
 	statistics := run.app.wantsDatabaseStatistics(run.project)
+	run.emptyPages, run.cursorBindings = map[string]bool{}, map[string]string{}
 	for i, step := range run.plan.Steps {
+		if isJoinedOp(step.Op) {
+			args, err := run.joinedArgs(step)
+			if err != nil {
+				return nil, err
+			}
+			if err := run.joinedPageArgs(ctx, step, args); err != nil {
+				return nil, err
+			}
+			operations[i] = map[string]any{"op": step.Op, "args": args}
+			continue
+		}
 		args := make(map[string]any, len(step.Args)+1)
 		for key, value := range step.Args {
 			switch key {
@@ -2364,13 +2579,27 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 		}
 		operations[i] = map[string]any{"op": step.Op, "args": args}
 	}
+	operations = append(operations, run.accessReads...)
 	results, err := run.batch(ctx, pipelineStageBatch, operations)
 	if err != nil {
 		return nil, err
 	}
+	for i := range run.accessReads {
+		if !sameAccessRead(run.accessFound[i], results[len(run.plan.Steps)+i]) {
+			return nil, errAccessChanged
+		}
+	}
 	out := make(map[string]any, len(results))
 	run.pages = map[string]map[string]any{}
 	for i, step := range run.plan.Steps {
+		if isJoinedOp(step.Op) {
+			rows, err := run.decodeJoinedStep(step, results[i])
+			if err != nil {
+				return nil, err
+			}
+			out[step.ID] = rows
+			continue
+		}
 		if step.Page != nil {
 			page, _ := results[i].(map[string]any)
 			records, _ := page["records"].([]any)
@@ -2504,6 +2733,9 @@ func (run *databasePipelineRun) assemble(steps map[string]any) (any, error) {
 			return run.scope[parts[1]]
 		}
 		return nil
+	}
+	if run.plan.ResultTemplate != nil {
+		return run.renderResult(run.plan.ResultTemplate, resolve)
 	}
 	if run.plan.ResultRoot != "" {
 		return resolve(run.plan.ResultRoot), nil

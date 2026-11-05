@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -26,6 +27,9 @@ type subscription struct {
 	// already guarantees a pending re-run, so extra events are dropped instead
 	// of failing the subscriber as too slow.
 	coalesce bool
+	// dropped records that a coalesce subscription lost an event, so what it says
+	// about which collections changed is incomplete.
+	dropped atomic.Bool
 }
 
 type subscriptionHub struct {
@@ -107,6 +111,7 @@ func (h *subscriptionHub) publishForAPI(project, api, topic string, payload map[
 			count++
 		default:
 			if sub.coalesce {
+				sub.dropped.Store(true)
 				continue
 			}
 			select {
@@ -138,6 +143,7 @@ func (h *subscriptionHub) publishAllAPIs(project, topic string, payload map[stri
 				count++
 			default:
 				if sub.coalesce {
+					sub.dropped.Store(true)
 					continue
 				}
 				select {
@@ -314,7 +320,7 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 			}
 			// Listen before the initial execution so a change committed while it
 			// runs triggers a re-run instead of being missed.
-			topic, watch := subscriptionTopic(a, project, api.Slug, req.Query, message.Payload)
+			topic, watch := subscriptionTopic(a, project, api.Slug, environment, req.Query, message.Payload)
 			var sub *subscription
 			var member *groupMember
 			cancelSubscription := func() {}
@@ -328,7 +334,7 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 					}
 					request := req
 					var leaveGroup func()
-					member, leaveGroup = a.joinSubscriptionGroup(ctx, key, project, api.Slug, topic, func(runCtx context.Context) (executeResult, error) {
+					member, leaveGroup = a.joinSubscriptionGroupWatching(ctx, key, project, api.Slug, topic, watch.authority, func(runCtx context.Context) (executeResult, error) {
 						return a.execute(runCtx, project, api.Slug, environment, request)
 					})
 					releaseWatch, watchErr := a.acquireDatabaseWatch(ctx, *watch)
@@ -343,14 +349,18 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			opCtx, opCancel := context.WithCancel(ctx)
-			result, execErr := a.execute(opCtx, project, api.Slug, environment, req)
+			result, send, execErr := firstSubscriptionRead(opCtx, member, func(readCtx context.Context) (executeResult, error) {
+				return a.execute(readCtx, project, api.Slug, environment, req)
+			})
 			if execErr != nil {
 				opCancel()
 				cancelSubscription()
 				_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": execErr.Error()}})})
 				continue
 			}
-			_ = write(wsMessage{ID: message.ID, Type: "next", Payload: mustJSON(map[string]any{"data": result.Data, "errors": result.Errors})})
+			if send {
+				_ = write(wsMessage{ID: message.ID, Type: "next", Payload: mustJSON(map[string]any{"data": result.Data, "errors": result.Errors})})
+			}
 			if topic == "" {
 				opCancel()
 				_ = write(wsMessage{ID: message.ID, Type: "complete"})
@@ -439,7 +449,7 @@ func (a *App) handleSourceEvent(_ *sdk.AppCtx, event sdk.Event) error {
 
 // subscriptionTopic returns the hub topic for a subscription, and the Database
 // change-feed watch that feeds it when the field reads a Database source.
-func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawMessage) (string, *databaseWatchSpec) {
+func subscriptionTopic(a *App, project, apiSlug, environment, query string, payload json.RawMessage) (string, *databaseWatchSpec) {
 	// The protocol permits an explicit topic for source adapters and tests.
 	var envelope map[string]any
 	if json.Unmarshal(payload, &envelope) == nil {
@@ -456,14 +466,13 @@ func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawM
 	if !ok {
 		return "", nil
 	}
-	resolver, _ := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, "Subscription", field.Name)
+	resolver, source := a.subscriptionBinding(project, apiSlug, environment, field.Name)
 	if resolver == nil {
 		return "", nil
 	}
 	if topic, ok := resolver.Config["topic"].(string); ok && strings.TrimSpace(topic) != "" {
 		return strings.TrimSpace(topic), nil
 	}
-	source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
 	if source == nil || source.Kind != "database" {
 		return "", nil
 	}
@@ -472,6 +481,29 @@ func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawM
 		return "", nil
 	}
 	return spec.topic(), &spec
+}
+
+// subscriptionBinding finds the resolver a subscription's refreshes will run: the
+// active release's, or the draft where nothing is published. Watching a draft could
+// miss a grant source the released plan reads.
+func (a *App) subscriptionBinding(project, apiSlug, environment, field string) (*resolverRecord, *sourceRecord) {
+	if release, err := a.cachedActiveRelease(project, apiSlug, environment); err == nil && release != nil {
+		bindings := a.bindingsFromRelease(release)
+		resolver, found := bindings.resolvers["Subscription."+field]
+		if !found {
+			return nil, nil
+		}
+		if source, found := bindings.sources[resolver.SourceID]; found {
+			return &resolver, &source
+		}
+		return &resolver, nil
+	}
+	resolver, _ := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, "Subscription", field)
+	if resolver == nil {
+		return nil, nil
+	}
+	source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
+	return resolver, source
 }
 
 func parseQueryOnly(query string) (*ast.QueryDocument, error) {

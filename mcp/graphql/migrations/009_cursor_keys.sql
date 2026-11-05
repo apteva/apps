@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS graphql_cursor_keys (
+  project_id TEXT PRIMARY KEY,
+  secret TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

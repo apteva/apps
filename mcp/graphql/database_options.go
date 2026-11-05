@@ -244,8 +244,16 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 		if err != nil {
 			continue // publishing reports it with the release checks
 		}
-		searches, conditionals := []any{}, []any{}
+		searches, conditionals, joined := []any{}, []any{}, []any{}
 		for _, step := range plan.Steps {
+			if isJoinedOp(step.Op) {
+				probe, err := step.joinedProbe()
+				if err != nil {
+					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+				}
+				joined = append(joined, probe)
+				continue
+			}
 			if step.Args["lookups"] != nil || step.Args["buckets"] != nil {
 				continue
 			}
@@ -275,6 +283,7 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 		}{
 			{searches, "Database cannot run its text search (" + databaseSearchOp + " requires Database 0.7.0 or later, " + databaseLiteralSearchOp + " Database 0.11.0 or later, and both existing text fields)"},
 			{conditionals, "Database cannot read the fields of its conditional filters"},
+			{joined, "Database cannot run its joined reads (related_read, joined_page and joined_aggregate require Database 0.12.0 or later, existing collections and fields, join keys of one type or a stated comparison, an index on each related field, and a bounded relation)"},
 		} {
 			for start := 0; start < len(check.operations); start += maxDatabaseBatchOperations {
 				probe, cancel := context.WithTimeout(ctx, 15*time.Second)

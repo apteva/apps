@@ -48,6 +48,7 @@ type App struct {
 	dbWatches        map[string]*databaseWatcher
 	groupMu          sync.Mutex
 	groups           map[string]*subscriptionGroup
+	cursorKeys       sync.Map // project → key that signs joined page cursors
 }
 
 func main() { sdk.Run(&App{}) }
