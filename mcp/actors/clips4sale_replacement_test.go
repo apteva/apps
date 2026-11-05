@@ -153,12 +153,14 @@ func TestReplacementDefinitionRequiresStagingPersistenceAndNoPublication(t *test
 }
 
 func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
-	for _, mode := range []string{"success", "source_rejected", "not_persisted", "performer_lost", "queued"} {
+	for _, mode := range []string{"success", "source_rejected", "not_persisted", "performer_lost", "queued", "onedrive_success", "onedrive_disconnected", "onedrive_wrong_file", "onedrive_extra_selection"} {
 		t.Run(mode, func(t *testing.T) {
 			d := realPerformerDefinition(t)
 			p := newFakePlatform()
 			current := ""
 			saved := false
+			cloud := strings.HasPrefix(mode, "onedrive_")
+			pickerOpen, selected := false, false
 			replacements, uploads, saves := 0, 0, 0
 			p.readViewsResponse = func(tool string, in map[string]any) map[string]any {
 				switch tool {
@@ -186,24 +188,74 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 							body = c4sLibraryDOM(status)
 						}
 					}
+					if pickerOpen {
+						if mode == "onedrive_disconnected" {
+							body = `<body>Please authenticate with OneDrive to select files</body>`
+						} else {
+							name := "new_video.mp4"
+							if mode == "onedrive_wrong_file" {
+								name = "new_video_other.mp4"
+							}
+							checked := ""
+							if selected {
+								checked = "checked"
+							}
+							body = `<body><input class="uppy-ProviderBrowser-searchFilterInput"><ul class="uppy-ProviderBrowser-list"><li class="uppy-ProviderBrowserItem"><input type="checkbox" name="listitem" ` + checked + `><label>` + name + `</label></li>`
+							if selected && mode == "onedrive_extra_selection" {
+								body += `<li class="uppy-ProviderBrowserItem"><input type="checkbox" name="listitem" checked><label>extra.mp4</label></li>`
+							}
+							body += `</ul><button>Select 1</button></body>`
+						}
+					}
 					return map[string]any{"html": body, "current_url": current, "rendered": true}
 				case "computer.computer_use":
 					switch in["action"] {
 					case "navigate":
 						current = stringFromAny(in["url"])
+						pickerOpen, selected = false, false
 						return map[string]any{"current_url": current}
 					case "wait_for":
 						return map[string]any{"matched": true, "current_url": current}
+					case "set_text":
+						if !pickerOpen || in["text"] != "new_video.mp4" {
+							t.Fatal("unexpected OneDrive filter")
+						}
+						return map[string]any{"current_url": current, "success": true}
+					case "set_checked":
+						if !pickerOpen || in["target_id"] != "new_video.mp4" || in["checked"] != true {
+							t.Fatal("unexpected OneDrive selection")
+						}
+						selected = true
+						return map[string]any{"current_url": current, "success": true}
 					case "prepare_upload":
+						if cloud {
+							t.Fatal("OneDrive transfer tried Computer staging")
+						}
 						return map[string]any{"prepared": mode != "source_rejected", "uploaded": false, "backend": "browserbase", "sha256": strings.Repeat("a", 64), "size_bytes": 22}
 					case "screenshot":
 						targets := []any{}
 						for i, name := range []string{"Replace video", "Replace File", "Upload Files", "Save and Exit"} {
 							targets = append(targets, map[string]any{"id": name, "text": name, "accessible_name": name, "role": "button", "x": 10, "y": 30 + i*50, "w": 200, "h": 40})
 						}
+						if cloud {
+							targets = append(targets,
+								map[string]any{"id": "OneDrive", "text": "OneDrive", "accessible_name": "OneDrive", "tag": "button", "role": "tab", "effect": "open_configuration"},
+								map[string]any{"id": "new_video.mp4", "text": "new_video.mp4", "accessible_name": "new_video.mp4", "role": "checkbox"},
+							)
+						}
 						return map[string]any{"current_url": current, "width": 1600, "height": 1000, "som_revision": 1, "som": targets}
 					case "click":
+						if in["expected_text"] == "Select 1" {
+							if !pickerOpen || !selected || replacements != 1 {
+								t.Fatal("OneDrive transfer before exact selection or replacement confirmation")
+							}
+							uploads++
+							pickerOpen = false
+							return map[string]any{"current_url": current, "success": true}
+						}
 						switch in["target_id"] {
+						case "OneDrive":
+							pickerOpen, selected = true, false
 						case "Replace File":
 							replacements++
 						case "Save and Exit":
@@ -238,19 +290,29 @@ func TestReplacementExecutionNeedsPersistedSameClipAndPerformers(t *testing.T) {
 			inputs["filename"] = "new_video.mp4"
 			inputs["source_sha256"] = strings.Repeat("a", 64)
 			inputs["replacement_authorized"] = true
-			_, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": "replace_clip_video", "input": inputs})
+			operation := "replace_clip_video"
+			if cloud {
+				operation = "replace_clip_video_onedrive"
+				delete(inputs, "source_url")
+				delete(inputs, "source_sha256")
+			}
+			_, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": operation, "input": inputs})
 			if err != nil {
 				t.Fatal(err)
 			}
 			run, _ := claimActorRun(ctx)
 			app.executeActorRun(context.Background(), ctx, run)
 			result, _ := getActorRun(ctx, run.ID)
-			if (result["status"] == "completed") != (mode == "success") {
+			if (result["status"] == "completed") != (mode == "success" || mode == "onedrive_success") {
 				t.Fatalf("status=%v error=%v replacement=%d", result["status"], result["error"], replacements)
 			}
-			if mode == "source_rejected" || mode == "queued" {
+			if mode == "source_rejected" || mode == "queued" || mode == "onedrive_disconnected" || mode == "onedrive_wrong_file" {
 				if replacements+uploads+saves != 0 {
 					t.Fatal("clip mutated before successful preflight")
+				}
+			} else if mode == "onedrive_extra_selection" {
+				if replacements != 1 || uploads != 0 || saves != 0 {
+					t.Fatal("multiple OneDrive files reached import", replacements, uploads, saves)
 				}
 			} else if replacements != 1 || uploads != 1 || saves != 1 {
 				t.Fatal("duplicate or missing write", replacements, uploads, saves)

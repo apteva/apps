@@ -119,3 +119,18 @@ saved document ID/type/filename before and after reload. Use the read-only
 `verify_performer_document_saved` to reconcile an uncertain save, without
 uploading another copy or clicking Save again. Native `tbd`/Under Review is a
 saved receipt awaiting platform review, not approval.
+
+### OneDrive import
+
+Connect OneDrive in the Clips4Sale Creator Workspace and place the MP4 at the
+root of that drive with a unique filename. Use `preflight_onedrive_import` to
+check the store, connection, and exact filename before importing. Supply
+`filename_stem` without the `.mp4` suffix and `filename` with it.
+
+Use `replace_clip_video_onedrive` for an existing draft or
+`upload_performer_clip_draft_onedrive` for a new real-performer draft. These
+operations use Clips4Sale's picker to import the file and retain the existing
+authorization and duplicate-request checks. For a replacement, the actor
+checks the picker before confirming Replace File, then verifies the saved
+filename and performer cards after reloading the same draft. Publishing
+remains a separate operation.

@@ -50511,6 +50511,2576 @@
         }
       ],
       "output_schema": {}
+    },
+    "preflight_onedrive_import": {
+      "required_explicit_inputs": [
+        "context_id",
+        "expected_store_id",
+        "expected_store_name",
+        "filename",
+        "filename_stem"
+      ],
+      "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "filename": {
+              "equals_exact": "{{filename_stem}}.mp4"
+            },
+            "filename_stem": {
+              "matches": "^[A-Za-z0-9][A-Za-z0-9_-]{0,140}$"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/",
+          "locator": {},
+          "read_only": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href$=\"/stores\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "read_only": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "clip_sales_metric_label": {
+              "type": "text",
+              "pattern": "(C4S\\s+Purchases|Clip\\s+sales)"
+            },
+            "clip_sales_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "currency_symbol": {
+              "type": "text",
+              "pattern": "Total income\\s*([$\u20ac\u00a3])"
+            },
+            "income": {
+              "type": "number",
+              "pattern": "Total income\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_label": {
+              "type": "text",
+              "pattern": "Next Payout\\s*([A-Za-z]+ [0-9]+, [0-9]{4})"
+            },
+            "next_payout_progress": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_threshold": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3][0-9.,]+\\s*of\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "payment_warning": {
+              "type": "text",
+              "pattern": "(Your ID has expired\\. To be paid you must Update Your ID Now)"
+            },
+            "purchases": {
+              "type": "integer",
+              "pattern": "(?:C4S\\s+)?Purchases\\s+([0-9]+)\\b"
+            },
+            "purchases_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "reported_clip_count": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "integer",
+              "pattern": "([0-9]+)\\s+clips"
+            },
+            "store_id": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "Store ID:\\s*([0-9]+)"
+            },
+            "store_name": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s*Store ID:"
+            },
+            "total_eligible_for_next_payout": {
+              "type": "number",
+              "pattern": "Total eligible for next payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "read_only": true
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "store_id": {
+              "equals_exact": "{{expected_store_id}}"
+            },
+            "store_name": {
+              "contains": "{{expected_store_name}}"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/upload"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "OneDrive",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Import from OneDrive",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+            },
+            {
+              "type": "text_present",
+              "value": "Please authenticate with OneDrive to select files",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "any"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_connected_picker": {
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput",
+              "type": "text",
+              "required": true,
+              "attribute": "class"
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+          },
+          "text": "{{filename}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled])"
+            },
+            {
+              "type": "text_present",
+              "value": "{{filename}}",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_matching_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "pattern": "^{{filename_stem}}\\.mp4$"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_matching_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "replace_clip_video_onedrive": {
+      "required_explicit_inputs": [
+        "context_id",
+        "clip_id",
+        "expected_store_id",
+        "expected_store_name",
+        "expected_clip_store_name",
+        "title",
+        "description",
+        "expected_saved_filename",
+        "expected_performer_names",
+        "expected_performer_cards",
+        "filename_stem",
+        "filename",
+        "replacement_authorized",
+        "request_id"
+      ],
+      "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "replacement_authorized": {
+              "equals_exact": true
+            },
+            "request_id": {
+              "matches": "^[A-Za-z0-9_-]{1,100}$"
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "filename_stem": {
+              "matches": "^[A-Za-z0-9][A-Za-z0-9_-]{0,140}$"
+            },
+            "filename": {
+              "equals_exact": "{{filename_stem}}.mp4"
+            },
+            "expected_saved_filename": {
+              "not_matches": "^{{filename_stem}}(?:_[0-9]{12})?\\.mp4$"
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "locator": {},
+          "assertions": {
+            "expected_clip_store_name": {
+              "equals_exact": "{{expected_store_name}}"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "action": "assert_inputs",
+          "locator": {},
+          "assertions": {
+            "clip_id": {
+              "matches": "^\\d+$"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/",
+          "locator": {},
+          "read_only": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href$=\"/stores\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "read_only": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "clip_sales_metric_label": {
+              "type": "text",
+              "pattern": "(C4S\\s+Purchases|Clip\\s+sales)"
+            },
+            "clip_sales_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "currency_symbol": {
+              "type": "text",
+              "pattern": "Total income\\s*([$\u20ac\u00a3])"
+            },
+            "income": {
+              "type": "number",
+              "pattern": "Total income\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_label": {
+              "type": "text",
+              "pattern": "Next Payout\\s*([A-Za-z]+ [0-9]+, [0-9]{4})"
+            },
+            "next_payout_progress": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_threshold": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3][0-9.,]+\\s*of\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "payment_warning": {
+              "type": "text",
+              "pattern": "(Your ID has expired\\. To be paid you must Update Your ID Now)"
+            },
+            "purchases": {
+              "type": "integer",
+              "pattern": "(?:C4S\\s+)?Purchases\\s+([0-9]+)\\b"
+            },
+            "purchases_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "reported_clip_count": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "integer",
+              "pattern": "([0-9]+)\\s+clips"
+            },
+            "store_id": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "Store ID:\\s*([0-9]+)"
+            },
+            "store_name": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s*Store ID:"
+            },
+            "total_eligible_for_next_payout": {
+              "type": "number",
+              "pattern": "Total eligible for next payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "read_only": true
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "store_id": {
+              "equals_exact": "{{expected_store_id}}"
+            },
+            "store_name": {
+              "contains": "{{expected_store_name}}"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/upload"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "OneDrive",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Import from OneDrive",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+            },
+            {
+              "type": "text_present",
+              "value": "Please authenticate with OneDrive to select files",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "any"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_connected_picker": {
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput",
+              "type": "text",
+              "required": true,
+              "attribute": "class"
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+          },
+          "text": "{{filename}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled])"
+            },
+            {
+              "type": "text_present",
+              "value": "{{filename}}",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_matching_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "pattern": "^{{filename_stem}}\\.mp4$"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_matching_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        },
+        {
+          "read_only": true,
+          "read_views": {
+            "entry_url": "https://workspace.clips4sale.com/content",
+            "identity_url": "https://workspace.clips4sale.com/stores",
+            "identity": {
+              "selector": "a[data-testid=\"app-drawer_a_menu-button-my-stores\"]",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "total": {
+                  "selector": "[data-testid$=\"_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "all",
+                "covers": [
+                  "all"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/content/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"content_management_section_menu_button\"]",
+                "empty_text_pattern": "No clips",
+                "empty_selector": "body",
+                "loading_selector": "#cm-clips-table[aria-busy=\"true\"],[data-testid=\"content-management-loading\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "#cm-clips-table tbody tr[data-testid$=\"_table-row\"]",
+                "fields": {
+                  "clip_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "filename": {
+                    "selector": "[data-testid$=\"_filename\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "performers": {
+                    "selector": "[data-testid$=\"_performers\"]",
+                    "type": "text"
+                  },
+                  "price": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_price\"]",
+                    "type": "number",
+                    "required": true,
+                    "pattern": "[$\u20ac\u00a3]([0-9.,]+)"
+                  },
+                  "status": {
+                    "selector": "[data-testid$=\"_cell_status\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "status:\\s*(\\w+)"
+                  },
+                  "title": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_title\"]",
+                    "type": "text",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "clip"
+                },
+                "field_rewrites": {
+                  "edit_url": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/content/$1?step=1"
+                  },
+                  "library_title": {
+                    "from": "title",
+                    "pattern": "^([\\s\\S]+)$",
+                    "replacement": "$1"
+                  },
+                  "saved_clip_id": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "$1"
+                  }
+                },
+                "key_field": "clip_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "select_record",
+          "locator": {},
+          "value": "https://workspace.clips4sale.com/content/{{clip_id}}?step=1",
+          "verified_field": "edit_url",
+          "read_only": true
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "clip_id": {
+              "equals_exact": "{{clip_id}}"
+            },
+            "filename": {
+              "equals_exact": "{{expected_saved_filename}}"
+            },
+            "status": {
+              "equals_exact": "draft"
+            },
+            "title": {
+              "equals_exact": "{{title}}"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "read_only": true,
+          "action": "goto_record",
+          "locator": {},
+          "verified_field": "edit_url"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_text_store-title\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "read_only": true
+        },
+        {
+          "action": "assert_element",
+          "locator": {
+            "selector": "[data-testid=\"edit-clip_input-text_clip-description_input\"] textarea:not([aria-hidden=\"true\"])"
+          },
+          "read_only": true
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "#mui-component-select-orientation_id",
+              "type": "text",
+              "required": true
+            },
+            "category": {
+              "selector": "#mui-component-select-category_id",
+              "type": "text",
+              "required": true
+            },
+            "description": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-description_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "performer_mode": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"] .Mui-checked input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "performer_section_text": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"]",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "saved_filename": {
+              "selector": "[data-testid=\"edit-clip_text_file-name\"]",
+              "type": "text",
+              "required": true
+            },
+            "status": {
+              "type": "text",
+              "required": true,
+              "pattern": "\\b(DRAFT)\\b"
+            },
+            "store_name": {
+              "selector": "[data-testid=\"edit-clip_text_store-title\"]",
+              "type": "text",
+              "required": true
+            },
+            "title": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true
+            },
+            "performer_names": {
+              "selector": "[data-testid^=\"featured-performers_row_\"][data-testid$=\"_span_stage-name\"]",
+              "type": "text",
+              "required": true,
+              "many": true
+            },
+            "performer_cards": {
+              "selector": "[data-testid=\"edit-clip_featured-performers_list\"] > [data-testid^=\"featured-performers_row_\"]",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "preserve_line_breaks": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "read_only": true
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "current_url": {
+              "equals_exact": "https://workspace.clips4sale.com/content/{{clip_id}}?step=1"
+            },
+            "description": {
+              "equals_exact": "{{description}}"
+            },
+            "saved_filename": {
+              "equals_exact": "{{expected_saved_filename}}"
+            },
+            "status": {
+              "equals_exact": "DRAFT"
+            },
+            "store_name": {
+              "equals_exact": "{{expected_clip_store_name}}"
+            },
+            "title": {
+              "equals_exact": "{{title}}"
+            },
+            "performer_names": {
+              "equals_set": "{{expected_performer_names}}"
+            },
+            "performer_cards": {
+              "equals_set": "{{expected_performer_cards}}"
+            }
+          },
+          "read_only": true
+        },
+        {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Replace video",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 30,
+            "fully_visible": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Replace video",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Replace video",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Replace File?"
+            }
+          ],
+          "timeout_ms": 10000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Replace File",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Replace File",
+          "expected_effect": "immediate_external_commit",
+          "once_key": "c4s:{{expected_store_id}}:clip:{{clip_id}}:replace-video:{{request_id}}",
+          "once_scope": "context",
+          "confirm_consequence": "immediate_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"app-content-upload-wrapper\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "OneDrive",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Import from OneDrive",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+            },
+            {
+              "type": "text_present",
+              "value": "Please authenticate with OneDrive to select files",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "any"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_connected_picker": {
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput",
+              "type": "text",
+              "required": true,
+              "attribute": "class"
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+          },
+          "text": "{{filename}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled])"
+            },
+            {
+              "type": "text_present",
+              "value": "{{filename}}",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_matching_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "pattern": "^{{filename_stem}}\\.mp4$"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_matching_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        },
+        {
+          "action": "set_checked",
+          "checked": true,
+          "locator": {
+            "text": "{{filename}}",
+            "role": "checkbox",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_selected_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:checked + label",
+              "type": "text",
+              "required": true,
+              "many": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_selected_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Select 1",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": ".uppy-ProviderBrowser-footer-buttons button.uppy-c-btn-primary"
+          },
+          "expected_text": "Select 1",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "c4s:{{expected_store_id}}:clip:{{clip_id}}:replace-video:{{request_id}}:onedrive-import",
+          "once_scope": "context"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_equals",
+              "value": "https://workspace.clips4sale.com/content/{{clip_id}}?step=1"
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Save and Exit",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 30,
+            "fully_visible": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Save and Exit",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Save and Exit",
+          "expected_effect": "immediate_external_commit",
+          "once_key": "c4s:{{expected_store_id}}:clip:{{clip_id}}:replace-video:{{request_id}}:save",
+          "once_scope": "context",
+          "confirm_consequence": "immediate_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_equals",
+              "value": "https://workspace.clips4sale.com/content"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/content/{{clip_id}}?step=1"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_text_file-name\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "#mui-component-select-orientation_id",
+              "type": "text",
+              "required": true
+            },
+            "category": {
+              "selector": "#mui-component-select-category_id",
+              "type": "text",
+              "required": true
+            },
+            "description": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-description_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "performer_mode": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"] .Mui-checked input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "performer_section_text": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"]",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "saved_filename": {
+              "selector": "[data-testid=\"edit-clip_text_file-name\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^({{filename_stem}}(?:_[0-9]{12})?\\.mp4)$"
+            },
+            "status": {
+              "type": "text",
+              "required": true,
+              "pattern": "\\b(DRAFT)\\b"
+            },
+            "store_name": {
+              "selector": "[data-testid=\"edit-clip_text_store-title\"]",
+              "type": "text",
+              "required": true
+            },
+            "title": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true
+            },
+            "performer_names": {
+              "selector": "[data-testid^=\"featured-performers_row_\"][data-testid$=\"_span_stage-name\"]",
+              "type": "text",
+              "required": true,
+              "many": true
+            },
+            "performer_cards": {
+              "selector": "[data-testid=\"edit-clip_featured-performers_list\"] > [data-testid^=\"featured-performers_row_\"]",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "preserve_line_breaks": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1,
+          "read_only": true
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "current_url": {
+              "equals_exact": "https://workspace.clips4sale.com/content/{{clip_id}}?step=1"
+            },
+            "description": {
+              "equals_exact": "{{description}}"
+            },
+            "saved_filename": {
+              "matches": "^{{filename_stem}}(?:_[0-9]{12})?\\.mp4$"
+            },
+            "status": {
+              "equals_exact": "DRAFT"
+            },
+            "store_name": {
+              "equals_exact": "{{expected_clip_store_name}}"
+            },
+            "title": {
+              "equals_exact": "{{title}}"
+            },
+            "performer_names": {
+              "equals_set": "{{expected_performer_names}}"
+            },
+            "performer_cards": {
+              "equals_set": "{{expected_performer_cards}}"
+            }
+          },
+          "read_only": true
+        }
+      ],
+      "output_schema": {}
+    },
+    "upload_performer_clip_draft_onedrive": {
+      "required_explicit_inputs": [
+        "context_id",
+        "expected_store_id",
+        "expected_store_name",
+        "performer_id",
+        "expected_stage_name",
+        "title",
+        "price",
+        "asset_class",
+        "real_person_appears",
+        "recording_authorization_ref",
+        "filename",
+        "filename_stem",
+        "request_id",
+        "draft_upload_authorized"
+      ],
+      "steps": [
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "draft_upload_authorized": {
+              "equals_exact": true
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "assertions": {
+            "filename": {
+              "equals_exact": "{{filename_stem}}.mp4"
+            },
+            "filename_stem": {
+              "matches": "^[A-Za-z0-9][A-Za-z0-9_-]{0,140}$"
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "locator": {},
+          "assertions": {
+            "filename": {
+              "matches": "^.+\\.mp4$"
+            },
+            "request_id": {
+              "matches": "^[A-Za-z0-9_-]{1,100}$"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href$=\"/stores\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "clip_sales_metric_label": {
+              "type": "text",
+              "pattern": "(C4S\\s+Purchases|Clip\\s+sales)"
+            },
+            "clip_sales_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "currency_symbol": {
+              "type": "text",
+              "pattern": "Total income\\s*([$\u20ac\u00a3])"
+            },
+            "income": {
+              "type": "number",
+              "pattern": "Total income\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_label": {
+              "type": "text",
+              "pattern": "Next Payout\\s*([A-Za-z]+ [0-9]+, [0-9]{4})"
+            },
+            "next_payout_progress": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_threshold": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3][0-9.,]+\\s*of\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "payment_warning": {
+              "type": "text",
+              "pattern": "(Your ID has expired\\. To be paid you must Update Your ID Now)"
+            },
+            "purchases": {
+              "type": "integer",
+              "pattern": "(?:C4S\\s+)?Purchases\\s+([0-9]+)\\b"
+            },
+            "purchases_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "reported_clip_count": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "integer",
+              "pattern": "([0-9]+)\\s+clips"
+            },
+            "store_id": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "Store ID:\\s*([0-9]+)"
+            },
+            "store_name": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s*Store ID:"
+            },
+            "total_eligible_for_next_payout": {
+              "type": "number",
+              "pattern": "Total eligible for next payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "store_id": {
+              "equals_exact": "{{expected_store_id}}"
+            },
+            "store_name": {
+              "contains": "{{expected_store_name}}"
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "locator": {},
+          "assertions": {
+            "asset_class": {
+              "equals_exact": "real_performer"
+            },
+            "expected_stage_name": {
+              "matches": "^\\S(?:[^\\r\\n]{0,248}\\S)?$"
+            },
+            "expected_store_id": {
+              "matches": "^\\d+$"
+            },
+            "performer_id": {
+              "matches": "^\\d+$"
+            },
+            "price": {
+              "greater_than": 0,
+              "less_than_or_equal": 1000
+            },
+            "real_person_appears": {
+              "equals_exact": true
+            },
+            "recording_authorization_ref": {
+              "matches": "^\\S[\\s\\S]{2,499}$"
+            },
+            "title": {
+              "matches": "^.{1,250}$"
+            }
+          }
+        },
+        {
+          "action": "assert_inputs",
+          "locator": {},
+          "assertions": {
+            "performer_id": {
+              "matches": "^\\d+$"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href$=\"/stores\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "clip_sales_metric_label": {
+              "type": "text",
+              "pattern": "(C4S\\s+Purchases|Clip\\s+sales)"
+            },
+            "clip_sales_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "currency_symbol": {
+              "type": "text",
+              "pattern": "Total income\\s*([$\u20ac\u00a3])"
+            },
+            "income": {
+              "type": "number",
+              "pattern": "Total income\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_label": {
+              "type": "text",
+              "pattern": "Next Payout\\s*([A-Za-z]+ [0-9]+, [0-9]{4})"
+            },
+            "next_payout_progress": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "next_payout_threshold": {
+              "type": "number",
+              "pattern": "Next Payout\\s*[$\u20ac\u00a3][0-9.,]+\\s*of\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            },
+            "payment_warning": {
+              "type": "text",
+              "pattern": "(Your ID has expired\\. To be paid you must Update Your ID Now)"
+            },
+            "purchases": {
+              "type": "integer",
+              "pattern": "(?:C4S\\s+)?Purchases\\s+([0-9]+)\\b"
+            },
+            "purchases_revenue": {
+              "type": "number",
+              "pattern": "(?:C4S\\s+Purchases|Clip\\s+sales)\\s*[$\u20ac\u00a3]\\s*([0-9.,]+)"
+            },
+            "reported_clip_count": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "integer",
+              "pattern": "([0-9]+)\\s+clips"
+            },
+            "store_id": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "Store ID:\\s*([0-9]+)"
+            },
+            "store_name": {
+              "selector": "a[href$=\"/stores\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s*Store ID:"
+            },
+            "total_eligible_for_next_payout": {
+              "type": "number",
+              "pattern": "Total eligible for next payout\\s*[$\u20ac\u00a3]([0-9.,]+)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "store_id": {
+              "equals_exact": "{{expected_store_id}}"
+            },
+            "store_name": {
+              "contains": "{{expected_store_name}}"
+            }
+          }
+        },
+        {
+          "read_only": true,
+          "read_views": {
+            "entry_url": "https://workspace.clips4sale.com/performers",
+            "identity_url": "https://workspace.clips4sale.com/stores",
+            "identity": {
+              "selector": "a[data-testid=\"app-drawer_a_menu-button-my-stores\"]",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "total": {
+                  "selector": "[data-testid=\"all-performers_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "all_performers",
+                "covers": [
+                  "all_performers"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/performers/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"performers-page_section_menu_button\"]",
+                "empty_text_pattern": "No performers in your store",
+                "empty_selector": "[data-testid=\"empty-state\"]",
+                "loading_selector": "[role=\"progressbar\"],[aria-busy=\"true\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "tr[data-testid^=\"all-performers_\"][data-testid$=\"_table-row\"]",
+                "fields": {
+                  "added_at": {
+                    "selector": "[data-testid$=\"_cell_created_at\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "created at:\\s*(.+)"
+                  },
+                  "clips_count": {
+                    "selector": "[data-testid$=\"_cell_clips_count\"]",
+                    "type": "integer",
+                    "required": true,
+                    "pattern": "([0-9]+)"
+                  },
+                  "date_of_birth_label": {
+                    "selector": "[data-testid$=\"_cell_date_of_birth\"]",
+                    "type": "text"
+                  },
+                  "legal_name": {
+                    "selector": "[data-testid$=\"_cell_name\"]",
+                    "type": "text"
+                  },
+                  "performer_id": {
+                    "selector": "[data-testid$=\"_cell_id\"]",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "^([0-9]+)$"
+                  },
+                  "stage_name": {
+                    "selector": "[data-testid$=\"_stage_name_title\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "store_id": {
+                    "selector": "[data-testid$=\"_stage_name_store_id\"]",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "Store ID:\\s*([0-9]+)"
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "performer"
+                },
+                "field_rewrites": {
+                  "performer_edit_url": {
+                    "from": "performer_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/performers/$1"
+                  }
+                },
+                "key_field": "performer_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "select_record",
+          "locator": {},
+          "value": "https://workspace.clips4sale.com/performers/{{performer_id}}",
+          "verified_field": "performer_edit_url"
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "stage_name": {
+              "equals_exact": "{{expected_stage_name}}"
+            },
+            "store_id": {
+              "equals_exact": "{{expected_store_id}}"
+            }
+          }
+        },
+        {
+          "read_only": true,
+          "action": "goto_record",
+          "locator": {},
+          "verified_field": "performer_edit_url"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#performer-stage-name-input"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "date_of_birth_label": {
+              "selector": "input[name=\"birthday_date\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "document_count": {
+              "type": "integer",
+              "required": true,
+              "pattern": "Documents\\s*\\(([0-9]+)\\)"
+            },
+            "document_page_text": {
+              "selector": "[data-testid=\"section-page-content-wrapper\"]",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "email": {
+              "selector": "#performer-email-input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "hidden_checkbox_types": {
+              "many": true,
+              "selector": "[data-testid=\"add-performer-form-content-details-container\"] input[type=\"checkbox\"][checked]",
+              "type": "text",
+              "attribute": "type"
+            },
+            "legal_name": {
+              "selector": "#performer-name-input",
+              "type": "text",
+              "attribute": "value"
+            },
+            "performer_id": {
+              "type": "text",
+              "required": true,
+              "pattern": "Performer ID:\\s*([0-9]+)"
+            },
+            "stage_name": {
+              "selector": "#performer-stage-name-input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "performer_id": {
+              "equals_exact": "{{performer_id}}"
+            },
+            "stage_name": {
+              "equals_exact": "{{expected_stage_name}}"
+            }
+          }
+        },
+        {
+          "read_only": true,
+          "read_views": {
+            "entry_url": "https://workspace.clips4sale.com/content",
+            "identity_url": "https://workspace.clips4sale.com/stores",
+            "identity": {
+              "selector": "a[data-testid=\"app-drawer_a_menu-button-my-stores\"]",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "total": {
+                  "selector": "[data-testid$=\"_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "all",
+                "covers": [
+                  "all"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/content/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"content_management_section_menu_button\"]",
+                "empty_text_pattern": "No clips",
+                "empty_selector": "body",
+                "loading_selector": "#cm-clips-table[aria-busy=\"true\"],[data-testid=\"content-management-loading\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "#cm-clips-table tbody tr[data-testid$=\"_table-row\"]",
+                "fields": {
+                  "clip_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "filename": {
+                    "selector": "[data-testid$=\"_filename\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "performers": {
+                    "selector": "[data-testid$=\"_performers\"]",
+                    "type": "text"
+                  },
+                  "price": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_price\"]",
+                    "type": "number",
+                    "required": true,
+                    "pattern": "[$\u20ac\u00a3]([0-9.,]+)"
+                  },
+                  "status": {
+                    "selector": "[data-testid$=\"_cell_status\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "status:\\s*(\\w+)"
+                  },
+                  "title": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_title\"]",
+                    "type": "text",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "clip"
+                },
+                "field_rewrites": {
+                  "edit_url": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/content/$1?step=1"
+                  },
+                  "library_title": {
+                    "from": "title",
+                    "pattern": "^([\\s\\S]+)$",
+                    "replacement": "$1"
+                  },
+                  "saved_clip_id": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "$1"
+                  }
+                },
+                "key_field": "clip_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              },
+              {
+                "navigation": [
+                  {
+                    "text": "Drafts",
+                    "role": "tab",
+                    "exact": true,
+                    "som_only": true,
+                    "text_suffix_pattern": "(?:\\s*[0-9]+)?"
+                  }
+                ],
+                "total": {
+                  "selector": "[data-testid$=\"_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "drafts",
+                "covers": [
+                  "drafts"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/content/drafts/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"content_management_section_menu_button\"]",
+                "empty_text_pattern": "No drafts",
+                "empty_selector": "body",
+                "loading_selector": "#cm-clips-table[aria-busy=\"true\"],[data-testid=\"content-management-loading\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "#cm-clips-table tbody tr[data-testid$=\"_table-row\"]",
+                "fields": {
+                  "clip_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "filename": {
+                    "selector": "[data-testid$=\"_filename\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "performers": {
+                    "selector": "[data-testid$=\"_performers\"]",
+                    "type": "text"
+                  },
+                  "price": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_price\"]",
+                    "type": "number",
+                    "required": true,
+                    "pattern": "[$\u20ac\u00a3]([0-9.,]+)"
+                  },
+                  "status": {
+                    "selector": "[data-testid$=\"_cell_status\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "status:\\s*(\\w+)"
+                  },
+                  "title": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_title\"]",
+                    "type": "text",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "clip"
+                },
+                "field_rewrites": {
+                  "edit_url": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/content/$1?step=1"
+                  },
+                  "library_title": {
+                    "from": "title",
+                    "pattern": "^([\\s\\S]+)$",
+                    "replacement": "$1"
+                  },
+                  "saved_clip_id": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "$1"
+                  }
+                },
+                "key_field": "clip_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              },
+              {
+                "navigation": [
+                  {
+                    "text": "Review",
+                    "role": "tab",
+                    "exact": true,
+                    "som_only": true,
+                    "text_suffix_pattern": "(?:\\s*[0-9]+)?"
+                  }
+                ],
+                "total": {
+                  "selector": "[data-testid$=\"_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "review",
+                "covers": [
+                  "review"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/content/actions/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"content_management_section_menu_button\"]",
+                "empty_text_pattern": "No content matches the current filters",
+                "empty_selector": "body",
+                "loading_selector": "#cm-clips-table[aria-busy=\"true\"],[data-testid=\"content-management-loading\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "#cm-clips-table tbody tr[data-testid$=\"_table-row\"]",
+                "fields": {
+                  "clip_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "comment": {
+                    "selector": "[data-testid$=\"_comment\"]",
+                    "type": "text"
+                  },
+                  "filename": {
+                    "selector": "[data-testid$=\"_filename\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "issue_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "performers": {
+                    "selector": "[data-testid$=\"_performers\"]",
+                    "type": "text"
+                  },
+                  "reason": {
+                    "selector": "[data-testid$=\"_rejection_reason\"]",
+                    "type": "text"
+                  },
+                  "status": {
+                    "selector": "[data-testid$=\"_cell_status\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "status:\\s*(\\w+)"
+                  },
+                  "title": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_title\"]",
+                    "type": "text",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "review_issue"
+                },
+                "field_rewrites": {
+                  "issue_id": {
+                    "from": "issue_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "review:$1"
+                  },
+                  "review_edit_url": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/content/$1?step=1"
+                  }
+                },
+                "key_field": "issue_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              },
+              {
+                "navigation": [
+                  {
+                    "text": "Deleted",
+                    "role": "tab",
+                    "exact": true,
+                    "som_only": true,
+                    "text_suffix_pattern": "(?:\\s*[0-9]+)?"
+                  }
+                ],
+                "total": {
+                  "selector": "[data-testid$=\"_pagination_label_range\"]",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "of ([0-9]+)"
+                },
+                "name": "deleted",
+                "covers": [
+                  "deleted"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://workspace\\.clips4sale\\.com/content/deleted/?(?:\\?.*)?$",
+                "ready_selector": "[data-testid=\"content_management_section_menu_button\"]",
+                "empty_text_pattern": "Trash is empty",
+                "empty_selector": "body",
+                "loading_selector": "#cm-clips-table[aria-busy=\"true\"],[data-testid=\"content-management-loading\"]",
+                "error_selector": "[role=\"alert\"].MuiAlert-standardError",
+                "items": "#cm-clips-table tbody tr[data-testid$=\"_table-row\"]",
+                "fields": {
+                  "clip_id": {
+                    "selector": "[data-testid$=\"_image_thumb\"]",
+                    "type": "text",
+                    "attribute": "src",
+                    "required": true,
+                    "pattern": "(?:^|/)(?:generated_|frame_accurate_thumbnail_)([0-9]+)(?:_[A-Za-z0-9-]+)?\\.jpg(?:[?#].*)?$"
+                  },
+                  "filename": {
+                    "selector": "[data-testid$=\"_filename\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "performers": {
+                    "selector": "[data-testid$=\"_performers\"]",
+                    "type": "text"
+                  },
+                  "price": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_price\"]",
+                    "type": "number",
+                    "required": true,
+                    "pattern": "[$\u20ac\u00a3]([0-9.,]+)"
+                  },
+                  "status": {
+                    "selector": "[data-testid$=\"_cell_status\"]",
+                    "type": "text",
+                    "attribute": "aria-label",
+                    "required": true,
+                    "pattern": "status:\\s*(\\w+)"
+                  },
+                  "title": {
+                    "selector": "[data-testid^=\"clip_\"][data-testid$=\"_title\"]",
+                    "type": "text",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "clip"
+                },
+                "field_rewrites": {
+                  "edit_url": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "https://workspace.clips4sale.com/content/$1?step=1"
+                  },
+                  "library_title": {
+                    "from": "title",
+                    "pattern": "^([\\s\\S]+)$",
+                    "replacement": "$1"
+                  },
+                  "saved_clip_id": {
+                    "from": "clip_id",
+                    "pattern": "^(\\d+)$",
+                    "replacement": "$1"
+                  }
+                },
+                "key_field": "clip_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Go to next page",
+                    "selector": "button[aria-label=\"Go to next page\"]:not([disabled])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 20,
+                  "stable_rounds": 2,
+                  "settle_ms": 500
+                }
+              }
+            ],
+            "timeout_ms": 10000
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "assert_no_record",
+          "locator": {},
+          "value": "{{title}}",
+          "verified_field": "title"
+        },
+        {
+          "action": "goto",
+          "url": "https://workspace.clips4sale.com/upload"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"upload-file_button_onedrive-option\"]"
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "OneDrive",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Import from OneDrive",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+            },
+            {
+              "type": "text_present",
+              "value": "Please authenticate with OneDrive to select files",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "any"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_connected_picker": {
+              "selector": "input.uppy-ProviderBrowser-searchFilterInput",
+              "type": "text",
+              "required": true,
+              "attribute": "class"
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "input.uppy-ProviderBrowser-searchFilterInput"
+          },
+          "text": "{{filename}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled])"
+            },
+            {
+              "type": "text_present",
+              "value": "{{filename}}",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_matching_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:not([aria-label]):not([disabled]) + label",
+              "type": "text",
+              "required": true,
+              "many": true,
+              "pattern": "^{{filename_stem}}\\.mp4$"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_matching_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        },
+        {
+          "action": "set_checked",
+          "checked": true,
+          "locator": {
+            "text": "{{filename}}",
+            "role": "checkbox",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "min_items": 1,
+          "max_items": 1,
+          "readability": false,
+          "fields": {
+            "onedrive_selected_files": {
+              "selector": ".uppy-ProviderBrowser-list .uppy-ProviderBrowserItem > input[name=\"listitem\"]:checked + label",
+              "type": "text",
+              "required": true,
+              "many": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "onedrive_selected_files": {
+              "equals_set": [
+                "{{filename}}"
+              ]
+            }
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Select 1",
+              "case_sensitive": true
+            }
+          ],
+          "timeout_ms": 30000,
+          "match": "all"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": ".uppy-ProviderBrowser-footer-buttons button.uppy-c-btn-primary"
+          },
+          "expected_text": "Select 1",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "c4s:{{expected_store_id}}:prepare:{{request_id}}",
+          "once_scope": "context"
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000,
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "input[data-testid=\"edit-clip_radio-input_performers-option\"]"
+          },
+          "checked": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "#mui-component-select-orientation_id",
+              "type": "text",
+              "required": true
+            },
+            "category": {
+              "selector": "#mui-component-select-category_id",
+              "type": "text",
+              "required": true
+            },
+            "description": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-description_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true
+            },
+            "performer_mode": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"] .Mui-checked input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "performer_section_text": {
+              "selector": "[data-testid=\"edit-clip_radio-group_performers\"]",
+              "type": "text",
+              "preserve_line_breaks": true
+            },
+            "saved_filename": {
+              "selector": "[data-testid=\"edit-clip_text_file-name\"]",
+              "type": "text",
+              "required": true
+            },
+            "status": {
+              "type": "text",
+              "required": true,
+              "pattern": "\\b(DRAFT)\\b"
+            },
+            "store_name": {
+              "selector": "[data-testid=\"edit-clip_text_store-title\"]",
+              "type": "text",
+              "required": true
+            },
+            "title": {
+              "selector": "[data-testid=\"edit-clip_input-text_clip-title_input\"] textarea:not([aria-hidden=\"true\"])",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "current_url": {
+              "matches": "^https://workspace\\.clips4sale\\.com/content/[0-9]+\\?step=1$"
+            },
+            "performer_mode": {
+              "equals_exact": "0"
+            },
+            "status": {
+              "equals_exact": "DRAFT"
+            },
+            "store_name": {
+              "equals_exact": "{{expected_store_name}}"
+            },
+            "saved_filename": {
+              "matches": "^{{filename_stem}}(?:_[0-9]{12})?\\.mp4$"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
     }
   },
   "schema_version": 1,
