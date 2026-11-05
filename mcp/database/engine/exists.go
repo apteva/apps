@@ -59,7 +59,7 @@ type ExistsOn struct {
 }
 
 const (
-	maxExistsNodes        = 8 // across the whole tree
+	maxExistsNodes        = 24 // across the whole tree
 	maxExistsDepth        = 4
 	maxExistsAlternatives = 16
 	maxExistsPairs        = 8

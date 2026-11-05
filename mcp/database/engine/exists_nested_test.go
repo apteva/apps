@@ -332,7 +332,7 @@ func testNestedExists(t *testing.T) {
 				wide = append(wide, *payment(nil))
 			}
 			must("count", "customers", Request{Query: Query{Where: order(&Filter{And: wide[:maxExistsNodes-1]})}})
-			reject("nine nodes", "", order(&Filter{And: append(wide, *payment(nil))}))
+			reject("one node over the limit", "", order(&Filter{And: append(wide, *payment(nil))}))
 
 			// Past the budget the operation fails, also under not_exists, where a
 			// failed evaluation would otherwise read as a match.
