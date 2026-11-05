@@ -14,6 +14,7 @@ Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional e
 - Several independently defined collections in every database.
 - Typed records, UUID defaults, composite primary keys, exact int64 values encoded as decimal strings, and service-owned timestamps/versions.
 - `get`, `find`, `insert`, `update`, `delete`, `upsert`, `count`, `aggregate`, `batch`, and `explain`.
+- Relational reads: `related_read`, `joined_page` and `joined_aggregate` over indexed joins.
 - Dashboard aggregates: distinct counts, per-metric filters, many-to-one lookups and timezone calendar buckets; read batches answered from one snapshot.
 - Generic single-field/compound, ascending/descending, and unique indexes. Native SQLite and AptevaDB compound indexes; ordered secondary and uniqueness keys in Pebble.
 - Atomic record writes and batches across collections in one database; optimistic version checks. Pebble automatically groups concurrent record writes into shared durable commits.
@@ -229,6 +230,35 @@ Everything else uses the portable streaming accumulator on the request's snapsho
 In the portable path, filters on stored fields are pushed to the adapter's scan and the rest run after joining. Joined records are read by primary key and cached within the query's work budget.
 
 `find` accepts the same `lookups` and nests each referenced record under its `as` name (null when absent). Filtering and ordering stay on the collection's own fields, and `select` must include each `localField`.
+
+## Relational reads
+
+`related_read`, `joined_page` and `joined_aggregate` read joined rows inside one snapshot, on every adapter, and can share a read `batch`. Database applies the filters it is given. Who may see what remains the caller's decision, so pass the eligibility filters you need.
+
+Joins name earlier fields as `alias.field`; the root's alias is `as`, default `root`.
+
+```json
+{"as":"sale","collection":"sales","kind":"left","anyOf":[
+  {"on":[{"local":"root.sale_ref","foreign":"local_id"},{"local":"root.centre","foreign":"centre"}]},
+  {"on":[{"local":"root.sale_ref","foreign":"id","comparison":"numeric"},{"local":"root.centre","foreign":"centre"}]}],
+ "where":{"field":"state","op":"eq","value":"valid"}}
+```
+
+- `kind` is `inner` (default), `left`, `semi`, `anti` or `aggregate`. Semi and anti joins filter without adding fields or rows. An aggregate join takes `metrics` and adds each one as `as.metric`, computed over that row's related records, for example `{as:"reach",kind:"aggregate",on:[...],metrics:[{name:"advisers",op:"count_distinct",field:"adviser"}]}` then `filter:{field:"reach.advisers",op:"eq",value:"1"}`. A join's `where` belongs to the join, so a left join keeps its row when no related record satisfies it.
+- Comparison `""` needs one type on both sides. `"text"` compares exact decimal text: `"1"` matches 1, `"01"` does not. `"numeric"` reads the local text as an integer: `"01"` matches 1.
+- A related field of each alternative needs an index, or the read fails with `query_too_expensive`. One row matches a physical record once, however many alternatives find it.
+- `computed` adds named values: `field`, `const`, `coalesce`, `nullIfEmpty`, `trim`, `strip`+`chars`, `concat`+`separator`, `json`+`path`, `if`+`then`+`else`. A value that does not fit its declared `type` fails the read.
+- `filter` runs over joined rows. `distinct` keeps the first row per combination of aliases (physical records) or fields. `pick {by,orderBy,where}` then keeps the first qualifying row per key; use `direction:"desc"` for the latest.
+
+**`related_read`** returns parents with their related rows. `relation {as,limit,sources}` fills one shared `limit`, source by source. Each source applies eligibility, orders its rows with the physical key as tie-break, and takes what still fits; `match` then tests only those rows. A row past the limit can never match. Each parent returns the exact rows under `as`, with a `source` field, and `count:true` adds an exact `total`.
+
+**`joined_page`** returns `total`, `hasMore`, `nextCursor` and either `records` or, with `group {by,orderBy:[{field,direction,agg}]}`, `groups:[{key,rows}]`. One row or one group is one item, and `total` counts items before paging. It reads the whole joined input for each page, so bound it with `where`. Use `cursor`, or `offset` up to 100000.
+
+**`joined_aggregate`** takes the `groupBy` and `metrics` of `aggregate` and returns `rows` and `truncated`. Integer sums stay exact, `count` is `"0"` over no rows, and `sum` is null. `derived [{name,op:"divide",numerator,denominator,round?}]` is null on a null side or a zero denominator.
+
+Two more stages answer questions one grouping cannot. `branches [{collection,as,where,joins,computed,filter,distinct,pick,select}]` replaces `collection` and concatenates inputs that select the same names and types; a top-level `distinct` of those names removes what several branches found. `rollup {by,metrics,computed,filter}` aggregates per key first, and the outer `groupBy` and `metrics` then read one row per key. For example, roll up per sale with `count_distinct` and `min` of its campaign, compute `if` one campaign `then` that campaign `else` a constant, then count sales per computed campaign.
+
+Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows.
 
 ## Query and mutation rules
 

@@ -334,30 +334,45 @@ func signCursor(key []byte, p cursorData) string {
 	mac.Write(b)
 	return base64.RawURLEncoding.EncodeToString(b) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
-func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
-	parts := strings.Split(q.Cursor, ".")
-	if len(parts) != 2 || len(q.Cursor) > 32768 {
-		return nil, Invalid("invalid cursor")
+func readCursor(cursor string, key []byte) (cursorData, error) {
+	var p cursorData
+	parts := strings.Split(cursor, ".")
+	if len(parts) != 2 || len(cursor) > 32768 {
+		return p, Invalid("invalid cursor")
 	}
 	b, e := base64.RawURLEncoding.DecodeString(parts[0])
 	if e != nil {
-		return nil, Invalid("invalid cursor")
+		return p, Invalid("invalid cursor")
 	}
 	sig, e := base64.RawURLEncoding.DecodeString(parts[1])
 	mac := hmac.New(sha256.New, key)
 	mac.Write(b)
 	if e != nil || !hmac.Equal(sig, mac.Sum(nil)) {
-		return nil, Invalid("invalid cursor signature")
+		return p, Invalid("invalid cursor signature")
 	}
-	var p cursorData
-	if decode(b, &p) != nil || p.Version != c.Version || p.Hash != queryHash(c, *q) || p.Expires < time.Now().Unix() {
+	if decode(b, &p) != nil {
+		return p, Invalid("invalid cursor")
+	}
+	return p, nil
+}
+func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
+	p, e := readCursor(q.Cursor, key)
+	if e != nil {
+		return nil, e
+	}
+	if p.Version != c.Version || p.Hash != queryHash(c, *q) || p.Expires < time.Now().Unix() {
 		return nil, Invalid("expired or incompatible cursor")
 	}
 	q.after = p.Values
+	return keysetFilter(c, q, p.Values), nil
+}
+
+// keysetFilter matches rows after values under q's order.
+func keysetFilter(c Collection, q *Query, values Record) *Filter {
 	branches := []Filter{}
 	prefix := []Filter{}
 	for _, o := range q.OrderBy {
-		v := p.Values[o.Field]
+		v := values[o.Field]
 		eq := Filter{Field: o.Field, Op: "eq", Value: v}
 		var next *Filter
 		if v == nil {
@@ -383,9 +398,9 @@ func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
 		prefix = append(prefix, eq)
 	}
 	if len(branches) == 0 {
-		return &Filter{Field: c.PrimaryKey[0], Op: "is_null"}, nil
+		return &Filter{Field: c.PrimaryKey[0], Op: "is_null"}
 	}
-	return &Filter{Or: branches}, nil
+	return &Filter{Or: branches}
 }
 func and(a, b *Filter) *Filter {
 	if a == nil {
