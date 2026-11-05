@@ -1,5 +1,36 @@
 # Content Catalog
 
+## Version 0.6.12: per-asset tag editing
+
+Asset cards in session grids, grouped outputs and search results expose **Edit
+tags**. Asset details offer the same action. The tag editor shows every saved
+tag as a removable chip and accepts comma-separated additions, including
+namespaced tags such as `review:hold`. Saving includes the asset's expected
+revision. A conflict offers an explicit reload before retrying.
+
+`content_catalog_assets_labels_update` supports `tags_add` and `tags_remove`
+alongside its existing `tags` replacement field. Supply one Catalog asset ID
+in `asset_ids` for a single-asset edit, or up to 100 for an atomic bulk edit.
+Delta edits preserve unrelated tags. Adding an existing tag or removing a
+missing tag is harmless. A tag cannot be both added and removed in one call,
+and delta fields cannot be combined with `tags`. The final tag set remains
+limited to 25 normalized tags. The response includes saved tags and revisions.
+
+Read the asset with `content_catalog_assets_get` first, then supply
+`expected_revisions` from that result. To remove one hold tag while keeping
+the other tags, call the label-update tool with the following arguments.
+
+```json
+{
+  "asset_ids": ["<catalog-asset-id>"],
+  "expected_revisions": {"<catalog-asset-id>": 7},
+  "tags_remove": ["review:hold"]
+}
+```
+
+Tags remain generic Catalog metadata. Editorial review rationale continues to
+live in Editorial.
+
 ## Version 0.6.11: delivery verification receipts
 
 `content_catalog_hosting_check` now verifies delivery after the provider reports

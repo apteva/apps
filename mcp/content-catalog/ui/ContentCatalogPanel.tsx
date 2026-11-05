@@ -1,6 +1,7 @@
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { buildAssetFamilies, assetInScope, lineageBadge, type AssetFamily } from "./lineage";
 import { hostingNotice, hostingPending, hostingStageLabel, transcodingMessages } from "./hosting";
+import { AssetTagsForm } from "./AssetTagsForm";
 import { uploadResumable } from "../../storage/ui/uploadResumable";
 
 import { publicationDateInput,publicationDateSubmit,audienceLabel, matchesPublicationState, type Audience, type PublicationScope } from "./publication";
@@ -178,7 +179,7 @@ function ParentLinks({ asset, projectId, onOpen, compact = false }: { asset: Ass
     {compact && sources.length > 1 && <button type="button" className="shrink-0 text-xs text-accent" title="View all sources" onClick={() => onOpen(asset.id)}>+{sources.length - 1}</button>}
   </div>;
 }
-function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen, onToggleFavorite }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void; onToggleFavorite?: (asset: Asset) => void }) {
+function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen, onToggleFavorite, onEditTags }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void; onToggleFavorite?: (asset: Asset) => void; onEditTags?: (asset: Asset) => void }) {
   return <article data-asset-id={asset.id} style={{ ...previewCardStyle, position: "relative" }} className="overflow-hidden rounded-xl border border-border text-sm">
     {onToggleFavorite && <button type="button" className="absolute right-2 top-2 z-10 rounded-md border border-border bg-bg/90 px-1.5 py-1 text-sm shadow" aria-label={asset.favorite ? `Remove ${asset.name} from favorites` : `Favorite ${asset.name}`} aria-pressed={!!asset.favorite} title={asset.favorite ? "Remove favorite" : "Favorite"} onClick={event => { event.stopPropagation(); onToggleFavorite(asset); }}>{asset.favorite ? "⭐" : "☆"}</button>}
     <div style={{ display: "flex", flexDirection: compact ? "row" : "column", alignItems: compact ? "center" : undefined }}>
@@ -189,7 +190,7 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
         <button type="button" className="font-medium truncate text-left hover:text-accent" style={{ height: 24, flexShrink: 0 }} title={asset.name} onClick={() => onOpen(asset.id)}>{asset.name}</button>
         <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }} title={`${assetMediaKind(asset)} · #${asset.storage_file_id} · ${asset.review_status}`}>{assetMediaKind(asset)}{duration ? ` · ${durationLabel(duration)}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
         <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{(asset.lifecycle === "archived" || asset.session_lifecycle === "archived") && <span className="rounded bg-yellow-500/10 px-1.5 text-yellow-400">Archived</span>}{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
-        <AssetLabels asset={asset} compact />
+        <div className="flex items-start justify-between gap-2"><AssetLabels asset={asset} compact />{onEditTags && <button type="button" className="shrink-0 text-xs text-accent underline" aria-label={`Edit tags for ${asset.name}`} onClick={() => onEditTags(asset)}>Edit tags</button>}</div>
       </div>
     </div>
     <div className="px-3 pb-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
@@ -199,11 +200,11 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
     </div>
   </article>;
 }
-function AssetFamilyCard({ node, projectId, durations, filtering, onOpen, onDerived, onToggleFavorite }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filtering: boolean; onOpen: (id: string) => void; onDerived: (id: string) => void; onToggleFavorite?: (asset: Asset) => void }) {
+function AssetFamilyCard({ node, projectId, durations, filtering, onOpen, onDerived, onToggleFavorite, onEditTags }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filtering: boolean; onOpen: (id: string) => void; onDerived: (id: string) => void; onToggleFavorite?: (asset: Asset) => void; onEditTags?: (asset: Asset) => void }) {
   const matchingDerived = node.matchingCount - Number(node.matches);
   const outputSummary = Object.entries(node.outputCounts).map(([type,count])=>`${count} ${type}${count===1?"":"s"}`).join(" · ");
   return <div className="min-w-0 flex flex-col gap-2" data-family-id={node.asset.id}>
-    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} onOpen={onOpen} onToggleFavorite={onToggleFavorite} />
+    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} onOpen={onOpen} onToggleFavorite={onToggleFavorite} onEditTags={onEditTags} />
     <button type="button" className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-xs hover:border-accent/60 disabled:opacity-40" style={{ flexShrink: 0 }} aria-haspopup="dialog" disabled={!matchingDerived} onClick={() => onDerived(node.asset.id)}><span title={outputSummary}>{node.derivedCount ? `Selected outputs · ${filtering ? `${matchingDerived} matching` : node.derivedCount}` : "No selected outputs"}</span>{matchingDerived > 0 && <span aria-hidden="true">↗</span>}</button>
     {!!outputSummary && <p className="text-xs text-text-muted px-1" data-output-counts>{outputSummary}</p>}
   </div>;
@@ -298,6 +299,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const sessionRequest = useRef(0);
   const [gigs, setGigs] = useState<GigLink[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [tagAsset, setTagAsset] = useState<Asset | null>(null);
   const [assetLoading, setAssetLoading] = useState(false);
   const assetRequest = useRef(0);
   const activeSessionId = useRef("");
@@ -310,7 +312,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
   const [publicationDetails,setPublicationDetails]=useState<{post:Publication;history:Array<{id:string;observed_at:string;recorded_at:string;before:Partial<Publication>;after:Partial<Publication>}>}|null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "publication-details" | "filters" | "lifecycle" | "labels" | null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "publication-details" | "filters" | "lifecycle" | "labels" | "tags" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -462,6 +464,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       if (selectedAsset?.id === asset.id) await openAsset({ ...asset, favorite: !asset.favorite });
     } catch (e) { setError(errorText(e)); }
   }, [action, openSession, openAsset, selectedSession, selectedAsset]);
+  const editAssetTags = (asset: Asset) => {
+    setError(""); setNotice(""); setTagAsset(asset); setModal("tags");
+  };
   const filteredSessions = (sessionBrand && brandSessions !== null ? brandSessions : sessions).filter(session => !sessionBrand || session.brand_id === sessionBrand);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
   const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, role: searchRole, include_intermediates: String(searchIntermediates || searchRole === "intermediate"), sort: searchSort, review_status: searchReview, tag: searchTag, favorite: searchFavorite, patreon_intent: searchPatreon, destination: searchDestination, account_ref: searchAccount, audience_type: searchAudience, access_policy: searchPolicy, group_scope: searchGroupScope, group_id: searchGroup, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchRole, searchIntermediates, searchSort, searchReview, searchTag, searchFavorite, searchPatreon, searchDestination, searchAccount, searchAudience, searchPolicy, searchGroupScope, searchGroup, searchAvailability]);
@@ -581,7 +586,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Unknown audience/group overlap blocks automatic readiness. Group IDs belong to the selected account; all-eligible coverage must be explicit. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
-      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{scopedSearchAssets.length}</span></h3>{scopedSearchAssets.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{scopedSearchAssets.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onToggleFavorite={toggleFavorite} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{scopedSearchAssets.length}</span></h3>{scopedSearchAssets.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{scopedSearchAssets.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
       {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" /><div className="p-3 text-sm" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {recordingDate(hit.session_date)} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
 
     </section>}
@@ -622,8 +627,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No assets in this lifecycle view. Choose All to inspect other linked files.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
-        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onToggleFavorite={toggleFavorite} onOpen={openLinkedAsset} /></div>)}</div>
-          : <><p className="text-xs text-text-muted">Grouped using recorded source links, including hidden provenance. Outputs appear once under the nearest visible main asset.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} onToggleFavorite={toggleFavorite} />)}</div></>}
+        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} onOpen={openLinkedAsset} /></div>)}</div>
+          : <><p className="text-xs text-text-muted">Grouped using recorded source links, including hidden provenance. Outputs appear once under the nearest visible main asset.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} />)}</div></>}
 
       </section>
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
@@ -662,7 +667,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <span className="text-xs text-text-muted">{assetFiltersActive ? `${derivedAssets.length} matching of ${derivedFamily.derivedCount}` : derivedAssets.length} derived assets</span>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 220px), 1fr))", gap: 12, alignItems: "stretch" }} aria-label="Derived asset grid">
-        {derivedAssets.map(node => <SessionAssetCard key={node.asset.id} asset={node.asset} projectId={projectId} duration={assetDurations[node.asset.id]} onToggleFavorite={toggleFavorite} onOpen={openLinkedAsset} />)}
+        {derivedAssets.map(node => <SessionAssetCard key={node.asset.id} asset={node.asset} projectId={projectId} duration={assetDurations[node.asset.id]} onToggleFavorite={toggleFavorite} onEditTags={editAssetTags} onOpen={openLinkedAsset} />)}
       </div>
       {!derivedAssets.length && <p className="text-sm text-text-muted">No selected outputs match the current filters.</p>}
     </Modal>}
@@ -671,6 +676,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
         <span className={selectedAsset.eligible === false ? "text-yellow-400" : "text-text-muted"}>{selectedAsset.eligible === false ? "Archived / unavailable for processing or new publication" : "Active"}</span>
         <AssetLabels asset={selectedAsset} />
+        <button type="button" disabled={assetLoading || busy} className="rounded border border-border px-2 py-1" onClick={() => editAssetTags(selectedAsset)}>Edit tags</button>
         <button type="button" className="rounded border border-border px-2 py-1" onClick={() => setModal("labels")}>Edit purpose / labels</button>
         {(["archive", "move", "restore"] as const).filter(operation => operation === "move" || (operation === "restore" ? selectedAsset.eligible === false : selectedAsset.lifecycle !== "archived")).map(operation => <button key={operation} type="button" className="rounded border border-border px-2 py-1 capitalize" onClick={() => manageLifecycle("asset",operation)}>{operation}</button>)}
       </div>
@@ -709,6 +715,26 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         if (savedAsset) await openAsset(savedAsset);
       }, "Catalog lifecycle updated")} />
       {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
+    </Modal>}
+
+    {modal === "tags" && tagAsset && <Modal title="Edit asset tags" onClose={() => { if (!busy) { setModal(null); setTagAsset(null); } }}>
+      <AssetTagsForm key={`${tagAsset.id}:${tagAsset.revision}`} asset={tagAsset} busy={busy} onSubmit={input => run(async () => {
+        const result = await action<{ assets: Array<Pick<Asset, "id" | "tags" | "revision">> }>("content_catalog_assets_labels_update", input);
+        const saved = result.assets.find(asset => asset.id === tagAsset.id);
+        if (!saved) throw new Error("Updated asset missing from response. Reload the asset to check its tags.");
+        const patch = { tags: saved.tags || [], revision: saved.revision };
+        setAssets(current => current.map(asset => asset.id === saved.id ? { ...asset, ...patch } : asset));
+        setSelectedAsset(current => current?.id === saved.id ? { ...current, ...patch } : current);
+        setSearchResults(current => ({ ...current, assets: { ...current.assets, items: current.assets.items.map(asset => asset.id === saved.id ? { ...asset, ...patch } : asset) } }));
+        setTagAsset(null); setModal(null);
+      }, "Asset tags updated")} />
+      {error && <div className="mt-3 space-y-2"><p role="alert" className="text-sm text-red-400">{error}</p><button type="button" disabled={busy} className="text-sm text-accent underline" onClick={async () => {
+        setBusy(true);
+        try {
+          const result = await get<{ asset: Asset }>(`/assets/${tagAsset.id}`);
+          setTagAsset(result.asset); setError("");
+        } catch (err) { setError(errorText(err)); } finally { setBusy(false); }
+      }}>Reload asset and discard edits</button></div>}
     </Modal>}
 
     {modal === "labels" && (selectedAsset || checkedAssets.length > 0) && <Modal title="Edit purpose and labels" onClose={() => setModal(null)}>
