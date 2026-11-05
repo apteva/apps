@@ -628,6 +628,14 @@ func (a *App) toolPostNativeInspect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	run := historyRun{Limitations: []string{}}
 	posts, err := a.inspectNativeHistory(ctx, b, &run, id)
 	if err != nil {
+		if run.facebookPagePost != nil {
+			return map[string]any{
+				"status": "unverified", "social_account_id": b.ID, "post_id": run.facebookPhoto.postID,
+				"target_id": run.facebookPhoto.targetID, "facebook_page_post": run.facebookPagePost,
+				"observed_at": run.facebookPagePost.ObservedAt, "verification_scope": run.Scope,
+				"public_live_verified": false, "limitations": run.Limitations,
+			}, nil
+		}
 		return map[string]any{"status": "failed", "social_account_id": b.ID, "error": redactDeliverySecrets(err.Error())}, nil
 	}
 	if len(posts) != 1 || run.Incomplete {
@@ -639,7 +647,11 @@ func (a *App) toolPostNativeInspect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "ok", "social_account_id": b.ID, "post_id": post, "target_id": target, "native_metadata": n, "observed_at": n.ObservedAt, "verification_scope": nonEmpty(run.Scope, "provider_metadata"), "public_live_verified": false, "limitations": run.Limitations}, nil
+	result := map[string]any{"status": "ok", "social_account_id": b.ID, "post_id": post, "target_id": target, "native_metadata": n, "observed_at": n.ObservedAt, "verification_scope": nonEmpty(run.Scope, "provider_metadata"), "public_live_verified": false, "limitations": run.Limitations}
+	if run.facebookPagePost != nil {
+		result["facebook_page_post"] = run.facebookPagePost
+	}
+	return result, nil
 }
 
 func nativeText(m map[string]any, keys ...string) *string {

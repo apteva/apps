@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.24.0
+version: 0.24.1
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -206,7 +206,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.0
+    ref: social/v0.24.1
     entry: mcp/social
   port: 8080
   health_check: /health

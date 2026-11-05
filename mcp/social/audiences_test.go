@@ -174,9 +174,9 @@ func TestMembershipAdapterIsGeneric(t *testing.T) {
 	}}
 	defer delete(audienceAdapters, key)
 	ctx := newSocialCtx(t, newRecordingPlatform())
-	id, _, err := (&App{}).runStrategy(ctx, platformDef{}, publishJob{platform: "future-channel", connID: 42, options: memberOptions()})
-	if err != nil || id != "future-id" {
-		t.Fatal(id, err)
+	identity, err := (&App{}).runStrategy(ctx, platformDef{}, publishJob{platform: "future-channel", connID: 42, options: memberOptions()})
+	if err != nil || identity.id != "future-id" {
+		t.Fatal(identity.id, err)
 	}
 }
 func configureMembershipUpload(t *testing.T, pf *membershipPlatform) {

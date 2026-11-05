@@ -134,7 +134,7 @@ func graphError(status int, message string) *sdk.ExecuteResult {
 func onlyReads(t *testing.T, pf *recordingPlatform) {
 	t.Helper()
 	for _, c := range pf.executeCalls {
-		if !strings.HasPrefix(c.Tool, "facebook_get_") {
+		if !strings.HasPrefix(c.Tool, "facebook_get_") && c.Tool != "get_page_posts" {
 			t.Fatalf("inspection made a non-read call: %s", c.Tool)
 		}
 	}
@@ -176,7 +176,8 @@ func TestFacebookInspectionPagePostAndPhotoContracts(t *testing.T) {
 	managedFacebookTarget(t, ctx, b, "777", "")
 	pf.executeResponses["facebook_get_post"] = graphOK(`{"id":"777","from":{"id":"page-1"},"created_time":"2026-10-27T18:00:00+0000","link":"https://www.facebook.com/photo.php?fbid=777"}`)
 	posts, err = (&App{}).inspectNativeHistory(ctx, b, &historyRun{}, "777")
-	if err != nil || posts[0].Body != nil || valueOrEmpty(posts[0].URL) == "" {
+	if err != nil || posts[0].Body != nil || valueOrEmpty(posts[0].URL) == "" ||
+		posts[0].PublishedAt != nil || valueOrEmpty(posts[0].CreatedAt) != "2026-10-27T18:00:00Z" {
 		t.Fatal("photo without caption", err, posts)
 	}
 	if fields := toString(pf.executeCalls[1].Input["fields"]); strings.Contains(fields, "message") || !strings.Contains(fields, "name") {

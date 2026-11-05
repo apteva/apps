@@ -28,6 +28,7 @@ type nativePost struct {
 	ProviderPublishedAt   *string        `json:"provider_reported_published_at"`
 	PublicationTimeSource string         `json:"publication_time_source"`
 	PublishedAt           *string        `json:"published_at"`
+	CreatedAt             *string        `json:"created_at,omitempty"`
 	URLSource             *string        `json:"url_source,omitempty"`
 	ScheduledPublishAt    *string        `json:"scheduled_publish_at,omitempty"`
 	Visibility            *string        `json:"visibility"`
@@ -40,6 +41,7 @@ type nativePost struct {
 	ProviderPostID        *string        `json:"provider_post_id"`
 	MediaURLs             []string       `json:"-"`
 	Options               map[string]any `json:"-"`
+	expectedTargetID      int64          // Inspections bound to this target must never import a replacement.
 }
 type historyAccount struct {
 	destinationAccount
@@ -74,6 +76,8 @@ func (b historyAccount) binding() string {
 }
 
 type historyRun struct {
+	facebookPhoto           facebookPhotoTarget
+	facebookPagePost        *facebookPagePostEvidence
 	MetadataUnresolvedIDs   []string               `json:"metadata_unresolved_sample"`
 	MetadataUnresolved      int                    `json:"metadata_unresolved"`
 	MetadataUnavailable     int                    `json:"metadata_unavailable"`
@@ -484,7 +488,12 @@ func (a *App) upsertNativeHistory(ctx *sdk.AppCtx, b historyAccount, n nativePos
 	}
 
 	var postID, targetID int64
-	err = tx.QueryRow(`SELECT t.post_id,t.id FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.social_account_id=? AND t.platform_post_id=?`, b.Project, b.ID, n.ID).Scan(&postID, &targetID)
+	err = tx.QueryRow(`SELECT t.post_id,t.id FROM post_targets t JOIN posts p ON p.id=t.post_id
+		WHERE p.project_id=? AND t.social_account_id=? AND t.platform_post_id=? AND (?=0 OR t.id=?)`,
+		b.Project, b.ID, n.ID, n.expectedTargetID, n.expectedTargetID).Scan(&postID, &targetID)
+	if n.expectedTargetID != 0 && err != nil {
+		return "", 0, 0, fmt.Errorf("delivery target changed before history write: %w", err)
+	}
 	result := "unchanged"
 	// A known provider operation may acquire its native ID after Social accepted
 	// it. Attach evidence to that exact target instead of creating a second post.
@@ -641,7 +650,7 @@ func (a *App) historyTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "account_history_sync", Description: "Read native history for ONE Social account into local history only; never creates publishing jobs, retries posts or changes automatic sync settings. mode=full traverses provider-accessible history across bounded resumable calls; follow continuation_cursor until null and inspect coverage/limitations. max_pages defaults to 2 (max 5). Duplicate/overlapping pages reconcile by project+account+native ID. No integration connection IDs are accepted.", InputSchema: schemaObject(map[string]any{"social_account_id": map[string]any{"type": "integer", "minimum": 1}, "mode": map[string]any{"type": "string", "enum": []string{"recent", "full"}}, "cursor": map[string]any{"type": "string"}, "max_pages": map[string]any{"type": "integer", "minimum": 1, "maximum": 5}, "page_size": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}, []string{"social_account_id"}), Handler: a.toolAccountHistorySync},
 		{Name: "account_history_status", Description: "Read stored history coverage and observation freshness for one Social account without provider requests. Complete means provider-accessible scope, subject to explicit limitations; current means observed within 15 minutes.", Annotations: map[string]any{"readOnlyHint": true}, InputSchema: schemaObject(map[string]any{"social_account_id": map[string]any{"type": "integer", "minimum": 1}}, []string{"social_account_id"}), Handler: a.toolAccountHistoryStatus},
-		{Name: "post_inspect", Description: "Read fresh native metadata for a post on one Social account. Does not publish/retry, change managed delivery state, or establish independent public-player verification. Private/unlisted never imply membership. Unknown provider fields remain null.", InputSchema: schemaObject(map[string]any{"social_account_id": map[string]any{"type": "integer", "minimum": 1}, "native_post_id": map[string]any{"type": "string"}}, []string{"social_account_id", "native_post_id"}), Handler: a.toolPostNativeInspect},
+		{Name: "post_inspect", Description: "Read fresh native metadata for a post on one Social account. Does not publish/retry, change managed delivery state, or establish independent public-player verification. Private/unlisted never imply membership. For Facebook photos, returns authenticated Page post evidence separately in facebook_page_post. Unknown provider fields remain null.", InputSchema: schemaObject(map[string]any{"social_account_id": map[string]any{"type": "integer", "minimum": 1}, "native_post_id": map[string]any{"type": "string"}}, []string{"social_account_id", "native_post_id"}), Handler: a.toolPostNativeInspect},
 	}
 }
 
