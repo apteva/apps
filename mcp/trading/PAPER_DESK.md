@@ -82,37 +82,23 @@ nonmarketable limit and cancellation, independent approval, an entry fill,
 idempotent retry, automatic exit/restart recovery and final cash/position
 reconciliation before relying on the agent workflow.
 
-## Initial team mandate
+## Research and instrument policy
 
-The local four-agent team evaluates two explicit hypotheses every 30 minutes,
-using completed source candles from `desk_market_context`:
+`desk_universe` pages through instruments known to Trading. Research can
+inspect instruments outside the portfolio's entry policy. Use completed bars
+for stock, ETF, and crypto analysis, and the general quote and history tools
+for event-market research. Discovery is not proof that an instrument is active,
+liquid, or currently executable.
 
-- `range-rebound-v1`: the latest candle closes above its open and the prior
-  close, and its low lies in the bottom 40% of the previous 20-candle range.
-- `breakout-v1`: the latest close exceeds the previous 20-candle high.
+Paper entries support stocks, ETFs, and USD spot crypto. The native portfolio
+universe policy determines symbol eligibility at proposal, approval, submission
+and while an entry is working. Existing protective exits can reduce positions
+even after the symbol is removed from the entry universe. An open plan owns its
+symbol until it closes. Prediction markets are research-only in this workflow
+until outcome execution, order-book liquidity and expiry can be verified.
 
-SMA and volume are context rather than additional mandatory entry gates. The
-analyst uses the project's Web app with Browserbase for source research; missing
-news alone does not reject a qualifying setup. Record actual timestamps and
-failed predicates, and investigate stale completed bars.
-
-The manager normally proposes about $500 notional, at most one proposal per
-cycle, with no duplicate open plan for a symbol. Size down to meet the $25
-planned-loss allowance and $1,000 order cap. Put the stop below the relevant
-low, normally at least 0.75% from entry, target about two times the stop distance
-and at least 1% gross, and close within two to four hours (before the regular
-close for ETFs). Native account, market and execution checks still apply.
-
-Risk reviews evidence integrity, immutable terms and budgets. Neither proven
-profitability, a backtest, a known win probability nor a news catalyst is a
-prerequisite for these explicitly unvalidated paper experiments. A hold must
-identify a failed setup condition or concrete data/account/risk issue. Review
-the scorecard after 20 closed experiments or five trading days; do not infer a
-reliable edge from a small sample or automatically raise limits.
-
-The team may retry a transient data or artifact-storage failure once after a
-health check, within its research budget. Retain the original failure and add
-the observed retry outcome. This routine read retry needs no further operator
-approval. An unrelated news/storage failure does not veto otherwise valid
-price/account/risk evidence. Keep routine journals concise and reference the
-native structured records rather than repeating entire packets.
+Record the hypothesis, versioned setup, source evidence, invalidation, expected
+holding time and cost assumptions. Review gross fill-price P&L and fees together
+with modeled spread and slippage already embedded in fills. The closed-trade
+scorecard reports each separately and excludes rehearsals from the experiment
+totals. A positive cost add-back on the same fills is not a cost-free backtest.

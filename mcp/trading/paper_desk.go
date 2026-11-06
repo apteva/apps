@@ -158,7 +158,8 @@ func (a *App) paperDeskTools() []sdk.Tool {
 		{Name: "desk_observe", Description: "Record a timestamped setup observation or hold with a stable ID and explicit reason; these are not realized trades or P&L.", InputSchema: schemaObject(props(map[string]any{"observation_id": str(), "setup": str(), "symbol": str(), "verdict": map[string]any{"type": "string", "enum": []string{"hold", "setup_present", "data_unavailable"}}, "reason": str()}), []string{"portfolio_id", "observation_id", "setup", "symbol", "verdict", "reason"}), Handler: a.toolPaperObserve},
 		{Name: "desk_scorecard", Description: "Read experiment/rehearsal counts, actual cash-flow P&L after fees, observations, pending exits and execution errors. Rehearsals are excluded from experiment performance.", InputSchema: schemaObject(props(nil), []string{"portfolio_id"}), Handler: a.toolPaperScorecard},
 		{Name: "desk_health", Description: "Check paper mode, balances, positions, orders, executable symbols and durable exit errors before a desk cycle. Closed/stale symbols are reported individually.", InputSchema: schemaObject(props(nil), []string{"portfolio_id"}), Handler: a.toolPaperHealth},
-		{Name: "desk_market_context", Description: "Read deterministic completed-bar facts for a symbol: interval, latest/prior OHLCV, SMA20/50 and previous range/volume. No trade signals or profitability claims.", InputSchema: schemaObject(props(map[string]any{"symbol": str()}), []string{"portfolio_id", "symbol"}), Handler: a.toolPaperMarketContext},
+		{Name: "desk_market_context", Description: "Read deterministic completed-bar facts for a symbol: interval, latest/prior OHLCV, SMA20/50 and previous range/volume. No trade signals or profitability claims.", InputSchema: schemaObject(props(map[string]any{"symbol": str(), "range": str()}), []string{"portfolio_id", "symbol"}), Handler: a.toolPaperMarketContext},
+		{Name: "desk_universe", Description: "Discover known instruments for paper research, including research-only markets. Filter by asset class and paginate with after_symbol.", InputSchema: schemaObject(props(map[string]any{"asset_class": str(), "after_symbol": str(), "limit": num()}), []string{"portfolio_id"}), Handler: a.toolPaperUniverse},
 	}
 }
 
@@ -199,10 +200,10 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 	if pf.Status != "active" {
 		return errors.New("portfolio is not active")
 	}
-	if mark == nil || !markFresh(mark, time.Now()) || mark.Source == "mock" {
+	if mark == nil || mark.Instrument == nil || !markFresh(mark, time.Now()) || oneOfString(mark.Source, "", "mock", "backtest") {
 		return errors.New("fresh non-synthetic market data required")
 	}
-	if !oneOfString(p.Symbol, "SPY", "QQQ", "BTC-USD", "ETH-USD") || !finite(p.Qty) || p.Qty <= 0 || !finite(p.StopLoss) || !finite(p.TakeProfit) || p.StopLoss <= 0 {
+	if p.Symbol == "" || !finite(p.Qty) || p.Qty <= 0 || !finite(p.StopLoss) || !finite(p.TakeProfit) || p.StopLoss <= 0 {
 		return errors.New("invalid paper experiment terms")
 	}
 	price := mark.Price
@@ -229,7 +230,13 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 	if !finite(riskPrice) || riskPrice*p.Qty > policy.MaxOrderNotional+1e-6 {
 		return errors.New("paper order exceeds notional cap")
 	}
-	profile := resolveVenueProfile(ctx.AppDB(), pf, p.Symbol, inferAssetClass(p.Symbol))
+	if mark.Symbol != p.Symbol || mark.Instrument.AssetClass != mark.AssetClass || mark.Instrument.QuoteCurrency != "USD" {
+		return errors.New("matching USD instrument metadata required")
+	}
+	if err := paperEntryClass(pf, mark.AssetClass); err != nil {
+		return err
+	}
+	profile := resolveVenueProfile(ctx.AppDB(), pf, p.Symbol, mark.AssetClass)
 	if v := validateExecutionOrder(profile, mark.Instrument, mark, p.Qty, riskPrice); v != nil {
 		return fmt.Errorf("%s: %s", v.Code, v.Detail)
 	}
@@ -251,6 +258,16 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 		return err
 	} else if v != nil {
 		return errors.New(v.Detail)
+	}
+	var overlapping bool
+	if err := ctx.AppDB().QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM paper_decisions d JOIN orders o ON o.id=d.order_id
+		WHERE d.portfolio_id=? AND d.decision_id<>? AND o.symbol=?
+		AND d.status IN ('submitted','active','exiting'))`, pf.ID, p.DecisionID, p.Symbol).Scan(&overlapping); err != nil {
+		return err
+	}
+	if overlapping {
+		return errors.New("an existing paper plan already owns this symbol")
 	}
 	if v, err := preTradeRiskCheck(ctx.AppDB(), pf, p.Symbol, "buy", p.Qty, riskPrice); err != nil {
 		return err
@@ -512,11 +529,15 @@ func (a *App) toolPaperObserve(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	id, setup, symbol, verdict, reason := strArg(args, "observation_id"), strArg(args, "setup"), canonicalSymbol(strArg(args, "symbol")), strArg(args, "verdict"), strings.TrimSpace(strArg(args, "reason"))
-	if id == "" || setup == "" || !oneOfString(symbol, "SPY", "QQQ", "BTC-USD", "ETH-USD") || !oneOfString(verdict, "hold", "setup_present", "data_unavailable") || len(reason) < 20 {
+	if id == "" || setup == "" || symbol == "" || !oneOfString(verdict, "hold", "setup_present", "data_unavailable") || len(reason) < 20 {
 		return nil, errors.New("stable observation, setup, symbol, verdict and substantive reason required")
 	}
 	price := 0.0
-	if m, err := dbGetMark(ctx.AppDB(), symbol); err == nil && markFresh(m, time.Now()) {
+	m, err := dbGetMark(ctx.AppDB(), symbol)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if m != nil && markFresh(m, time.Now()) {
 		price = m.Price
 	}
 	_, err = ctx.AppDB().Exec(`INSERT INTO paper_observations(portfolio_id,observation_id,setup,symbol,verdict,reason,reference_price,observed_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, pf.ID, id, setup, symbol, verdict, reason, price, paperNow())
@@ -547,7 +568,31 @@ func (a *App) toolPaperScorecard(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	decisions := []map[string]any{}
-	net, fees := 0.0, 0.0
+	net, fees, spread, slippage := 0.0, 0.0, 0.0, 0.0
+	type fillCosts struct{ spread, slippage float64 }
+	costByOrder := map[string]fillCosts{}
+	costRows, err := ctx.AppDB().Query(`SELECT order_id,
+		SUM(CASE WHEN kind='spread' THEN amount ELSE 0 END),
+		SUM(CASE WHEN kind='slippage' THEN amount ELSE 0 END)
+		FROM execution_costs WHERE portfolio_id=? AND currency='USD'
+		AND kind IN ('spread','slippage') AND order_id IS NOT NULL GROUP BY order_id`, pf.ID)
+	if err != nil {
+		return nil, err
+	}
+	for costRows.Next() {
+		var orderID string
+		var cost fillCosts
+		if err = costRows.Scan(&orderID, &cost.spread, &cost.slippage); err != nil {
+			costRows.Close()
+			return nil, err
+		}
+		costByOrder[orderID] = cost
+	}
+	err = costRows.Err()
+	costRows.Close()
+	if err != nil {
+		return nil, err
+	}
 	closed, wins := 0, 0
 	for _, id := range ids {
 		d, err := loadPaperDecision(ctx.AppDB(), pf.ID, id)
@@ -564,9 +609,16 @@ func (a *App) toolPaperScorecard(ctx *sdk.AppCtx, args map[string]any) (any, err
 		row := map[string]any{"decision": d, "fees_paid": fee, "performance_included": d.Packet.Purpose == "experiment" && d.Status == "closed"}
 		if d.Status == "closed" {
 			row["realized_cashflow_pnl"] = pnl
+			entry, exit := costByOrder[d.OrderID], costByOrder[d.ExitOrderID]
+			decisionSpread, decisionSlippage := entry.spread+exit.spread, entry.slippage+exit.slippage
+			row["fill_price_pnl"] = pnl + fee
+			row["spread_cost_in_fills"] = decisionSpread
+			row["slippage_cost_in_fills"] = decisionSlippage
 			if d.Packet.Purpose == "experiment" {
 				net += pnl
 				fees += fee
+				spread += decisionSpread
+				slippage += decisionSlippage
 				closed++
 				if pnl > 0 {
 					wins++
@@ -591,5 +643,5 @@ func (a *App) toolPaperScorecard(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	err = obs.Err()
 	obs.Close()
-	return map[string]any{"policy": policy, "decisions": decisions, "observations": observations, "closed_experiments": closed, "winning_experiments": wins, "experiment_net_pnl": net, "experiment_fees": fees, "cash_benchmark_pnl": 0, "rehearsals_excluded": true, "planned_loss_is_not_guaranteed": true}, err
+	return map[string]any{"policy": policy, "decisions": decisions, "observations": observations, "closed_experiments": closed, "winning_experiments": wins, "experiment_net_pnl": net, "experiment_fees": fees, "experiment_fill_price_pnl": net + fees, "experiment_spread_in_fills": spread, "experiment_slippage_in_fills": slippage, "cash_benchmark_pnl": 0, "rehearsals_excluded": true, "planned_loss_is_not_guaranteed": true}, err
 }

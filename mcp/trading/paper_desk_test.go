@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -368,5 +369,66 @@ func TestPaperDeskEveryPublicToolHasPermissionBoundary(t *testing.T) {
 				t.Errorf("tool %s requires portfolio_id for authorization but does not accept it", tool.Name)
 			}
 		}
+	}
+}
+
+func TestPaperDeskDiscoversResearchOutsideEntryPolicyAndAdmitsExpandedCrypto(t *testing.T) {
+	ctx, pfID := paperTest(t)
+	app := &App{}
+	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", pfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := defaultUniversePolicy(pf)
+	policy.SelectionMode = "symbol_allowlist"
+	policy.IncludeSymbols = []string{"BTC-USD"}
+	if _, err := dbUpsertPortfolioUniversePolicy(ctx.AppDB(), pf, *policy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for symbol, class := range map[string]string{"SOL-USD": "crypto", "POLY:test": "polymarket"} {
+		mark := &Mark{
+			Symbol: symbol, AssetClass: class, Price: 100, Source: "fixture",
+			MarkedAt: now.Format(time.RFC3339Nano), Instrument: defaultInstrument(symbol, class, "fixture", now),
+		}
+		if class == "polymarket" {
+			mark.Price, mark.NoPrice = 0.45, ptr(0.55)
+		}
+		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+			t.Fatal(err)
+		}
+	}
+	discovery, err := app.toolPaperUniverse(ctx, map[string]any{"portfolio_id": pfID, "asset_class": "polymarket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(discovery)
+	if err != nil || !strings.Contains(string(raw), "POLY:test") || !strings.Contains(string(raw), "research-only") {
+		t.Fatalf("prediction-market discovery = %s, %v", raw, err)
+	}
+	observation := map[string]any{"portfolio_id": pfID, "symbol": "POLY:test", "observation_id": "event-1", "setup": "event-research", "verdict": "hold", "reason": "Resolution rules are under independent review."}
+	if _, err := app.toolPaperObserve(ctx, observation); err != nil {
+		t.Fatal(err)
+	}
+	proposal := paperTestArgs(pfID, "broader-desk")
+	proposal["symbol"] = "SOL-USD"
+	if _, err := app.toolPaperPropose(paperCall(11), ctx, proposal); err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("narrow policy should reject SOL: %v", err)
+	}
+	policy.SelectionMode, policy.IncludeSymbols = "all_allowed_classes", nil
+	if _, err := dbUpsertPortfolioUniversePolicy(ctx.AppDB(), pf, *policy); err != nil {
+		t.Fatal(err)
+	}
+	decision := paperApproved(t, ctx, pfID, proposal)
+	if _, err := app.toolPaperSubmit(paperCall(13), ctx, paperSubmitArgs(decision)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := loadPaperDecision(ctx.AppDB(), pfID, decision.Packet.DecisionID)
+	if err != nil || stored.OrderID == "" {
+		t.Fatalf("expanded paper order missing: %v, %v", stored, err)
+	}
+	proposal["decision_id"] = "overlap"
+	if _, err := app.toolPaperPropose(paperCall(11), ctx, proposal); err == nil || !strings.Contains(err.Error(), "already owns") {
+		t.Fatalf("overlapping plan should be rejected: %v", err)
 	}
 }
