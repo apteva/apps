@@ -31,6 +31,8 @@ After saving it:
 
 Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows.
 
+Set the Actors installation’s `worker_limit` to control concurrent runs (default 4, range 1–32). Runs for the same saved browser context or read continuation wait for each other. Independent runs can use the other slots. Run details report `wait_reason` while queued, plus separate `queue_wait_ms` and `execution_ms` timings. The actor’s `max_duration_seconds` budget begins at execution. If a timed-out run may have changed external state, its result sets `reconciliation_required` and disables Retry for that run. Reconcile the outcome before explicitly queuing another run.
+
 For a saved login, add `browser.context_id` using a context created through Computer. Omit `backend` to defer to Computer; the saved context can determine its backend. The context remains owned by Computer, and Actors requests `persist: true`. Do not store credentials in inputs: input/definition snapshots are intentionally retained.
 
 ## Publish media

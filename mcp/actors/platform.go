@@ -16,7 +16,7 @@ import (
 var operationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 func (e *actorExecution) lockContext() error {
-	res, err := e.ctx.AppDB().Exec(`INSERT INTO actors_context_locks(project_id,context_id,run_id,expires_at) VALUES(?,?,?,?) ON CONFLICT(project_id,context_id) DO UPDATE SET run_id=excluded.run_id,expires_at=excluded.expires_at WHERE actors_context_locks.expires_at<? OR actors_context_locks.run_id=excluded.run_id`, projectID(e.ctx), e.definition.Browser.ContextID, e.run.ID, e.deadline.Add(time.Minute).Unix(), time.Now().Unix())
+	res, err := e.ctx.AppDB().Exec(`INSERT INTO actors_context_locks(project_id,context_id,run_id,expires_at) VALUES(?,?,?,?) ON CONFLICT(project_id,context_id) DO UPDATE SET run_id=excluded.run_id,expires_at=excluded.expires_at,cleanup_pending=0 WHERE actors_context_locks.expires_at<=? OR actors_context_locks.run_id=excluded.run_id`, projectID(e.ctx), strings.TrimSpace(e.definition.Browser.ContextID), e.run.ID, e.deadline.Add(time.Minute).Unix(), time.Now().Unix())
 	if err != nil {
 		return err
 	}
@@ -25,6 +25,18 @@ func (e *actorExecution) lockContext() error {
 		return errors.New("saved Computer context is in use by another actor run; retry after it completes")
 	}
 	return nil
+}
+
+func (e *actorExecution) releaseContextLock(keep bool) {
+	query := `DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`
+	if keep {
+		// A cancelled open/close may still be running at Computer. Keep
+		// the saved context reserved until the existing lease expires.
+		query = `UPDATE actors_context_locks SET cleanup_pending=1 WHERE project_id=? AND run_id=?`
+	}
+	if _, err := e.ctx.AppDB().Exec(query, projectID(e.ctx), e.run.ID); err != nil {
+		e.ctx.Logger().Warn("release actor context lock", "run_id", e.run.ID, "err", err.Error())
+	}
 }
 
 type actorOperation struct {

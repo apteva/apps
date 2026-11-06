@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -50,7 +51,13 @@ var blockedNetworkPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"),
 }
 
-type App struct{}
+type App struct {
+	queueMu      sync.Mutex
+	queueWorkers sync.WaitGroup
+	queueActive  int
+	queueStopped bool
+	queueScope   *sdk.AppCtx
+}
 
 //go:embed apteva.yaml
 var manifestYAML []byte
@@ -220,14 +227,20 @@ func (a *App) openBrowser(callCtx context.Context, ctx *sdk.AppCtx, target strin
 	return &out, nil
 }
 
-func (a *App) closeBrowser(ctx *sdk.AppCtx, sessionID string) {
+const actorCleanupTimeout = 5 * time.Second
+
+func (a *App) closeBrowser(ctx *sdk.AppCtx, sessionID string) error {
 	if sessionID == "" {
-		return
+		return nil
 	}
+	callCtx, cancel := context.WithTimeout(context.Background(), actorCleanupTimeout)
+	defer cancel()
 	var out struct{}
-	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": sessionID}), &out); err != nil {
+	if err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": sessionID}), &out); err != nil {
 		ctx.Logger().Warn("computer.browser_close failed", "session_id", sessionID, "err", err.Error())
+		return err
 	}
+	return nil
 }
 
 func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessionID string, args map[string]any, includeText bool) (*browserExtractResult, error) {
@@ -288,16 +301,21 @@ func recoverInterruptedRuns(ctx *sdk.AppCtx) error {
 	if _, err := tx.Exec(`UPDATE actors_crawl_queue SET status='pending',fence=fence+1,lease_until=NULL WHERE status='running'`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE actors_runs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'queued' ELSE 'cancelled' END WHERE status='running' AND json_extract(definition_snapshot_json,'$.schema_version')=2`); err != nil {
+	if _, err := tx.Exec(`UPDATE actors_runs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'queued' ELSE 'cancelled' END, queued_at=?, started_at=NULL, completed_at=CASE WHEN cancel_requested_at IS NULL THEN NULL ELSE ? END WHERE status='running' AND json_extract(definition_snapshot_json,'$.schema_version')=2`, time.Now().UTC(), time.Now().UTC()); err != nil {
 		return err
 	}
 	// V1 writes keep their uncertain-outcome failure policy. Finish this in the
 	// same transaction as releasing stale context locks so a restarted worker
 	// cannot mistake an interrupted terminal run for a live context owner.
-	if _, err := tx.Exec(`UPDATE actors_runs SET status='failed', error='interrupted by app restart', completed_at=? WHERE status='running'`, time.Now().UTC()); err != nil {
+	if _, err := tx.Exec(`UPDATE actors_runs SET status='failed', error='interrupted by app restart', completed_at=?, output_json=CASE WHEN json_extract(output_json,'$.execution_progress.possible_external_write')=1
+		OR json_extract(output_json,'$.execution_progress.commit_attempted')=1
+		THEN json_set(output_json,'$.reconciliation_required',json('true')) ELSE output_json END WHERE status='running'`, time.Now().UTC()); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled','failed','completed'))`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE (cleanup_pending=0 OR expires_at<=unixepoch()) AND run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled','failed','completed'))`); err != nil {
+		return err
+	}
+	if err := backfillActorQueueKeys(tx); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -320,11 +338,17 @@ func pruneHistory(ctx *sdk.AppCtx) error {
 }
 
 func rollbackStoredFile(ctx *sdk.AppCtx, storageID int64) {
+	callCtx, cancel := context.WithTimeout(context.Background(), actorCleanupTimeout)
+	defer cancel()
+	rollbackStoredFileContext(callCtx, ctx, storageID)
+}
+
+func rollbackStoredFileContext(callCtx context.Context, ctx *sdk.AppCtx, storageID int64) {
 	if ctx == nil || storageID <= 0 {
 		return
 	}
 	var out map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_delete", withProjectID(ctx, map[string]any{"id": storageID}), &out); err != nil {
+	if err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "storage", "files_delete", withProjectID(ctx, map[string]any{"id": storageID}), &out); err != nil {
 		ctx.Logger().Warn("rollback uploaded Actors artifact failed", "storage_id", storageID, "err", err.Error())
 	}
 }
@@ -357,12 +381,12 @@ func listRuns(ctx *sdk.AppCtx, limit, offset int) ([]map[string]any, error) {
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, kind, status, COALESCE(error,''), COALESCE(summary,''),
 		        created_at, completed_at, output_json, COALESCE(actor_id,0),
-		        COALESCE(actor_revision,0), cancel_requested_at
-		 FROM actors_runs
+		        COALESCE(actor_revision,0), cancel_requested_at, queued_at, started_at, `+actorWaitReason+`
+		 FROM actors_runs AS queued
 		 WHERE project_id = ?
 		 ORDER BY created_at DESC
 		 LIMIT ? OFFSET ?`,
-		projectID(ctx), limit, offset,
+		actorWorkerLimit(ctx), projectID(ctx), limit, offset,
 	)
 	if err != nil {
 		return nil, err
@@ -376,8 +400,9 @@ func listRuns(ctx *sdk.AppCtx, limit, offset int) ([]map[string]any, error) {
 		var completed sql.NullTime
 		var outputJSON sql.NullString
 		var actorID, actorRevision int64
-		var cancelRequested sql.NullTime
-		if err := rows.Scan(&id, &kind, &status, &errText, &summary, &created, &completed, &outputJSON, &actorID, &actorRevision, &cancelRequested); err != nil {
+		var cancelRequested, enqueued, started sql.NullTime
+		var waitReason string
+		if err := rows.Scan(&id, &kind, &status, &errText, &summary, &created, &completed, &outputJSON, &actorID, &actorRevision, &cancelRequested, &enqueued, &started, &waitReason); err != nil {
 			return nil, err
 		}
 		run := map[string]any{
@@ -388,6 +413,7 @@ func listRuns(ctx *sdk.AppCtx, limit, offset int) ([]map[string]any, error) {
 			"summary":    summary,
 			"created_at": created.Format(time.RFC3339),
 		}
+		setActorQueueTiming(run, enqueued, started, completed, created, waitReason)
 		if completed.Valid {
 			run["completed_at"] = completed.Time.UTC().Format(time.RFC3339)
 			run["duration_ms"] = maxInt64(0, completed.Time.Sub(created).Milliseconds())
@@ -815,9 +841,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("actors requires a database")
 	}
 	globalCtx = ctx
+	a.queueScope = ctx
 	return recoverInterruptedRuns(ctx)
 }
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.queueMu.Lock()
+	a.queueStopped = true
+	a.queueMu.Unlock()
+	a.queueWorkers.Wait()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {

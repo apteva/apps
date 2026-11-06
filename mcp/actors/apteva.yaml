@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.5
+version: 0.3.6
 description: |
+  v0.3.6 runs independent browser jobs concurrently with a configurable worker
+  limit, serializes shared contexts, and exposes queue wait, execution time,
+  and timeout reconciliation in run details.
   v0.3.5 raises the actor definition limit to 2 MiB so larger workflows can
   retain their operations in one actor.
   v0.3.4 stages exact upload bytes before destructive replacement, forwards
@@ -151,7 +154,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.5
+    ref: actors/v0.3.6
     entry: mcp/actors
   port: 8080
   health_check: /health
@@ -160,6 +163,11 @@ db:
   path: /data/actors.db
   migrations: migrations/
 config_schema:
+  - name: worker_limit
+    type: number
+    default: 4
+    label: Concurrent actor runs
+    description: Maximum concurrent queued actor runs per installation (1 to 32). Runs sharing a saved browser context or continuation still run in order.
   - name: browser_secrets
     type: secret
     label: Browser secret references

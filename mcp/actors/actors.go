@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1449,56 +1448,6 @@ func hostAllowed(rawURL string, hosts []string) bool {
 		}
 	}
 	return false
-}
-
-func (a *App) runActorWorker(workerCtx context.Context, app *sdk.AppCtx) (workerErr error) {
-	run, err := claimActorRun(app)
-	if err != nil || run == nil {
-		return err
-	}
-	ctx := app.WithProject(run.ProjectID)
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			workerErr = finishActorRun(ctx, run.ID, "failed", nil, errors.New("actor worker interrupted by internal error; inspect server logs"))
-			ctx.Logger().Error("actor worker panic", "run_id", run.ID, "panic", fmt.Sprint(recovered))
-		}
-	}()
-	return a.executeActorRun(workerCtx, ctx, run)
-}
-
-func claimActorRun(ctx *sdk.AppCtx) (*actorQueuedRun, error) {
-	tx, err := ctx.AppDB().BeginTx(context.Background(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	query := `SELECT id,project_id,actor_id,actor_revision,input_json,definition_snapshot_json,COALESCE(trigger_json,'{}') FROM actors_runs WHERE status='queued' AND actor_id IS NOT NULL`
-	args := []any{}
-	if pid := ctx.CurrentProject(); pid != "" {
-		query += ` AND project_id=?`
-		args = append(args, pid)
-	}
-	query += ` ORDER BY created_at,id LIMIT 1`
-	var run actorQueuedRun
-	if err := tx.QueryRow(query, args...).Scan(&run.ID, &run.ProjectID, &run.ActorID, &run.ActorRevision, &run.InputJSON, &run.DefinitionSnapshot, &run.TriggerJSON); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	res, err := tx.Exec(`UPDATE actors_runs SET status='running' WHERE id=? AND status='queued'`, run.ID)
-	if err != nil {
-		return nil, err
-	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
-		return nil, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	ctx.EmitWithProject("actor.run.started", run.ProjectID, map[string]any{"run_id": run.ID, "actor_id": run.ActorID})
-	return &run, nil
 }
 
 func (a *App) handleActorGet(w http.ResponseWriter, r *http.Request) {
