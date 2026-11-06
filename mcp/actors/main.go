@@ -229,14 +229,25 @@ func (a *App) openBrowser(callCtx context.Context, ctx *sdk.AppCtx, target strin
 
 const actorCleanupTimeout = 5 * time.Second
 
+// Computer captures final session state and Browserbase waits for saved
+// context synchronization after releasing the session.
+const actorBrowserCloseTimeout = 30 * time.Second
+
 func (a *App) closeBrowser(ctx *sdk.AppCtx, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
-	callCtx, cancel := context.WithTimeout(context.Background(), actorCleanupTimeout)
+	callCtx, cancel := context.WithTimeout(context.Background(), actorBrowserCloseTimeout)
 	defer cancel()
-	var out struct{}
-	if err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": sessionID}), &out); err != nil {
+	var out struct {
+		Status         string `json:"status"`
+		CleanupPending bool   `json:"cleanup_pending"`
+	}
+	err := sdk.CallAppResultContext(callCtx, ctx.PlatformAPI(), "computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": sessionID}), &out)
+	if err == nil && (out.CleanupPending || out.Status == "cleanup_pending") {
+		err = errors.New("computer browser session cleanup is pending")
+	}
+	if err != nil {
 		ctx.Logger().Warn("computer.browser_close failed", "session_id", sessionID, "err", err.Error())
 		return err
 	}

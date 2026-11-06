@@ -223,3 +223,30 @@ func TestActorQueueDoesNotReplayATimedOutWrite(t *testing.T) {
 		t.Fatalf("write dispatched %d times, want once", len(platform.started))
 	}
 }
+
+type pendingBrowserClosePlatform struct {
+	*fakePlatform
+	budget time.Duration
+}
+
+func (p *pendingBrowserClosePlatform) CallAppResultContext(ctx context.Context, app, tool string, in map[string]any, out any) error {
+	if app == "computer" && tool == "browser_close" {
+		if deadline, ok := ctx.Deadline(); ok {
+			p.budget = time.Until(deadline)
+		}
+		return json.Unmarshal([]byte(`{"status":"cleanup_pending","cleanup_pending":true}`), out)
+	}
+	return p.fakePlatform.CallAppResultContext(ctx, app, tool, in, out)
+}
+
+func TestActorBrowserCloseAllowsProviderSyncAndReportsPendingCleanup(t *testing.T) {
+	platform := &pendingBrowserClosePlatform{fakePlatform: newFakePlatform()}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	err := (&App{}).closeBrowser(ctx, "saved-browser")
+	if err == nil || !strings.Contains(err.Error(), "cleanup is pending") {
+		t.Fatalf("pending close returned %v", err)
+	}
+	if platform.budget < 20*time.Second || platform.budget > actorBrowserCloseTimeout {
+		t.Fatalf("browser close budget = %v", platform.budget)
+	}
+}

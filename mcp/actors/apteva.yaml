@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.6
+version: 0.3.7
 description: |
+  v0.3.7 allows time for Computer to close persisted Browserbase sessions and
+  keeps the context locked when Computer reports cleanup is pending.
   v0.3.6 runs independent browser jobs concurrently with a configurable worker
   limit, serializes shared contexts, and exposes queue wait, execution time,
   and timeout reconciliation in run details.
@@ -154,7 +156,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.6
+    ref: actors/v0.3.7
     entry: mcp/actors
   port: 8080
   health_check: /health
