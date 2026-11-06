@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -236,14 +239,23 @@ func readYouTubeThumbnailVideo(ctx *sdk.AppCtx, job youtubeThumbnailJob) (youtub
 	return payload.Items[0], nil
 }
 
+func youtubeThumbnailURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Fragment != "" {
+		return nil
+	}
+	if !strings.HasSuffix(u.Hostname(), ".ytimg.com") && u.Hostname() != "img.youtube.com" {
+		return nil
+	}
+	return u
+}
+
 func youtubeThumbnailURLs(thumbnails map[string]any) map[string]string {
 	result := map[string]string{}
 	for name, item := range thumbnails {
 		rendition, _ := item.(map[string]any)
 		raw := historyString(rendition, "url")
-		u, err := url.Parse(raw)
-		if err == nil && u.Scheme == "https" && u.User == nil && u.Port() == "" && u.Fragment == "" &&
-			(strings.HasSuffix(u.Hostname(), ".ytimg.com") || u.Hostname() == "img.youtube.com") {
+		if youtubeThumbnailURL(raw) != nil {
 			result[name] = raw
 		}
 	}
@@ -258,15 +270,92 @@ func youtubeThumbnailMatches(video youtubeThumbnailVideo, expected map[string]st
 		return false
 	}
 	if short := expected["shortsAspectRatio"]; short != "" {
-		return actual["shortsAspectRatio"] == short
+		return sameYouTubeThumbnail(video.ID, short, actual["shortsAspectRatio"])
 	}
 	if video.Content.Custom == nil && actual["shortsAspectRatio"] == "" {
 		return false
 	}
 	for name, want := range expected {
-		if actual[name] == want {
+		if want != "" && actual[name] == want {
+			return true
+		}
+	}
+	for _, name := range []string{"maxres", "standard", "high", "medium", "default"} {
+		if sameYouTubeThumbnail(video.ID, expected[name], actual[name]) {
 			return true
 		}
 	}
 	return false
+}
+
+// YouTube can return the same rendition with different CDN signing or
+// transformation parameters. Compare the served images when only those
+// parameters differ. The stable path by itself can also serve older art.
+func sameYouTubeThumbnail(videoID, expected, actual string) bool {
+	if expected == "" || actual == "" {
+		return false
+	}
+	if expected == actual {
+		return true
+	}
+	want, got := youtubeThumbnailURL(expected), youtubeThumbnailURL(actual)
+	if want == nil || got == nil || want.Host != got.Host || want.EscapedPath() != got.EscapedPath() {
+		return false
+	}
+	path := got.EscapedPath()
+	if !strings.HasPrefix(path, "/vi/"+url.PathEscape(videoID)+"/") &&
+		!strings.HasPrefix(path, "/vi_webp/"+url.PathEscape(videoID)+"/") {
+		return false
+	}
+	wantQuery, err := url.ParseQuery(want.RawQuery)
+	if err != nil {
+		return false
+	}
+	gotQuery, err := url.ParseQuery(got.RawQuery)
+	if err != nil {
+		return false
+	}
+	for _, param := range []string{"sqp", "rs"} {
+		wantQuery.Del(param)
+		gotQuery.Del(param)
+	}
+	if wantQuery.Encode() != gotQuery.Encode() {
+		return false
+	}
+	wantImage, ok := youtubeThumbnailImageHash(expected)
+	if !ok {
+		return false
+	}
+	gotImage, ok := youtubeThumbnailImageHash(actual)
+	return ok && wantImage == gotImage
+}
+
+var youtubeThumbnailCDNClient = &http.Client{
+	Timeout: 5 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+func youtubeThumbnailImageHash(raw string) ([sha256.Size]byte, bool) {
+	const maxRenditionBytes = 4 << 20
+	var empty [sha256.Size]byte
+	res, err := youtubeThumbnailCDNClient.Get(raw)
+	if err != nil {
+		return empty, false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.ContentLength > maxRenditionBytes {
+		return empty, false
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxRenditionBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxRenditionBytes {
+		return empty, false
+	}
+	switch http.DetectContentType(body) {
+	case "image/jpeg", "image/png", "image/webp":
+		return sha256.Sum256(body), true
+	default:
+		return empty, false
+	}
 }

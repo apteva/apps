@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -201,4 +206,117 @@ func assertYouTubeThumbnailCalls(t *testing.T, pf *recordingPlatform, video stri
 			}
 		}
 	}
+}
+
+func TestYouTubeThumbnailCDNReadback(t *testing.T) {
+	const videoID = "abc123def45"
+	const cover = "https://i9.ytimg.com/vi/abc123def45/sardefault.jpg"
+	var requests atomic.Int32
+	coverPNG := testThumbnailPNG(t, color.RGBA{R: 180, A: 255})
+	otherPNG := testThumbnailPNG(t, color.RGBA{B: 180, A: 255})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.URL.Query().Get("rs") {
+		case "redirect":
+			http.Redirect(w, r, "/redirected", http.StatusFound)
+		case "unavailable":
+			w.WriteHeader(http.StatusNotFound)
+		case "other-image":
+			_, _ = w.Write(otherPNG)
+		default:
+			_, _ = w.Write(coverPNG)
+		}
+	}))
+	defer server.Close()
+	dest, _ := url.Parse(server.URL)
+	original := youtubeThumbnailCDNClient
+	client := *original
+	client.Transport = rewriteUploadTransport{http.DefaultTransport, dest}
+	youtubeThumbnailCDNClient = &client
+	t.Cleanup(func() { youtubeThumbnailCDNClient = original })
+
+	for _, tc := range []struct {
+		name, actual, receipt string
+		custom, want          bool
+		fetches               int32
+	}{
+		{name: "rotated CDN parameters", receipt: cover + "?sqp=before&rs=first", actual: cover + "?rs=second&sqp=after", custom: true, want: true, fetches: 2},
+		{name: "different image bytes", receipt: cover + "?rs=first", actual: cover + "?rs=other-image", custom: true, fetches: 2},
+		{name: "different rendition", receipt: cover + "?rs=first", actual: "https://i9.ytimg.com/vi/abc123def45/hqdefault.jpg?rs=second", custom: true},
+		{name: "different video path", receipt: "https://i9.ytimg.com/vi/other-video/sardefault.jpg?rs=first", actual: "https://i9.ytimg.com/vi/other-video/sardefault.jpg?rs=second", custom: true},
+		{name: "unrelated query difference", receipt: cover + "?rs=first&variant=a", actual: cover + "?rs=second&variant=b", custom: true},
+		{name: "untrusted receipt host", receipt: "https://example.test/vi/abc123def45/sardefault.jpg?rs=first", actual: cover + "?rs=second", custom: true},
+		{name: "CDN readback redirect", receipt: cover + "?rs=first", actual: cover + "?rs=redirect", custom: true, fetches: 2},
+		{name: "CDN readback unavailable", receipt: cover + "?rs=first", actual: cover + "?rs=unavailable", custom: true, fetches: 2},
+		{name: "provider says no custom image", receipt: cover + "?rs=first", actual: cover + "?rs=second"},
+		{name: "exact URL fast path", receipt: cover, actual: cover, custom: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response struct {
+				Items []youtubeThumbnailVideo `json:"items"`
+			}
+			if err := json.Unmarshal(youtubeThumbnailRead(videoID, "succeeded", tc.actual, tc.custom).Data, &response); err != nil {
+				t.Fatal(err)
+			}
+			requests.Store(0)
+			if got := youtubeThumbnailMatches(response.Items[0], map[string]string{"shortsAspectRatio": tc.receipt}); got != tc.want {
+				t.Fatalf("match=%v, want %v", got, tc.want)
+			}
+			if got := requests.Load(); got != tc.fetches {
+				t.Fatalf("CDN requests=%d, want %d", got, tc.fetches)
+			}
+		})
+	}
+}
+
+func testThumbnailPNG(t *testing.T, pixel color.RGBA) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.SetRGBA(0, 0, pixel)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestYouTubeThumbnailUpgradeRechecksTimedOutReceiptWithoutApplying(t *testing.T) {
+	const videoID = "abc123def45"
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_video"] = youtubeThumbnailRead(videoID, "succeeded", testShortThumbnail, true)
+	ctx := newSocialCtx(t, pf)
+	db := ctx.AppDB()
+	accountResult, err := db.Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,external_account_id,display_name,status)
+		VALUES('test-proj','youtube',42,'owner','YT','active')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, _ := accountResult.LastInsertId()
+	postResult, err := db.Exec(`INSERT INTO posts(project_id,body,status) VALUES ('test-proj','Short','published')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post, _ := postResult.LastInsertId()
+	receipt, _ := json.Marshal(map[string]string{"shortsAspectRatio": testShortThumbnail})
+	_, err = db.Exec(`INSERT INTO post_targets(post_id,social_account_id,status,platform_post_id,attempts,youtube_thumbnail_state,
+		youtube_thumbnail_video_id,youtube_thumbnail_receipt,youtube_thumbnail_attempts,youtube_thumbnail_error)
+		VALUES(?,?,'published',?,2,'failed',?,?,15,'YouTube has not returned the applied custom thumbnail yet')`,
+		post, account, videoID, videoID, string(receipt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := assertYouTubeThumbnailState(t, ctx, post, videoID, "failed", 2)
+	sql, err := os.ReadFile("migrations/040_retry_youtube_thumbnail_verification.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(sql)); err != nil {
+		t.Fatal(err)
+	}
+	assertYouTubeThumbnailState(t, ctx, post, videoID, "verifying", 2)
+	runYouTubeThumbnailTick(t, ctx, post)
+	if got := assertYouTubeThumbnailState(t, ctx, post, videoID, "verified", 2); got != target {
+		t.Fatalf("target changed from %d to %d", target, got)
+	}
+	assertYouTubeThumbnailCalls(t, pf, videoID, "get_video")
 }
