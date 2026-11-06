@@ -40,10 +40,12 @@ func TestManifestGuestRoutesMatchRuntime(t *testing.T) {
 	}
 
 	wantPublic := map[string]bool{
-		"/join/":      true,
-		"/room/":      true,
-		"/api/join":   true,
-		"/api/rooms/": true,
+		"/join/":            true,
+		"/room/":            true,
+		"/api/join":         true,
+		"/api/rooms/":       true,
+		"/ui/frontend.json": true,
+		"/ui/frontend/":     true,
 	}
 	for prefix := range wantPublic {
 		noAuth, ok := manifestRoutes[prefix]

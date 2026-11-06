@@ -311,7 +311,7 @@ func (a *App) toolJoinRoom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if jt == nil {
+	if jt == nil || (strArg(args, "_project_id") != "" && jt.ProjectID != strArg(args, "_project_id")) {
 		return nil, errors.New("join token not found")
 	}
 	if jt.RevokedAt != "" {

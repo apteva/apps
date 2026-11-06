@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.2.2
+version: 0.3.0
 description: |
   Secure realtime audio/video rooms using authenticated WebRTC mesh
   signaling, expiring join links, unified human/agent/service
   participants, chat, transcripts, presence, and lifecycle events.
+  Includes an embeddable browser client for custom audio/video call interfaces.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/calls
@@ -31,6 +32,10 @@ provides:
     - prefix: /api/join
       no_auth: true
     - prefix: /api/rooms/
+      no_auth: true
+    - prefix: /ui/frontend.json
+      no_auth: true
+    - prefix: /ui/frontend/
       no_auth: true
     - prefix: /
   mcp_tools:
@@ -58,7 +63,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: calls/v0.3.0
     entry: mcp/calls
   port: 8080
   health_check: /health
@@ -69,6 +74,10 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: allowed_embed_origins
+    type: text
+    label: Allowed embed origins
+    description: Comma-separated exact browser origins for cross-origin invite redemption. Also allow these origins in the Apteva gateway CORS settings.
   - name: ice_servers_json
     type: text
     default: '[{"urls":["stun:stun.l.google.com:19302"]}]'
