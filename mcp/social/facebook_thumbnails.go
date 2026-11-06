@@ -4,16 +4,60 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 const facebookThumbnailMaxBytes = 10 << 20
 
+// Facebook Page video IDs are numeric. Feed post IDs are compound and
+// photo deliveries that saved a Page post ID can be excluded up front.
+// The worker still checks the native video and its owning Page.
+func facebookThumbnailCandidate(id, pagePostID string) bool {
+	return id != "" && pagePostID == "" && strings.Trim(id, "0123456789") == ""
+}
+
+func (a *App) editFacebookVideoThumbnail(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, pageCreds, pagePostID string, eff, requested map[string]any, mediaProjectID string) targetEditOutcome {
+	if !facebookThumbnailCandidate(out.PlatformPostID, pagePostID) {
+		out.Status, out.Reason = "unsupported", "Facebook cover edits require a saved Page video ID"
+		return out
+	}
+	if extractPageToken(pageCreds) == "" {
+		out.Status, out.Error = "failed", "Facebook Page access token missing — reconnect the account"
+		return out
+	}
+	state, fileID, sourceProject := videoThumbnailRequest(ctx, eff, mediaProjectID)
+	if fileID <= 0 {
+		out.Status, out.Error = "failed", "Choose a Storage image for the Facebook video cover"
+		return out
+	}
+	if _, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID); err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if _, bodyRequested := requested["body"]; bodyRequested {
+		out = a.editFacebookPost(ctx, out, connID, pageCreds, eff)
+		if out.Status != "ok" {
+			return out
+		}
+	}
+	options, err := json.Marshal(eff)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	encoded := string(options)
+	if err := queueVideoThumbnailEdit(ctx, out, state, fileID, sourceProject, &encoded); err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	out.Status, out.ThumbnailStatus = "ok", state
+	return out
+}
+
 func (a *App) applyFacebookVideoThumbnail(ctx *sdk.AppCtx, job videoThumbnailJob) error {
-	var credentials map[string]string
-	_ = json.Unmarshal([]byte(job.pageCredentials), &credentials)
-	token := credentials["access_token"]
+	token := extractPageToken(job.pageCredentials)
 	if job.channel == "" || token == "" {
 		return job.finish(ctx, "failed", "", "Facebook Page credentials are missing")
 	}
@@ -26,6 +70,9 @@ func (a *App) applyFacebookVideoThumbnail(ctx *sdk.AppCtx, job videoThumbnailJob
 		return job.retry(ctx, err.Error())
 	}
 	if result == nil || !result.Success {
+		if result != nil && result.Status >= 400 && result.Status < 500 && result.Status != http.StatusTooManyRequests {
+			return job.finish(ctx, "failed", "", upstreamError(result).Error())
+		}
 		return job.retry(ctx, upstreamError(result).Error())
 	}
 	var video struct {
@@ -42,6 +89,8 @@ func (a *App) applyFacebookVideoThumbnail(ctx *sdk.AppCtx, job videoThumbnailJob
 	}
 	switch video.Status.VideoStatus {
 	case "ready":
+	case "":
+		return job.finish(ctx, "failed", "", "Facebook did not return a video processing status for this object")
 	case "error", "failed":
 		return job.finish(ctx, "failed", "", "Facebook video processing failed")
 	default:
