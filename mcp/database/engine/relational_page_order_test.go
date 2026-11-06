@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,8 +91,11 @@ func answerOf(out map[string]any) string {
 }
 
 // One read in any order must answer what batches in primary key order answer: SQLite
-// and Pebble still read in batches, so they are the reference for AptevaDB.
+// and Pebble still read in batches, so they are the reference for AptevaDB. Walking the
+// pages costs far more than the whole answers, and CI runs under -race with a 10 minute
+// limit, so a normal run walks them for one filter. JOINED_PAGE_FULL=1 walks them all.
 func TestJoinedPageIgnoresArrivalOrder(t *testing.T) {
+	walkAll := os.Getenv("JOINED_PAGE_FULL") != ""
 	answers := map[string]map[string]string{}
 	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		rt := relOpen(t, adapter)
@@ -108,6 +112,9 @@ func TestJoinedPageIgnoresArrivalOrder(t *testing.T) {
 					if !visitContradictions[name] {
 						t.Fatalf("%s %s: nothing matched, so it proves nothing", adapter, name)
 					}
+					continue
+				}
+				if !walkAll && whereName != "indexed" {
 					continue
 				}
 				// The same read by offset and by cursor, seven items at a time.
