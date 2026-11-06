@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,53 @@ func setSourceURL(pf *recordingPlatform, url string) {
 	raw, _ := json.Marshal(map[string]any{"url": url})
 	pf.callAppResponses["storage:files_get_url"] = raw
 }
+
+type videoCoverPlatform struct {
+	*recordingPlatform
+	coverURL string
+}
+
+func (p videoCoverPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app == "storage" && input["id"] == int64(8) {
+		switch tool {
+		case "files_get":
+			return json.Unmarshal([]byte(`{"id":8,"content_type":"image/jpeg"}`), out)
+		case "files_get_url":
+			return json.Unmarshal(fmt.Appendf(nil, `{"url":%q}`, p.coverURL), out)
+		}
+	}
+	return p.recordingPlatform.CallAppResult(app, tool, input, out)
+}
+
+func TestPublishFacebookVideoWithThumbnail(t *testing.T) {
+	image := []byte{0xff, 0xd8, 0xff, 0xe0}
+	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(image)
+	}))
+	defer cover.Close()
+	pf := newRecordingPlatform()
+	configureTestVideo(t, pf, 7, int64(len(testMP4)))
+	pf.executeResponses["post_video_with_thumbnail"] = graphOK(`{"id":"fb-video"}`)
+	ctx := newSocialCtx(t, videoCoverPlatform{pf, cover.URL})
+	identity, err := (&App{}).publishSingle(ctx, platforms["facebook"], publishJob{
+		platform: "facebook", connID: 42, extID: "fb-page", pageCreds: `{"access_token":"page-token"}`,
+		media: []mediaItem{testSourceItem()}, options: map[string]any{"thumbnail_storage_id": int64(8)},
+	})
+	if err != nil || identity.id != "fb-video" {
+		t.Fatalf("publish returned id=%q err=%v", identity.id, err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video_with_thumbnail" {
+		t.Fatalf("unexpected publish calls: %+v", pf.executeCalls)
+	}
+	input := pf.executeCalls[0].Input
+	thumb, _ := input["thumb"].(map[string]any)
+	if input["thumb_filename"] != "thumbnail.jpg" || input["access_token"] != "page-token" ||
+		thumb["mimeType"] != "image/jpeg" || thumb["base64"] != base64.StdEncoding.EncodeToString(image) {
+		t.Fatalf("unexpected multipart input: %+v", input)
+	}
+}
+
 func TestVideoSourceRejectsBeforeProviderInitialization(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

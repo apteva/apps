@@ -327,10 +327,7 @@ type platformDef struct {
 	VideoMediaURLField string
 	VideoBodyField     string // overrides BodyField when posting a video
 	// ThumbnailURLField — optional input field for platforms that can
-	// receive a custom thumbnail/cover URL during create (Facebook
-	// videos: "thumb", Instagram Reels: "coverUrl"). YouTube is
-	// different: it requires a second post-upload call, configured by
-	// ThumbnailTool below.
+	// receive a custom cover URL when creating a post (Instagram Reels).
 	ThumbnailURLField string
 	// ThumbnailFrameField — optional input field for platforms that
 	// accept a video timestamp instead of a separate image asset
@@ -479,7 +476,6 @@ var platforms = map[string]platformDef{
 		VideoPostTool:      "post_video",
 		VideoMediaURLField: "file_url",
 		VideoBodyField:     "description",
-		ThumbnailURLField:  "thumb",
 		OptionFields: []optionField{
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Video thumbnail",
 				Help: "Optional image from Storage used as the custom thumbnail for Facebook video posts."},
@@ -3489,13 +3485,27 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (pub
 	if mediaField != "" && len(j.media) > 0 {
 		input[mediaField] = j.media[0].URL
 	}
-	if isVideo && def.ThumbnailURLField != "" {
+	if isVideo && def.Platform == "facebook" {
 		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
 		if err != nil {
 			return publishIdentity{}, err
 		}
 		if thumb != nil {
-			input[def.ThumbnailURLField] = thumb.URL
+			body, err := fetchThumbnailSource(thumb.URL, 10<<20)
+			if err != nil {
+				return publishIdentity{}, err
+			}
+			mime := http.DetectContentType(body)
+			switch mime {
+			case "image/jpeg":
+				input["thumb_filename"] = "thumbnail.jpg"
+			case "image/png":
+				input["thumb_filename"] = "thumbnail.png"
+			default:
+				return publishIdentity{}, fmt.Errorf("Facebook thumbnail must be a JPEG or PNG image, got %s", mime)
+			}
+			tool = "post_video_with_thumbnail"
+			input["thumb"] = thumbnailBinaryEnvelope(body, mime)
 		}
 	}
 	// Inject per-destination credentials (Facebook page access token,
@@ -4945,7 +4955,7 @@ func prepareYouTubeThumbnail(body []byte, mime string) ([]byte, string, error) {
 	return optimized.Bytes(), "image/jpeg", nil
 }
 
-func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
+func fetchThumbnailSource(url string, maxBytes int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -4960,22 +4970,34 @@ func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch thumbnail: storage returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, youtubeThumbnailSourceMaxBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > youtubeThumbnailSourceMaxBytes {
-		return nil, fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("thumbnail source exceeds %d bytes", maxBytes)
+	}
+	return body, nil
+}
+
+func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
+	body, err := fetchThumbnailSource(url, youtubeThumbnailSourceMaxBytes)
+	if err != nil {
+		return nil, err
 	}
 	body, mime, err = prepareYouTubeThumbnail(body, mime)
 	if err != nil {
 		return nil, err
 	}
+	return thumbnailBinaryEnvelope(body, mime), nil
+}
+
+func thumbnailBinaryEnvelope(body []byte, mime string) map[string]any {
 	return map[string]any{
 		"_binary":  true,
 		"base64":   base64.StdEncoding.EncodeToString(body),
 		"mimeType": mime,
-	}, nil
+	}
 }
 
 func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64, platformPostID string, thumb mediaItem) (map[string]string, error) {

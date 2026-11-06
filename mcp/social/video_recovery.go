@@ -202,6 +202,9 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 		case r.Platform == "facebook" && facebookFetchRejected(r.LastError):
 			decision = "retry"
 			e["reason"] = "Facebook explicitly rejected fetching the video (389/1363057)"
+		case r.Platform == "facebook" && d.OperationState == "confirmed_failure" && facebookThumbnailRejected(r.LastError):
+			decision = "retry"
+			e["reason"] = "Facebook rejected the thumbnail before accepting the video"
 		}
 	}
 	if decision == "blocked" {
@@ -330,6 +333,22 @@ func facebookFetchRejected(message string) bool {
 	}
 	return json.Unmarshal([]byte(message[start:]), &body) == nil && body.Error.Code == 389 && body.Error.Subcode == 1363057
 }
+
+func facebookThumbnailRejected(message string) bool {
+	const prefix = "upstream 400: "
+	if !strings.HasPrefix(message, prefix) {
+		return false
+	}
+	var body struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(strings.TrimPrefix(message, prefix)), &body) == nil &&
+		body.Error.Code == 100 && body.Error.Message == "(#100) Invalid image format. It should be an image file data."
+}
+
 func (a *App) toolPostDeliveryRevalidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx = ctx.WithProject(projectScope(ctx, args))
 	post, target, err := recoveryIDs(args)
