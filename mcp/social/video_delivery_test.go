@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // Minimal ISO BMFF ftyp box. This tests transport/container validation, not codec decoding.
@@ -63,31 +65,62 @@ func (p videoCoverPlatform) CallAppResult(app, tool string, input map[string]any
 }
 
 func TestPublishFacebookVideoWithThumbnail(t *testing.T) {
-	image := []byte{0xff, 0xd8, 0xff, 0xe0}
-	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Write(image)
-	}))
-	defer cover.Close()
-	pf := newRecordingPlatform()
-	configureTestVideo(t, pf, 7, int64(len(testMP4)))
-	pf.executeResponses["post_video_with_thumbnail"] = graphOK(`{"id":"fb-video"}`)
-	ctx := newSocialCtx(t, videoCoverPlatform{pf, cover.URL})
-	identity, err := (&App{}).publishSingle(ctx, platforms["facebook"], publishJob{
-		platform: "facebook", connID: 42, extID: "fb-page", pageCreds: `{"access_token":"page-token"}`,
-		media: []mediaItem{testSourceItem()}, options: map[string]any{"thumbnail_storage_id": int64(8)},
-	})
-	if err != nil || identity.id != "fb-video" {
-		t.Fatalf("publish returned id=%q err=%v", identity.id, err)
-	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video_with_thumbnail" {
-		t.Fatalf("unexpected publish calls: %+v", pf.executeCalls)
-	}
-	input := pf.executeCalls[0].Input
-	thumb, _ := input["thumb"].(map[string]any)
-	if input["thumb_filename"] != "thumbnail.jpg" || input["access_token"] != "page-token" ||
-		thumb["mimeType"] != "image/jpeg" || thumb["base64"] != base64.StdEncoding.EncodeToString(image) {
-		t.Fatalf("unexpected multipart input: %+v", input)
+	for _, page := range []string{"fb-page", "different-page"} {
+		t.Run(page, func(t *testing.T) {
+			const id = "fb-video"
+			image := []byte{0xff, 0xd8, 0xff, 0xe0}
+			cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "image/jpeg")
+				w.Write(image)
+			}))
+			defer cover.Close()
+			pf := newRecordingPlatform()
+			configureTestVideo(t, pf, 7, int64(len(testMP4)))
+			pf.executeResponses["post_video"] = graphOK(`{"id":"fb-video"}`)
+			pf.executeResponses["facebook_set_video_thumbnail"] = graphOK(`{"success":true}`)
+			ctx := newSocialCtx(t, videoCoverPlatform{pf, cover.URL})
+			r, err := ctx.AppDB().Exec(`INSERT INTO social_accounts(project_id,platform,connection_id,external_account_id,display_name,status,page_credentials)
+				VALUES('test-proj','facebook',42,'fb-page','FB','active','{"access_token":"page-token"}')`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			account, _ := r.LastInsertId()
+			out, err := (&App{}).toolPostCreate(ctx, map[string]any{
+				"mode": "publish", "body": "Facebook video", "media_storage_ids": []any{int64(7)},
+				"targets": []any{map[string]any{"social_account_id": account, "thumbnail_storage_id": int64(8)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			post := out.(map[string]any)["post_id"].(int64)
+			target := assertYouTubeThumbnailState(t, ctx, post, id, "pending", 1)
+			assertYouTubeThumbnailCalls(t, pf, id, "post_video")
+			pf.executeQueues["facebook_get_video"] = []*sdk.ExecuteResult{
+				graphOK(`{"id":"fb-video","from":{"id":"fb-page"},"status":{"video_status":"processing"}}`),
+				graphOK(fmt.Sprintf(`{"id":"fb-video","from":{"id":%q},"status":{"video_status":"ready"}}`, page)),
+			}
+			runYouTubeThumbnailTick(t, ctx, post)
+			assertYouTubeThumbnailState(t, ctx, post, id, "pending", 1)
+			assertYouTubeThumbnailCalls(t, pf, id, "post_video", "facebook_get_video")
+			runYouTubeThumbnailTick(t, ctx, post)
+			if page != "fb-page" {
+				assertYouTubeThumbnailState(t, ctx, post, id, "failed", 1)
+				assertYouTubeThumbnailCalls(t, pf, id, "post_video", "facebook_get_video", "facebook_get_video")
+				return
+			}
+			if got := assertYouTubeThumbnailState(t, ctx, post, id, "applied", 1); got != target {
+				t.Fatalf("thumbnail job changed the target: %d, want %d", got, target)
+			}
+			runYouTubeThumbnailTick(t, ctx, post)
+			assertYouTubeThumbnailCalls(t, pf, id, "post_video", "facebook_get_video", "facebook_get_video", "facebook_set_video_thumbnail")
+			input := pf.executeCalls[3].Input
+			thumb, _ := input["source"].(map[string]any)
+			if input["videoId"] != id || input["source_filename"] != "thumbnail.jpg" ||
+				input["access_token"] != "page-token" || input["is_preferred"] != true ||
+				thumb["mimeType"] != "image/jpeg" || thumb["base64"] != base64.StdEncoding.EncodeToString(image) {
+				t.Fatalf("unexpected multipart input: %+v", input)
+			}
+		})
 	}
 }
 

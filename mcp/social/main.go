@@ -784,7 +784,7 @@ func (a *App) Workers() []sdk.Worker {
 		{
 			Name:     "youtube_thumbnails",
 			Schedule: "@every 1m",
-			Run:      a.runYouTubeThumbnails,
+			Run:      a.runVideoThumbnails,
 		},
 	}
 }
@@ -2971,8 +2971,8 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		platformPostID, platformURL := identity.id, identity.url
 		var thumbnailState, thumbnailVideoID, thumbnailProject string
 		var thumbnailID int64
-		if j.platform == "youtube" && platformPostID != "" {
-			thumbnailState, thumbnailID, thumbnailProject = youtubeThumbnailRequest(ctx, j.options, j.mediaProjectID)
+		if platformPostID != "" && (j.platform == "youtube" || (j.platform == "facebook" && len(j.media) > 0 && j.media[0].IsVideo())) {
+			thumbnailState, thumbnailID, thumbnailProject = videoThumbnailRequest(ctx, j.options, j.mediaProjectID)
 			if thumbnailID > 0 {
 				thumbnailVideoID = platformPostID
 			}
@@ -2986,7 +2986,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		if err != nil {
 			var awaiting *awaitingAudienceError
 			if errors.As(err, &awaiting) && platformPostID != "" {
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0, `+queueYouTubeThumbnailSQL+` WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, j.targetID, j.deliveryAttempt)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0, `+queueVideoThumbnailSQL+` WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, j.targetID, j.deliveryAttempt)
 				ctx.Emit("target.awaiting_audience_setup", map[string]any{"target_id": j.targetID, "platform": j.platform, "platform_post_id": platformPostID})
 				continue
 			}
@@ -3031,7 +3031,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			`UPDATE post_targets
 			    SET status='published', platform_post_id=?, platform_url=?, facebook_page_post_id=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
-			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueYouTubeThumbnailSQL+`, `+queueEventSQL+`
+			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueVideoThumbnailSQL+`, `+queueEventSQL+`
 			  WHERE id=? AND attempts=? AND status='publishing'`,
 			nullable(platformPostID), nullable(platformURL), nullable(identity.facebookPagePostID), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, topic, event, j.targetID, j.deliveryAttempt,
 		)
@@ -3484,29 +3484,6 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (pub
 	}
 	if mediaField != "" && len(j.media) > 0 {
 		input[mediaField] = j.media[0].URL
-	}
-	if isVideo && def.Platform == "facebook" {
-		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
-		if err != nil {
-			return publishIdentity{}, err
-		}
-		if thumb != nil {
-			body, err := fetchThumbnailSource(thumb.URL, 10<<20)
-			if err != nil {
-				return publishIdentity{}, err
-			}
-			mime := http.DetectContentType(body)
-			switch mime {
-			case "image/jpeg":
-				input["thumb_filename"] = "thumbnail.jpg"
-			case "image/png":
-				input["thumb_filename"] = "thumbnail.png"
-			default:
-				return publishIdentity{}, fmt.Errorf("Facebook thumbnail must be a JPEG or PNG image, got %s", mime)
-			}
-			tool = "post_video_with_thumbnail"
-			input["thumb"] = thumbnailBinaryEnvelope(body, mime)
-		}
 	}
 	// Inject per-destination credentials (Facebook page access token,
 	// etc.). The integration tool's input_schema declares the field
@@ -9443,7 +9420,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 	_, thumbnailRequested := requested["thumbnail_storage_id"]
 	_, projectRequested := requested["thumbnail_project_id"]
 	thumbnailRequested = thumbnailRequested || projectRequested
-	state, fileID, sourceProject := youtubeThumbnailRequest(ctx, eff, mediaProjectID)
+	state, fileID, sourceProject := videoThumbnailRequest(ctx, eff, mediaProjectID)
 	if thumbnailRequested && fileID != 0 {
 		if _, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID); err != nil {
 			out.Status, out.Error = "failed", err.Error()
@@ -9482,7 +9459,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		_, _ = a.toolPostNativeInspect(ctx, map[string]any{"social_account_id": out.SocialAccountID, "native_post_id": out.PlatformPostID})
 	}
 	if thumbnailRequested {
-		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueYouTubeThumbnailSQL+`
+		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueVideoThumbnailSQL+`
 			WHERE id=? AND social_account_id=? AND platform_post_id=? AND status IN ('published','awaiting_audience_setup')`,
 			state, out.PlatformPostID, fileID, sourceProject, out.TargetID, out.SocialAccountID, out.PlatformPostID)
 		if err != nil {
