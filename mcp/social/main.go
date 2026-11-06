@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.3
+version: 0.24.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -231,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.3
+    ref: social/v0.24.4
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -334,7 +334,7 @@ type platformDef struct {
 	ThumbnailURLField string
 	// ThumbnailFrameField — optional input field for platforms that
 	// accept a video timestamp instead of a separate image asset
-	// (Instagram: thumbOffset, TikTok: video_cover_timestamp_ms).
+	// (Instagram: thumb_offset, TikTok: video_cover_timestamp_ms).
 	ThumbnailFrameField string
 	// ThumbnailTool/BinaryField/IDField — post-publish thumbnail step
 	// for platforms such as YouTube where thumbnails.set needs the
@@ -549,8 +549,8 @@ var platforms = map[string]platformDef{
 		// account, not the user-level token).
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
-		ThumbnailURLField:    "coverUrl",
-		ThumbnailFrameField:  "thumbOffset",
+		ThumbnailURLField:    "cover_url",
+		ThumbnailFrameField:  "thumb_offset",
 		OptionFields: []optionField{
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Reel cover",
 				Help: "Optional image from Storage used as the cover for Instagram video/Reel posts."},
