@@ -1,4 +1,4 @@
-import {useEffect, useState} from "react";
+import {useEffect, useMemo, useState} from "react";
 import type {Message} from "./types";
 
 export interface ReplySuggestion {key:string; text:string; messageId:number}
@@ -29,7 +29,7 @@ export function useReplySuggestion(messages:Message[],conversationId:string,stor
  const [state,setState]=useState(()=>({key,consumed:readConsumed(key)}));
  useEffect(()=>{setState({key,consumed:readConsumed(key)})},[key]);
  const consumed=state.key===key?state.consumed:readConsumed(key);
- const candidate=latestReplySuggestion(messages,conversationId);
+ const candidate=useMemo(()=>latestReplySuggestion(messages,conversationId),[messages,conversationId]);
  const suggestion=candidate&&!consumed.includes(candidate.key)?candidate:null;
  const dismiss=()=>{
   if(!suggestion)return;

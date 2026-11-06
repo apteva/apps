@@ -1340,8 +1340,16 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
-  const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
-  const showAgentNames = conversation.kind === "room" || speakerIds.size > 1;
+  const showAgentNames = useMemo(() => {
+    if (conversation.kind === "room") return true;
+    const speakerIds = new Set([
+      conversation.lead_agent_id,
+      ...messages.filter(message => message.role === "agent").map(message => message.agent_id),
+      ...bubbles.map(bubble => bubble.agentId),
+      ...activities.map(activity => activity.agent_id),
+    ].filter(Boolean));
+    return speakerIds.size > 1;
+  }, [conversation.kind, conversation.lead_agent_id, messages, bubbles, activities]);
   const [agentNames, setAgentNames] = useState<Record<number, string>>({});
   const [agentDirectory, setAgentDirectory] = useState<AgentInfo[]>([]);
   useEffect(() => {
@@ -1362,50 +1370,20 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   }, [conversationsClient, conversation.id, showAgentNames]);
   const directoryAgent = agentDirectory.find(agent => agent.id === conversation.lead_agent_id);
   const resolvedAgentOnline = agentOnline ?? (directoryAgent ? directoryAgent.status === "running" : undefined);
-  const agentName = (id?: number) => showAgentNames && id
-    ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
-    : undefined;
   const runningActivity = activities.find(item => item.status === "running");
-  const awaitingProgressMessage = (p: ResponseProgress) => Boolean(p.completion_message_id && !messages.some(m => m.id === p.completion_message_id));
+  const awaitingProgressMessage = useCallback((p: ResponseProgress) => Boolean(p.completion_message_id && !messages.some(m => m.id === p.completion_message_id)), [messages]);
   const responseProgress = progresses.find(p=>p.phase!=="idle" || awaitingProgressMessage(p));
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
-  const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
-    && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
-    ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
-    : []);
-  const queuedMessages = archived ? [] : messages.filter(message=>message.conversation_id===conversation.id&&message.role==="user"&&message.queue_state==="queued")
-    .sort((a,b)=>(a.queue_position||a.id)-(b.queue_position||b.id)||a.id-b.id);
-  const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
-  const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
-  const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
-  const progressShowsThinking = (p: LiveResponseProgress) => {
-    const belongsToResponse = (m: Message) => m.id > p.after_message_id
-      && (p.after_message_id > 0 || Date.parse(m.created_at) >= Date.parse(p.started_at));
-    if (messages.some(m => m.role === "agent" && !m.component_kind && m.phase === "final" && m.agent_id === p.agent_id && belongsToResponse(m))) return false;
-    if (awaitingProgressMessage(p)) return true;
-    const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval" && m.agent_id === p.agent_id && belongsToResponse(m));
-    return p.phase !== "idle" && !approvalDelivered
-      && !ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})
-      && !bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done);
-  };
-  const waitingToolGroups = new Set<string>();
-  for (const p of progresses) if (progressShowsThinking(p) && !awaitingProgressMessage(p)) {
-    const key = responseWaitingToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)},timeline,messages);
-    if (key) waitingToolGroups.add(key);
-  }
-  for (const b of bubbles) if (!b.text && pendingResponsePhase(b, activities, messages) !== null && !progresses.some(p=>p.agent_id===b.agentId)) {
-    const key = responseWaitingToolGroup(b,timeline,messages);
-    if (key) waitingToolGroups.add(key);
-  }
-  const waitsInToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => {
-    const key = responseWaitingToolGroup(response,timeline,messages);
-    return Boolean(key && waitingToolGroups.has(key));
-  };
+  const queuedMessages = useMemo(() => archived ? [] : messages.filter(message=>message.conversation_id===conversation.id&&message.role==="user"&&message.queue_state==="queued")
+    .sort((a,b)=>(a.queue_position||a.id)-(b.queue_position||b.id)||a.id-b.id), [archived, messages, conversation.id]);
 
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
-  const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
-    const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
-  });
+  const toggleToolGroup = useCallback((key: string) => setExpandedToolGroups(current => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  }), []);
   const storageKey = `conversations:draft:${conversationsClient.storageKey}:${conversation.id}`;
   const [draft, setDraft] = useState(() => { try {
     if (legacyDrafts) for (const suffix of ["", ":pending"]) {
@@ -1425,9 +1403,16 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const [sending, setSending] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
   const [deliveries,setDeliveries]=useState<MessageDelivery[]>([]);
-  const refreshDeliveries=useCallback(async()=>{try{setDeliveries(await conversationsClient.deliveries(conversation.id));}catch{}},[conversation.id,conversation.project_id]);
+  const refreshDeliveries=useCallback(async()=>{try{setDeliveries(await conversationsClient.deliveries(conversation.id));}catch{}},[conversationsClient, conversation.id]);
   useEffect(()=>{void refreshDeliveries();const timer=window.setInterval(refreshDeliveries,5000);return ()=>window.clearInterval(timer);},[refreshDeliveries]);
-  const retryDelivery=async(delivery:MessageDelivery)=>{try{await conversationsClient.retryDelivery(delivery.id);void refreshDeliveries();}catch(err){setSendError(String(err));}};
+  const retryDelivery = useCallback(async (delivery: MessageDelivery) => {
+    try {
+      await conversationsClient.retryDelivery(delivery.id);
+      void refreshDeliveries();
+    } catch (err) {
+      setSendError(String(err));
+    }
+  }, [conversationsClient, refreshDeliveries]);
 
   const [breakBusy, setBreakBusy] = useState(false);
   const [breakRequested, setBreakRequested] = useState(false);
@@ -1441,7 +1426,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const appliedComposerRequests = useRef<Set<string>>(new Set());
   const nextReply=useReplySuggestion(messages,conversation.id,storageKey);
   const hasPendingSend=Boolean(pendingSendRef.current||(()=>{try{return sessionStorage.getItem(storageKey+":pending")}catch{return null}})());
-  const waitingForInput=messages.some(m=>(m.components??[]).some(c=>Boolean(c.interaction?.blocking&&c.interaction.status==="pending")||(c.app==="conversations"&&c.name==="approval-card"&&(c.props.status??"pending")==="pending")));
+  const waitingForInput = useMemo(() => messages.some(m => (m.components ?? []).some(c => Boolean(c.interaction?.blocking && c.interaction.status === "pending") || (c.app === "conversations" && c.name === "approval-card" && (c.props.status ?? "pending") === "pending"))), [messages]);
   const replySuggestion=replySuggestions!==false&&!waitingForInput&&!hasPendingSend&&!archived&&!sending&&!voiceActive&&resolvedAgentOnline!==false&&connected&&!activeResponse&&!draft.length&&!attachments.items.length&&!messages.some(m=>m.queue_state==="queued")?nextReply.suggestion:null;
   const acceptReplySuggestion=()=>{
     if(!replySuggestion||draft.length||inputRef.current?.value||attachments.items.length||voiceActive||sending||archived)return;
@@ -1607,11 +1592,11 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     }
   };
 
-  const onAction = async (messageId: number, actionId: string, note: string) => {
+  const onAction = useCallback(async (messageId: number, actionId: string, note: string) => {
     const result = await conversationsClient.act(messageId, actionId, note);
     mergeMessages([result.message]);
     onActed();
-  };
+  }, [conversationsClient, mergeMessages, onActed]);
   const onQueueEdit = async (message: Message, content: string) => {
     const row=await conversationsClient.editQueued(conversation.id, message.id, content);
     if(mountedRef.current)mergeMessages([row]);
@@ -1624,6 +1609,100 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     const row=await conversationsClient.steerQueued(conversation.id, message.id);
     if(mountedRef.current)mergeMessages([row]);
   };
+
+  // Draft edits should leave the transcript and its message rows intact.
+  const { messageNodes, streamNode, hasTranscript } = useMemo(() => {
+    const agentName = (id?: number) => showAgentNames && id
+      ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
+      : undefined;
+    const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
+      && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
+      ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
+      : []);
+    const visibleMessages = voiceTranscriptMessages(messages.filter(message => message.queue_state !== "cancelled" && (archived || message.queue_state !== "queued")));
+    const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
+    const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
+    const progressShowsThinking = (p: LiveResponseProgress) => {
+      const belongsToResponse = (m: Message) => m.id > p.after_message_id
+        && (p.after_message_id > 0 || Date.parse(m.created_at) >= Date.parse(p.started_at));
+      if (messages.some(m => m.role === "agent" && !m.component_kind && m.phase === "final" && m.agent_id === p.agent_id && belongsToResponse(m))) return false;
+      if (awaitingProgressMessage(p)) return true;
+      const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval" && m.agent_id === p.agent_id && belongsToResponse(m));
+      return p.phase !== "idle" && !approvalDelivered
+        && !ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})
+        && !bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done);
+    };
+    const waitingToolGroups = new Set<string>();
+    for (const p of progresses) if (progressShowsThinking(p) && !awaitingProgressMessage(p)) {
+      const key = responseWaitingToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)},timeline,messages);
+      if (key) waitingToolGroups.add(key);
+    }
+    for (const b of bubbles) if (!b.text && pendingResponsePhase(b, activities, messages) !== null && !progresses.some(p=>p.agent_id===b.agentId)) {
+      const key = responseWaitingToolGroup(b,timeline,messages);
+      if (key) waitingToolGroups.add(key);
+    }
+    const waitsInToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => {
+      const key = responseWaitingToolGroup(response,timeline,messages);
+      return Boolean(key && waitingToolGroups.has(key));
+    };
+
+    const messageNodes = <>
+      {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
+      {timeline.map(item => {
+        if (item.kind === "toolGroup" || item.kind === "tool") {
+          return <ChatToolActivity
+            key={item.key}
+            tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
+            parallel={item.kind === "toolGroup" && item.parallel}
+            expanded={expandedToolGroups.has(item.key)}
+            onToggle={() => toggleToolGroup(item.key)}
+            waitingForModel={waitingToolGroups.has(item.key)}
+            registry={toolVisualRegistry}
+            detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
+            showCompletion={showToolCompletion}
+            showDuration={showToolDuration}
+          />;
+        }
+        if (item.kind === "stream") {
+          const name = agentName(item.stream.agentId);
+          return <div key={item.key}>
+            {name && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{name}</p>}
+            <StreamingBubble text={item.stream.text} />
+          </div>;
+        }
+        const message = item.message;
+        return <div key={item.key}>
+          <fieldset disabled={archived} className="min-w-0">
+            <MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction} />
+          </fieldset>
+          {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => (
+            <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
+              <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
+              <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
+            </div>
+          ))}
+        </div>;
+      })}
+    </>;
+    const streamNode = bubbles.length || progresses.some(p => p.phase !== "idle" || awaitingProgressMessage(p)) ? <>
+      {bubbles.map(b => {
+        const phase = pendingResponsePhase(b, activities, messages);
+        if (b.text || phase === null || ownsToolGroup(b) || waitsInToolGroup(b) || progresses.some(p => p.agent_id === b.agentId)) return null;
+        return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic} />;
+      })}
+      {progresses.map(p => {
+        if (!progressShowsThinking(p)) return null;
+        if (!awaitingProgressMessage(p) && waitsInToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})) return null;
+        return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} />;
+      })}
+    </> : null;
+    return { messageNodes, streamNode, hasTranscript: timeline.length > 0 };
+  }, [
+    activities, agentNames, archived, awaitingProgressMessage, bubbles, conversation.id,
+    conversation.lead_agent_id, conversation.lead_agent_name, deliveries, expandedToolGroups,
+    hasOlder, loadOlder, messages, onAction, progresses, retryDelivery, showAgentNames,
+    showToolCompletion, showToolDuration, t, toggleToolGroup, toolVisualRegistry,
+  ]);
 
   return (
     <ConversationChatView
@@ -1639,30 +1718,9 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       connected={connected}
       archived={archived}
       agentOnline={resolvedAgentOnline}
-      messageNodes={<>
-        {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
-        {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
-          key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
-          parallel={item.kind === "toolGroup" && item.parallel}
-          expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
-          waitingForModel={waitingToolGroups.has(item.key)}
-          registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
-          showCompletion={showToolCompletion} showDuration={showToolDuration}
-        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={item.key}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
- {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
-   <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
-   <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
- </div>)}
- </div>;})())}
-      </>}
-      hasMessages={timeline.length > 0 || queuedMessages.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || waitsInToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
-        {progresses.map(p => {
-          if (!progressShowsThinking(p)) return null;
-          if (!awaitingProgressMessage(p) && waitsInToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})) return null;
-          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
-        })}
-      </> : null}
+      messageNodes={messageNodes}
+      hasMessages={hasTranscript || queuedMessages.length > 0}
+      streamNode={streamNode}
       emptyMessage={emptyMessage}
       welcomeText={welcomeText}
       suggestions={suggestions}

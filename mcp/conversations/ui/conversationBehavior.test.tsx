@@ -75,6 +75,37 @@ test("unread conversations use the shared dot indicator without a numeric badge"
   expect(element.querySelector('[aria-label="Unread messages"]')).toBeNull();
 });
 
+test("typing leaves loaded message rows untouched while live messages still render", async () => {
+  let contentReads = 0;
+  conversations.history = async () => ({
+    messages: [{
+      ...message(1),
+      role: "user",
+      get content() {
+        contentReads++;
+        return "Previously loaded message";
+      },
+    }],
+    cursor: 1,
+    before: 0,
+    has_more: false,
+  });
+
+  await render();
+  expect(element.querySelector(".chat-transcript")?.textContent).toContain("Previously loaded message");
+  expect(contentReads).toBeGreaterThan(0);
+  contentReads = 0;
+
+  await type("a");
+  await type("a draft");
+  expect(element.querySelector("textarea")?.value).toBe("a draft");
+  expect(contentReads).toBe(0);
+
+  await act(async () => FakeEvents.instances[0].emit(message(2, "a", "New live message")));
+  expect(element.querySelector(".chat-transcript")?.textContent).toContain("New live message");
+  expect(element.querySelector("textarea")?.value).toBe("a draft");
+});
+
 test("composer autosize remeasures after a narrow wrapped draft is cleared", () => {
   const input = win.document.createElement("textarea");
   input.value = "A draft that wraps in a narrow pane";

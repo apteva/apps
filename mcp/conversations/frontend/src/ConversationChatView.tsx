@@ -87,19 +87,28 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
   if (!["auto", "compact", "expanded", "single-line"].includes(layout)) {
     throw new Error(`Unsupported Conversations composer layout: ${layout}`);
   }
-  // Reflow long/restored drafts when the container or selected layout changes.
+  const { archived, draft, inputRef } = props;
   useLayoutEffect(() => {
-    const input = props.inputRef.current;
+    const input = inputRef.current;
     if (!input) return;
-    if (layout === "single-line") { input.style.height = ""; return; }
-    const resize = () => resizeComposerInput(input);
-    resize();
-    if (typeof ResizeObserver === "undefined") return;
+    if (layout === "single-line") input.style.height = "";
+    else resizeComposerInput(input);
+  }, [draft, inputRef, layout, archived]);
+
+  // Keep the width observer attached as the draft changes.
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!input || layout === "single-line" || typeof ResizeObserver === "undefined") return;
     let width = input.getBoundingClientRect().width;
-    const observer = new ResizeObserver(() => { const next = input.getBoundingClientRect().width; if (next !== width) { width = next; resize(); } });
+    const observer = new ResizeObserver(() => {
+      const nextWidth = input.getBoundingClientRect().width;
+      if (nextWidth === width) return;
+      width = nextWidth;
+      resizeComposerInput(input);
+    });
     observer.observe(input);
     return () => observer.disconnect();
-  }, [props.draft, layout, props.archived]);
+  }, [inputRef, layout, archived]);
   const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
   const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.25.2 — 2026-11-06
+
+- Keep typing responsive in long conversations by reusing rendered message rows during draft edits. Live messages and tool updates still render as they arrive.
+- Pin App SDK v0.115.0.
+
 ## 0.25.1 — 2026-10-31
 
 - Release queued follow-ups strictly one turn at a time. A released message only became an active response once its delivery started, and concurrent delivery workers or activity changes in that gap could release the next queued message too, so the agent received both in one turn. An agent now stays busy until a message already sent to it is delivered, release decisions are serialized, and each agent delivery retries the queue so a turn that finishes before its delivery is confirmed doesn't leave the next message waiting.
