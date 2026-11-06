@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.1
+version: 0.24.2
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -110,6 +110,7 @@ provides:
     - { name: analytics_collector, schedule: "@every 1h" }
     - { name: provider_reconciler, schedule: "@every 15m" }
     - { name: event_publisher, schedule: "@every 1m" }
+    - { name: youtube_thumbnails, schedule: "@every 1m" }
   mcp_tools:
     - { name: account_list_connections, description: "Choose an active direct connection or connect another account." }
     - { name: destination_list, description: "List publishing destinations under an account." }
@@ -230,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.1
+    ref: social/v0.24.2
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -684,7 +685,7 @@ var platforms = map[string]platformDef{
 			{Name: "contains_synthetic_media", Type: "boolean", Label: "AI-generated or altered content",
 				Help: "Discloses that the video contains realistic altered or synthetic content (status.containsSyntheticMedia). Kept on later edits."},
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Thumbnail",
-				Help: "Optional image from Storage. YouTube applies it after the video upload returns a video id."},
+				Help: "Optional image from Storage. Social applies and verifies it after YouTube finishes processing."},
 		},
 		// Comments only: YouTube has no DM API. Delete covers the
 		// channel's own comments; viewers' comments are hidden instead.
@@ -783,6 +784,11 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "event_publisher",
 			Schedule: "@every 1m",
 			Run:      a.runEventPublisher,
+		},
+		{
+			Name:     "youtube_thumbnails",
+			Schedule: "@every 1m",
+			Run:      a.runYouTubeThumbnails,
 		},
 	}
 }
@@ -1159,7 +1165,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_edit",
 			Description: "Edit an already-published post's body and/or per-target metadata. Updates the local post + fans out to each platform's edit verb where supported. " +
-				"Editable platforms today: Facebook (message), X/Twitter (body/text via edit_options.previous_post_id when the authenticated account/API plan permits it), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits or the catalog doesn't expose the verb yet. " +
+				"Editable platforms today: Facebook (message), X/Twitter (body/text via edit_options.previous_post_id when the authenticated account/API plan permits it), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. Social queues the thumbnail until the existing video has finished processing. TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits or the catalog doesn't expose the verb yet. " +
 				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, thumbnail_storage_id, etc.). At least one of body/targets must be set.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
@@ -2967,6 +2973,14 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		}
 		identity, err := a.runStrategy(ctx, def, j)
 		platformPostID, platformURL := identity.id, identity.url
+		var thumbnailState, thumbnailVideoID, thumbnailProject string
+		var thumbnailID int64
+		if j.platform == "youtube" && platformPostID != "" {
+			thumbnailState, thumbnailID, thumbnailProject = youtubeThumbnailRequest(ctx, j.options, j.mediaProjectID)
+			if thumbnailID > 0 {
+				thumbnailVideoID = platformPostID
+			}
+		}
 		if j.platform == "tiktok" {
 			var current int
 			if checkErr := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE id=? AND attempts=? AND status='publishing'`, j.targetID, j.deliveryAttempt).Scan(&current); checkErr != nil || current != 1 {
@@ -2976,7 +2990,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		if err != nil {
 			var awaiting *awaitingAudienceError
 			if errors.As(err, &awaiting) && platformPostID != "" {
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0 WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), j.targetID, j.deliveryAttempt)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0, `+queueYouTubeThumbnailSQL+` WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, j.targetID, j.deliveryAttempt)
 				ctx.Emit("target.awaiting_audience_setup", map[string]any{"target_id": j.targetID, "platform": j.platform, "platform_post_id": platformPostID})
 				continue
 			}
@@ -3021,9 +3035,9 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			`UPDATE post_targets
 			    SET status='published', platform_post_id=?, platform_url=?, facebook_page_post_id=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
-			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueEventSQL+`
+			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueYouTubeThumbnailSQL+`, `+queueEventSQL+`
 			  WHERE id=? AND attempts=? AND status='publishing'`,
-			nullable(platformPostID), nullable(platformURL), nullable(identity.facebookPagePostID), topic, event, j.targetID, j.deliveryAttempt,
+			nullable(platformPostID), nullable(platformURL), nullable(identity.facebookPagePostID), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, topic, event, j.targetID, j.deliveryAttempt,
 		)
 		publishRowEvent(ctx, durablePostTargets, j.targetID)
 		successes++
@@ -4092,8 +4106,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if !first.IsVideo() {
 		return "", "", errors.New("youtube only accepts video files")
 	}
-	thumbnail, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
-	if err != nil {
+	if _, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID); err != nil {
 		return "", "", err
 	}
 
@@ -4182,24 +4195,10 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if err != nil {
 		return "", "", err
 	}
-	resource := struct{ ID string }{ID: videoID}
-	// Canonical watch URL derived from the video ID YouTube returned for this
-	// channel's upload. It does not prove public or Members access.
-	url := youtubeWatchURL(videoID)
-	if thumbnail != nil {
-		if err := a.setBinaryThumbnail(ctx, def, j.connID, resource.ID, *thumbnail); err != nil {
-			// The video is already uploaded at this point. Do not return
-			// an error that would make post_retry upload a duplicate video;
-			// surface this in logs so the user can edit the post and retry
-			// only the thumbnail later.
-			ctx.Logger().Warn("publishYoutube: thumbnail set failed",
-				"video_id", resource.ID, "thumbnail_id", thumbnail.ID, "err", redactDeliverySecrets(err.Error()))
-			return resource.ID, url, &publishedWarningError{warning: "video published, but custom thumbnail failed: " + redactDeliverySecrets(err.Error())}
-		}
-	}
-	ctx.Logger().Info("publishYoutube: upload complete",
-		"video_id", resource.ID)
-	return resource.ID, url, nil
+	// The target completion write binds the thumbnail request to this ID.
+	// Processing and thumbnail delivery happen independently of video upload.
+	ctx.Logger().Info("publishYoutube: upload complete", "video_id", videoID)
+	return videoID, youtubeWatchURL(videoID), nil
 }
 
 // waitContainerReady polls get_container_status on an Instagram media
@@ -4951,7 +4950,9 @@ func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := mediaHTTPClient.Do(req)
+	client := *mediaHTTPClient
+	client.Timeout = 20 * time.Second
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -4977,18 +4978,18 @@ func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	}, nil
 }
 
-func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64, platformPostID string, thumb mediaItem) error {
+func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64, platformPostID string, thumb mediaItem) (map[string]string, error) {
 	if def.ThumbnailTool == "" {
-		return errors.New("platform has no thumbnail tool")
+		return nil, errors.New("platform has no thumbnail tool")
 	}
 	if platformPostID == "" {
-		return errors.New("platform post id required to set thumbnail")
+		return nil, errors.New("platform post id required to set thumbnail")
 	}
 	if err := validateYouTubeThumbnailMime(thumb.Mime); err != nil {
-		return err
+		return nil, err
 	}
 	if thumb.Bytes > youtubeThumbnailSourceMaxBytes {
-		return fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
+		return nil, fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
 	}
 	binaryField := def.ThumbnailBinaryField
 	if binaryField == "" {
@@ -5000,20 +5001,27 @@ func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64,
 	}
 	envelope, err := fetchYouTubeThumbnailEnvelope(thumb.URL, thumb.Mime)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	input := map[string]any{
 		idField:     platformPostID,
 		binaryField: envelope,
 	}
+	input["_apteva"] = map[string]any{"timeout_ms": 20000}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ThumbnailTool, input)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if res == nil || !res.Success {
-		return upstreamError(res)
+		return nil, &historyReadError{status: executeStatus(res), err: upstreamError(res)}
 	}
-	return nil
+	var receipt struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(res.Data, &receipt); err != nil || len(receipt.Items) == 0 {
+		return nil, nil // An accepted upload with no usable rendition evidence.
+	}
+	return youtubeThumbnailURLs(receipt.Items[0]), nil
 }
 
 // extractContainerID pulls the IG containerId from create_media_container.
@@ -5408,7 +5416,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		if boolArg(args, "compact", false) {
 			for i, target := range targets {
 				keep := map[string]any{}
-				for _, key := range []string{"id", "social_account_id", "platform", "status", "platform_post_id", "platform_url", "published_at", "publication_facts", "native_metadata", "last_known_native_metadata", "native_observed_at"} {
+				for _, key := range []string{"id", "social_account_id", "platform", "status", "platform_post_id", "platform_url", "published_at", "publication_facts", "thumbnail_status", "thumbnail_error", "native_metadata", "last_known_native_metadata", "native_observed_at"} {
 					if value, ok := target[key]; ok {
 						keep[key] = value
 					}
@@ -5588,7 +5596,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision, t.youtube_thumbnail_state, t.youtube_thumbnail_error
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5605,13 +5613,13 @@ func loadTargetsFrom(db interface {
 			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw          string
 			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt              string
 			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider, deliveryRaw string
-			videoRaw, operationID                                                           string
+			videoRaw, operationID, thumbnailStatus, thumbnailError                          string
 			attempts                                                                        int
 			retryable                                                                       int64
 			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision, &thumbnailStatus, &thumbnailError); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5663,6 +5671,10 @@ func loadTargetsFrom(db interface {
 			"audience_confirmation_actor": audienceActor,
 			"audience_setup_url":          audienceSetupURL(platform, targetProvider, ppid),
 		})
+		if thumbnailStatus != "" {
+			out[len(out)-1]["thumbnail_status"] = thumbnailStatus
+			out[len(out)-1]["thumbnail_error"] = redactDeliverySecrets(thumbnailError)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -9021,6 +9033,7 @@ type targetEditOutcome struct {
 	Status          string `json:"status"` // ok | unsupported | skipped | failed
 	Reason          string `json:"reason,omitempty"`
 	Error           string `json:"error,omitempty"`
+	ThumbnailStatus string `json:"thumbnail_status,omitempty"`
 }
 
 func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -9405,11 +9418,15 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 			}
 		}
 	}
-	def := platforms["youtube"]
-	thumbnail, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID)
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
+	_, thumbnailRequested := requested["thumbnail_storage_id"]
+	_, projectRequested := requested["thumbnail_project_id"]
+	thumbnailRequested = thumbnailRequested || projectRequested
+	state, fileID, sourceProject := youtubeThumbnailRequest(ctx, eff, mediaProjectID)
+	if thumbnailRequested && fileID != 0 {
+		if _, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID); err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
 	}
 	metadataRequested := false
 	for _, key := range youtubeMetadataOptions {
@@ -9418,7 +9435,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 			break
 		}
 	}
-	if !metadataRequested && thumbnail == nil {
+	if !metadataRequested && !thumbnailRequested {
 		out.Status = "skipped"
 		out.Reason = "youtube edit needs metadata or thumbnail_storage_id"
 		return out
@@ -9442,11 +9459,19 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		// what YouTube now holds. Best effort: the edit already succeeded.
 		_, _ = a.toolPostNativeInspect(ctx, map[string]any{"social_account_id": out.SocialAccountID, "native_post_id": out.PlatformPostID})
 	}
-	if thumbnail != nil {
-		if err := a.setBinaryThumbnail(ctx, def, connID, out.PlatformPostID, *thumbnail); err != nil {
+	if thumbnailRequested {
+		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueYouTubeThumbnailSQL+`
+			WHERE id=? AND social_account_id=? AND platform_post_id=? AND status IN ('published','awaiting_audience_setup')`,
+			state, out.PlatformPostID, fileID, sourceProject, out.TargetID, out.SocialAccountID, out.PlatformPostID)
+		if err != nil {
 			out.Status, out.Error = "failed", err.Error()
 			return out
 		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			out.Status, out.Error = "failed", "YouTube delivery target changed before the thumbnail was queued"
+			return out
+		}
+		out.ThumbnailStatus = state
 	}
 	out.Status = "ok"
 	return out
