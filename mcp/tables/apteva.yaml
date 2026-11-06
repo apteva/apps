@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.20
+version: 0.2.21
 description: |
+  v0.2.21 Accepts bounded compressed batches, scoped snapshot replacement with
+  stable row IDs, and optional post-commit event coalescing.
   v0.2.20 Indexes published heads by generation, automatically upgrading existing
   projection storage to avoid correlated head scans during bounded cleanup.
   v0.2.18 Adds opt-in projection-wide durable windows, multi-scope SQL,
@@ -135,13 +137,13 @@ provides:
     - name: rows_insert
       description: 'Insert one or many rows. Args: table, rows (array of objects keyed by column name). Atomic — first failing row aborts the whole call. Returns {ids, inserted}.'
     - name: rows_upsert
-      description: 'Insert or update rows by a caller-supplied key. Args: table, key (array of column names), rows. Existing rows matching the key are patched; missing rows are inserted. Returns {ids, inserted, updated}.'
+      description: 'Insert or update rows by a caller-supplied key. Args: table, key (array of column names), rows, bulk?. Existing rows matching the key keep their IDs. With bulk=true, complete rows with distinct keys skip unchanged values. Returns {ids, inserted, updated} and unchanged in bulk mode.'
     - name: rows_get
       description: 'Fetch one row by id. Args: table, id, hydrate_files? (resolve file_id columns to signed URLs via the storage app). Returns {row, found}.'
     - name: rows_update
       description: 'Patch fields on a row. Args: table, id, fields (object). Touches updated_at and increments _revision. Optional expected_revision rejects stale edits. Returns the new row.'
     - name: rows_delete
-      description: 'Delete by id, or by filter when where is supplied + confirm=true. Returns {deleted}.'
+      description: 'Delete by id, or by filter when where is supplied + confirm=true. Filter deletes can preserve matching values with keep: {column, values}. Returns {deleted}.'
     - name: rows_search
       description: 'Filter, sort, paginate. Args: table, where? (legacy) or filter_ast? (recursive, correlated, parameterized), order_by?, limit?, offset?, cursor?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more.'
     - name: rows_count
@@ -151,7 +153,7 @@ provides:
     - name: tables_query
       description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced.'
     - name: tables_batch
-      description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports object keys and zero-based array positions in dependency references, e.g. {$ref: facts.rows.0.payload}; returns per-operation status and errors.'
+      description: 'Execute a bounded list of validated Tables operations. Pass operations or operations_gzip_base64. Modes: read_snapshot, write_transaction, best_effort. Set coalesce_events=true to combine adjacent aggregate insert and update notifications after a write transaction commits. References support object keys and zero-based array positions. Returns per-operation status and errors.'
     - name: tables_capabilities
       description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
     - name: projections_worker_status
@@ -272,7 +274,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.20
+    ref: tables/v0.2.21
     entry: mcp/tables
   port: 8080
   health_check: /health

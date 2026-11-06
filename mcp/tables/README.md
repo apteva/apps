@@ -1,4 +1,4 @@
-# Tables (v0.2.20)
+# Tables (v0.2.21)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -37,6 +37,17 @@ and keeps operational refresh work separate from ordinary row editing.
   `{"$ref":"operation.path"}` and receive independent status/error entries.
   Paths support object keys and zero-based array positions, including
   `{"$ref":"facts.rows.0.payload"}`.
+  Supply either `operations` or `operations_gzip_base64`, a base64-encoded gzip
+  JSON array. Compressed input is capped at 8 MiB before expansion and 32 MiB
+  after expansion. Both forms use the same operation and transaction limits.
+  In `write_transaction` mode, `coalesce_events: true` combines adjacent
+  aggregate insert or update notifications for the same table after commit.
+- **Scoped snapshot replacement** — Use `rows_delete` with `where`,
+  `confirm: true`, and `keep: {column, values}` to delete stale rows inside a
+  filter. An empty keep list deletes every row in that scope. Use
+  `rows_upsert` with `bulk: true` for complete rows with distinct keys.
+  Existing IDs are preserved and unchanged rows are skipped. A write
+  transaction can commit both operations with a snapshot watermark.
 - **Strict typed columns** — `text`, `number`, `bool`, `datetime`,
   `json`, `file_id` (FK into the `storage` app)
 - **Read-only SQL escape hatch** — `tables_query` runs on a SQLite

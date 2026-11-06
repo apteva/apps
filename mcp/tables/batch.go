@@ -74,9 +74,9 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	if mode != "read_snapshot" && mode != "write_transaction" && mode != "best_effort" {
 		return nil, errf("mode must be read_snapshot, write_transaction, or best_effort")
 	}
-	rawOps, ok := args["operations"].([]any)
-	if !ok || len(rawOps) == 0 {
-		return nil, errf("operations is required and must be non-empty")
+	rawOps, err := decodeBatchOperations(args)
+	if err != nil {
+		return nil, err
 	}
 	if len(rawOps) > maxBatchOperations(ctx) {
 		return nil, errf("operations exceeds maximum of %d", maxBatchOperations(ctx))
@@ -252,7 +252,13 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (resultValue
 			return nil, err
 		} else if eventBuffer != nil {
 			a.wakeProjectionWorker()
-			for _, event := range eventBuffer.snapshot() {
+			var events []batchEvent
+			if boolArg(args, "coalesce_events") {
+				events = eventBuffer.compactSnapshot()
+			} else {
+				events = eventBuffer.snapshot()
+			}
+			for _, event := range events {
 				ctx.Emit(event.topic, event.data)
 			}
 		}

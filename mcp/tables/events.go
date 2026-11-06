@@ -57,3 +57,43 @@ func (b *batchEventBuffer) snapshot() []batchEvent {
 	copy(out, b.events)
 	return out
 }
+
+func (b *batchEventBuffer) compactSnapshot() []batchEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Only adjacent aggregate invalidations may be combined. Detailed updates
+	// carrying row/field data and single-row events retain their original shape.
+	out := make([]batchEvent, 0, len(b.events))
+	for _, event := range b.events {
+		ids, aggregate := aggregateIDs(event)
+		if aggregate && len(out) > 0 {
+			last := &out[len(out)-1]
+			previous, compatible := aggregateIDs(*last)
+			if compatible && last.topic == event.topic && last.data["table"] == event.data["table"] && len(previous)+len(ids) <= 4096 {
+				merged := append(append([]int64{}, previous...), ids...)
+				last.data = map[string]any{"table": event.data["table"], "ids": merged, "count": len(merged)}
+				continue
+			}
+		}
+		out = append(out, event)
+	}
+	return out
+}
+
+func aggregateIDs(event batchEvent) ([]int64, bool) {
+	if event.topic != topicRowInserted && event.topic != topicRowUpdated {
+		return nil, false
+	}
+	if len(event.data) != 3 {
+		return nil, false
+	}
+	if _, ok := event.data["table"].(string); !ok {
+		return nil, false
+	}
+	ids, ok := event.data["ids"].([]int64)
+	if !ok {
+		return nil, false
+	}
+	count, ok := event.data["count"].(int)
+	return ids, ok && count == len(ids)
+}

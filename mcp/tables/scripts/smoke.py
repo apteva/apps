@@ -3,6 +3,8 @@
 Usage: python3 scripts/smoke.py /absolute/path/to/tables-binary
 Uses temporary data and synthetic credentials; never calls a live gateway.
 """
+import base64
+import gzip
 import json
 import os
 from pathlib import Path
@@ -69,6 +71,43 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert out["selected"]["result"]["row"]["id"] == out["facts"]["result"]["rows"][0]["id"], out
         assert out["matching"]["result"]["rows"], out
         assert out["invalid"]["status"] == "error", out
+    def check_compressed_snapshot():
+        mcp("tables_create", {"name": "snapshot", "columns": [
+            {"name": "key", "type": "text"}, {"name": "scope", "type": "text"},
+            {"name": "value", "type": "text"}]})
+        retained = {"key": "current", "scope": "ads", "value": "unchanged"}
+        watermark = {"key": "last_success", "scope": "sync", "value": "old"}
+        ids = mcp("rows_insert", {"table": "snapshot", "rows": [
+            retained, watermark, {"key": "stale", "scope": "ads", "value": "old"},
+            {"key": "history", "scope": "archive", "value": "old"}]})["ids"]
+        operations = [
+            {"id": "prune", "operation": "rows_delete", "args": {
+                "table": "snapshot", "where": [{"col": "scope", "op": "eq", "value": "ads"}],
+                "confirm": True, "keep": {"column": "key", "values": ["current", "new"]}}},
+            {"id": "write", "operation": "rows_upsert", "args": {
+                "table": "snapshot", "key": ["key"], "bulk": True,
+                "rows": [retained, {"key": "new", "scope": "ads", "value": "new"}]}},
+            {"id": "watermark", "operation": "rows_upsert", "args": {
+                "table": "snapshot", "key": ["key"], "rows": [dict(watermark, value="new")]}}]
+        def submit(ops):
+            packed = base64.b64encode(gzip.compress(json.dumps(ops).encode())).decode()
+            return mcp("tables_batch", {"mode": "write_transaction", "coalesce_events": True,
+                                        "operations_gzip_base64": packed})["results"]
+        def rows_by_key():
+            return {row["key"]: row for row in mcp("rows_search", {"table": "snapshot"})["rows"]}
+        original = rows_by_key()
+        failed = submit(operations + [{"id": "fail", "operation": "rows_upsert", "args": {
+            "table": "snapshot", "key": ["key"], "rows": [{"key": "bad", "unknown": True}]}}])
+        assert all(failed[op["id"]]["status"] == "rolled_back" for op in operations), failed
+        assert rows_by_key() == original
+        committed = submit(operations)
+        assert all(committed[op["id"]]["status"] == "ok" for op in operations), committed
+        assert committed["write"]["result"]["unchanged"] == 1, committed
+        assert committed["write"]["result"]["ids"][0] == ids[0], committed
+        after = rows_by_key()
+        assert set(after) == {"current", "new", "history", "last_success"}, after
+        assert after["current"] == original["current"] and after["history"] == original["history"], after
+        assert after["last_success"]["id"] == ids[1] and after["last_success"]["value"] == "new", after
     try:
         start()
         for path in ("/tables", "/tables?sig=untrusted", "/diagnostics", "/diagnostics/1"):
@@ -111,6 +150,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert upgraded["revision"] == "patched"
         assert upgraded["payload"]["id"] == 9007199254740993
         check_batch_array_references()
+        check_compressed_snapshot()
         # Exercise watched dependencies through the public MCP API and actual
         # background worker, then restart the sidecar with captured dirty work.
         mcp("tables_create", {"name":"measurements", "columns":[
@@ -277,7 +317,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         start()
         await_projection(8)
         await_batch(8)
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases, additive batch migration, durable collection windows and grouped forced publication, idempotent published-head index restoration for retained/retired results")
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, compressed snapshot commit/rollback, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases, additive batch migration, durable collection windows and grouped forced publication, idempotent published-head index restoration for retained/retired results")
     finally:
         stop()
         log.close()

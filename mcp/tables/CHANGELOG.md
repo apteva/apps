@@ -1,3 +1,10 @@
+# Tables v0.2.21 — scoped snapshot writes
+
+- Accept base64 gzip operation arrays up to 32 MiB after expansion. Compressed and plain batches share validation and transaction handling.
+- Preserve selected rows during a confirmed filter delete and support bulk upsert of complete rows with stable IDs. Unchanged rows retain their revision. Reject `keep` on ID deletes and reject duplicate numeric keys that differ only by the sign of zero.
+- Coalesce adjacent aggregate insert and update events after a write transaction commits. Preserve their IDs and deliver detailed events separately.
+- Pin SDK v0.115.0.
+
 # Tables v0.2.20 — indexed generation cleanup
 
 - Create nonunique `phg_<id>` indexes on published-head `generation` for new projections, keeping the scope primary key and visibility join unchanged.

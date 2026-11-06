@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -228,6 +229,10 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			keyVals = append(keyVals, coerced)
 		}
 		prepared[i] = preparedRow{obj: obj, keyVals: keyVals}
+	}
+
+	if boolArg(args, "bulk") {
+		return a.bulkUpsert(ctx, t, tableName, keyCols, rawRows)
 	}
 
 	tx, err := beginWrite(ctx)
@@ -629,6 +634,10 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	id := int64Arg(args, "id")
 	wherePreds := sliceArg(args, "where")
+	keepArg, hasKeep := args["keep"]
+	if hasKeep && len(wherePreds) == 0 {
+		return nil, errf("keep requires a scoped where filter")
+	}
 	if id == 0 && len(wherePreds) == 0 {
 		return nil, errf("either id or where is required")
 	}
@@ -667,6 +676,49 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	if hasKeep {
+		keep, ok := keepArg.(map[string]any)
+		if !ok {
+			return nil, errf("keep must be an object")
+		}
+		key := strArg(keep, "column")
+		var column *Column
+		for i := range t.Columns {
+			if t.Columns[i].Name == key {
+				column = &t.Columns[i]
+				break
+			}
+		}
+		if column == nil {
+			return nil, errf("keep column does not exist")
+		}
+		values, ok := keep["values"].([]any)
+		if !ok || len(values) > 29000 {
+			return nil, errf("keep.values must be an array of at most 29000 values")
+		}
+		if err := checkBatchBytes(ctx, values); err != nil {
+			return nil, err
+		}
+		normalized := make([]any, len(values))
+		for i, value := range values {
+			if value == nil {
+				return nil, errf("keep values must be non-null")
+			}
+			normalized[i], err = coerceForTableStorage(t, *column, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(normalized) > 0 {
+			encoded, err := json.Marshal(normalized)
+			if err != nil {
+				return nil, err
+			}
+			clause += " AND (" + quote(key) + " IS NULL OR " + quote(key) + " NOT IN (SELECT value FROM json_each(?)))"
+			vals = append(vals, string(encoded))
+		}
+	}
+
 	stmt := "DELETE FROM " + quote(t.PhysicalName)
 	if clause != "" {
 		stmt += " " + clause

@@ -296,6 +296,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"table": map[string]any{"type": "string"},
 				"key":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"rows":  map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"bulk":  map[string]any{"type": "boolean", "description": "Opt-in bulk SQL for complete rows with distinct keys; skips unchanged rows."},
 			}, []string{"table", "key", "rows"}),
 			Handler: a.toolRowsUpsert,
 		},
@@ -333,6 +334,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"expected_revision": positiveIDSchema(),
 				"expected_table_id": positiveIDSchema(),
 				"confirm":           map[string]any{"type": "boolean"},
+				"keep":              map[string]any{"type": "object", "properties": map[string]any{"column": map[string]any{"type": "string"}, "values": map[string]any{"type": "array"}}, "required": []string{"column", "values"}},
 			}, []string{"table"}),
 			Handler: a.toolRowsDelete,
 		},
@@ -389,7 +391,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "tables_batch",
 			Description: "Execute a bounded list of validated Tables operations. Args: mode (read_snapshot, write_transaction, or best_effort), operations ([{id, operation, args}]). Dependency references traverse objects and zero-based array positions, e.g. {\"$ref\":\"facts.rows.0.payload\"}. Returns per-operation status, result, and error.",
 			InputSchema: schemaObject(map[string]any{
-				"mode": map[string]any{"type": "string", "enum": []string{"read_snapshot", "write_transaction", "best_effort"}},
+				"operations_gzip_base64": map[string]any{"type": "string", "description": "Optional base64 gzip JSON operation array; mutually exclusive with operations. Decoded size is limited to 32 MiB; all ordinary validation and transaction limits still apply."},
+				"coalesce_events":        map[string]any{"type": "boolean", "description": "In write_transaction mode, combine adjacent aggregate row insert and update notifications after commit, preserving all IDs. Detailed events remain separate."},
+				"mode":                   map[string]any{"type": "string", "enum": []string{"read_snapshot", "write_transaction", "best_effort"}},
 				"operations": map[string]any{"type": "array", "maxItems": 256, "items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -399,7 +403,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					},
 					"required": []string{"id", "operation", "args"},
 				}},
-			}, []string{"operations"}),
+			}, nil),
 			Handler: a.toolTablesBatch,
 		},
 		{
