@@ -202,7 +202,7 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 		case r.Platform == "facebook" && facebookFetchRejected(r.LastError):
 			decision = "retry"
 			e["reason"] = "Facebook explicitly rejected fetching the video (389/1363057)"
-		case r.Platform == "facebook" && d.OperationState == "confirmed_failure" && facebookThumbnailRejected(r.LastError):
+		case r.Platform == "facebook" && r.Failure == "upstream_rejected" && facebookThumbnailRejected(r.LastError):
 			decision = "retry"
 			e["reason"] = "Facebook rejected the thumbnail before accepting the video"
 		}
