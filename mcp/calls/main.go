@@ -56,6 +56,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/room/", Handler: a.handleRoomPage, NoAuth: true},
 		{Pattern: "/api/join", Handler: a.handleAPIJoin, NoAuth: true},
 		{Pattern: "/api/rooms/", Handler: a.handleAPIRooms, NoAuth: true},
+		{Pattern: "/ui/frontend.json", Handler: handleFrontendAsset, NoAuth: true},
+		{Pattern: "/ui/frontend/", Handler: handleFrontendAsset, NoAuth: true},
 		{Pattern: "/admin/rooms", Handler: a.handleAdminRooms},
 		{Pattern: "/admin/rooms/", Handler: a.handleAdminRoomItem},
 	}

@@ -1,0 +1,9 @@
+{
+  "schema": "apteva-app-frontend/v1",
+  "app": "calls",
+  "version": "0.3.0",
+  "client": {
+    "path": "/ui/frontend/client-6f3936b62de73246.mjs",
+    "sha256": "6f3936b62de732469bb458a9e4697da58cae0c496462d7ba6f1bb44b6c0fdc3f"
+  }
+}

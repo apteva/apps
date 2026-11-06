@@ -1,3 +1,4 @@
+import { RoomSession } from "./RoomSession";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const API = "/api/apps/calls";
@@ -391,6 +392,13 @@ export default function CallsPanel({ projectId }: NativePanelProps) {
                   {busy === "end" ? "Ending…" : "End"}
                 </button>
               </section>
+
+              {selected.status === "open" && <RoomSession
+                key={projectId + ":" + selected.id}
+                projectId={projectId}
+                roomId={selected.id}
+                onEnd={() => { void loadRooms(); void loadRoomDetail(); }}
+              />}
 
               <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
                 <div className="space-y-4">
