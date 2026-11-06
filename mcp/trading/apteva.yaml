@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.17.2
+version: 0.18.0
 description: Portfolio management and paper or broker-backed trade execution for humans, agents and connected apps.
   Owns balances, positions, orders, fills, performance, market data, broker connections and enforced portfolio risk
   limits. Automated strategies and research are provided by the separate Strategies app.
@@ -287,6 +287,10 @@ provides:
     description: Inspect desk health, per-symbol freshness/session state and durable exit errors.
     requires: trading.read
     resource_from: portfolio/{arg.portfolio_id}
+  - name: desk_universe
+    description: Discover known research instruments and their paper entry policy.
+    requires: trading.read
+    resource_from: portfolio/{arg.portfolio_id}
   - name: desk_market_context
     description: Compute deterministic completed-bar facts without generating a trade signal.
     requires: trading.read
@@ -401,7 +405,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: trading/v0.17.2
+    ref: trading/v0.18.0
     entry: mcp/trading
   port: 8080
   health_check: /health

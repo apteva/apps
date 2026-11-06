@@ -165,8 +165,15 @@ func dbUpsertPortfolioUniversePolicy(db *sql.DB, portfolio *Portfolio, p Portfol
 
 func portfolioUniverseViolation(db *sql.DB, portfolio *Portfolio, symbol string) (*UniverseViolation, error) {
 	policy, err := dbGetPortfolioUniversePolicy(db, portfolio)
-	if err != nil || !policy.EnforcementEnabled {
+	if err != nil {
 		return nil, err
+	}
+	return universeViolation(db, policy, symbol)
+}
+
+func universeViolation(db *sql.DB, policy *PortfolioUniversePolicy, symbol string) (*UniverseViolation, error) {
+	if !policy.EnforcementEnabled {
+		return nil, nil
 	}
 	symbol = canonicalSymbol(symbol)
 	if contains(policy.ExcludeSymbols, symbol) {
