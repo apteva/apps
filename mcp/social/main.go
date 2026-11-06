@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.3
+version: 0.24.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -231,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.3
+    ref: social/v0.24.4
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -327,14 +327,11 @@ type platformDef struct {
 	VideoMediaURLField string
 	VideoBodyField     string // overrides BodyField when posting a video
 	// ThumbnailURLField — optional input field for platforms that can
-	// receive a custom thumbnail/cover URL during create (Facebook
-	// videos: "thumb", Instagram Reels: "coverUrl"). YouTube is
-	// different: it requires a second post-upload call, configured by
-	// ThumbnailTool below.
+	// receive a custom cover URL when creating a post (Instagram Reels).
 	ThumbnailURLField string
 	// ThumbnailFrameField — optional input field for platforms that
 	// accept a video timestamp instead of a separate image asset
-	// (Instagram: thumbOffset, TikTok: video_cover_timestamp_ms).
+	// (Instagram: thumb_offset, TikTok: video_cover_timestamp_ms).
 	ThumbnailFrameField string
 	// ThumbnailTool/BinaryField/IDField — post-publish thumbnail step
 	// for platforms such as YouTube where thumbnails.set needs the
@@ -479,7 +476,6 @@ var platforms = map[string]platformDef{
 		VideoPostTool:      "post_video",
 		VideoMediaURLField: "file_url",
 		VideoBodyField:     "description",
-		ThumbnailURLField:  "thumb",
 		OptionFields: []optionField{
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Video thumbnail",
 				Help: "Optional image from Storage used as the custom thumbnail for Facebook video posts."},
@@ -549,8 +545,8 @@ var platforms = map[string]platformDef{
 		// account, not the user-level token).
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
-		ThumbnailURLField:    "coverUrl",
-		ThumbnailFrameField:  "thumbOffset",
+		ThumbnailURLField:    "cover_url",
+		ThumbnailFrameField:  "thumb_offset",
 		OptionFields: []optionField{
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Reel cover",
 				Help: "Optional image from Storage used as the cover for Instagram video/Reel posts."},
@@ -788,7 +784,7 @@ func (a *App) Workers() []sdk.Worker {
 		{
 			Name:     "youtube_thumbnails",
 			Schedule: "@every 1m",
-			Run:      a.runYouTubeThumbnails,
+			Run:      a.runVideoThumbnails,
 		},
 	}
 }
@@ -2975,8 +2971,8 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		platformPostID, platformURL := identity.id, identity.url
 		var thumbnailState, thumbnailVideoID, thumbnailProject string
 		var thumbnailID int64
-		if j.platform == "youtube" && platformPostID != "" {
-			thumbnailState, thumbnailID, thumbnailProject = youtubeThumbnailRequest(ctx, j.options, j.mediaProjectID)
+		if platformPostID != "" && (j.platform == "youtube" || (j.platform == "facebook" && len(j.media) > 0 && j.media[0].IsVideo())) {
+			thumbnailState, thumbnailID, thumbnailProject = videoThumbnailRequest(ctx, j.options, j.mediaProjectID)
 			if thumbnailID > 0 {
 				thumbnailVideoID = platformPostID
 			}
@@ -2990,7 +2986,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 		if err != nil {
 			var awaiting *awaitingAudienceError
 			if errors.As(err, &awaiting) && platformPostID != "" {
-				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0, `+queueYouTubeThumbnailSQL+` WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, j.targetID, j.deliveryAttempt)
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0, `+queueVideoThumbnailSQL+` WHERE id=? AND attempts=? AND status='publishing'`, platformPostID, platformURL, awaiting.Error(), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, j.targetID, j.deliveryAttempt)
 				ctx.Emit("target.awaiting_audience_setup", map[string]any{"target_id": j.targetID, "platform": j.platform, "platform_post_id": platformPostID})
 				continue
 			}
@@ -3035,7 +3031,7 @@ func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTarget
 			`UPDATE post_targets
 			    SET status='published', platform_post_id=?, platform_url=?, facebook_page_post_id=?,
 			        publish_operation_id='', identity_resolve_after=NULL,
-			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueYouTubeThumbnailSQL+`, `+queueEventSQL+`
+			        delivery_recorded_at=CURRENT_TIMESTAMP, last_error=NULL, `+queueVideoThumbnailSQL+`, `+queueEventSQL+`
 			  WHERE id=? AND attempts=? AND status='publishing'`,
 			nullable(platformPostID), nullable(platformURL), nullable(identity.facebookPagePostID), thumbnailState, thumbnailVideoID, thumbnailID, thumbnailProject, topic, event, j.targetID, j.deliveryAttempt,
 		)
@@ -3488,15 +3484,6 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (pub
 	}
 	if mediaField != "" && len(j.media) > 0 {
 		input[mediaField] = j.media[0].URL
-	}
-	if isVideo && def.ThumbnailURLField != "" {
-		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
-		if err != nil {
-			return publishIdentity{}, err
-		}
-		if thumb != nil {
-			input[def.ThumbnailURLField] = thumb.URL
-		}
 	}
 	// Inject per-destination credentials (Facebook page access token,
 	// etc.). The integration tool's input_schema declares the field
@@ -4945,7 +4932,7 @@ func prepareYouTubeThumbnail(body []byte, mime string) ([]byte, string, error) {
 	return optimized.Bytes(), "image/jpeg", nil
 }
 
-func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
+func fetchThumbnailSource(url string, maxBytes int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -4960,22 +4947,34 @@ func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch thumbnail: storage returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, youtubeThumbnailSourceMaxBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > youtubeThumbnailSourceMaxBytes {
-		return nil, fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("thumbnail source exceeds %d bytes", maxBytes)
+	}
+	return body, nil
+}
+
+func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
+	body, err := fetchThumbnailSource(url, youtubeThumbnailSourceMaxBytes)
+	if err != nil {
+		return nil, err
 	}
 	body, mime, err = prepareYouTubeThumbnail(body, mime)
 	if err != nil {
 		return nil, err
 	}
+	return thumbnailBinaryEnvelope(body, mime), nil
+}
+
+func thumbnailBinaryEnvelope(body []byte, mime string) map[string]any {
 	return map[string]any{
 		"_binary":  true,
 		"base64":   base64.StdEncoding.EncodeToString(body),
 		"mimeType": mime,
-	}, nil
+	}
 }
 
 func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64, platformPostID string, thumb mediaItem) (map[string]string, error) {
@@ -9421,7 +9420,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 	_, thumbnailRequested := requested["thumbnail_storage_id"]
 	_, projectRequested := requested["thumbnail_project_id"]
 	thumbnailRequested = thumbnailRequested || projectRequested
-	state, fileID, sourceProject := youtubeThumbnailRequest(ctx, eff, mediaProjectID)
+	state, fileID, sourceProject := videoThumbnailRequest(ctx, eff, mediaProjectID)
 	if thumbnailRequested && fileID != 0 {
 		if _, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID); err != nil {
 			out.Status, out.Error = "failed", err.Error()
@@ -9460,7 +9459,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		_, _ = a.toolPostNativeInspect(ctx, map[string]any{"social_account_id": out.SocialAccountID, "native_post_id": out.PlatformPostID})
 	}
 	if thumbnailRequested {
-		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueYouTubeThumbnailSQL+`
+		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueVideoThumbnailSQL+`
 			WHERE id=? AND social_account_id=? AND platform_post_id=? AND status IN ('published','awaiting_audience_setup')`,
 			state, out.PlatformPostID, fileID, sourceProject, out.TargetID, out.SocialAccountID, out.PlatformPostID)
 		if err != nil {

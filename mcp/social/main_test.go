@@ -3004,6 +3004,51 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 	}
 }
 
+func TestPublishInstagram_ReelCover(t *testing.T) {
+	const coverURL = "https://cdn.test/cover.jpg"
+	for _, tt := range []struct {
+		name    string
+		options map[string]any
+		field   string
+		want    any
+	}{
+		{"image takes precedence", map[string]any{"thumbnail_storage_id": int64(77), "thumbnail_frame_ms": int64(1500)}, "cover_url", coverURL},
+		{"video frame", map[string]any{"thumbnail_frame_ms": int64(1500)}, "thumb_offset", int64(1500)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pf := newRecordingPlatform()
+			pf.callAppResponses["storage:files_get"] = json.RawMessage(`{"id":77,"content_type":"image/jpeg"}`)
+			pf.callAppResponses["storage:files_get_url"] = json.RawMessage(`{"url":"https://cdn.test/cover.jpg"}`)
+			pf.executeResponses["create_media_container"] = graphOK(`{"id":"container_42"}`)
+			pf.executeResponses["get_container_status"] = graphOK(`{"status_code":"FINISHED"}`)
+			pf.executeResponses["publish_media_container"] = graphOK(`{"id":"ig_999"}`)
+
+			id, _, err := (&App{}).publishInstagram(newSocialCtx(t, pf), platforms["instagram"], publishJob{
+				connID:  42,
+				extID:   "ig-acct-1",
+				media:   []mediaItem{{URL: "https://cdn.test/reel.mp4", Mime: "video/mp4"}},
+				options: tt.options,
+			})
+			if err != nil || id != "ig_999" {
+				t.Fatalf("publish Reel returned id=%q err=%v", id, err)
+			}
+			if len(pf.executeCalls) < 3 || pf.executeCalls[0].Tool != "create_media_container" ||
+				pf.executeCalls[1].Tool != "get_container_status" || pf.executeCalls[2].Tool != "publish_media_container" {
+				t.Fatalf("unexpected Reel publishing steps: %+v", pf.executeCalls)
+			}
+			input := pf.executeCalls[0].Input
+			if input["media_type"] != "REELS" || input[tt.field] != tt.want {
+				t.Fatalf("unexpected container input: %+v", input)
+			}
+			for _, field := range []string{"coverUrl", "thumbOffset", "cover_url", "thumb_offset"} {
+				if _, ok := input[field]; ok && field != tt.field {
+					t.Errorf("unexpected cover field %q in %+v", field, input)
+				}
+			}
+		})
+	}
+}
+
 func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)

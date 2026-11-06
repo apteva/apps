@@ -109,7 +109,7 @@ func TestYouTubeThumbnailWorkerRejectsUnverifiedOrChangedDelivery(t *testing.T) 
 		{name: "processing failed", videoID: id, state: "pending", response: youtubeThumbnailRead(id, "failed", "", false), calls: []string{"get_video"}},
 		{name: "wrong native video", videoID: id, state: "pending", response: youtubeThumbnailRead("other-video", "succeeded", "", false), calls: []string{"get_video"}},
 		{name: "local video identity changed", videoID: "other-video", state: "pending"},
-		{name: "verification timed out", videoID: id, state: "verifying", attempts: youtubeThumbnailVerificationPolls - 1, response: youtubeThumbnailRead(id, "succeeded", "", false), calls: []string{"get_video"}},
+		{name: "verification timed out", videoID: id, state: "verifying", attempts: videoThumbnailVerificationPolls - 1, response: youtubeThumbnailRead(id, "succeeded", "", false), calls: []string{"get_video"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pf := newRecordingPlatform()
@@ -172,7 +172,7 @@ func runYouTubeThumbnailTick(t *testing.T, ctx *sdk.AppCtx, post int64) {
 	if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET youtube_thumbnail_due_at=0 WHERE post_id=?`, post); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&App{}).runYouTubeThumbnails(context.Background(), ctx); err != nil {
+	if err := (&App{}).runVideoThumbnails(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
 }

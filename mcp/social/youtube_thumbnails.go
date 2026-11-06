@@ -17,17 +17,18 @@ import (
 
 // Queue the image in the same write as the saved video ID. A thumbnail job
 // never participates in the video upload or publication retry lifecycle.
-const queueYouTubeThumbnailSQL = `youtube_thumbnail_state=?, youtube_thumbnail_video_id=?,
+// The columns retain their original names to preserve existing YouTube jobs.
+const queueVideoThumbnailSQL = `youtube_thumbnail_state=?, youtube_thumbnail_video_id=?,
 	youtube_thumbnail_file_id=?, youtube_thumbnail_project_id=?, youtube_thumbnail_due_at=0,
 	youtube_thumbnail_attempts=0, youtube_thumbnail_receipt='', youtube_thumbnail_error=''`
 
 const (
-	youtubeThumbnailLeaseSeconds      = 120
-	youtubeThumbnailProcessingPolls   = 120
-	youtubeThumbnailVerificationPolls = 15
+	videoThumbnailLeaseSeconds      = 120
+	videoThumbnailProcessingPolls   = 120
+	videoThumbnailVerificationPolls = 15
 )
 
-func youtubeThumbnailRequest(ctx *sdk.AppCtx, options map[string]any, mediaProject string) (string, int64, string) {
+func videoThumbnailRequest(ctx *sdk.AppCtx, options map[string]any, mediaProject string) (string, int64, string) {
 	id := thumbnailStorageID(options)
 	if id <= 0 {
 		return "", 0, ""
@@ -36,14 +37,15 @@ func youtubeThumbnailRequest(ctx *sdk.AppCtx, options map[string]any, mediaProje
 	return "pending", id, project
 }
 
-type youtubeThumbnailJob struct {
+type videoThumbnailJob struct {
 	targetID, connectionID, fileID                           int64
 	state, receipt, videoID, project, sourceProject, channel string
+	platform, pageCredentials                                string
 	attempts                                                 int
 	leaseUntil                                               int64
 }
 
-func (a *App) runYouTubeThumbnails(runCtx context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runVideoThumbnails(runCtx context.Context, ctx *sdk.AppCtx) error {
 	rows, err := ctx.AppDB().QueryContext(runCtx, `SELECT id,post_id FROM post_targets
 		WHERE youtube_thumbnail_state IN ('pending','verifying') AND youtube_thumbnail_due_at<=unixepoch()
 		ORDER BY youtube_thumbnail_due_at,id LIMIT 12`)
@@ -69,27 +71,28 @@ func (a *App) runYouTubeThumbnails(runCtx context.Context, ctx *sdk.AppCtx) erro
 			return err
 		}
 		unlock := lockSocialPost(ctx, ids[1])
-		err := a.advanceYouTubeThumbnail(ctx, ids[0])
+		err := a.advanceVideoThumbnail(ctx, ids[0])
 		unlock()
 		if err != nil {
-			ctx.Logger().Warn("YouTube thumbnail job could not be advanced", "target_id", ids[0], "err", redactDeliverySecrets(err.Error()))
+			ctx.Logger().Warn("Video thumbnail job could not be advanced", "target_id", ids[0], "err", redactDeliverySecrets(err.Error()))
 		}
 	}
 	return nil
 }
 
-func (a *App) advanceYouTubeThumbnail(ctx *sdk.AppCtx, targetID int64) error {
-	job := youtubeThumbnailJob{targetID: targetID}
+func (a *App) advanceVideoThumbnail(ctx *sdk.AppCtx, targetID int64) error {
+	job := videoThumbnailJob{targetID: targetID}
 	var bound bool
 	err := ctx.AppDB().QueryRow(`SELECT t.youtube_thumbnail_state,t.youtube_thumbnail_receipt,t.youtube_thumbnail_video_id,
 		t.youtube_thumbnail_file_id,t.youtube_thumbnail_project_id,t.youtube_thumbnail_attempts,
-		p.project_id,sa.connection_id,COALESCE(sa.external_account_id,''),
+		p.project_id,sa.connection_id,COALESCE(sa.external_account_id,''),sa.platform,COALESCE(sa.page_credentials,''),
 		COALESCE(t.platform_post_id=t.youtube_thumbnail_video_id AND t.youtube_thumbnail_video_id<>'' AND
-			t.status IN ('published','awaiting_audience_setup') AND sa.status='active' AND sa.platform='youtube'
+			(t.status='published' OR (t.status='awaiting_audience_setup' AND sa.platform='youtube'))
+			AND sa.status='active' AND sa.platform IN ('youtube','facebook')
 			AND COALESCE(sa.provider_slug,'native')='native' AND sa.project_id=p.project_id,0)
 		FROM post_targets t JOIN posts p ON p.id=t.post_id JOIN social_accounts sa ON sa.id=t.social_account_id
 		WHERE t.id=? AND t.youtube_thumbnail_state IN ('pending','verifying') AND t.youtube_thumbnail_due_at<=unixepoch()`, targetID).
-		Scan(&job.state, &job.receipt, &job.videoID, &job.fileID, &job.sourceProject, &job.attempts, &job.project, &job.connectionID, &job.channel, &bound)
+		Scan(&job.state, &job.receipt, &job.videoID, &job.fileID, &job.sourceProject, &job.attempts, &job.project, &job.connectionID, &job.channel, &job.platform, &job.pageCredentials, &bound)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -100,7 +103,7 @@ func (a *App) advanceYouTubeThumbnail(ctx *sdk.AppCtx, targetID int64) error {
 		WHERE id=? AND youtube_thumbnail_state=? AND youtube_thumbnail_video_id=? AND youtube_thumbnail_file_id=?
 		AND youtube_thumbnail_project_id=? AND youtube_thumbnail_attempts=? AND youtube_thumbnail_due_at<=unixepoch()
 		RETURNING youtube_thumbnail_due_at`,
-		youtubeThumbnailLeaseSeconds, job.targetID, job.state, job.videoID, job.fileID, job.sourceProject, job.attempts).Scan(&job.leaseUntil)
+		videoThumbnailLeaseSeconds, job.targetID, job.state, job.videoID, job.fileID, job.sourceProject, job.attempts).Scan(&job.leaseUntil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -110,7 +113,10 @@ func (a *App) advanceYouTubeThumbnail(ctx *sdk.AppCtx, targetID int64) error {
 	job.attempts++
 	ctx = ctx.WithProject(job.project)
 	if !bound {
-		return job.finish(ctx, "failed", job.receipt, "YouTube account or saved video no longer matches the delivery")
+		return job.finish(ctx, "failed", job.receipt, "Account or saved video no longer matches the delivery")
+	}
+	if job.platform == "facebook" {
+		return a.applyFacebookVideoThumbnail(ctx, job)
 	}
 
 	video, err := readYouTubeThumbnailVideo(ctx, job)
@@ -165,7 +171,7 @@ func (a *App) advanceYouTubeThumbnail(ctx *sdk.AppCtx, targetID int64) error {
 	return job.finish(ctx, "verifying", string(encoded), "")
 }
 
-func (j youtubeThumbnailJob) stillBound(ctx *sdk.AppCtx) (bool, error) {
+func (j videoThumbnailJob) stillBound(ctx *sdk.AppCtx) (bool, error) {
 	var ok bool
 	err := ctx.AppDB().QueryRow(`SELECT EXISTS(SELECT 1 FROM post_targets t
 		JOIN social_accounts sa ON sa.id=t.social_account_id JOIN posts p ON p.id=t.post_id
@@ -173,16 +179,17 @@ func (j youtubeThumbnailJob) stillBound(ctx *sdk.AppCtx) (bool, error) {
 		AND t.youtube_thumbnail_attempts=? AND t.youtube_thumbnail_video_id=? AND t.platform_post_id=?
 		AND t.youtube_thumbnail_file_id=? AND t.youtube_thumbnail_project_id=?
 		AND t.status IN ('published','awaiting_audience_setup')
-		AND sa.platform='youtube' AND sa.status='active' AND COALESCE(sa.provider_slug,'native')='native'
-		AND sa.connection_id=? AND COALESCE(sa.external_account_id,'')=? AND p.project_id=? AND sa.project_id=p.project_id)`,
-		j.targetID, j.leaseUntil, j.attempts, j.videoID, j.videoID, j.fileID, j.sourceProject, j.connectionID, j.channel, j.project).Scan(&ok)
+		AND sa.platform=? AND sa.status='active' AND COALESCE(sa.provider_slug,'native')='native'
+		AND sa.connection_id=? AND COALESCE(sa.external_account_id,'')=? AND COALESCE(sa.page_credentials,'')=?
+		AND p.project_id=? AND sa.project_id=p.project_id)`,
+		j.targetID, j.leaseUntil, j.attempts, j.videoID, j.videoID, j.fileID, j.sourceProject, j.platform, j.connectionID, j.channel, j.pageCredentials, j.project).Scan(&ok)
 	return ok, err
 }
 
-func (j youtubeThumbnailJob) retry(ctx *sdk.AppCtx, reason string) error {
-	limit := youtubeThumbnailProcessingPolls
+func (j videoThumbnailJob) retry(ctx *sdk.AppCtx, reason string) error {
+	limit := videoThumbnailProcessingPolls
 	if j.state == "verifying" {
-		limit = youtubeThumbnailVerificationPolls
+		limit = videoThumbnailVerificationPolls
 	}
 	if j.attempts >= limit {
 		return j.finish(ctx, "failed", j.receipt, reason)
@@ -190,7 +197,7 @@ func (j youtubeThumbnailJob) retry(ctx *sdk.AppCtx, reason string) error {
 	return j.finish(ctx, j.state, j.receipt, reason)
 }
 
-func (j youtubeThumbnailJob) finish(ctx *sdk.AppCtx, state, receipt, reason string) error {
+func (j videoThumbnailJob) finish(ctx *sdk.AppCtx, state, receipt, reason string) error {
 	attempts := j.attempts
 	if state != j.state {
 		attempts = 0
@@ -219,7 +226,7 @@ type youtubeThumbnailVideo struct {
 	} `json:"snippet"`
 }
 
-func readYouTubeThumbnailVideo(ctx *sdk.AppCtx, job youtubeThumbnailJob) (youtubeThumbnailVideo, error) {
+func readYouTubeThumbnailVideo(ctx *sdk.AppCtx, job videoThumbnailJob) (youtubeThumbnailVideo, error) {
 	var video youtubeThumbnailVideo
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(job.connectionID, "get_video", map[string]any{
 		"id": job.videoID, "part": "processingDetails,snippet,contentDetails", "_apteva": map[string]any{"timeout_ms": 8000},

@@ -100,6 +100,30 @@ func TestDeliveryRecoverySelectedAuditedIdempotent(t *testing.T) {
 		t.Fatal("original failure history lost", count)
 	}
 }
+
+func TestDeliveryRecoveryFacebookThumbnailRejection(t *testing.T) {
+	for _, failure := range []string{"upstream_rejected", "outcome_unknown"} {
+		t.Run(failure, func(t *testing.T) {
+			a, ctx, pf, post, target, _ := recoveryFixture(t, "facebook")
+			const rejection = `upstream 400: {"error":{"code":100,"message":"(#100) Invalid image format. It should be an image file data."}}`
+			if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET last_error=?, failure_code=? WHERE id=?`, rejection, failure, target); err != nil {
+				t.Fatal(err)
+			}
+			grant := mustRevalidate(t, a, ctx, post, target)
+			want := "blocked"
+			if failure == "upstream_rejected" {
+				want = "retry"
+			}
+			if grant["decision"] != want || len(pf.executeCalls) != 0 {
+				t.Fatalf("unexpected recovery decision or provider write: %v, %v", grant, pf.executeCalls)
+			}
+			if want == "retry" && mustRevalidate(t, a, ctx, post, target)["decision"] != "retry" {
+				t.Fatal("source revalidation changed the confirmed rejection decision")
+			}
+		})
+	}
+}
+
 func TestDeliveryRecoveryRejectsStaleCrossProjectUnconfirmedAndDuplicateGrants(t *testing.T) {
 	for _, scenario := range []string{"expired", "revision", "options", "source", "account", "connection", "external_id", "cross_project", "unconfirmed", "duplicate_grant"} {
 		t.Run(scenario, func(t *testing.T) {
