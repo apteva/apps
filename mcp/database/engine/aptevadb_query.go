@@ -501,6 +501,10 @@ func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 	return t.aggregatePortable(c, r, outSchema)
 }
 
+// unorderedRoots: scan callbacks run outside the database lock, so joins can read
+// during them.
+func (t *aptevaTx) unorderedRoots() bool { return true }
+
 func (t *aptevaTx) scanRecords(c Collection, q Query, fields []string, consume func(Record) bool) error {
 	return t.scanFields(c, q, fields, func(r Record, _ []byte) bool { return consume(r) }, nil)
 }

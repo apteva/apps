@@ -958,6 +958,45 @@ func eachRoot(tx transaction, c Collection, where *Filter, state *existsState, o
 	}
 }
 
+// unorderedRootReader marks a transaction that reads every matching root once, in
+// whatever order costs least, more cheaply than in batches of primary key order, and
+// that can read other records while that scan is open.
+type unorderedRootReader interface {
+	unorderedRoots() bool
+}
+
+// eachRootOnce gives yield every matching root once, in no particular order, on the
+// tx's snapshot. Batches re-read what an index can't return in primary key order and
+// test each row against the last key, so they cost more than the scan itself.
+func eachRootOnce(tx transaction, c Collection, where *Filter, state *existsState, order []Order, fields []string, budget *relBudget, yield func(Record) (bool, error)) error {
+	reader, unordered := tx.(unorderedRootReader)
+	scanner, scans := tx.(recordScanner)
+	if !unordered || !scans || !reader.unorderedRoots() {
+		return eachRoot(tx, c, where, state, order, fields, budget, yield)
+	}
+	q := Query{Where: where, Select: fields}
+	var failed error
+	e := scanner.scanRecords(c, q, fields, func(r Record) bool {
+		// A failure under not_exists reads as a match, so check before the row counts.
+		if failed = state.failure(); failed != nil {
+			return false
+		}
+		if failed = budget.spend(1); failed != nil {
+			return false
+		}
+		more, e := yield(retainSelected(r, q))
+		failed = e
+		return more && e == nil
+	})
+	if failed != nil {
+		return failed
+	}
+	if e != nil {
+		return e
+	}
+	return state.failure()
+}
+
 // rootView types the root's fields as "alias.field".
 func rootView(c Collection, alias string) Collection {
 	view := Collection{Name: c.Name, PrimaryKey: c.PrimaryKey, Version: c.Version}
@@ -1144,8 +1183,9 @@ func relInput(tx transaction, c Collection, r *Request, budget *relBudget) (*rel
 // relStream runs the whole input, sending each surviving row to yield: rows pass
 // through pick last, so it sees joined, filtered, deduplicated rows. With keep, a
 // picked row holds only those fields until it is yielded; pick's own order fields and
-// the row's identity must be among them.
-func relStream(tx transaction, c Collection, r Request, alias string, state *existsState, p *relChain, budget *relBudget, keep []string, yield func(Record) (bool, error)) error {
+// the row's identity must be among them. anyOrder says the caller orders the rows
+// itself. Distinct still reads in primary key order, because the first row it sees wins.
+func relStream(tx transaction, c Collection, r Request, alias string, state *existsState, p *relChain, budget *relBudget, keep []string, anyOrder bool, yield func(Record) (bool, error)) error {
 	order := []Order{}
 	for _, pk := range c.PrimaryKey {
 		order = append(order, Order{pk, "asc"})
@@ -1155,13 +1195,14 @@ func relStream(tx transaction, c Collection, r Request, alias string, state *exi
 	bestBytes := 0
 	if r.Pick != nil {
 		best = map[string]Record{}
+		pickFields := relFields(p, r.Pick.OrderBy)
 		sink = func(row Record) (bool, error) {
 			if !matches(p.view, row, r.Pick.Where) {
 				return true, nil
 			}
 			key := string(marshal(project(row, r.Pick.By)))
 			old, ok := best[key]
-			if ok && !relLess(p, row, old, r.Pick.OrderBy) {
+			if ok && !relLess(p, row, old, r.Pick.OrderBy, pickFields) {
 				return true, nil
 			}
 			if !ok {
@@ -1186,7 +1227,11 @@ func relStream(tx transaction, c Collection, r Request, alias string, state *exi
 			return true, nil
 		}
 	}
-	e := eachRoot(tx, c, r.Where, state, order, rootFields(c, alias, p), budget, func(rec Record) (bool, error) {
+	read := eachRoot
+	if anyOrder && len(p.distinct) == 0 {
+		read = eachRootOnce
+	}
+	e := read(tx, c, r.Where, state, order, rootFields(c, alias, p), budget, func(rec Record) (bool, error) {
 		return p.run(rootRow(c, alias, rec), sink)
 	})
 	if e != nil || best == nil {
@@ -1207,10 +1252,19 @@ func relStream(tx transaction, c Collection, r Request, alias string, state *exi
 	return nil
 }
 
-func relLess(p *relChain, a, b Record, order []Order) bool {
-	for _, o := range order {
-		f, _ := p.view.field(o.Field)
-		if d := compare(f, a[o.Field], b[o.Field]); d != 0 {
+// relFields resolves an order's fields once. A lookup walks the collection's fields, so
+// doing it per comparison costs more than the comparison on a wide collection.
+func relFields(p *relChain, order []Order) []Field {
+	fields := make([]Field, len(order))
+	for i, o := range order {
+		fields[i], _ = p.view.field(o.Field)
+	}
+	return fields
+}
+
+func relLess(p *relChain, a, b Record, order []Order, fields []Field) bool {
+	for i, o := range order {
+		if d := compare(fields[i], a[o.Field], b[o.Field]); d != 0 {
 			if o.Direction == "desc" {
 				return d > 0
 			}
@@ -1318,10 +1372,9 @@ func relReadLegs(tx transaction, c Collection, alias string, p *relChain, budget
 	return nil
 }
 
-func relItemCompare(p *relChain, order []Order, a, b *relItem) int {
+func relItemCompare(order []Order, fields []Field, a, b *relItem) int {
 	for i, o := range order {
-		f, _ := p.view.field(o.Field)
-		if d := compare(f, a.sort[i], b.sort[i]); d != 0 {
+		if d := compare(fields[i], a.sort[i], b.sort[i]); d != 0 {
 			if o.Direction == "desc" {
 				return -d
 			}
@@ -1382,6 +1435,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		return nil, e
 	}
 	p.finish()
+	itemFields := relFields(p, itemOrder)
 	var keep []string
 	if r.Pick != nil {
 		keep = append(keep, groupFields...)
@@ -1407,7 +1461,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		itemBytes += n
 		return budget.retain(n)
 	}
-	e = relStream(tx, c, r, alias, state, p, budget, keep, func(row Record) (bool, error) {
+	e = relStream(tx, c, r, alias, state, p, budget, keep, true, func(row Record) (bool, error) {
 		leg, e := p.leg(c, alias, row)
 		if e != nil {
 			return false, e
@@ -1442,8 +1496,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		}
 		g.legs = append(g.legs, leg)
 		for i, o := range r.Group.OrderBy {
-			f, _ := p.view.field(o.Field)
-			d := compare(f, row[o.Field], g.sort[i])
+			d := compare(itemFields[i], row[o.Field], g.sort[i])
 			if o.Agg == "min" && d < 0 || o.Agg == "max" && d > 0 {
 				if e := hold(retainedBytes(row[o.Field]) - retainedBytes(g.sort[i])); e != nil {
 					return false, e
@@ -1456,7 +1509,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 	if e != nil {
 		return nil, e
 	}
-	sort.Slice(items, func(i, j int) bool { return relItemCompare(p, itemOrder, items[i], items[j]) < 0 })
+	sort.Slice(items, func(i, j int) bool { return relItemCompare(itemOrder, itemFields, items[i], items[j]) < 0 })
 	start := r.Offset
 	if r.Cursor != "" {
 		values, e := relReadCursor(c, r, key)
@@ -1467,7 +1520,7 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 		if e != nil {
 			return nil, e
 		}
-		start = sort.Search(len(items), func(i int) bool { return relItemCompare(p, itemOrder, items[i], at) > 0 })
+		start = sort.Search(len(items), func(i int) bool { return relItemCompare(itemOrder, itemFields, items[i], at) > 0 })
 	}
 	if start > len(items) {
 		start = len(items)
@@ -1488,8 +1541,9 @@ func executeJoinedPage(tx transaction, c Collection, r Request, key []byte) (any
 	out := []any{}
 	size := 0
 	var last *relItem
+	rowFields := relFields(p, r.OrderBy)
 	for _, item := range selected {
-		sort.SliceStable(item.rows, func(i, j int) bool { return relLess(p, item.rows[i], item.rows[j], r.OrderBy) })
+		sort.SliceStable(item.rows, func(i, j int) bool { return relLess(p, item.rows[i], item.rows[j], r.OrderBy, rowFields) })
 		rows := make([]Record, len(item.rows))
 		for i, row := range item.rows {
 			rows[i] = project(row, names)
@@ -1733,7 +1787,8 @@ func executeRelatedRead(tx transaction, c Collection, r Request, key []byte) (an
 			}
 			p.forget()
 			budget.retained -= size
-			sort.SliceStable(rows, func(a, b int) bool { return relLess(p, rows[a], rows[b], s.OrderBy) })
+			fields := relFields(p, s.OrderBy)
+			sort.SliceStable(rows, func(a, b int) bool { return relLess(p, rows[a], rows[b], s.OrderBy, fields) })
 			for _, row := range rows {
 				if len(out) >= rel.Limit {
 					break
@@ -1924,7 +1979,7 @@ func relAggregateInput(tx transaction, c Collection, r *Request, budget *relBudg
 		},
 		finish: p.finish,
 		stream: func(yield func(Record) (bool, error)) error {
-			return relStream(tx, c, req, alias, state, p, budget, nil, yield)
+			return relStream(tx, c, req, alias, state, p, budget, nil, false, yield)
 		},
 	}, nil
 }
@@ -2003,7 +2058,7 @@ func relBranches(tx transaction, r *Request, budget *relBudget) (*relAggInput, e
 				if stopped {
 					return nil
 				}
-				e := relStream(tx, b.c, b.req, b.alias, b.state, b.p, budget, nil, func(row Record) (bool, error) {
+				e := relStream(tx, b.c, b.req, b.alias, b.state, b.p, budget, nil, false, func(row Record) (bool, error) {
 					out := project(row, b.names)
 					if len(r.Distinct) > 0 {
 						key := string(marshal(project(out, r.Distinct)))

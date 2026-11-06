@@ -133,6 +133,10 @@ func (d *database) pointRead(ctx context.Context, b pointReader, r Request) (any
 	row, e := b.pointGet(ctx, c, key, pk)
 	return map[string]any{"found": row != nil, "record": row}, e
 }
+func (t cachedSchemaTx) unorderedRoots() bool {
+	r, ok := t.transaction.(unorderedRootReader)
+	return ok && r.unorderedRoots()
+}
 func (t cachedSchemaTx) concurrentReads() bool {
 	c, ok := t.transaction.(concurrentReader)
 	return ok && c.concurrentReads()
