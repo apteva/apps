@@ -4485,7 +4485,6 @@ func TestYouTubeThumbnailOnlyEditDoesNotRewriteMetadata(t *testing.T) {
 		`{"id":4903,"content_type":"image/png","size_bytes":9}`,
 	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(fmt.Sprintf(`{"url":%q}`, imageServer.URL))
-	pf.executeResponses["set_thumbnail"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[]}`)}
 	ctx := newSocialCtx(t, pf)
 	acct, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -4511,9 +4510,20 @@ func TestYouTubeThumbnailOnlyEditDoesNotRewriteMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "set_thumbnail" {
+	if len(pf.executeCalls) != 0 || out.(map[string]any)["targets"].([]targetEditOutcome)[0].ThumbnailStatus != "pending" {
 		t.Fatalf("thumbnail-only edit rewrote metadata: calls=%+v out=%+v", pf.executeCalls, out)
 	}
+	assertYouTubeThumbnailState(t, ctx, postID, "video-1", "pending", 0)
+	pf.executeQueues["get_video"] = []*sdk.ExecuteResult{
+		youtubeThumbnailRead("video-1", "succeeded", "", false),
+		graphOK(`{"items":[{"id":"video-1","contentDetails":{"hasCustomThumbnail":true},
+			"snippet":{"thumbnails":{"high":{"url":"https://i.ytimg.com/vi/video-1/hqdefault.jpg"}}}}]}`),
+	}
+	pf.executeResponses["set_thumbnail"] = graphOK(`{"items":[{"high":{"url":"https://i.ytimg.com/vi/video-1/hqdefault.jpg"}}]}`)
+	runYouTubeThumbnailTick(t, ctx, postID)
+	runYouTubeThumbnailTick(t, ctx, postID)
+	assertYouTubeThumbnailState(t, ctx, postID, "video-1", "verified", 0)
+	assertYouTubeThumbnailCalls(t, pf, "video-1", "get_video", "set_thumbnail", "get_video")
 }
 
 func TestExtractContainerID(t *testing.T) {

@@ -17,10 +17,10 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-type awaitingAudienceError struct{ Warning string }
+type awaitingAudienceError struct{}
 
 func (e *awaitingAudienceError) Error() string {
-	return "Uploaded as unlisted. Complete members-only audience and tier settings on the platform, then confirm in Social." + e.Warning
+	return "Uploaded as unlisted. Complete members-only audience and tier settings on the platform, then confirm in Social."
 }
 
 type youtubeUploadRetryError struct{ Message string }
@@ -117,8 +117,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if json.Unmarshal(identity.Data, &channel) != nil || len(channel.Items) != 1 || channel.Items[0].ID == "" || (account.ExternalID != "" && account.ExternalID != channel.Items[0].ID) {
 		return "", "", errors.New("membership connection does not match the selected channel")
 	}
-	thumbnail, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
-	if err != nil {
+	if _, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID); err != nil {
 		return "", "", err
 	}
 	// Share scoped source preparation and bounded replayable spooling with
@@ -265,13 +264,7 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 	if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET platform_post_id=?,platform_url=?,audience_status='awaiting_setup',youtube_upload_retry_after=NULL WHERE id=?`, id, watch, j.targetID); err != nil {
 		return "", "", err
 	}
-	warning := ""
-	if thumbnail != nil {
-		if err := a.setBinaryThumbnail(ctx, def, j.connID, id, *thumbnail); err != nil {
-			warning = " Custom thumbnail failed; edit the thumbnail without uploading another video."
-		}
-	}
-	return id, watch, &awaitingAudienceError{Warning: warning}
+	return id, watch, &awaitingAudienceError{}
 }
 func uploadedVideoID(res *sdk.ExecuteResult) string {
 	var resource struct {
