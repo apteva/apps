@@ -141,6 +141,9 @@ interface PostTarget {
   platform_url: string;
   attempts: number;
   last_error: string;
+  thumbnail_editable?: boolean;
+  thumbnail_status?: "pending" | "verifying" | "applied" | "verified" | "failed";
+  thumbnail_error?: string;
   published_at: string;
   delivery_recorded_at?: string;
   options?: Record<string, any>;
@@ -5150,6 +5153,12 @@ function PostDetailPanel({
                   </div>
                   {target.platform === "youtube" && target.status === "published" && target.platform_post_id && <NativeRefreshButton postId={post.id} targetId={target.id} projectId={projectId} onRefreshed={onAudienceConfirmed} />}
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
+                  {target.thumbnail_status && (
+                    <div className={`text-xs mt-1 ${target.thumbnail_status === "failed" ? "text-error" : "text-text-dim"}`}>
+                      Thumbnail {target.thumbnail_status === "pending" ? "queued" : target.thumbnail_status}
+                      {target.thumbnail_error && ` · ${target.thumbnail_error}`}
+                    </div>
+                  )}
                   {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
                   <PublicationFacts facts={target.publication_facts}/><NativePostObservation metadata={target.native_metadata}/>
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
@@ -5386,6 +5395,7 @@ interface TargetEditOutcome {
   social_account_id: number;
   platform: string;
   status: "ok" | "unsupported" | "skipped" | "failed";
+  thumbnail_status?: string;
   reason?: string;
   error?: string;
 }
@@ -5471,6 +5481,8 @@ function EditPostDialog({
         setStatus(`Saved locally. Edit failed upstream on: ${names}.`);
       } else if (unsupported.length > 0) {
         setStatus(`Saved. ${unsupported.length} target${unsupported.length !== 1 ? "s" : ""} couldn't be edited upstream (platform constraint).`);
+      } else if (outcomes.some((t) => t.thumbnail_status === "pending")) {
+        setStatus("Thumbnail update queued.");
       } else {
         setStatus("Edits applied.");
       }
@@ -5536,6 +5548,22 @@ function EditPostDialog({
                         placeholder="leave blank to use the post body above"
                         value={targetOptions[t.social_account_id]?.body || ""}
                         onChange={(v) => setOpt(t.social_account_id, "body", v)}
+                      />
+                    )}
+                    {!draftLike && t.thumbnail_editable && (
+                      <OptionFieldInput
+                        field={{
+                          name: "thumbnail_storage_id",
+                          label: "Video cover",
+                          type: "media",
+                          help: "Pick a Storage image for the existing Facebook video.",
+                        }}
+                        value={targetOptions[t.social_account_id]?.thumbnail_storage_id}
+                        projectId={projectId}
+                        onChange={(v) => {
+                          setOpt(t.social_account_id, "thumbnail_storage_id", v);
+                          setOpt(t.social_account_id, "thumbnail_project_id", v ? projectId || "" : "");
+                        }}
                       />
                     )}
                     {editable && t.platform === "youtube" && (

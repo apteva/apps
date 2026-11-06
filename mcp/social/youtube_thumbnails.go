@@ -37,6 +37,32 @@ func videoThumbnailRequest(ctx *sdk.AppCtx, options map[string]any, mediaProject
 	return "pending", id, project
 }
 
+func thumbnailEditRequested(options map[string]any) bool {
+	_, image := options["thumbnail_storage_id"]
+	_, project := options["thumbnail_project_id"]
+	return image || project
+}
+
+func queueVideoThumbnailEdit(ctx *sdk.AppCtx, out targetEditOutcome, state string, fileID int64, sourceProject string, options *string) error {
+	result, err := ctx.AppDB().Exec(`UPDATE post_targets SET options=COALESCE(?,options), `+queueVideoThumbnailSQL+`
+		WHERE id=? AND social_account_id=? AND platform_post_id=?
+		AND (status='published' OR (?='youtube' AND status='awaiting_audience_setup'))
+		AND EXISTS(SELECT 1 FROM posts WHERE id=post_targets.post_id AND project_id=?)`,
+		options, state, out.PlatformPostID, fileID, sourceProject, out.TargetID, out.SocialAccountID,
+		out.PlatformPostID, out.Platform, ctx.CurrentProject())
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("delivery target changed before the thumbnail was queued")
+	}
+	return nil
+}
+
 type videoThumbnailJob struct {
 	targetID, connectionID, fileID                           int64
 	state, receipt, videoID, project, sourceProject, channel string

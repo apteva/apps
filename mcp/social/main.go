@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.4
+version: 0.24.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -231,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.4
+    ref: social/v0.24.5
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1161,14 +1161,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_edit",
 			Description: "Edit an already-published post's body and/or per-target metadata. Updates the local post + fans out to each platform's edit verb where supported. " +
-				"Editable platforms today: Facebook (message), X/Twitter (body/text via edit_options.previous_post_id when the authenticated account/API plan permits it), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. Social queues the thumbnail until the existing video has finished processing. TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits or the catalog doesn't expose the verb yet. " +
+				"Editable platforms today: Facebook (message and Page video thumbnail), X/Twitter (body/text via edit_options.previous_post_id when the authenticated account/API plan permits it), YouTube (title, description, tags, privacy, category, thumbnail). For Facebook or YouTube thumbnail-only edits, pass targets:[{social_account_id, thumbnail_storage_id, thumbnail_project_id?}]. Social queues the thumbnail on the existing video. TikTok and Instagram return status=unsupported. " +
 				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, thumbnail_storage_id, etc.). At least one of body/targets must be set.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
 				"body":    map[string]any{"type": "string"},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Optional per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags/thumbnail_storage_id for YouTube; body/message for Facebook).}",
+					"description": "Optional per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags/thumbnail_storage_id for YouTube; body/thumbnail_storage_id for Facebook Page videos).}",
 					"items":       map[string]any{"type": "object"},
 				},
 			}, []string{"post_id"}),
@@ -5595,7 +5595,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision, t.youtube_thumbnail_state, t.youtube_thumbnail_error
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision, t.youtube_thumbnail_state, t.youtube_thumbnail_error, COALESCE(t.facebook_page_post_id,'')
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5612,13 +5612,13 @@ func loadTargetsFrom(db interface {
 			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw          string
 			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt              string
 			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider, deliveryRaw string
-			videoRaw, operationID, thumbnailStatus, thumbnailError                          string
+			videoRaw, operationID, thumbnailStatus, thumbnailError, facebookPagePostID      string
 			attempts                                                                        int
 			retryable                                                                       int64
 			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision, &thumbnailStatus, &thumbnailError); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision, &thumbnailStatus, &thumbnailError, &facebookPagePostID); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5670,6 +5670,9 @@ func loadTargetsFrom(db interface {
 			"audience_confirmation_actor": audienceActor,
 			"audience_setup_url":          audienceSetupURL(platform, targetProvider, ppid),
 		})
+		if platform == "facebook" && targetProvider == "native" && status == "published" && facebookThumbnailCandidate(ppid, facebookPagePostID) {
+			out[len(out)-1]["thumbnail_editable"] = true
+		}
 		if thumbnailStatus != "" {
 			out[len(out)-1]["thumbnail_status"] = thumbnailStatus
 			out[len(out)-1]["thumbnail_error"] = redactDeliverySecrets(thumbnailError)
@@ -9011,7 +9014,7 @@ func bestYoutubeThumb(thumbnails map[string]struct {
 // skipped / failed independently, with reason / error strings for
 // non-ok outcomes.
 //
-// Editable platforms today: Facebook (message), X/Twitter (text via
+// Editable platforms today: Facebook (message / video cover), X/Twitter (text via
 // edit_options.previous_post_id when upstream permits it), YouTube
 // (title / description / tags / privacy / category / thumbnail).
 // Other platforms either don't permit programmatic edits (TikTok) or
@@ -9099,7 +9102,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		        a.platform, a.connection_id, COALESCE(a.page_credentials,''),
 		        COALESCE(t.options,''), COALESCE(p.media_project_id,''),
 		        COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,''),
-		        COALESCE(t.provider_post_id,'')
+		        COALESCE(t.provider_post_id,''), COALESCE(t.facebook_page_post_id,''), t.status, COALESCE(a.status,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
 		 LEFT JOIN posts p ON p.id=t.post_id
@@ -9111,12 +9114,13 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	defer rows.Close()
 	type editTarget struct {
-		TargetID, SocialAccountID, ConnID int64
-		Platform, ExtPostID, PageCreds    string
-		ProviderSlug, ProviderAccountID   string
-		ProviderPostID                    string
-		MediaProjectID                    string
-		ExistingOptions                   map[string]any
+		TargetID, SocialAccountID, ConnID  int64
+		Platform, ExtPostID, PageCreds     string
+		ProviderSlug, ProviderAccountID    string
+		ProviderPostID, FacebookPagePostID string
+		TargetStatus, AccountStatus        string
+		MediaProjectID                     string
+		ExistingOptions                    map[string]any
 	}
 	var trs []editTarget
 	for rows.Next() {
@@ -9124,7 +9128,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		var optsRaw, mediaProjectID string
 		var connID sql.NullInt64
 		var platform sql.NullString
-		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &platform, &connID, &r.PageCreds, &optsRaw, &mediaProjectID, &r.ProviderSlug, &r.ProviderAccountID, &r.ProviderPostID); err == nil {
+		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &platform, &connID, &r.PageCreds, &optsRaw, &mediaProjectID, &r.ProviderSlug, &r.ProviderAccountID, &r.ProviderPostID, &r.FacebookPagePostID, &r.TargetStatus, &r.AccountStatus); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String
 			}
@@ -9213,6 +9217,22 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// that edit body get the latest text.
 		if _, has := eff["body"].(string); !has {
 			eff["body"] = resolvedPostBody
+		}
+
+		if r.Platform == "facebook" && thumbnailEditRequested(requested) {
+			switch {
+			case r.ProviderSlug != "native":
+				out.Status, out.Reason = "unsupported", "Facebook cover edits require a direct Page connection"
+			case r.TargetStatus != "published" || r.AccountStatus != "active":
+				out.Status, out.Reason = "skipped", "Facebook cover edits need a published video and an active Page account"
+			default:
+				if _, explicit := requested["thumbnail_project_id"]; !explicit && thumbnailStorageID(eff) != thumbnailStorageID(r.ExistingOptions) {
+					delete(eff, "thumbnail_project_id")
+				}
+				out = a.editFacebookVideoThumbnail(ctx, out, r.ConnID, r.PageCreds, r.FacebookPagePostID, eff, requested, r.MediaProjectID)
+			}
+			outcomes = append(outcomes, out)
+			continue
 		}
 
 		// Persist the merged options back so subsequent reads (metrics
@@ -9417,9 +9437,7 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 			}
 		}
 	}
-	_, thumbnailRequested := requested["thumbnail_storage_id"]
-	_, projectRequested := requested["thumbnail_project_id"]
-	thumbnailRequested = thumbnailRequested || projectRequested
+	thumbnailRequested := thumbnailEditRequested(requested)
 	state, fileID, sourceProject := videoThumbnailRequest(ctx, eff, mediaProjectID)
 	if thumbnailRequested && fileID != 0 {
 		if _, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID); err != nil {
@@ -9459,15 +9477,8 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 		_, _ = a.toolPostNativeInspect(ctx, map[string]any{"social_account_id": out.SocialAccountID, "native_post_id": out.PlatformPostID})
 	}
 	if thumbnailRequested {
-		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET `+queueVideoThumbnailSQL+`
-			WHERE id=? AND social_account_id=? AND platform_post_id=? AND status IN ('published','awaiting_audience_setup')`,
-			state, out.PlatformPostID, fileID, sourceProject, out.TargetID, out.SocialAccountID, out.PlatformPostID)
-		if err != nil {
+		if err := queueVideoThumbnailEdit(ctx, out, state, fileID, sourceProject, nil); err != nil {
 			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if count, err := result.RowsAffected(); err != nil || count != 1 {
-			out.Status, out.Error = "failed", "YouTube delivery target changed before the thumbnail was queued"
 			return out
 		}
 		out.ThumbnailStatus = state

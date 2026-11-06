@@ -286,3 +286,68 @@ func TestVideoContainerRejectsTruncatedBoxAndSupportsMIMEAliases(t *testing.T) {
 		t.Fatal("valid MIME alias rejected")
 	}
 }
+
+func TestPostEditFacebookVideoCoverUsesExistingDelivery(t *testing.T) {
+	image := []byte{0xff, 0xd8, 0xff, 0xe0}
+	cover := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(image)
+	}))
+	t.Cleanup(cover.Close)
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, videoCoverPlatform{pf, cover.URL})
+	app := &App{}
+	execID := func(query string, args ...any) int64 {
+		t.Helper()
+		r, err := ctx.AppDB().Exec(query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := r.LastInsertId()
+		return id
+	}
+	account := execID(`INSERT INTO social_accounts(project_id,platform,connection_id,external_account_id,display_name,status,page_credentials)
+		VALUES('test-proj','facebook',42,'123','Page','active','{"access_token":"page-token"}')`)
+	post := execID(`INSERT INTO posts(project_id,body,status,media_project_id) VALUES('test-proj','Original caption','published','video-project')`)
+	target := execID(`INSERT INTO post_targets(post_id,social_account_id,status,platform_post_id,attempts,options)
+		VALUES(?,?,'published','987',1,'{"body":"Original caption","thumbnail_storage_id":7,"thumbnail_project_id":"old-cover-project"}')`, post, account)
+
+	edit := func() targetEditOutcome {
+		t.Helper()
+		result, err := app.toolPostEdit(ctx, map[string]any{
+			"post_id": post,
+			"targets": []any{map[string]any{"social_account_id": account, "thumbnail_storage_id": int64(8)}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.(map[string]any)["targets"].([]targetEditOutcome)[0]
+	}
+	if got := edit(); got.Status != "ok" || got.ThumbnailStatus != "pending" || got.TargetID != target || got.PlatformPostID != "987" {
+		t.Fatalf("unexpected edit outcome: %+v", got)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("cover-only edit called the provider before queuing: %+v", pf.executeCalls)
+	}
+	var sourceProject string
+	if err := ctx.AppDB().QueryRow(`SELECT youtube_thumbnail_project_id FROM post_targets WHERE id=?`, target).Scan(&sourceProject); err != nil || sourceProject != "video-project" {
+		t.Fatalf("thumbnail project=%q, err=%v", sourceProject, err)
+	}
+	pf.executeResponses["facebook_get_video"] = graphOK(`{"id":"987","from":{"id":"123"},"status":{"video_status":"ready"}}`)
+	pf.executeResponses["facebook_set_video_thumbnail"] = graphOK(`{"success":true}`)
+	runYouTubeThumbnailTick(t, ctx, post)
+	runYouTubeThumbnailTick(t, ctx, post)
+	if got := assertYouTubeThumbnailState(t, ctx, post, "987", "applied", 1); got != target {
+		t.Fatalf("worker changed target: %d, want %d", got, target)
+	}
+	assertYouTubeThumbnailCalls(t, pf, "987", "facebook_get_video", "facebook_set_video_thumbnail")
+	if pf.executeCalls[1].Input["videoId"] != "987" || pf.executeCalls[1].Input["is_preferred"] != true {
+		t.Fatalf("unexpected thumbnail write: %+v", pf.executeCalls[1])
+	}
+
+	if _, err := ctx.AppDB().Exec(`UPDATE post_targets SET facebook_page_post_id='123_456' WHERE id=?`, target); err != nil {
+		t.Fatal(err)
+	}
+	if got := edit(); got.Status != "unsupported" || len(pf.executeCalls) != 2 {
+		t.Fatalf("photo delivery accepted a cover edit: %+v", got)
+	}
+}
