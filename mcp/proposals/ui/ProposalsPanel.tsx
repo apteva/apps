@@ -702,6 +702,19 @@ function SelectionPreview({content, reply, readOnly = false}: {content: Content;
 }
 
 const styles = `
+.pp-crm-picker { display: grid; gap: 12px; }
+.pp-crm-picker.pp-section-divider { margin-top: 0; }
+.ap-proposals .pp-crm-picker p { margin: 0; }
+.pp-crm-results { list-style: none; padding: 0; margin: 0; max-height: 265px; overflow: auto;
+  border: 1px solid var(--pp-line); border-radius: var(--radius-md, 8px); }
+.pp-crm-results li + li { border-top: 1px solid var(--pp-line); }
+.ap-proposals .pp-crm-results button { width: 100%; display: grid; gap: 4px; padding: 12px 14px;
+  text-align: left; justify-content: stretch; white-space: normal; border: 0; border-radius: 0; background: transparent; }
+.pp-crm-results button span { color: var(--pp-muted); font-size: 12px; }
+.pp-crm-results button small { color: var(--pp-accent); font-size: 11px; }
+.ap-proposals .pp-crm-results button.is-selected { background: var(--pp-hover); box-shadow: inset 3px 0 var(--pp-accent); }
+.pp-crm-search-error { display: grid; gap: 8px; justify-items: start; }
+
 .pp-backlog-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 24px; align-items: start; }
 .pp-client-list { display: grid; gap: 20px; padding: 20px; }
 .pp-client-list nav { display: grid; gap: 6px; max-height: 58vh; overflow: auto; }
