@@ -32,7 +32,7 @@ type databaseBridge struct {
 func newDatabaseBridge(t *testing.T, database *tk.Sidecar, project string) *databaseBridge {
 	t.Helper()
 	bridge := &databaseBridge{calls: map[string]int{}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var call struct {
 			Tool  string         `json:"tool"`
 			Input map[string]any `json:"input"`
@@ -75,6 +75,7 @@ func newDatabaseBridge(t *testing.T, database *tk.Sidecar, project string) *data
 			bridge.mu.Unlock()
 		}
 	}
+	server.Start()
 	t.Cleanup(server.Close)
 	bridge.URL = server.URL
 	return bridge
