@@ -394,44 +394,89 @@ func TestAppleAssetUploadExecutesReservedChunks(t *testing.T) {
 }
 
 func TestApplePendingReleaseIsNotMarkedLive(t *testing.T) {
-	platform := &iosPlatform{state: "PENDING_APPLE_RELEASE"}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
-	oldGlobal := globalCtx
-	globalCtx = ctx
-	t.Cleanup(func() { globalCtx = oldGlobal })
-	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
-		Name: "ios-pending", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, state := range []string{"PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE"} {
+		t.Run(state, func(t *testing.T) {
+			platform := &iosPlatform{state: state}
+			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+			oldGlobal := globalCtx
+			globalCtx = ctx
+			t.Cleanup(func() { globalCtx = oldGlobal })
+			d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+				Name: "ios-pending", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			release, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := dbUpdateRelease(ctx.AppDB(), release.ID, map[string]any{
+				"provider": "app_store_connect", "status": "starting",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+			if err := (&App{}).syncAppStoreVersionState(bound, release, &mobileReleaseMeta{AppStoreVersionID: "version-1"}); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := dbGetRelease(ctx.AppDB(), release.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fresh.Status != "starting" || fresh.ExternalStatus != strings.ToLower(state) {
+				t.Fatalf("release=%+v", fresh)
+			}
+		})
 	}
-	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dbUpdateRelease(ctx.AppDB(), release.ID, map[string]any{
-		"provider": "app_store_connect", "status": "starting",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
-	if err := (&App{}).syncAppStoreVersionState(bound, release, &mobileReleaseMeta{AppStoreVersionID: "version-1"}); err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := dbGetRelease(ctx.AppDB(), release.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.Status == "live" || fresh.ExternalStatus != "approved_pending_release" {
-		t.Fatalf("release=%+v", fresh)
+}
+
+func TestAppleManualReleaseEligibility(t *testing.T) {
+	for _, tt := range []struct {
+		state   string
+		allowed bool
+	}{
+		{"pending_developer_release", true},
+		{"approved_pending_release", false}, // Legacy alias conflated Apple-held releases; sync first.
+		{"pending_apple_release", false},
+		{"in_review", false},
+		{"waiting_for_review", false},
+		{"rejected", false},
+		{"ready_for_sale", false},
+		{"release_requested", false},
+	} {
+		t.Run(tt.state, func(t *testing.T) {
+			p, release, _, _ := setupAppStoreReview(t)
+			if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"external_status": tt.state}); err != nil {
+				t.Fatal(err)
+			}
+			fresh, _ := releaseWithMeta(t, release.ID)
+			_, err := (&App{}).releaseApprovedMobileVersion(fresh)
+			if (err == nil) != tt.allowed {
+				t.Fatalf("manual release allowed=%v, error=%v", tt.allowed, err)
+			}
+			var requests int
+			for _, call := range p.calls {
+				if call.Tool == "request_version_release" {
+					requests++
+				}
+			}
+			want := 0
+			if tt.allowed {
+				want = 1
+			}
+			if requests != want {
+				t.Fatalf("release requests=%d, want %d", requests, want)
+			}
+		})
 	}
 }
 

@@ -12,6 +12,46 @@ if (!compiled.success) throw new Error(compiled.logs.join("\n"));
 const bundle = await compiled.outputs[0].text();
 const deployment = (id: number, mobile = false) => ({id, name: id === 1 ? "Alpha" : "Bravo", target_kind:mobile?"ios":"service", framework:mobile?"ios":"blank", source_kind:"local", source_ref:"/fixture", build_backend:"local", build_backend_config_json:"{}", target_config_json:"{}", env_json:"{}", build_cmd:"", start_cmd:"", port_hint:0, domain:"", created_at:"2026-09-05", updated_at:"2026-09-05"});
 
+test("manual Apple release is offered for developer-held versions", async () => {
+  const states = ["pending_developer_release", "pending_apple_release", "approved_pending_release", "release_requested"];
+  const releases = states.map((state, index) => ({id:index+1,build_id:9,status:"starting",channel:"production",provider:"app_store_connect",external_status:state,release_meta_json:"{}"}));
+  const posts: string[] = [];
+  const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/") return new Response('<div id="root"></div><script type="module" src="/host.js"></script>',{headers:{"content-type":"text/html"}});
+    if (path === "/host.js") return new Response(bundle,{headers:{"content-type":"text/javascript"}});
+    if (req.method === "POST") {
+      posts.push(path);
+      releases[0].external_status = "release_requested";
+      return Response.json({release:releases[0],release_requested:true});
+    }
+    if (path.endsWith("/deployments")) return Response.json({deployments:[deployment(1,true)]});
+    if (path.endsWith("/deployments/1")) return Response.json({deployment:deployment(1,true),builds:[],releases,environments:[{id:1,name:"production"}]});
+    if (path.endsWith("/store-config")) return Response.json({preflight:{ready:true,errors:0}});
+    if (path.endsWith("/distribution")) return Response.json({audience:[],desired_audience:[],count:0,tester_access:"not_configured"});
+    return Response.json({});
+  }});
+  const browser = await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
+    await page.goto(server.url.href);
+    await page.locator("aside li").filter({hasText:"Alpha"}).click();
+    const row = (state: string) => page.getByRole("row").filter({has:page.getByText(state,{exact:true})});
+    await row("pending_developer_release").waitFor();
+    for (const state of states) {
+      expect(await row(state).getByRole("button",{name:"release",exact:true}).count()).toBe(
+        state === "pending_developer_release" ? 1 : 0,
+      );
+    }
+    expect(posts).toEqual([]);
+    await row("pending_developer_release").getByRole("button",{name:"release",exact:true}).click();
+    await row("pending_developer_release").waitFor({state:"detached"});
+    expect(posts).toEqual(["/api/apps/deploy/api/releases/1/release-approved"]);
+    expect(await page.getByRole("button",{name:"release",exact:true}).count()).toBe(0);
+  } finally { await browser.close(); server.stop(true); }
+});
+
 test("content rating edits independent questions and a boolean health answer", async () => {
   const desired = {schema_version:1,version_name:"1.0",default_locale:"en-US",release_mode:"manual",localizations:{"en-US":{}},assets:[],review:{},classification:{content_rating:{violence:"FREQUENT",sexual_content:"NONE",health_wellness:false}},distribution:{},privacy:{}};
   const preflight = {ready:false,errors:1,warnings:0,findings:[]};

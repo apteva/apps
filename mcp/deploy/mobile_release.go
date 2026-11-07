@@ -1244,9 +1244,8 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	switch state {
 	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE", "READY_FOR_DISTRIBUTION", "PREORDER_READY_FOR_DISTRIBUTION":
 		fields["status"] = "live"
-	case "PENDING_APPLE_RELEASE":
+	case "PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE":
 		fields["status"] = "starting"
-		fields["external_status"] = "approved_pending_release"
 	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY", "DEVELOPER_REJECTED", "REMOVED_FROM_SALE", "DEVELOPER_REMOVED_FROM_SALE", "REMOVED_FROM_DISTRIBUTION", "DEVELOPER_REMOVED_FROM_DISTRIBUTION":
 		fields["status"] = "failed"
 		fields["error"] = appleReviewFailureMessage(state, meta.ReviewOutcome)
