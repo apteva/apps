@@ -276,7 +276,22 @@ func (e *engine) startRecording(ctx context.Context, s Session, runID string, ar
 		_ = os.Remove(path)
 		return r, err
 	}
-	a := &activeRecording{rec: r, path: path, r: rec, started: time.Now(), finished: make(chan struct{})}
+	// Compilation, USB setup and encoder warm-up are not recorded time. Align
+	// the panel timer with the same ready boundary used by markers and limits.
+	started := time.Now()
+	r.StartedAt = started.Unix()
+	if _, err := e.db.Exec(`UPDATE mobile_recordings SET started_at=? WHERE id=?`, r.StartedAt, r.ID); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_ = rec.Stop(stopCtx)
+		cancel()
+		r.Status, r.Error = "failed", "could not persist recording start time"
+		finished := time.Now().Unix()
+		r.FinishedAt = &finished
+		_ = e.saveRecording(r)
+		_ = os.Remove(path)
+		return r, err
+	}
+	a := &activeRecording{rec: r, path: path, r: rec, started: started, finished: make(chan struct{})}
 	e.mu.Lock()
 	e.recorders[r.ID] = a
 	e.mu.Unlock()
