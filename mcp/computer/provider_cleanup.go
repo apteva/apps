@@ -73,6 +73,15 @@ func leaseConfig(ctx *sdk.AppCtx, l providerLease) (backends.Config, error) {
 }
 
 var releaseProviderLease = func(ctx *sdk.AppCtx, l providerLease) error {
+	if l.Backend == "mobile" {
+		if l.ProjectID == "" {
+			return fmt.Errorf("mobile cleanup requires the original project")
+		}
+		callCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		var out any
+		return mobileCaller(ctx.WithProject(l.ProjectID))(callCtx, "mobile_session", map[string]any{"action": "close", "session_id": l.ProviderID}, &out)
+	}
 	cfg, err := leaseConfig(ctx, l)
 	if err != nil {
 		return err

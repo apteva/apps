@@ -2,25 +2,32 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
+
+	api "github.com/apteva/apps/mcp/computer/internal/browser/api"
 )
 
 type ComputerContext struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Backend           string `json:"backend"`
-	ProviderContextID string `json:"provider_context_id,omitempty"`
-	PersistDefault    bool   `json:"persist_default"`
-	AutoCreated       bool   `json:"auto_created"`
-	MetadataJSON      string `json:"metadata_json,omitempty"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
-	LastUsedAt        string `json:"last_used_at,omitempty"`
+	Target            *api.SessionTarget `json:"target,omitempty"`
+	ProjectID         string             `json:"project_id,omitempty"`
+	ID                string             `json:"id"`
+	Name              string             `json:"name"`
+	Backend           string             `json:"backend"`
+	ProviderContextID string             `json:"provider_context_id,omitempty"`
+	PersistDefault    bool               `json:"persist_default"`
+	AutoCreated       bool               `json:"auto_created"`
+	MetadataJSON      string             `json:"metadata_json,omitempty"`
+	CreatedAt         string             `json:"created_at"`
+	UpdatedAt         string             `json:"updated_at"`
+	LastUsedAt        string             `json:"last_used_at,omitempty"`
 }
 
 type contextCreateInput struct {
+	Target            *api.SessionTarget
+	ProjectID         string
 	ID                string
 	Name              string
 	Backend           string
@@ -33,14 +40,20 @@ type contextCreateInput struct {
 var errContextNotFound = errors.New("computer context not found")
 
 const contextCols = `id, name, backend, provider_context_id, persist_default,
-	auto_created, metadata_json, created_at, updated_at, COALESCE(last_used_at, '')`
+	auto_created, metadata_json, created_at, updated_at, COALESCE(last_used_at, ''), target_json, project_id`
 
 func scanComputerContext(s rowScanner) (*ComputerContext, error) {
 	var c ComputerContext
 	var persist, auto int
+	var targetJSON string
 	if err := s.Scan(&c.ID, &c.Name, &c.Backend, &c.ProviderContextID, &persist,
-		&auto, &c.MetadataJSON, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt); err != nil {
+		&auto, &c.MetadataJSON, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt, &targetJSON, &c.ProjectID); err != nil {
 		return nil, err
+	}
+	if targetJSON != "" {
+		if err := json.Unmarshal([]byte(targetJSON), &c.Target); err != nil {
+			return nil, err
+		}
 	}
 	c.PersistDefault = persist != 0
 	c.AutoCreated = auto != 0
@@ -62,10 +75,10 @@ func dbCreateContext(db *sql.DB, in contextCreateInput) (*ComputerContext, error
 	_, err := db.Exec(`
 		INSERT INTO computer_contexts (
 			id, name, backend, provider_context_id, persist_default,
-			auto_created, metadata_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			auto_created, metadata_json, created_at, updated_at, target_json, project_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.Name, in.Backend, in.ProviderContextID, boolInt(in.PersistDefault),
-		boolInt(in.AutoCreated), in.MetadataJSON, now, now,
+		boolInt(in.AutoCreated), in.MetadataJSON, now, now, encodeJSON(in.Target), in.ProjectID,
 	)
 	if err != nil {
 		return nil, err
@@ -147,7 +160,7 @@ func dbListContexts(db *sql.DB, backend string) ([]*ComputerContext, error) {
 func dbUpdateContext(db *sql.DB, id string, fields map[string]any) (*ComputerContext, error) {
 	sets := []string{}
 	args := []any{}
-	for _, k := range []string{"name", "provider_context_id", "persist_default", "auto_created", "metadata_json", "last_used_at"} {
+	for _, k := range []string{"name", "provider_context_id", "persist_default", "auto_created", "metadata_json", "last_used_at", "target_json"} {
 		v, ok := fields[k]
 		if !ok {
 			continue

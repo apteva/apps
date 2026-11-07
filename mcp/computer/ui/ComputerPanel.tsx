@@ -78,6 +78,8 @@ interface NativePanelProps {
 }
 
 interface SessionRow {
+ target?: {kind: string; device_id?: string; app_id?: string};
+ capabilities?: {target_kind: string; actions: string[]; keys?: string[]; observations: string[]; context: {reuse: boolean; persistence: boolean; isolation: boolean; snapshot_restore: boolean}};
   session_id: string;
   backend_session_id?: string;
   backend: "local" | "browserbase" | "steel" | string;
@@ -153,6 +155,7 @@ interface ListResponse {
 }
 
 interface ContextRow {
+ target?: {kind: string; device_id?: string; app_id?: string};
   id: string;
   name: string;
   backend: "local" | "browserbase" | "steel" | "browser-engine" | string;
@@ -242,6 +245,7 @@ const BACKEND_LABEL: Record<string, string> = {
   steel: "Steel",
   "browser-engine": "Browser Engine",
   service: "Browser Service",
+  mobile: "Mobile devices",
 };
 
 const backendOptions = [
@@ -250,6 +254,7 @@ const backendOptions = [
   { value: "steel", label: "Steel" },
   { value: "browser-engine", label: "Browser Engine" },
   { value: "service", label: "Browser Service" },
+  { value: "mobile", label: "Mobile devices" },
 ] as const;
 
 function appURL(path: string, projectId?: string, extra?: Record<string, string | number | boolean | undefined>) {
@@ -815,6 +820,7 @@ function BrowsersList({
             <option value="steel">Steel</option>
             <option value="browser-engine">Browser Engine</option>
             <option value="service">Browser Service</option>
+ <option value="mobile">Mobile devices</option>
           </select>
           <label
             className="text-text-muted"
@@ -1134,6 +1140,7 @@ function SessionDetail({
   const [err, setErr] = useState<string | null>(null);
   const [typeText, setTypeText] = useState("");
   const [keyText, setKeyText] = useState("Enter");
+   const [mobileAppID, setMobileAppID] = useState("");
   const [manualX, setManualX] = useState("");
   const [manualY, setManualY] = useState("");
   const [embedLive, setEmbedLive] = useState(false);
@@ -1198,6 +1205,8 @@ function SessionDetail({
   const sendCoordinate = (action: "click" | "double_click", x: number, y: number) =>
     sendUse(action, { coordinate: `${Math.round(x)},${Math.round(y)}` });
 
+  const supports = (action: string) => !session.capabilities || session.capabilities.actions.includes(action);
+  const supportsKey = (key: string) => !session.capabilities?.keys || session.capabilities.keys.includes(key.toLowerCase());
   const host = hostFor(session.current_url);
   const currentURL = session.current_url || "-";
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
@@ -1352,13 +1361,13 @@ function SessionDetail({
               style={{ ...inputStyle, flex: "1 1 240px", minWidth: 0 }}
               placeholder="Key"
             />
-            <IconButton disabled={!keyText || Boolean(busy)} onClick={() => sendUse("key", { key: keyText })} title="Send key">
+            <IconButton disabled={!keyText || Boolean(busy) || !supportsKey(keyText)} onClick={() => sendUse("key", { key: keyText })} title="Send key">
               Key
             </IconButton>
-            <IconButton disabled={Boolean(busy)} onClick={() => sendUse("key", { key: "Backspace" })} title="Backspace">
+            <IconButton disabled={Boolean(busy)||!supportsKey("Backspace")} onClick={() => sendUse("key", { key: "Backspace" })} title="Backspace">
               Backspace
             </IconButton>
-            <IconButton disabled={Boolean(busy)} onClick={() => sendUse("key", { key: "Delete" })} title="Delete">
+            <IconButton disabled={Boolean(busy)||!supportsKey("Delete")} onClick={() => sendUse("key", { key: "Delete" })} title="Delete">
               Delete
             </IconButton>
             <IconButton disabled={Boolean(busy)} onClick={() => sendUse("scroll", { direction: "up", amount: 550 })} title="Scroll up">
@@ -1396,13 +1405,19 @@ function SessionDetail({
               Click
             </IconButton>
             <IconButton
-              disabled={!manualX || !manualY || Boolean(busy)}
+              disabled={!manualX || !manualY || Boolean(busy) || !supports("double_click")}
               onClick={() => sendCoordinate("double_click", Number(manualX), Number(manualY))}
               title="Double click coordinate"
             >
               Double
             </IconButton>
           </div>
+          {supports("home") && session.capabilities && <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <IconButton disabled={Boolean(busy)} onClick={()=>sendUse("home")} title="Home">Home</IconButton>
+            <input aria-label="App ID" value={mobileAppID} onChange={e=>setMobileAppID(e.target.value)} placeholder="App bundle/package id" className="border border-border bg-bg text-text" style={inputStyle}/>
+            <IconButton disabled={!mobileAppID||Boolean(busy)} onClick={()=>sendUse("launch_app",{app_id:mobileAppID})} title="Launch app">Launch</IconButton>
+            <IconButton disabled={!mobileAppID||Boolean(busy)} onClick={()=>sendUse("stop_app",{app_id:mobileAppID})} title="Stop app">Stop</IconButton>
+          </div>}
           <div style={actionStatusStyle}>
             {err ? (
               <span style={{ color: "#dc2626" }}>{err}</span>
@@ -1417,6 +1432,7 @@ function SessionDetail({
         <DataList
           items={[
             { label: "App session", value: session.session_id },
+ ...(session.target?.device_id ? [{label:"Device",value:session.target.device_id},{label:"Context isolation",value:session.capabilities?.context.isolation?"isolated":"shared device data"}]:[]),
             { label: "Backend session", value: session.backend_session_id || "-" },
             { label: "App context", value: session.context_name || session.app_context_id || "-" },
             { label: "Provider context", value: session.context_id || "-" },
@@ -1691,6 +1707,8 @@ function OpenSessionModal({
 }) {
   const [mode, setMode] = useState<OpenMode>("open");
   const [url, setUrl] = useState("https://");
+  const [deviceID, setDeviceID] = useState("");
+  const [appID, setAppID] = useState("");
   const [backend, setBackend] = useState("");
   const [contextID, setContextID] = useState("");
   const [contextName, setContextName] = useState("");
@@ -1707,6 +1725,7 @@ function OpenSessionModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const isMobile = (backend || settings.default_backend) === "mobile";
   const submit = async () => {
     setBusy(true);
     setErr(null);
@@ -1717,23 +1736,27 @@ function OpenSessionModal({
       if (url && url !== "https://") body.url = url;
       if (backend) body.backend = backend;
       if (contextID && mode === "context") body.context_id = contextID;
-      if (contextID && mode === "open") body.provider_context_id = contextID;
+      if (!isMobile && contextID && mode === "open") body.provider_context_id = contextID;
       if (contextName && mode === "create_context") {
         body.context_name = contextName;
         body.auto_create_context = true;
       }
-      if (providerContextID && mode !== "resume") body.provider_context_id = providerContextID;
+      if (!isMobile && providerContextID && mode !== "resume") body.provider_context_id = providerContextID;
       if (mode === "resume" && backendSessionID) body.backend_session_id = backendSessionID;
-      if (mode !== "resume") body.persist = persist;
+      if (mode !== "resume" && !isMobile) body.persist = persist;
+      if (isMobile && mode !== "context") {
+        if (!deviceID.trim()) throw new Error("Select an exact device id from Mobile first.");
+        body.target = { kind: "mobile", device_id: deviceID.trim(), ...(appID.trim() ? { app_id: appID.trim() } : {}) };
+      }
       if (timeout) body.timeout = Number(timeout);
-      if (proxyMode) body.proxy_mode = proxyMode;
-      if (proxyProfile) body.proxy_profile = proxyProfile;
-      if (proxyCountry) body.proxy_country = proxyCountry.toUpperCase();
-      if (proxySticky) body.proxy_sticky = proxySticky;
+      if (!isMobile && proxyMode) body.proxy_mode = proxyMode;
+      if (!isMobile && proxyProfile) body.proxy_profile = proxyProfile;
+      if (!isMobile && proxyCountry) body.proxy_country = proxyCountry.toUpperCase();
+      if (!isMobile && proxySticky) body.proxy_sticky = proxySticky;
       const viewport: Record<string, number> = {};
       if (width) viewport.width = Number(width);
       if (height) viewport.height = Number(height);
-      if (viewport.width || viewport.height) body.viewport = viewport;
+      if (!isMobile && (viewport.width || viewport.height)) body.viewport = viewport;
 
       const res = await fetch(appURL(SESSIONS_URL, projectId), {
         method: "POST",
@@ -1742,8 +1765,8 @@ function OpenSessionModal({
         body: JSON.stringify(body),
       });
       const j = await res.json();
-      if (!res.ok || j.error) {
-        setErr(j.error ?? `HTTP ${res.status}`);
+      if (!res.ok || j.error || j.success === false) {
+        setErr([j.error ?? `HTTP ${res.status}`, j.next_step].filter(Boolean).join(" "));
         return;
       }
       onOpened(String(j.session_id ?? ""));
@@ -1780,13 +1803,13 @@ function OpenSessionModal({
         }}
       >
         <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "12px" }}>
-          Browser session
+          Computer session
         </h2>
         <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
           <ModeButton active={mode === "open"} onClick={() => setMode("open")}>Open</ModeButton>
           <ModeButton active={mode === "context"} onClick={() => setMode("context")}>Context</ModeButton>
           <ModeButton active={mode === "create_context"} onClick={() => setMode("create_context")}>Save</ModeButton>
-          <ModeButton active={mode === "resume"} onClick={() => setMode("resume")}>Resume</ModeButton>
+          {!isMobile && <ModeButton active={mode === "resume"} onClick={() => setMode("resume")}>Resume</ModeButton>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
           <Field label="Backend">
@@ -1806,6 +1829,10 @@ function OpenSessionModal({
           <Field label="URL">
             <input value={url} onChange={(e) => setUrl(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
           </Field>
+          {isMobile && mode !== "context" && <>
+            <Field label="Device ID"><input aria-label="Device ID" value={deviceID} onChange={e=>setDeviceID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}/></Field>
+            <Field label="Default app (optional)"><input value={appID} onChange={e=>setAppID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}/></Field>
+          </>}
           {mode === "resume" ? (
             <Field label="Backend session ID">
               <input value={backendSessionID} onChange={(e) => setBackendSessionID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
@@ -1838,12 +1865,12 @@ function OpenSessionModal({
             <Field label="Context name">
               <input value={contextName} onChange={(e) => setContextName(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
             </Field>
-          ) : (
+          ) : !isMobile ? (
             <Field label="Provider context ID">
               <input value={contextID} onChange={(e) => setContextID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
             </Field>
-          )}
-          {mode === "create_context" && (
+          ) : null}
+          {!isMobile && mode === "create_context" && (
             <Field label="Import provider context">
               <input value={providerContextID} onChange={(e) => setProviderContextID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
             </Field>
@@ -1851,6 +1878,7 @@ function OpenSessionModal({
           <Field label="Timeout seconds">
             <input value={timeout} onChange={(e) => setTimeoutValue(e.target.value)} inputMode="numeric" className="border border-border bg-bg text-text" style={inputStyle} />
           </Field>
+          {!isMobile && <>
           <Field label="Viewport width">
             <input value={width} onChange={(e) => setWidth(e.target.value)} inputMode="numeric" className="border border-border bg-bg text-text" style={inputStyle} />
           </Field>
@@ -1905,8 +1933,10 @@ function OpenSessionModal({
               </select>
             </Field>
           )}
+          </>}
         </div>
-        {mode !== "resume" && (
+        {isMobile && <p className="text-text-muted" style={{fontSize:"12px"}}>Devices retain shared app data. Saved contexts reconnect to the same device; they do not isolate accounts or restore snapshots. Manage device discovery and signing in Mobile.</p>}
+        {!isMobile && mode !== "resume" && (
           <div style={{ display: "grid", gap: "8px", marginTop: "10px", fontSize: "13px" }}>
             <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />

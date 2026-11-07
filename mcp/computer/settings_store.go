@@ -172,7 +172,7 @@ func validProxyMode(mode string) bool {
 
 func isSessionBackend(backend string) bool {
 	switch backend {
-	case "local", "browserbase", "steel", "browser-engine", "service":
+	case "local", "browserbase", "steel", "browser-engine", "service", "mobile":
 		return true
 	default:
 		return false
@@ -181,7 +181,7 @@ func isSessionBackend(backend string) bool {
 
 func isContextBackend(backend string) bool {
 	switch backend {
-	case "local", "browserbase", "steel", "browser-engine":
+	case "local", "browserbase", "steel", "browser-engine", "mobile":
 		return true
 	default:
 		return false

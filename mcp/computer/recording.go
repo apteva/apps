@@ -64,6 +64,9 @@ func replayResolverForSession(ctx *sdk.AppCtx, row *ComputerSession) (replay.Res
 }
 
 func (a *App) toolBrowserRecording(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.authorizeSessionProject(ctx, stringArg(args, "session_id")); err != nil {
+		return nil, err
+	}
 	id := strings.TrimSpace(stringArg(args, "session_id"))
 	if id == "" {
 		return nil, errors.New("session_id required")
