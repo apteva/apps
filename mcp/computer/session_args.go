@@ -38,7 +38,7 @@ func (d *sessionArgumentDiagnostics) finish() {
 }
 
 var browserSessionSupportedArguments = map[string]struct{}{
-	"action": {}, "session_id": {}, "tab_id": {}, "backend": {}, "presentation_mode": {},
+	"target": {}, "device_id": {}, "action": {}, "session_id": {}, "tab_id": {}, "backend": {}, "presentation_mode": {},
 	"url": {}, "context_id": {}, "context_name": {}, "provider_context_id": {},
 	"auto_create_context": {}, "persist": {}, "timeout": {}, "proxy_mode": {},
 	"proxy_profile": {}, "proxy_country": {}, "proxy_sticky": {}, "environment": {},
@@ -281,7 +281,7 @@ func filterBrowserSessionArgumentsForAction(args map[string]any, diagnostics *se
 		return
 	}
 	for _, key := range []string{
-		"backend", "presentation_mode", "url", "context_id", "context_name", "provider_context_id", "provider_context",
+		"target", "device_id", "backend", "presentation_mode", "url", "context_id", "context_name", "provider_context_id", "provider_context",
 		"auto_create_context", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky",
 		"environment", "environment_override", "viewport", "user_agent", "backend_session_id", "provider_session_id", "region", "backend_url", "initial_url", "proxy_url",
 		"solve_captchas", "use_proxy", "block_ads", "solve_captcha", "proxy_enabled", "browser_project_id",

@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	api "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
@@ -60,8 +62,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.100
+version: 0.8.0
 description: |
+  v0.8.0 adds physical Mobile sessions through the existing session tools.
+  Mobile startup retries preparation within a bounded window
+  and reports explicit user authorization/setup states without replaying input.
+  Browser and physical mobile sessions share browser_session, computer_use,
+  saved target contexts and explicit backend capabilities. Mobile contexts
+  reuse shared device data without isolated profiles or snapshot restore.
   v0.7.100 fixes upload preparation on hosted workers without a user cache.
   Staging defaults to the app's private data directory unless an operator
   sets APTEVA_UPLOAD_STAGING_DIR. Standalone sessions use the OS user cache.
@@ -89,6 +97,9 @@ requires:
     - net.egress
     - platform.connections.read_credentials
     - platform.connections.execute
+    - platform.apps.call
+  apps:
+    - { name: mobile, version: ">=0.3.2", optional: true, reason: Physical device sessions through the Mobile app. }
   integrations:
     - role: browserbase
       kind: integration
@@ -118,7 +129,7 @@ provides:
     - name: browser_download
       description: "List, wait for, or export files captured by an active browser session. After a click returns a dl_* id, wait for browser-confirmed completion before get. get exports the browser-captured bytes as a Core-managed blobref; it never refetches the URL and Computer never unzips or interprets the file. Actions: list, wait, get."
     - name: computer_context_create
-      description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
+      description: "Create or import an app-managed context. Mobile requires target.device_id (or device_id), binds the calling project, and reuses shared device data without isolated profiles or snapshots. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
       description: "List app-managed browser contexts. Omit backend, or pass backend=all, to see every saved context across providers. Use backend=default/auto for the Computer app default provider. Only pass a concrete backend when the user explicitly wants that provider."
     - name: computer_context_get
@@ -268,7 +279,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.7.100
+    ref: computer/v0.8.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -320,6 +331,7 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
+	projectID            string
 	actionMu             sessionLock
 	preparedUpload       *preparedUpload
 	comp                 backends.Computer
@@ -571,7 +583,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // All routes are reachable through the platform proxy at
 // /api/apps/computer/<pattern>.
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/contexts", Handler: a.handleContextsCollection},
 		{Method: http.MethodPost, Pattern: "/contexts", Handler: a.handleContextsCollection},
 		{Method: http.MethodGet, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
@@ -607,13 +619,35 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// poll it directly for a cheap "live" view.
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/screenshot", Handler: a.handleSessionScreenshot},
 	}
+	for i := range routes {
+		if strings.Contains(routes[i].Pattern, "/sessions/{id}") {
+			handler := routes[i].Handler
+			routes[i].Handler = func(w http.ResponseWriter, r *http.Request) {
+				id := ""
+				parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+				for i, part := range parts {
+					if part == "sessions" && i+1 < len(parts) {
+						id = parts[i+1]
+						break
+					}
+				}
+				if err := a.authorizeSessionProject(appCtxForRequest(r, nil), id); err != nil {
+					httpErr(w, http.StatusNotFound, "session not found")
+					return
+				}
+				handler(w, r)
+			}
+		}
+	}
+	return routes
+
 }
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "browser_session",
-			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
+			Description: "Session lifecycle for browser and Mobile targets; tab control is browser-only. backend=mobile accepts device_id or target (kind, device_id, platform, physical, mode, app_id). Saved Mobile contexts bind the exact device and project; they reuse shared device app data without isolation or snapshot restore. Results report capabilities; only use supported actions. Mobile timeout is a renewable lease of 30..3600 seconds (default 900). Actions: open, status, close, tabs, switch_tab, close_tab. " +
 				"Ordinary open: pass only action=open plus url? or context_id?/context_name?. Generic example: {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. " +
 				"Advanced open overrides are backend?, persist?, auto_create_context?, timeout?, proxy_mode?/proxy_profile?/proxy_country?/proxy_sticky?, viewport?, environment?, and presentation_mode?. " +
 				"environment is advanced, opt-in QA/device emulation and requires environment_override=true. Never send environment for normal navigation, read-only audits, or saved-login contexts; omit environment_override there too. " +
@@ -635,10 +669,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
 				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
 				"tab_id":            map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
-				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service", "mobile"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
 				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo shows a non-interactive cursor/click pulse and structured-control cues on CDP backends, types short text character by character, and holds visible states. Presentation overlays never dispatch input events or replace agent actions."},
 				"url":               map[string]any{"type": "string"},
 				"context_id":        map[string]any{"type": "string", "description": "App-managed saved context id. Unknown ids return context_not_found. Import provider ids with computer_context_create or use the explicit provider_context_id compatibility argument."},
+				"target":            targetSchema(),
+				"device_id":         map[string]any{"type": "string", "description": "Exact Mobile device id; requires backend=mobile."},
 				"context_name":      map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
@@ -667,7 +703,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "computer_use",
-			Description: "Use action=prepare_upload before a destructive file replacement: it stages and hashes the exact source in this session without sending it to the website. Then upload_file with the identical source arguments and require_prepared=true. Default cloud uploads retain a 100 MiB cap; explicitly configured local sessions can stream up to 5 GiB. No login context migration occurs. Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
+			Description: "Use action=prepare_upload before a destructive file replacement: it stages and hashes the exact source in this session without sending it to the website. Then upload_file with the identical source arguments and require_prepared=true. Default cloud uploads retain a 100 MiB cap; explicitly configured local sessions can stream up to 5 GiB. No login context migration occurs. Drive a session opened by browser_session. For Mobile use screenshot plus pixel coordinate clicks, swipe (coordinate start plus to_x/to_y), home, key=home|enter (Android also back), launch_app/stop_app with app_id, type, scroll or navigate. Mobile has no DOM/SoM guards; do not send semantic arguments. Consult session capabilities. Browser workflows follow: Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. Operator-owned workflow constraints independently restrict the resource, commit effect and scheduled time; acknowledgements cannot override them. For a scheduling task, do not click an immediate Publish control to look for scheduling afterward. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, semantic-target, or media conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. For an embed, use media_present and media_error together with match=any to wait for a terminal rendered-player-or-error outcome. Computer reports the visible provider/source and player state but does not decide whether the media is the intended asset. Use action=wait_for_stable only when the whole page must become quiet. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with a fresh label or target_id and its som_revision, plus source_url/base64/file_path. Optional expected_name and expected_role must copy accessible_name and role from the current semantic target; omit an expectation when that field is absent, and never infer role from tag/type; omit expected_text, expected_effect, and confirm_consequence, which are click/double_click-only. A compatibility selector must match exactly one element. After a stale-target rejection, take action=screenshot with include_som=true and retry upload_file with the new target and original file source; do not click Browse or operate the native OS file picker. For native image uploads, verify the visible image preview and draft-save state afterward; media_present checks an audio/video player, not a still-image preview. " +
@@ -683,7 +719,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -716,6 +752,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"mode":                map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
 				"newline_mode":        map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
 				"key":                 map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
+				"to_x":                map[string]any{"type": "integer", "description": "Swipe endpoint X in observed screen pixels."},
+				"to_y":                map[string]any{"type": "integer", "description": "Swipe endpoint Y in observed screen pixels."},
+				"app_id":              map[string]any{"type": "string", "description": "Mobile bundle/package id for launch_app or stop_app."},
 				"direction":           map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
 				"amount":              map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":            map[string]any{"type": "integer"},
@@ -751,13 +790,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "computer_context_create",
-			Description: "Create or import an app-managed browser context. Browserbase creates a provider Context immediately; local/browser-engine use the app id as provider id; Steel materializes the profile id on first persisted session.",
+			Description: "Create or import an app-managed context. Mobile requires target.device_id (or device_id), binds the calling project, and reuses shared device data without isolated profiles or snapshots. Browserbase creates a provider Context immediately; local/browser-engine use the app id as provider id; Steel materializes the profile id on first persisted session.",
 			InputSchema: schemaObject(map[string]any{
 				"name":                 map[string]any{"type": "string"},
-				"backend":              map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+				"backend":              map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "mobile"}},
 				"provider_context_id":  map[string]any{"type": "string"},
 				"persist_default":      map[string]any{"type": "boolean"},
 				"metadata":             map[string]any{"type": "object"},
+				"target":               targetSchema(),
+				"device_id":            map[string]any{"type": "string"},
 				"auto_create_provider": map[string]any{"type": "boolean"},
 			}, []string{"name"}),
 			Handler: a.toolContextCreate,
@@ -766,7 +807,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "computer_context_list",
 			Description: "List app-managed browser contexts. Omit backend, or pass backend=all, to see every saved context across providers. Use backend=default/auto for the Computer app default provider. Only pass a concrete backend when the user explicitly wants that provider.",
 			InputSchema: schemaObject(map[string]any{
-				"backend": map[string]any{"type": "string", "enum": []string{"all", "default", "auto", "local", "browserbase", "steel", "browser-engine"}, "description": "Omit or use all to list all contexts. Use default/auto for the app default provider. Concrete providers filter and may hide contexts saved under another provider."},
+				"backend": map[string]any{"type": "string", "enum": []string{"all", "default", "auto", "local", "browserbase", "steel", "browser-engine", "mobile"}, "description": "Omit or use all to list all contexts. Use default/auto for the app default provider. Concrete providers filter and may hide contexts saved under another provider."},
 			}, nil),
 			Handler: a.toolContextList,
 		},
@@ -775,7 +816,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Fetch one app-managed browser context by id, by backend+name, or by unique name across all backends when backend is omitted.",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "string"},
-				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "mobile"}},
 				"name":    map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolContextGet,
@@ -789,6 +830,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider_context_id": map[string]any{"type": "string"},
 				"persist_default":     map[string]any{"type": "boolean"},
 				"metadata":            map[string]any{"type": "object"},
+				"target":              targetSchema(),
 			}, []string{"id"}),
 			Handler: a.toolContextUpdate,
 		},
@@ -818,10 +860,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
-				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service", "mobile"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
 				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo adds non-interactive visual cues and pacing without replacing agent actions."},
 				"url":               map[string]any{"type": "string"},
 				"context_id":        map[string]any{"type": "string"},
+				"target":            targetSchema(),
+				"device_id":         map[string]any{"type": "string", "description": "Exact Mobile device id; requires backend=mobile."},
 				"context_name":      map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
@@ -916,6 +960,7 @@ func (a *App) toolContextList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	rows = visibleContexts(ctx, rows)
 	out := map[string]any{
 		"contexts":          rows,
 		"backend":           firstNonEmpty(backend, "all"),
@@ -926,6 +971,7 @@ func (a *App) toolContextList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if err != nil {
 			return nil, err
 		}
+		allRows = visibleContexts(ctx, allRows)
 		out["available_backends"] = contextBackends(allRows)
 		out["total_contexts"] = len(allRows)
 		if len(rows) == 0 && len(allRows) > 0 {
@@ -958,6 +1004,7 @@ func (a *App) toolContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			if matchErr != nil {
 				return nil, matchErr
 			}
+			matches = visibleContexts(ctx, matches)
 			switch len(matches) {
 			case 0:
 				err = errContextNotFound
@@ -979,6 +1026,9 @@ func (a *App) toolContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		return nil, err
 	}
+	if !contextVisible(ctx, rec) {
+		return map[string]any{"found": false}, nil
+	}
 	return map[string]any{"found": true, "context": rec}, nil
 }
 
@@ -991,7 +1041,27 @@ func (a *App) toolContextUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == "" {
 		return nil, fmt.Errorf("id required")
 	}
+	existing, err := dbGetContext(db, id)
+	if err != nil {
+		return nil, err
+	}
+	if !contextVisible(ctx, existing) {
+		return nil, errContextNotFound
+	}
 	fields := map[string]any{}
+	if raw, ok := args["target"]; ok {
+		target, err := parseSessionTarget(existing.Backend, map[string]any{"target": raw})
+		if err != nil {
+			return nil, err
+		}
+		if existing.Backend == "mobile" && target.DeviceID == "" {
+			return nil, errors.New("mobile context requires an exact device_id")
+		}
+		fields["target_json"] = encodeJSON(target)
+	}
+	if existing.Backend == "mobile" && stringArg(args, "provider_context_id") != "" {
+		return nil, errors.New("mobile contexts do not support browser provider profiles")
+	}
 	if name := strings.TrimSpace(stringArg(args, "name")); name != "" {
 		fields["name"] = name
 	}
@@ -999,6 +1069,9 @@ func (a *App) toolContextUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		fields["provider_context_id"] = providerID
 	}
 	if v, ok := boolArg(args, "persist_default"); ok {
+		if existing.Backend == "mobile" && !v {
+			return nil, errors.New("mobile context cannot discard device data")
+		}
 		fields["persist_default"] = v
 	}
 	if raw, ok := args["metadata"]; ok {
@@ -1031,6 +1104,9 @@ func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			return map[string]any{"deleted": false}, nil
 		}
 		return nil, err
+	}
+	if !contextVisible(ctx, rec) {
+		return nil, errContextNotFound
 	}
 	providerDeleted := false
 	if boolArgDefault(args, "delete_provider", false) && rec.ProviderContextID != "" {
@@ -1119,11 +1195,28 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 	if !isContextBackend(backend) {
 		return nil, fmt.Errorf("backend %q does not support managed contexts", backend)
 	}
+	target, err := parseSessionTarget(backend, args)
+	if err != nil {
+		return nil, err
+	}
+	projectID := ""
+	if backend == "mobile" {
+		if ctx == nil || ctx.CurrentProject() == "" {
+			return nil, errors.New("mobile contexts require a project-scoped caller")
+		}
+		if target.DeviceID == "" {
+			return nil, errors.New("mobile context requires an exact device_id")
+		}
+		if stringArg(args, "provider_context_id") != "" || !boolArgDefault(args, "persist_default", true) {
+			return nil, errors.New("mobile contexts reuse device data and do not support browser profiles or persist_default=false")
+		}
+		projectID = ctx.CurrentProject()
+	}
 	providerID := stringArg(args, "provider_context_id")
 	persistDefault := boolArgDefault(args, "persist_default", true)
 	autoCreateProvider := boolArgDefault(args, "auto_create_provider", true)
 
-	if providerID == "" && autoCreateProvider {
+	if providerID == "" && autoCreateProvider && backend != "mobile" {
 		id, err := createProviderContext(ctx, backend)
 		if err != nil {
 			return nil, err
@@ -1140,6 +1233,7 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 	}
 	autoCreated := boolArgDefault(args, "auto_created", false)
 	rec, err := dbCreateContext(db, contextCreateInput{
+		Target: target, ProjectID: projectID,
 		Name:              name,
 		Backend:           backend,
 		ProviderContextID: providerID,
@@ -1155,11 +1249,21 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 }
 
 func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolBrowserSessionContext(context.Background(), ctx, args)
+}
+
+func (a *App) toolBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.authorizeSessionProject(ctx, stringArg(args, "session_id")); err != nil {
+		return nil, err
+	}
 	if err := validateBrowserSessionArguments(args); err != nil {
 		return nil, err
 	}
 	args, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(args)
 	decorate := func(value any, err error) (any, error) {
+		if out, ok := mobileStartupResponse(err); ok {
+			return out, nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1179,7 +1283,7 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	switch action {
 	case "open":
-		return decorate(a.openBrowserSession(ctx, args, false))
+		return decorate(a.openBrowserSessionContext(callCtx, ctx, args, false))
 	case "resume":
 		if id := strings.TrimSpace(stringArg(args, "session_id")); id != "" {
 			sess, ok := a.reg.get(id)
@@ -1192,9 +1296,9 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 			defer sess.actionMu.Unlock()
 			return decorate(a.sessionOutput(id, sess), nil)
 		}
-		return decorate(a.openBrowserSession(ctx, args, true))
+		return decorate(a.openBrowserSessionContext(callCtx, ctx, args, true))
 	case "list":
-		return decorate(map[string]any{"sessions": a.listSessions()}, nil)
+		return decorate(map[string]any{"sessions": a.scopedSessions(ctx, a.listSessions())}, nil)
 	case "status":
 		id := stringArg(args, "session_id")
 		if id == "" {
@@ -1233,7 +1337,7 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolBrowserSessionCaller(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := a.toolBrowserSession(app, args)
+	out, err := a.toolBrowserSessionContext(callCtx, app, args)
 	if err != nil || stringArg(args, "action") != "open" {
 		return out, err
 	}
@@ -1483,6 +1587,8 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 type resolvedContext struct {
+	Target               *api.SessionTarget
+	ProjectID            string
 	AppContextID         string
 	ContextName          string
 	Backend              string
@@ -1537,6 +1643,7 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 			if matchErr != nil {
 				return out, fmt.Errorf("get context %q: %w", contextName, matchErr)
 			}
+			matches = visibleContexts(ctx, matches)
 			switch len(matches) {
 			case 1:
 				rec = matches[0]
@@ -1557,19 +1664,31 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 	}
 	if rec == nil && autoCreate {
 		name := firstNonEmpty(contextName, contextIDArg, generatedContextName(backend, stringArg(args, "url")))
-		rec, err = a.createContextRecord(ctx, map[string]any{
+		createArgs := map[string]any{
 			"name":                 name,
 			"backend":              backend,
 			"provider_context_id":  rawProviderID,
 			"persist_default":      persist,
 			"auto_create_provider": true,
 			"auto_created":         true,
-		})
+			"target":               args["target"], "device_id": args["device_id"],
+		}
+		for k, v := range createArgs {
+			if v == nil {
+				delete(createArgs, k)
+			}
+		}
+		rec, err = a.createContextRecord(ctx, createArgs)
 		if err != nil {
 			return out, err
 		}
 	}
 	if rec != nil {
+		if !contextVisible(ctx, rec) {
+			return out, errContextNotFound
+		}
+		out.Target = rec.Target
+		out.ProjectID = rec.ProjectID
 		if explicitBackend && rec.Backend != backend {
 			return out, fmt.Errorf("context_backend_mismatch: context uses %s, requested %s", rec.Backend, backend)
 		}
@@ -1623,6 +1742,10 @@ func generatedContextName(backend, rawURL string) string {
 }
 
 func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
+	return a.openBrowserSessionContext(context.Background(), ctx, args, resume)
+}
+
+func (a *App) openBrowserSessionContext(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
 	// Defense in depth for callers that reach this adapter without going
 	// through toolBrowserSession. In particular, preserve a saved context's
 	// provider-owned environment when a serializer injected default values.
@@ -1659,7 +1782,23 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 			return nil, err
 		}
 	}
+	if rc.Backend != "" && rc.Backend != backend {
+		return nil, errors.New("context_backend_mismatch: saved context conflicts with the locked backend")
+	}
+	target, err := resolveSessionTarget(ctx, backend, args, rc)
+	if err != nil {
+		return nil, err
+	}
 	effectiveTimeout := effectiveSessionTimeout(backend, intArg(args, "timeout"))
+	if backend == "mobile" {
+		effectiveTimeout = intArg(args, "timeout")
+		if effectiveTimeout == 0 {
+			effectiveTimeout = 900
+		}
+		if effectiveTimeout < 30 || effectiveTimeout > 3600 {
+			return nil, errors.New("mobile timeout must be between 30 and 3600 seconds")
+		}
+	}
 	proxyPolicy, err := a.resolveSessionProxy(ctx, args, backend, rc.AppContextID)
 	if err != nil {
 		return nil, err
@@ -1680,6 +1819,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	}
 
 	cfg := backendConfig(ctx, args, backend, width, height, environmentOptions)
+	cfg.Target = *target
+	if backend == "mobile" {
+		cfg.MobileCall = mobileCaller(ctx)
+	}
 	if usingProductionBackendFactory() {
 		if err := validateBackendConfigured(cfg); err != nil {
 			return nil, err
@@ -1691,6 +1834,11 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	}
 	if comp == nil {
 		return nil, fmt.Errorf("backend %q unknown", backend)
+	}
+	openCtx, cancelOpen := context.WithTimeout(callCtx, 2*time.Minute)
+	defer cancelOpen()
+	if bound, ok := comp.(interface{ BindRequest(context.Context) func() }); ok {
+		defer bound.BindRequest(openCtx)()
 	}
 
 	openOpts := backends.OpenOptions{
@@ -1704,6 +1852,9 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		ProxyCountry:  proxyPolicy.ManagedCountry,
 		ExternalProxy: proxyPolicy.External,
 		Environment:   environmentOptions,
+	}
+	if backend == "mobile" {
+		openOpts.ContextID = ""
 	}
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
@@ -1774,6 +1925,9 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		_ = comp.Close()
 		return nil, errors.New("computer session history is unavailable")
 	}
+	if backend == "mobile" {
+		sess.projectID = ctx.CurrentProject()
+	}
 	if err := storeProviderLease(ctx, id, comp, cfg); err != nil {
 		_ = comp.Close()
 		return nil, err
@@ -1842,6 +1996,9 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
+	ProjectID            string                         `json:"project_id,omitempty"`
+	Target               *api.SessionTarget             `json:"target,omitempty"`
+	Capabilities         api.Capabilities               `json:"capabilities"`
 	SessionID            string                         `json:"session_id"`
 	BackendSessionID     string                         `json:"backend_session_id,omitempty"`
 	Backend              string                         `json:"backend"`
@@ -1882,7 +2039,7 @@ type sessionUsageInfo struct {
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return map[string]any{"sessions": a.listSessions()}, nil
+	return map[string]any{"sessions": a.scopedSessions(ctx, a.listSessions())}, nil
 }
 
 // listSessions snapshots the registry under the lock and projects
@@ -1914,7 +2071,7 @@ func (a *App) listUISessions(ctx *sdk.AppCtx, limit int) ([]sessionInfo, error) 
 }
 
 func (a *App) listUISessionsPage(ctx *sdk.AppCtx, limit, offset int) ([]sessionInfo, error) {
-	active := a.listSessions()
+	active := a.scopedSessions(ctx, a.listSessions())
 	if ctx == nil || ctx.AppDB() == nil {
 		return active, nil
 	}
@@ -1929,6 +2086,9 @@ func (a *App) listUISessionsPage(ctx *sdk.AppCtx, limit, offset int) ([]sessionI
 	out := make([]sessionInfo, 0, len(active)+len(history))
 	out = append(out, active...)
 	for _, row := range history {
+		if !projectVisible(ctx, row.ProjectID) {
+			continue
+		}
 		if _, ok := seen[row.ID]; ok || row.Status == "active" {
 			continue
 		}
@@ -1947,6 +2107,7 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 		closedAt = *row.ClosedAt
 	}
 	return sessionInfo{
+		Target: row.Target, Capabilities: row.Capabilities, ProjectID: row.ProjectID,
 		SessionID:          row.ID,
 		BackendSessionID:   row.BackendSessionID,
 		Backend:            row.Backend,
@@ -1978,6 +2139,13 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	disp := s.comp.DisplaySize()
 	providerExpiresAt := s.providerState.ExpiresAt
+	if s.backend == "mobile" {
+		if r, ok := s.comp.(backends.ProviderSessionStateReporter); ok {
+			if state, err := r.ProviderSessionState(context.Background()); err == nil {
+				providerExpiresAt = state.ExpiresAt
+			}
+		}
+	}
 	if s.timeout > 0 {
 		if providerExpiresAt == "" {
 			providerExpiresAt = s.openedAt.Add(time.Duration(s.timeout) * time.Second).UTC().Format(time.RFC3339)
@@ -1989,6 +2157,7 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	}
 	tabs := tabsFor(s.comp)
 	return sessionInfo{
+		Target: targetFor(s.backend, s.comp), Capabilities: capabilitiesFor(s.backend, s.comp), ProjectID: s.projectID,
 		SessionID:            id,
 		BackendSessionID:     sessionBackendID(s),
 		Backend:              s.backend,
@@ -2038,11 +2207,12 @@ func historicalSessionOutput(row *ComputerSession) map[string]any {
 
 func sessionInfoOutput(info sessionInfo) map[string]any {
 	out := map[string]any{
+		"target": info.Target, "target_kind": info.Capabilities.TargetKind, "capabilities": info.Capabilities,
 		"session_id":                    info.SessionID,
 		"backend_session_id":            info.BackendSessionID,
 		"backend":                       info.Backend,
 		"presentation_mode":             info.PresentationMode,
-		"presentation_cursor_supported": info.Backend != "service",
+		"presentation_cursor_supported": info.Backend != "service" && info.Backend != "mobile",
 		"status":                        info.Status,
 		"recording_supported":           info.RecordingSupported,
 		"recording_status":              info.RecordingStatus,
@@ -2107,6 +2277,9 @@ func browserViewReference(sessionID string) map[string]any {
 }
 
 func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.authorizeSessionProject(ctx, stringArg(args, "session_id")); err != nil {
+		return nil, err
+	}
 	shotArgs := mapWithDefault(args, "action", "screenshot")
 	if _, ok := shotArgs["annotate"]; !ok {
 		if _, ok := shotArgs["som"]; !ok {
@@ -2442,6 +2615,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return a.toolComputerUseCaller(context.Background(), ctx, args)
 }
 func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.authorizeSessionProject(ctx, stringArg(args, "session_id")); err != nil {
+		return nil, err
+	}
 	id := stringArg(args, "session_id")
 	if id == "" {
 		return nil, fmt.Errorf("session_id required")
@@ -2465,6 +2641,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	defer sess.actionMu.Unlock()
 	if bound, ok := sess.comp.(interface{ BindRequest(context.Context) func() }); ok {
 		defer bound.BindRequest(requestCtx)()
+	}
+	if err := validateBackendAction(sess.comp, args); err != nil {
+		return nil, err
 	}
 	if action == "prepare_upload" {
 		return sess.prepareUpload(args, ctx.DataDir())
@@ -2549,7 +2728,8 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 
 	act := backends.Action{
-		Type:               action,
+		Type: action,
+		ToX:  intArg(args, "to_x"), ToY: intArg(args, "to_y"), AppID: stringArg(args, "app_id"),
 		Label:              intArg(args, "label"),
 		Selector:           stringArg(args, "selector"),
 		Text:               stringArg(args, "text"),
@@ -2725,6 +2905,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	screenshotSkipped := false
 	includeSOM := action == "screenshot" && boolArgDefault(args, "include_som", false)
 	annotate := annotateArg(args, true)
+	if !slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "som") {
+		annotate = false
+	}
 	if includeSOM {
 		annotate = true
 	}
@@ -2861,6 +3044,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	markSemanticSnapshotDirty(sess, action)
 	observation := observationArg(args, action)
+	if !slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "som") && observation == "som_delta" {
+		observation = "screenshot"
+	}
 	if (action == "click" || action == "double_click") && act.ClickResult != nil && act.ClickResult.Dangerous {
 		// Consequential clicks always return a fresh lightweight semantic delta,
 		// even when ordinary clicks default to no post-action observation.
@@ -2872,7 +3058,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	var observationDelta map[string]any
 	if action != "screenshot" && observation != "none" {
-		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
+		observeAnnotate := slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "som") && (observation == "som_delta" || annotateArg(args, true))
 		observedShot, observeErr := observeBrowser(sess.comp, observation, observeAnnotate)
 		if observeErr != nil {
 			return nil, computerUseFailure("backend_error", id, sess, action,
@@ -2900,7 +3086,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 			"browser history did not move to a different URL",
 			"Take a fresh screenshot and use action=navigate with an explicit URL if the destination is known.", nil)
 	}
-	if action == "navigate" && !navigationURLChanged(beforeURL, afterURL) && !navigationURLsEquivalent(act.URL, afterURL) {
+	if action == "navigate" && slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "url") && !navigationURLChanged(beforeURL, afterURL) && !navigationURLsEquivalent(act.URL, afterURL) {
 		return nil, computerUseFailure("navigation_ineffective", id, sess, action,
 			fmt.Sprintf("browser remained at %q", afterURL),
 			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
@@ -2980,6 +3166,10 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		out["height"] = disp.Height
 	}
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
+	if action == "navigate" && !slices.Contains(capabilitiesFor(sess.backend, sess.comp).Observations, "url") {
+		delete(out, "url_changed")
+		out["navigation_verified"] = false
+	}
 	mergeWorkflowSummary(out, act)
 	if waitResult != nil {
 		mergeWaitResultPayload(out, *waitResult)
@@ -3380,6 +3570,9 @@ func batchStepArgs(raw any) ([]map[string]any, error) {
 }
 
 func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.authorizeSessionProject(ctx, stringArg(args, "session_id")); err != nil {
+		return nil, err
+	}
 	id := stringArg(args, "session_id")
 	if id == "" {
 		return nil, fmt.Errorf("session_id required")
@@ -4344,6 +4537,7 @@ func sessionBackendID(s *session) string {
 func sessionRecord(id string, s *session, status, closeReason string, closedAt *time.Time) *ComputerSession {
 	now := time.Now().UTC()
 	row := &ComputerSession{
+		Target: targetFor(s.backend, s.comp), Capabilities: capabilitiesFor(s.backend, s.comp), ProjectID: s.projectID,
 		ID:               id,
 		Backend:          s.backend,
 		BackendSessionID: sessionBackendID(s),
@@ -5494,7 +5688,7 @@ func isSessionUnhealthyError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, api.ErrSessionExpired) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -6125,11 +6319,11 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	ctx := appCtxForRequest(r, nil)
 	if view == "active" {
-		writeJSON(w, map[string]any{"sessions": a.listSessions()})
+		writeJSON(w, map[string]any{"sessions": a.scopedSessions(ctx, a.listSessions())})
 		return
 	}
-	ctx := appCtxForRequest(r, nil)
 	if view == "history" {
 		if ctx == nil || ctx.AppDB() == nil {
 			writeJSON(w, map[string]any{"sessions": []sessionInfo{}, "has_more": false})
@@ -6146,6 +6340,9 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		rows := make([]sessionInfo, 0, len(history))
 		for _, row := range history {
+			if !projectVisible(ctx, row.ProjectID) {
+				continue
+			}
 			rows = append(rows, historicalSessionInfo(row))
 		}
 		writeJSON(w, map[string]any{"sessions": rows, "limit": limit, "offset": offset, "next_offset": offset + len(rows), "has_more": hasMore})
@@ -6171,7 +6368,7 @@ func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 	if stringArg(body, "action") == "" {
 		body["action"] = "open"
 	}
-	out, err := a.toolBrowserSession(appCtxForRequest(r, body), body)
+	out, err := a.toolBrowserSessionContext(r.Context(), appCtxForRequest(r, body), body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

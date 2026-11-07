@@ -52,6 +52,49 @@ relevant `computer_use` action's `timeout_ms` for short operation waits.
 Even when the whole task is expected to take about one minute, omit `timeout`;
 estimated task duration is not authorization to shorten the browser lifetime.
 
+## Physical mobile sessions and saved contexts
+
+`browser_session` also opens Mobile v0.3.2+ through `backend="mobile"`:
+
+```json
+{"action":"open","backend":"mobile","device_id":"iphone-test"}
+```
+
+Discover exact device ids and complete signing setup in Mobile. To save a
+reusable binding, use `computer_context_create` with `backend="mobile"`, a
+name, and `target={"kind":"mobile","device_id":"iphone-test"}`. An optional
+`target.app_id` launches that app when opened. Alternatively, pass the same
+target with `context_name` and `auto_create_context=true` to `browser_session`.
+Reopen with only `action="open"` and `context_name` or `context_id`.
+
+Mobile contexts belong to the calling project and bind an exact device.
+They retain the phone's shared app data; they do not isolate accounts, reset
+data, or restore an earlier screen. Session results report these guarantees
+under `capabilities.context`. Do not override a saved context's target at open.
+
+Inspect `capabilities.actions`, `keys` and `observations` before acting.
+Mobile supports screenshot, click using pixel `coordinate`, type, key, scroll,
+swipe (pixel coordinate start plus `to_x`/`to_y`), home, launch_app/stop_app
+(`app_id`), navigate and bounded wait. Keys are home/enter, plus back on Android.
+Take a new screenshot after rotation before sending coordinates. Native
+navigation dispatch does not prove the final URL; verify the screenshot.
+
+Mobile has no Computer DOM/SoM, browser profile, proxy override, viewport
+emulation, upload, tab, or semantic wait support. Do not send labels, selectors,
+semantic expectations or consequence confirmations: unsupported guard requests
+are rejected rather than silently ignored. Use a screenshot to inspect results.
+Recordings, installation, native UI inspection, setup, and smoke tests remain
+available through Mobile's own tools. Mobile timeout is a renewable lease in
+seconds (30..3600, default 900), not the cloud browser wall-clock limit.
+Computer retries only explicit runner-preparation responses for a bounded startup
+window. A result with success=false and error_code=mobile_starting has no session
+handle; retry open after retry_after_ms. needs_user_action means an operator must
+complete the reported phone authorization or setup step before retrying. The
+Enable UI Automation switch and the separate per-session XCTest passcode prompt
+are distinct. Never request or enter the device passcode for the operator.
+Transport failures and input actions are never automatically replayed.
+Close the Computer session when finished to release the Mobile device lease.
+
 ## Browser downloads are a three-step lifecycle
 
 A click only dispatches the page action. When it starts a download,

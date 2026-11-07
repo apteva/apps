@@ -6,9 +6,11 @@ package computer
 import (
 	"fmt"
 
+	api "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/browserbase"
 	"github.com/apteva/apps/mcp/computer/internal/browser/browserengine"
 	"github.com/apteva/apps/mcp/computer/internal/browser/local"
+	"github.com/apteva/apps/mcp/computer/internal/browser/mobile"
 	"github.com/apteva/apps/mcp/computer/internal/browser/service"
 	"github.com/apteva/apps/mcp/computer/internal/browser/steel"
 )
@@ -18,12 +20,14 @@ import (
 // agent-runtime decisions, made via browser_session.open's context_id /
 // session_id parameters at tool-call time, not at instance boot.
 type Config struct {
-	Type      string `json:"type"`                 // "browserbase", "steel", "browser-engine", "service", "local"
-	URL       string `json:"url,omitempty"`        // for "service" type; also BaseURL override for "browser-engine"
-	APIKey    string `json:"api_key,omitempty"`    // for "browserbase", "steel", "browser-engine"
-	ProjectID string `json:"project_id,omitempty"` // for "browserbase"
-	Width     int    `json:"width,omitempty"`      // display width (default 2000)
-	Height    int    `json:"height,omitempty"`     // display height (default 1000)
+	Target     api.SessionTarget `json:"target,omitempty"`
+	MobileCall mobile.Caller     `json:"-"`
+	Type       string            `json:"type"`                 // "browserbase", "steel", "browser-engine", "service", "local", "mobile"
+	URL        string            `json:"url,omitempty"`        // for "service" type; also BaseURL override for "browser-engine"
+	APIKey     string            `json:"api_key,omitempty"`    // for "browserbase", "steel", "browser-engine"
+	ProjectID  string            `json:"project_id,omitempty"` // for "browserbase"
+	Width      int               `json:"width,omitempty"`      // display width (default 2000)
+	Height     int               `json:"height,omitempty"`     // display height (default 1000)
 
 	// Browserbase-only extended options. Omit any field to use
 	// Browserbase's server-side default.
@@ -133,6 +137,8 @@ func New(cfg Config) (Computer, error) {
 			ProjectID:  cfg.BrowserProjectID,
 			Metadata:   cfg.Metadata,
 		})
+	case "mobile":
+		return mobile.New(cfg.Target, cfg.MobileCall)
 	case "service":
 		return service.New(cfg.URL, display)
 	case "local":

@@ -9,9 +9,13 @@ import (
 	"time"
 
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	api "github.com/apteva/apps/mcp/computer/internal/browser/api"
 )
 
 type ComputerSession struct {
+	ProjectID           string                      `json:"project_id,omitempty"`
+	Target              *api.SessionTarget          `json:"target,omitempty"`
+	Capabilities        api.Capabilities            `json:"capabilities"`
 	ID                  string                      `json:"session_id"`
 	Backend             string                      `json:"backend"`
 	BackendSessionID    string                      `json:"backend_session_id,omitempty"`
@@ -58,9 +62,10 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			recording_status, opened_at, closed_at, updated_at,
 			final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
 			proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-			environment_json, proxy_bytes, usage_status, usage_measured_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			environment_json, proxy_bytes, usage_status, usage_measured_at, target_json, capabilities_json, project_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+			target_json=excluded.target_json, capabilities_json=excluded.capabilities_json, project_id=excluded.project_id,
 			backend=excluded.backend,
 			backend_session_id=excluded.backend_session_id,
 			app_context_id=excluded.app_context_id,
@@ -95,7 +100,7 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 		nullableText(row.CloseReason), row.RecordingStatus, row.OpenedAt, row.ClosedAt, row.UpdatedAt,
 		nullableBytes(row.FinalScreenshot), row.FinalScreenshotMIME, row.ProxyMode, row.ProxyProvider,
 		row.ProxyProfileID, row.ProxyProfileName, row.ProxyCountry, row.ProxyStickyScope,
-		encodeEnvironment(row.Environment), nullableInt64(row.ProxyBytes), row.UsageStatus, nullableStringPointer(row.UsageMeasuredAt),
+		encodeEnvironment(row.Environment), nullableInt64(row.ProxyBytes), row.UsageStatus, nullableStringPointer(row.UsageMeasuredAt), encodeJSON(row.Target), encodeJSON(row.Capabilities), row.ProjectID,
 	)
 	if err != nil {
 		return fmt.Errorf("persist computer session %s: %w", row.ID, err)
@@ -113,7 +118,7 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 		       recording_status, opened_at, closed_at, updated_at,
 		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-		       environment_json, proxy_bytes, usage_status, usage_measured_at
+		       environment_json, proxy_bytes, usage_status, usage_measured_at, target_json, capabilities_json, project_id
 		FROM computer_sessions WHERE id=?`, id))
 }
 
@@ -127,7 +132,7 @@ func dbGetSessionMetadata(db *sql.DB, id string) (*ComputerSession, error) {
 		       recording_status, opened_at, closed_at, updated_at,
 		       NULL, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-		       environment_json, proxy_bytes, usage_status, usage_measured_at
+		       environment_json, proxy_bytes, usage_status, usage_measured_at, target_json, capabilities_json, project_id
 		FROM computer_sessions WHERE id=?`, id))
 }
 
@@ -167,7 +172,7 @@ func dbListSessionsPageFiltered(db *sql.DB, limit, offset int, endedOnly bool) (
 		       recording_status, opened_at, closed_at, updated_at,
 		       NULL, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-		       environment_json, proxy_bytes, usage_status, usage_measured_at
+		       environment_json, proxy_bytes, usage_status, usage_measured_at, target_json, capabilities_json, project_id
 		FROM computer_sessions
 		`+where+`
 		ORDER BY opened_at DESC, id DESC
@@ -196,6 +201,7 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 	row := &ComputerSession{}
 	var appContextID, contextName, initialURL, currentURL, closeReason, environmentJSON, usageMeasuredAt sql.NullString
 	var proxyBytes sql.NullInt64
+	var targetJSON, capabilitiesJSON string
 	var closedAt sql.NullString
 	err := scanner.Scan(
 		&row.ID, &row.Backend, &row.BackendSessionID, &appContextID, &contextName,
@@ -204,10 +210,26 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		&row.FinalScreenshot, &row.FinalScreenshotMIME,
 		&row.ProxyMode, &row.ProxyProvider, &row.ProxyProfileID, &row.ProxyProfileName,
 		&row.ProxyCountry, &row.ProxyStickyScope, &environmentJSON,
-		&proxyBytes, &row.UsageStatus, &usageMeasuredAt,
+		&proxyBytes, &row.UsageStatus, &usageMeasuredAt, &targetJSON, &capabilitiesJSON, &row.ProjectID,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if targetJSON != "" {
+		if err := json.Unmarshal([]byte(targetJSON), &row.Target); err != nil {
+			return nil, err
+		}
+	}
+	if capabilitiesJSON != "" {
+		if err := json.Unmarshal([]byte(capabilitiesJSON), &row.Capabilities); err != nil {
+			return nil, err
+		}
+	}
+	if row.Capabilities.TargetKind == "" {
+		row.Capabilities = capabilitiesFor(row.Backend, nil)
+	}
+	if row.Target == nil {
+		row.Target = &api.SessionTarget{Kind: row.Capabilities.TargetKind}
 	}
 	row.AppContextID = appContextID.String
 	row.ContextName = contextName.String

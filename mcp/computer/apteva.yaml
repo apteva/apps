@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.100
+version: 0.8.0
 description: |
+  v0.8.0 adds physical Mobile sessions through the existing session tools.
+  Mobile startup retries preparation within a bounded window
+  and reports explicit user authorization/setup states without replaying input.
+  Browser and physical mobile sessions share browser_session, computer_use,
+  saved target contexts and explicit backend capabilities. Mobile contexts
+  reuse shared device data without isolated profiles or snapshot restore.
   v0.7.100 fixes upload preparation on hosted workers without a user cache.
   Staging defaults to the app's private data directory unless an operator
   sets APTEVA_UPLOAD_STAGING_DIR. Standalone sessions use the OS user cache.
@@ -38,6 +44,9 @@ requires:
     - net.egress
     - platform.connections.read_credentials
     - platform.connections.execute
+    - platform.apps.call
+  apps:
+    - { name: mobile, version: ">=0.3.2", optional: true, reason: Physical device sessions through the Mobile app. }
   integrations:
     - role: browserbase
       kind: integration
@@ -64,7 +73,12 @@ provides:
   mcp_tools:
     - name: browser_session
       description: |
-        Open a fresh app-owned browser session, inspect it, close it, or switch
+        Open browser or Mobile sessions through the same lifecycle. Use
+        backend=mobile with device_id or target (kind, device_id, platform,
+        physical, mode, app_id). Saved Mobile contexts bind the exact device
+        and calling project. Mobile leases accept timeout=30..3600 seconds
+        (default 900) and renew during use. Consult returned capabilities.
+        For browser targets, open a fresh session, inspect it, close it, or switch
         its tabs. For ordinary browsing, pass only action=open plus url or
         context_id/context_name, for example
         {"action":"open","url":"https://example.com"}. Omit every other
@@ -120,7 +134,11 @@ provides:
         proxy_mode=direct to explicitly disable proxies.
     - name: computer_use
       description: |
-        Drive an app-owned browser session. Default workflow: call
+        Drive an app-owned session. Mobile uses screenshots and pixel
+        coordinates, swipe with to_x/to_y, home, key=home|enter (Android also
+        back), launch_app/stop_app with app_id, type, scroll and navigate.
+        Mobile does not expose browser DOM or semantic guards; inspect session
+        capabilities and omit semantic target arguments. Browser workflow: call
         action=screenshot first; screenshots contain Set-of-Mark numeric
         badges on interactive elements. To click, use action=click with
         label=N from the latest screenshot. label must be >= 1; do not
@@ -536,7 +554,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.7.100
+    ref: computer/v0.8.0
     entry: mcp/computer
   port: 8080
   health_check: /health

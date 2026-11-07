@@ -55,3 +55,61 @@ test("history is requested only when opened and pages on demand",async()=>{
  expect(requests).toEqual(["active","history","history"]);
  expect(root!.root.findAll(n=>n.props.row?.session_id==="past-1").length).toBeGreaterThan(0);
 });
+
+test("mobile capabilities expose Home and disable unsupported keyboard controls",async()=>{
+ const phone={...row("phone"),backend:"mobile",current_url:"",width:400,height:800,
+  target:{kind:"mobile",device_id:"iphone-test"},
+  capabilities:{target_kind:"mobile",actions:["screenshot","click","type","key","scroll","wait","home","launch_app","stop_app"],keys:["home","enter"],observations:["screenshot"],context:{reuse:true,persistence:true,isolation:false,snapshot_restore:false}}};
+ install("",async()=>Response.json({sessions:[phone]}));
+ await act(async()=>{root=create(<ComputerPanel projectId="one"/>)});
+ const byTitle=(title:string)=>root!.root.findAll(n=>n.type==="button"&&n.props.title===title)[0];
+ expect(byTitle("Home")).toBeDefined();
+ expect(byTitle("Backspace").props.disabled).toBe(true);
+ expect(byTitle("Delete").props.disabled).toBe(true);
+ expect(root!.root.findAll(n=>n.type==="input"&&n.props["aria-label"]==="App ID")).toHaveLength(1);
+});
+
+test("opening a Mobile context sends a device binding without browser defaults",async()=>{
+ install("",async()=>Response.json({sessions:[]}));
+ let submitted:any;
+ const baseFetch=globalThis.fetch;
+ globalThis.fetch=(async(input:any,init:any)=>{
+  if(init?.method==="POST"&&String(input).split("?")[0].endsWith("/sessions")){
+   submitted=JSON.parse(init.body);return Response.json({session_id:"phone"});
+  }
+  return baseFetch(input,init);
+ }) as typeof fetch;
+ await act(async()=>{root=create(<ComputerPanel projectId="one"/>)});
+ const open=root!.root.findAll(n=>n.type==="button"&&n.props.title==="Open browser")[0];
+ // Use the sidebar's open action; its visible title remains compatible.
+ const opener=open??root!.root.findAll(n=>n.type==="button"&&n.props.onClick&&String(n.props.children).includes("Open"))[0];
+ expect(opener).toBeDefined();
+ await act(async()=>opener.props.onClick());
+ const modal=root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="OpenSessionModal")[0];
+ expect(modal).toBeDefined();
+ const backend=modal.findAll(n=>n.type==="select")[0];
+ await act(async()=>backend.props.onChange({target:{value:"mobile"}}));
+ const device=modal.findAll(n=>n.type==="input"&&n.props["aria-label"]==="Device ID")[0];
+ await act(async()=>device.props.onChange({target:{value:"iphone-test"}}));
+ await act(async()=>modal.findAll(n=>n.type==="button"&&n.props.title==="Open session")[0].props.onClick());
+ expect(submitted.target).toEqual({kind:"mobile",device_id:"iphone-test"});
+ expect(submitted.viewport).toBeUndefined();
+ expect(submitted.persist).toBeUndefined();
+ expect(submitted.proxy_mode).toBeUndefined();
+});
+
+test("Mobile startup authorization explains the required action without opening a session",async()=>{
+ install("",async()=>Response.json({sessions:[]}));
+ const baseFetch=globalThis.fetch;
+ globalThis.fetch=(async(input:any,init:any)=>{
+  if(init?.method==="POST"&&String(input).split("?")[0].endsWith("/sessions"))return Response.json({success:false,status:"needs_user_action",error:"Mobile needs authorization on the iPhone.",next_step:"Complete the XCTest passcode prompt directly on the phone, then retry."});
+  return baseFetch(input,init);
+ }) as typeof fetch;
+ await act(async()=>{root=create(<ComputerPanel projectId="one"/>)});
+ const opener=root!.root.findAll(n=>n.type==="button"&&n.props.onClick&&String(n.props.children).includes("Open"))[0];
+ await act(async()=>opener.props.onClick());
+ const modal=root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="OpenSessionModal")[0];
+ await act(async()=>modal.findAll(n=>n.type==="button"&&n.props.title==="Open session")[0].props.onClick());
+ expect(modal.findAll(n=>n.type==="div"&&typeof n.props.children==="string"&&n.props.children.includes("Complete the XCTest passcode prompt directly on the phone")).length).toBeGreaterThan(0);
+ expect(root!.root.findAll(n=>typeof n.type==="function"&&n.type.name==="OpenSessionModal")).toHaveLength(1);
+});

@@ -44,6 +44,12 @@ func (a *App) resolveSessionProxy(ctx *sdk.AppCtx, args map[string]any, backend 
 		return resolvedProxyPolicy{}, err
 	}
 
+	if backend == "mobile" {
+		if settings.LockProxyPolicy && settings.DefaultProxyMode != "auto" && settings.DefaultProxyMode != "direct" {
+			return resolvedProxyPolicy{}, fmt.Errorf("mobile cannot satisfy the locked browser proxy policy")
+		}
+		return resolvedProxyPolicy{State: SessionProxyState{Mode: "device"}}, nil
+	}
 	mode := normalizeProxyMode(stringArg(args, "proxy_mode"))
 	profileRef := strings.TrimSpace(stringArg(args, "proxy_profile"))
 	country := strings.ToUpper(strings.TrimSpace(stringArg(args, "proxy_country")))

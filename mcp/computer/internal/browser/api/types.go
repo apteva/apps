@@ -13,6 +13,9 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
+	ToX          int             `json:"to_x,omitempty"`
+	ToY          int             `json:"to_y,omitempty"`
+	AppID        string          `json:"app_id,omitempty"`
 	Type         string          `json:"type"`                    // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "wait_for", "wait_for_stable", "select_option", "set_checked", "set_temporal", "set_text"
 	X            int             `json:"x,omitempty"`             // click/scroll coordinate
 	Y            int             `json:"y,omitempty"`             // click/scroll coordinate
