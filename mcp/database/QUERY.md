@@ -1,6 +1,8 @@
-# Composable read queries
+# Pipeline stages and legacy query compatibility
 
-Available in Database 0.13.0. `db_query` (MCP) and
+Introduced in Database 0.13.0. New callers should use `find` or `aggregate` with
+`pipeline: {version: 1, nodes, from}`; see [READS.md](READS.md). The standalone
+query operation described here remains a compatibility API. `db_query` (MCP) and
 `POST /operations/query` (trusted admin HTTP) execute a typed graph of relations
 on one read snapshot in one database. The operation requires `database.read`,
 including a read app grant when a calling app uses `scope: "project"`.

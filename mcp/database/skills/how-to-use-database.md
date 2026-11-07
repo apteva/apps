@@ -1,6 +1,6 @@
 # Database app
 
-Use this app for local structured data shared through a portable record contract. First discover databases with `db_databases_list`, then collections with `db_collections_list` and their schema with `db_collection_describe`. Every data call selects a `database` (default: `default`) and a `collection`. Several databases and collections are supported. SQLite and Pebble use the same arguments.
+Use this app for local structured data shared through a portable record contract. First discover databases with `db_databases_list`, then collections with `db_collections_list` and their schema with `db_collection_describe`. Data calls select a `database` (default: `default`) and stored `collection`, or an optional named pipeline for `find`/`aggregate`. The canonical record operations are `get`, `find`, `insert`, `update`, `upsert`, `delete`, `count`, `aggregate` and `batch`. Several databases and collections are supported. SQLite, Pebble and AptevaDB use the same arguments.
 
 Create the database and explicit collection schema before writing. Undeclared fields are rejected. Integers are decimal strings, booleans are JSON booleans, and datetimes are RFC3339 with at most microsecond precision. Nullable fields may be omitted or null. Primary keys default to generated UUID `id` values; read the schema for custom/composite keys.
 
@@ -20,9 +20,9 @@ Use `db_insert` with a records array; `db_upsert` uses primary keys or a named u
 
 `db_batch` atomically executes record writes across collections in the same database using `operations:[{op,args}]`. It cannot span databases or run schema operations. Do not automatically retry writes after an uncertain network response: request-id deduplication is not implemented yet. Resolve state first with a known key or unique index. A batch of only reads (`get`, `find`, `count`, `aggregate`) instead answers every operation from one consistent snapshot and needs only read access; use it when several dashboard numbers must agree with each other. Reads and writes cannot mix in one batch. `timeoutMs` applies to read batches. Several aggregates over the same collection, filter and `groupBy` should be one aggregate with a `where` on each metric (for example answered and missed calls as two filtered `count` metrics): it reads the records once. Never derive a global distinct count by summing per-group distinct counts; request it as its own `count_distinct` without `groupBy`.
 
-Calling apps have private database namespaces; project-owned databases are separate. When the user wants an app (for example GraphQL) to use a project database, grant it explicitly with `db_access_grant` (`database`, `app` name, `access: "read"|"write"`); the app then passes `scope:"project"`. Grant only what the user asked for, prefer read, and remove it with `db_access_revoke`; `db_access_list` shows current grants. Apps never manage project schema or realtime capture. Cross-project access, cloud adapters, joins, raw SQL, schema alteration and backups are not available in this version. Large Pebble scans and synchronous index builds have explicit work limits (AptevaDB builds indexes on up to 1,000,000 existing records; SQLite and Pebble on 10,000); prefer indexed queries and create indexes before large imports.
+Calling apps have private database namespaces; project-owned databases are separate. When the user wants an app (for example GraphQL) to use a project database, grant it explicitly with `db_access_grant` (`database`, `app` name, `access: "read"|"write"`); the app then passes `scope:"project"`. Grant only what the user asked for, prefer read, and remove it with `db_access_revoke`; `db_access_list` shows current grants. Apps never manage project schema or realtime capture. Cross-project access, cloud adapters, raw SQL, schema alteration and backups are not available in this version. Large Pebble scans and synchronous index builds have explicit work limits (AptevaDB builds indexes on up to 1,000,000 existing records; SQLite and Pebble on 10,000); prefer indexed queries and create indexes before large imports.
 
-Choose `adapter: "aptevadb"` when creating a new database to use experimental embedded AptevaDB v0.2.0-alpha.15. SQLite remains the default; Pebble is also supported. All share the same typed records, indexes, aggregates and atomic batches. An existing database’s adapter cannot be changed in place.
+Choose `adapter: "aptevadb"` when creating a new database to use experimental embedded AptevaDB v0.2.0-alpha.18. SQLite remains the default; Pebble is also supported. All share the same typed records, indexes, aggregates and atomic batches. An existing database’s adapter cannot be changed in place.
 
 AptevaDB writes stay synchronous. The app's `aptevadb_sync_mode` configuration (or `DATABASE_APTEVADB_SYNC_MODE`) accepts `full` (default), `barrier`, or `os`. On macOS, OS uses ordinary fsync like SQLite's default; OS/barrier provide weaker power-loss protection. Restart/remount after changing it. Read the active mode with `db_explain`.
 
@@ -33,19 +33,35 @@ For AptevaDB realtime updates, inspect `db_realtime_describe`. A database manage
 Use `joined_page` to page joined rows at a chosen grain, `joined_aggregate` for metrics over them, and `related_read` for parents with a bounded list of related rows. Every join needs an index on a related field. Database applies only the filters you pass, so include access and same-centre conditions yourself, such as an extra `{local:"root.centre",foreign:"centre"}` pair. See the README's "Relational reads".
 
 
-## Dependent calculations in one snapshot
+## Dependent calculations and related records
 
-Use `db_query` for a calculation whose aggregate output must feed another join,
-calculation or aggregate. It is read-only and uses the same database read grant
-as `db_aggregate`. Supply `version: 1`, named `nodes` and `result: {from: name}`.
-The node kinds are `scan`, `compute`, `join` and `aggregate`; joins reference a
-named `relation`, and all dependencies run on one snapshot. See `QUERY.md` for
-the full contract and `testdata/dependent-aggregation.json` for an example.
+Use `db_aggregate` for every summary, including joined or dependent calculations.
+An ordinary request uses collection/where/groupBy/metrics. Relational requests
+also accept joins, computed, filter, distinct, pick, branches and rollup, with
+alias.field references. Optional lookups and timezone buckets enrich the final
+input before grouping. Conditional metric filters, exact distinct counts and
+explicit rounding retain their semantics.
 
-Put every caller-derived eligibility/tenant filter on the relevant scan. Keep
-rate-calculation periods separate from display filters on the valued rows.
-Use `cardinality: many_to_one` when joining a grouped rate back to facts so
-unexpected duplicate keys fail instead of multiplying amounts. Keep money as
-integer cents and specify rounding before the intended aggregation stage.
-Limits fail the whole query; neither intermediate relations nor results are
-silently truncated. Return large relations through the existing page APIs.
+For dependent work, supply `pipeline: {version: 1, nodes: [...], from: name}`.
+Nodes are named scan, compute, join or aggregate stages. Top-level groupBy and
+metrics perform the final aggregation over the selected relation. Use
+`db_find` with the same pipeline for calculated records, adding where/select/
+orderBy/limit/cursor and optional count:true. Put scans and calculations inside
+the pipeline rather than mixing a collection or relational shorthand beside it.
+See READS.md and testdata/dependent-aggregate.json for the complete contract and
+an example that joins period rates back to individual sales before summing.
+
+Use `db_find` with joins/computed/distinct/pick/group for joined paging, or with
+relation and match for bounded related records. `match` only tests related rows
+kept after their ordering and limit. Ordinary finds keep plain record fields;
+explicit joins use alias.field names. Legacy db_query, db_joined_aggregate,
+db_joined_page and db_related_read remain compatibility aliases; use the core
+verbs in new integrations.
+
+Put caller-derived eligibility/tenant filters on every independent scan. Keep
+rate-calculation periods separate from display filters on valued sales. Use
+cardinality: many_to_one when joining a rate to facts so duplicate keys fail.
+Keep money in checked integer cents and round at the intended stage. Intermediate
+budget exhaustion fails the whole read. Final aggregate limits only group output,
+never metric inputs; never sum one limited output page to infer a global total.
+Read-only batches of canonical operations share a snapshot and need read access.

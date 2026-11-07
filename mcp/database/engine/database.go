@@ -319,7 +319,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if isAccessOp(op) {
 		return m.accessOperation(ctx, scope, op, r)
 	}
-	d, release, e := m.acquireDatabase(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default" && op != "query")
+	d, release, e := m.acquireDatabase(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default" && op != "query" && r.Pipeline == nil)
 	if e != nil {
 		return nil, e
 	}
@@ -439,7 +439,7 @@ func batchReads(r Request) (bool, error) {
 // QueryKind names the work an operation does: a batch of only reads is a
 // "read_batch", with read permissions and query deadlines.
 func QueryKind(op string, r Request) string {
-	if op == "query" || isRelationalRead(op) {
+	if op == "query" || isRelationalRead(op) || (op == "find" || op == "aggregate") && (r.Pipeline != nil || hasRelationalInput(r) || r.Relation != nil) {
 		return "read_batch"
 	}
 	if op == "batch" {
@@ -500,6 +500,16 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			out = append(out, v)
 		}
 		return map[string]any{"results": out, "affected": total}, nil
+	}
+	if op == "find" || op == "aggregate" {
+		planned, e := planCoreRead(op, r)
+		if e != nil {
+			return nil, e
+		}
+		if r.Pipeline != nil {
+			return executePipelineRead(tx, op, r, cursorKey)
+		}
+		op = planned
 	}
 	if op == "query" {
 		return executeQuery(tx, r)
@@ -618,16 +628,29 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 			q.Where = and(q.Where, after)
 		}
-		rows, e := tx.find(c, q, q.Limit+1)
+		rows, e := tx.find(c, q, r.Offset+q.Limit+1)
 		if e == nil {
 			e = exists.failure()
 		}
 		if e != nil {
 			return nil, e
 		}
+		if r.Offset > 0 {
+			rows = rows[min(r.Offset, len(rows)):]
+		}
 		out, e := page(c, r.Query, rows, cursorKey)
-		if e != nil || r.analytics == nil {
-			return out, e
+		if e != nil {
+			return nil, e
+		}
+		if r.Count {
+			v, e := execute(tx, "count", Request{Collection: r.Collection, Query: Query{Where: r.Where, RequireIndex: r.RequireIndex}}, cursorKey)
+			if e != nil {
+				return nil, e
+			}
+			out.(map[string]any)["total"] = v.(map[string]any)["count"]
+		}
+		if r.analytics == nil {
+			return out, nil
 		}
 		records := out.(map[string]any)["records"].([]Record)
 		if e := r.analytics.attach(records); e != nil {
@@ -658,6 +681,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e != nil {
 			return nil, e
 		}
+		if e := validateDerived(outSchema, r.Derived); e != nil {
+			return nil, e
+		}
 		if r.analytics != nil {
 			r.analytics.finish(c, r)
 		}
@@ -681,14 +707,8 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 			return out, nil
 		}
-		if len(marshal(rows)) > MaxBytes {
-			return nil, fail("resource_limit", "aggregate response exceeds 4 MiB")
-		}
-		more := len(rows) > r.Limit
-		if more {
-			rows = rows[:r.Limit]
-		}
-		return map[string]any{"rows": rows, "truncated": more}, nil
+		return finishAggregate(rows, r.Limit, r.Derived)
+
 	case "insert", "upsert", "update", "delete":
 		return mutate(tx, c, op, r)
 	case opRelatedRead:

@@ -388,7 +388,7 @@ func (b bucketPlan) key(v any) any {
 			if b.at(start.Add(time.Hour-time.Microsecond)) == k {
 				cached = k
 			}
-			if len(b.hours) < 1<<16 {
+			if b.hours != nil && len(b.hours) < 1<<16 {
 				b.hours[hour] = cached
 			}
 			if cached == k {

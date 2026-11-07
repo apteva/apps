@@ -178,6 +178,8 @@ type relBudget struct {
 // relContext is the deadline of the transaction's request.
 func relContext(tx transaction) context.Context {
 	switch t := tx.(type) {
+	case pipelineSchemaTx:
+		return relContext(t.transaction)
 	case cachedSchemaTx:
 		return relContext(t.transaction)
 	case *sqliteTx:
@@ -1712,6 +1714,20 @@ func executeJoinedAggregate(tx transaction, c Collection, r Request) (any, error
 	} else {
 		base.use(r.GroupBy, r.Metrics)
 	}
+	var enriched *relationAnalytics
+	if len(r.Lookups) > 0 || len(r.Buckets) > 0 {
+		for _, f := range base.view.Fields {
+			base.use(nil, []Metric{{Name: "input", Op: "min", Field: f.Name}})
+		}
+		var err error
+		enriched, err = prepareRelationAnalytics(tx, view, r)
+		if err != nil {
+			return nil, err
+		}
+		view = enriched.view
+		prior := stream
+		stream = func(yield func(Record) (bool, error)) error { return enriched.stream(prior, yield, budget) }
+	}
 	base.finish()
 	if e := noExistsInMetrics(r.Metrics); e != nil {
 		return nil, e
@@ -1722,44 +1738,15 @@ func executeJoinedAggregate(tx transaction, c Collection, r Request) (any, error
 	if e != nil {
 		return nil, e
 	}
-	derivedNames := map[string]bool{}
-	for _, d := range r.Derived {
-		if e := nameOK(d.Name); e != nil {
-			return nil, e
-		}
-		if d.Op != "divide" {
-			return nil, Invalid("unknown derived op %s", d.Op)
-		}
-		if _, e := outSchema.field(d.Name); e == nil || derivedNames[d.Name] {
-			return nil, Invalid("%s is already a result name", d.Name)
-		}
-		derivedNames[d.Name] = true
-		for _, name := range []string{d.Numerator, d.Denominator} {
-			if _, e := outSchema.field(name); e != nil {
-				return nil, Invalid("derived %s reads %s, which is not a group key or metric", d.Name, name)
-			}
-		}
-		if d.Round != nil && (*d.Round < 0 || *d.Round > 12) {
-			return nil, Invalid("round must be 0–12")
-		}
+	if e := validateDerived(outSchema, r.Derived); e != nil {
+		return nil, e
 	}
+
 	rows, e := relRunAggregate(budget, view, input, outSchema, stream)
 	if e != nil {
 		return nil, e
 	}
-	for _, row := range rows {
-		for _, d := range r.Derived {
-			row[d.Name] = relDivide(row[d.Numerator], row[d.Denominator], d.Round)
-		}
-	}
-	if len(marshal(rows)) > MaxBytes {
-		return nil, fail("resource_limit", "aggregate response exceeds 4 MiB")
-	}
-	more := len(rows) > input.Limit
-	if more {
-		rows = rows[:input.Limit]
-	}
-	return map[string]any{"rows": rows, "truncated": more}, nil
+	return finishAggregate(rows, input.Limit, r.Derived, budget.retain)
 }
 
 // executeRelatedRead selects each parent's related rows in a fixed order, takes
@@ -2249,4 +2236,29 @@ func (j *relJoinPlan) aggregate(tx transaction, budget *relBudget, row Record) (
 	}
 	j.aggMemo[key] = out[0]
 	return out[0], nil
+}
+
+func validateDerived(outSchema Collection, derived []RelDerived) error {
+	derivedNames := map[string]bool{}
+	for _, d := range derived {
+		if e := nameOK(d.Name); e != nil {
+			return e
+		}
+		if d.Op != "divide" {
+			return Invalid("unknown derived op %s", d.Op)
+		}
+		if _, e := outSchema.field(d.Name); e == nil || derivedNames[d.Name] {
+			return Invalid("%s is already a result name", d.Name)
+		}
+		derivedNames[d.Name] = true
+		for _, name := range []string{d.Numerator, d.Denominator} {
+			if _, e := outSchema.field(name); e != nil {
+				return Invalid("derived %s reads %s, which is not a group key or metric", d.Name, name)
+			}
+		}
+		if d.Round != nil && (*d.Round < 0 || *d.Round > 12) {
+			return Invalid("round must be 0–12")
+		}
+	}
+	return nil
 }

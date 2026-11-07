@@ -24,7 +24,7 @@ provides:
     - {name: database.write, resource: database, description: Insert and modify records.}
     - {name: database.manage, resource: database, description: "Create and delete databases, collections and indexes."}
   mcp_tools:
-    - {name: db_query, description: "Execute named scan, compute, join and aggregate relations in one bounded read snapshot.", read_only: true}
+    - {name: db_query, description: "Compatibility alias. Use db_aggregate or db_find with pipeline for named calculations.", read_only: true}
     - {name: db_realtime_configure, description: Enable or disable native realtime capture.}
     - {name: db_realtime_describe, description: Inspect realtime support and usage.}
     - {name: db_changes, description: Wait for resumable collection invalidations.}
@@ -40,16 +40,16 @@ provides:
     - {name: db_index_create, description: Create an ordered compound or unique index.}
     - {name: db_index_drop, description: Delete a secondary index.}
     - {name: db_get, description: Get a record by primary key.}
-    - {name: db_find, description: "Filter, order, project and paginate records, optionally nesting looked-up records."}
+    - {name: db_find, description: "Read records with filters, joins, related records or a pipeline; sort, project and paginate."}
     - {name: db_insert, description: Atomically insert records.}
     - {name: db_update, description: Atomically patch matching records.}
     - {name: db_delete, description: Atomically delete matching records.}
     - {name: db_upsert, description: Atomically insert or patch by a unique key.}
     - {name: db_count, description: Count matching records exactly.}
-    - {name: db_aggregate, description: "Group records and compute count, distinct count, sum, avg, min and max, with per-metric filters, lookups and timezone date buckets."}
-    - {name: db_related_read, description: "Read parents with ordered, bounded related rows; match tests only the rows kept."}
-    - {name: db_joined_page, description: "Join through indexes, deduplicate, group, and count and page at that grain."}
-    - {name: db_joined_aggregate, description: "Aggregate joined, deduplicated rows, with first or latest record per key and safe division."}
+    - {name: db_aggregate, description: "Aggregate stored or joined records and dependent pipelines with exact numeric expressions."}
+    - {name: db_related_read, description: "Compatibility alias. Use db_find with relation and match."}
+    - {name: db_joined_page, description: "Compatibility alias. Use db_find with joins, distinct, pick or group."}
+    - {name: db_joined_aggregate, description: "Compatibility alias. Use db_aggregate with relational input or pipeline."}
     - {name: db_batch, description: "Atomic writes, or reads from one snapshot, within one database."}
     - {name: db_explain, description: Inspect query index use and sorting.}
     - {name: db_access_grant, description: Let a calling app use a project database.}
