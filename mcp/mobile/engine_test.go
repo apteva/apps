@@ -264,7 +264,7 @@ func TestCleanupFailureKeepsDeviceReserved(t *testing.T) {
 }
 func TestUnknownAppiumCreationRequiresExplicitRecovery(t *testing.T) {
 	e, b := fixture(t)
-	e.drivers.cfg.DevicesJSON = `[{"id":"ios","platform":"ios","udid":"iphone","physical":true}]`
+	e.drivers.cfg.DevicesJSON = `[{"id":"ios","platform":"ios","udid":"iphone","physical":true,"driver":"appium"}]`
 	e.drivers.cfg.AppiumURL = "http://127.0.0.1:4723"
 	b.openErr = context.DeadlineExceeded
 	if _, err := e.open(context.Background(), "p", map[string]any{"device_id": "ios"}); err == nil {

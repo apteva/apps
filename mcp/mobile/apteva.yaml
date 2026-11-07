@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: mobile
 display_name: Mobile
-version: 0.3.0
+version: 0.3.1
 description: |
   Operate physical Android and iOS devices through exclusive sessions.
   Navigate websites, install and launch apps, inspect screens and UI trees,
@@ -51,6 +51,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: mobile_setup, description: "Inspect and complete native iPhone signing setup. Args: action? (status|select_team|open_xcode), team_id?; no existing certificate is needed. Apple sign-in, phone trust and Developer Mode require operator interaction." }
     - { name: mobile_devices, description: "List discovered/configured devices and host setup diagnostics. Args: platform?, physical?." }
     - { name: mobile_session, description: "Open, list, get, renew or close an exclusive device session. Recover releases an unknown Appium creation outcome after manual cleanup and confirm=true. Args: action, device_id? or platform?, physical?, session_id?, ttl_seconds?, mode? (screen|structured), confirm?. Close preserves app data." }
     - { name: mobile_observe, description: "Inspect a session. Returns screenshot image content and optional UI source. Args: session_id, source? (default false)." }
@@ -92,7 +93,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: mobile/v0.3.0
+    ref: mobile/v0.3.1
     entry: mcp/mobile
   port: 8080
   health_check: /health
@@ -109,7 +110,7 @@ config_schema:
   - { name: devices_json, type: text, label: Device inventory JSON, description: 'Optional array: [{"id":"iphone","name":"Test iPhone","platform":"ios","udid":"...","browser":"Safari","physical":true}]. Required for devices attached to a separate Appium host. Add "capture_id" if USB capture lists the device under a different ID than its UDID.' }
   - { name: android_driver, type: text, default: adb, label: Android driver, description: "adb for screen input; appium for structured native/browser automation." }
   - { name: ios_driver, type: text, default: native, label: iOS driver, description: "native: Mobile controls iPhones, iPads and booted Simulators itself through Xcode on this Mac (a small signed test runner is built and installed automatically). appium: use appium_url and devices_json instead." }
-  - { name: ios_team_id, type: text, label: Apple team ID, description: "10-character team that signs the native iOS runner for physical devices. Empty uses the team of the Apple Development certificate in this Mac's keychain (sign in under Xcode > Settings > Accounts; a free Apple ID works)." }
+  - { name: ios_team_id, type: text, label: Apple team ID (advanced), description: "Optional 10-character signing team override. Mobile discovers teams from Xcode even before a certificate exists; choose between multiple teams in Mobile > Setup. Sign into Xcode once; certificates and profiles are created automatically." }
   - { name: artifact_dir, type: text, label: Install artifact directory, description: "Runner-local directory containing APK/IPA files. Defaults to the Mobile data directory's uploads subdirectory." }
   - { name: export_presets_json, type: text, label: Export presets JSON, description: 'Optional array of extra export presets, e.g. [{"name":"store_landscape","container":"mp4","video_codec":"h264","sizes":{"tv":{"w":1080,"h":1920}},"orientations":["landscape"],"max_fps":30,"max_seconds":30,"video_bitrate_kbps":11000,"audio":"aac"}]. Same fields as the built-in presets listed by mobile_record(action=presets).' }
   - { name: lock_dir, type: text, label: Shared device lock directory, description: "All local Mobile processes controlling the same devices must share this directory. Defaults to ~/.apteva/mobile-locks." }

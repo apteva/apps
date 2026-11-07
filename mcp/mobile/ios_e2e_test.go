@@ -30,6 +30,14 @@ func TestNativeIOSEndToEnd(t *testing.T) {
 	call := func(tool string, args map[string]any) map[string]any {
 		t.Helper()
 		v, err := e.Execute(ctx, "p1", tool, args)
+		for errorCode(err) == "setup_in_progress" && ctx.Err() == nil {
+			select {
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-time.After(3 * time.Second):
+			}
+			v, err = e.Execute(ctx, "p1", tool, args)
+		}
 		if err != nil {
 			t.Fatalf("%s %v: %v", tool, args, err)
 		}
@@ -39,8 +47,9 @@ func TestNativeIOSEndToEnd(t *testing.T) {
 	listed := call("mobile_devices", map[string]any{"platform": "ios"})
 	devices, _ := listed["devices"].([]Device)
 	var sim Device
+	target := os.Getenv("MOBILE_IOS_E2E_DEVICE")
 	for _, v := range devices {
-		if strings.HasPrefix(v.ID, "ios-sim:") && v.State == "ready" {
+		if strings.HasPrefix(v.ID, "ios-sim:") && v.State == "ready" && (target == "" || target == v.UDID) {
 			sim = v
 			break
 		}

@@ -26,7 +26,7 @@ func TestADBDiscoveryAndAuthorization(t *testing.T) {
 	}
 }
 func TestConfiguredDevicesAndDuplicateIDs(t *testing.T) {
-	d := newDrivers(runnerConfig{DevicesJSON: `[{"id":"iphone","platform":"ios","udid":"ios-1","physical":true}]`})
+	d := newDrivers(runnerConfig{IOSDriver: "appium", DevicesJSON: `[{"id":"iphone","platform":"ios","udid":"ios-1","physical":true}]`})
 	d.command = func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("no adb") }
 	devices, _, err := d.devices(context.Background())
 	if err != nil || len(devices) != 1 || devices[0].State != "setup_required" {

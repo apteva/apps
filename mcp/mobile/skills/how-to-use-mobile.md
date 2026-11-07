@@ -14,7 +14,13 @@
    Mac) support tap_element with using=accessibility id or id, Unicode text,
    home and enter; iOS has no Back key, so tap the app's back button.
    The first native iOS session builds and installs a test runner; if open
-   returns setup_in_progress, wait a minute and open again.
+   returns setup_in_progress, retry after a few seconds. The panel and smoke
+   tests wait automatically. For signing setup_required, call mobile_setup:
+   status discovers Xcode teams without an existing certificate; select_team
+   chooses a discovered team; open_xcode opens Xcode for Apple sign-in. Ask
+   operators only for Apple sign-in/2FA, team choice when ambiguous, phone trust,
+   Developer Mode and developer trust if iOS asks. Do not ask them to create
+   certificates or provisioning profiles manually.
    ADB supports printable ASCII text excluding percent signs; use Appium for Unicode.
 6. `mobile_app` installs runner-local APK/IPA artifacts, launches/stops apps by
    package/bundle ID, and uninstalls only with confirm=true. Mobile does not build
