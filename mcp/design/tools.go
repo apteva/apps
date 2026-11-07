@@ -28,6 +28,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		"lip_thickness_mm": numberSchema(.05, 8), "opening_clearance_mm": numberSchema(.05, 5),
 	}}
 	return []sdk.Tool{
+		{Name: "design_verification_record", Description: "Attach a physical fit or enclosed thermal test result to the exact tested revision and source hash, without mutating CAD source. Requires evidence URL and notes describing actual results.", InputSchema: schemaObject(map[string]any{"revision_id": id, "source_sha256": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"physical_fit", "enclosed_thermal"}}, "status": map[string]any{"type": "string", "enum": []string{"pass", "fail"}}, "evidence_url": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}}, []string{"revision_id", "source_sha256", "kind", "status", "evidence_url"}), HandlerCtx: a.toolVerificationRecord},
+		{Name: "design_step_import", Description: "Import immutable manufacturer STEP with XDE names/placements and evidence. Returns a purchased component design. Use HTTP multipart for large files.", InputSchema: schemaObject(map[string]any{"filename": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "evidence": map[string]any{"type": "object"}}, []string{"filename", "content_base64", "evidence"}), HandlerCtx: a.toolSTEPImport},
+		{Name: "design_measure", Description: "Measure exact B-rep instance/face distances in one immutable revision. Query a/b instance IDs, optional face_a/face_b indices or point_a/point_b world coordinates.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "query": map[string]any{"type": "object"}}, []string{"design_id", "query"}), HandlerCtx: a.toolMeasure},
+		{Name: "design_enclosure_from_assembly", Description: "Create a pinned enclosure from any purchased component assembly without PCB Studio. Options: wall_mm, component_gap_mm, front_mm, rear_mm, lid_fit_mm; display opening, supports, brackets, battery_cradle and cutout boxes in assembly coordinates.", InputSchema: schemaObject(map[string]any{"assembly_design_id": id, "assembly_revision_id": id, "name": map[string]any{"type": "string"}, "options": map[string]any{"type": "object"}}, []string{"assembly_design_id"}), HandlerCtx: a.toolEnclosureFromAssembly},
 		{Name: "design_examples", Description: "Return the operation vocabulary, open-hardware assembly contract, output formats, and complete canonical examples including Open Rover.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolExamples},
 		{Name: "design_pcb_source_status", Description: "Report whether the optional PCB Studio mechanical source is bound and ready for enclosure handoff.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolPCBSourceStatus},
 		{Name: "design_enclosure_from_pcb", Description: "Read a validated apteva-mechanical-envelope/v1 payload from bound PCB Studio and create a linked parametric enclosure with a base, lid, standoffs, fastener bores, panel openings, and source provenance.", InputSchema: schemaObject(map[string]any{
@@ -302,7 +306,25 @@ func (a *App) toolAssemblyCreate(ctx context.Context, app *sdk.AppCtx, args map[
 		if name == "" {
 			name = sourceDesign.Name
 		}
-		definition.Parts = append(definition.Parts, DesignPart{ID: partID, Name: name, Source: &PartSourceReference{
+		var sourceDefinition DesignDefinition
+		_ = json.Unmarshal(revision.Definition, &sourceDefinition)
+		var inherited *DesignPart
+		for i := range sourceDefinition.Parts {
+			p := &sourceDefinition.Parts[i]
+			if p.ID == component.PartID || (component.PartID == "" && len(sourceDefinition.Parts) == 1) {
+				inherited = p
+			}
+		}
+		var manufacturing *PartManufacturing
+		var evidence *ComponentEvidence
+		if inherited == nil && len(sourceDefinition.Parts) > 1 {
+			manufacturing = &PartManufacturing{Classification: "reference"}
+		}
+		if inherited != nil {
+			manufacturing = inherited.Manufacturing
+			evidence = inherited.Evidence
+		}
+		definition.Parts = append(definition.Parts, DesignPart{ID: partID, Name: name, Manufacturing: manufacturing, Evidence: evidence, Source: &PartSourceReference{
 			DesignID: sourceDesign.ID, RevisionID: revision.ID, SourceSHA256: revision.SourceSHA256, PartID: component.PartID,
 		}})
 		definition.Assembly.Instances = append(definition.Assembly.Instances, AssemblyInstance{ID: partID + "_instance", PartID: partID, Transform: component.Transform})

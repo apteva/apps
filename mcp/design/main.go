@@ -43,7 +43,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if dataDir == "" {
 		return errors.New("design requires a persistent app data directory")
 	}
-	timeout := configInt(ctx, "geometry_timeout_seconds", 45, 5, 300)
+	timeout := configInt(ctx, "geometry_timeout_seconds", 300, 5, 300)
 	maxOperations := configInt(ctx, "max_operations", 256, 1, 256)
 	runtimeRoot := filepath.Join(dataDir, "geometry-runtime")
 	engine, err := NewEngine(runtimeRoot, ctx.Config().Get("bun_path"), time.Duration(timeout)*time.Second)
@@ -95,6 +95,10 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/api/verification", Handler: a.handleVerification},
+		{Pattern: "/api/measure", Handler: a.handleMeasure},
+		{Pattern: "/api/assembly-enclosures", Handler: a.handleAssemblyEnclosure},
+		{Pattern: "/api/sources", Handler: a.handleSources},
 		{Pattern: "/api/designs", Handler: a.handleDesigns},
 		{Pattern: "/api/designs/", Handler: a.handleDesign},
 		{Pattern: "/api/revisions/", Handler: a.handleRevision},
