@@ -160,8 +160,15 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Replies use the inbound message's Reply-To/From and receiving identity. Use
   `reply_to_activity_id` for a specific inbound message; do not work around a
   blocked reply route by silently sending to a different address.
-- Both `contacts_send_message` with an email `conversation_id` and
-  `contacts_reply` inherit `Re: <original subject>` for omitted/blank subject,
+- Normal email replies require Messaging v0.15.0+ and use its `send_message`
+  reply mode internally. Messaging derives RFC/Gmail threading, subject and
+  supported ticket identifiers from the selected/latest inbound message.
+  `reply_to_activity_id` also identifies its conversation when `conversation_id`
+  is omitted. Automatic deduplication is scoped to the selected inbound activity.
+  Intentional sender/subject overrides retain regular sends with the selected
+  RFC reference chain; unknown legacy source IDs are never looked up remotely.
+- For legacy activities without a usable Messaging anchor, both
+  `contacts_send_message` with an email `conversation_id` and `contacts_reply` inherit `Re: <original subject>` for omitted/blank subject,
   before dispatch and automatic idempotency. Existing Re: prefixes are not
   duplicated. Nonblank explicit subjects are preserved; if the conversation
   subject is also blank, supply an explicit subject instead of accepting a
