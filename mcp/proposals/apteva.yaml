@@ -1,0 +1,80 @@
+schema: apteva-app/v1
+name: proposals
+display_name: Proposals
+version: 0.1.0
+description: Build interactive client proposals with selectable scope, live pricing, private links, and recorded decisions.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/proposals
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [proposals, sales, quotes, clients]
+scopes: [project]
+requires:
+  permissions: [db.write.app, platform.apps.call]
+  apps:
+    - {name: crm, optional: true, reason: Link an opportunity and sync its accepted value.}
+    - {name: messaging, optional: true, reason: Send private proposal invitations.}
+provides:
+  http_routes:
+    - {prefix: /proposals}
+    - {prefix: /proposals/}
+    - {prefix: /offer/, no_auth: true}
+  resources:
+    - name: proposal
+      label: Proposal
+      list_endpoint: /proposals/resources
+      matcher: id_set
+      picker: list
+  permissions:
+    - {name: proposals.read, resource: proposal, description: Read proposals and decisions.}
+    - {name: proposals.edit, resource: proposal, description: Create and edit proposal drafts.}
+    - {name: proposals.publish, resource: proposal, description: Publish or withdraw proposals.}
+    - {name: proposals.share, resource: proposal, description: Issue private links and send invitations.}
+    - {name: proposals.sync_crm, resource: proposal, description: Update the linked CRM opportunity value.}
+  mcp_tools:
+    - {name: proposals_list, description: List authorized proposals., requires: proposals.read}
+    - {name: proposals_get, description: Read proposal revisions and client decisions., requires: proposals.read, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_create, description: Create a draft proposal., requires: proposals.edit}
+    - {name: proposals_update_draft, description: Replace the draft using its expected version., requires: proposals.edit, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_revise, description: Create a draft based on the latest published revision., requires: proposals.edit, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_preview, description: Validate and price a draft selection without publishing., requires: proposals.read, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_publish, description: Publish the draft and supersede any open revision., requires: proposals.publish, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_withdraw, description: Close the currently published proposal., requires: proposals.publish, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_link_create, description: Get or rotate the private link for a published proposal., requires: proposals.share, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_send, description: Send a real proposal email through Messaging., requires: proposals.share, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_crm_lookup, description: Read an opportunity to populate a draft., requires: proposals.edit}
+    - {name: proposals_crm_sync, description: Set the linked deal value from the accepted quote., requires: proposals.sync_crm, resource_from: 'proposal/{arg.proposal_id}'}
+    - {name: proposals_acceptance_get, description: Read the accepted selection and frozen price., requires: proposals.read, resource_from: 'proposal/{arg.proposal_id}'}
+  publishes:
+    - {name: proposal.published, description: A proposal revision is ready to share.}
+    - {name: proposal.accepted, description: A client accepted a frozen selection and price.}
+    - {name: proposal.declined, description: A client declined the entire proposal.}
+    - {name: proposal.changes_requested, description: A client requested a revision.}
+    - {name: proposal.withdrawn, description: The sender withdrew the live revision.}
+  workers:
+    - {name: proposal-events, schedule: '@every 10s'}
+  ui_panels:
+    - {slot: project.page, label: Proposals, icon: file-text, entry: /ui/ProposalsPanel.mjs}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: proposals/v0.1.0, entry: mcp/proposals}
+  port: 8080
+  health_check: /health
+  storage:
+    - {name: data, mount_path: /data}
+  env:
+    APTEVA_GATEWAY_URL: {from: platform}
+    APTEVA_APP_TOKEN: {from: platform}
+    APTEVA_INSTALL_ID: {from: platform}
+    APTEVA_PROJECT_ID: {from: platform}
+    APTEVA_APP_CONFIG: {from: platform}
+db:
+  driver: sqlite
+  path: /data/proposals.db
+  migrations: migrations/
+config_schema:
+  - name: public_base_url
+    type: text
+    label: Public app URL override
+    description: Optional HTTPS URL ending in /api/apps/proposals. Defaults to the platform public URL.
+upgrade_policy: auto-patch
