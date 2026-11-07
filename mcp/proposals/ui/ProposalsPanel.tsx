@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { proposalLocale } from "./locale";
+import { useConfirmation } from "./confirmation";
 import { BacklogPanel, BacklogPicker, ClientSelector, currencyOptions as currencies, formatMoney as money } from "./backlog";
 
 type Choice = "unselected" | "include" | "later" | "decline";
@@ -154,6 +155,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
   const [busy, setBusy] = useState(false);
   const reminder = useRef("");
   const root = useRef<HTMLDivElement>(null);
+  const {confirm, modal} = useConfirmation();
   const latest = record?.revisions[0];
   const open = record?.revisions.find((r) => r.state === "published");
   const accepted = record?.revisions.find((r) => r.state === "accepted");
@@ -185,11 +187,11 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     reminder.current = "";
     if (nextTab) changeTab(nextTab);
   }
-  function confirmLeave() {
-    return !dirty || window.confirm("Leave this draft and discard your unsaved changes?");
+  async function confirmLeave() {
+    return !dirty || await confirm("Leave this draft and discard your unsaved changes?", "Discard changes", "Unsaved draft");
   }
-  function start(c?: Content) {
-    if (!confirmLeave()) return;
+  async function start(c?: Content) {
+    if (!(await confirmLeave())) return;
     setRecord(null);
     setCreating(true);
     setDraft(c ? editable({...c, client_name: "", client_email: "", client_id: undefined, opportunity_id: undefined,
@@ -202,8 +204,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     setError("");
     changeTab("overview");
   }
-  function back() {
-    if (!confirmLeave()) return;
+  async function back() {
+    if (!(await confirmLeave())) return;
     setRecord(null);
     setCreating(false);
     setURL("");
@@ -222,12 +224,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     });
     return () => { active = false; };
   }, [projectId, installId, eventRevision]);
-  useEffect(() => {
-    if (!dirty) return;
-    const protect = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", protect);
-    return () => window.removeEventListener("beforeunload", protect);
-  }, [dirty]);
+
 
   async function run(action: () => Promise<unknown> | void) {
     setBusy(true);
@@ -274,7 +271,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     catch { setNotice("Your private client link is ready below."); }
   }
   async function email(remind: boolean) {
-    if (!open || !window.confirm((remind ? "Send a reminder" : "Send a proposal invitation") + " to " + open.content.client_email + "?")) return;
+    if (!open || !(await confirm((remind ? "Send a reminder" : "Send a proposal invitation") + " to " + open.content.client_email + "?", remind ? "Send reminder" : "Send invitation", "Email proposal"))) return;
     if (remind) reminder.current ||= crypto.randomUUID();
     await run(async () => {
       const result = await request<{status: string}>("send", {
@@ -302,6 +299,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
 
   return <div className="ap-proposals" ref={root}>
     <style>{styles}</style>
+    {modal}
     {detailVisible && <button type="button" className="pp-back" disabled={busy} onClick={back}>
       <Icon name="back"/> All proposals
     </button>}
@@ -409,10 +407,10 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
             <SectionTitle title="Client" description="Choose a saved client to use their private backlog, or enter details below."/>
             <div className="pp-fields">
               <ClientSelector request={request} selected={draft.client_id ? {id: draft.client_id, name: draft.client_name} : undefined}
-                onChange={(client) => {
+                onChange={async (client) => {
                   if (draft.client_id === client?.id) return;
                   const imported = draft.categories.some((group) => group.items.some((item) => item.backlog_item_id));
-                  if (imported && !window.confirm("Change the client and remove items imported from the previous client’s backlog?")) return;
+                  if (imported && !(await confirm("Change the client and remove items imported from the previous client’s backlog?", "Change client", "Change proposal client"))) return;
                   setDraft({...draft, client_id: client?.id, client_name: client?.name || draft.client_name,
                     client_email: client?.email || "", categories: imported ? draft.categories.map((group) => ({
                       ...group, items: group.items.filter((item) => !item.backlog_item_id),
@@ -475,8 +473,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
           </section>
           {!!accepted?.content.opportunity_id && <section className="pp-card">
             <SectionTitle title="CRM opportunity" description={"Opportunity #" + accepted.content.opportunity_id}/>
-            <button disabled={busy} onClick={() => {
-              if (!window.confirm("Update the value of CRM opportunity #" + accepted.content.opportunity_id + "?")) return;
+            <button disabled={busy} onClick={async () => {
+              if (!(await confirm("Update the value of CRM opportunity #" + accepted.content.opportunity_id + "?", "Update CRM", "Sync accepted value"))) return;
               void run(async () => {
                 await request("crm_sync", {proposal_id: record!.id});
                 setNotice("Accepted value synced to CRM.");
@@ -512,8 +510,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
               updateCategory(i, {rule, items: rule === "any" ? group.items : group.items.map((item) => ({...item, required: false}))});
             }}>{Object.entries(rules).map(([rule, name]) => <option key={rule} value={rule}>{name}</option>)}</select></label>
             <button className="pp-icon-button pp-danger-text" aria-label={"Remove category " + (i + 1)}
-              onClick={() => {
-                if (group.items.length && !window.confirm("Remove this category and its items?")) return;
+              onClick={async () => {
+                if (group.items.length && !(await confirm("Remove this category and its items?", "Remove category", "Remove category"))) return;
                 setDraft({...draft, categories: draft.categories.filter((_, index) => index !== i)});
               }}><Icon name="trash"/></button>
           </div>
@@ -534,8 +532,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
                 {group.rule === "any" ? <label className="pp-check"><input type="checkbox" checked={!!line.required}
                   onChange={(event) => updateLine(i, j, {required: event.target.checked})}/> Required item</label>
                   : <p className="pp-muted">Part of a pick-one category</p>}
-                <button className="pp-text-button pp-danger-text" onClick={() => {
-                  if ((line.name || line.description || Number(line.amount)) && !window.confirm("Remove this item from the draft?")) return;
+                <button className="pp-text-button pp-danger-text" onClick={async () => {
+                  if ((line.name || line.description || Number(line.amount)) && !(await confirm("Remove this item from the draft?", "Remove item", "Remove item"))) return;
                   updateCategory(i, {items: group.items.filter((_, index) => index !== j)});
                 }}><Icon name="trash"/> Remove item</button>
               </div>
@@ -563,8 +561,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
             <a className="pp-button" href={url} target="_blank" rel="noopener noreferrer">Open client page <Icon name="arrow"/></a></div>}
           <div className="pp-section-divider">
             <h3>Replace a shared link</h3><p>Issue a new link if you need to revoke access through the previous one.</p>
-            <button disabled={busy} onClick={() => {
-              if (window.confirm("Revoke the current link and issue a new one?")) void run(() => shareLink(true));
+            <button disabled={busy} onClick={async () => {
+              if (await confirm("Revoke the current link and issue a new one?", "Replace link", "Replace private link")) void run(() => shareLink(true));
             }}><Icon name="refresh"/> Rotate link</button>
           </div>
         </section>
@@ -579,8 +577,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
           </section>
           <section className="pp-card">
             <SectionTitle title="Close this revision" description="Withdraw it to stop new responses. Its record stays in your history."/>
-            <button className="pp-danger-text" disabled={busy} onClick={() => {
-              if (!window.confirm("Close this revision to new client responses?")) return;
+            <button className="pp-danger-text" disabled={busy} onClick={async () => {
+              if (!(await confirm("Close this revision to new client responses?", "Withdraw proposal", "Withdraw proposal"))) return;
               void run(async () => { show(await request<Detail>("withdraw", fields(open))); await reload(); });
             }}>Withdraw proposal</button>
           </section>
@@ -623,8 +621,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
       <div className="pp-actions">
         <button disabled={busy} onClick={() => changeTab("preview")}>Preview</button>
         <button disabled={busy} onClick={() => run(() => save(false))}>Save draft</button>
-        <button className="pp-primary" disabled={busy} onClick={() => {
-          if (open && !window.confirm("Publish this draft and close the previous client link?")) return;
+        <button className="pp-primary" disabled={busy} onClick={async () => {
+          if (open && !(await confirm("Publish this draft and close the previous client link?", "Publish revision", "Publish updated proposal"))) return;
           void run(() => save(true));
         }}>{busy ? "Saving…" : "Save and publish"}<Icon name="arrow"/></button>
       </div>
@@ -768,6 +766,7 @@ const styles = `
 .ap-proposals .pp-dialog { width: min(940px, calc(100vw - 36px)); max-height: min(92vh, 1100px); margin: auto; padding: 0;
   border: 1px solid var(--pp-line); border-radius: var(--pp-radius); background: var(--pp-card); color: var(--pp-text);
   font: inherit; overflow: auto; box-shadow: var(--shadow-popover, 0 16px 60px #0005); }
+.ap-proposals .pp-dialog.pp-confirm-dialog { width: min(480px, calc(100vw - 36px)); }
 .ap-proposals .pp-dialog::backdrop { background: var(--color-bg-overlay, var(--bg-overlay, #0009)); }
 .pp-dialog > header { position: sticky; top: 0; z-index: 1; background: var(--pp-card); border-bottom: 1px solid var(--pp-line);
   padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }

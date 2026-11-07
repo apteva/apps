@@ -30,6 +30,8 @@ var en = {
   nameError: "Enter your name to accept.",
   noteError: "Describe what you would like changed.",
   confirmDecline: "Decline the entire proposal?",
+  cancel: "Cancel",
+  declineDescription: "This declines the entire proposal. To skip an individual item, use its Decline button instead.",
   requiredChoice: (name) => `Choose one item in “${name}” to accept.`,
   previewEmpty: "Add categories and items in Scope & pricing to preview the client’s choices.",
   untitledCategory: "Untitled category",
@@ -73,6 +75,8 @@ var fr = {
   nameError: "Indiquez votre nom pour accepter.",
   noteError: "Décrivez les modifications souhaitées.",
   confirmDecline: "Refuser toute la proposition ?",
+  cancel: "Annuler",
+  declineDescription: "Cette action refuse toute la proposition. Pour refuser un seul élément, utilisez son bouton Refuser.",
   requiredChoice: (name) => `Choisissez un élément dans « ${name} » pour accepter.`,
   previewEmpty: "Ajoutez des catégories et des éléments dans Scope & pricing pour prévisualiser les choix du client.",
   untitledCategory: "Catégorie sans titre",
@@ -101,6 +105,46 @@ function element(tag, text2, className) {
   if (className)
     node.className = className;
   return node;
+}
+function confirmDecline() {
+  return new Promise((resolve) => {
+    const previous = document.activeElement;
+    const dialog = element("dialog", "", "confirmation");
+    dialog.setAttribute("aria-labelledby", "decline-title");
+    dialog.setAttribute("aria-describedby", "decline-description");
+    const title = element("h2", text.confirmDecline);
+    title.id = "decline-title";
+    const description = element("p", text.declineDescription, "muted");
+    description.id = "decline-description";
+    const footer = element("div", "", "confirmation-actions");
+    const cancel = element("button", text.cancel);
+    const accept = element("button", text.declineProposal, "danger");
+    cancel.type = accept.type = "button";
+    cancel.autofocus = true;
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled)
+        return;
+      settled = true;
+      dialog.close();
+      dialog.remove();
+      if (previous?.isConnected)
+        previous.focus();
+      resolve(confirmed);
+    };
+    cancel.addEventListener("click", () => finish(false));
+    accept.addEventListener("click", () => finish(true));
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finish(false);
+    });
+    dialog.addEventListener("close", () => finish(false));
+    footer.append(cancel, accept);
+    dialog.append(title, description, footer);
+    document.body.append(dialog);
+    dialog.showModal();
+    cancel.focus();
+  });
 }
 async function request(path, body) {
   const endpoint = new URL(path, location.href);
@@ -313,8 +357,11 @@ function render(view) {
       form.append(button);
       return button;
     });
+    let submitting = false;
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (submitting)
+        return;
       const outcome = event.submitter?.value || "accepted";
       error.textContent = "";
       if (outcome === "accepted" && !name.value.trim()) {
@@ -334,8 +381,11 @@ function render(view) {
         note.focus();
         return;
       }
-      if (outcome === "declined" && !window.confirm(text.confirmDecline))
+      submitting = true;
+      if (outcome === "declined" && !await confirmDecline()) {
+        submitting = false;
         return;
+      }
       buttons.forEach((button) => {
         button.disabled = true;
       });
@@ -343,6 +393,7 @@ function render(view) {
         render(await request("respond", { outcome, name: name.value, note: note.value, selection: choices }));
         root.focus();
       } catch (err) {
+        submitting = false;
         error.textContent = err.message;
         buttons.forEach((button) => {
           button.disabled = false;
