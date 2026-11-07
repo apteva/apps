@@ -16,10 +16,11 @@ var (
 )
 
 type item struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	AmountMinor int64  `json:"amount_minor"`
-	Required    bool   `json:"required,omitempty"`
+	BacklogItemID int64  `json:"backlog_item_id,omitempty"`
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	AmountMinor   int64  `json:"amount_minor"`
+	Required      bool   `json:"required,omitempty"`
 }
 
 type category struct {
@@ -29,6 +30,7 @@ type category struct {
 }
 
 type content struct {
+	ClientID      int64      `json:"client_id,omitempty"`
 	Title         string     `json:"title"`
 	Sender        string     `json:"sender"`
 	ClientName    string     `json:"client_name"`
@@ -103,7 +105,7 @@ func (c *content) validate(publish bool) error {
 	default:
 		return errors.New("choose a supported currency")
 	}
-	if c.ValidityDays < 1 || c.ValidityDays > 365 || c.OpportunityID < 0 {
+	if c.ValidityDays < 1 || c.ValidityDays > 365 || c.OpportunityID < 0 || c.ClientID < 0 {
 		return errors.New("validity must be between 1 and 365 days and the opportunity ID cannot be negative")
 	}
 	if len(c.Categories) > 20 {
@@ -131,7 +133,7 @@ func (c *content) validate(publish bool) error {
 			if len(line.Name) > 160 || (publish && line.Name == "") || len(line.Description) > 2000 {
 				return fmt.Errorf("check the name and description for item %d in category %d", j+1, i+1)
 			}
-			if line.AmountMinor < 0 || line.AmountMinor > maxItemMinor {
+			if line.BacklogItemID < 0 || line.AmountMinor < 0 || line.AmountMinor > maxItemMinor {
 				return fmt.Errorf("invalid amount for item %d in category %d", j+1, i+1)
 			}
 			if line.Required && group.Rule != "any" {

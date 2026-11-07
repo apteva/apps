@@ -4,6 +4,14 @@ A project-scoped Apteva sidecar for client proposals. Create and preview a draft
 
 Clients can include, defer, or decline optional items. Categories support any number of options, at most one, or exactly one for acceptance. Required lines are included automatically. The client can accept the selection, decline the proposal, or request changes with a note. A published revision freezes its prices and scope, and the server calculates the recorded total. Publishing a replacement closes the previous open link.
 
+## Client backlog
+
+Use the **Client backlog** tab to create clients and keep private ideas, categories, scope descriptions, optional estimates, and internal notes. Existing CRM contacts can be imported by contact ID. Items without a price can be planned now and priced later.
+
+Select priced items and choose **Create proposal from selection**, or select a saved client in an existing draft and use **Add from client backlog** under **Scope & pricing**. The draft receives copies of only the selected scope and prices. Unselected items and internal notes stay in the backlog. Later backlog edits do not change those copies. Archive items when they are no longer needed.
+
+Clients and their backlog use separate, client-scoped MCP permissions. Older proposals keep working with their existing client details.
+
 ## Integrations
 
 - CRM is optional. Import a deal by opportunity ID and use **Sync accepted value to CRM** to update its amount and currency after acceptance.

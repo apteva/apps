@@ -14,16 +14,25 @@ import (
 )
 
 type input struct {
-	ProposalID    int64     `json:"proposal_id,omitempty"`
-	RevisionID    int64     `json:"revision_id,omitempty"`
-	Version       int       `json:"version,omitempty"`
-	Before        int64     `json:"before,omitempty"`
-	Limit         int       `json:"limit,omitempty"`
-	Content       *content  `json:"content,omitempty"`
-	Selection     selection `json:"selection,omitempty"`
-	Rotate        bool      `json:"rotate,omitempty"`
-	OpportunityID int64     `json:"opportunity_id,omitempty"`
-	ReminderKey   string    `json:"reminder_key,omitempty"`
+	ClientID      int64        `json:"client_id,omitempty"`
+	Client        *client      `json:"client,omitempty"`
+	Item          *backlogItem `json:"item,omitempty"`
+	ItemID        int64        `json:"item_id,omitempty"`
+	ItemIDs       []int64      `json:"item_ids,omitempty"`
+	ContactID     int64        `json:"contact_id,omitempty"`
+	RequestKey    string       `json:"request_key,omitempty"`
+	Q             string       `json:"q,omitempty"`
+	Archived      bool         `json:"archived,omitempty"`
+	ProposalID    int64        `json:"proposal_id,omitempty"`
+	RevisionID    int64        `json:"revision_id,omitempty"`
+	Version       int          `json:"version,omitempty"`
+	Before        int64        `json:"before,omitempty"`
+	Limit         int          `json:"limit,omitempty"`
+	Content       *content     `json:"content,omitempty"`
+	Selection     selection    `json:"selection,omitempty"`
+	Rotate        bool         `json:"rotate,omitempty"`
+	OpportunityID int64        `json:"opportunity_id,omitempty"`
+	ReminderKey   string       `json:"reminder_key,omitempty"`
 }
 
 type operation struct {
@@ -32,6 +41,7 @@ type operation struct {
 	permission  string
 	properties  map[string]any
 	required    []string
+	client      bool
 	record      bool
 	readOnly    bool
 }
@@ -42,13 +52,15 @@ var (
 	contentSchema = objectSchema(map[string]any{
 		"title": textSchema, "sender": textSchema, "client_name": textSchema, "client_email": textSchema,
 		"overview": textSchema, "terms": textSchema, "currency": textSchema, "validity_days": idSchema,
+		"client_id":      map[string]any{"type": "integer", "minimum": 0},
 		"opportunity_id": map[string]any{"type": "integer", "minimum": 0},
 		"categories": arraySchema(objectSchema(map[string]any{
 			"name": textSchema, "rule": map[string]any{"type": "string", "enum": []string{"any", "one", "one_required"}},
 			"items": arraySchema(objectSchema(map[string]any{
 				"name": textSchema, "description": textSchema,
-				"amount_minor": map[string]any{"type": "integer", "minimum": 0, "description": "Price in minor currency units, e.g. 250000 for €2,500."},
-				"required":     map[string]any{"type": "boolean"},
+				"backlog_item_id": map[string]any{"type": "integer", "minimum": 0},
+				"amount_minor":    map[string]any{"type": "integer", "minimum": 0, "description": "Price in minor currency units, e.g. 250000 for €2,500."},
+				"required":        map[string]any{"type": "boolean"},
 			}, "name", "amount_minor")),
 		}, "name", "rule", "items")),
 	}, "title", "currency", "validity_days")
@@ -66,7 +78,7 @@ func objectSchema(properties map[string]any, required ...string) map[string]any 
 	return out
 }
 
-var operations = []operation{
+var operations = append([]operation{
 	{name: "list", description: "List accessible proposals, newest first. Use before to page by proposal ID.", permission: "read", readOnly: true,
 		properties: map[string]any{"limit": idSchema, "before": idSchema}},
 	{name: "get", description: "Read a proposal and its revision history.", permission: "read", record: true, readOnly: true},
@@ -89,7 +101,7 @@ var operations = []operation{
 		properties: map[string]any{"opportunity_id": idSchema}, required: []string{"opportunity_id"}},
 	{name: "crm_sync", description: "Explicitly write the accepted total and currency to the linked CRM opportunity.", permission: "sync_crm", record: true},
 	{name: "acceptance_get", description: "Read the accepted revision, including frozen choices and total, for downstream apps.", permission: "read", record: true, readOnly: true},
-}
+}, backlogOperations...)
 
 func (a *App) MCPTools() []sdk.Tool {
 	out := make([]sdk.Tool, 0, len(operations))
@@ -99,6 +111,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			properties[key] = value
 		}
 		required := append([]string(nil), op.required...)
+		if op.client {
+			properties["client_id"] = idSchema
+			required = append(required, "client_id")
+		}
 		if op.record {
 			properties["proposal_id"] = idSchema
 			required = append(required, "proposal_id")
@@ -138,6 +154,13 @@ func (a *App) execute(ctx context.Context, op operation, in input) (any, error) 
 	caller := sdk.CallerFrom(ctx)
 	permission := "proposals." + op.permission
 	switch {
+	case op.client:
+		if in.ClientID <= 0 {
+			return nil, invalid("client_id is required")
+		}
+		if !caller.Allows(permission, clientResource(in.ClientID)) {
+			return nil, errForbidden
+		}
 	case op.record:
 		if in.ProposalID <= 0 {
 			return nil, invalid("proposal_id is required")
@@ -145,7 +168,7 @@ func (a *App) execute(ctx context.Context, op operation, in input) (any, error) 
 		if !caller.Allows(permission, resource(in.ProposalID)) {
 			return nil, errForbidden
 		}
-	case op.name == "list":
+	case op.name == "list" || op.name == "clients_list":
 		if !caller.Has(permission) {
 			return nil, errForbidden
 		}
@@ -192,6 +215,9 @@ func (a *App) execute(ctx context.Context, op operation, in input) (any, error) 
 		if err := in.Content.validate(false); err != nil {
 			return nil, invalid(err.Error())
 		}
+		if err := a.validateClientReferences(ctx, *in.Content); err != nil {
+			return nil, err
+		}
 		if op.name == "create" {
 			return s.create(ctx, a.project, *in.Content)
 		}
@@ -227,7 +253,7 @@ func (a *App) execute(ctx context.Context, op operation, in input) (any, error) 
 			}
 		}
 	}
-	return nil, errNotFound
+	return a.executeBacklog(ctx, op, in)
 }
 
 func resource(id int64) string { return fmt.Sprintf("proposal/%d", id) }
