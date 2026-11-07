@@ -40,6 +40,26 @@ func (a *App) handlePanel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/proposals/")
+	if name == "clients_resources" && r.Method == http.MethodGet {
+		var op operation
+		for _, candidate := range operations {
+			if candidate.name == "clients_list" {
+				op = candidate
+				break
+			}
+		}
+		result, err := a.execute(r.Context(), op, input{})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		items := []map[string]any{}
+		for _, c := range result.(map[string]any)["clients"].([]client) {
+			items = append(items, map[string]any{"id": strconv.FormatInt(c.ID, 10), "label": c.Name})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
 	if name == "resources" && r.Method == http.MethodGet {
 		rows, err := a.store.list(r.Context(), a.project, 0, 100)
 		if err != nil {
@@ -105,6 +125,14 @@ func publicView(r revision) offerView {
 	}
 	r.Content.ClientEmail = ""
 	r.Content.OpportunityID = 0
+	r.Content.ClientID = 0
+	r.Content.Categories = append([]category(nil), r.Content.Categories...)
+	for i := range r.Content.Categories {
+		r.Content.Categories[i].Items = append([]item(nil), r.Content.Categories[i].Items...)
+		for j := range r.Content.Categories[i].Items {
+			r.Content.Categories[i].Items[j].BacklogItemID = 0
+		}
+	}
 	return offerView{State: r.State, Number: r.Number, Content: &r.Content, ExpiresAt: r.ExpiresAt, Response: r.Response}
 }
 

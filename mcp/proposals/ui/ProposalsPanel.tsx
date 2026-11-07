@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { BacklogPanel, BacklogPicker, ClientSelector, currencyOptions as currencies, formatMoney as money } from "./backlog";
 
 type Choice = "unselected" | "include" | "later" | "decline";
 type Rule = "any" | "one" | "one_required";
-type Line = { name: string; description?: string; required?: boolean; amount_minor: number };
+type Line = { name: string; description?: string; required?: boolean; backlog_item_id?: number; amount_minor: number };
 type Category = { name: string; rule: Rule; items: Line[] | null };
 type Content = {
   title: string; sender: string; client_name: string; client_email?: string;
   overview?: string; terms?: string; currency: string; validity_days: number;
-  opportunity_id?: number; categories: Category[] | null;
+  client_id?: number; opportunity_id?: number; categories: Category[] | null;
 };
 type DraftLine = Omit<Line, "amount_minor"> & { amount: string };
 type Draft = Omit<Content, "categories"> & {
@@ -19,11 +20,10 @@ type Revision = {
   id: number; proposal_id: number; number: number; version: number; state: string;
   content: Content; expires_at?: number; published_at?: number; response?: Reply;
 };
-type Detail = { id: number; revisions: Revision[] };
+export type Detail = { id: number; revisions: Revision[] };
 type List = { proposals: Revision[]; next_before?: number };
 type Opportunity = { id: number; title: string; contact_name?: string; contact_email?: string; currency?: string };
 
-const currencies = ["EUR", "USD", "GBP", "CAD", "AUD", "CHF", "NZD", "SEK", "NOK", "DKK"];
 const states: Record<string, string> = {
   draft: "Draft", published: "Open", accepted: "Accepted", declined: "Declined",
   changes_requested: "Changes requested", expired: "Expired", superseded: "Superseded", withdrawn: "Withdrawn",
@@ -63,10 +63,6 @@ function toContent(draft: Draft): Content {
   };
 }
 
-function money(amount: number, currency: string) {
-  return new Intl.NumberFormat(undefined, {style: "currency", currency}).format(amount / 100);
-}
-
 async function api<T>(projectId: string, action: string, body?: object, query?: Record<string, string>, installId?: number) {
   const params = new URLSearchParams({project_id: projectId, ...query});
   if (installId) params.set("install_id", String(installId));
@@ -85,13 +81,13 @@ async function api<T>(projectId: string, action: string, body?: object, query?: 
 
 type Props = { projectId: string; installId?: number; eventRevision?: number };
 type DetailTab = "overview" | "scope" | "preview" | "sharing" | "history";
-type ListTab = "all" | "drafts" | "open" | "responses";
+type ListTab = "all" | "drafts" | "open" | "responses" | "backlog";
 
 const detailTabs = [
   ["overview", "Overview"], ["scope", "Scope & pricing"], ["preview", "Client preview"],
   ["sharing", "Sharing"], ["history", "History"],
 ];
-const listTabs = [["all", "All proposals"], ["drafts", "Drafts"], ["open", "Open"], ["responses", "Responses"]];
+const listTabs = [["all", "All proposals"], ["drafts", "Drafts"], ["open", "Open"], ["responses", "Responses"], ["backlog", "Client backlog"]];
 
 const iconPaths = {
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5",
@@ -144,6 +140,8 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<Draft>(blankDraft);
   const [tab, setTab] = useState<DetailTab>("overview");
+  const [backlogClientID, setBacklogClientID] = useState(0);
+  const [backlogPicker, setBacklogPicker] = useState(false);
   const [listTab, setListTab] = useState<ListTab>("all");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -193,7 +191,9 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     if (!confirmLeave()) return;
     setRecord(null);
     setCreating(true);
-    setDraft(c ? editable({...c, client_name: "", client_email: "", opportunity_id: undefined}) : blankDraft());
+    setDraft(c ? editable({...c, client_name: "", client_email: "", client_id: undefined, opportunity_id: undefined,
+      categories: (c.categories || []).map((group) => ({...group, items: (group.items || []).map((item) => ({...item, backlog_item_id: undefined}))})),
+    }) : blankDraft());
     setHistoryId(undefined);
     setURL("");
     setCrmID("");
@@ -228,7 +228,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
     return () => window.removeEventListener("beforeunload", protect);
   }, [dirty]);
 
-  async function run(action: () => Promise<void> | void) {
+  async function run(action: () => Promise<unknown> | void) {
     setBusy(true);
     setError("");
     setNotice("");
@@ -250,6 +250,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
       setNotice("Draft saved.");
     }
     await reload();
+    return saved;
   }
   function updateCategory(index: number, change: Partial<Draft["categories"][number]>) {
     setDraft((current) => ({
@@ -338,7 +339,9 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
       label={detailVisible ? "Proposal sections" : "Proposal status"}/>
     <main role="tabpanel" id={"pp-panel-" + (detailVisible ? tab : listTab)}
       aria-labelledby={"pp-tab-" + (detailVisible ? tab : listTab)}>
-      {!detailVisible && <>
+      {!detailVisible && listTab === "backlog" && <BacklogPanel request={request} initialClientID={backlogClientID}
+        onSelectClient={setBacklogClientID} onProposal={async (proposal) => {show(proposal, "scope");await reload();}}/>}
+      {!detailVisible && listTab !== "backlog" && <>
         <div className="pp-list-toolbar">
           <label className="pp-search"><Icon name="search"/><input type="search" placeholder="Search proposals or clients"
             aria-label="Search proposals" value={search} onChange={(event) => setSearch(event.target.value)}/></label>
@@ -395,8 +398,20 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
         </section>
         <div className="pp-stack">
           <section className="pp-card">
-            <SectionTitle title="Client" description="Who this proposal is prepared for."/>
+            <SectionTitle title="Client" description="Choose a saved client to use their private backlog, or enter details below."/>
             <div className="pp-fields">
+              <ClientSelector request={request} selected={draft.client_id ? {id: draft.client_id, name: draft.client_name} : undefined}
+                onChange={(client) => {
+                  if (draft.client_id === client?.id) return;
+                  const imported = draft.categories.some((group) => group.items.some((item) => item.backlog_item_id));
+                  if (imported && !window.confirm("Change the client and remove items imported from the previous client’s backlog?")) return;
+                  setDraft({...draft, client_id: client?.id, client_name: client?.name || draft.client_name,
+                    client_email: client?.email || "", categories: imported ? draft.categories.map((group) => ({
+                      ...group, items: group.items.filter((item) => !item.backlog_item_id),
+                    })).filter((group) => group.items.length > 0) : draft.categories});
+                }}/>
+              <div className="pp-client-fields-divider"/>
+
               <label>Client name<input maxLength={160} value={draft.client_name} placeholder="Client or company"
                 onChange={(event) => setDraft({...draft, client_name: event.target.value})}/></label>
               <label>Client email<input type="email" value={draft.client_email || ""} placeholder="client@company.com"
@@ -466,9 +481,10 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
       {detailVisible && tab === "scope" && (editing ? <div className="pp-stack">
         <div className="pp-section-toolbar">
           <SectionTitle title="Scope & pricing" description="Group work into categories. Clients can include, defer, or decline optional items."/>
+          <div className="pp-actions"><button disabled={busy || !draft.client_id} onClick={() => setBacklogPicker(true)}>Add from client backlog</button>
           <button disabled={busy || draft.categories.length >= 20} onClick={() => setDraft({
             ...draft, categories: [...draft.categories, {name: "", rule: "any", items: []}],
-          })}><Icon name="plus"/> Add category</button>
+          })}><Icon name="plus"/> Add category</button></div>
         </div>
         {!draft.categories.length && <Empty title="Build your scope" icon="layers"
           description="Start with a category such as Core build, Integrations, or Support. Add items and set how your client can choose.">
@@ -581,6 +597,18 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
         </section>
       </div> : <Empty title="Your revision history will appear here" icon="clock" description="Save your first draft to start the proposal record."/> )}
     </main>
+    {backlogPicker && <BacklogPicker request={request} clientID={draft.client_id!} currency={draft.currency}
+      imported={draft.categories.flatMap((group) => group.items.map((item) => item.backlog_item_id || 0))}
+      onClose={() => setBacklogPicker(false)} onImport={async (ids) => {
+        setBusy(true);
+        try {
+          const saved = await save(false);
+          const imported = await request<Detail>("backlog_add_to_draft", {
+            ...fields(saved.revisions[0]), client_id: saved.revisions[0].content.client_id, item_ids: ids,
+          });
+          show(imported, "scope");setBacklogPicker(false);setNotice("Selected backlog items copied into the draft.");await reload();
+        } finally {setBusy(false);}
+      }}/>}
     {editing && detailVisible && <footer className="pp-save-bar">
       <span className="pp-muted"><span className={"pp-save-dot" + (dirty ? " is-dirty" : "")}/>{dirty ? "Unsaved draft" : "All changes saved"}</span>
       <div className="pp-actions">
@@ -674,6 +702,37 @@ function SelectionPreview({content, reply, readOnly = false}: {content: Content;
 }
 
 const styles = `
+.pp-backlog-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 24px; align-items: start; }
+.pp-client-list { display: grid; gap: 20px; padding: 20px; }
+.pp-client-list nav { display: grid; gap: 6px; max-height: 58vh; overflow: auto; }
+.ap-proposals .pp-client-list nav button { display: grid; justify-content: stretch; text-align: left; gap: 5px; border-color: transparent; white-space: normal; }
+.pp-client-list nav small { color: var(--pp-muted); font-size: 11px; }
+.ap-proposals .pp-client-list nav button[aria-current="true"] { background: var(--pp-hover); border-color: var(--pp-accent); }
+.pp-backlog-controls, .pp-backlog-selection { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pp-backlog-selection { position: sticky; bottom: -28px; background: var(--pp-bg); border-top: 1px solid var(--pp-line); padding: 18px 0; z-index: 2; }
+.ap-proposals .pp-backlog-table :is(th,td):first-child { width: 40px; min-width: 40px; }
+.pp-backlog-table td:nth-child(2) { min-width: 220px; }
+.pp-backlog-description { max-width: 480px; white-space: pre-wrap; }
+.pp-private-note { color: var(--pp-accent) !important; }
+.pp-client-fields-divider { border-top: 1px solid var(--pp-line); }
+.ap-proposals .pp-dialog { width: min(940px, calc(100vw - 36px)); max-height: min(92vh, 1100px); margin: auto; padding: 0;
+  border: 1px solid var(--pp-line); border-radius: var(--pp-radius); background: var(--pp-card); color: var(--pp-text);
+  font: inherit; overflow: auto; box-shadow: var(--shadow-popover, 0 16px 60px #0005); }
+.ap-proposals .pp-dialog::backdrop { background: var(--color-bg-overlay, var(--bg-overlay, #0009)); }
+.pp-dialog > header { position: sticky; top: 0; z-index: 1; background: var(--pp-card); border-bottom: 1px solid var(--pp-line);
+  padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.pp-dialog form, .pp-dialog-body { display: grid; gap: 20px; padding: 24px; }
+.pp-dialog footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; padding-top: 20px; border-top: 1px solid var(--pp-line); }
+.pp-error-text { color: var(--pp-error); font-size: 12px; }
+@media (max-width: 900px) { .pp-backlog-layout { grid-template-columns: 1fr; }.pp-client-list nav { max-height: 180px; } }
+@media (max-width: 700px) {
+  .ap-proposals .pp-backlog-table :is(th,td):nth-child(n) { display: table-cell; }
+  .ap-proposals .pp-backlog-table :is(th,td) { padding: 12px; }
+  .ap-proposals .pp-backlog-table :is(th,td):first-child { width: 30px; }
+  .pp-backlog-table .pp-actions { flex-wrap: nowrap; }
+  .pp-dialog form, .pp-dialog-body { padding: 18px; }.pp-backlog-selection { bottom: -18px; }
+}
+
 .ap-proposals {
   --pp-bg: var(--color-bg, var(--bg, #11161c));
   --pp-card: var(--color-bg-card, var(--bg-card, #1a222b));
