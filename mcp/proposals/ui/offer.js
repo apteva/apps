@@ -26,7 +26,7 @@ async function request(path, body) {
   const endpoint = new URL(path, location.href);
   endpoint.searchParams.set("project_id", project);
   const res = await fetch(endpoint, {
-    method: "POST", credentials: "omit",
+    method: "POST", credentials: "same-origin",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({token, ...body}),
   });
