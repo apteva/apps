@@ -24,6 +24,7 @@ provides:
     - {name: database.write, resource: database, description: Insert and modify records.}
     - {name: database.manage, resource: database, description: "Create and delete databases, collections and indexes."}
   mcp_tools:
+    - {name: db_query, description: "Execute named scan, compute, join and aggregate relations in one bounded read snapshot.", read_only: true}
     - {name: db_realtime_configure, description: Enable or disable native realtime capture.}
     - {name: db_realtime_describe, description: Inspect realtime support and usage.}
     - {name: db_changes, description: Wait for resumable collection invalidations.}

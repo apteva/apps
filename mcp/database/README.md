@@ -1,6 +1,6 @@
 # Database
 
-Independent Apteva sidecar app, version 0.5.3. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, based on release 0.12.2. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
 [Release notes](docs/release-0.5.3.md) · [Realtime API](REALTIME.md)
 
@@ -68,7 +68,7 @@ See [alpha.4 adapter/direct-driver comparisons](benchmarks/APTEVADB-ALPHA4.md) a
 
 ## Build and run
 
-Use Go 1.25.1 or newer. This module pins app-sdk v0.111.0, the latest published tag by commit topology at release preparation.
+Use Go 1.25.1 or newer. This module pins app-sdk v0.115.0, the latest published tag by commit topology at release preparation.
 
 ```sh
 cd apps/mcp/database
@@ -262,6 +262,12 @@ Two more stages answer questions one grouping cannot. `branches [{collection,as,
 
 Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows. The memory budget is an accounting estimate, not a cap on process memory. In `joined_page` an item costs about 500 bytes plus its share of what else the read holds: each join can cache up to 16 MiB, a `distinct` remembers each key it has seen, and `pick` keeps each winner's order values until the page is chosen. A page's own rows count too, so one group with too many rows fails even when the page holds only that group.
 
+## Composable read queries (unreleased)
+
+`query` (`db_query` over MCP) evaluates named scan, compute, join and aggregate relations in one database read snapshot. An aggregate result can be computed and joined back to another relation before a final aggregation. No temporary business records are written. See [the query contract](QUERY.md) and the [cross-adapter acceptance fixture](testdata/dependent-aggregation.json).
+
+Numeric `op`/`args` expressions also work in the existing relational `computed` fields. Money can stay in checked int64 cents; safe division stays exact inside an expression, and rounding remains explicit at the supplied stage.
+
 ## Query and mutation rules
 
 Filters use `{field,op,value}` leaves and explicit `{and:[...]}` / `{or:[...]}` groups. Operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `is_null`, `is_not_null`, `starts_with`, `contains_ascii`. Null predicates omit `value`. `in` takes 1–100 non-null values; a one-value list is treated as `eq`, so it binds index prefixes on every adapter. `not_in` takes the same list with SQL's null behaviour: a null value does not satisfy it. String matching is literal, case-sensitive UTF-8 byte comparison.
@@ -339,7 +345,7 @@ Each calling app gets its own private namespace within the authenticated project
 {"database": "prod", "app": "graphql", "access": "read"}
 ```
 
-Grants are made with `db_access_grant` (agents need `database.manage` on the database) or `POST /operations/access_grant` from the dashboard surface, listed with `db_access_list` and removed with `db_access_revoke`. They are keyed by the caller's server-asserted app name, so they apply to that app's install in this project only. `read` allows describe, list, get, find, count, aggregate, explain, read-only batches and `db_changes`; `write` adds insert, update, delete, upsert and batch. Calling apps can never create, drop or alter project databases, collections or indexes, configure realtime capture, or change grants. Grants require an existing database, and dropping a database removes its grants. `db_databases_list` with `scope: "project"` lists only granted databases. Agent and grant-policy checks (`database.read`/`write`/`watch`) still apply on top. Administration of another app's private databases is future work.
+Grants are made with `db_access_grant` (agents need `database.manage` on the database) or `POST /operations/access_grant` from the dashboard surface, listed with `db_access_list` and removed with `db_access_revoke`. They are keyed by the caller's server-asserted app name, so they apply to that app's install in this project only. `read` allows describe, list, get, find, count, aggregate, explain, read-only batches, `db_query` and `db_changes`; `write` adds insert, update, delete, upsert and batch. Calling apps can never create, drop or alter project databases, collections or indexes, configure realtime capture, or change grants. Grants require an existing database, and dropping a database removes its grants. `db_databases_list` with `scope: "project"` lists only granted databases. Agent and grant-policy checks (`database.read`/`write`/`watch`) still apply on top. Administration of another app's private databases is future work.
 
 ## Initial limits and remaining work
 

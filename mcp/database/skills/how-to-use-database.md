@@ -31,3 +31,21 @@ For AptevaDB realtime updates, inspect `db_realtime_describe`. A database manage
 ## Joined reads
 
 Use `joined_page` to page joined rows at a chosen grain, `joined_aggregate` for metrics over them, and `related_read` for parents with a bounded list of related rows. Every join needs an index on a related field. Database applies only the filters you pass, so include access and same-centre conditions yourself, such as an extra `{local:"root.centre",foreign:"centre"}` pair. See the README's "Relational reads".
+
+
+## Dependent calculations in one snapshot
+
+Use `db_query` for a calculation whose aggregate output must feed another join,
+calculation or aggregate. It is read-only and uses the same database read grant
+as `db_aggregate`. Supply `version: 1`, named `nodes` and `result: {from: name}`.
+The node kinds are `scan`, `compute`, `join` and `aggregate`; joins reference a
+named `relation`, and all dependencies run on one snapshot. See `QUERY.md` for
+the full contract and `testdata/dependent-aggregation.json` for an example.
+
+Put every caller-derived eligibility/tenant filter on the relevant scan. Keep
+rate-calculation periods separate from display filters on the valued rows.
+Use `cardinality: many_to_one` when joining a grouped rate back to facts so
+unexpected duplicate keys fail instead of multiplying amounts. Keep money as
+integer cents and specify rounding before the intended aggregation stage.
+Limits fail the whole query; neither intermediate relations nor results are
+silently truncated. Return large relations through the existing page APIs.

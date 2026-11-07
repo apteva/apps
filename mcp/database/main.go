@@ -92,6 +92,7 @@ var specs = []toolSpec{
 	{"related_read", "Read parents with their ordered, bounded related rows. relation {as,limit,sources:[{name,joins,computed,filter,distinct,orderBy,select}]} fills one shared limit source by source: filter decides which rows take a slot, rows are ordered, the first limit kept, and only then does match test them, so a row past the limit can never match. Each parent returns the exact rows under its as name. Database applies the filters it receives; access policy stays with the caller. count:true adds an exact total.", []string{"as", "where", "orderBy", "select", "limit", "cursor", "offset", "count", "relation", "match"}, []string{"collection", "relation"}},
 	{"joined_page", "Join through indexes, deduplicate, and count and page at the requested grain. joins [{as,collection,kind:inner|left|semi|anti,on|anyOf:[{on:[{local:\"alias.field\",foreign,comparison?}]}],where}]. comparison \"text\" compares exact decimal text, \"numeric\" reads the local text as a number. distinct collapses by aliases (physical records) or fields; group {by,orderBy:[{field,direction,agg:min|max}]} pages groups and returns their ordered rows. total is computed before paging at the same grain.", []string{"as", "where", "joins", "computed", "filter", "distinct", "pick", "group", "orderBy", "select", "limit", "cursor", "offset"}, []string{"collection"}},
 	{"joined_aggregate", "Run aggregate metrics over joined, deduplicated rows. Accepts the joins, computed, filter and distinct of joined_page, plus a join kind \"aggregate\" with metrics that adds per-row related metrics as as.metric. branches [{collection,as,where,joins,computed,filter,distinct,pick,select}] replaces collection and concatenates inputs selecting the same names; rollup {by,metrics,computed,filter} aggregates per key before the outer groupBy and metrics. pick {by,orderBy,where} keeps the first qualifying row per key under its order (use desc for latest). groupBy and metrics are those of aggregate: integer sums stay exact, count is \"0\" over no rows and sum is null. derived [{name,op:\"divide\",numerator,denominator,round?}] is null on a null side or zero denominator.", []string{"as", "where", "joins", "computed", "filter", "distinct", "pick", "branches", "rollup", "groupBy", "metrics", "orderBy", "limit", "derived"}, []string{"metrics"}},
+	{"query", "Execute a typed DAG of named scan, compute, join and aggregate relations in one read snapshot. version:1, nodes:[{name,op,...}], result:{from,orderBy?,limit?}. No intermediate truncation; limits may lower server row, memory and work budgets. See QUERY.md for numeric expressions, cardinality and scope filters.", []string{"version", "nodes", "result", "limits", "timeoutMs"}, []string{"version", "nodes", "result"}},
 	{"explain", "Inspect the adapter's planned find access without executing it; not evidence of what a count did (use count with diagnostics:true).", []string{"where", "orderBy", "requireIndex"}, []string{"collection"}},
 	{"access_grant", "Let a calling app use one existing project database with read or write access. Calling apps reach it with scope=\"project\". Repeating changes the access level.", []string{"app", "access"}, []string{"database", "app", "access"}},
 	{"access_revoke", "Remove a calling app's access to a project database.", []string{"app"}, []string{"database", "app"}},
@@ -112,7 +113,7 @@ func permission(op string) string {
 		return "database.watch"
 	case "realtime_describe":
 		return "database.read"
-	case "databases_list", "database_describe", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "related_read", "joined_page", "joined_aggregate", "explain":
+	case "query", "databases_list", "database_describe", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "related_read", "joined_page", "joined_aggregate", "explain":
 		return "database.read"
 	case "insert", "update", "delete", "upsert", "batch":
 		return "database.write"
@@ -241,7 +242,10 @@ func (a *App) appProjectAccess(ctx context.Context, caller *sdk.Caller, projectS
 }
 func parseArgs(args map[string]any, s toolSpec) (engine.Request, error) {
 	var r engine.Request
-	allowed := map[string]bool{"database": true, "collection": true}
+	allowed := map[string]bool{"database": true}
+	if s.op != "query" {
+		allowed["collection"] = true
+	}
 	for _, k := range s.args {
 		allowed[k] = true
 	}
@@ -355,7 +359,7 @@ func httpResult(w http.ResponseWriter, v any, e error) {
 				status = 403
 			case "not_found":
 				status = 404
-			case "unique_conflict", "version_conflict", "schema_conflict", "resume_invalid":
+			case "unique_conflict", "version_conflict", "schema_conflict", "resume_invalid", "cardinality_violation":
 				status = 409
 			case "history_expired":
 				status = 410
@@ -377,7 +381,11 @@ func inputSchema(s toolSpec) map[string]any {
 	obj := func() map[string]any { return map[string]any{"type": "object"} }
 	arr := func(items any) map[string]any { return map[string]any{"type": "array", "items": items} }
 	order := map[string]any{"type": "object", "properties": map[string]any{"field": str(), "direction": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}}, "required": []string{"field"}}
-	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate", "query"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all["version"] = map[string]any{"type": "integer", "enum": []int{1}}
+	for k, v := range queryInputProperties() {
+		all[k] = v
+	}
 	all["lookups"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "object", "properties": map[string]any{"as": str(), "collection": str(), "localField": str(), "select": arr(str())}, "required": []string{"as", "collection", "localField"}, "additionalProperties": false}}
 	all["buckets"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "field": str(), "unit": map[string]any{"type": "string", "enum": []string{"hour", "day", "week", "month", "year"}}, "timezone": map[string]any{"type": "string", "description": "IANA timezone such as Europe/Paris; defaults to UTC."}, "weekStart": map[string]any{"type": "string", "enum": []string{"monday", "sunday"}}}, "required": []string{"name", "field", "unit"}, "additionalProperties": false}}
 	all["timeoutMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 60000, "description": "Query deadline in milliseconds; omitted or 0 defaults to 30000. An earlier caller deadline takes precedence."}
@@ -385,7 +393,7 @@ func inputSchema(s toolSpec) map[string]any {
 	all["after"] = str()
 	all["as"] = map[string]any{"type": "string", "description": "Alias of the root collection in joined names; default root."}
 	all["joins"] = arr(obj())
-	all["computed"] = map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "object", "description": "{name,type?,expr}; expr is one of field, const, coalesce, nullIfEmpty, trim, strip+chars, concat+separator, json+path, if+then+else."}}
+	all["computed"] = map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "object", "description": "{name,type?,expr}; expr is one of field, const, coalesce, nullIfEmpty, trim, strip+chars, concat+separator, json+path, if+then+else, or numeric op+args (add, subtract, multiply, safe_divide, comparisons, min, max, round, if, and/or/not)."}}
 	all["filter"] = map[string]any{"type": "object", "description": "Filter over joined rows, using alias.field names and computed names."}
 	all["distinct"] = map[string]any{"type": "array", "items": str(), "description": "Aliases (physical records) or fields whose combination appears once."}
 	all["pick"] = obj()
@@ -406,7 +414,7 @@ func inputSchema(s toolSpec) map[string]any {
 	all["app"] = map[string]any{"type": "string", "description": "Installed app name, for example graphql."}
 	all["access"] = map[string]any{"type": "string", "enum": []string{"read", "write"}}
 	props := map[string]any{"database": all["database"], "scope": map[string]any{"type": "string", "enum": []string{"app", "project"}, "description": "Calling apps only: app (default) uses the app's private databases; project uses a project database an operator granted with db_access_grant."}}
-	if s.op != "batch" && !strings.HasPrefix(s.op, "database") && !strings.HasPrefix(s.op, "access_") {
+	if s.op != "query" && s.op != "batch" && !strings.HasPrefix(s.op, "database") && !strings.HasPrefix(s.op, "access_") {
 		props["collection"] = all["collection"]
 	}
 	for _, k := range s.args {

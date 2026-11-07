@@ -986,3 +986,8 @@ func (t *sqliteTx) aggregate(c Collection, r Request, out Collection) ([]Record,
 	}
 	return result, rows.Err()
 }
+
+// SQLite exposes its existing streaming projection reader to relation scans.
+func (t *sqliteTx) scanRecords(c Collection, q Query, fields []string, consume func(Record) bool) error {
+	return t.scanFields(c, q, fields, func(r Record, _ []byte) bool { return consume(r) })
+}
