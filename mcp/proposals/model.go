@@ -30,6 +30,7 @@ type category struct {
 }
 
 type content struct {
+	Language      string     `json:"language"`
 	ClientID      int64      `json:"client_id,omitempty"`
 	Title         string     `json:"title"`
 	Sender        string     `json:"sender"`
@@ -80,6 +81,13 @@ func (r revision) stateAt(now int64) string {
 }
 
 func (c *content) validate(publish bool) error {
+	c.Language = strings.ToLower(strings.TrimSpace(c.Language))
+	if c.Language == "" {
+		c.Language = "en"
+	}
+	if c.Language != "en" && c.Language != "fr" {
+		return errors.New("choose English or French for the proposal language")
+	}
 	c.Title = strings.TrimSpace(c.Title)
 	c.Sender = strings.TrimSpace(c.Sender)
 	c.ClientName = strings.TrimSpace(c.ClientName)

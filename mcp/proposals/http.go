@@ -112,6 +112,7 @@ type offerRequest struct {
 }
 
 type offerView struct {
+	Language  string    `json:"language"`
 	State     string    `json:"state"`
 	Number    int       `json:"number,omitempty"`
 	Content   *content  `json:"content,omitempty"`
@@ -121,7 +122,7 @@ type offerView struct {
 
 func publicView(r revision) offerView {
 	if r.State != "published" && r.Response == nil {
-		return offerView{State: r.State}
+		return offerView{State: r.State, Language: r.Content.Language}
 	}
 	r.Content.ClientEmail = ""
 	r.Content.OpportunityID = 0
@@ -133,7 +134,7 @@ func publicView(r revision) offerView {
 			r.Content.Categories[i].Items[j].BacklogItemID = 0
 		}
 	}
-	return offerView{State: r.State, Number: r.Number, Content: &r.Content, ExpiresAt: r.ExpiresAt, Response: r.Response}
+	return offerView{State: r.State, Language: r.Content.Language, Number: r.Number, Content: &r.Content, ExpiresAt: r.ExpiresAt, Response: r.Response}
 }
 
 func (a *App) handleOffer(w http.ResponseWriter, r *http.Request) {

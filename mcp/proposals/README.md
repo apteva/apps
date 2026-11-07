@@ -2,7 +2,11 @@
 
 A project-scoped Apteva sidecar for client proposals. Create and preview a draft in the Proposals dashboard panel, publish a revision, and share its private URL. You can duplicate an existing proposal to reuse its structure.
 
-Clients can include, defer, or decline optional items. Categories support any number of options, at most one, or exactly one for acceptance. Required lines are included automatically. The client can accept the selection, decline the proposal, or request changes with a note. A published revision freezes its prices and scope, and the server calculates the recorded total. Publishing a replacement closes the previous open link.
+Clients use visible **Include**, **For later**, and **Decline** buttons for optional items. Multi-select categories also offer group buttons to include, defer, or decline every optional item at once, with live group subtotals. Required lines always stay included, and choose-one categories still allow only one included item. Clicking an active choice clears it. Categories support any number of options, at most one, or exactly one for acceptance. Required lines are included automatically. The client can accept the selection, decline the proposal, or request changes with a note. A published revision freezes its prices and scope, and the server calculates the recorded total. Publishing a replacement closes the previous open link.
+
+## Proposal language
+
+Choose **English (Default)** or **Français** in each draft’s **Proposal details**. This controls the public page, client preview, response buttons and messages, invitation emails, and date/price formatting. Write the title, overview, categories, item descriptions, and terms in that language; content is not automatically translated. The MCP content field is `language: "en" | "fr"`; omitted values and older proposals default to English. Language is frozen with the published revision.
 
 ## Client backlog
 
@@ -22,4 +26,4 @@ The app uses the platform's public URL for client links. Set `public_base_url` i
 
 ## Development
 
-From `mcp/proposals`, use `GOWORK=off go test ./...` to test the pinned SDK and `GOWORK=off go build -o /tmp/apteva-proposals .` to build the sidecar. From the apps repository root, rebuild the dashboard bundle with `bun run scripts/build-panels.ts --app proposals`.
+From `mcp/proposals`, use `GOWORK=off go test ./...` to test the pinned SDK and `GOWORK=off go build -o /tmp/apteva-proposals .` to build the sidecar. From the apps repository root, rebuild the public page with `bun build mcp/proposals/ui/offer-source.js --target browser --outfile mcp/proposals/ui/offer.js`, then rebuild the dashboard bundle with `bun run scripts/build-panels.ts --app proposals`. Run the scope and localization tests with `bun test mcp/proposals/ui/offer.test.ts`.

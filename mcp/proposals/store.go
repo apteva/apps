@@ -42,6 +42,9 @@ func scanRevision(row interface{ Scan(...any) error }) (revision, error) {
 	if err := json.Unmarshal([]byte(raw), &r.Content); err != nil {
 		return r, err
 	}
+	if r.Content.Language == "" {
+		r.Content.Language = "en"
+	}
 	if outcome.Valid {
 		r.Response = &response{Outcome: outcome.String, Name: name.String, Note: note.String, TotalMinor: total.Int64, CreatedAt: created.Int64}
 		err = json.Unmarshal([]byte(choices.String), &r.Response.Selection)

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { proposalLocale } from "./locale";
 import { BacklogPanel, BacklogPicker, ClientSelector, currencyOptions as currencies, formatMoney as money } from "./backlog";
 
 type Choice = "unselected" | "include" | "later" | "decline";
@@ -8,7 +9,7 @@ type Line = { name: string; description?: string; required?: boolean; backlog_it
 type Category = { name: string; rule: Rule; items: Line[] | null };
 type Content = {
   title: string; sender: string; client_name: string; client_email?: string;
-  overview?: string; terms?: string; currency: string; validity_days: number;
+  overview?: string; terms?: string; currency: string; validity_days: number; language?: "en" | "fr";
   client_id?: number; opportunity_id?: number; categories: Category[] | null;
 };
 type DraftLine = Omit<Line, "amount_minor"> & { amount: string };
@@ -34,12 +35,12 @@ const labels: Record<Choice, string> = {
 const rules: Record<Rule, string> = { any: "Allow any", one: "Pick up to one", one_required: "Require one choice" };
 
 function blankDraft(): Draft {
-  return { title: "", sender: "", client_name: "", client_email: "", currency: "EUR", validity_days: 14, categories: [] };
+  return { language: "en", title: "", sender: "", client_name: "", client_email: "", currency: "EUR", validity_days: 14, categories: [] };
 }
 
 function editable(c: Content): Draft {
   return {
-    ...c,
+    ...c, language: c.language || "en",
     categories: (c.categories || []).map((group) => ({
       ...group,
       items: (group.items || []).map(({amount_minor, ...line}) => ({...line, amount: (amount_minor / 100).toFixed(2)})),
@@ -388,6 +389,13 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
               <label>Days open after publishing<input type="number" min={1} max={365} value={draft.validity_days || ""}
                 onChange={(event) => setDraft({...draft, validity_days: Number(event.target.value)})}/></label>
             </div>
+            <div className="pp-language-field"><span>Proposal language</span>
+              <div className="pp-visual-choices" role="group" aria-label="Proposal language">
+                <button type="button" aria-pressed={(draft.language || "en") === "en"} onClick={() => setDraft({...draft, language: "en"})}>English (Default)</button>
+                <button type="button" aria-pressed={draft.language === "fr"} onClick={() => setDraft({...draft, language: "fr"})}>Français</button>
+              </div>
+              <small>Sets client-facing buttons, messages, dates, and prices. Write your title, scope, and terms in the chosen language.</small>
+            </div>
             <label>Overview<textarea className="pp-overview-input" maxLength={16000} value={draft.overview || ""}
               placeholder="What you’re building, the outcome, and how you’ll work together."
               onChange={(event) => setDraft({...draft, overview: event.target.value})}/></label>
@@ -446,6 +454,7 @@ function ProjectPanel({projectId, installId, eventRevision}: Props) {
           <div className="pp-metadata">
             <div><span>Client</span><strong>{latest!.content.client_name || "—"}</strong><small>{latest!.content.client_email}</small></div>
             <div><span>Required scope</span><strong>{money(requiredTotal(latest!.content), latest!.content.currency)}</strong></div>
+            <div><span>Language</span><strong>{latest!.content.language === "fr" ? "Français" : "English"}</strong></div>
             <div><span>Revision</span><strong>{latest!.number}</strong></div>
             <div><span>Valid until</span><strong>{latest!.expires_at ? formatDate(latest!.expires_at) : "—"}</strong></div>
           </div>
@@ -648,60 +657,88 @@ function DecisionCounts({reply}: {reply: Reply}) {
 }
 function SelectionPreview({content, reply, readOnly = false}: {content: Content; reply?: Reply; readOnly?: boolean}) {
   const [choices, setChoices] = useState<Record<string, Choice>>({});
+  const text = proposalLocale(content.language);
   const selection = reply?.selection || choices;
+  const format = (amount: number) => new Intl.NumberFormat(text.locale, {style: "currency", currency: content.currency}).format(amount / 100);
+  const values: Choice[] = ["include", "later", "decline"];
   let total = 0;
-  const categories = (content.categories || []).map((group, i) => <section className="pp-preview-category" key={i}>
-    <div className="pp-preview-category-head"><h3>{group.name || "Untitled category"}</h3><span>{rules[group.rule]}</span></div>
-    {(group.items || []).map((line, j) => {
-      const key = i + ":" + j;
-      const choice = selection[key] || "unselected";
-      if (line.required || choice === "include") total += line.amount_minor;
-      return <div className="pp-preview-item" key={j}>
-        <div><strong>{line.name || "Untitled item"}</strong>{line.description && <p className="pp-copy">{line.description}</p>}</div>
-        <span className="pp-amount">{money(line.amount_minor, content.currency)}</span>
-        {line.required ? <span className="pp-required"><Icon name="check"/> Required</span> :
-          reply || readOnly ? <span className={"pp-choice pp-choice-" + choice}>{labels[choice]}</span> :
-          <select aria-label={"Choice for " + line.name} value={choice} onChange={(event) => {
-            const value = event.target.value as Choice;
-            setChoices((previous) => {
-              const next = {...previous, [key]: value};
-              if (value === "include" && group.rule !== "any") {
-                (group.items || []).forEach((_, index) => {
-                  const other = i + ":" + index;
-                  if (other !== key && next[other] === "include") next[other] = "unselected";
+  const categories = (content.categories || []).map((group, i) => {
+    const items = group.items || [];
+    const included = items.filter((line, j) => line.required || selection[i + ":" + j] === "include");
+    const subtotal = included.reduce((sum, line) => sum + line.amount_minor, 0);
+    total += subtotal;
+    return <section className="pp-preview-category" key={i}>
+      <div className="pp-preview-category-head"><h3>{group.name || text.untitledCategory}</h3><span>{text.groupCount(included.length, items.length)} · {format(subtotal)}</span></div>
+      <p className="pp-muted">{text.rules[group.rule]}</p>
+      {!reply && !readOnly && group.rule === "any" && items.some((line) => !line.required) && <div className="pp-visual-choices pp-group-choices" role="group" aria-label={text.groupChoices + " " + group.name}>
+        {values.map((value) => {
+          const active = items.every((line, j) => line.required || selection[i + ":" + j] === value);
+          return <button key={value} type="button" data-choice={value} aria-pressed={active} onClick={() => setChoices((previous) => {
+            const next = {...previous};
+            items.forEach((line, j) => { if (!line.required) next[i + ":" + j] = active ? "unselected" : value; });
+            return next;
+          })}>{value === "include" ? text.includeGroup : text.decisions[value]}</button>;
+        })}
+      </div>}
+      {items.map((line, j) => {
+        const key = i + ":" + j;
+        const choice = selection[key] || "unselected";
+        return <div className="pp-preview-item" key={j}>
+          <div><strong>{line.name || text.untitledItem}</strong>{line.description && <p className="pp-copy">{line.description}</p>}</div>
+          <span className="pp-amount">{format(line.amount_minor)}</span>
+          {line.required ? <span className="pp-required"><Icon name="check"/> {text.required}</span> :
+            reply || readOnly ? <span className={"pp-choice pp-choice-" + choice}>{text.decisions[choice]}</span> :
+            <div className="pp-visual-choices" role="group" aria-label={text.itemChoices + " " + line.name}>
+              {values.map((value) => <button key={value} type="button" data-choice={value} aria-pressed={choice === value} onClick={() => {
+                setChoices((previous) => {
+                  const next = {...previous, [key]: previous[key] === value ? "unselected" : value};
+                  if (next[key] === "include" && group.rule !== "any") {
+                    items.forEach((_, index) => {
+                      const other = i + ":" + index;
+                      if (other !== key && next[other] === "include") next[other] = "unselected";
+                    });
+                  }
+                  return next;
                 });
-              }
-              return next;
-            });
-          }}>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
-      </div>;
-    })}
-  </section>);
-  return <div className="pp-client-preview">
+              }}>{text.decisions[value]}</button>)}
+            </div>}
+        </div>;
+      })}
+    </section>;
+  });
+  return <div className="pp-client-preview" lang={text.lang}>
     <section className="pp-card pp-preview-document">
-      <header className="pp-document-header"><p className="pp-eyebrow">{content.sender || "Your business"} · Proposal</p>
-        <h2>{content.title || "Untitled proposal"}</h2>{content.client_name && <p>Prepared for {content.client_name}</p>}
+      <header className="pp-document-header"><p className="pp-eyebrow">{content.sender || text.business} · {text.proposal}</p>
+        <h2>{content.title || text.untitledProposal}</h2>{content.client_name && <p>{text.prepared} {content.client_name}</p>}
         {content.overview && <p className="pp-copy pp-document-overview">{content.overview}</p>}
       </header>
-      {categories.length ? categories : <p className="pp-muted">Add categories and items in Scope & pricing to preview the client’s choices.</p>}
-      {content.terms && <section className="pp-preview-terms"><h3>Terms & exclusions</h3><p className="pp-copy">{content.terms}</p></section>}
+      {categories.length ? categories : <p className="pp-muted">{text.previewEmpty}</p>}
+      {content.terms && <section className="pp-preview-terms"><h3>{text.terms}</h3><p className="pp-copy">{content.terms}</p></section>}
     </section>
     <aside className="pp-card pp-preview-summary">
-      <SectionTitle title={reply ? states[reply.outcome] : "Selected scope"} description={reply ? "Recorded client response" : "The total updates as items are included."}/>
-      <p className="pp-price">{money(reply?.total_minor ?? total, content.currency)}</p>
-      <span className="pp-muted">{content.currency}{reply?.outcome === "accepted" ? " · Accepted total" : " · Selected total"}</span>
-      {reply && <><DecisionCounts reply={reply}/><div className="pp-section-divider">
-        <strong>{reply.name || "Client"}</strong><p>{formatDate(reply.created_at)}</p>
+      <SectionTitle title={reply ? text.outcomes[reply.outcome as keyof typeof text.outcomes] : text.total} description={reply ? text.recorded : text.livePricing}/>
+      <p className="pp-price">{format(reply?.total_minor ?? total)}</p>
+      <span className="pp-muted">{content.currency} · {reply?.outcome === "accepted" ? text.acceptedTotal : text.total}</span>
+      {reply && <div className="pp-section-divider">
+        <strong>{reply.name || "Client"}</strong><p>{new Intl.DateTimeFormat(text.locale, {dateStyle: "long"}).format(new Date(reply.created_at * 1000))}</p>
         {reply.note && <p className="pp-copy">{reply.note}</p>}
-      </div></>}
-      {!reply && <div className="pp-preview-help"><Icon name="link"/><p>{readOnly
-        ? "This is a saved revision. Its scope and prices are preserved."
-        : "Clients can include items, save them for later, or decline them before responding."}</p></div>}
+      </div>}
+      {!reply && <div className="pp-preview-help"><Icon name="link"/><p>{readOnly ? text.saved : text.help}</p></div>}
     </aside>
   </div>;
 }
 
 const styles = `
+.pp-language-field { display: grid; gap: 10px; font-size: 12px; }
+.pp-language-field > small { color: var(--pp-muted); line-height: 1.5; }
+.pp-visual-choices { display: flex; gap: 7px; flex-wrap: wrap; }
+.pp-preview-item > .pp-visual-choices { grid-column: 1/-1; }
+.ap-proposals .pp-visual-choices button { min-height: 40px; padding: 8px 12px; font-size: 12px; }
+.ap-proposals .pp-visual-choices button[aria-pressed="true"] { background: var(--pp-accent); color: var(--pp-on-accent, #fff); border-color: var(--pp-accent); }
+.ap-proposals .pp-visual-choices button[data-choice="later"][aria-pressed="true"] { background: var(--pp-warn); border-color: var(--pp-warn); color: #1b1b1b; }
+.ap-proposals .pp-visual-choices button[data-choice="decline"][aria-pressed="true"] { background: var(--pp-error); border-color: var(--pp-error); color: #fff; }
+.pp-group-choices { margin: 14px 0 8px; }
+
 .pp-crm-picker { display: grid; gap: 12px; }
 .pp-crm-picker.pp-section-divider { margin-top: 0; }
 .ap-proposals .pp-crm-picker p { margin: 0; }
@@ -857,7 +894,7 @@ const styles = `
 .pp-preview-document { padding: 32px; }.pp-document-header { padding-bottom: 28px; }.pp-eyebrow { color: var(--pp-accent); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; font-weight: 600; }
 .ap-proposals .pp-document-header h2 { font-size: 25px; font-weight: 650; margin: 14px 0 8px; letter-spacing: -.025em; }.pp-document-header > p:not(.pp-eyebrow) { color: var(--pp-muted); font-size: 13px; }.pp-document-overview { margin-top: 24px !important; }
 .pp-preview-category { border-top: 1px solid var(--pp-line); padding: 24px 0 8px; }.pp-preview-category-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }.pp-preview-category-head span { color: var(--pp-dim); font-size: 11px; }
-.pp-preview-item { display: grid; grid-template-columns: minmax(0, 1fr) auto 140px; align-items: center; gap: 20px; padding: 18px 0; }.pp-preview-item strong { font-size: 13px; font-weight: 550; }.pp-preview-item p { color: var(--pp-muted); font-size: 12px; margin-top: 5px; }.pp-preview-item .pp-amount { font-size: 13px; }.ap-proposals .pp-preview-item select { padding: 7px 9px; font-size: 12px; }
+.pp-preview-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 18px 0; }.pp-preview-item strong { font-size: 13px; font-weight: 550; }.pp-preview-item p { color: var(--pp-muted); font-size: 12px; margin-top: 5px; }.pp-preview-item .pp-amount { font-size: 13px; }
 .pp-required { display: flex; align-items: center; gap: 5px; color: var(--pp-dim); font-size: 11px; }.pp-required svg { width: 13px; height: 13px; }
 .pp-preview-summary { position: sticky; top: 0; }.pp-preview-summary .pp-section-title { margin-bottom: 18px; }.pp-price { font-size: 30px; font-weight: 650; letter-spacing: -.035em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }.pp-preview-help { border-top: 1px solid var(--pp-line); margin-top: 24px; padding-top: 20px; color: var(--pp-muted); display: flex; align-items: start; gap: 9px; font-size: 12px; }.pp-preview-terms { border-top: 1px solid var(--pp-line); padding-top: 24px; margin-top: 20px; }.pp-preview-terms p { color: var(--pp-muted); margin-top: 10px !important; font-size: 12px; }
 .pp-choice { font-size: 12px; color: var(--pp-muted); }.pp-choice-include { color: var(--pp-success); }.pp-choice-later { color: var(--pp-warn); }.pp-choice-decline { color: var(--pp-error); }
@@ -865,7 +902,7 @@ const styles = `
 .pp-history-grid .pp-client-preview { grid-template-columns: minmax(0, 1fr); }.pp-history-grid .pp-preview-summary { position: static; }.pp-history-grid .pp-price { font-size: 26px; }
 .pp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (min-width: 1800px) { .pp-editor-grid { grid-template-columns: minmax(0, 2fr) minmax(400px, 1fr); }.pp-client-preview { grid-template-columns: minmax(0, 1fr) 380px; } }
-@media (max-width: 1000px) { .pp-editor-grid, .pp-share-grid, .pp-history-grid { grid-template-columns: 1fr; }.pp-client-preview { grid-template-columns: minmax(0, 1fr) 270px; }.pp-preview-item { grid-template-columns: minmax(0, 1fr) auto; }.pp-preview-item select { grid-column: 1/-1; }.pp-history-list { display: flex; flex-wrap: wrap; gap: 8px; }.pp-history-list .pp-section-title { width: 100%; }.ap-proposals .pp-history-list button { width: auto; } }
+@media (max-width: 1000px) { .pp-editor-grid, .pp-share-grid, .pp-history-grid { grid-template-columns: 1fr; }.pp-client-preview { grid-template-columns: minmax(0, 1fr) 270px; }.pp-preview-item { grid-template-columns: minmax(0, 1fr) auto; }.pp-history-list { display: flex; flex-wrap: wrap; gap: 8px; }.pp-history-list .pp-section-title { width: 100%; }.ap-proposals .pp-history-list button { width: auto; } }
 @media (max-width: 700px) {
   .ap-proposals { padding: 18px; }.pp-header { align-items: start; flex-direction: column; gap: 14px; margin-bottom: 18px; }.ap-proposals h1 { font-size: 21px; }
   .pp-tabs { gap: 22px; margin-bottom: 20px; }.pp-tabs button { white-space: nowrap; }.pp-list-toolbar { align-items: start; flex-direction: column; gap: 10px; }.ap-proposals .pp-search { width: 100%; }
