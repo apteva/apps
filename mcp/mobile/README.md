@@ -51,8 +51,8 @@ GOWORK=off go test -race ./...
 ```
 
 `GOWORK=off` makes this independently installable module use its published SDK
-pin without changing the workspace's go.work. The SDK pin is v0.108.0, selected
-from fetched tags by ancestry (it descends from v0.107.0 and local HEAD's
+pin without changing the workspace's go.work. The SDK pin is v0.115.0, selected
+from fetched tags by ancestry (it descends from v0.108.0 and local HEAD's
 v0.82.0). No local SDK replace directive is distributed.
 
 Build just this panel from the apps root:
@@ -85,24 +85,38 @@ its own. Touch input, typing, the UI tree and screenshots go through a small
 XCUITest bundle shipped in `runner/`: on the first session for a device Mobile
 builds it with `xcodebuild`, installs it and keeps it running, reaching it over
 usbmuxd (devices) or loopback (Simulators). Later sessions reuse the warm
-runner. If opening a session returns `setup_in_progress`, the build is still
-running; open again in a minute.
+runner. The dashboard shows preparation progress and retries the connection automatically.
+MCP callers receiving `setup_in_progress` should retry after a few seconds;
+smoke tests wait automatically within their overall deadline.
 
 One-time steps Apple requires for a physical device:
 
-1. Sign in to an Apple ID under Xcode > Settings > Accounts. A free account
-   works (its runner signature lasts 7 days; Mobile rebuilds when needed). The
-   team comes from the Apple Development certificate in the keychain, or set
-   `ios_team_id`.
+1. Sign in to your Apple Account under Xcode > Settings > Accounts, including
+   any Apple two-factor authentication. A free account works. No manual
+   certificate or provisioning-profile creation is needed. Mobile discovers
+   teams from Xcode before any certificate exists, uses a single team
+   automatically, and lets you select between multiple teams in Mobile > Setup.
+   The selection is remembered. `ios_team_id` remains an optional advanced override.
 2. Connect the device, unlock it and tap Trust.
 3. Enable Developer Mode (Settings > Privacy & Security > Developer Mode) and
    restart the device.
 4. Free accounts only: after the first install, trust the developer app under
    Settings > General > VPN & Device Management.
 
+The native runner requires iOS 17 or newer. Xcode creates certificates, app IDs
+and provisioning profiles automatically, registers the phone, and builds and
+installs the runner. Cached device builds are re-provisioned when their embedded
+profile is missing or expires within an hour (free-team profiles last 7 days).
+
+Mobile > Setup checks signing status automatically and can open Xcode for
+sign-in. The `mobile_setup` tool provides the same status, `select_team` and
+`open_xcode` actions. For a remote runner, these actions apply to its Mac.
+
 Simulators need none of this. Errors from these steps come back as
 `setup_required` with the step to take. The runner listens on device port
-22087 and is reachable only through the Mac's USB mux. Mobile must run outside
+22087 and Mobile connects through the Mac's USB mux. Every runner request,
+including screenshots, requires a random per-process bearer token passed by
+Mobile automatically. Simulator listeners bind loopback only. Mobile must run outside
 any sandbox that blocks `xcodebuild` from reaching `testmanagerd`.
 
 The opt-in end-to-end test drives a booted Simulator through the real runner:
@@ -265,6 +279,7 @@ ADB/Appium clients outside Mobile. Do not run other controllers concurrently.
 
 | Tool | Operations |
 |---|---|
+| `mobile_setup` | Native iPhone signing status, team selection and opening Xcode for Apple sign-in |
 | `mobile_devices` | Inventory, platform/physical filters, setup diagnostics |
 | `mobile_session` | open, list, get, renew, close, recover |
 | `mobile_observe` | Screenshot image content; optional UI source |

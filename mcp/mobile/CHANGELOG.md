@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-11-07
+
+- Bootstrap native iPhone signing from Xcode team metadata before a development
+  certificate exists. Automatically provision certificates, app IDs, profiles
+  and device registration through Xcode; remember an explicit team choice.
+- Add mobile_setup and a live setup panel with Apple sign-in guidance and team
+  selection. Keep manual steps to Apple account/device approvals.
+- Show first-build progress and reconnect automatically; smoke tests also wait
+  for native runner preparation. Re-provision expired cached device builds.
+- Fix configured native iPhone inventory and report the iOS 17 minimum.
+- Authenticate every native runner request; restrict simulator listeners to
+  loopback and cancel background preparation when Mobile shuts down.
+- Pin app-sdk v0.115.0, selected by tag ancestry.
+
 ## 0.3.0 — 2026-11-01
 
 - Native iOS control without Appium (`ios_driver=native`, the default on a

@@ -11,6 +11,7 @@ interface Check { name: string; ok: boolean; detail: string }
 interface Upload { status: string; storage_file_id?: number; error?: string }
 interface Recording { id: string; kind: "capture" | "export"; parent_id?: string; session_id?: string; run_id?: string; device_id?: string; platform?: string; method?: string; preset?: string; audio: boolean; status: string; file_name?: string; size_bytes: number; duration_ms: number; width: number; height: number; fps: number; video_codec?: string; audio_codec?: string; markers: Marker[]; checks: Check[]; valid?: boolean; error?: string; created_at: number; started_at?: number; file_url?: string; upload?: Upload }
 interface Preset { name: string; description?: string; sizes?: Record<string, { w: number; h: number }>; default_variant?: string; min_seconds?: number; max_seconds?: number; orientations?: string[] }
+interface IOSSetup { state: string; message: string; team_id?: string; teams: {id: string; name: string; personal: boolean}[] }
 
 const API = "/api/apps/mobile/api";
 const sample = JSON.stringify([
@@ -54,6 +55,10 @@ export default function MobilePanel({ projectId }: Props) {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [iosSetup, setIOSSetup] = useState<IOSSetup | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [pendingConnection,setPendingConnection] = useState(false);
+  const connection = useRef<AbortController | null>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
 
   const call = useCallback(async (tool: string, args: Record<string, unknown> = {}, signal?: AbortSignal) => {
@@ -62,9 +67,22 @@ export default function MobilePanel({ projectId }: Props) {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, args }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+    if (!response.ok) throw Object.assign(new Error(body.error || `Request failed (${response.status})`), { code: body.code });
     return body;
   }, [projectId]);
+
+  useEffect(() => {
+    if (tab !== "setup") return;
+    const abort = new AbortController(); let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try { const setup = await call("mobile_setup", {action: "status"}, abort.signal); if (!abort.signal.aborted) setIOSSetup(setup); }
+      catch (e) { if (!abort.signal.aborted) setIOSSetup({state:"unavailable", message:(e as Error).message, teams:[]}); }
+      if (!abort.signal.aborted) timer = setTimeout(poll, 5000);
+    };
+    void poll();
+    return () => { abort.abort(); clearTimeout(timer); };
+  }, [tab,call]);
+  useEffect(() => () => { connection.current?.abort(); }, [projectId]);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const [inventory, active, history, videos] = await Promise.all([
@@ -78,7 +96,7 @@ export default function MobilePanel({ projectId }: Props) {
   }, [call]);
 
   useEffect(() => {
-    setSessionID(""); setImage(""); setSource(""); setSelected(""); setSelectedRun(""); setLive(false); setLoading(true);
+    setSessionID(""); setImage(""); setSource(""); setSelected(""); setSelectedRun(""); setLive(false); setLoading(true);setPendingConnection(false);
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -143,10 +161,30 @@ export default function MobilePanel({ projectId }: Props) {
     await observe();
   }
   async function open() {
-    const result = await call("mobile_session", { action: "open", device_id: selected, mode });
-    setSessionID(result.session.id); setSessions(current => [result.session, ...current]); setLive(true); setImage(""); setSource("");
+    if (device?.driver === "xctest" && device.physical) {
+      const setup = await call("mobile_setup",{action:"status"}); setIOSSetup(setup);
+      if (setup.state !== "ready") {setPendingConnection(true);setTab("setup"); return;}
+    }
+    const abort = new AbortController(); connection.current = abort; setConnecting(true);
+    const deadline = Date.now() + 20 * 60 * 1000;
+    try {
+      while (!abort.signal.aborted) {
+        try {
+          const result = await call("mobile_session", { action: "open", device_id: selected, mode }, abort.signal);
+          if (abort.signal.aborted) return;
+          setSessionID(result.session.id); setSessions(current => [result.session, ...current]); setLive(true); setImage(""); setSource(""); setNotice(""); return;
+        } catch(e) {
+          if (abort.signal.aborted) return;
+          if ((e as Error & {code?:string}).code !== "setup_in_progress") throw e;
+          if (Date.now() >= deadline) throw new Error("The iPhone runner is taking longer than expected. Check Xcode and the phone for Apple approval prompts, then try again.");
+          setNotice("Preparing your iPhone: Mobile is building, signing and installing its runner. This can take a few minutes. Connection resumes automatically.");
+          await new Promise<void>(resolve => { const done = () => { clearTimeout(timer); abort.signal.removeEventListener("abort",done); resolve(); }; const timer = setTimeout(done,3000); abort.signal.addEventListener("abort",done,{once:true}); });
+        }
+      }
+    } finally { if (connection.current === abort) connection.current = null; setConnecting(false); }
   }
   function selectDevice(id: string) {
+    setPendingConnection(false);
     setSelected(id);
     const existing = sessions.find(s => s.device_id === id && ["active", "cleanup_failed"].includes(s.status));
     setSessionID(existing?.id || ""); setImage(""); setSource(""); setLive(existing?.status === "active");
@@ -163,6 +201,11 @@ export default function MobilePanel({ projectId }: Props) {
     setSelectedRun(result.run_id); setTab("tests");
   }
   const evidenceURL = (id: string) => `${API}/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`;
+
+  useEffect(() => {
+    if (!pendingConnection || busy || iosSetup?.state !== "ready") return;
+    setPendingConnection(false);setTab("devices");void perform(open);
+  },[pendingConnection,busy,iosSetup?.state]);
 
   return <div className="h-full min-h-0 flex flex-col bg-bg text-text">
     <nav className="shrink-0 flex items-center gap-1 border-b border-border px-3 pt-2 text-xs" aria-label="Mobile views">
@@ -183,6 +226,7 @@ export default function MobilePanel({ projectId }: Props) {
 
     {notice && <div role="status" className="shrink-0 flex items-start justify-between gap-3 border-b border-border bg-bg-input px-4 py-2 text-xs text-text-muted">
       <span>{notice}</span>
+      {connecting && <button type="button" className="shrink-0 hover:underline" onClick={() => { connection.current?.abort(); setNotice("Connection cancelled. Runner preparation may finish in the background."); }}>Cancel connection</button>}
       <button type="button" aria-label="Dismiss notice" className="shrink-0 hover:underline" onClick={() => setNotice("")}>Dismiss</button>
     </div>}
 
@@ -469,8 +513,17 @@ export default function MobilePanel({ projectId }: Props) {
           </section>
           <section className="space-y-3">
             <h2 className={sectionTitleClass}>iPhone</h2>
-            <ol className="list-decimal pl-5 text-sm text-text-muted space-y-2"><li>Run Mobile on a Mac with Xcode, and sign in to your Apple ID under Xcode › Settings › Accounts (a free account works).</li><li>Connect the iPhone, unlock it and tap Trust.</li><li>Turn on Developer Mode (Settings › Privacy & Security), then restart the phone.</li><li>Refresh Devices and open a session. The first one builds and installs Mobile’s test runner, which takes a minute or two.</li></ol>
-            <p className="text-xs text-text-dim">Free Apple IDs: trust the runner once under Settings › General › VPN & Device Management. Booted iOS Simulators appear automatically. Appium remains available with ios_driver=appium.</p>
+            <p className="text-sm text-text-muted">Mobile handles certificates, provisioning profiles, signing and runner installation. Complete only Apple's account and device approvals.</p>
+            <div role="status" className="text-sm text-text-muted border border-border rounded p-3">{iosSetup?.message || "Checking Xcode and Apple signing teams…"}</div>
+            {iosSetup && ["needs_account","needs_xcode"].includes(iosSetup.state) && <button type="button" className={primaryButtonClass} disabled={busy} onClick={() => void perform(async () => { setIOSSetup(await call("mobile_setup",{action:"open_xcode"})); })}>Open Xcode to sign in</button>}
+            {iosSetup?.teams && iosSetup.teams.length > 1 && <label className={labelClass}>Apple signing team
+              <select className={inputClass} value={iosSetup.team_id || ""} disabled={busy} onChange={e => {const team_id=e.target.value; if(team_id) void perform(async () => { setIOSSetup(await call("mobile_setup",{action:"select_team",team_id})); });}}>
+                <option value="">Choose your team</option>
+                {iosSetup.teams.map(t => <option key={t.id} value={t.id}>{t.name || t.id}{t.personal ? " (Personal Team)" : ""}</option>)}
+              </select>
+            </label>}
+            <ol className="list-decimal pl-5 text-sm text-text-muted space-y-2"><li>Sign into Xcode › Settings › Accounts once, including any two-factor authentication. A free Apple Account works; no manual certificate creation is needed.</li><li>Connect your iPhone by USB, unlock it and tap Trust.</li><li>Enable Developer Mode under Settings › Privacy & Security and confirm after restarting.</li><li>If iOS asks, trust the developer under Settings › General › VPN & Device Management.</li></ol>
+            <p className="text-xs text-text-dim">Requires iOS 17 or newer. Setup refreshes automatically after sign-in. Open a Screen session from Devices; Mobile connects automatically when its first build finishes. Booted Simulators need no Apple Account.</p>
           </section>
         </div>
         <section className="border-t border-border pt-5 space-y-3">

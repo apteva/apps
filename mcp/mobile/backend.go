@@ -113,11 +113,14 @@ func (d *drivers) devices(ctx context.Context) ([]Device, []string, error) {
 			}
 			if v.Driver == "" {
 				v.Driver = "appium"
+				if v.Platform == "ios" && d.nativeIOS() {
+					v.Driver = driverXCTest
+				}
 				if v.Platform == "android" && d.cfg.AndroidDriver != "appium" {
 					v.Driver = "adb"
 				}
 			}
-			if v.Driver != "adb" && v.Driver != "appium" || v.Platform == "ios" && v.Driver != "appium" && v.Driver != driverXCTest || v.Platform == "android" && v.Driver == driverXCTest {
+			if (v.Driver != "adb" && v.Driver != "appium" && v.Driver != driverXCTest) || (v.Platform == "ios" && v.Driver == "adb") || (v.Platform == "android" && v.Driver == driverXCTest) {
 				return nil, nil, problem("invalid_configuration", "unsupported device driver")
 			}
 			v.State = "configured"
@@ -229,7 +232,11 @@ func (d *drivers) Open(ctx context.Context, v Device, mode string) (string, erro
 			return "", problem("unsupported", "structured mode requires the Appium driver")
 		}
 		// The runner stays warm across sessions; Close does not stop it.
-		_, err := d.runner(ctx, v)
+		// Return progress promptly instead of holding the HTTP request through
+		// a first-time Xcode build; the panel retries automatically.
+		prepareCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		_, err := d.runner(prepareCtx, v)
 		return "", err
 	}
 	if d.cfg.AppiumURL == "" {

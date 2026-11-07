@@ -109,7 +109,10 @@ func (d *drivers) iosDevices(ctx context.Context, taken map[string]bool) ([]Devi
 		if v.Name == "" {
 			v.Name = "iPhone"
 		}
+		major, _ := strconv.Atoi(strings.SplitN(v.OS, ".", 2)[0])
 		switch {
+		case major > 0 && major < 17:
+			v.State, v.Hint = "setup_required", "Mobile's native runner requires iOS 17 or newer. Update this iPhone before opening a session."
 		case x.ConnectionProperties.TransportType == "":
 			v.State, v.Hint = "offline", "Connect the device by USB (or keep it on the same Wi-Fi as this Mac) and unlock it."
 		case x.ConnectionProperties.PairingState != "paired":
@@ -153,13 +156,17 @@ func (d *drivers) iosDevices(ctx context.Context, taken map[string]bool) ([]Devi
 
 // --- signing -------------------------------------------------------------------
 
-// teamID returns the configured team, or the team of the newest valid
-// "Apple Development" certificate in the login keychain.
+// Team discovery must work before the first development certificate exists.
+// The selected/configured team wins, followed by existing signing assets or
+// a single team cached by Xcode. xcodebuild creates any missing signing assets.
 func (d *drivers) teamID(ctx context.Context) (string, error) {
 	if t := strings.TrimSpace(d.cfg.IOSTeamID); t != "" {
 		if !teamIDPattern.MatchString(t) {
 			return "", problem("invalid_configuration", "ios_team_id must be the 10-character Apple team ID")
 		}
+		return t, nil
+	}
+	if t := d.savedTeam(); t != "" {
 		return t, nil
 	}
 	out, err := d.command(ctx, "security", "find-certificate", "-a", "-c", "Apple Development", "-p")
@@ -168,7 +175,14 @@ func (d *drivers) teamID(ctx context.Context) (string, error) {
 			return t, nil
 		}
 	}
-	return "", problem("setup_required", "no Apple development signing identity on this Mac. Open Xcode > Settings > Accounts and sign in with your Apple ID (a free account works), or set ios_team_id.")
+	teams := d.signingTeams(ctx)
+	if len(teams) == 1 {
+		return teams[0].ID, nil
+	}
+	if len(teams) > 1 {
+		return "", problem("setup_required", "Choose your Apple signing team in Mobile > Setup. Mobile will create the certificate and provisioning profile automatically.")
+	}
+	return "", problem("setup_required", "Open Xcode > Settings > Accounts and sign in with your Apple Account (a free account works), then refresh Mobile > Setup. No manual certificate creation is needed. Advanced runners can set ios_team_id.")
 }
 
 func teamFromPEM(b []byte, now time.Time) string {
@@ -222,6 +236,7 @@ type iosRunner struct {
 	proc   *exec.Cmd
 	exited chan struct{}
 	log    ringLog
+	token  string
 }
 
 func (r *iosRunner) alive() bool {
@@ -245,6 +260,10 @@ type iosRunners struct {
 	mu      sync.Mutex
 	byUDID  map[string]*iosRunner
 	buildMu sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	stopped bool
 }
 
 // runner returns a started runner for v, starting (and on first use
@@ -252,14 +271,29 @@ type iosRunners struct {
 // setup_in_progress problem while preparation continues.
 func (d *drivers) runner(ctx context.Context, v Device) (*iosRunner, error) {
 	d.ios.mu.Lock()
+	if d.ios.stopped {
+		d.ios.mu.Unlock()
+		return nil, problem("infrastructure_error", "Mobile's iOS runner is shutting down")
+	}
+	if d.ios.ctx == nil {
+		d.ios.ctx, d.ios.cancel = context.WithCancel(context.Background())
+	}
 	if d.ios.byUDID == nil {
 		d.ios.byUDID = map[string]*iosRunner{}
 	}
 	r := d.ios.byUDID[v.UDID]
+	if r != nil && !r.alive() && r.err != nil {
+		// A polling caller must see a completed preparation failure before
+		// another build replaces it, especially Apple's approval/sign-in errors.
+		delete(d.ios.byUDID, v.UDID)
+		d.ios.mu.Unlock()
+		return nil, r.err
+	}
 	if r == nil || !r.alive() {
-		r = &iosRunner{udid: v.UDID, sim: !v.Physical, ready: make(chan struct{}), exited: make(chan struct{})}
+		r = &iosRunner{udid: v.UDID, sim: !v.Physical, token: id(""), ready: make(chan struct{}), exited: make(chan struct{})}
 		d.ios.byUDID[v.UDID] = r
-		go d.prepareRunner(r)
+		d.ios.wg.Add(1)
+		go func() { defer d.ios.wg.Done(); d.prepareRunner(d.ios.ctx, r) }()
 	}
 	d.ios.mu.Unlock()
 	select {
@@ -268,12 +302,17 @@ func (d *drivers) runner(ctx context.Context, v Device) (*iosRunner, error) {
 		return nil, problem("setup_in_progress", "the iOS runner is still starting (the first start builds and installs it, about 1-3 minutes); retry shortly")
 	}
 	if r.err != nil {
+		d.ios.mu.Lock()
+		if d.ios.byUDID[v.UDID] == r {
+			delete(d.ios.byUDID, v.UDID)
+		}
+		d.ios.mu.Unlock()
 		return nil, r.err
 	}
 	return r, nil
 }
 
-func (d *drivers) prepareRunner(r *iosRunner) {
+func (d *drivers) prepareRunner(parent context.Context, r *iosRunner) {
 	defer close(r.ready)
 	fail := func(err error) {
 		r.err = err
@@ -281,7 +320,7 @@ func (d *drivers) prepareRunner(r *iosRunner) {
 			_ = r.proc.Process.Kill()
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runnerBuildLimit+runnerStartLimit)
+	ctx, cancel := context.WithTimeout(parent, runnerBuildLimit+runnerStartLimit)
 	defer cancel()
 	xctestrun, err := d.buildRunner(ctx, r)
 	if err != nil {
@@ -308,7 +347,7 @@ func (d *drivers) prepareRunner(r *iosRunner) {
 	}
 	cmd := exec.Command("xcrun", "xcodebuild", "test-without-building", "-xctestrun", xctestrun, "-destination", "id="+r.udid)
 	// xcodebuild forwards TEST_RUNNER_-prefixed variables to the test process.
-	cmd.Env = append(os.Environ(), "TEST_RUNNER_APTEVA_PORT="+strconv.Itoa(r.port))
+	cmd.Env = append(os.Environ(), "TEST_RUNNER_APTEVA_PORT="+strconv.Itoa(r.port), "TEST_RUNNER_APTEVA_TOKEN="+r.token)
 	cmd.Stdout, cmd.Stderr = &r.log, &r.log
 	if err := cmd.Start(); err != nil {
 		fail(problem("setup_required", "cannot start xcodebuild: "+err.Error()))
@@ -319,6 +358,9 @@ func (d *drivers) prepareRunner(r *iosRunner) {
 	deadline := time.Now().Add(runnerStartLimit)
 	for time.Now().Before(deadline) {
 		select {
+		case <-ctx.Done():
+			fail(ctx.Err())
+			return
 		case <-r.exited:
 			fail(runnerProblem("the iOS runner stopped while starting", r.log.String()))
 			return
@@ -378,12 +420,12 @@ func (d *drivers) buildRunner(ctx context.Context, r *iosRunner) (string, error)
 	}
 	root := filepath.Join(d.cfg.ToolDir, "iosrunner-"+sum)
 	derived := filepath.Join(root, key)
-	if p := findXCTestRun(derived); p != "" {
+	if p := findXCTestRun(derived); p != "" && (r.sim || d.runnerProvisioningValid(ctx, derived)) {
 		return p, nil
 	}
 	d.ios.buildMu.Lock()
 	defer d.ios.buildMu.Unlock()
-	if p := findXCTestRun(derived); p != "" {
+	if p := findXCTestRun(derived); p != "" && (r.sim || d.runnerProvisioningValid(ctx, derived)) {
 		return p, nil
 	}
 	src := filepath.Join(root, "src")
@@ -444,6 +486,8 @@ func runnerProblem(what, log string) error {
 	l := strings.ToLower(log)
 	hint := ""
 	switch {
+	case strings.Contains(l, "license") || strings.Contains(l, "firstlaunch"):
+		return problem("setup_required", what+": open Xcode and complete Apple's license and first-launch component prompts, then retry.")
 	case strings.Contains(l, "no account for team") || strings.Contains(l, "no accounts") || strings.Contains(l, "requires a development team") || strings.Contains(l, "no profiles for") || strings.Contains(l, "sign in with your apple id"):
 		return problem("setup_required", what+": Xcode could not sign it. Open Xcode > Settings > Accounts, sign in with the Apple ID of the signing team (a free account works), then retry.")
 	case strings.Contains(l, "developer mode"):
@@ -476,12 +520,17 @@ func runnerProblem(what, log string) error {
 
 func (d *drivers) stopRunners() {
 	d.ios.mu.Lock()
+	d.ios.stopped = true
+	if d.ios.cancel != nil {
+		d.ios.cancel()
+	}
 	runners := make([]*iosRunner, 0, len(d.ios.byUDID))
 	for _, r := range d.ios.byUDID {
 		runners = append(runners, r)
 	}
 	d.ios.byUDID = nil
 	d.ios.mu.Unlock()
+	d.ios.wg.Wait()
 	for _, r := range runners {
 		select {
 		case <-r.ready:
@@ -518,6 +567,9 @@ func (r *iosRunner) do(ctx context.Context, method, path string, body any) ([]by
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
 	res, err := r.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {

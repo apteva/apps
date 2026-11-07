@@ -21,8 +21,11 @@ final class RunnerTests: XCTestCase {
 
     func testRunner() throws {
         let port = UInt16(ProcessInfo.processInfo.environment["APTEVA_PORT"] ?? "") ?? 22087
+        guard let token = ProcessInfo.processInfo.environment["APTEVA_TOKEN"], !token.isEmpty else {
+            throw NSError(domain: "AptevaRunner", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing runner authentication token"])
+        }
         let agent = self.agent
-        let server = try HTTPServer(port: port) { request in
+        let server = try HTTPServer(port: port, token: token) { request in
             var response = HTTPResponse.error(500, "internal", "no response")
             DispatchQueue.main.sync { response = agent.handle(request) }
             return response

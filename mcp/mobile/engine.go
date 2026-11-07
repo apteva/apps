@@ -433,6 +433,8 @@ func (e *engine) Execute(ctx context.Context, pid, tool string, args map[string]
 	e.mu.Unlock()
 	defer e.opWG.Done()
 	switch tool {
+	case "mobile_setup":
+		return e.drivers.iosSetup(ctx, args)
 	case "mobile_devices":
 		devices, hints, err := e.drivers.devices(ctx)
 		if err != nil {
@@ -773,6 +775,17 @@ func (e *engine) executeTest(ctx context.Context, r TestRun, steps []Step, mode 
 		_ = e.saveRun(r)
 	}
 	s, err := e.open(ctx, r.ProjectID, map[string]any{"device_id": r.DeviceID, "mode": mode, "ttl_seconds": 900})
+	for errorCode(err) == "setup_in_progress" {
+		timer := time.NewTimer(3 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			finish(ctx.Err())
+			return
+		case <-timer.C:
+		}
+		s, err = e.open(ctx, r.ProjectID, map[string]any{"device_id": r.DeviceID, "mode": mode, "ttl_seconds": 900})
+	}
 	if err != nil {
 		finish(err)
 		return

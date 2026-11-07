@@ -219,6 +219,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		name, description string
 		input             map[string]any
 	}{
+		{"mobile_setup", "Inspect native iPhone setup on the Mac hosting Mobile. action=status (default) discovers Apple teams without requiring an existing certificate; select_team(team_id) remembers a discovered team; open_xcode opens Xcode for Apple Account sign-in. Mobile automatically creates signing assets when a device session opens. Phone trust, Developer Mode and any Apple sign-in/2FA remain operator steps.", schema(map[string]any{"action": enumSchema("status", "select_team", "open_xcode"), "team_id": stringSchema()})},
 		{"mobile_devices", "List phones, backend capabilities and setup diagnostics.", schema(deviceFields)},
 		{"mobile_session", "Reserve one phone exclusively; list/get/renew/close sessions. Close preserves data. Recover requires confirm=true after manually stopping an orphaned Appium session.", schema(sessionFields, "action")},
 		{"mobile_observe", "See a phone screenshot as image content, optionally including the UI hierarchy or browser source.", schema(map[string]any{"session_id": stringSchema(), "source": boolSchema()}, "session_id")},
@@ -375,7 +376,7 @@ func writeFailure(w http.ResponseWriter, err error) {
 		status = 403
 	case "not_found":
 		status = 404
-	case "device_unavailable", "session_inactive", "session_expired":
+	case "device_unavailable", "session_inactive", "session_expired", "setup_in_progress":
 		status = 409
 	case "unsupported", "setup_required", "invalid_configuration":
 		status = 422
