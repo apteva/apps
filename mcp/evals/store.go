@@ -103,7 +103,7 @@ func scanSuite(row interface{ Scan(...any) error }) (*Suite, error) {
 }
 
 func (s store) listCases(suiteID string) ([]Case, error) {
-	rows, err := s.db.Query(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE suite_id=? ORDER BY created_at`, suiteID)
+	rows, err := s.db.Query(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,environment_json,rating_profile,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE suite_id=? ORDER BY created_at`, suiteID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (s store) listCases(suiteID string) ([]Case, error) {
 }
 
 func (s store) getCase(id string) (*Case, error) {
-	return scanCase(s.db.QueryRow(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE id=?`, id))
+	return scanCase(s.db.QueryRow(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,environment_json,rating_profile,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE id=?`, id))
 }
 
 func (s store) saveCase(item *Case) error {
@@ -145,7 +145,7 @@ func (s store) saveCase(item *Case) error {
 	if item.Voice != nil {
 		voiceJSON = encodeJSON(item.Voice)
 	}
-	_, err := s.db.Exec(`INSERT INTO eval_cases(id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET suite_id=excluded.suite_id,name=excluded.name,prompt=excluded.prompt,mode=excluded.mode,voice_json=excluded.voice_json,goals_json=excluded.goals_json,assertions_json=excluded.assertions_json,environment_id=excluded.environment_id,weight=excluded.weight,timeout_seconds=excluded.timeout_seconds,max_turns=excluded.max_turns,enabled=excluded.enabled,revision=eval_cases.revision+1,updated_at=excluded.updated_at`, item.ID, item.SuiteID, item.Name, item.Prompt, item.Mode, voiceJSON, encodeJSON(item.Goals), encodeJSON(item.Assertions), item.EnvironmentID, item.Weight, item.TimeoutSeconds, item.MaxTurns, boolInt(item.Enabled), item.Revision, formatTime(item.CreatedAt), formatTime(item.UpdatedAt))
+	_, err := s.db.Exec(`INSERT INTO eval_cases(id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,environment_json,rating_profile,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET suite_id=excluded.suite_id,name=excluded.name,prompt=excluded.prompt,mode=excluded.mode,voice_json=excluded.voice_json,goals_json=excluded.goals_json,assertions_json=excluded.assertions_json,environment_id=excluded.environment_id,environment_json=excluded.environment_json,rating_profile=excluded.rating_profile,weight=excluded.weight,timeout_seconds=excluded.timeout_seconds,max_turns=excluded.max_turns,enabled=excluded.enabled,revision=eval_cases.revision+1,updated_at=excluded.updated_at`, item.ID, item.SuiteID, item.Name, item.Prompt, item.Mode, voiceJSON, encodeJSON(item.Goals), encodeJSON(item.Assertions), item.EnvironmentID, encodeJSON(item.Environment), item.RatingProfile, item.Weight, item.TimeoutSeconds, item.MaxTurns, boolInt(item.Enabled), item.Revision, formatTime(item.CreatedAt), formatTime(item.UpdatedAt))
 	if err == nil {
 		_, _ = s.db.Exec(`UPDATE eval_suites SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), item.SuiteID)
 	}
@@ -166,10 +166,10 @@ func (s store) deleteCase(id string) error {
 
 func scanCase(row interface{ Scan(...any) error }) (*Case, error) {
 	var item Case
-	var goals, assertions, created, updated string
+	var goals, assertions, environment, created, updated string
 	var voice sql.NullString
 	var enabled int
-	err := row.Scan(&item.ID, &item.SuiteID, &item.Name, &item.Prompt, &item.Mode, &voice, &goals, &assertions, &item.EnvironmentID, &item.Weight, &item.TimeoutSeconds, &item.MaxTurns, &enabled, &item.Revision, &created, &updated)
+	err := row.Scan(&item.ID, &item.SuiteID, &item.Name, &item.Prompt, &item.Mode, &voice, &goals, &assertions, &item.EnvironmentID, &environment, &item.RatingProfile, &item.Weight, &item.TimeoutSeconds, &item.MaxTurns, &enabled, &item.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -180,6 +180,9 @@ func scanCase(row interface{ Scan(...any) error }) (*Case, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(assertions), &item.Assertions); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(environment), &item.Environment); err != nil {
 		return nil, err
 	}
 	if voice.Valid {
@@ -312,6 +315,10 @@ func (s store) listRuns(experimentID string) ([]Run, error) {
 		return nil, err
 	}
 	for i := range out {
+		out[i].Attempts, err = s.listAttempts(out[i].ID)
+		if err != nil {
+			return nil, err
+		}
 		out[i].Suggestions, err = s.listSuggestions(out[i].ID)
 		if err != nil {
 			return nil, err
@@ -325,18 +332,23 @@ func (s store) getRun(id string) (*Run, error) {
 	if err != nil || run == nil {
 		return run, err
 	}
+	run.Attempts, err = s.listAttempts(run.ID)
+	if err != nil {
+		return nil, err
+	}
 	run.Suggestions, err = s.listSuggestions(run.ID)
 	return run, err
 }
 
-const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,collaborator_executions_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
+const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,collaborator_executions_json,voice_call_json,assertions_json,judge_json,outcome,correctness_score,judge_score,quality_score,overall_score,started_at,finished_at,error,created_at,cancel_requested_at FROM eval_runs`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
 	var caseRaw, targetRaw, assertionsRaw, created string
 	var executionRaw, collaboratorsRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
-	var correctness, judgeScore, overall sql.NullFloat64
-	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &collaboratorsRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
+	var correctness, judgeScore, quality, overall sql.NullFloat64
+	var cancellation sql.NullString
+	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &collaboratorsRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &run.Outcome, &correctness, &judgeScore, &quality, &overall, &started, &finished, &run.Error, &created, &cancellation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -373,6 +385,10 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 		value := judgeScore.Float64
 		run.JudgeScore = &value
 	}
+	if quality.Valid {
+		value := quality.Float64
+		run.QualityScore = &value
+	}
 	if overall.Valid {
 		value := overall.Float64
 		run.OverallScore = &value
@@ -386,6 +402,10 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 		run.FinishedAt = &value
 	}
 	run.CreatedAt = parseTime(created)
+	if cancellation.Valid {
+		t := parseTime(cancellation.String)
+		run.CancelRequestedAt = &t
+	}
 	return &run, nil
 }
 
@@ -395,12 +415,12 @@ func (s store) claimRun() (*Run, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	run, err := scanRun(tx.QueryRow(runSelect + ` WHERE status='queued' ORDER BY created_at LIMIT 1`))
+	run, err := scanRun(tx.QueryRow(runSelect + ` WHERE status='queued' AND cancel_requested_at IS NULL AND NOT EXISTS(SELECT 1 FROM eval_experiments e WHERE e.id=eval_runs.experiment_id AND e.cancel_requested_at IS NOT NULL) ORDER BY created_at LIMIT 1`))
 	if err != nil || run == nil {
 		return run, err
 	}
 	now := formatTime(time.Now().UTC())
-	result, err := tx.Exec(`UPDATE eval_runs SET status='running',stage='starting',started_at=? WHERE id=? AND status='queued'`, now, run.ID)
+	result, err := tx.Exec(`UPDATE eval_runs SET status='running',stage='starting',started_at=? WHERE id=? AND status='queued' AND cancel_requested_at IS NULL`, now, run.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -418,8 +438,26 @@ func (s store) claimRun() (*Run, error) {
 }
 
 func (s store) updateRunProgress(id, stage, environmentRunID string) error {
-	_, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=?`, stage, environmentRunID, id)
-	return err
+	result, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=? AND status='running' AND cancel_requested_at IS NULL`, stage, environmentRunID, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 1 {
+		return nil
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM eval_runs WHERE id=?`, id).Scan(&status); err != nil {
+		return err
+	}
+	requested, _ := s.cancellationRequested(id)
+	if status == "cancelled" || requested {
+		return errRunCancelled
+	}
+	return fmt.Errorf("eval run %s is not running (status %s)", id, status)
 }
 
 func (s store) finishRun(run *Run) error {
@@ -436,9 +474,24 @@ func (s store) finishRun(run *Run) error {
 	if run.VoiceCall != nil {
 		voiceCallJSON = encodeJSON(run.VoiceCall)
 	}
-	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,collaborator_executions_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, collaboratorsJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
+	result, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,collaborator_executions_json=?,voice_call_json=?,assertions_json=?,judge_json=?,outcome=?,correctness_score=?,judge_score=?,quality_score=?,overall_score=?,finished_at=?,error=? WHERE id=? AND status!='cancelled' AND cancel_requested_at IS NULL`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, collaboratorsJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, run.Outcome, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.QualityScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
 	if err != nil {
 		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		var status string
+		if err := s.db.QueryRow(`SELECT status FROM eval_runs WHERE id=?`, run.ID).Scan(&status); err != nil {
+			return err
+		}
+		requested, _ := s.cancellationRequested(run.ID)
+		if status == "cancelled" || requested {
+			return errRunCancelled
+		}
+		return fmt.Errorf("eval run %s could not be finished from status %s", run.ID, status)
 	}
 	return s.rollupExperiment(run.ExperimentID)
 }
@@ -447,7 +500,12 @@ func (s store) retryInvalidSimulation(run *Run) (bool, error) {
 	if run == nil || run.SimulationAttempt >= 1 {
 		return false, nil
 	}
-	result, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
 		UPDATE eval_runs
 		SET status='queued',
 			stage='retrying_simulation',
@@ -464,7 +522,7 @@ func (s store) retryInvalidSimulation(run *Run) (bool, error) {
 			started_at=NULL,
 			finished_at=NULL,
 			error=''
-		WHERE id=? AND simulation_attempt=?
+		WHERE id=? AND simulation_attempt=? AND status='running' AND cancel_requested_at IS NULL AND NOT EXISTS(SELECT 1 FROM eval_experiments e WHERE e.id=eval_runs.experiment_id AND e.cancel_requested_at IS NOT NULL)
 	`, run.ID, run.SimulationAttempt)
 	if err != nil {
 		return false, err
@@ -473,8 +531,11 @@ func (s store) retryInvalidSimulation(run *Run) (bool, error) {
 	if err != nil || changed != 1 {
 		return false, err
 	}
-	_, err = s.db.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=?`, run.ExperimentID)
-	return true, err
+	_, err = tx.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=? AND cancel_requested_at IS NULL`, run.ExperimentID)
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 func (s store) rollupExperiment(id string) error {
@@ -492,14 +553,37 @@ func (s store) rollupExperiment(id string) error {
 }
 
 func (s store) cancelExperiment(id string) error {
-	_, err := s.db.Exec(`UPDATE eval_runs SET status='cancelled',finished_at=? WHERE experiment_id=? AND status='queued'`, formatTime(time.Now().UTC()), id)
+	tx, err := s.db.Begin()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now().UTC())
+	if _, err = tx.Exec(`UPDATE eval_experiments SET cancel_requested_at=COALESCE(cancel_requested_at,?) WHERE id=?`, now, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE eval_runs SET cancel_requested_at=COALESCE(cancel_requested_at,?),status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,outcome=CASE WHEN status='queued' THEN 'cancelled' ELSE outcome END,stage=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancelling' END,finished_at=CASE WHEN status='queued' THEN COALESCE(finished_at,?) ELSE finished_at END WHERE experiment_id=? AND status IN ('queued','running')`, now, now, id); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	return s.rollupExperiment(id)
 }
 
 func (s store) retryRun(source *Run) (*Run, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var cancelled sql.NullString
+	if err := tx.QueryRow(`SELECT cancel_requested_at FROM eval_experiments WHERE id=?`, source.ExperimentID).Scan(&cancelled); err != nil {
+		return nil, err
+	}
+	if cancelled.Valid {
+		return nil, errRunCancelled
+	}
 	run := *source
 	run.ID = "run_" + token(12)
 	run.Status = "queued"
@@ -507,14 +591,18 @@ func (s store) retryRun(source *Run) (*Run, error) {
 	run.Repetition++
 	run.EnvironmentRunID, run.Execution, run.Judge, run.Error = "", nil, nil, ""
 	run.Collaborators = nil
-	run.Assertions, run.CorrectnessScore, run.JudgeScore, run.OverallScore = nil, nil, nil, nil
+	run.Outcome = ""
+	run.Assertions, run.CorrectnessScore, run.JudgeScore, run.QualityScore, run.OverallScore = nil, nil, nil, nil, nil
 	run.StartedAt, run.FinishedAt = nil, nil
 	run.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO eval_runs(id,experiment_id,case_id,case_revision,target_index,repetition,status,case_snapshot_json,target_snapshot_json,created_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)`, run.ID, run.ExperimentID, run.CaseID, run.CaseRevision, run.TargetIndex, run.Repetition, encodeJSON(run.CaseSnapshot), encodeJSON(run.TargetSnapshot), formatTime(run.CreatedAt))
+	_, err = tx.Exec(`INSERT INTO eval_runs(id,experiment_id,case_id,case_revision,target_index,repetition,status,case_snapshot_json,target_snapshot_json,created_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)`, run.ID, run.ExperimentID, run.CaseID, run.CaseRevision, run.TargetIndex, run.Repetition, encodeJSON(run.CaseSnapshot), encodeJSON(run.TargetSnapshot), formatTime(run.CreatedAt))
 	if err == nil {
-		_, _ = s.db.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=?`, run.ExperimentID)
+		_, err = tx.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=?`, run.ExperimentID)
 	}
-	return &run, err
+	if err != nil {
+		return nil, err
+	}
+	return &run, tx.Commit()
 }
 
 func (s store) saveSuggestion(item *Suggestion) error {

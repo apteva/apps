@@ -1,5 +1,10 @@
+import {validateRTCICEOptions} from "../frontend/src/rtc-ice";
+import { SOFTPHONE_CLIENT_VERSION } from "./client-version";
+import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
-import { mediaFailure, type MediaSessionEvent } from "../frontend/src/media-lease";
+import type { PreparedAudioDevices } from "./audio-preparation";
+import { measureAudioSetup } from "./audio-setup";
+import { mediaFailure, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
 //
 // Wire format on both directions of the media socket is the same one every
@@ -85,21 +90,46 @@ export interface SoftphoneAudioHealth {
   reason?: "audio_degraded";
   stages: Record<string, {state: "healthy" | "audio_degraded" | "inactive"; reason?: string; signal?: string; last_bad_at?: string}>;
 }
+export interface SoftphoneMediaReadiness {
+  type: "media.ready" | "media.not_ready";
+  call_id: string;
+  connection_id: string;
+  revision: number;
+  bridge_generation: number;
+  occurred_at: string;
+  reason: string;
+}
 export interface SoftphoneCallbacks {
+  /** Server path readiness; onState/live also requires local browser readiness. */
+  onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
   onAudioHealth?: (health: SoftphoneAudioHealth) => void;
-  refreshMediaURL?: () => Promise<string>;
+  refreshMediaURL?: (recovery?: MediaRecoveryContext, signal?:AbortSignal) => Promise<string>;
   onSessionEvent?: (event: MediaSessionEvent) => void;
-  onState?: (state: SoftphoneState, detail?: string) => void;
+  sessionDiagnostics?: () => {session_id?: string; previous_session_id?: string};
+  onState?: (state: SoftphoneState, detail?: string, failure?:{recoverable:boolean}) => void;
   onNotice?: (detail:string) => void;
   onLevels?: (mic: number, speaker: number) => void;
   onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
   /** Pushed call progress; hosts may keep polling as a fallback. */
   onCallStatus?: (status: SoftphoneCallStatus) => void;
+  /** One summary per finished recovery, sent by the controller over HTTP. */
+  onRecoveryRecord?: (record: import("../frontend/src/media-recovery-record").MediaRecoveryRecord) => void;
+  /** Signaling failed with audio still flowing: replace this connection while it plays.
+   * Null means not now. Resolves true after the swap, which stops this connection. */
+  startHandover?: (cause: string, evidence: import("../frontend/src/media-recovery-record").RecoveryEvidence) => Promise<boolean> | null;
 }
 
 export interface SoftphoneAudioOptions {
+ networkProfile?: import("../frontend/src/network-policy").NetworkPolicy;
+  /** Shorter connection limits for a replacement. The first connection never sets these. */
+  setupLimits?: { socketOpenMs: number; mediaConnectMs: number };
+  turnTransport?: "all"|"udp"|"tcp"|"tls";
+  iceTransportPolicy?: "all"|"relay";
+  turnTLSPort?:number;
 	/** Optional browser transport; existing PCM WebSocket remains the default. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
+  /** WebRTC Opus redundancy. Default true when supported; false disables redundancy while retaining native Opus when available. Applied on start/reconnect. */
+  webrtcFec?: boolean;
   inputDeviceId?: string;
   outputDeviceId?: string;
   outputVolume?: number;
@@ -119,6 +149,9 @@ export interface SoftphoneAudioOptions {
 }
 
 export interface AudioDropEvent {
+  packet_count?: number;
+  ssrc?: number;
+  window_ms?: number;
   timestamp: string;
   direction: string;
   reason: string;
@@ -162,13 +195,23 @@ export function endPlaybackObservation(events: PlaybackUnderrunEvent[], reason: 
   return events.map(event => event.ended_at ? event : {...event, ended_at:event.observed_until, end_reason:reason, complete:false});
 }
 
+export interface AudioObservationEvent {
+  id:string; timestamp:string; connection_id?:string; kind:string; reason:string;
+  phase?:string; audio_time_ms?:number; queue_ms:number; target_ms?:number;
+  minimum_ms?:number; wait_ms?:number; duration_ms?:number; match_score?:number;
+  queue_bytes?:number; frame_age_ms?:number; worker_delay_ms?:number;
+  clock_uncertainty_ms?:number; sequence?:number;
+}
 export interface SoftphoneDiagnostics {
+  transportSamples?: TransportSample[];
+  playbackEvents?: AudioObservationEvent[];
+  captureQueueEvents?: AudioObservationEvent[];
   /** Playback starvation, separate from discarded received frames. */
   underrunDurationMs?: number;
   underrunEvents?: PlaybackUnderrunEvent[];
 	mediaTransport?: "websocket" | "webrtc";
 	codec?: "pcm16" | "opus";
-	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number };
+	webrtc?: { relayProtocol?:string; protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number; jitterBufferIntervalMs?:number };
   audioHealth?: SoftphoneAudioHealth;
   sessionEvents?: MediaSessionEvent[];
   coachingPlayedMs?: number;
@@ -177,7 +220,8 @@ export interface SoftphoneDiagnostics {
   rttMs: number | null;
   queueMs: number;
   targetMs: number;
-  underruns: number;
+  /** Native WebRTC does not expose our PCM underrun counter. */
+  underruns: number | null;
   droppedMs: number;
   maxQueueMs: number;
   audioContextRate: number;
@@ -207,6 +251,8 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
 
 export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
 	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
+  validateRTCICEOptions(options);
+  if (options.webrtcFec !== undefined && typeof options.webrtcFec !== "boolean") throw new RangeError("webrtcFec must be boolean");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
   const maxTargetMs = options.playbackMaxMs ?? 280;
@@ -417,6 +463,14 @@ export class MicrophoneTestSession {
 
 export class SoftphoneSession {
   private clientEpoch = crypto.randomUUID();
+  private transportTelemetry=new TransportTelemetry("websocket");
+  private transportSender=new TransportTelemetrySender(sample=>{
+    if(!this.mediaSocketConnected||!this.worker||this.diagnostics.websocketBufferedBytes>1920)return false;
+    this.worker.postMessage({type:"send.telemetry",data:JSON.stringify({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}})});return true;
+  },report=>{
+    if(!this.mediaSocketConnected||!this.worker||this.diagnostics.websocketBufferedBytes>1920)return false;
+    this.worker.postMessage({type:"send.telemetry",data:JSON.stringify(report)});return true;
+  });
   private worker: Worker | null = null;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -435,6 +489,10 @@ export class SoftphoneSession {
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
+  private sessionReady = false;
+  private mediaPathReady?: boolean;
+  private mediaRevision = 0;
+  private callAnswered = false;
   private playbackHeld = false;
   private mediaSocketConnected = false;
   private ringback: (() => void) | null = null;
@@ -462,20 +520,24 @@ export class SoftphoneSession {
     workletURL: string,
     workerURL: string,
     options: SoftphoneAudioOptions = DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
+    prepared?: PreparedAudioDevices,
   ): Promise<void> {
     const playbackOptions = playbackBufferOptions(options);
     this.diagnostics.targetMs = playbackOptions.initialTargetMs;
     this.callbacks.onState?.("connecting");
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
+    this.runtimeTelemetry.observeEnvironment();
     this.runtimeTelemetry.tick();
     this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
+      if (prepared) { this.stream = prepared.stream; this.ctx = prepared.context; }
+      this.stream = prepared?.stream ?? await measureAudioSetup("microphone_device", event => this.recordSessionEvent(event), () => navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) }));
       this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
       if (track.readyState === "ended") throw new Error("Microphone disconnected before audio setup.");
-      track.onmute = () => this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser.");
-      track.onunmute = () => this.callbacks.onNotice?.("Microphone input restored.");
+      track.onmute = () => { this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_muted"}); this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser."); };
+      track.onunmute = () => { this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_unmuted"}); this.callbacks.onNotice?.("Microphone input restored."); };
       track.onended = () => { if (!this.closed) this.fail("Microphone disconnected. Select a microphone and reconnect audio."); };
       const applied = appliedMicrophoneSettings(track);
       this.diagnostics = {
@@ -484,14 +546,16 @@ export class SoftphoneSession {
         noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl,
         micInputGainDb: options.inputGainDB,
       };
-      try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
-      catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
+      if (!this.ctx) {
+        try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
+        catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
+      }
       this.runtimeTelemetry.context(this.ctx.state);
-      if (this.ctx.state === "suspended") await this.ctx.resume();
+      if (this.ctx.state === "suspended") await measureAudioSetup("audio_context", event => this.recordSessionEvent(event), () => this.ctx!.resume());
       this.runtimeTelemetry.context(this.ctx.state);
       this.ensureOpen();
       if (options.outputDeviceId && "setSinkId" in this.ctx) { await (this.ctx as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId); this.ensureOpen(); }
-      await loadAudioWorklet(this.ctx, workletURL);
+      await measureAudioSetup("audio_worklet", event => this.recordSessionEvent(event), () => loadAudioWorklet(this.ctx!, workletURL));
       this.ensureOpen();
       this.diagnostics.audioContextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
@@ -512,7 +576,7 @@ export class SoftphoneSession {
       source.connect(this.capture);
       this.output = this.ctx.createGain(); this.output.gain.value = options.outputVolume ?? 1;
       this.playback.connect(this.output).connect(this.ctx.destination);
-      await this.openWorker(mediaURL, workerURL);
+      await measureAudioSetup("audio_transport", event => this.recordSessionEvent(event), () => this.openWorker(mediaURL, workerURL));
       this.ensureOpen();
       this.capture.onprocessorerror = this.playback.onprocessorerror = () => this.fail("Audio processing stopped. Reconnect audio.");
       this.runtimeTelemetry.context(this.ctx.state);
@@ -522,7 +586,7 @@ export class SoftphoneSession {
         this.worker?.postMessage({type:"clock.reset",paused:this.ctx?.state !== "running"});
         this.setPlaybackObservation(this.ctx?.state === "running" && this.microphoneTransportReady && !this.playbackHeld, "audio_context_paused");
         if (this.ctx?.state === "suspended" || (this.ctx?.state as string) === "interrupted") this.callbacks.onState?.("reconnecting", "Browser paused audio. Reconnect audio to continue.");
-        else if (this.ctx?.state === "running" && this.microphoneTransportReady) this.callbacks.onState?.("live");
+        else if (this.ctx?.state === "running") this.updateLiveState();
       };
       this.levelTimer = setInterval(() => {
         this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
@@ -538,7 +602,7 @@ export class SoftphoneSession {
 
   private ensureOpen(): void { if (this.closed) { this.teardown(); throw new Error("Audio session was cancelled."); } }
 
-  async resumeAudio(): Promise<void> { await this.ctx?.resume(); if (this.microphoneTransportReady) this.callbacks.onState?.("live"); }
+  async resumeAudio(): Promise<void> { await this.ctx?.resume(); this.updateLiveState(); }
   setOutputVolume(value:number): void { if (this.output) this.output.gain.value=Math.max(0,Math.min(1,value)); }
   sendDTMF(digits: string): void { if (/^[0-9*#]+$/.test(digits)) this.sendText(JSON.stringify({type:"dtmf",digits})); }
 
@@ -571,6 +635,7 @@ export class SoftphoneSession {
         return;
       }
       if (stats?.type !== "stats") return;
+      this.diagnostics.playbackEvents=stats.playback_events;
       this.playbackTiming = {reserve_expanded_ms:stats.reserve_expanded_ms,reserve_compressed_ms:stats.reserve_compressed_ms,reserve_adjustments:stats.reserve_adjustments,reserve_match_rejections:stats.reserve_match_rejections,played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms,coaching:{played_ms:stats.whisper_played_ms,dropped_ms:stats.whisper_dropped_ms,max_queue_ms:stats.whisper_max_queue_ms}};
       this.speakerLevel = Math.max(this.speakerLevel, stats.speaker_level ?? 0);
       this.diagnostics = {
@@ -610,8 +675,10 @@ export class SoftphoneSession {
         if (this.closed) { finish(new Error("audio session closed")); return; }
         const message = event.data;
         if (message?.type === "socket.open") {
+          this.reportedPlaybackIDs.clear();this.reportedCaptureQueueIDs.clear();
           this.opened = true;
           this.mediaSocketConnected = true;
+          this.mediaPathReady=undefined;this.mediaRevision=0;this.sessionReady=false;
           this.startRTTProbe();
           finish();
         } else if (message?.type === "runtime.event") {
@@ -619,12 +686,12 @@ export class SoftphoneSession {
         } else if (message?.type === "socket.message") {
           this.handleControl(message.data);
         } else if (message?.type === "socket.reconnect") {
-          if(this.callbacks.refreshMediaURL) void this.callbacks.refreshMediaURL().then(mediaURL=>{
+          if(this.callbacks.refreshMediaURL) void this.callbacks.refreshMediaURL(message.recovery).then(mediaURL=>{
             if(!this.closed && this.worker===worker) worker.postMessage({type:"socket.credentials",id:message.id,mediaURL});
           },error=>{
             if(this.closed || this.worker!==worker) return;
             const failure=mediaFailure(error);
-            this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:failure.denied ? "revoked" : "retrying",status:failure.status,code:failure.code});
+            this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:failure.denied ? "revoked" : "retrying",...message.recovery,status:failure.status,code:failure.code});
             worker.postMessage({type:"socket.credentials",id:message.id,denied:failure.denied});
           });
         } else if (message?.type === "socket.error") {
@@ -640,12 +707,16 @@ export class SoftphoneSession {
         } else if (message?.type === "socket.failed") {
           this.mediaSocketConnected = false;
           finish(new Error(message.detail || "audio connection lost"));
-          this.fail(message.detail || "audio connection lost");
+          this.fail(message.detail || "audio connection lost",message.recoverable===true);
         } else if (message?.type === "transport.drop" && message.event) {
           this.diagnostics.dropEvents = this.mergeDropEvents(message.event);
         } else if (message?.type === "transport.stats") {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
+          this.diagnostics.captureQueueEvents=message.capture_queue_events;
           this.transportTiming = message.timing ?? {};
+          if(message.observation)this.transportTelemetry.observe({...this.transportTiming,...message.observation,rtt_ms:message.timing?.rtt_ms,queue_ms:this.diagnostics.queueMs,target_ms:this.diagnostics.targetMs,buffered_bytes:message.buffered_bytes,underruns:this.diagnostics.underruns,dropped_ms:this.diagnostics.droppedMs,capture_sequence_gaps:this.diagnostics.captureSequenceGaps,playback_sequence_gaps:this.diagnostics.playbackSequenceGaps,main_thread_max_pause_ms:this.runtimeTelemetry.counters.main_thread_max_pause_ms},
+            {connection:this.mediaSocketConnected?"connected":"reconnecting",context:this.ctx?.state,muted:String(this.muted),device_muted:String(this.stream?.getAudioTracks()[0]?.muted),track:this.stream?.getAudioTracks()[0]?.readyState,codec:"pcm16"},performance.now(),message.observation?.timestamp,message.observation?.window_ms);
+          this.diagnostics.transportSamples=this.transportTelemetry.recent();
           if (typeof message.timing?.rtt_ms === "number") this.diagnostics.rttMs = Math.round(message.timing.rtt_ms);
         }
       };
@@ -668,18 +739,33 @@ export class SoftphoneSession {
 
   private carrierDeliveryStalled = false;
   private deliveryDegradedNotice = false;
+  private shutdownIntent = "session_cleanup";
+  private reportedPlaybackIDs=new Set<string>();
+  private reportedCaptureQueueIDs=new Set<string>();
 
   private handleControl(data: string): void {
     if (this.closed) return;
     try {
       const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number; call_id?: string; status?: string };
-      if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
+      if(parsed.type === "media.ready" || parsed.type === "media.not_ready") {
+        const event=parsed as unknown as SoftphoneMediaReadiness;
+        if(!Number.isSafeInteger(event.revision)||event.revision<=this.mediaRevision)return;
+        this.mediaRevision=event.revision;this.mediaPathReady=event.type==="media.ready";
+        try { this.callbacks.onMediaReadiness?.(event); } catch { /* Observers cannot gate audio. */ }
+        if(!this.mediaPathReady&&this.callAnswered)this.callbacks.onState?.("reconnecting","Connecting carrier audio…");
+        this.updateLiveState();
+      } else if (parsed.type === "ready") {
+        this.sessionReady=true;
+        this.worker?.postMessage({type:"microphone.ready",value:true});
+        this.updateLiveState();
+      } else if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
       } else if (parsed.type === "pong") {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
         if (typeof parsed.nonce === "number" && parsed.nonce >= 0) this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
       } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
         this.setPlaybackObservation(false, parsed.type === "call.ended" ? "call_ended" : "observation_ended");
+        this.shutdownIntent=parsed.type === "call.ended" ? "call_ended" : "session_replaced";
         this.closed = true;
         try { this.callbacks.onState?.("ended", parsed.type); }
         finally { this.teardown(); }
@@ -691,6 +777,8 @@ export class SoftphoneSession {
         if ((parsed as SoftphoneCallStatus).hold_state && (parsed as SoftphoneCallStatus).hold_state !== "active") {
           this.worker?.postMessage({ type: "flush" });
         }
+        this.callAnswered=["answered","in-progress"].includes(parsed.status);
+        this.updateLiveState();
         this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.recordSessionEvent({timestamp:new Date().toISOString(),action:"carrier",outcome:"audio_error",detail:parsed.detail?.slice(0,160)});
@@ -718,16 +806,20 @@ export class SoftphoneSession {
       } else if (parsed.type === "peer.disconnected") {
         this.microphoneTransportReady = false;
         this.setPlaybackObservation(false, "carrier_disconnected");
-        this.worker?.postMessage({ type: "microphone.ready", value: false });
+        // Keep fresh capture flowing to the bounded server attachment reserve.
         this.worker?.postMessage({ type: "flush" });
         this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
       } else if (parsed.type === "peer.connected") {
         this.microphoneTransportReady = true;
         this.setPlaybackObservation(this.ctx?.state === "running" && !this.playbackHeld, "carrier_connected");
         this.worker?.postMessage({ type: "microphone.ready", value: true });
-        this.callbacks.onState?.("live", this.opened ? undefined : "Audio reconnected");
+        this.updateLiveState();
       }
     } catch { /* Status frames are advisory. */ }
+  }
+
+  private updateLiveState(): void {
+    if(this.sessionReady&&this.callAnswered&&this.microphoneTransportReady&&this.mediaPathReady!==false&&this.ctx?.state==="running") this.callbacks.onState?.("live");
   }
 
   private startRTTProbe(): void {
@@ -743,16 +835,35 @@ export class SoftphoneSession {
   private sendText(data: string): void { this.worker?.postMessage({ type: "send.text", data }); }
 
   recordSessionEvent(event: MediaSessionEvent): void {
+    try{event={...this.callbacks.sessionDiagnostics?.(),...event};}catch{/* observer isolation */}
+    event=safeMediaSessionEvent(event);
     this.diagnostics.sessionEvents=[...(this.diagnostics.sessionEvents ?? []),event].slice(-50);
     try { this.callbacks.onSessionEvent?.(event); } catch { /* host observer isolation */ }
-    try { this.sendDiagnostics(); } catch { /* diagnostics cannot interrupt media recovery */ }
+    // Sparse events share the existing paced, bounded telemetry sender. Never
+    // push a full diagnostics history synchronously for a recovery callback.
+    try {
+      const report={type:"diagnostics.events",diagnostics:{client_epoch:this.clientEpoch,session_events:[event]}};
+      if(new TextEncoder().encode(JSON.stringify(report)).byteLength<=1100)this.transportSender.enqueueAuxiliary(report);
+      else this.transportSender.skippedAuxiliary++;
+    } catch { /* diagnostics cannot interrupt media recovery */ }
   }
 
   private sendDiagnostics(): void {
     const value = this.diagnostics;
+    const fresh=(events:AudioObservationEvent[]|undefined,seen:Set<string>)=>{
+      const bounded=(events??[]).slice(-64),pending=bounded.filter(e=>!seen.has(e.id)).slice(0,8);
+      if(this.mediaSocketConnected){
+        const retained=new Set(bounded.map(e=>e.id));for(const id of seen)if(!retained.has(id))seen.delete(id);
+        for(const e of pending)seen.add(e.id);
+      }
+      return pending;
+    };
+    const playbackEvents=fresh(value.playbackEvents,this.reportedPlaybackIDs);
+    const captureQueueEvents=fresh(value.captureQueueEvents,this.reportedCaptureQueueIDs);
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
-      media_transport: "websocket", codec: "pcm16",
-      client_epoch:this.clientEpoch, session_events:value.sessionEvents,
+      media_transport: "websocket", codec: "pcm16", client_version: SOFTPHONE_CLIENT_VERSION,
+      client_epoch:this.clientEpoch,
+      playback_events:playbackEvents, capture_queue_events:captureQueueEvents,
       timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},
       connection_state: this.mediaSocketConnected ? "connected" : this.closed ? "closed" : "reconnecting",
       carrier_peer_connected: this.microphoneTransportReady,
@@ -772,6 +883,7 @@ export class SoftphoneSession {
       mic_limiter_reduction_db: value.micLimiterReductionDb, capture_sequence_gaps: value.captureSequenceGaps,
       playback_sequence_gaps: value.playbackSequenceGaps, drop_events: value.dropEvents,
     }}));
+    if(this.mediaSocketConnected)this.transportSender.enqueue(this.transportTelemetry.drain());
     this.callbacks.onDiagnostics?.({ ...value });
   }
 
@@ -797,23 +909,28 @@ export class SoftphoneSession {
   }
 
   stop(): void {
+    this.shutdownIntent="user_stop";
     const notify = !this.closed;
     this.closed = true;
     try { if (notify) this.callbacks.onState?.("ended"); }
     finally { this.teardown(); }
   }
 
-  private fail(detail: string): void {
+  private fail(detail: string, recoverable=false): void {
+    this.shutdownIntent="audio_error";
     if (!this.closed) this.recordSessionEvent({timestamp:new Date().toISOString(),action:"audio",outcome:"error",detail:detail.slice(0,160)});
     this.closed = true;
-    try { this.callbacks.onState?.("error", detail); }
+    try { this.callbacks.onState?.("error", detail,{recoverable}); }
     finally { this.teardown(); }
   }
 
   private teardown(): void {
+    this.runtimeTelemetry.stopEnvironment();
+    this.transportSender.stop();
     this.setPlaybackObservation(false, "observation_ended");
     this.stopRingback();
     this.microphoneTransportReady = false;
+    this.sessionReady=this.callAnswered=false;this.mediaPathReady=undefined;this.mediaRevision=0;
     this.cancelWorkerStart?.();
     this.cancelWorkerStart = undefined;
     try { this.sendDiagnostics(); } catch { /* diagnostics cannot prevent device cleanup */ }
@@ -824,8 +941,11 @@ export class SoftphoneSession {
     if (this.levelTimer !== null) clearInterval(this.levelTimer);
     this.levelTimer = null;
     const worker = this.worker;
-    worker?.postMessage({ type: "close" });
-    if (worker) setTimeout(() => worker.terminate(), 100);
+    worker?.postMessage({ type: "close", reason:this.shutdownIntent });
+    if (worker) {
+      const timeout=setTimeout(() => worker.terminate(),600);
+      worker.onmessage=(event)=>{if(event.data?.type === "socket.shutdown.complete") {clearTimeout(timeout);worker.terminate();}};
+    }
     this.worker = null;
     this.capture?.disconnect();
     this.playback?.disconnect();

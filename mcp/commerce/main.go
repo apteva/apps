@@ -127,6 +127,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_checkout_mark_paid", Description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "commerce_sales_list", Description: "List sales, including profitability totals and completeness. Args: store_id?, status?, payment_status?, profitability_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
 		{Name: "commerce_sales_get", Description: "Fetch one sale. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolSalesGet},
+		{Name: "commerce_sale_refund", Description: "Execute an authorized partial or full Stripe refund for a sale through Billing. Args: sale_id, amount_cents? (omit for remaining paid balance), reason?, idempotency_key. Reuse the same key on retries. Returns request status, current sale/invoice, and reconciliation outcome; unknown/submitted is not completed.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer"), "amount_cents": typ("integer"), "reason": map[string]any{"type": "string", "enum": []string{"requested_by_customer", "duplicate", "fraudulent"}}, "idempotency_key": typ("string")}, []string{"sale_id", "idempotency_key"}), Handler: a.toolSaleRefund},
+		{Name: "commerce_sale_refunds_list", Description: "List durable refund requests for a sale, including original idempotency keys for safe recovery. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolSaleRefundsList},
 		{Name: "commerce_sale_financials_record", Description: "Idempotently record an exact sale cost, fee, refund, or signed adjustment. Args: sale_id, kind, amount_cents, idempotency_key, currency?, source?, external_id?, occurred_at?, metadata?.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer"), "kind": map[string]any{"type": "string", "enum": []any{"shipping_cost", "payment_fee", "refund", "adjustment", "product_cost_adjustment"}}, "amount_cents": typ("integer"), "idempotency_key": typ("string"), "currency": typ("string"), "source": typ("string"), "external_id": typ("string"), "occurred_at": typ("string"), "metadata": typ("object")}, []string{"sale_id", "kind", "amount_cents", "idempotency_key"}), Handler: a.toolSaleFinancialsRecord},
 		{Name: "commerce_sale_financials_list", Description: "List the immutable financial events behind a sale's profitability totals. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolSaleFinancialsList},
 		{Name: "commerce_sale_financials_reconcile", Description: "Reconcile a sale's refunds and exact payment fee fields from its Billing invoice, then recompute profitability. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolSaleFinancialsReconcile},
@@ -3257,6 +3259,29 @@ func (a *App) handleSale(w http.ResponseWriter, r *http.Request) {
 	parts := pathParts(r.URL.Path, "/admin/sales/")
 	if id == 0 {
 		httpErr(w, http.StatusBadRequest, "sale id required")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "refunds" {
+		args := map[string]any{"sale_id": id}
+		switch r.Method {
+		case http.MethodPost:
+			if err := readJSON(r, &args); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if args == nil {
+				httpErr(w, http.StatusBadRequest, "JSON object required")
+				return
+			}
+			args["sale_id"] = id
+			out, err := a.toolSaleRefund(ctx, args)
+			httpResult(w, out, err)
+		case http.MethodGet:
+			out, err := a.toolSaleRefundsList(ctx, args)
+			httpResult(w, out, err)
+		default:
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
 		return
 	}
 	if len(parts) > 1 && parts[1] == "retry" && r.Method == http.MethodPost {

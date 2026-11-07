@@ -40,18 +40,19 @@ type Costs struct {
 }
 
 type Config struct {
-	NotifyFills           bool             `json:"notify_fills,omitempty"`
-	Risk                  RiskLimits       `json:"risk"`
-	Seed                  uint64           `json:"seed"`
-	StartingCash          float64          `json:"starting_cash"`
-	SubmissionLatencyMS   int64            `json:"submission_latency_ms"`
-	CancellationLatencyMS int64            `json:"cancellation_latency_ms"`
-	LatencyJitterMS       int64            `json:"latency_jitter_ms"`
-	MaxFillQty            float64          `json:"max_fill_qty"`       // shared capacity per symbol per quote; zero is unlimited
-	ParticipationRate     float64          `json:"participation_rate"` // zero disables volume limits
-	Costs                 Costs            `json:"costs"`
-	SymbolCosts           map[string]Costs `json:"symbol_costs,omitempty"`
-	BenchmarkSymbol       string           `json:"benchmark_symbol,omitempty"`
+	Contracts             map[string]Contract `json:"contracts,omitempty"`
+	NotifyFills           bool                `json:"notify_fills,omitempty"`
+	Risk                  RiskLimits          `json:"risk"`
+	Seed                  uint64              `json:"seed"`
+	StartingCash          float64             `json:"starting_cash"`
+	SubmissionLatencyMS   int64               `json:"submission_latency_ms"`
+	CancellationLatencyMS int64               `json:"cancellation_latency_ms"`
+	LatencyJitterMS       int64               `json:"latency_jitter_ms"`
+	MaxFillQty            float64             `json:"max_fill_qty"`       // shared capacity per symbol per quote; zero is unlimited
+	ParticipationRate     float64             `json:"participation_rate"` // zero disables volume limits
+	Costs                 Costs               `json:"costs"`
+	SymbolCosts           map[string]Costs    `json:"symbol_costs,omitempty"`
+	BenchmarkSymbol       string              `json:"benchmark_symbol,omitempty"`
 }
 
 type RiskLimits struct {
@@ -63,24 +64,34 @@ type RiskLimits struct {
 }
 
 type Order struct {
-	ID           string    `json:"id"`
-	Symbol       string    `json:"symbol"`
-	Side         string    `json:"side"`
-	Type         string    `json:"type"`
-	Qty          float64   `json:"qty"`
-	LimitPrice   float64   `json:"limit_price,omitempty"`
-	StopPrice    float64   `json:"stop_price,omitempty"`
-	TIF          string    `json:"tif"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
-	SubmittedAt  time.Time `json:"submitted_at"`
-	AcceptedAt   time.Time `json:"accepted_at,omitempty"`
-	ResolvedAt   time.Time `json:"resolved_at,omitempty"`
-	Status       string    `json:"status"`
-	FilledQty    float64   `json:"filled_qty"`
-	AvgFillPrice float64   `json:"avg_fill_price"`
-	Fees         float64   `json:"fees"`
-	Triggered    bool      `json:"triggered,omitempty"`
-	Reason       string    `json:"reason,omitempty"`
+	FirstFillAt        time.Time   `json:"first_fill_at,omitempty"`
+	Tag                string      `json:"tag,omitempty"`
+	OCOGroup           string      `json:"oco_group,omitempty"`
+	ParentID           string      `json:"parent_id,omitempty"`
+	ReduceOnly         bool        `json:"reduce_only,omitempty"`
+	Protection         *Protection `json:"protection,omitempty"`
+	TrailEntry         float64     `json:"trail_entry,omitempty"`
+	TrailBest          float64     `json:"trail_best,omitempty"`
+	TrailActivationPct float64     `json:"trail_activation_pct,omitempty"`
+	TrailDistancePct   float64     `json:"trail_distance_pct,omitempty"`
+	ID                 string      `json:"id"`
+	Symbol             string      `json:"symbol"`
+	Side               string      `json:"side"`
+	Type               string      `json:"type"`
+	Qty                float64     `json:"qty"`
+	LimitPrice         float64     `json:"limit_price,omitempty"`
+	StopPrice          float64     `json:"stop_price,omitempty"`
+	TIF                string      `json:"tif"`
+	ExpiresAt          time.Time   `json:"expires_at,omitempty"`
+	SubmittedAt        time.Time   `json:"submitted_at"`
+	AcceptedAt         time.Time   `json:"accepted_at,omitempty"`
+	ResolvedAt         time.Time   `json:"resolved_at,omitempty"`
+	Status             string      `json:"status"`
+	FilledQty          float64     `json:"filled_qty"`
+	AvgFillPrice       float64     `json:"avg_fill_price"`
+	Fees               float64     `json:"fees"`
+	Triggered          bool        `json:"triggered,omitempty"`
+	Reason             string      `json:"reason,omitempty"`
 }
 
 type Position struct {
@@ -162,6 +173,9 @@ func Hash(v any) string {
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func New(config Config, inputs []Input, state *State, strategy Strategy) (*Engine, error) {
+	if err := validateContracts(config.Contracts); err != nil {
+		return nil, err
+	}
 	if !finite(config.StartingCash) || config.StartingCash <= 0 {
 		return nil, errors.New("starting cash must be positive and finite")
 	}
@@ -235,6 +249,13 @@ func New(config Config, inputs []Input, state *State, strategy Strategy) (*Engin
 		}
 		if inputPriority(a.Type) != inputPriority(b.Type) {
 			return inputPriority(a.Type) < inputPriority(b.Type)
+		}
+		if a.Type == "market.bar.close" && b.Type == "market.bar.close" && a.Symbol == b.Symbol && a.Metadata["timeframe"] != b.Metadata["timeframe"] {
+			ad, _ := time.ParseDuration(a.Metadata["timeframe"])
+			bd, _ := time.ParseDuration(b.Metadata["timeframe"])
+			if ad != bd {
+				return ad > bd
+			}
 		}
 		if a.Symbol != b.Symbol {
 			return a.Symbol < b.Symbol
@@ -331,7 +352,7 @@ func (e *Engine) command(c Command) {
 	}
 	e.State.Orders = append(e.State.Orders, &o)
 	e.record("order.submitted", o)
-	if o.Symbol == "" || (o.Side != "buy" && o.Side != "sell") || !finite(o.Qty) || o.Qty <= 0 || (o.Type != "market" && o.Type != "limit" && o.Type != "stop") || (o.Type == "limit" && (!finite(o.LimitPrice) || o.LimitPrice <= 0)) || (o.Type == "stop" && (!finite(o.StopPrice) || o.StopPrice <= 0)) || (o.TIF != "gtc" && o.TIF != "ioc" && o.TIF != "day") || (o.TIF == "day" && o.ExpiresAt.IsZero()) {
+	if !validProtection(o.Protection) || o.Symbol == "" || (o.Side != "buy" && o.Side != "sell") || !finite(o.Qty) || o.Qty <= 0 || (o.Type != "market" && o.Type != "limit" && o.Type != "stop") || (o.Type == "limit" && (!finite(o.LimitPrice) || o.LimitPrice <= 0)) || (o.Type == "stop" && (!finite(o.StopPrice) || o.StopPrice <= 0)) || (o.TIF != "gtc" && o.TIF != "ioc" && o.TIF != "day") || (o.TIF == "day" && o.ExpiresAt.IsZero()) {
 		e.resolve(&o, "rejected", "invalid order")
 		return
 	}
@@ -509,9 +530,19 @@ func floorFillQuantity(qty, step, scale float64) float64 {
 
 func (e *Engine) fill(fresh map[string]bool) {
 	s := e.State
-	orders := append([]*Order(nil), s.Orders...)
+	orders := make([]*Order, 0)
+	for _, order := range s.Orders {
+		if fresh[order.Symbol] && (order.Status == "working" || order.Status == "partially_filled") {
+			orders = append(orders, order)
+		}
+	}
 	// Sell proceeds are available to simultaneous buys, independent of symbol order.
-	sort.SliceStable(orders, func(i, j int) bool { return orders[i].Side == "sell" && orders[j].Side != "sell" })
+	sort.SliceStable(orders, func(i, j int) bool {
+		if orders[i].ReduceOnly != orders[j].ReduceOnly {
+			return orders[i].ReduceOnly
+		}
+		return orders[i].Side == "sell" && orders[j].Side != "sell"
+	})
 	used := map[string]float64{}
 	for _, o := range orders {
 		if (o.Status != "working" && o.Status != "partially_filled") || !fresh[o.Symbol] {
@@ -529,8 +560,19 @@ func (e *Engine) fill(fresh map[string]bool) {
 		qty := math.Min(o.Qty-o.FilledQty, math.Max(0, capacity-used[o.Symbol]))
 		price := q.Price
 		buy := o.Side == "buy"
+		touch := price
+		if buy && q.Ask > 0 {
+			touch = q.Ask
+		} else if !buy && q.Bid > 0 {
+			touch = q.Bid
+		} else if buy {
+			touch *= 1 + p.SpreadBps/20000
+		} else {
+			touch *= 1 - p.SpreadBps/20000
+		}
+		e.updateTrail(o, touch)
 		if o.Type == "stop" && !o.Triggered {
-			if (buy && price >= o.StopPrice) || (!buy && price <= o.StopPrice) {
+			if (buy && priceAtOrAbove(touch, o.StopPrice)) || (!buy && priceAtOrBelow(touch, o.StopPrice)) {
 				o.Triggered = true
 			} else {
 				continue
@@ -557,15 +599,29 @@ func (e *Engine) fill(fresh map[string]bool) {
 			sign = -1
 		}
 		price *= 1 + sign*(p.SlippageBps+impact)/10000
-		if o.Type == "limit" && ((buy && price > o.LimitPrice) || (!buy && price < o.LimitPrice)) {
+		if o.Type == "limit" && ((buy && !priceAtOrBelow(price, o.LimitPrice)) || (!buy && !priceAtOrAbove(price, o.LimitPrice))) {
 			if o.TIF == "ioc" {
 				e.resolve(o, "cancelled", "IOC limit not marketable")
 			}
 			continue
 		}
-		if buy {
+		_, contract := e.Config.Contracts[o.Symbol]
+		multiplier := e.multiplier(o.Symbol)
+		position := s.Positions[o.Symbol]
+		direction := 1.0
+		if !buy {
+			direction = -1
+		}
+		if o.ReduceOnly {
+			if position.Qty*direction >= 0 {
+				e.resolve(o, "cancelled", "reduce-only position is flat or opposite")
+				continue
+			}
+			qty = math.Min(qty, math.Abs(position.Qty))
+		}
+		if !contract && buy {
 			qty = math.Min(qty, s.Cash/(price*(1+p.FeeBps/10000)))
-		} else {
+		} else if !contract {
 			qty = math.Min(qty, s.Positions[o.Symbol].Qty)
 		}
 		if p.QtyStep > 0 {
@@ -575,35 +631,36 @@ func (e *Engine) fill(fresh map[string]bool) {
 			impact = p.ImpactBps * math.Min(1, qty/q.Volume)
 		}
 		price = touchPrice * (1 + sign*(p.SlippageBps+impact)/10000)
-		if buy && qty*price*(1+p.FeeBps/10000) > s.Cash {
+		if !contract && buy && qty*price*(1+p.FeeBps/10000) > s.Cash {
 			qty = math.Nextafter(qty, 0)
 			if p.QtyStep > 0 {
 				qty = math.Floor(qty/p.QtyStep) * p.QtyStep
 			}
 		}
-		if qty <= 1e-12 || qty < p.MinQty || qty*price < p.MinNotional {
+		if qty <= 1e-12 || qty < p.MinQty || qty*price*multiplier < p.MinNotional {
 			if o.TIF == "ioc" {
 				e.resolve(o, "cancelled", "IOC has no executable quantity")
 			}
 			continue
 		}
-		if buy {
+		increases := math.Abs(position.Qty+direction*qty) > math.Abs(position.Qty)+1e-12
+		if buy && !contract || contract && increases {
 			m := e.Metrics()
 			equity := m["equity"]
 			risk := e.Config.Risk
-			positionValue := s.Positions[o.Symbol].Qty * q.Price
+			positionValue := math.Abs(s.Positions[o.Symbol].Qty) * q.Price * multiplier
 			gross := m["exposure"] * equity / 100
 			breach := ""
 			if equity <= 0 {
 				breach = "no equity"
 			}
-			if risk.MaxOrderPct > 0 && ((o.FilledQty*o.AvgFillPrice+qty*price)/equity*100) > risk.MaxOrderPct+1e-9 {
+			if risk.MaxOrderPct > 0 && ((o.FilledQty*o.AvgFillPrice+qty*price)*multiplier/equity*100) > risk.MaxOrderPct+1e-9 {
 				breach = "maximum order exposure"
 			}
-			if risk.MaxPositionPct > 0 && ((positionValue+qty*price)/equity*100) > risk.MaxPositionPct+1e-9 {
+			if risk.MaxPositionPct > 0 && (math.Abs(position.Qty+direction*qty)*price*multiplier/equity*100) > risk.MaxPositionPct+1e-9 {
 				breach = "maximum position exposure"
 			}
-			if risk.MaxGrossExposurePct > 0 && ((gross+qty*price)/equity*100) > risk.MaxGrossExposurePct+1e-9 {
+			if risk.MaxGrossExposurePct > 0 && ((gross-positionValue+math.Abs(position.Qty+direction*qty)*price*multiplier)/equity*100) > risk.MaxGrossExposurePct+1e-9 {
 				breach = "maximum gross exposure"
 			}
 			if risk.MaxDrawdownPct > 0 && s.Peak > 0 && (1-equity/s.Peak)*100 > risk.MaxDrawdownPct {
@@ -612,14 +669,33 @@ func (e *Engine) fill(fresh map[string]bool) {
 			if risk.MaxDailyLossPct > 0 && s.DayStartEquity > 0 && (1-equity/s.DayStartEquity)*100 > risk.MaxDailyLossPct {
 				breach = "daily loss halt"
 			}
+			if contract {
+				c := e.Config.Contracts[o.Symbol]
+				margin := e.marginUsed() - positionValue*c.MarginFraction + math.Abs(position.Qty+direction*qty)*price*multiplier*c.MarginFraction
+				if margin+qty*price*multiplier*p.FeeBps/10000 > equity {
+					breach = "insufficient contract margin"
+				}
+			}
 			if breach != "" {
 				e.resolve(o, "rejected", breach)
 				continue
 			}
 		}
-		fee := qty * price * p.FeeBps / 10000
+		if o.Protection != nil && !o.ReduceOnly {
+			direction := 1.0
+			if !buy {
+				direction = -1
+			}
+			if o.Protection.StopPrice > 0 && direction*(price-o.Protection.StopPrice) <= 0 || o.Protection.TargetPrice > 0 && direction*(o.Protection.TargetPrice-price) <= 0 {
+				e.resolve(o, "rejected", "entry gapped beyond its absolute protective boundary")
+				continue
+			}
+		}
+		fee := qty * price * multiplier * p.FeeBps / 10000
 		pos := s.Positions[o.Symbol]
-		if buy {
+		if contract {
+			e.contractFill(o, qty, price, fee)
+		} else if buy {
 			pos.AvgCost = (pos.AvgCost*pos.Qty + price*qty) / (pos.Qty + qty)
 			pos.Qty += qty
 			s.Cash -= qty*price + fee
@@ -628,24 +704,31 @@ func (e *Engine) fill(fresh map[string]bool) {
 			pos.Qty -= qty
 			s.Cash += qty*price - fee
 		}
-		if pos.Qty <= 1e-12 {
-			delete(s.Positions, o.Symbol)
-		} else {
-			s.Positions[o.Symbol] = pos
+		if !contract {
+			if pos.Qty <= 1e-12 {
+				delete(s.Positions, o.Symbol)
+			} else {
+				s.Positions[o.Symbol] = pos
+			}
 		}
 		o.AvgFillPrice = (o.AvgFillPrice*o.FilledQty + price*qty) / (o.FilledQty + qty)
+		if o.FirstFillAt.IsZero() {
+			o.FirstFillAt = s.Now
+		}
 		o.FilledQty += qty
 		o.Fees += fee
 		s.Fees += fee
-		s.Turnover += qty * price
+		s.Turnover += qty * price * multiplier
 		used[o.Symbol] += qty
 		o.Status = "partially_filled"
 		if o.Qty-o.FilledQty <= 1e-9 {
 			o.Status = "filled"
 			o.ResolvedAt = s.Now
 		}
-		e.record("fill", map[string]any{"order_id": o.ID, "symbol": o.Symbol, "side": o.Side, "qty": qty, "price": price, "fee": fee, "reference_price": q.Price, "execution_cost": math.Abs(price-q.Price) * qty})
+		e.record("fill", map[string]any{"order_id": o.ID, "symbol": o.Symbol, "side": o.Side, "qty": qty, "price": price, "fee": fee, "reference_price": q.Price, "execution_cost": math.Abs(price-q.Price) * qty * multiplier})
 		e.record("order."+o.Status, *o)
+		e.resolveOCO(o, qty)
+		e.protectFill(o, qty, price)
 		if o.TIF == "ioc" && active(o) {
 			e.resolve(o, "cancelled", "IOC remainder")
 		}
@@ -668,10 +751,15 @@ func (e *Engine) Metrics() map[string]float64 {
 		if price <= 0 {
 			price = p.AvgCost
 		}
-		value := p.Qty * price
-		equity += value
-		exposure += value
-		open += (price - p.AvgCost) * p.Qty
+		value := p.Qty * price * e.multiplier(symbol)
+		pnl := (price - p.AvgCost) * p.Qty * e.multiplier(symbol)
+		if _, contract := e.Config.Contracts[symbol]; contract {
+			equity += pnl
+		} else {
+			equity += value
+		}
+		exposure += math.Abs(value)
+		open += pnl
 	}
 	benchmark := e.Config.StartingCash
 	if s.BenchmarkQty > 0 {
@@ -679,5 +767,5 @@ func (e *Engine) Metrics() map[string]float64 {
 	}
 	ret := (equity/e.Config.StartingCash - 1) * 100
 	br := (benchmark/e.Config.StartingCash - 1) * 100
-	return map[string]float64{"equity": equity, "cash": s.Cash, "open_pnl": open, "realized_pnl": s.RealizedPnL, "total_pnl": equity - e.Config.StartingCash, "fees": s.Fees, "return_pct": ret, "benchmark_equity": benchmark, "benchmark_return_pct": br, "excess_return_pct": ret - br, "max_drawdown_pct": s.MaxDrawdownPct, "turnover_pct": s.Turnover / e.Config.StartingCash * 100, "exposure": exposure / math.Max(equity, 1e-12) * 100}
+	return map[string]float64{"equity": equity, "cash": s.Cash, "margin_used": e.marginUsed(), "available_margin": equity - e.marginUsed(), "open_pnl": open, "realized_pnl": s.RealizedPnL, "total_pnl": equity - e.Config.StartingCash, "fees": s.Fees, "return_pct": ret, "benchmark_equity": benchmark, "benchmark_return_pct": br, "excess_return_pct": ret - br, "max_drawdown_pct": s.MaxDrawdownPct, "turnover_pct": s.Turnover / e.Config.StartingCash * 100, "exposure": exposure / math.Max(equity, 1e-12) * 100}
 }

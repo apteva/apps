@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -146,7 +147,8 @@ func TestRuntimeInventoryFailureIsolation(t *testing.T) {
 				t.Fatalf("partial result: %+v", result)
 			}
 			p.failIDs[10] = true
-			result, err = a.connectedNumbers(ctx)
+			// Explicitly verify the new carrier failure rather than the 25-second snapshot.
+			result, err = a.connectedNumbers(ctx, inventoryFreshContext(context.Background(), true))
 			if err != nil || result["inventory_status"] != "unavailable" || len(result["numbers"].([]connectedNumberView)) != 0 || len(result["warnings"].([]numberInventoryWarning)) != 2 {
 				t.Fatalf("all failures hidden: %+v %v", result, err)
 			}
@@ -237,7 +239,7 @@ func TestRuntimeAuthorizedChoicesAndAdministrativeDenial(t *testing.T) {
 	if !strings.Contains(access.Body.String(), "+33189313432") {
 		t.Fatal("existing permission was revoked")
 	}
-	for _, path := range []string{"/numbers/outbound-policy", "/numbers/routes/enable", "/_runtime/bindings"} {
+	for _, path := range []string{"/numbers/outbound-transport", "/numbers/outbound-policy", "/numbers/routes/enable", "/_runtime/bindings"} {
 		response := phoneTestRequest(a, &alice, "POST", path, map[string]any{"scope": "provider", "value": "twilio", "enabled": false})
 		if response.Code != 403 && response.Code != 401 {
 			t.Fatalf("admin exposed: %s %d", path, response.Code)

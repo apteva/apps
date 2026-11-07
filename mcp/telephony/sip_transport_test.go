@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	tk "github.com/apteva/app-sdk/testkit"
 	"math/big"
 	"net"
 	"net/http"
@@ -324,7 +325,7 @@ func TestSIPSDESSRTPRoundTripAndAnswer(t *testing.T) {
 }
 
 func TestRTPJitterBufferReordersAndConcealsLoss(t *testing.T) {
-	buffer := newRTPJitterBuffer()
+	buffer := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
 	buffer.push(12, append([]byte{12}, make([]byte, 159)...))
 	buffer.push(10, append([]byte{10}, make([]byte, 159)...))
 	buffer.push(11, append([]byte{11}, make([]byte, 159)...))
@@ -335,7 +336,7 @@ func TestRTPJitterBufferReordersAndConcealsLoss(t *testing.T) {
 		}
 	}
 
-	loss := newRTPJitterBuffer()
+	loss := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
 	loss.push(20, append([]byte{20}, make([]byte, 159)...))
 	loss.push(22, append([]byte{22}, make([]byte, 159)...))
 	loss.push(23, append([]byte{23}, make([]byte, 159)...))
@@ -698,16 +699,19 @@ func TestTwilioDirectSIPCarrierConfigurationAndRestore(t *testing.T) {
 	}
 	if len(platform.integrationCalls) != 4 ||
 		platform.integrationCalls[1].Input["Secure"] != true ||
-		platform.integrationCalls[2].Input["SipUrl"] != "sip:sip.example.test;transport=tls" {
+		!strings.HasPrefix(fmt.Sprint(platform.integrationCalls[2].Input["SipUrl"]), "sip:sip.example.test;transport=tls;x-apteva-token=") {
 		t.Fatalf("unexpected Twilio SIP calls: %#v", platform.integrationCalls)
 	}
 	stored, _ = app.db().findRoute(route.ID)
 	var state directSIPProviderConfig
-	if json.Unmarshal([]byte(stored.TransportConfig), &state) != nil || state.TrunkID != "TK1" || state.OriginationURLID != "OU1" {
+	if json.Unmarshal([]byte(stored.TransportConfig), &state) != nil || state.TrunkID != "TK1" || state.OriginationURLID != "OU1" ||
+		state.InboundToken == "" || state.InboundTokenVerified ||
+		platform.integrationCalls[2].Input["SipUrl"] != "sip:sip.example.test;transport=tls;x-apteva-token="+state.InboundToken {
 		t.Fatalf("unexpected saved Twilio SIP state: %+v", state)
 	}
 	platform.integrationCalls = nil
-	if err := app.deconfigureDirectSIPCarrierRoute(ctx, stored); err != nil {
+	cleanupCtx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&contextAnswerPlatform{platform}))
+	if err := app.deconfigureDirectSIPCarrierRoute(cleanupCtx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != "delete_elastic_sip_trunk" {
@@ -744,7 +748,8 @@ func TestTelnyxDirectSIPCarrierConfigurationAndRestore(t *testing.T) {
 	}
 	stored, _ = app.db().findRoute(route.ID)
 	platform.integrationCalls = nil
-	if err := app.deconfigureDirectSIPCarrierRoute(ctx, stored); err != nil {
+	cleanupCtx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&contextAnswerPlatform{platform}))
+	if err := app.deconfigureDirectSIPCarrierRoute(cleanupCtx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 3 ||
@@ -813,7 +818,7 @@ func TestDirectSIPCarrierSetupRollsBackPartialResources(t *testing.T) {
 	})
 }
 
-func TestDirectSIPRecordingPolicyRejectsProviderCloudRecording(t *testing.T) {
+func TestDirectSIPRecordingPolicyUsesLocalRecording(t *testing.T) {
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	app.sip.gateway = &sipGateway{cfg: directSIPTestConfig()}
 	route := routeRow{
@@ -824,7 +829,7 @@ func TestDirectSIPRecordingPolicyRejectsProviderCloudRecording(t *testing.T) {
 	if err := app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.setRouteTransport(ctx, route.ID, inboundTransportSIPDirect, 0); err == nil || !strings.Contains(err.Error(), "recording") {
+	if _, err := app.setRouteTransport(ctx, route.ID, inboundTransportSIPDirect, 0); err != nil {
 		t.Fatalf("direct SIP recording-policy error=%v", err)
 	}
 }

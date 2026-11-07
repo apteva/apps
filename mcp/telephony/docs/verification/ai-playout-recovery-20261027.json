@@ -1,0 +1,170 @@
+{
+  "version": "0.12.58",
+  "scope": "Local source tests and live OpenAI gpt-live-1 through actual local Core, Server proxy and Telephony with loopback carrier; no deployed settings or PSTN calls changed",
+  "created_at": "2026-10-27T11:56:30.970385+00:00",
+  "implementation": {
+    "recovery_idle_ms": 1000,
+    "normal_startup_reserve_ms": 60,
+    "sample_order_and_backlog_limits": "unchanged",
+    "core_companion": "pending silence settles before quiet summary; partial failures retain output_dropped; local only"
+  },
+  "tests": {
+    "telephony_go_all": "passed (421.377s)",
+    "core_go_all_short_final": "passed (122.683s)",
+    "frontend_ui": {
+      "passed": 437,
+      "failed": 0
+    },
+    "focused_race": "Telephony and Core passed",
+    "go_vet": "passed",
+    "typecheck": "passed",
+    "linux_amd64_build": "passed",
+    "actual_core_server_carrier_paths": {
+      "passed": 12,
+      "directions": [
+        "inbound",
+        "outbound"
+      ],
+      "carriers": [
+        "telnyx",
+        "twilio",
+        "sip-PCMA",
+        "sip-G722",
+        "vonage",
+        "sinch"
+      ]
+    },
+    "recorded_speech_recovery": {
+      "codecs": [
+        "G722",
+        "PCMA",
+        "PCMU"
+      ],
+      "baseline_vs_new_gap_ms": {
+        "regular": [
+          20,
+          20
+        ],
+        "jitter30": [
+          20,
+          20
+        ],
+        "burst240": [
+          260,
+          200
+        ],
+        "burst320": [
+          340,
+          280
+        ],
+        "slow110": [
+          100,
+          40
+        ]
+      },
+      "samples": "identical, in order",
+      "ten_minute_stream": {
+        "source_ms": 600000,
+        "last_packet_ms": 600300,
+        "max_queue_ms": 420,
+        "initial_priming_count": 1
+      }
+    },
+    "live_matched_latency": [
+      {
+        "provider": "conversations-pcm",
+        "direction": "inbound",
+        "caller_end_to_first_reply_ms": 1406.656875,
+        "caller_end_to_expected_answer_transcript_ms": 1225.065,
+        "max_core_input_wait_ms": 15.399875,
+        "max_provider_audio_to_bridge_write_ms": 0.208458
+      },
+      {
+        "provider": "conversations-pcm-pcmu",
+        "direction": "inbound",
+        "caller_end_to_first_reply_ms": 1403.356,
+        "caller_end_to_expected_answer_transcript_ms": 1228.981,
+        "max_core_input_wait_ms": 22.150584,
+        "max_provider_audio_to_bridge_write_ms": 0
+      },
+      {
+        "provider": "sip-G722",
+        "direction": "inbound",
+        "caller_end_to_first_reply_ms": 1682.238666,
+        "caller_end_to_expected_answer_transcript_ms": 1398.971,
+        "max_core_input_wait_ms": 64.396083,
+        "max_provider_audio_to_bridge_write_ms": 0.781625
+      },
+      {
+        "provider": "sip-G722",
+        "direction": "outbound",
+        "caller_end_to_first_reply_ms": 1476.96125,
+        "caller_end_to_expected_answer_transcript_ms": 1279.414,
+        "max_core_input_wait_ms": 33.217625,
+        "max_provider_audio_to_bridge_write_ms": 0.227459
+      },
+      {
+        "provider": "sip-PCMA",
+        "direction": "inbound",
+        "caller_end_to_first_reply_ms": 1683.291125,
+        "caller_end_to_expected_answer_transcript_ms": 1451.472,
+        "max_core_input_wait_ms": 27.830833,
+        "max_provider_audio_to_bridge_write_ms": 0.902417
+      },
+      {
+        "provider": "sip-PCMA",
+        "direction": "outbound",
+        "caller_end_to_first_reply_ms": 1462.30525,
+        "caller_end_to_expected_answer_transcript_ms": 1217.866,
+        "max_core_input_wait_ms": 28.968958,
+        "max_provider_audio_to_bridge_write_ms": 0.494875
+      },
+      {
+        "provider": "twilio",
+        "direction": "inbound",
+        "caller_end_to_first_reply_ms": 1473.648625,
+        "caller_end_to_expected_answer_transcript_ms": 1217.455,
+        "max_core_input_wait_ms": 40.062916,
+        "max_provider_audio_to_bridge_write_ms": 0.172791
+      },
+      {
+        "provider": "twilio",
+        "direction": "outbound",
+        "caller_end_to_first_reply_ms": 1251.726,
+        "caller_end_to_expected_answer_transcript_ms": 1141.776,
+        "max_core_input_wait_ms": 36.378209,
+        "max_provider_audio_to_bridge_write_ms": 0.1655
+      }
+    ],
+    "live_g722_local_interrupt": {
+      "passed": true,
+      "caller_clip_start_to_clear_ms": 286.47975,
+      "received_packets": 81,
+      "sequence_loss": 0,
+      "largest_rtp_gap_ms": 6779.666667,
+      "delivery": {
+        "acknowledged_audio_ms": 1620,
+        "audible_playback_confirmed": false,
+        "awaiting_playback_ms": 60,
+        "bridge_written_audio_ms": 1800,
+        "dropped_audio_ms": 0,
+        "pending_audio_ms": 0,
+        "playback_ack_supported": true,
+        "playback_evidence": "rtp_transmitted",
+        "queued_audio_ms": 1800
+      }
+    }
+  },
+  "limitations": [
+    "One matched live sample per path; not a production network or human-perceived quality guarantee.",
+    "Provider-owned interruption failed the explicit-clear test: model continued its prescribed long greeting. Retained as a failure; local-interruption policy test passed. No provider capability or production policy changed.",
+    "RTP gaps include caller turns and intentional silence. Largest live interval includes caller speech plus provider response; it is not measured speech loss.",
+    "Sustained slower-than-realtime audio still has gaps. Immediate recovery reduces maximum gaps but can increase their frequency.",
+    "Live response wait remains roughly 1.25\u20131.68s; removing the 60ms restart wait does not remove model latency.",
+    "No hardware/headset, live carrier network, or staging/production acceptance run."
+  ],
+  "core_files": {
+    "realtime_timing.go": "ab7cb0a2926b3892756083bb2b52ed3e88baede6aa67dc5261b3ad9c7c593f22",
+    "realtime_quiet_accounting_test.go": "5b3dc3d426d0e496df1391af68da43a71655154d9bbd61535a72f0cb1aaa5d30"
+  }
+}

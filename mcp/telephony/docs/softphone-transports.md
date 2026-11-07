@@ -108,6 +108,75 @@ address alone cannot prove the route used by RTP or identify a VPN fault.
 Virtual hub writer timings describe the local PCM bridge. Native RTP metrics
 must be consulted for the browser network boundary.
 
+### Timestamped transport history
+
+The shared PCM session and the headless WebRTC connection expose
+`SoftphoneDiagnostics.transportSamples` in `onDiagnostics`. The same data is
+available to operators in Telephony’s audio-health call detail under
+`transport_samples`, alongside `network_events`, browser and carrier diagnostics.
+No client app needs to parse Chrome’s internal debugging page.
+
+WebRTC reads an allowlist from `RTCPeerConnection.getStats()` once per second.
+Only one read may be outstanding per peer connection. Failed or late reads never
+close, claim, answer or reconnect a call. Samples include:
+
+- Directional RTP bytes/packets, loss, retransmissions/NACK/FEC counters when
+  supported, concealment, silent concealment and sample adjustments.
+- Interval jitter-buffer delay/target/minimum and processing delay, calculated
+  from counter deltas for the same RTP stats identity. The existing summary’s
+  jitter-buffer delay remains a lifetime average for compatibility.
+- Remote receiver reports for **browser → Telephony**, including loss, fraction
+  lost, jitter and RTCP RTT. These do not measure the carrier/PSTN leg.
+- Selected ICE pair bandwidth estimates, request/response counters, RTT,
+  candidate types, relay protocol, ICE/DTLS states, a numeric path revision and
+  safe codec fields. Raw candidate IDs are used only for private delta tracking.
+
+Missing native fields stay absent. Counter decreases, new RTP identities and
+reconnects establish new baselines rather than producing large artificial rates.
+Native `jitter`, `roundTripTime` and pair RTT values retain WebRTC’s **seconds**;
+keys ending `_ms`, the common `rtt_ms` and legacy flat summaries use milliseconds.
+Available bitrate is a browser estimate, not proof of spare office/VPN bandwidth.
+
+PCM adds interval wire-byte rates, receipt gaps, capture age, transit/delivery
+excess and server queue maxima on the existing Worker statistics timer. Delay is
+observed before stale frames are discarded. Unknown delay/clock measurements
+stay absent. Wire rates include the Telephony binary frame header; native RTP
+rates use RTP payload bytes, so these rates are not directly interchangeable.
+Receipt gaps are observations and do not independently classify silence as a
+fault. Cumulative mute, loss, underrun, reconnect and scheduling counters remain
+separate, with existing timestamped drop and underrun events unchanged.
+
+Both transports emit at most two additional samples per five-second observation
+period, with no catch-up loop after timer delays. A new incident preserves its
+first observation and the preceding observation until the next emission.
+The client keeps 24 emitted samples and at most eight pending samples.
+The additional history is split into parts of at most 768 ASCII JSON bytes,
+sent at most once per 250 ms. Including the control envelope, each history
+message stays below 1 KiB. The sender has at most 32 pending parts, and PCM
+skips observational pieces when more than 40 ms of PCM is already queued.
+Parts keep one sample identity and the server idempotently merges their
+allowlisted maps. `complete` and `parts` distinguish a fully collected sample
+from a sample missing diagnostic pieces; missing monitoring never counts as lost
+audio. WebRTC summary reports share this pacing slot so they cannot collide with a
+history piece. Root call/audio controls retain their existing protocol. The server
+accepts at most four samples per incoming control. These are
+bounded diagnostic windows, **not a complete all-call Chrome internals dump**.
+
+A nonblocking, 1,024-entry collector stores history in a separate indexed table,
+with batches of 100, at most 96 periodic and 32 incident samples per call, and
+the existing network retention setting (seven days by default). Database failure
+retains a bounded pending batch; contention/overflow drops monitoring data and
+logs a warning. Idle expiry cleanup runs at most once per minute. Audio frames
+never wait for collection or storage. Call-list and SSE summaries do not read
+history. Server-validated call/project and receiving-connection IDs override
+browser input; source-time connection attribution may remain unknown if clocks
+cannot be matched to an observed interval.
+
+No raw SDP, ICE credentials, candidate addresses, media tokens or token-bearing
+URLs are accepted in samples. The existing separately protected network-event
+store remains the place for validated browser IPs. An RTC signaling socket’s
+address does not establish the route used by RTP through ICE/TURN.
+
 ## Verification scope
 
 Local tests cover disabled/invalid configuration, unauthorized attachment,

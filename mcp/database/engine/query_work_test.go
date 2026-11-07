@@ -32,7 +32,7 @@ func TestQueryTimeouts(t *testing.T) {
 }
 
 func TestStreamingQueryCancellation(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)
@@ -86,6 +86,6 @@ func TestPebbleAggregateMemoryBound(t *testing.T) {
 		t.Fatal(v)
 	}
 	// Many large distinct keys require too much retained aggregation state.
-	_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "large", Collection: "items", GroupBy: []string{"label"}, Metrics: []Metric{{"n", "count", ""}}, Query: Query{Limit: 1}})
+	_, e := m.Execute(context.Background(), "p", "aggregate", Request{Database: "large", Collection: "items", GroupBy: []string{"label"}, Metrics: []Metric{{"n", "count", "", nil}}, Query: Query{Limit: 1}})
 	expectCode(t, e, "resource_limit")
 }

@@ -11,6 +11,8 @@ func TestTrackingSourceCreateNormalizesAndSelectsMetaPixel(t *testing.T) {
 	platform := newRecordingPlatform()
 	platform.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 		switch tool {
+		case "ad_account_get":
+			return executeJSON(`{"id":"act_42"}`), nil
 		case "pixel_list":
 			return executeJSON(`{"data":[]}`), nil
 		case "pixel_create":
@@ -50,8 +52,8 @@ func TestTrackingSourceCreateNormalizesAndSelectsMetaPixel(t *testing.T) {
 	if err != nil || defaults[trackingSourceDefaultPurpose].(map[string]any)["id"] != resource.ID {
 		t.Fatalf("tracking source was not selected by default: defaults=%#v err=%v", defaults, err)
 	}
-	if len(platform.executeCalls) != 2 {
-		t.Fatalf("expected one discovery and one create call, got %#v", platform.executeCalls)
+	if len(platform.executeCalls) != 3 {
+		t.Fatalf("expected discovery, business lookup and create calls, got %#v", platform.executeCalls)
 	}
 }
 
@@ -115,6 +117,8 @@ func TestTrackingSourceCreateReconcilesTransientFailureWithoutRetry(t *testing.T
 	createCalls := 0
 	platform.executeResponder = func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
 		switch tool {
+		case "ad_account_get":
+			return executeJSON(`{"id":"act_42"}`), nil
 		case "pixel_list":
 			listCalls++
 			if listCalls == 1 {
@@ -170,6 +174,9 @@ func TestTrackingSourceCreateDoesNotRetryUnreconciledCreate(t *testing.T) {
 	platform.executeResponder = func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
 		if tool == "pixel_list" {
 			return executeJSON(`{"data":[]}`), nil
+		}
+		if tool == "ad_account_get" {
+			return executeJSON(`{"id":"act_42"}`), nil
 		}
 		createCalls++
 		return &sdk.ExecuteResult{Success: false, Status: 403, Data: json.RawMessage(`{"error":{"code":190,"type":"OAuthException","message":"Invalid token"}}`)}, nil

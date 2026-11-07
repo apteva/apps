@@ -1,0 +1,8 @@
+{
+  "version": "v0.2.0-alpha.5",
+  "commit": "2dbc4d428c82e281f1489dd450004a6d33b3adfc",
+  "checksum": "h1:srqnpPwygVrSBtbvEBD/7ErRNvwFjxaOEZEl48f+F0M=",
+  "sdk": "v0.82.0",
+  "sdk_head": "950b91d",
+  "migration": "9 to 10; genuine backed-up alpha.4 probe passed"
+}

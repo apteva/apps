@@ -1,0 +1,324 @@
+name: Telephony validation
+on:
+  pull_request:
+    paths: ['mcp/telephony/**', '.github/workflows/telephony.yml']
+  push:
+    branches: [main]
+    tags: ['telephony/v*']
+    paths: ['mcp/telephony/**', '.github/workflows/telephony.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ice-continuity:
+    name: Bundled ICE transport and renewal races
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp/telephony/third_party/pion-ice
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/third_party/pion-ice/go.sum
+      - run: go test -count=1 -timeout 7m ./...
+      - run: go test -race -count=1 -timeout 2m -run '^TestRestart(KeepsBidirectionalMedia|MediaRejects)' .
+  telephony:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/telephony
+      - run: go vet ./...
+        working-directory: mcp/telephony
+      - name: Managed dashboard origins and Audio Health race checks
+        run: go test -race -count=1 -run '^Test(RuntimeDashboard|ManagedRuntimeBrowser|AudioDashboard|BrowserTelemetry|DeliveryRequest)' .
+        working-directory: mcp/telephony
+      - name: Automatic pickup policy and ownership races
+        run: go test -race -count=1 -run '^TestAutoAnswer' .
+        working-directory: mcp/telephony
+      - name: Statistics access and snapshot race checks
+        run: go test -race -count=1 -run '^TestCallStatistics' -skip '^TestCallStatisticsDSTAndIndexWithLargeHistory$' .
+        working-directory: mcp/telephony
+      - run: go test -json ./... > /tmp/telephony-go.jsonl
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_SHORT_GAP_RESULTS: /tmp/telephony-short-source-gaps.json
+          TELEPHONY_VARIABLE_DELIVERY_RESULTS: /tmp/telephony-variable-delivery.json
+          TELEPHONY_PRODUCTION_SCENARIO_RESULTS: /tmp/telephony-production-scenarios.json
+          TELEPHONY_SPEECH_ACCEPTANCE_RESULTS: /tmp/telephony-speech-acceptance.json
+          TELEPHONY_SPEECH_ACCEPTANCE_AUDIO_DIR: /tmp/telephony-speech-audio
+      - name: Bounded audio timing and telemetry overhead
+        run: go test -run '^$' -bench '^Benchmark(AgentAudioCancellationFence|AgentAudioReplyTimingSteadyFrame|AgentPlaybackPressureNoPressure|AgentCoreLinkDuplex|AgentAudioFrontend|SIPReceiveEvidence|SIPRecoveryEligibility|SIPRTCPReport|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
+        working-directory: mcp/telephony
+      - name: Runtime optimization benchmarks
+        run: |
+          go test -run '^TestRuntimeOptimizationPerformance$' -count=1 -v . > /tmp/telephony-runtime-reads.log
+          go test -run '^$' -bench '^BenchmarkRTCOptimizedPipeline$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-runtime-audio.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_RUNTIME_OPT_RESULTS: /tmp/telephony-runtime-reads.json
+      - name: Archive and idle worker efficiency comparison
+        run: go test -run '^TestEfficiencyPerformance$' -count=1 -v . > /tmp/telephony-efficiency.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_EFFICIENCY_BENCHMARK: '1'
+          TELEPHONY_EFFICIENCY_RESULTS: /tmp/telephony-efficiency.json
+      - run: bun test --timeout 15000 frontend/tests/*.test.ts ui/*.test.ts
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_RESULTS: /tmp/telephony-network-model.json
+          TELEPHONY_GUARDED_MODEL_RESULTS: /tmp/telephony-guarded-model.json
+      - name: Natural speech under identical packet faults and bandwidth limits
+        run: go test -run '^TestNetworkSpeechReplay$' -count=1 -v . > /tmp/telephony-network-speech.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_SPEECH_RESULTS: /tmp/telephony-network-speech.json
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: mcp/telephony
+      - run: bunx --no-install playwright test -c frontend/outbound-setup.playwright.config.ts
+        working-directory: mcp/telephony
+      - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
+        working-directory: mcp/telephony
+      - name: Call inspector, statistics and Audio Health navigation
+        run: |
+          bunx --no-install playwright test -c frontend/call-inspector.playwright.config.ts
+          bunx --no-install playwright test -c frontend/audio-dashboard.playwright.config.ts
+          bunx --no-install playwright test -c frontend/call-statistics.playwright.config.ts
+        working-directory: mcp/telephony
+      - name: Compiled sidecar Chromium, network checks, TURN recovery and managed renewal
+        run: go test -tags integration -run '^Test(AutoAnswerRealBrowserPickup|ManagedRuntimeAutomaticBrowserAnswerAndRenewal|Tier2HeadlessBrowser|TURNBrowserMediaCredentialRenewal|NetworkCheckBrowserNoMicrophoneOrCall|NetworkCheckBrowserDetectsRealDatagramLoss|NetworkBrowserDirectVersusRelayRealPacketLoss)$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_NETWORK_BROWSER_RESULTS: /tmp/telephony-network-paths.json
+      - name: Outbound Chromium to SIP recovery smoke
+        run: go test -tags integration -run '^TestOutboundSIPBrowserSoak($|Metrics|SourceClock|PauseWindow)' -count=1 -timeout 4m -v . > /tmp/telephony-outbound-soak.log 2>&1
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_OUTBOUND_SOAK_OUTPUT: /tmp/telephony-outbound-soak
+          TELEPHONY_OUTBOUND_SOAK_SECONDS: '20'
+          TELEPHONY_OUTBOUND_SOAK_CALLS: '8'
+          TELEPHONY_OUTBOUND_SOAK_PAUSE_MS: '570'
+          TELEPHONY_OUTBOUND_SOAK_RECORDING: '1'
+      - name: Long SIP recording import and playback
+        run: go test -run '^TestLongSIPRecordingImportAndPlaybackMatrix$' -count=1 -timeout 10m -v . > /tmp/telephony-long-recordings.log
+        working-directory: mcp/telephony
+        env:
+          CGO_ENABLED: '0'
+          GOMAXPROCS: '2'
+          TELEPHONY_LONG_RECORDING_TEST: '1'
+          TELEPHONY_LONG_RECORDING_OUTPUT: /tmp/telephony-long-recordings.json
+      - run: bun run scripts/build-panels.ts --app telephony
+      - run: go build -o /tmp/telephony .
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-go-results
+          path: |
+            /tmp/telephony-go.jsonl
+            /tmp/telephony-short-source-gaps.json
+            /tmp/telephony-variable-delivery.json
+            /tmp/telephony-production-scenarios.json
+            /tmp/telephony-speech-acceptance.json
+            /tmp/telephony-speech-audio/
+            /tmp/telephony-audio-overhead.log
+            /tmp/telephony-runtime-reads.log
+            /tmp/telephony-runtime-reads.json
+            /tmp/telephony-runtime-audio.log
+            /tmp/telephony-efficiency.log
+            /tmp/telephony-efficiency.json
+            /tmp/telephony-long-recordings.log
+            /tmp/telephony-long-recordings.json
+            /tmp/telephony-chromium.log
+            /tmp/telephony-network-speech.json
+            /tmp/telephony-network-speech.log
+            /tmp/telephony-guarded-model.json
+            /tmp/telephony-network-model.json
+            /tmp/telephony-network-paths.json
+            /tmp/telephony-outbound-soak.log
+            /tmp/telephony-outbound-soak/
+  browser-outages:
+    name: Browser long-outage scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/telephony
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: mcp/telephony
+      - name: Packaged WebRTC and PCM recover past transport budget and lease expiry
+        run: go test -tags integration -run '^TestTier2HeadlessBrowserLongNetworkOutages$' -count=1 -timeout 8m -v . > /tmp/telephony-browser-outages.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-browser-outages
+          path: /tmp/telephony-browser-outages.log
+  native-opus:
+    name: Bundled Opus (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            musl_arch: x86_64
+            musl_root_sha256: 412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            musl_arch: aarch64
+            musl_root_sha256: 6bf491907b705caa5fc65773fbbc1d0954530b6c455d4446f670a4c1fdcea489
+          - runner: macos-15-intel
+            arch: amd64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp/telephony
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Verify native runtime and bundled codec (no system Opus required)
+        run: |
+          test "$(go env GOARCH)" = '${{ matrix.arch }}'
+          go test -count=1 -run 'TestRecordingMP3RoundTrip|TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -v .
+      - name: Verify musl library with a musl-loader binary
+        if: runner.os == 'Linux'
+        run: |
+          # Native CPU execution in a musl-only filesystem; Ubuntu's GNU libc
+          # must not enter this test process. No container runtime is needed.
+          musl_root=$(mktemp -d)
+          trap 'if mountpoint -q "$musl_root/proc"; then sudo umount "$musl_root/proc"; fi; sudo rm -rf "$musl_root"' EXIT
+          musl_archive=/tmp/telephony-musl-root-${{ matrix.musl_arch }}.tar.gz
+          curl --fail --silent --show-error --max-time 60 \
+            https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/${{ matrix.musl_arch }}/alpine-minirootfs-3.22.2-${{ matrix.musl_arch }}.tar.gz \
+            -o "$musl_archive"
+          printf '%s  %s\n' '${{ matrix.musl_root_sha256 }}' "$musl_archive" | sha256sum -c -
+          sudo tar -xzf "$musl_archive" -C "$musl_root"
+          sudo chmod 0755 "$musl_root"
+          go test -c -ldflags '-I /lib/ld-musl-${{ matrix.musl_arch }}.so.1' -o /tmp/telephony-opus-musl .
+          sudo install -m 0755 /tmp/telephony-opus-musl "$musl_root/test"
+          sudo mount -t proc proc "$musl_root/proc"
+          sudo chroot --userspec=10001:10001 "$musl_root" /usr/bin/env XDG_CACHE_HOME=/tmp/codec-cache /test \
+            -test.run 'TestRecordingMP3RoundTrip|TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
+  mixed-media-load:
+    name: Mixed SIP media load
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '4'
+      TELEPHONY_SIP_RECOVERY_LOAD: '1'
+      TELEPHONY_SIP_MIXED_LOAD: '1'
+      TELEPHONY_SIP_LOAD_RESULTS: /tmp/telephony-mixed-load.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Paced media, codecs, recording and database contention
+        run: go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -timeout 5m -v . > /tmp/telephony-mixed-load.log 2>&1
+        working-directory: mcp/telephony
+      - name: Production-shaped faults remain isolated under load
+        run: go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -timeout 5m -v . > /tmp/telephony-production-load.log 2>&1
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_SIP_PRODUCTION_LOAD: '1'
+          TELEPHONY_SIP_LOAD_RESULTS: /tmp/telephony-production-load.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-mixed-load
+          path: |
+            /tmp/telephony-mixed-load.json
+            /tmp/telephony-mixed-load.log
+            /tmp/telephony-production-load.json
+            /tmp/telephony-production-load.log
+  race:
+    name: Race checks (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: media
+            pattern: 'Test(AgentAudio|AgentMedia|AgentCoreCompletion|AgentCompletionClose|AgentCoreLink|AgentContinuity|AgentPlaybackPressure|AudioFrontend|SIPShortSourceGap|SIPSourceGap|SIPJitterResumesShortDTX|SIPAutomatic|SIPRTCP|CarrierMedia|SIPMicrophoneProgress|ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|RTCOutgoingTail|RTCPlaybackTick|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance|RTCTimeline|RTCReceive|RTCTiming|AudioDelayDistribution|SIPDelayDistribution|ReceiveEstimator|SIPStarvation|SIPReceiveRecovery)'
+          - group: efficiency
+            pattern: 'TestEfficiency'
+          - group: review
+            pattern: 'Test(Review|ZZReviewA|DiscardConcurrentWriter)'
+          - group: lifecycle
+            pattern: 'Test(RecordingMP3|RealtimePreparation|PushImmediate|TwilioImmediate|SIPCrossedBYE|CarrierInventoryOutage|CarrierVerification|TemporaryCarrier|InventoryReads|AccountFailure|AccountEvent|GuardedAttachment|BrowserCurrentBuffer|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Focused race regressions
+        run: go test -race -timeout 20m -run '${{ matrix.pattern }}' -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' -count=1 -v . > /tmp/telephony-race.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-race-${{ matrix.group }}
+          path: /tmp/telephony-race.log
+
+  recording-mp3:
+    name: MP3 long recordings (30/60/120 minutes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOWORK: 'off'
+      TELEPHONY_LONG_RECORDING_TEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - run: go test -count=1 -timeout 35m -run '^TestLongSIPMP3RecordingMatrix$' -v . > /tmp/telephony-mp3.log
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-mp3-long-recordings
+          path: /tmp/telephony-mp3.log

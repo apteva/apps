@@ -183,10 +183,10 @@ func TestAuditRemoteSilentVideo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("bash", "-c", remoteEnsureAudioScript(source)).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-c", componentEnsureAudioScript(source)).CombinedOutput(); err != nil {
 		t.Fatalf("remote audio preparation: %v %s", err, out)
 	}
-	args := buildLocalFFmpegArgsWithAudioInfo(edit, Output{Format: "mp4", Resolution: "sd", Aspect: "16:9", FPS: 24}, []string{source}, -1, filepath.Join(dir, "out.mp4"), remoteVisualAudioDefaults(edit))
+	args := buildLocalFFmpegArgsWithAudioInfo(edit, Output{Format: "mp4", Resolution: "sd", Aspect: "16:9", FPS: 24}, []string{source}, -1, filepath.Join(dir, "out.mp4"), componentVisualAudioDefaults(edit))
 	if out, err := exec.Command(ffmpegPath(), args...).CombinedOutput(); err != nil {
 		t.Fatalf("remote command fails for video without audio: %v %s", err, out)
 	}
@@ -266,7 +266,7 @@ func TestAuditRejectsExecutableOutputFormat(t *testing.T) {
 		t.Fatalf("fixture render: %v %s", err, output)
 	}
 	// Isolate the first post-render shell statement from the exact generated script.
-	script := remoteRenderScript(nil, "true", format, "owner", "https://example.com", "fake-audit-token", "out.mp4", "video/mp4", nil)
+	script := renderUploadScript(format)
 	start := strings.Index(script, "BYTES=$(")
 	end := strings.Index(script[start:], "\n")
 	line := script[start : start+end]
@@ -274,6 +274,6 @@ func TestAuditRejectsExecutableOutputFormat(t *testing.T) {
 	command.Dir = dir
 	_ = command.Run()
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("accepted output.format executed shell substitution in generated remote script")
+		t.Fatal("accepted output.format executed shell substitution in generated renderer plan")
 	}
 }

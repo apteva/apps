@@ -99,7 +99,7 @@ interface Deployment {
   source_extra_json?: string;
   framework: string;
   build_cmd: string;
-  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions" | "bitrise" | "appcircle";
   build_backend_config_json: string;
   start_cmd: string;
   port_hint: number;
@@ -132,7 +132,7 @@ interface Build {
   deployment_id: number;
   source_sha: string;
   framework: string;
-  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions" | "bitrise" | "appcircle";
   external_job_id: string;
   external_status: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
@@ -249,7 +249,30 @@ interface DistributionAudienceMember {
   state?: string;
 }
 
+interface ProviderObservation {
+  checked_at: string;
+  cached: boolean;
+  stale: boolean;
+  next_retry_at?: string;
+  reason?: string;
+}
+
+function ProviderObservationStatus({ value }: { value?: ProviderObservation | null }) {
+  if (!value) return null;
+  return <span className={value.stale ? "text-yellow/80" : "text-text-dim"}>
+    Last checked {new Date(value.checked_at).toLocaleString()}{value.cached ? " · cached" : ""}
+    {value.stale && ` · ${value.reason || "refresh paused"}`}
+    {value.next_retry_at && ` · retry after ${new Date(value.next_retry_at).toLocaleString()}`}
+  </span>;
+}
+
+function releaseObservation(release: Release): ProviderObservation | null {
+  try { return JSON.parse(release.release_meta_json || "{}").observation || null; }
+  catch { return null; }
+}
+
 interface MobileDistributionState {
+  observation?: ProviderObservation;
   platform: "android" | "ios" | "macos";
   provider: string;
   channel: string;
@@ -319,8 +342,13 @@ interface StoreAsset {
 type StoreRatingLevel = "NONE" | "INFREQUENT" | "FREQUENT";
 
 interface StoreContentRating {
+  // Retained to flag older combined answers for review.
   violence?: StoreRatingLevel;
+  violence_cartoon_fantasy?: StoreRatingLevel;
+  violence_realistic?: StoreRatingLevel;
+  violence_graphic_realistic?: StoreRatingLevel;
   sexual_content?: StoreRatingLevel;
+  sexual_content_graphic?: StoreRatingLevel;
   profanity?: StoreRatingLevel;
   drugs?: StoreRatingLevel;
   gambling_simulation?: StoreRatingLevel;
@@ -328,7 +356,7 @@ interface StoreContentRating {
   weapons?: StoreRatingLevel;
   horror_fear?: StoreRatingLevel;
   medical_information?: StoreRatingLevel;
-  health_wellness?: StoreRatingLevel;
+  health_wellness?: boolean;
   mature_themes?: StoreRatingLevel;
   unrestricted_web_access?: boolean;
   real_money_gambling?: boolean;
@@ -460,8 +488,11 @@ const GOOGLE_CATEGORIES = [
 ] as const;
 
 const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
-  { key: "violence", label: "Violence" },
+  { key: "violence_cartoon_fantasy", label: "Cartoon or fantasy violence" },
+  { key: "violence_realistic", label: "Realistic violence" },
+  { key: "violence_graphic_realistic", label: "Prolonged graphic or sadistic realistic violence" },
   { key: "sexual_content", label: "Sexual content or nudity" },
+  { key: "sexual_content_graphic", label: "Graphic sexual content and nudity" },
   { key: "profanity", label: "Profanity or crude humor" },
   { key: "drugs", label: "Alcohol, tobacco, or drugs" },
   { key: "gambling_simulation", label: "Simulated gambling" },
@@ -469,7 +500,6 @@ const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
   { key: "weapons", label: "Guns or other weapons" },
   { key: "horror_fear", label: "Horror or fear" },
   { key: "medical_information", label: "Medical information" },
-  { key: "health_wellness", label: "Health or wellness topics" },
   { key: "mature_themes", label: "Mature or suggestive themes" },
 ];
 
@@ -510,7 +540,15 @@ const API = "/api/apps/deploy/api";
 const FRAMEWORKS = ["command", "", "go", "node", "bun", "static", "blank", "android", "ios", "macos"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 const TARGET_KINDS = ["service", "android", "ios", "macos", "artifact"] as const;
-const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
+const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"] as const;
+const BUILD_BACKEND_EXAMPLES: Record<string, string> = {
+  runner: '{"runner_url":"https://runner.example","source_mode":"bundle","artifact_mode":"file"}',
+  codemagic: '{"connection_id":1,"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}',
+  bitrise: '{"connection_id":1,"app_id":"app-slug","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}',
+  appcircle: '{"connection_id":2,"profile_id":"...","configuration_id":"...","workflow_id":"...","branch_id":"...","source_mode":"bundle","artifact_mode":"file"}',
+  github_actions: '{"connection_id":3,"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}',
+};
+
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -1038,15 +1076,15 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 			title: platform === "android" ? "Rotate Android upload key" : "Rotate Apple signing",
 			body: platform === "android"
 				? "Replace the managed Android upload key? Google Play must accept the new upload certificate before builds signed with it can be published."
-				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
+				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, and keep shared certificates available for other apps?",
       confirmLabel: "Rotate",
       tone: "warning",
       onConfirm: () => runMobileSigningSetup(true),
 		});
 	};
 
-	const importAndroidSigning = async () => {
-		if (!detail || !signingImportFile || !signingStorePassword) return;
+	const importMobileSigning = async () => {
+		if (!detail || !signingImportFile || (detail.deployment.target_kind === "android" && !signingStorePassword)) return;
 		setSigningBusy(true);
 		try {
 			const submit = async (commit: boolean) => {
@@ -1065,9 +1103,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 			if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
 			const preview = await response.json() as { identity: MobileSigningIdentity; replacement_required: boolean };
 			setConfirmState({
-				title: preview.replacement_required ? "Replace Android upload key" : "Import Android upload key",
-				body: `${preview.identity.application_identifier} · alias ${preview.identity.key_alias || "1"} · SHA-1 ${preview.identity.certificate_sha1 || "-"} · SHA-256 ${preview.identity.certificate_sha256 || "-"}`,
-				confirmLabel: preview.replacement_required ? "Replace keystore" : "Import keystore",
+				title: `${preview.replacement_required ? "Replace" : "Import"} ${detail.deployment.target_kind === "android" ? "Android upload key" : "Apple signing identity"}`,
+				body: `${preview.identity.application_identifier} ${preview.identity.key_alias ? `· alias ${preview.identity.key_alias}` : ""} · SHA-1 ${preview.identity.certificate_sha1 || "-"} · SHA-256 ${preview.identity.certificate_sha256 || "-"}`,
+				confirmLabel: preview.replacement_required ? "Replace identity" : "Import identity",
 				tone: preview.replacement_required ? "warning" : undefined,
 				onConfirm: async () => {
 					const committed = await submit(true);
@@ -1559,12 +1597,10 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 <button
                   type="button"
                   onClick={handleMobileSigningSetup}
-								disabled={signingBusy || detail.deployment.build_backend === "github_actions"}
+								disabled={signingBusy}
                   className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
                   title={
-									detail.deployment.build_backend !== "github_actions"
-										? "Prepare the managed signing identity for this build provider."
-                      : "This build provider does not yet expose a signing-secret adapter."
+									"Prepare the managed signing identity for this build provider."
                   }
                 >
                   {signingBusy
@@ -1601,14 +1637,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 										Certificate
 									</button>
 								)}
-								{detail.deployment.target_kind === "android" && (
+								{(detail.deployment.target_kind === "android" || detail.deployment.target_kind === "ios" || detail.deployment.target_kind === "macos") && (
 									<div className="basis-full flex items-center gap-2 pt-1 flex-wrap">
-										<input type="file" accept=".p12,.pfx,application/x-pkcs12" onChange={(event) => setSigningImportFile(event.target.files?.[0] || null)} className="text-xs max-w-[14rem]" />
-										<input type="password" value={signingStorePassword} onChange={(event) => setSigningStorePassword(event.target.value)} placeholder="Store password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<input type="password" value={signingKeyPassword} onChange={(event) => setSigningKeyPassword(event.target.value)} placeholder="Key password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<input value={signingKeyAlias} onChange={(event) => setSigningKeyAlias(event.target.value)} placeholder="Alias (default 1)" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<button type="button" onClick={() => void importAndroidSigning()} disabled={signingBusy || !signingImportFile || !signingStorePassword} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">
-											{mobileSigningIdentity ? "Replace keystore" : "Import keystore"}
+										<input type="file" accept={detail.deployment.target_kind === "android" ? ".p12,.pfx,application/x-pkcs12" : ".p12,.pfx,.zip,application/x-pkcs12,application/zip"} onChange={(event) => setSigningImportFile(event.target.files?.[0] || null)} className="text-xs max-w-[14rem]" />
+										<input type="password" value={signingStorePassword} onChange={(event) => setSigningStorePassword(event.target.value)} placeholder={detail.deployment.target_kind === "android" ? "Store password" : "PKCS#12 password (if any)"} className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
+										{detail.deployment.target_kind === "android" && <input type="password" value={signingKeyPassword} onChange={(event) => setSigningKeyPassword(event.target.value)} placeholder="Key password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />}
+										{detail.deployment.target_kind === "android" && <input value={signingKeyAlias} onChange={(event) => setSigningKeyAlias(event.target.value)} placeholder="Alias (default 1)" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />}
+										<button type="button" onClick={() => void importMobileSigning()} disabled={signingBusy || !signingImportFile || (detail.deployment.target_kind === "android" && !signingStorePassword)} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">
+											{mobileSigningIdentity ? "Replace identity" : "Import identity"}
 										</button>
 									</div>
 								)}
@@ -1630,6 +1666,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 {distribution?.group_name && (
                   <span className="text-text-dim truncate">{distribution.group_name}</span>
                 )}
+                <ProviderObservationStatus value={distribution?.observation} />
 				<div className="flex items-center gap-2 ml-auto min-w-0">
                   <input
                     type="email"
@@ -1735,6 +1772,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         </span>
                       )}
                     </div>
+                    {mobile && <ProviderObservationStatus value={releaseObservation(latestMobileRelease!)} />}
                     {(mobile ? latestMobileRelease! : detail.current_release!).error && (
                       <div className="text-red truncate" title={(mobile ? latestMobileRelease! : detail.current_release!).error}>
                         {(mobile ? latestMobileRelease! : detail.current_release!).error}
@@ -1895,7 +1933,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                               {promotionValidations[rel.id].valid ? "ready" : "blocked"}
                             </span>
                           )}
-                          {(rel.external_status === "approved_pending_release" || rel.external_status === "pending_apple_release") && (
+                          {rel.external_status === "pending_developer_release" && (
                             <button
                               type="button"
                               disabled={busy}
@@ -2326,17 +2364,18 @@ function CreateDeploymentDialog({
               <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
+              <option value="bitrise">Bitrise</option>
+              <option value="appcircle">Appcircle</option>
             </select>
           </div>
           {buildBackend !== "local" && (
             <div className="col-span-2">
               <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <p className="text-xs text-text-muted mb-1">Select a bound account with connection_id. The source recipe and signing identity follow the deployment.</p>
               <textarea
                 value={buildBackendConfig}
                 onChange={(e) => setBuildBackendConfig(e.target.value)}
-                placeholder={buildBackend === "codemagic"
-                  ? '{"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}'
-                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}'}
+                placeholder={BUILD_BACKEND_EXAMPLES[buildBackend]}
                 rows={4}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />
@@ -3246,11 +3285,17 @@ function StoreListingDialog({
               </div>
               <section className="border-t border-border pt-4 space-y-3">
                 <div className="text-xs uppercase text-text-dim">Content rating</div>
+                {((doc.classification.content_rating?.violence && currentRatingLevel(doc.classification.content_rating.violence) !== "NONE" &&
+                    (!doc.classification.content_rating.violence_cartoon_fantasy || !doc.classification.content_rating.violence_realistic || !doc.classification.content_rating.violence_graphic_realistic)) ||
+                  (doc.classification.content_rating?.sexual_content && currentRatingLevel(doc.classification.content_rating.sexual_content) !== "NONE" && !doc.classification.content_rating.sexual_content_graphic)) && (
+                  <p className="text-xs text-warning">Older combined content answers need review. Answer each violence and graphic-content question separately before applying classification.</p>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {RATING_FIELDS.map(({ key, label }) => (
                     <label key={key} className="text-xs text-text-muted">
                       {label}
                       <select
+                        aria-label={label}
                         value={currentRatingLevel(doc.classification.content_rating?.[key])}
                         onChange={(e) => setDoc({
                           ...doc,
@@ -3274,6 +3319,7 @@ function StoreListingDialog({
                 </div>
                 <div className="flex flex-wrap gap-4">
                   {([
+                    ["health_wellness", "Health or wellness topics"],
                     ["unrestricted_web_access", "Unrestricted web access"],
                     ["real_money_gambling", "Real-money gambling"],
                     ["loot_boxes", "Loot boxes"],
@@ -3303,7 +3349,7 @@ function StoreListingDialog({
                 </div>
                 {isAppleTarget(deployment.target_kind) && (
                   <details className="text-xs text-text-muted">
-                    <summary className="cursor-pointer">Advanced Apple declaration fields</summary>
+                    <summary className="cursor-pointer">Advanced Apple answers (override the questionnaire)</summary>
                     <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={6} className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
                   </details>
                 )}
@@ -3888,14 +3934,18 @@ function EditConfigDialog({
               <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
+              <option value="bitrise">Bitrise</option>
+              <option value="appcircle">Appcircle</option>
             </select>
           </div>
           {buildBackend !== "local" && (
             <div className="col-span-2">
               <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <p className="text-xs text-text-muted mb-1">Select a bound account with connection_id. The source recipe and signing identity follow the deployment.</p>
               <textarea
                 value={buildBackendConfig}
                 onChange={(e) => setBuildBackendConfig(e.target.value)}
+                placeholder={BUILD_BACKEND_EXAMPLES[buildBackend]}
                 rows={4}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />

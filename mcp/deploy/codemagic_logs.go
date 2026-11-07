@@ -159,18 +159,25 @@ func tailLogText(body string, tail int) string {
 
 func (a *App) buildLog(ctx context.Context, build *Build, tail int) (string, error) {
 	local, localErr := tailFile(build.LogPath, tail)
-	if normalizeBuildBackend(build.BuildBackend) != buildBackendCodemagic || build.ExternalJobID == "" {
+	backend := normalizeBuildBackend(build.BuildBackend)
+	if (backend != buildBackendCodemagic && backend != buildBackendBitrise && backend != buildBackendAppcircle) || build.ExternalJobID == "" {
 		return local, localErr
 	}
 	// Share a brief disk cache across MCP and dashboard requests to avoid hitting
 	// Codemagic once for every UI poll. Log paths already belong to scoped builds.
-	cache := build.LogPath + ".codemagic"
+	cache := build.LogPath + "." + backend
 	if info, err := os.Stat(cache); build.LogPath != "" && err == nil && time.Since(info.ModTime()) < 15*time.Second {
 		if body, err := os.ReadFile(cache); err == nil {
 			return tailLogText(local+string(body), tail), nil
 		}
 	}
-	provider, err := a.codemagicBuildLog(ctx, build)
+	var provider string
+	var err error
+	if backend == buildBackendCodemagic {
+		provider, err = a.codemagicBuildLog(ctx, build)
+	} else {
+		provider, err = mobileProviderBuildLog(ctx, build)
+	}
 	if err != nil {
 		return local + "\nProvider logs unavailable: " + err.Error() + "\n", nil
 	}
@@ -190,7 +197,11 @@ func (a *App) buildLog(ctx context.Context, build *Build, tail int) (string, err
 }
 
 func (a *App) codemagicBuildLog(ctx context.Context, build *Build) (string, error) {
-	bound, err := cloudIntegrationFor(buildBackendCodemagic)
+	cfg, err := parseCloudBuildConfig(build.BuildBackend, build.BuildBackendJSON)
+	if err != nil {
+		return "", err
+	}
+	bound, err := cloudIntegrationForConfig(buildBackendCodemagic, cfg)
 	if err != nil {
 		return "", err
 	}

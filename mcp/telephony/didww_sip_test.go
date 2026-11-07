@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	tk "github.com/apteva/app-sdk/testkit"
 	"testing"
 )
 
@@ -52,7 +53,8 @@ func TestDIDWWDirectSIPConfigurationRestoresOriginalTrunk(t *testing.T) {
 		t.Fatalf("saved DIDWW state: %+v err=%v", state, err)
 	}
 	platform.integrationCalls = nil
-	if err := app.deconfigureDirectSIPCarrierRoute(ctx, stored); err != nil {
+	cleanupCtx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&contextAnswerPlatform{platform}))
+	if err := app.deconfigureDirectSIPCarrierRoute(cleanupCtx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "set_did_voice_trunk" ||

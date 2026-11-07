@@ -16,7 +16,12 @@ func seedAudience(t *testing.T, app *App, ctx *sdk.AppCtx, accountID int64, plat
 	t.Helper()
 	acct := &adAccount{ID: accountID, ProjectID: "test-proj", Platform: platform}
 	resource, err := app.upsertResource(ctx, acct, discoveredResource{
-		Kind: resourceAudience, ProviderType: platform + "_audience", NativeID: nativeID,
+		Kind: resourceAudience, ProviderType: func() string {
+			if platform == "google" {
+				return "google_user_list"
+			}
+			return platform + "_audience"
+		}(), NativeID: nativeID,
 		DisplayName: "Customers", Status: "active", Capabilities: audienceResourceCapabilities(platform, "customer_list"),
 		Metadata: map[string]any{"type": "customer_list"}, ManagedByApp: true,
 	})
@@ -35,8 +40,8 @@ func TestAudienceCapabilitiesAreProviderSpecific(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities := out.(map[string]any)
-	if containsString(capabilities["kinds"].([]string), "lookalike") {
-		t.Fatalf("Google must not advertise removed similar-audience creation: %#v", capabilities)
+	if !containsString(capabilities["create_kinds"].([]string), "lookalike") || containsString(capabilities["create_kinds"].([]string), "engagement") {
+		t.Fatalf("Google must advertise supported lookalikes and provider-managed engagement: %#v", capabilities)
 	}
 	privacy := capabilities["privacy"].(map[string]any)
 	if privacy["hashes_before_provider"] != true || privacy["persists_identifiers"] != false {

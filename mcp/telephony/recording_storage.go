@@ -128,7 +128,10 @@ func (c *recordingStorageClient) upload(ctx context.Context, projectID string, r
 	if partSize <= 0 {
 		partSize = 5 * 1024 * 1024
 	}
-	parts := int((info.Size() + partSize - 1) / partSize)
+	parts := int(info.Size() / partSize)
+	if info.Size()%partSize != 0 {
+		parts++
+	}
 	if initialized.MaxParts > 0 && parts > initialized.MaxParts {
 		return nil, fmt.Errorf("recording needs %d upload parts; Storage permits %d", parts, initialized.MaxParts)
 	}
@@ -137,24 +140,13 @@ func (c *recordingStorageClient) upload(ctx context.Context, projectID string, r
 		return nil, err
 	}
 	defer file.Close()
-	buffer := make([]byte, int(partSize))
-	for part := 1; ; part++ {
-		n, readErr := io.ReadFull(file, buffer)
-		if readErr == io.EOF {
-			break
-		}
-		if readErr == io.ErrUnexpectedEOF {
-			readErr = nil
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read recording part %d: %w", part, readErr)
-		}
+	for part := 1; part <= parts; part++ {
+		offset := int64(part-1) * partSize
+		size := min(partSize, info.Size()-offset)
 		partPath := fmt.Sprintf("/uploads/%s/parts/%d?%s", url.PathEscape(initialized.UploadID), part, query.Encode())
-		if _, err := c.do(ctx, http.MethodPut, partPath, nil, "application/octet-stream", bytes.NewReader(buffer[:n])); err != nil {
+		// Stream each negotiated part from disk; do not allocate a part-sized buffer.
+		if _, err := c.do(ctx, http.MethodPut, partPath, nil, "application/octet-stream", io.NewSectionReader(file, offset, size)); err != nil {
 			return nil, fmt.Errorf("upload recording part %d/%d: %w", part, parts, err)
-		}
-		if n < len(buffer) {
-			break
 		}
 	}
 	body, err = c.do(ctx, http.MethodPost, "/uploads/"+url.PathEscape(initialized.UploadID)+"/complete?"+query.Encode(), map[string]any{"sha256": sha}, "application/json", nil)
@@ -192,6 +184,9 @@ func (c *recordingStorageClient) do(ctx context.Context, method, path string, js
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if part, ok := raw.(*io.SectionReader); ok {
+		req.ContentLength = part.Size()
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.http.Do(req)
@@ -241,7 +236,7 @@ func downloadTwilioRecordingChannels(ctx context.Context, creds map[string]strin
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", 0, fmt.Errorf("Twilio recording download returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	tmp, err := os.CreateTemp("", "apteva-telephony-recording-*."+ext)
+	tmp, err := newRecordingTemporaryFile("apteva-telephony-recording-*." + ext)
 	if err != nil {
 		return "", 0, err
 	}
@@ -253,12 +248,15 @@ func downloadTwilioRecordingChannels(ctx context.Context, creds map[string]strin
 			_ = os.Remove(path)
 		}
 	}()
-	written, err := io.Copy(tmp, resp.Body)
+	written, err := io.Copy(tmp, io.LimitReader(resp.Body, recordingDownloadLimit(ctx)+1))
 	if err != nil {
 		return "", 0, err
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err
+	}
+	if written > recordingDownloadLimit(ctx) {
+		return "", 0, &recordingSizeLimitError{recordingDownloadLimit(ctx)}
 	}
 	if written <= 0 {
 		return "", 0, errors.New("Twilio recording download was empty")
@@ -291,8 +289,11 @@ func (c *recordingStorageClient) download(ctx context.Context, projectID string,
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", 0, &storageProxyError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
+	if resp.ContentLength > recordingDownloadLimit(ctx) {
+		return "", 0, &recordingSizeLimitError{recordingDownloadLimit(ctx)}
+	}
 	ext := recordingExtension(format)
-	tmp, err := os.CreateTemp("", "apteva-telephony-stored-recording-*."+ext)
+	tmp, err := newRecordingTemporaryFile("apteva-telephony-stored-recording-*." + ext)
 	if err != nil {
 		return "", 0, err
 	}
@@ -311,8 +312,11 @@ func (c *recordingStorageClient) download(ctx context.Context, projectID string,
 	if err := tmp.Close(); err != nil {
 		return "", 0, err
 	}
-	if written <= 0 || written > recordingDownloadLimit(ctx) {
-		return "", 0, errors.New("stored recording download empty or exceeds size limit")
+	if written > recordingDownloadLimit(ctx) {
+		return "", 0, &recordingSizeLimitError{recordingDownloadLimit(ctx)}
+	}
+	if written <= 0 {
+		return "", 0, errors.New("stored recording download empty")
 	}
 	ok = true
 	return path, written, nil

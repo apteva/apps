@@ -25,13 +25,13 @@ func (a *App) handleJoinPage(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "room not found")
 		return
 	}
-	titleJSON, _ := json.Marshal(room.Title)
-	roomIDJSON, _ := json.Marshal(room.ID)
-	tokenJSON, _ := json.Marshal(token)
-	nameJSON, _ := json.Marshal(jt.DisplayName)
-	roleJSON, _ := json.Marshal(jt.Role)
-	kindJSON, _ := json.Marshal(jt.ParticipantKind)
-	capsJSON, _ := json.Marshal(jt.Capabilities)
+	config, err := json.Marshal(map[string]any{
+		"roomId": room.ID, "title": room.Title, "roomStatus": room.Status, "capabilities": capabilities(jt.Capabilities),
+	})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "could not prepare room")
+		return
+	}
 	nonce := randomToken()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -43,13 +43,10 @@ func (a *App) handleJoinPage(w http.ResponseWriter, r *http.Request) {
 		"__TITLE__", html.EscapeString(room.Title),
 		"__ROOM_STATUS__", html.EscapeString(room.Status),
 		"__DISPLAY_NAME__", html.EscapeString(jt.DisplayName),
-		"__ROOM_ID_JSON__", string(roomIDJSON),
-		"__TOKEN_JSON__", string(tokenJSON),
-		"__TITLE_JSON__", string(titleJSON),
-		"__NAME_JSON__", string(nameJSON),
-		"__ROLE_JSON__", string(roleJSON),
-		"__KIND_JSON__", string(kindJSON),
-		"__CAPS_JSON__", string(capsJSON),
+		"__ROLE__", html.EscapeString(jt.Role),
+		"__KIND__", html.EscapeString(jt.ParticipantKind),
+		"__CONFIG__", string(config),
+		"__GUEST_SCRIPT__", string(guestScript),
 		"__NONCE__", nonce,
 	).Replace(joinPageHTML)
 	fmt.Fprint(w, page)
@@ -347,8 +344,8 @@ const joinPageHTML = `<!doctype html>
         <div class="joined" id="joined" role="status" aria-live="polite"></div>
         <div class="error" id="error" role="alert"></div>
         <div class="details">
-          <div class="row"><span>Kind</span><strong id="kind"></strong></div>
-          <div class="row"><span>Role</span><strong id="role"></strong></div>
+          <div class="row"><span>Kind</span><strong id="kind">__KIND__</strong></div>
+          <div class="row"><span>Role</span><strong id="role">__ROLE__</strong></div>
           <div class="row"><span>Participants</span><strong id="participant-count">0</strong></div>
         </div>
         <section class="chat" id="chat">
@@ -361,479 +358,8 @@ const joinPageHTML = `<!doctype html>
       </aside>
     </main>
   </div>
-  <script nonce="__NONCE__">
-    const ROOM_ID = __ROOM_ID_JSON__;
-    const TOKEN = __TOKEN_JSON__;
-    const ROOM_TITLE = __TITLE_JSON__;
-    const DEFAULT_NAME = __NAME_JSON__;
-    const ROLE = __ROLE_JSON__;
-    const KIND = __KIND_JSON__;
-    const CAPABILITIES = JSON.parse(__CAPS_JSON__);
-    const base = location.pathname.split("/join/")[0];
-    const routeQuery = location.search || "";
-    const sessionKey = "calls-session-" + ROOM_ID + "-" + TOKEN.slice(-8);
-    const nameInput = document.getElementById("display-name");
-    const localTile = document.getElementById("local-tile");
-    const localVideo = document.getElementById("local-video");
-    const avatar = document.getElementById("avatar");
-    const tileLabel = document.getElementById("tile-label");
-    const joined = document.getElementById("joined");
-    const error = document.getElementById("error");
-    const button = document.getElementById("join-button");
-    const micButton = document.getElementById("mic-button");
-    const camButton = document.getElementById("cam-button");
-    const shareButton = document.getElementById("share-button");
-    const leaveButton = document.getElementById("leave-button");
-    const chat = document.getElementById("chat");
-    const messages = document.getElementById("messages");
-    const chatForm = document.getElementById("chat-form");
-    const messageInput = document.getElementById("message-input");
-    const videoGrid = document.querySelector(".video-grid");
-    const roomStatus = document.getElementById("room-status");
-    const participantCount = document.getElementById("participant-count");
-    let localStream = null;
-    let screenStream = null;
-    let participant = null;
-    let participantToken = "";
-    let rtcConfig = { ice_servers: [] };
-    let lastMessageId = 0;
-    let lastSignalId = 0;
-    let messageTimer = null;
-    let signalTimer = null;
-    let participantTimer = null;
-    let heartbeatTimer = null;
-    const peers = new Map();
-    const pendingCandidates = new Map();
-    document.getElementById("kind").textContent = KIND;
-    document.getElementById("role").textContent = ROLE;
-    micButton.disabled = !CAPABILITIES.audio;
-    camButton.disabled = !CAPABILITIES.video;
-    shareButton.disabled = !CAPABILITIES.screen;
-    if (!CAPABILITIES.chat) chatForm.style.display = "none";
-    leaveButton.textContent = CAPABILITIES.room_control ? "End" : "Leave";
-    function syncName() {
-      const name = (nameInput.value || DEFAULT_NAME || "Guest").trim();
-      avatar.textContent = name.slice(0, 1).toUpperCase();
-      tileLabel.textContent = name;
-    }
-    function showError(message) {
-      error.textContent = message;
-      error.style.display = "block";
-    }
-    function setButtonState(el, active, onLabel, offLabel) {
-      el.classList.toggle("active", active);
-      el.textContent = active ? onLabel : offLabel;
-      el.setAttribute("aria-pressed", String(active));
-    }
-    function apiURL(path) {
-      const url = new URL(base + path, location.origin);
-      new URLSearchParams(routeQuery).forEach((value, key) => url.searchParams.set(key, value));
-      return url.pathname + url.search;
-    }
-    async function apiFetch(path, options = {}) {
-      const headers = new Headers(options.headers || {});
-      if (participantToken) headers.set("Authorization", "Bearer " + participantToken);
-      return fetch(apiURL(path), { ...options, headers, credentials: "same-origin" });
-    }
-    async function ensureLocalStream(wantsAudio, wantsVideo) {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Browser media devices are not available on this page.");
-      }
-      const hasAudio = localStream?.getAudioTracks().length > 0;
-      const hasVideo = localStream?.getVideoTracks().length > 0;
-      if (!localStream || (wantsAudio && !hasAudio) || (wantsVideo && !hasVideo)) {
-        localStream?.getTracks().forEach((track) => track.stop());
-        localStream = await navigator.mediaDevices.getUserMedia({
-          audio: wantsAudio || hasAudio,
-          video: wantsVideo || hasVideo
-        });
-        localVideo.srcObject = localStream;
-        syncLocalTracks();
-      }
-      localTile.classList.toggle("video-on", localStream.getVideoTracks().some((track) => track.enabled));
-      return localStream;
-    }
-    async function toggleMic() {
-      error.style.display = "none";
-      try {
-        const stream = await ensureLocalStream(true, false);
-        const track = stream.getAudioTracks()[0];
-        track.enabled = !micButton.classList.contains("active");
-        setButtonState(micButton, track.enabled, "Mic on", "Mic off");
-      } catch (e) {
-        showError(e.message);
-      }
-    }
-    async function toggleCamera() {
-      error.style.display = "none";
-      try {
-        const stream = await ensureLocalStream(false, true);
-        const track = stream.getVideoTracks()[0];
-        track.enabled = !camButton.classList.contains("active");
-        localTile.classList.toggle("video-on", track.enabled);
-        setButtonState(camButton, track.enabled, "Cam on", "Cam off");
-      } catch (e) {
-        showError(e.message);
-      }
-    }
-    async function toggleShare() {
-      error.style.display = "none";
-      try {
-        if (screenStream) {
-          screenStream.getTracks().forEach((track) => track.stop());
-          screenStream = null;
-          localVideo.srcObject = localStream;
-          localTile.classList.toggle("video-on", localStream?.getVideoTracks().some((track) => track.enabled));
-          setButtonState(shareButton, false, "Sharing", "Share");
-          return;
-        }
-        if (!navigator.mediaDevices?.getDisplayMedia) {
-          throw new Error("Screen sharing is not available in this browser.");
-        }
-        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-        syncLocalTracks();
-        screenStream.getVideoTracks()[0].addEventListener("ended", () => {
-          screenStream = null;
-          localVideo.srcObject = localStream;
-          setButtonState(shareButton, false, "Sharing", "Share");
-        });
-        localVideo.srcObject = screenStream;
-        localTile.classList.add("video-on");
-        setButtonState(shareButton, true, "Sharing", "Share");
-      } catch (e) {
-        showError(e.message);
-      }
-    }
-    function stopMedia() {
-      localStream?.getTracks().forEach((track) => track.stop());
-      screenStream?.getTracks().forEach((track) => track.stop());
-      localStream = null;
-      screenStream = null;
-      localVideo.srcObject = null;
-      localTile.classList.remove("video-on");
-      setButtonState(micButton, false, "Mic on", "Mic");
-      setButtonState(camButton, false, "Cam on", "Cam");
-      setButtonState(shareButton, false, "Sharing", "Share");
-    }
-    function outboundStreams() {
-      return [localStream, screenStream].filter(Boolean);
-    }
-    function syncLocalTracks() {
-      for (const { pc } of peers.values()) {
-        const senderTrackIds = new Set(pc.getSenders().map((s) => s.track?.id).filter(Boolean));
-        for (const stream of outboundStreams()) {
-          for (const track of stream.getTracks()) {
-            if (!senderTrackIds.has(track.id)) pc.addTrack(track, stream);
-          }
-        }
-      }
-    }
-    function remoteTile(remote, streamId) {
-      const safeStreamId = String(streamId || "default").replace(/[^a-zA-Z0-9_-]/g, "-");
-      let tile = document.getElementById("remote-" + remote.id + "-" + safeStreamId);
-      if (tile) return tile;
-      tile = document.createElement("div");
-      tile.className = "tile";
-      tile.id = "remote-" + remote.id + "-" + safeStreamId;
-      tile.dataset.participantId = String(remote.id);
-      const video = document.createElement("video");
-      video.autoplay = true;
-      video.playsInline = true;
-      const av = document.createElement("div");
-      av.className = "avatar";
-      av.textContent = (remote.display_name || "?").slice(0, 1).toUpperCase();
-      const label = document.createElement("div");
-      label.className = "tile-label";
-      label.textContent = remote.display_name || "Participant " + remote.id;
-      tile.append(video, av, label);
-      videoGrid.append(tile);
-      return tile;
-    }
-    async function sendSignal(kind, toParticipantId, payload) {
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/signal/" + kind, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to_participant_id: toParticipantId, payload })
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Signaling failed");
-    }
-    async function ensurePeer(remote, initiator = false) {
-      if (!participant || remote.id === participant.id) return null;
-      if (peers.has(remote.id)) return peers.get(remote.id).pc;
-      const pc = new RTCPeerConnection({ iceServers: rtcConfig.ice_servers || [] });
-      const entry = { pc, remote, makingOffer: false, ignoreOffer: false, settingRemoteAnswerPending: false };
-      peers.set(remote.id, entry);
-      for (const stream of outboundStreams()) {
-        for (const track of stream.getTracks()) pc.addTrack(track, stream);
-      }
-      pc.onicecandidate = (event) => {
-        if (event.candidate) sendSignal("ice", remote.id, event.candidate.toJSON()).catch((e) => showError(e.message));
-      };
-      pc.onnegotiationneeded = async () => {
-        try {
-          entry.makingOffer = true;
-          await pc.setLocalDescription();
-          await sendSignal("offer", remote.id, pc.localDescription.toJSON());
-        } catch (e) {
-          showError(e.message);
-        } finally {
-          entry.makingOffer = false;
-        }
-      };
-      pc.ontrack = (event) => {
-        const remoteStream = event.streams[0] || new MediaStream([event.track]);
-        const tile = remoteTile(remote, remoteStream.id || event.track.id);
-        const video = tile.querySelector("video");
-        video.srcObject = remoteStream;
-        if (event.track.kind === "video") tile.classList.add("video-on");
-        event.track.addEventListener("ended", () => tile.remove(), { once: true });
-      };
-      pc.onconnectionstatechange = () => {
-        roomStatus.textContent = pc.connectionState === "connected" ? "connected" : pc.connectionState;
-        if (["failed", "closed"].includes(pc.connectionState)) closePeer(remote.id);
-      };
-      if (initiator && pc.getSenders().length === 0) {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await sendSignal("offer", remote.id, pc.localDescription.toJSON());
-      }
-      return pc;
-    }
-    function closePeer(id) {
-      const entry = peers.get(id);
-      if (entry) entry.pc.close();
-      peers.delete(id);
-      pendingCandidates.delete(id);
-      document.querySelectorAll('[data-participant-id="' + id + '"]').forEach((tile) => tile.remove());
-    }
-    async function flushCandidates(id, pc) {
-      const queued = pendingCandidates.get(id) || [];
-      pendingCandidates.delete(id);
-      for (const candidate of queued) await pc.addIceCandidate(candidate);
-    }
-    async function handleSignal(signal) {
-      const remote = { id: signal.from_participant_id, display_name: "Participant " + signal.from_participant_id };
-      const pc = await ensurePeer(remote, false);
-      if (!pc) return;
-      const entry = peers.get(remote.id);
-      if (signal.kind === "offer") {
-        const readyForOffer = !entry.makingOffer && (pc.signalingState === "stable" || entry.settingRemoteAnswerPending);
-        const offerCollision = !readyForOffer;
-        entry.ignoreOffer = !((participant?.id || 0) > remote.id) && offerCollision;
-        if (entry.ignoreOffer) return;
-        await pc.setRemoteDescription(signal.payload);
-        await flushCandidates(remote.id, pc);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await sendSignal("answer", remote.id, pc.localDescription.toJSON());
-      } else if (signal.kind === "answer") {
-        entry.ignoreOffer = false;
-        entry.settingRemoteAnswerPending = true;
-        try { await pc.setRemoteDescription(signal.payload); }
-        finally { entry.settingRemoteAnswerPending = false; }
-        await flushCandidates(remote.id, pc);
-      } else if (signal.kind === "ice") {
-        if (entry.ignoreOffer) return;
-        if (pc.remoteDescription) await pc.addIceCandidate(signal.payload);
-        else pendingCandidates.set(remote.id, [...(pendingCandidates.get(remote.id) || []), signal.payload]);
-      }
-    }
-    async function loadSignals() {
-      if (!participant) return;
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/signal?since_id=" + lastSignalId);
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      for (const signal of data.signals || []) {
-        lastSignalId = Math.max(lastSignalId, signal.id || 0);
-        try { await handleSignal(signal); } catch (e) { showError(e.message); }
-      }
-    }
-    async function loadParticipants() {
-      if (!participant) return;
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/participants");
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      const active = data.participants || [];
-      participantCount.textContent = String(active.length);
-      const ids = new Set(active.map((p) => p.id));
-      for (const id of peers.keys()) if (!ids.has(id)) closePeer(id);
-      for (const remote of active) {
-        if (remote.id !== participant.id && participant.id < remote.id) {
-          try { await ensurePeer(remote, true); } catch (e) { showError(e.message); }
-        }
-      }
-    }
-    async function heartbeat() {
-      if (!participant) return;
-      const states = [...peers.values()].map(({ pc }) => pc.connectionState);
-      const state = states.includes("connected") ? "connected" : states.includes("connecting") ? "connecting" : "new";
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/heartbeat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          connection_state: state,
-          muted_audio: !localStream?.getAudioTracks().some((t) => t.enabled),
-          muted_video: !localStream?.getVideoTracks().some((t) => t.enabled),
-          tracks: [
-            ...(localStream?.getTracks() || []).map((t) => ({ id: t.id, kind: t.kind, source: t.kind === "video" ? "camera" : "microphone", label: t.label, enabled: t.enabled })),
-            ...(screenStream?.getVideoTracks() || []).map((t) => ({ id: t.id, kind: "screen", source: "screen", label: t.label, enabled: t.enabled }))
-          ]
-        }),
-        keepalive: true
-      }).catch(() => null);
-      if (res?.ok) {
-        const data = await res.json().catch(() => ({}));
-        roomStatus.textContent = data.room_status || state;
-        if (data.room_status === "ended") await leaveRoom();
-      }
-    }
-    function renderMessage(item) {
-      if (!item || item.id <= lastMessageId) return;
-      lastMessageId = item.id;
-      const wrap = document.createElement("div");
-      wrap.className = "message";
-      const by = document.createElement("div");
-      by.className = "by";
-      by.textContent = item.participant_id === participant?.id ? "You" : "Participant " + (item.participant_id || "-");
-      const body = document.createElement("div");
-      body.className = "body";
-      body.textContent = item.body || "";
-      wrap.append(by, body);
-      messages.append(wrap);
-      messages.scrollTop = messages.scrollHeight;
-    }
-    async function loadMessages() {
-      if (!participant) return;
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/messages?since_id=" + lastMessageId);
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      (data.messages || []).forEach(renderMessage);
-    }
-    async function leaveRoom() {
-      if (messageTimer) clearInterval(messageTimer);
-      if (signalTimer) clearInterval(signalTimer);
-      if (participantTimer) clearInterval(participantTimer);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (participant) {
-        await apiFetch("/api/rooms/" + ROOM_ID + "/leave", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-          keepalive: true
-        }).catch(() => {});
-      }
-      for (const id of [...peers.keys()]) closePeer(id);
-      participant = null;
-      participantToken = "";
-      try { sessionStorage.removeItem(sessionKey); } catch {}
-      stopMedia();
-      chat.classList.remove("open");
-      joined.style.display = "none";
-      button.disabled = false;
-      button.textContent = "Join room";
-      participantCount.textContent = "0";
-    }
-    async function endOrLeaveRoom() {
-      if (CAPABILITIES.room_control && participant) {
-        if (!window.confirm("End this room for everyone?")) return;
-        const res = await apiFetch("/api/rooms/" + ROOM_ID + "/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          showError(data.error || "Could not end the room");
-          return;
-        }
-      }
-      await leaveRoom();
-    }
-    async function activateSession(data, persist = true) {
-      const p = data.participant || {};
-      participant = p;
-      participantToken = data.participant_token || "";
-      rtcConfig = data.rtc_config || { ice_servers: [] };
-      if (!participantToken) throw new Error("Join response did not include a participant token");
-      if (persist) {
-        try { sessionStorage.setItem(sessionKey, JSON.stringify({ participant: p, participant_token: participantToken, rtc_config: rtcConfig })); } catch {}
-      }
-      joined.textContent = "Joined " + ROOM_TITLE + " as " + (p.display_name || nameInput.value || "Guest") + ".";
-      joined.style.display = "block";
-      button.disabled = true;
-      button.textContent = "Joined";
-      chat.classList.toggle("open", Boolean(CAPABILITIES.chat));
-      await loadMessages();
-      await loadParticipants();
-      await loadSignals();
-      await heartbeat();
-      messageTimer = setInterval(loadMessages, 2500);
-      signalTimer = setInterval(loadSignals, 1000);
-      participantTimer = setInterval(loadParticipants, 3000);
-      heartbeatTimer = setInterval(heartbeat, 15000);
-    }
-    async function resumeSession() {
-      const raw = sessionStorage.getItem(sessionKey);
-      if (!raw) return;
-      try {
-        const saved = JSON.parse(raw);
-        participant = saved.participant;
-        participantToken = saved.participant_token;
-        rtcConfig = saved.rtc_config || { ice_servers: [] };
-        const probe = await apiFetch("/api/rooms/" + ROOM_ID + "/participants");
-        if (!probe.ok) throw new Error("saved session expired");
-        await activateSession(saved, false);
-      } catch {
-        participant = null;
-        participantToken = "";
-        try { sessionStorage.removeItem(sessionKey); } catch {}
-      }
-    }
-    nameInput.addEventListener("input", syncName);
-    micButton.addEventListener("click", toggleMic);
-    camButton.addEventListener("click", toggleCamera);
-    shareButton.addEventListener("click", toggleShare);
-    leaveButton.addEventListener("click", endOrLeaveRoom);
-    syncName();
-    document.getElementById("join-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      error.style.display = "none";
-      joined.style.display = "none";
-      button.disabled = true;
-      button.textContent = "Joining...";
-      try {
-        const res = await fetch(base + "/api/join" + routeQuery, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: TOKEN, display_name: nameInput.value })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "Join failed");
-        await activateSession(data);
-      } catch (e) {
-        showError(e.message);
-        button.disabled = false;
-        button.textContent = "Join room";
-      }
-    });
-    chatForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!participant) return showError("Join the room before sending messages.");
-      const body = messageInput.value.trim();
-      if (!body) return;
-      messageInput.value = "";
-      const res = await apiFetch("/api/rooms/" + ROOM_ID + "/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        showError(data.error || "Message failed");
-        messageInput.value = body;
-        return;
-      }
-      renderMessage(data.message);
-    });
-    resumeSession();
-  </script>
+  <script id="calls-config" type="application/json" nonce="__NONCE__">__CONFIG__</script>
+  <script nonce="__NONCE__">__GUEST_SCRIPT__</script>
 </body>
 </html>`
 
@@ -868,8 +394,8 @@ func (a *App) handleAPIJoin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	if err := requireSameOrigin(r); err != nil {
-		httpErr(w, http.StatusForbidden, err.Error())
+	if !a.allowJoinOrigin(r) {
+		httpErr(w, http.StatusForbidden, "cross-origin request rejected")
 		return
 	}
 	args := map[string]any{}
@@ -883,6 +409,17 @@ func (a *App) handleAPIJoin(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		args["token"] = r.FormValue("token")
 		args["display_name"] = r.FormValue("display_name")
+	}
+	// The token owns the room, but a caller that explicitly selected a project
+	// must not consume an invite from a different project.
+	delete(args, "_project_id")
+	if r.Header.Get("X-Apteva-Project-ID") != "" || r.URL.Query().Get("project_id") != "" {
+		pid, err := resolveProjectFromRequest(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		args["_project_id"] = pid
 	}
 	out, err := a.toolJoinRoom(globalCtx, args)
 	if err != nil {

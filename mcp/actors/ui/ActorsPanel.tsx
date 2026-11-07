@@ -34,6 +34,17 @@ async function request(path, scope, options = {}, params = {}) {
   return body;
 }
 
+export async function loadActorSummaries(scope) {
+  const actors = []; let after = 0;
+  while (true) {
+    const page = await request("/actors", scope, {}, { after: String(after), limit: "50" });
+    actors.push(...(page.actors || []));
+    if (!page.has_more) return actors;
+    if (!(page.next_cursor > after)) throw new Error("Actor discovery did not advance");
+    after = page.next_cursor;
+  }
+}
+
 function parseJSON(value, label) {
   try { return JSON.parse(value); } catch (error) { throw new Error(`${label}: ${error.message}`); }
 }
@@ -106,15 +117,20 @@ function ActorsView({ scope, refreshRuns, onExplore }) {
 
   const load = useCallback(async () => {
     setError("");
-    try { const body = await request("/actors", scope); setActors(body.actors || []); }
+    try { setActors(await loadActorSummaries(scope)); }
     catch (err) { setError(String(err.message || err)); }
     finally { setLoading(false); }
   }, [scope]);
   useEffect(() => { load(); }, [load]);
 
-  function edit(record) {
-    setEditorOpen(true); setEditing(record || null); setName(record?.name || ""); setDescription(record?.description || "");
-    setDefinition(JSON.stringify(record?.definition || STARTER_DEFINITION, null, 2)); setError(""); setMessage("");
+  async function edit(record) {
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const complete = record ? (record.definition || await request(`/actors/${record.id}/definition/file`, scope, {}, { revision: String(record.revision) })) : STARTER_DEFINITION;
+      setEditing(record || null); setName(record?.name || ""); setDescription(record?.description || "");
+      setDefinition(JSON.stringify(complete, null, 2)); setEditorOpen(true);
+    } catch (err) { setError(String(err.message || err)); }
+    finally { setBusy(false); }
   }
 
   async function save(event) {
@@ -122,7 +138,7 @@ function ActorsView({ scope, refreshRuns, onExplore }) {
     try {
       const body = { id: editing?.id, expected_revision: editing?.revision, name, description, enabled: editing?.enabled ?? true, definition: parseJSON(definition, "Definition") };
       const result = await request("/actors", scope, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      edit(result.actor); setMessage(`Saved ${result.actor.name} revision ${result.actor.revision}.`); await load();
+      await edit(result.actor); setMessage(`Saved ${result.actor.name} revision ${result.actor.revision}.`); await load();
     } catch (err) { setError(String(err.message || err)); } finally { setBusy(false); }
   }
 
@@ -148,7 +164,7 @@ function ActorsView({ scope, refreshRuns, onExplore }) {
       loading ? h("div", { className: "py-10 text-center text-sm text-text-muted" }, "Loading actors…") : error && actors.length === 0 ? h("button", { type: "button", onClick: load, className: "rounded border border-border px-3 py-1.5 text-sm" }, "Retry loading") : actors.length === 0 ? h(Empty, { title: "No actors yet", detail: "Create a browser workflow or schema version 2 crawl." }) :
         h("div", { className: "grid gap-2" }, actors.map((record) => h("article", { key: record.id, className: "rounded border border-border bg-bg-card p-3" },
           h("div", { className: "flex gap-2" }, h("div", { className: "min-w-0 flex-1" }, h("div", { className: "font-medium" }, record.name), h("div", { className: "mt-0.5 text-xs text-text-muted" }, record.description || "No description")), h("span", { className: "text-xs text-text-dim" }, `rev ${record.revision}`)),
-          h("div", { className: "mt-2 flex flex-wrap gap-2 text-xs text-text-muted" }, record.definition.crawl ? h("span", null, `${Object.keys(record.definition.crawl.routes || {}).length} routes · ${Object.keys(record.definition.crawl.datasets || {}).length} datasets`) : h("span", null, `${record.definition.steps?.length || 0} steps`), h("span", null, `${record.definition.allowed_hosts?.length || 0} hosts`), h("span", null, record.enabled ? "Enabled" : "Disabled")),
+          h("div", { className: "mt-2 flex flex-wrap gap-2 text-xs text-text-muted" }, record.schema_version === 2 ? h("span", null, `${record.route_count || 0} routes · ${record.dataset_count || 0} datasets`) : h("span", null, `${record.step_count || 0} steps`), h("span", null, `${record.host_count || 0} hosts`), h("span", null, record.enabled ? "Enabled" : "Disabled")),
           h("div", { className: "mt-3 flex gap-2" }, h("button", { type: "button", onClick: () => edit(record), className: "rounded border border-border px-2 py-1 text-xs hover:bg-bg-input" }, "Edit"), h("button", { type: "button", disabled: busy || !record.enabled, onClick: () => run(record.id), className: "rounded border border-accent px-2 py-1 text-xs text-accent hover:bg-accent/10 disabled:opacity-50" }, "Test run"), h("button", { type: "button", onClick: () => onExplore({ actorId: record.id }), className: "rounded border border-border px-2 py-1 text-xs text-accent" }, "Explore data"), h("button", { type: "button", disabled: busy, onClick: () => remove(record), className: "ml-auto rounded border border-red px-2 py-1 text-xs text-red disabled:opacity-50" }, "Delete"))
         )))
     ),
@@ -263,7 +279,7 @@ function TasksView({ scope, actors, onRun }) {
       h("h2", { className: "font-semibold" }, "New task"), h(Notice, { error }),
       h("label", null, "Name", h("input", { required: true, value: name, maxLength: 120, onChange: (e) => setName(e.target.value), className: `${fieldClass} w-full` })),
       h("label", null, "Actor", h("select", { required: true, value: actorId, onChange: (e) => {
-        setActorId(e.target.value); const actor = actors.find((item) => String(item.id) === e.target.value); setOperation(Object.keys(actor?.definition.operations || {})[0] || "run");
+        setActorId(e.target.value); const actor = actors.find((item) => String(item.id) === e.target.value); setOperation(actor?.operation_names?.[0] || "run");
       }, className: `${fieldClass} w-full` }, h("option", { value: "" }, "Choose actor"), actors.map((actor) => h("option", { key: actor.id, value: actor.id }, `${actor.name} (revision ${actor.revision})`)))),
       h("label", null, "Operation", h("input", { value: operation, required: true, onChange: (e) => setOperation(e.target.value), className: `${fieldClass} w-full` })),
       h("label", null, "Input JSON", h("textarea", { value: input, rows: 8, spellCheck: false, onChange: (e) => setInput(e.target.value), className: `${fieldClass} w-full font-mono` })),
@@ -374,7 +390,7 @@ function ActorsPanel({ projectId, installId } = {}) {
   const [selection, setSelection] = useState(null);
   const explore = value => { setSelection(value); setTab("data"); };
   const [tab, setTab] = useState("actors"); const [refreshRuns, setRefreshRuns] = useState(0); const [actors, setActors] = useState([]);
-  useEffect(() => { if (!installId) return; request("/actors", scope).then((body) => setActors(body.actors || [])).catch(() => {}); }, [scope, tab]);
+  useEffect(() => { if (!installId) return; loadActorSummaries(scope).then(setActors).catch(() => {}); }, [scope, tab]);
   if (!installId) return h(Notice, { error: "Open Actors from an installed app panel." });
   return h("div", { className: "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-bg text-text" },
     h("header", { className: "shrink-0 border-b border-border bg-bg px-4 pt-3" }, h("div", null, h("h1", { className: "text-lg font-semibold" }, "Actors"), h("p", { className: "text-xs text-text-muted" }, "Browser workflows, durable crawls, structured datasets, and schedules")), h("nav", { className: "mt-3 flex gap-1", "aria-label": "Actors sections" }, [["actors", "Actors"], ["tasks", "Tasks"], ["runs", "Runs"], ["data", "Data"], ["schedules", "Schedules"]].map(([id, label]) => h("button", { key: id, type: "button", onClick: () => { if (id === "data") setSelection(null); setTab(id); }, className: `border-b-2 px-3 py-2 text-sm ${tab === id ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"}` }, label)))),

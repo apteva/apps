@@ -168,6 +168,8 @@ func (y *yahooPublic) BacktestBarsContext(ctx context.Context, symbol, interval 
 
 func yahooBacktestPageSpan(interval string) time.Duration {
 	switch interval {
+	case "1m":
+		return 7 * 24 * time.Hour
 	case "5m":
 		return 7 * 24 * time.Hour
 	case "15m":
@@ -185,6 +187,8 @@ func yahooBacktestPageSpan(interval string) time.Duration {
 
 func yahooBacktestInterval(interval string) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return "1m", false, nil
 	case "5m":
 		return "5m", false, nil
 	case "15m":

@@ -1,5 +1,5 @@
 import {expect,test,spyOn} from "bun:test";
-import {mediaTransport,rtcMediaURL,rtcStatistics,selectableAudio,permanentRTCFailure,WebRTCAudioConnection} from "../src/webrtc-audio";
+import {mediaTransport,rtcMediaURL,rtcStatistics,rtcLossEvents,selectableAudio,permanentRTCFailure,WebRTCAudioConnection} from "../src/webrtc-audio";
 import {DEFAULT_SOFTPHONE_AUDIO_OPTIONS,playbackBufferOptions} from "../../ui/softphone-audio";
 import type {AudioConnection} from "../src/audio";
 
@@ -10,6 +10,18 @@ test("existing WebSocket remains the default, invalid options fail before media"
  expect(mediaTransport()).toBe("websocket");expect(()=>mediaTransport("bad" as any)).toThrow();expect(()=>playbackBufferOptions({mediaTransport:"bad" as any})).toThrow();
  expect(rtcMediaURL("wss://example.test/softphone/media/id/token?project_id=p")).toBe("wss://example.test/softphone/media/id/token?project_id=p&transport=webrtc");
 });
+test("per-softphone FEC preference survives refreshed authorization URLs and rejects malformed options",()=>{
+ const url="wss://example.test/softphone/media/id/fresh-token?project_id=p";
+ expect(new URL(rtcMediaURL(url,false)).searchParams.get("webrtc_fec")).toBe("false");
+ expect(new URL(rtcMediaURL(url,true)).searchParams.get("webrtc_fec")).toBe("true");
+ expect(new URL(rtcMediaURL(url+"&webrtc_fec=false",true)).searchParams.getAll("webrtc_fec")).toEqual(["true"]);
+ expect(new URL(rtcMediaURL(url+"&webrtc_fec=false")).searchParams.has("webrtc_fec")).toBe(false);
+ expect(new URL(rtcMediaURL(url,false)).pathname).toBe("/softphone/media/id/fresh-token");
+ for(const value of ["false",0,null]){
+  expect(()=>playbackBufferOptions({webrtcFec:value as any})).toThrow();
+  expect(()=>rtcMediaURL(url,value as any)).toThrow();
+ }
+});
 test("default does not create a peer connection; explicit RTC never silently falls back",async()=>{
  const events:string[]=[];
  const normal=selectableAudio({},()=>connection("ws",events),()=>{throw Error("RTC must not run");});
@@ -17,6 +29,15 @@ test("default does not create a peer connection; explicit RTC never silently fal
  events.length=0;const explicit=selectableAudio({},()=>connection("ws",events),()=>connection("rtc",events,Error("failed")));
  await expect(explicit.start("ws://test",{...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,mediaTransport:"webrtc"})).rejects.toThrow("failed");
  expect(events).toEqual(["rtc:mute:false","rtc:start","rtc:stop"]);
+});
+
+test("preflight evidence is bounded and reaches the selected transport before startup failure",async()=>{
+ const events:string[]=[],observed:any[]=[];
+ const audio=selectableAudio({},()=>({...connection("ws",events,new Error("socket failed")),recordSessionEvent(event){observed.push(event);}}),()=>connection("rtc",events));
+ for(let i=0;i<40;i++)audio.recordSessionEvent?.({timestamp:new Date().toISOString(),action:"audio_preflight",outcome:"completed",duration_ms:i});
+ await expect(audio.start("ws://test",DEFAULT_SOFTPHONE_AUDIO_OPTIONS)).rejects.toThrow("socket failed");
+ expect(observed).toHaveLength(20);expect(observed[0].duration_ms).toBe(20);expect(observed.at(-1).duration_ms).toBe(39);
+ audio.stop();
 });
 test("auto releases failed RTC before starting fallback and retains mute",async()=>{
  const events:string[]=[],notices:any[]=[];
@@ -53,7 +74,7 @@ test("RTP statistics retain transport and separate concealment from dropped PCM"
  ]) as unknown as RTCStatsReport;
  const value=rtcStatistics(report,{at:epoch+1000,sent:1000,received:2000});
  expect(value.rtt).toBe(40);expect(value.webrtc.sendBitrateBps).toBe(32000);expect(value.webrtc.receiveBitrateBps).toBe(40000);
- expect(value.webrtc.concealedMs).toBe(20);expect(value.webrtc.jitterMs).toBe(20);expect(value.queueMs).toBe(20);
+ expect(value.webrtc.concealedMs).toBe(20);expect(value.webrtc.jitterMs).toBe(20);expect(value.queueMs).toBe(0);expect(value.webrtc.jitterBufferMs).toBe(20);expect(value.webrtc.jitterBufferIntervalMs).toBeUndefined();
  expect(value.webrtc.protocol).toBe("udp");expect(JSON.stringify(value)).not.toContain("sensitive-ip");
 });
 test("a hung fresh-authorization request is bounded and late completion cannot revive audio",async()=>{
@@ -70,4 +91,121 @@ test("a hung fresh-authorization request is bounded and late completion cannot r
   resolve("ws://local/new-session");await Promise.resolve();await Promise.resolve();
   expect(connections).toBe(0);audio.stop();
  }finally{timer.mockRestore();}
+});
+
+function richReport(time:number,inboundID="in",pairID="pair",base=0):RTCStatsReport {
+ return new Map<string,any>([
+ ["out",{type:"outbound-rtp",kind:"audio",timestamp:time,bytesSent:base+1000,packetsSent:base+100,totalPacketSendDelay:base+1,retransmittedPacketsSent:2,nackCount:1}],
+ [inboundID,{type:"inbound-rtp",kind:"audio",timestamp:time,bytesReceived:base+2000,packetsReceived:base+100,packetsLost:2,jitter:.01,codecId:"codec",jitterBufferDelay:base+2,jitterBufferTargetDelay:base+3,jitterBufferMinimumDelay:base+1,jitterBufferEmittedCount:base+100,totalProcessingDelay:base+.5,lastPacketReceivedTimestamp:time-30,concealmentEvents:3,silentConcealedSamples:100,insertedSamplesForDeceleration:50}],
+ ["remote-in",{type:"remote-inbound-rtp",kind:"audio",packetsLost:7,fractionLost:.04,jitter:.02,roundTripTime:.1}],
+ ["remote-out",{type:"remote-outbound-rtp",kind:"audio",packetsSent:400,bytesSent:3000}],
+ ["transport",{type:"transport",selectedCandidatePairId:pairID,dtlsState:"connected"}],
+ [pairID,{type:"candidate-pair",state:"succeeded",localCandidateId:"local",remoteCandidateId:"remote",availableOutgoingBitrate:128000,availableIncomingBitrate:256000,currentRoundTripTime:.04,requestsSent:100}],
+ ["local",{type:"local-candidate",protocol:"udp",candidateType:"relay",relayProtocol:"tls",address:"SECRET-IP",url:"SECRET-TURN"}],
+ ["remote",{type:"remote-candidate",candidateType:"srflx",address:"SECRET-REMOTE"}],
+ ["codec",{type:"codec",mimeType:"audio/opus",clockRate:48000,channels:1,sdpFmtpLine:"SECRET-SDP"}],
+ ]) as unknown as RTCStatsReport;
+}
+test("rich native stats separate remote receiver loss, expose bandwidth and interval delays without raw identifiers",()=>{
+ const at=Date.UTC(2026,9,9), first=rtcStatistics(richReport(at));
+ expect(first.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const next=rtcStatistics(richReport(at+1000,"in","pair",100),first.previous);
+ expect(next.metrics.remote_receiver_packetsLost).toBe(7);expect(next.metrics.receiver_packetsLost).toBe(2);
+ expect(next.metrics.receiver_jitter_buffer_interval_ms).toBe(1000);expect(next.metrics.sender_send_delay_interval_ms).toBe(1000);
+ expect(next.metrics.pair_availableOutgoingBitrate).toBe(128000);expect(next.metrics.receiver_last_packet_age_ms).toBe(30);
+ expect(next.states.remote_candidate).toBe("srflx");expect(next.states.relay_protocol).toBe("tls");expect(next.states.codec).toBe("audio/opus");
+ expect(JSON.stringify({metrics:next.metrics,states:next.states,webrtc:next.webrtc})).not.toContain("SECRET");
+ const moved=rtcStatistics(richReport(at+2000,"in","pair2",200),next.previous);expect(moved.metrics.path_revision).toBe(2);
+});
+test("missing stats, counter resets and new RTP identities do not fabricate rates or delay deltas",()=>{
+ const at=Date.UTC(2026,9,9), first=rtcStatistics(richReport(at,"in","pair",1000));
+ const reset=rtcStatistics(richReport(at+1000),first.previous);
+ expect(reset.webrtc.sendBitrateBps).toBe(0);expect(reset.webrtc.receiveBitrateBps).toBe(0);expect(reset.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const replaced=rtcStatistics(richReport(at+2000,"new-ssrc","pair",2000),first.previous);
+ expect(replaced.webrtc.receiveBitrateBps).toBe(0);expect(replaced.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const absent=rtcStatistics(new Map() as any);expect(absent.rtt).toBeNull();expect(absent.metrics.pair_availableOutgoingBitrate).toBeUndefined();expect(absent.metrics.remote_receiver_packetsLost).toBeUndefined();
+});
+test("overlapping getStats, failed sampling and late completions never stop or revive media",async()=>{
+ let resolve!:(v:RTCStatsReport)=>void,reads=0;const published:any[]=[];
+ const audio:any=new WebRTCAudioConnection({onDiagnostics:d=>published.push(d)});
+ const pc={getStats:()=>{reads++;return new Promise<RTCStatsReport>(r=>resolve=r);},iceConnectionState:"connected",connectionState:"connected"};
+ audio.pc=pc;audio.generation=1;
+ const pending=audio.statistics(1);await audio.statistics(1);expect(reads).toBe(1);
+ resolve(richReport(Date.now()));await pending;expect(published).toHaveLength(1);
+ pc.getStats=async()=>{throw new Error("stats unavailable")};await audio.statistics(1);expect(audio.statsErrors).toBe(1);expect(audio.pc).toBe(pc);expect(audio.stopped).toBe(false);
+ pc.getStats=()=>new Promise<RTCStatsReport>(r=>resolve=r);
+ const late=audio.statistics(1);audio.generation=2;resolve(richReport(Date.now()));await late;expect(published).toHaveLength(2);audio.transportSender.stop();
+});
+
+test("timestamped loss deltas retain SSRC and reset safely across streams and reconnections",()=>{
+ const report=(at:number,lost:number,id="in",ssrc=123)=>new Map([
+ [id,{type:"inbound-rtp",kind:"audio",timestamp:at,packetsLost:lost,packetsReceived:100,ssrc}],
+ ["remote",{type:"remote-inbound-rtp",kind:"audio",timestamp:at,packetsLost:lost+2,ssrc:456}]
+ ]) as unknown as RTCStatsReport;
+ const first=rtcStatistics(report(1000,2));expect(first.metrics.receiver_loss_delta).toBeUndefined();
+ const next=rtcStatistics(report(2000,5),first.previous);
+ expect(next.metrics.receiver_ssrc).toBe(123);expect(next.metrics.receiver_loss_delta).toBe(3);expect(next.metrics.receiver_loss_window_ms).toBe(1000);
+ expect(next.metrics.remote_receiver_ssrc).toBe(456);expect(next.metrics.remote_receiver_loss_delta).toBe(3);
+ const clean=rtcStatistics(report(3000,5),next.previous);expect(clean.metrics.receiver_loss_delta).toBe(0);
+ for(const r of [report(3000,1),report(3000,8,"new-id"),report(3000,8,"in",999),report(1500,8)]){
+  expect(rtcStatistics(r,next.previous).metrics.receiver_loss_delta).toBeUndefined();
+ }
+ expect(rtcStatistics(report(3000,8)).metrics.receiver_loss_delta).toBeUndefined();
+});
+
+
+test("loss events are sampled directional deltas with timestamp and SSRC, never fabricated duration",()=>{
+ const stamp="2026-10-10T09:00:00.000Z";
+ const events=rtcLossEvents({receiver_loss_delta:3,receiver_loss_window_ms:1000,receiver_ssrc:123,remote_receiver_loss_delta:2,remote_receiver_loss_window_ms:2000,remote_receiver_ssrc:456},stamp);
+ expect(events).toHaveLength(2);expect(events[0]).toEqual({timestamp:stamp,direction:"carrier_to_operator",reason:"webrtc_packet_loss",duration_ms:0,packet_count:3,ssrc:123,window_ms:1000});
+ expect(events[1].direction).toBe("operator_to_carrier");expect(events[1].ssrc).toBe(456);
+ expect(rtcLossEvents({receiver_loss_delta:0,remote_receiver_loss_delta:-1})).toEqual([]);
+});
+
+test("RTC retries retain one recovery chain with distinct attempts and terminal outcomes",async()=>{
+ const events:any[]=[],contexts:any[]=[];let retry!:()=>void;
+ const audio:any=new WebRTCAudioConnection({onSessionEvent:e=>events.push(e),refreshMediaURL:async c=>{contexts.push(c);if(contexts.length===1)throw new Error("temporary network issue");return "ws://local/fresh";}});
+ audio.connect=async()=>{audio.pc={connectionState:"connected",close(){}};};
+ const original=setTimeout;const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:any,...args:any[])=>{
+   if(ms===1000){retry=fn;return 0;}return original(fn,ms,...args);
+ }) as typeof setTimeout);
+ try{
+  audio.disconnected(0,"signaling_closed");await new Promise(r=>original(r,0));
+  expect(events.some(e=>e.outcome==="attempt_failed")).toBe(true);retry();await new Promise(r=>original(r,0));
+  expect(contexts).toHaveLength(2);expect(contexts[0].recovery_id).toBe(contexts[1].recovery_id);
+  expect(contexts[0].attempt_id).not.toBe(contexts[1].attempt_id);
+  expect(events.filter(e=>e.outcome==="connected").at(-1).attempt_id).toBe(contexts[1].attempt_id);
+  expect(audio.recovering).toBe(false);
+ }finally{audio.stop();timer.mockRestore();}
+});
+
+test("audio processing delay uses decoded samples and omits unavailable/reset counters",()=>{
+ const sample=(seconds:number,changes:Record<string,unknown>={})=>new Map([["in",{id:"in",type:"inbound-rtp",kind:"audio",timestamp:seconds*1000,ssrc:1,packetsReceived:seconds*50,totalProcessingDelay:seconds*48000*.012,totalSamplesDecoded:seconds*48000,...changes}]]) as unknown as RTCStatsReport;
+ const a=rtcStatistics(sample(1));const b=rtcStatistics(sample(2),a.previous);
+ expect(b.metrics.receiver_processing_interval_ms).toBeCloseTo(12,6);
+ expect(b.states.receiver_processing).toBe("per_decoded_sample");
+ expect(rtcStatistics(sample(2,{packetsReceived:150}),a.previous).metrics.receiver_processing_interval_ms).toBeCloseTo(12,6);
+ for(const changes of [{totalSamplesDecoded:undefined},{totalSamplesDecoded:48000},{totalProcessingDelay:0},{ssrc:2}])expect(rtcStatistics(sample(2,changes),a.previous).metrics.receiver_processing_interval_ms).toBeUndefined();
+ expect(rtcStatistics(sample(1,{totalSamplesDecoded:undefined})).states.receiver_processing).toBe("unavailable");
+});
+
+test("recent buffering recovers independently of lifetime mean and resets explicitly",()=>{
+ const report=(at:number,delay:number,emitted:number,ssrc=42)=>new Map([["in",{type:"inbound-rtp",kind:"audio",timestamp:at,ssrc,jitterBufferDelay:delay,jitterBufferEmittedCount:emitted}]]) as any;
+ const first=rtcStatistics(report(1000,1000,1000));expect(first.webrtc.jitterBufferIntervalMs).toBeUndefined();
+ const next=rtcStatistics(report(2000,1006,1100),first.previous);
+ expect(next.webrtc.jitterBufferMs).toBeGreaterThan(900);expect(next.queueMs).toBe(60);expect(next.webrtc.jitterBufferIntervalMs).toBe(60);
+ const reset=rtcStatistics(report(3000,1,10),next.previous);expect(reset.webrtc.jitterBufferIntervalMs).toBeUndefined();expect(reset.queueMs).toBe(0);
+ const replaced=rtcStatistics(report(4000,1012,1200,43),next.previous);expect(replaced.webrtc.jitterBufferIntervalMs).toBeUndefined();
+});
+
+test("stalled RTC setup is bounded before signaling and auto can still fall back to PCM",async()=>{
+ const events:string[]=[];let late!:()=>void;
+ const original=setTimeout;
+ const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:number,...args:any[])=>original(fn,ms===18000?5:ms,...args)) as typeof setTimeout);
+ const audio=selectableAudio({},()=>connection("ws",events),()=>({...connection("rtc",events),start:()=>new Promise<void>(resolve=>{late=resolve;})}));
+ try{
+  await audio.start("ws://fixture",{...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,mediaTransport:"auto"});
+  expect(events).toContain("rtc:stop");expect(events).toContain("ws:start");
+  late();await Bun.sleep(0);expect(events.filter(e=>e==="ws:start")).toHaveLength(1);
+ }finally{audio.stop();timer.mockRestore();}
 });

@@ -28,6 +28,7 @@ type draftContent struct {
 }
 
 type conversationDraft struct {
+	Mode               string          `json:"mode"`
 	ID                 int64           `json:"id"`
 	ContactID          int64           `json:"contact_id"`
 	ConversationID     int64           `json:"conversation_id"`
@@ -50,13 +51,13 @@ type conversationDraft struct {
 var errDraftConflict = errors.New("draft conflict: reload the latest draft; it changed or is not editable")
 var errDraftNotFound = errors.New("draft not found in this project")
 
-const draftColumns = `id,contact_id,conversation_id,reply_to_activity_id,content,status,revision,created_by,updated_by,created_at,updated_at,last_error,sent_result,messaging_install_id,attempt_key,lease_until,dispatched`
+const draftColumns = `id,contact_id,COALESCE(conversation_id,0),COALESCE(reply_to_activity_id,0),content,status,revision,created_by,updated_by,created_at,updated_at,last_error,sent_result,messaging_install_id,attempt_key,lease_until,dispatched,mode`
 
 func scanDraft(row interface{ Scan(...any) error }) (*conversationDraft, error) {
 	d := &conversationDraft{}
 	var content string
 	var result sql.NullString
-	err := row.Scan(&d.ID, &d.ContactID, &d.ConversationID, &d.ReplyToActivityID, &content, &d.Status, &d.Revision, &d.CreatedBy, &d.UpdatedBy, &d.CreatedAt, &d.UpdatedAt, &d.LastError, &result, &d.MessagingInstallID, &d.AttemptKey, &d.LeaseUntil, &d.Dispatched)
+	err := row.Scan(&d.ID, &d.ContactID, &d.ConversationID, &d.ReplyToActivityID, &content, &d.Status, &d.Revision, &d.CreatedBy, &d.UpdatedBy, &d.CreatedAt, &d.UpdatedAt, &d.LastError, &result, &d.MessagingInstallID, &d.AttemptKey, &d.LeaseUntil, &d.Dispatched, &d.Mode)
 	if err == sql.ErrNoRows {
 		return nil, errDraftNotFound
 	}
@@ -170,9 +171,9 @@ func patchDraftContent(c draftContent, args map[string]any) (draftContent, error
 			}
 		case "to":
 			if canonicalParticipantAddress(c.Channel, anyString(value)) != c.To {
-				return c, errors.New("draft recipient is pinned to the original reply; create a new draft to change recipient")
+				return c, errors.New("draft recipient is pinned; create a new draft to change recipient")
 			}
-		case "contact_id", "conversation_id", "reply_to_activity_id", "id", "expected_revision", "source", "client_key", "_project_id":
+		case "mode", "contact_id", "conversation_id", "reply_to_activity_id", "id", "expected_revision", "source", "client_key", "_project_id":
 			// Identity/CAS fields are handled separately, never copied into content.
 		default:
 			return c, fmt.Errorf("unsupported draft field %q", key)
@@ -187,25 +188,74 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	convo, err := dbConversationGet(ctx.AppDB(), pid, int64Arg(args, "conversation_id"))
+	// Return the original operation before deriving today's route/anchor. A
+	// create response may have been lost, an inbound may have arrived, or the
+	// first-outreach draft may already have acquired its conversation at send.
+	if key := strArg(args, "client_key"); key != "" {
+		d, e := scanDraft(ctx.AppDB().QueryRow(`SELECT `+draftColumns+` FROM conversation_drafts WHERE project_id=? AND client_key=?`, pid, key))
+		if e == nil {
+			if err := draftCreateIdentity(d, args); err != nil {
+				return nil, err
+			}
+			return map[string]any{"draft": d}, nil
+		}
+		if !errors.Is(e, errDraftNotFound) {
+			return nil, e
+		}
+	}
+	convoID, cid := int64Arg(args, "conversation_id"), int64Arg(args, "contact_id")
+	var convo *Conversation
+	if convoID > 0 {
+		convo, err = dbConversationGet(ctx.AppDB(), pid, convoID)
+		if err != nil {
+			return nil, err
+		}
+		if convo == nil {
+			return nil, errors.New("conversation not found in this project")
+		}
+		if cid > 0 && cid != convo.ContactID {
+			return nil, errors.New("conversation does not belong to contact")
+		}
+		cid = convo.ContactID
+	}
+	c, err := dbGetByID(ctx.AppDB(), pid, cid)
 	if err != nil {
 		return nil, err
 	}
-	if convo == nil {
-		return nil, errors.New("conversation not found in this project")
+	if c == nil {
+		return nil, errors.New("contact not found in this project; supply contact_id or conversation_id")
 	}
-	if cid := int64Arg(args, "contact_id"); cid > 0 && cid != convo.ContactID {
-		return nil, errors.New("conversation does not belong to contact")
+	mode := strArg(args, "mode")
+	if mode == "" {
+		if convo == nil {
+			mode = "message"
+		} else {
+			mode = "reply"
+		}
+	}
+	if mode != "reply" && mode != "message" {
+		return nil, errors.New("draft mode must be reply or message")
+	}
+	if mode == "reply" && convo == nil {
+		return nil, errors.New("reply draft requires conversation_id; use mode:message for first outreach")
 	}
 	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
-	if channel == "" {
+	if channel == "" && convo != nil {
 		channel = convo.Channel
 	}
-	if err = validateReplyTransport(convo.Channel, channel); err != nil {
-		return nil, err
+	if convo != nil {
+		if err = validateReplyTransport(convo.Channel, channel); err != nil {
+			return nil, err
+		}
+		if mode == "message" && channel != convo.Channel {
+			return nil, errors.New("message follow-up must use the conversation channel")
+		}
 	}
 	anchor := int64Arg(args, "reply_to_activity_id")
-	if anchor == 0 {
+	if mode == "message" && anchor != 0 {
+		return nil, errors.New("message draft cannot have a reply anchor")
+	}
+	if mode == "reply" && anchor == 0 {
 		err = ctx.AppDB().QueryRow(`SELECT id FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND kind IN ('email_received','sms_received','whatsapp_received') ORDER BY CASE WHEN kind=? THEN 0 ELSE 1 END,julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, convo.ContactID, convo.ID, receivedKindForChannel(channel)).Scan(&anchor)
 		if err == sql.ErrNoRows {
 			return nil, errors.New("reply draft requires an inbound message in this conversation")
@@ -214,7 +264,12 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, err
 		}
 	}
-	to, from, err := replyRoute(ctx.AppDB(), pid, convo.ContactID, convo.ID, channel, anchor)
+	var to, from string
+	if mode == "reply" {
+		to, from, err = replyRoute(ctx.AppDB(), pid, cid, convoID, channel, anchor)
+	} else {
+		to, from, err = messageDraftRoute(ctx.AppDB(), pid, cid, convoID, channel, strArg(args, "to"))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +277,7 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errors.New("reply recipient is missing")
 	}
 	content := draftContent{Channel: channel, To: to, From: from}
-	if channel == channelEmail && convo.Subject != "" {
+	if channel == channelEmail && convo != nil && convo.Subject != "" {
 		content.Subject = "Re: " + strings.TrimPrefix(convo.Subject, "Re: ")
 	}
 	content, err = patchDraftContent(content, args)
@@ -239,7 +294,7 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	raw, _ := json.Marshal(content)
 	now := draftNow()
 	author := draftAuthor(args)
-	res, err := ctx.AppDB().Exec(`INSERT INTO conversation_drafts(project_id,contact_id,conversation_id,reply_to_activity_id,content,client_key,created_by,updated_by,created_at,updated_at,messaging_install_id) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,client_key) DO NOTHING`, pid, convo.ContactID, convo.ID, anchor, string(raw), key, author, author, now, now, messagingInstallID(ctx))
+	res, err := ctx.AppDB().Exec(`INSERT INTO conversation_drafts(project_id,contact_id,conversation_id,reply_to_activity_id,mode,content,client_key,created_by,updated_by,created_at,updated_at,messaging_install_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,client_key) DO NOTHING`, pid, cid, draftNullableID(convoID), draftNullableID(anchor), mode, string(raw), key, author, author, now, now, messagingInstallID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +307,7 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if d.ContactID != convo.ContactID || d.ConversationID != convo.ID {
+	if d.ContactID != cid || (convoID > 0 && d.ConversationID != convoID) || d.Mode != mode {
 		return nil, errors.New("client_key already used for another conversation")
 	}
 	n, _ := res.RowsAffected()
@@ -260,6 +315,80 @@ func (a *App) toolDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		draftChanged(ctx, pid, d)
 	}
 	return map[string]any{"draft": d}, nil
+}
+
+func draftCreateIdentity(d *conversationDraft, args map[string]any) error {
+	if cid := int64Arg(args, "contact_id"); cid > 0 && cid != d.ContactID {
+		return errors.New("client_key already used for another contact")
+	}
+	if convo := int64Arg(args, "conversation_id"); convo > 0 && convo != d.ConversationID {
+		return errors.New("client_key already used for another conversation")
+	}
+	if mode := strArg(args, "mode"); mode != "" && mode != d.Mode {
+		return errors.New("client_key already used for another draft mode")
+	}
+	if anchor := int64Arg(args, "reply_to_activity_id"); anchor > 0 && anchor != d.ReplyToActivityID {
+		return errors.New("client_key already used for another reply anchor")
+	}
+	return nil
+}
+
+func draftNullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
+// Outbound follow-ups retain the original destination, not today's primary.
+// Saving is allowed for blocked channels; sending must revalidate eligibility.
+func messageDraftRoute(db *sql.DB, pid string, cid, convoID int64, channel, requested string) (string, string, error) {
+	if channel != channelEmail && !phoneTransport(channel) {
+		return "", "", errors.New("message draft requires channel: email, sms or whatsapp")
+	}
+	to, from := "", ""
+	if convoID > 0 {
+		err := db.QueryRow(`SELECT COALESCE(json_extract(source_detail,'$.to'),''),COALESCE(json_extract(source_detail,'$.from'),'') FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND kind=? ORDER BY julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, cid, convoID, sentKindForChannel(channel)).Scan(&to, &from)
+		if err != nil && err != sql.ErrNoRows {
+			return "", "", err
+		}
+		if to == "" {
+			return "", "", errors.New("follow-up recipient metadata is missing; use a reply draft or a new contact message")
+		}
+	}
+	requested = canonicalParticipantAddress(channel, requested)
+	to = canonicalParticipantAddress(channel, to)
+	if requested != "" {
+		if to != "" && requested != to {
+			return "", "", errors.New("follow-up recipient must match the original outbound message")
+		}
+		to = requested
+	}
+	var stored string
+	err := db.QueryRow(`SELECT value FROM contact_channels WHERE project_id=? AND contact_id=? AND kind=? AND (?='' OR value=?) ORDER BY is_primary DESC,id LIMIT 1`, pid, cid, contactChannelKindFor(channel), to, to).Scan(&stored)
+	if err == sql.ErrNoRows {
+		return "", "", errors.New("draft recipient is not an existing contact channel")
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return canonicalParticipantAddress(channel, stored), canonicalParticipantAddress(channel, from), nil
+}
+
+func messageDraftAddress(db *sql.DB, pid string, d *conversationDraft) (*resolvedAddress, error) {
+	addr := &resolvedAddress{Channel: d.Content.Channel, Address: d.Content.To}
+	var blocked int
+	err := db.QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, d.Content.Channel, pid, d.ContactID, contactChannelKindFor(d.Content.Channel), d.Content.To).Scan(&addr.ChannelID, &blocked)
+	if err == sql.ErrNoRows {
+		return nil, errors.New("draft recipient no longer belongs to contact")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if blocked != 0 {
+		return nil, errors.New("draft recipient is not messageable")
+	}
+	return addr, nil
 }
 
 func (a *App) toolDraftGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -279,12 +408,23 @@ func (a *App) toolDraftList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	convo, err := dbConversationGet(ctx.AppDB(), pid, int64Arg(args, "conversation_id"))
-	if err != nil {
-		return nil, err
-	}
-	if convo == nil {
-		return nil, errors.New("conversation not found in this project")
+	convoID, cid := int64Arg(args, "conversation_id"), int64Arg(args, "contact_id")
+	if convoID > 0 {
+		convo, e := dbConversationGet(ctx.AppDB(), pid, convoID)
+		if e != nil {
+			return nil, e
+		}
+		if convo == nil || (cid > 0 && cid != convo.ContactID) {
+			return nil, errors.New("conversation not found for contact in this project")
+		}
+	} else {
+		c, e := dbGetByID(ctx.AppDB(), pid, cid)
+		if e != nil {
+			return nil, e
+		}
+		if c == nil {
+			return nil, errors.New("contact_id or conversation_id required in this project")
+		}
 	}
 	limit := intArg(args, "limit", 50)
 	if limit < 1 || limit > 200 {
@@ -295,7 +435,11 @@ func (a *App) toolDraftList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		offset = 0
 	}
 	where := `project_id=? AND conversation_id=?`
-	params := []any{pid, convo.ID}
+	params := []any{pid, convoID}
+	if convoID == 0 {
+		where = `project_id=? AND contact_id=?`
+		params = []any{pid, cid}
+	}
 	if !boolArg(args, "include_finished", false) {
 		where += ` AND status IN ('draft','sending','send_failed')`
 	}
@@ -303,7 +447,7 @@ func (a *App) toolDraftList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM conversation_drafts WHERE `+where, params...).Scan(&total); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id,contact_id,conversation_id,status,revision,created_by,updated_by,updated_at,last_error,json_extract(content,'$.channel'),json_extract(content,'$.from'),json_extract(content,'$.to'),json_extract(content,'$.subject'),substr(json_extract(content,'$.body'),1,200) FROM conversation_drafts WHERE `+where+` ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`, append(params, limit, offset)...)
+	rows, err := ctx.AppDB().Query(`SELECT id,contact_id,COALESCE(conversation_id,0),status,revision,created_by,updated_by,updated_at,last_error,json_extract(content,'$.channel'),json_extract(content,'$.from'),json_extract(content,'$.to'),json_extract(content,'$.subject'),substr(json_extract(content,'$.body'),1,200),mode FROM conversation_drafts WHERE `+where+` ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`, append(params, limit, offset)...)
 	if err != nil {
 		return nil, err
 	}
@@ -311,11 +455,11 @@ func (a *App) toolDraftList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	drafts := []map[string]any{}
 	for rows.Next() {
 		var id, cid, conv, revision int64
-		var status, createdBy, updatedBy, updatedAt, lastError, channel, from, to, subject, preview string
-		if err = rows.Scan(&id, &cid, &conv, &status, &revision, &createdBy, &updatedBy, &updatedAt, &lastError, &channel, &from, &to, &subject, &preview); err != nil {
+		var status, createdBy, updatedBy, updatedAt, lastError, channel, from, to, subject, preview, mode string
+		if err = rows.Scan(&id, &cid, &conv, &status, &revision, &createdBy, &updatedBy, &updatedAt, &lastError, &channel, &from, &to, &subject, &preview, &mode); err != nil {
 			return nil, err
 		}
-		drafts = append(drafts, map[string]any{"id": id, "contact_id": cid, "conversation_id": conv, "status": status, "revision": revision, "created_by": createdBy, "updated_by": updatedBy, "updated_at": updatedAt, "last_error": lastError, "channel": channel, "from": from, "to": to, "subject": subject, "preview": preview})
+		drafts = append(drafts, map[string]any{"mode": mode, "id": id, "contact_id": cid, "conversation_id": conv, "status": status, "revision": revision, "created_by": createdBy, "updated_by": updatedBy, "updated_at": updatedAt, "last_error": lastError, "channel": channel, "from": from, "to": to, "subject": subject, "preview": preview})
 	}
 	return map[string]any{"drafts": drafts, "total": total, "limit": limit, "offset": offset, "content_included": false}, rows.Err()
 }
@@ -332,6 +476,9 @@ func (a *App) toolDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if d.Status != "draft" || int64Arg(args, "expected_revision") != d.Revision {
 		return nil, errDraftConflict
 	}
+	if mode, ok := args["mode"]; ok && mode != d.Mode {
+		return nil, errors.New("draft mode cannot change")
+	}
 	for key, want := range map[string]int64{"contact_id": d.ContactID, "conversation_id": d.ConversationID, "reply_to_activity_id": d.ReplyToActivityID} {
 		if _, ok := args[key]; ok && int64Arg(args, key) != want {
 			return nil, errors.New("draft reply identity cannot change")
@@ -343,6 +490,9 @@ func (a *App) toolDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if err = validateReplyTransport(d.Content.Channel, content.Channel); err != nil {
 		return nil, err
+	}
+	if d.Mode == "message" && content.Channel != d.Content.Channel {
+		return nil, errors.New("message draft channel is pinned; create a new draft to change it")
 	}
 	if content.Channel != d.Content.Channel {
 		// Channel switches must explicitly choose their sender; no inherited WA
@@ -394,18 +544,31 @@ func (a *App) draftPreflight(ctx *sdk.AppCtx, pid string, d *conversationDraft) 
 	if err != nil {
 		return err
 	}
-	if convo == nil || convo.ContactID != d.ContactID {
+	if (convo == nil && (d.Mode == "reply" || d.ConversationID > 0)) || (convo != nil && convo.ContactID != d.ContactID) {
 		return errors.New("draft conversation ownership changed")
 	}
-	if err = validateReplyTransport(convo.Channel, d.Content.Channel); err != nil {
-		return err
+	if convo != nil {
+		if err = validateReplyTransport(convo.Channel, d.Content.Channel); err != nil {
+			return err
+		}
+		if d.Mode == "message" && convo.Channel != d.Content.Channel {
+			return errors.New("draft conversation channel changed")
+		}
 	}
-	to, receiving, err := replyRoute(ctx.AppDB(), pid, d.ContactID, d.ConversationID, d.Content.Channel, d.ReplyToActivityID)
-	if err != nil {
-		return err
-	}
-	if to != d.Content.To {
-		return errors.New("reply recipient changed; draft was not sent")
+	receiving := ""
+	if d.Mode == "reply" {
+		var to string
+		to, receiving, err = replyRoute(ctx.AppDB(), pid, d.ContactID, d.ConversationID, d.Content.Channel, d.ReplyToActivityID)
+		if err != nil {
+			return err
+		}
+		if to != d.Content.To {
+			return errors.New("reply recipient changed; draft was not sent")
+		}
+	} else {
+		if _, err = messageDraftAddress(ctx.AppDB(), pid, d); err != nil {
+			return err
+		}
 	}
 	source := messagingInstallID(ctx)
 	if source == 0 {
@@ -486,9 +649,12 @@ func (a *App) toolDraftSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// outcome. No new dispatch is needed, even if send eligibility changed.
 	act, sendErr := dbActivityByIdempotencyKey(ctx.AppDB(), pid, d.AttemptKey, "")
 	if sendErr == nil && act != nil {
-		if act.ContactID != d.ContactID || act.ConversationID != d.ConversationID {
+		var detail map[string]any
+		_ = json.Unmarshal([]byte(act.SourceDetail), &detail)
+		if act.ContactID != d.ContactID || (d.ConversationID > 0 && act.ConversationID != d.ConversationID) || act.Kind != sentKindForChannel(d.Content.Channel) || (d.Mode == "message" && canonicalParticipantAddress(d.Content.Channel, anyString(detail["to"])) != d.Content.To) {
 			sendErr = errors.New("draft delivery identity mismatch")
 		} else {
+			d.ConversationID = act.ConversationID
 			out = outboundSendResult(act, d.Content.Channel, d.Content.To, activityProviderMessageID(act), d.AttemptKey, true)
 		}
 	} else if sendErr == nil {
@@ -534,7 +700,17 @@ func (a *App) toolDraftSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				}
 			}
 		}
-		out, sendErr = a.toolReply(ctx, sendArgs)
+		if d.Mode == "message" {
+			sendArgs["_draft_resolve_address"] = func() (*resolvedAddress, error) { return messageDraftAddress(ctx.AppDB(), pid, d) }
+			out, sendErr = a.sendMessageImpl(ctx, sendArgs, false)
+		} else {
+			out, sendErr = a.toolReply(ctx, sendArgs)
+		}
+		if sendErr == nil {
+			if result, ok := out.(map[string]any); ok {
+				d.ConversationID = int64Arg(result, "conversation_id")
+			}
+		}
 	}
 	state := "sent"
 	lastError := ""
@@ -559,7 +735,7 @@ func (a *App) toolDraftSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		key = ""
 		dispatched = false
 	}
-	res, err = ctx.AppDB().Exec(`UPDATE conversation_drafts SET status=?,revision=revision+1,lease_until='',last_error=?,sent_result=?,attempt_key=?,dispatched=?,updated_at=? WHERE project_id=? AND id=? AND revision=? AND status='sending'`, state, lastError, result, key, dispatched, draftNow(), pid, d.ID, d.Revision)
+	res, err = ctx.AppDB().Exec(`UPDATE conversation_drafts SET status=?,revision=revision+1,lease_until='',last_error=?,sent_result=?,attempt_key=?,dispatched=?,updated_at=?,conversation_id=? WHERE project_id=? AND id=? AND revision=? AND status='sending'`, state, lastError, result, key, dispatched, draftNow(), draftNullableID(d.ConversationID), pid, d.ID, d.Revision)
 	if err != nil {
 		return nil, fmt.Errorf("draft outcome persistence failed; retry this same draft: %w", err)
 	}
@@ -596,7 +772,7 @@ func (a *App) handleHTTPDrafts(w http.ResponseWriter, r *http.Request) {
 	if parts[0] == "" {
 		switch r.Method {
 		case "GET":
-			for _, key := range []string{"conversation_id", "limit", "offset"} {
+			for _, key := range []string{"conversation_id", "contact_id", "limit", "offset"} {
 				if value := r.URL.Query().Get(key); value != "" {
 					args[key] = value
 				}

@@ -1,0 +1,19 @@
+# Editable Patreon publishing actor
+
+Import `patreon-publishing.json` or merge its operations into your existing creator actor. Keep a saved Computer login context, the creator profile URL and the verified profile identity (URL slug) together in a preset. Set `context_id`, `creator_url` and `expected_creator_identity` for your own creator. No account, tier name, country, asset or credentials are built into this example.
+
+Use `composer_navigation_preflight` to verify the assigned creator, open the native Create post menu, select Post and prove the intended composer is present. The opener targets the creator navigation's floating Create post control with an exact accessible-name and effect guard; it uses no coordinates and does not guess a composer URL. A change to that menu fails closed.
+
+For a complete saved-draft check, choose `text_post_preflight`, `image_post_preflight`, `image_url_post_preflight`, `video_post_preflight`, `poll_post_preflight` or `gallery_post_preflight`. These create and reload a draft and stop before Publish. They are not read-only: Patreon autosaves drafts and uploaded assets. They assert exact title/body paragraphs, assigned creator editor URL, requested audience, the complete selected tier set and Sell this post off. Public posts may hide the sale toggle after its off state has been verified in Paid mode. Use a test account for content preflights; production reads should use `inspect_page` or `fetch_posts`.
+
+All content operations accept `post_title`, `post_body`, `audience` (`public` or `paid`) and `tier_labels` (empty for Public, exact nonempty live labels for Paid). Discover and reconcile the creator's plans before choosing labels; pricing is creator policy. `text_post`, `image_post`, `image_url_post`, `video_post`, `poll_post` and `gallery_post` add a guarded Publish and verify its live confirmation. Supply one stable `request_id` and reuse the same `actors_run.idempotency_key` for that logical post. Exact copy and paragraph structure are preserved.
+
+- `image_post`: `image_base64`, `image_filename`, `image_mime_type`.
+- `image_url_post`: `image_url`, `image_filename`, `image_mime_type`.
+- `gallery_post`: two original URLs in approved order, `image_1_source_url`/`image_2_source_url`, with each filename and MIME type. Verifies exactly two saved attachments and their unchanged IDs/order.
+- `video_post`: `video_url`; verifies the saved loaded embed and exact source URL, including explicitly supported Embedly wrappers. A player alone does not prove the correct video.
+- `poll_post`: two exact choices, `poll_option_1` and `poll_option_2`; verifies both saved values and exactly two nonempty choices. This operation uses Patreon’s native default voting behavior; it does not configure expiration or multi-select settings.
+
+Require `fetch_posts` to complete all published/scheduled/draft coverage and read all dataset cursors before interpreting absence. An inaccessible or stopped view is incomplete, even if its current list is empty.
+
+Recovery is separate from ordinary retry. `actors_run_retry` repeats the original snapshot. Use `actors_get` with `revision` to inspect the actual pin. `actors_run_recover` accepts the failed run `id`, an explicitly reviewed replacement `revision`, `reviewed:true` and a fresh `duplicate_check_run_id` from that replacement's complete `fetch_posts`. The publishing operation's generic `recovery` policy defines required views and duplicate match fields. Recovery retains the original operation, inputs, preset, request identity and publish-once keys. It records the original execution key and links its new run to the failure; it never clears a consequence reservation. Successful, uncertain, stale, duplicate, wrong-creator or incomplete outcomes block. The worker repeats full duplicate inspection as a separate child run immediately before the repaired attempt.

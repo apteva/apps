@@ -6,6 +6,7 @@ import {
   defaultAudioFilters,
   audioWidgetPreferences,
   audioStateLabel,
+  audioIncidentURL,
 } from "../../ui/audio-dashboard";
 const host = { appName: "telephony", projectId: "project a", installId: 42 };
 test("monitor scopes project/install and preserves exact identity and stage filters", () => {
@@ -82,4 +83,22 @@ test("widget settings bounded and no-telemetry labels do not claim healthy audio
   expect(audioWidgetPreferences({ max_calls: 1 }).maxCalls).toBe(3);
   expect(audioStateLabel("unobserved")).toBe("No telemetry");
   expect(audioStateLabel("stale")).toBe("Telemetry stale");
+});
+
+test("audio health identifies carrier, browser and internal boundaries separately", async () => {
+  const {audioBoundaryIndicators} = await import("../../ui/audio-dashboard");
+  const values = audioBoundaryIndicators({carrier_transport:"sip",boundaries:{carrier:{state:"audio_degraded"},browser:{state:"healthy"},internal:{state:"healthy"}}} as any);
+  expect(values.map(v=>v.label)).toEqual(["Carrier SIP / RTP","Browser WebRTC / WebSocket","Internal audio processing"]);
+  expect(values.map(v=>v.state)).toEqual(["audio_degraded","healthy","healthy"]);
+  expect(audioBoundaryIndicators({} as any).every(v=>v.state==="unobserved")).toBe(true);
+});
+
+test("the incident view asks for a bounded project window and leaves blanks to the server", () => {
+  const blank = new URL(audioIncidentURL(host), "https://x.test");
+  expect(blank.pathname).toBe("/api/apps/telephony/audio-health");
+  expect(Object.fromEntries(blank.searchParams)).toEqual({ view: "incident", project_id: "project a", install_id: "42" });
+  const chosen = new URL(audioIncidentURL(host, "2026-11-04T15:00:00Z", "2026-11-04T15:15:00Z"), "https://x.test");
+  expect(chosen.searchParams.get("from")).toBe("2026-11-04T15:00:00.000Z");
+  expect(chosen.searchParams.get("to")).toBe("2026-11-04T15:15:00.000Z");
+  expect(() => audioIncidentURL(host, "not a time")).toThrow("valid time");
 });

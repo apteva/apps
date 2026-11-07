@@ -77,6 +77,23 @@ contracts; validate real account permissions and SDK/MMP event receipt before
 activating delivery. Google mobile conversion import follows the
 [provider's conversion action contract](https://developers.google.com/google-ads/api/docs/conversions/categories).
 
+## Ads Demand Gen
+
+Ads extends its existing campaign, ad group, creative, activation and reporting
+tools with structured Demand Gen and YouTube engagement support. See
+[mcp/ads/DEMAND_GEN.md](mcp/ads/DEMAND_GEN.md) for the API contract, real-provider
+validation and provider-version limits.
+
+## Ads Google audiences
+
+The existing audience lifecycle and UI now expose structured Google custom
+segments (keywords, URLs and apps), first-party seeded lookalikes, grouped
+composition, interest discovery and named Demand Gen targeting. Capabilities
+report creation, editing, deletion and seed eligibility per type. Existing
+YouTube viewer/subscriber lists are discoverable seeds; Google requires creating
+those lists in Audience Manager. See [the API and validation guide](mcp/ads/GOOGLE_AUDIENCES.md).
+Ads 0.1.52 custom segments require integrations catalog 0.54.3 or newer.
+
 ## Releasing
 
 Per-app version tags in the `name/vX.Y.Z` form (e.g. `crm/v0.2.0`)
@@ -84,3 +101,11 @@ let each app cut its own release without coordinating with siblings.
 The `apteva/app-registry` registry points at
 `raw.githubusercontent.com/apteva/apps/main/<bucket>/<name>/apteva.yaml`,
 so updates land for users on the next refresh.
+
+## Trading and Strategies
+
+`mcp/trading` owns portfolios and execution for humans, agents and connected
+apps. `mcp/strategies` owns automated strategy research and scheduling, and uses
+Trading as a required integration. Agents can use Trading independently.
+See [the migration guide](mcp/strategies/MIGRATION.md) when upgrading from the
+combined Trading v0.15 app.

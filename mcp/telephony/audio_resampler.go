@@ -50,7 +50,11 @@ func newPCMResampler(inRate, outRate int) *pcmResampler {
 	}
 }
 
-func (r *pcmResampler) Process(input []int16) []int16 {
+func (r *pcmResampler) Process(input []int16) []int16 { return r.ProcessInto(input, nil) }
+
+// The returned slice belongs to the caller. Keep independent storage for any
+// queued output; reuse is only safe on the owning conversion goroutine.
+func (r *pcmResampler) ProcessInto(input []int16, dst []int16) []int16 {
 	if r == nil || len(input) == 0 {
 		return nil
 	}
@@ -59,7 +63,10 @@ func (r *pcmResampler) Process(input []int16) []int16 {
 	}
 	last := r.base + int64(len(r.samples)) - 1
 	estimate := int(math.Ceil(float64(len(input))*r.outRate/r.inRate)) + 2
-	out := make([]int16, 0, estimate)
+	out := dst[:0]
+	if cap(out) < estimate {
+		out = make([]int16, 0, estimate)
+	}
 	for r.next+float64(r.half) <= float64(last) {
 		center := int64(math.Floor(r.next))
 		phase := int(math.Round((r.next - float64(center)) * float64(len(r.kernels))))

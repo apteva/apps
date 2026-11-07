@@ -16,6 +16,7 @@ import (
 )
 
 const DefaultBudget = int64(512 << 20)
+const pruneInterval = time.Minute
 
 type Status struct {
 	BudgetEvictions  int64  `json:"budget_evictions"`
@@ -31,9 +32,10 @@ type Status struct {
 	SampleIntervalMS int    `json:"sample_interval_ms"`
 }
 type Store struct {
-	DB     *sql.DB
-	mu     sync.Mutex
-	budget int64
+	DB        *sql.DB
+	mu        sync.Mutex
+	budget    int64
+	lastPrune time.Time
 }
 
 func OpenStore(path string, budget int64) (*Store, error) {
@@ -61,6 +63,8 @@ func OpenStore(path string, budget int64) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS points_age ON points(step,ts)`,
 		`CREATE TABLE IF NOT EXISTS incidents(host INTEGER NOT NULL,id TEXT NOT NULL,start INTEGER NOT NULL,updated INTEGER NOT NULL,data TEXT NOT NULL,detail BLOB,PRIMARY KEY(host,id)) WITHOUT ROWID`,
 		`CREATE INDEX IF NOT EXISTS incidents_age ON incidents(updated)`,
+		`CREATE INDEX IF NOT EXISTS incidents_host_start ON incidents(host,start DESC,id)`,
+		`CREATE INDEX IF NOT EXISTS incidents_detail_budget ON incidents(updated DESC,host,id,length(detail)) WHERE detail IS NOT NULL`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			db.Close()
@@ -142,25 +146,35 @@ func (s *Store) Ingest(id int64, b monitor.Batch) error {
 	if err := s.EnsureHost(id); err != nil {
 		return err
 	}
-	// Prune before writing, including when budget exhaustion interrupted a prior
-	// import. Checkpoint advancement happens only in the successful transaction.
-	if err := s.pruneLocked(time.Now()); err != nil {
-		return err
+	// Maintenance is shared by all hosts, not repeated for every two-second
+	// import. Bound catch-up work; SQLite's page cap and the full-database retry
+	// below enforce the physical budget even between scheduled passes.
+	now := time.Now()
+	if s.lastPrune.IsZero() || now.Sub(s.lastPrune) >= pruneInterval {
+		if err := s.pruneLocked(now, false); err != nil {
+			return err
+		}
+		s.lastPrune = now
 	}
 	err := s.ingestLocked(id, b)
 	for retry := 0; err != nil && strings.Contains(strings.ToLower(err.Error()), "full") && retry < 3; retry++ {
 		// Reclaim old incident detail first; preserve its summary and rollup peaks.
-		result, evictErr := s.DB.Exec(`UPDATE incidents SET detail=NULL WHERE (host,id) IN (SELECT host,id FROM incidents WHERE detail IS NOT NULL ORDER BY updated LIMIT 16)`)
+		n, evictErr := s.execSelected(`SELECT host,id FROM incidents INDEXED BY incidents_detail_budget WHERE detail IS NOT NULL ORDER BY updated LIMIT 16`, `UPDATE incidents SET detail=NULL WHERE host=? AND id=?`, 2)
 		if evictErr != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
 		if n == 0 {
-			result, evictErr = s.DB.Exec(`DELETE FROM points WHERE (host,step,ts) IN (SELECT host,step,ts FROM points ORDER BY CASE step WHEN 1000 THEN 0 ELSE 1 END,ts LIMIT 1000)`)
-			if evictErr != nil {
-				return err
+			// Prefer the finest tier, with an indexed age range rather than a
+			// CASE sort or a tuple-IN DELETE that scans retained payload pages.
+			for _, tier := range monitor.Tiers {
+				n, evictErr = s.deletePoints(`SELECT host,step,ts FROM points WHERE step=? ORDER BY ts LIMIT 1000`, tier.Step)
+				if evictErr != nil {
+					return err
+				}
+				if n > 0 {
+					break
+				}
 			}
-			n, _ = result.RowsAffected()
 		}
 		if n == 0 {
 			return err
@@ -249,6 +263,16 @@ func (s *Store) ingestLocked(id int64, b monitor.Batch) error {
 			return err
 		}
 	}
+	if len(b.Incidents) > 0 {
+		// Incident limits are enforced when incidents change, independently of
+		// the scheduled history sweep. The host/start index avoids payload scans.
+		if _, err := tx.Exec(`DELETE FROM incidents WHERE host=? AND id IN (SELECT id FROM incidents WHERE host=? ORDER BY start DESC,id LIMIT 50 OFFSET 200)`, id, id); err != nil {
+			return err
+		}
+		if err := s.trimDetails(tx); err != nil {
+			return err
+		}
+	}
 	latest, err := json.Marshal(b.Latest)
 	if err != nil {
 		return err
@@ -262,44 +286,58 @@ func (s *Store) ingestLocked(id int64, b monitor.Batch) error {
 func (s *Store) Prune(now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pruneLocked(now)
+	// Explicit maintenance drains expired backlog; routine ingestion uses only
+	// one bounded batch per tier and one incident batch per minute.
+	return s.pruneLocked(now, true)
 }
-func (s *Store) pruneLocked(now time.Time) error {
+func (s *Store) pruneLocked(now time.Time, drain bool) error {
 	for _, tier := range monitor.Tiers {
 		for {
-			result, err := s.DB.Exec(`DELETE FROM points WHERE (host,step,ts) IN (SELECT host,step,ts FROM points WHERE step=? AND ts<? LIMIT 1000)`, tier.Step, now.Add(-tier.Retention).UnixMilli()/tier.Step*tier.Step)
+			n, err := s.deletePoints(`SELECT host,step,ts FROM points WHERE step=? AND ts<? ORDER BY ts LIMIT 1000`, tier.Step, now.Add(-tier.Retention).UnixMilli()/tier.Step*tier.Step)
 			if err != nil {
 				return err
 			}
-			n, _ := result.RowsAffected()
-			if n == 0 {
+			if n < 1000 || !drain {
 				break
 			}
 		}
 	}
 	for {
-		result, err := s.DB.Exec(`DELETE FROM incidents WHERE (host,id) IN (SELECT host,id FROM incidents WHERE updated<? LIMIT 16)`, now.Add(-30*24*time.Hour).UnixMilli())
+		n, err := s.deleteIncidents(`SELECT host,id FROM incidents WHERE updated<? ORDER BY updated LIMIT 16`, now.Add(-30*24*time.Hour).UnixMilli())
 		if err != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
-		if n == 0 {
+		if n < 16 || !drain {
 			break
 		}
 	}
 	// Limit incident metadata as well as bytes: a noisy machine cannot create
 	// unbounded rows even when each incident has only a small summary.
 	for {
-		result, err := s.DB.Exec(`DELETE FROM incidents WHERE (host,id) IN (SELECT host,id FROM (SELECT host,id,ROW_NUMBER() OVER(PARTITION BY host ORDER BY start DESC) AS n FROM incidents) WHERE n>200 LIMIT 16)`)
+		n, err := s.deleteIncidents(`SELECT host,id FROM (SELECT host,id,ROW_NUMBER() OVER(PARTITION BY host ORDER BY start DESC,id) AS n FROM incidents) WHERE n>200 LIMIT 16`)
 		if err != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
-		if n == 0 {
+		if n < 16 || !drain {
 			break
 		}
 	}
-	rows, err := s.DB.Query(`SELECT host,id,length(detail) FROM incidents WHERE detail IS NOT NULL ORDER BY updated DESC,host`)
+	if err := s.trimDetails(s.DB); err != nil {
+		return err
+	}
+	// Size reclamation avoids a large retained file after expiry. Work is bounded
+	// per pass; allocation itself is hard-limited by SQLite max_page_count.
+	_, err := s.DB.Exec("PRAGMA incremental_vacuum(128)")
+	return err
+}
+
+type detailDatabase interface {
+	Query(string, ...any) (*sql.Rows, error)
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func (s *Store) trimDetails(db detailDatabase) error {
+	rows, err := db.Query(`SELECT host,id,length(detail) FROM incidents INDEXED BY incidents_detail_budget WHERE detail IS NOT NULL ORDER BY updated DESC,host`)
 	if err != nil {
 		return err
 	}
@@ -330,15 +368,73 @@ func (s *Store) pruneLocked(now time.Time) error {
 	}
 	rows.Close()
 	for _, k := range evict {
-		if _, err := s.DB.Exec(`UPDATE incidents SET detail=NULL WHERE host=? AND id=?`, k.host, k.id); err != nil {
+		if _, err := db.Exec(`UPDATE incidents SET detail=NULL WHERE host=? AND id=?`, k.host, k.id); err != nil {
 			return err
 		}
-		s.DB.Exec(`UPDATE hosts SET evicted=evicted+1 WHERE id=?`, k.host)
+		if _, err := db.Exec(`UPDATE hosts SET evicted=evicted+1 WHERE id=?`, k.host); err != nil {
+			return err
+		}
 	}
-	// Size reclamation avoids a large retained file after expiry. Work is bounded
-	// per pass; allocation itself is hard-limited by SQLite max_page_count.
-	_, err = s.DB.Exec("PRAGMA incremental_vacuum(128)")
-	return err
+	return nil
+}
+
+func (s *Store) deletePoints(query string, args ...any) (int64, error) {
+	return s.execSelected(query, `DELETE FROM points WHERE host=? AND step=? AND ts=?`, 3, args...)
+}
+
+func (s *Store) deleteIncidents(query string, args ...any) (int64, error) {
+	return s.execSelected(query, `DELETE FROM incidents WHERE host=? AND id=?`, 2, args...)
+}
+
+// SQLite can scan the entire WITHOUT ROWID table for DELETE ... tuple IN
+// (SELECT ...), even if that SELECT returns no keys. Read at most one batch
+// from a covering index, then delete by exact primary key in a small transaction.
+func (s *Store) execSelected(query, statement string, columns int, args ...any) (int64, error) {
+	rows, err := s.DB.Query(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	var keys [][]any
+	for rows.Next() {
+		key := make([]any, columns)
+		into := make([]any, columns)
+		for i := range key {
+			into[i] = &key[i]
+		}
+		if err = rows.Scan(into...); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		keys = append(keys, key)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(keys) == 0 {
+		return 0, err
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(statement)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	var removed int64
+	for _, key := range keys {
+		result, err := stmt.Exec(key...)
+		if err != nil {
+			return 0, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		removed += n
+	}
+	return removed, tx.Commit()
 }
 
 type History struct {

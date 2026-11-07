@@ -1,0 +1,88 @@
+package main
+
+// Test-only overlay, using the actual realtime and generic app proxies.
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestTelephonyInternalAudioServerFixture(t *testing.T) {
+	ready := os.Getenv("TELEPHONY_INTERNAL_READY")
+	if ready == "" {
+		t.Skip("local benchmark helper")
+	}
+	coreURL, err := url.Parse(os.Getenv("TELEPHONY_INTERNAL_CORE_URL"))
+	if err != nil || coreURL.Hostname() != "127.0.0.1" {
+		t.Fatal("local Core URL required")
+	}
+	port, err := strconv.Atoi(coreURL.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t)
+	s.agents.mu.Lock()
+	s.agents.processes[42] = &runningAgent{port: port, coreAPIKey: "fixture-only", reattached: true}
+	s.agents.mu.Unlock()
+	stop := make(chan struct{})
+	var once sync.Once
+	var mu sync.RWMutex
+	var human *url.URL
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/realtime/audio", s.handleRealtimeAudioProxy)
+	mux.HandleFunc("/human-target", func(w http.ResponseWriter, r *http.Request) {
+		target, err := url.Parse(r.URL.Query().Get("url"))
+		if err != nil || target.Scheme != "http" || target.Hostname() != "127.0.0.1" {
+			http.Error(w, "loopback target required", 400)
+			return
+		}
+		mu.Lock()
+		human = target
+		mu.Unlock()
+		w.WriteHeader(204)
+	})
+	mux.HandleFunc("/human/", func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		target := human
+		mu.RUnlock()
+		if target == nil {
+			http.Error(w, "not configured", 503)
+			return
+		}
+		copy := r.Clone(r.Context())
+		copy.URL.Path = strings.TrimPrefix(copy.URL.Path, "/human")
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		s.serveObservedWebsocketProxy(proxy, w, copy, websocketProxyMetadata{Proxy: "app", App: "telephony", InstallID: 999})
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		var events []TelemetryEvent
+		for _, agentID := range []int64{0, 42} {
+			batch, err := s.store.QueryTelemetry(agentID, "", time.Time{}, 4096)
+			if err != nil {
+				http.Error(w, "read fixture telemetry", 500)
+				return
+			}
+			events = append(events, batch...)
+		}
+		_ = json.NewEncoder(w).Encode(events)
+	})
+	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) { once.Do(func() { close(stop) }); w.WriteHeader(204) })
+	srv := httptest.NewServer(mux)
+	if !strings.HasPrefix(srv.URL, "http://127.0.0.1:") {
+		t.Fatal("loopback only")
+	}
+	if err := os.WriteFile(ready, []byte(srv.URL), 0600); err != nil {
+		t.Fatal(err)
+	}
+	<-stop
+	s.shutdownWebsocketProxies()
+	srv.Close()
+}

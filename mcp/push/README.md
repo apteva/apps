@@ -1,5 +1,17 @@
 # Push
 
+Version 0.3.2 accepts an optional `preview: {title, body}` on a delivery. The
+originating Server includes this only after the recipient enables notification
+previews. Absent previews retain the generic privacy-safe copy. Preview content
+is bounded and sanitized, used for `aps.alert`, and never persisted in relay
+delivery history or emitted in app events. Existing routing, grants and receipt
+semantics are unchanged. No database migration is needed for this update.
+
+Version 0.3.1 accepts generic app `notification` deliveries alongside legacy
+approvals, alerts and reports. Its database migration preserves registered
+devices, encrypted tokens, grants and delivery history. Notification text stays
+generic; clients resolve `instance_ref`, `project_id` and `item_id` after opening.
+
 Push is a small, self-hostable relay between Apteva instances and Apple Push
 Notification service (APNs). It intentionally sends generic notification copy;
 private inbox content remains on the user's Apteva instance.

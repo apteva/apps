@@ -115,27 +115,78 @@ type StoreClassification struct {
 }
 
 type StoreContentRating struct {
-	Violence              string `json:"violence,omitempty"`
-	SexualContent         string `json:"sexual_content,omitempty"`
-	Profanity             string `json:"profanity,omitempty"`
-	Drugs                 string `json:"drugs,omitempty"`
-	GamblingSimulation    string `json:"gambling_simulation,omitempty"`
-	Contests              string `json:"contests,omitempty"`
-	Weapons               string `json:"weapons,omitempty"`
-	HorrorFear            string `json:"horror_fear,omitempty"`
-	MedicalInformation    string `json:"medical_information,omitempty"`
-	HealthWellness        string `json:"health_wellness,omitempty"`
-	MatureThemes          string `json:"mature_themes,omitempty"`
-	UnrestrictedWebAccess bool   `json:"unrestricted_web_access,omitempty"`
-	RealMoneyGambling     bool   `json:"real_money_gambling,omitempty"`
-	LootBoxes             bool   `json:"loot_boxes,omitempty"`
-	Advertising           bool   `json:"advertising,omitempty"`
-	MessagingChat         bool   `json:"messaging_chat,omitempty"`
-	UserGeneratedContent  bool   `json:"user_generated_content,omitempty"`
-	ParentalControls      bool   `json:"parental_controls,omitempty"`
-	AgeAssurance          bool   `json:"age_assurance,omitempty"`
-	SocialMedia           bool   `json:"social_media,omitempty"`
-	SocialMediaAgeGate    bool   `json:"social_media_age_gate,omitempty"`
+	// Violence is retained for legacy documents. Only NONE can be expanded
+	// safely; other legacy answers need the three independent questions.
+	Violence                 string `json:"violence,omitempty"`
+	ViolenceCartoonFantasy   string `json:"violence_cartoon_fantasy,omitempty"`
+	ViolenceRealistic        string `json:"violence_realistic,omitempty"`
+	ViolenceGraphicRealistic string `json:"violence_graphic_realistic,omitempty"`
+	SexualContent            string `json:"sexual_content,omitempty"`
+	SexualContentGraphic     string `json:"sexual_content_graphic,omitempty"`
+	Profanity                string `json:"profanity,omitempty"`
+	Drugs                    string `json:"drugs,omitempty"`
+	GamblingSimulation       string `json:"gambling_simulation,omitempty"`
+	Contests                 string `json:"contests,omitempty"`
+	Weapons                  string `json:"weapons,omitempty"`
+	HorrorFear               string `json:"horror_fear,omitempty"`
+	MedicalInformation       string `json:"medical_information,omitempty"`
+	HealthWellness           bool   `json:"health_wellness,omitempty"`
+	MatureThemes             string `json:"mature_themes,omitempty"`
+	UnrestrictedWebAccess    bool   `json:"unrestricted_web_access,omitempty"`
+	RealMoneyGambling        bool   `json:"real_money_gambling,omitempty"`
+	LootBoxes                bool   `json:"loot_boxes,omitempty"`
+	Advertising              bool   `json:"advertising,omitempty"`
+	MessagingChat            bool   `json:"messaging_chat,omitempty"`
+	UserGeneratedContent     bool   `json:"user_generated_content,omitempty"`
+	ParentalControls         bool   `json:"parental_controls,omitempty"`
+	AgeAssurance             bool   `json:"age_assurance,omitempty"`
+	SocialMedia              bool   `json:"social_media,omitempty"`
+	SocialMediaAgeGate       bool   `json:"social_media_age_gate,omitempty"`
+}
+
+func (rating *StoreContentRating) UnmarshalJSON(data []byte) error {
+	type ratingFields StoreContentRating
+	next := ratingFields(*rating)
+	var wire struct {
+		*ratingFields
+		Health json.RawMessage `json:"health_wellness"`
+	}
+	wire.ratingFields = &next
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Health) > 0 && string(wire.Health) != "null" {
+		if err := json.Unmarshal(wire.Health, &next.HealthWellness); err != nil {
+			var legacy string
+			if json.Unmarshal(wire.Health, &legacy) != nil {
+				return errors.New("content_rating.health_wellness must be a boolean")
+			}
+			switch normalizeAppleRatingLevel(legacy) {
+			case "NONE":
+				next.HealthWellness = false
+			case "INFREQUENT", "FREQUENT":
+				next.HealthWellness = true
+			default:
+				return errors.New("content_rating.health_wellness must be a boolean or a valid legacy rating level")
+			}
+		}
+	}
+	*rating = normalizeStoreContentRating(StoreContentRating(next))
+	return nil
+}
+
+func normalizeStoreContentRating(rating StoreContentRating) StoreContentRating {
+	if normalizeAppleRatingLevel(rating.Violence) == "NONE" {
+		for _, answer := range []*string{&rating.ViolenceCartoonFantasy, &rating.ViolenceRealistic, &rating.ViolenceGraphicRealistic} {
+			if *answer == "" {
+				*answer = "NONE"
+			}
+		}
+	}
+	if normalizeAppleRatingLevel(rating.SexualContent) == "NONE" && rating.SexualContentGraphic == "" {
+		rating.SexualContentGraphic = "NONE"
+	}
+	return rating
 }
 
 type StoreDistribution struct {
@@ -691,7 +742,10 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 				add("category.required", "error", "classification", "", "primary_category", "Primary App Store category is required.", "Select a category.", true)
 			}
 			if !storeContentRatingComplete(doc.Classification.ContentRating) && len(doc.Classification.AgeDeclaration) == 0 {
-				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are required.", "Complete the age-rating questionnaire.", true)
+				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are incomplete or contain older combined answers.", "Answer each violence and graphic-content question separately, or supply exact Apple declaration answers.", true)
+			}
+			if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+				add("age_rating.invalid", "error", "classification", "", "age_declaration", err.Error(), "Correct the Apple age-rating field names, types and allowed values.", true)
 			}
 			if !doc.Privacy.ManualAttestations["apple_privacy_published"] && !providerCommitValidated(cfg, "app_privacy", doc.VersionName) {
 				findings = append(findings, StoreFinding{
@@ -870,19 +924,22 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 		err = fmt.Errorf("unsupported store platform %q", d.TargetKind)
 	}
 	if err != nil {
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", err.Error())
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, googleObservationErrorStatus(cfg.Status, err), "", "", "", err.Error())
 		return nil, nil, err
 	}
 	if len(doc.Testing.Channels) > 0 {
 		testing, testingErr := a.observeDesiredTesting(d, doc)
 		if testingErr != nil {
-			_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", testingErr.Error())
+			_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, googleObservationErrorStatus(cfg.Status, testingErr), "", "", "", testingErr.Error())
 			return nil, nil, testingErr
 		}
 		observed["testing"] = testing
 	}
 	preserveStoreObservationState(observed, cfg.ObservedJSON)
 	observed["observed_at"] = nowUTC()
+	if observation, ok := observed["observation"].(*providerObservation); ok {
+		observed["observed_at"] = observation.CheckedAt
+	}
 	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), "", "", cfg.LastError); err != nil {
 		return nil, nil, err
 	}
@@ -1050,7 +1107,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		if err == nil {
 			value := decodeJSONValue(age)
 			observed["age_rating"] = value
-			readiness["classification"] = readinessCheck(classificationInfoReady && jsonValueHasData(value), "provider", "Category and age-rating declarations were compared with Apple.")
+			readiness["classification"] = readinessCheck(classificationInfoReady && appleAgeDeclarationMatches(age, doc.Classification), "provider", "Category and each requested age-rating answer were compared with Apple.")
 		} else {
 			observed["age_rating_error"] = storeObservationError(err, false, "retry_sync")
 			readiness["classification"] = readinessCheck(false, "provider", "Age-rating declarations could not be read from Apple.")
@@ -1086,7 +1143,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	return observed, nil
 }
 
-func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
+func (a *App) observeGoogleStoreConfigUncached(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
 	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -1095,7 +1152,7 @@ func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *Mo
 	if err != nil {
 		return nil, err
 	}
-	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName})
+	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName, "_deploy_observation": true})
 	if err != nil {
 		return nil, err
 	}
@@ -1336,10 +1393,12 @@ func boolMapValue(values map[string]any, key string) bool {
 }
 
 func storeContentRatingComplete(rating StoreContentRating) bool {
+	rating = normalizeStoreContentRating(rating)
 	for _, value := range []string{
-		rating.Violence, rating.SexualContent, rating.Profanity, rating.Drugs,
+		rating.ViolenceCartoonFantasy, rating.ViolenceRealistic, rating.ViolenceGraphicRealistic,
+		rating.SexualContent, rating.SexualContentGraphic, rating.Profanity, rating.Drugs,
 		rating.GamblingSimulation, rating.Contests, rating.Weapons, rating.HorrorFear,
-		rating.MedicalInformation, rating.HealthWellness, rating.MatureThemes,
+		rating.MedicalInformation, rating.MatureThemes,
 	} {
 		switch strings.ToUpper(strings.TrimSpace(value)) {
 		case "NONE", "INFREQUENT", "FREQUENT", "INFREQUENT_OR_MILD", "FREQUENT_OR_INTENSE":
@@ -1358,13 +1417,18 @@ func appleAgeDeclaration(classification StoreClassification) map[string]any {
 	if !storeContentRatingComplete(classification.ContentRating) {
 		return attributes
 	}
-	rating := classification.ContentRating
+	rating := normalizeStoreContentRating(classification.ContentRating)
+	setDefault := func(key string, value any) {
+		if _, explicit := attributes[key]; !explicit {
+			attributes[key] = value
+		}
+	}
 	for key, value := range map[string]string{
-		"violenceCartoonOrFantasy":                    rating.Violence,
-		"violenceRealistic":                           rating.Violence,
-		"violenceRealisticProlongedGraphicOrSadistic": rating.Violence,
+		"violenceCartoonOrFantasy":                    rating.ViolenceCartoonFantasy,
+		"violenceRealistic":                           rating.ViolenceRealistic,
+		"violenceRealisticProlongedGraphicOrSadistic": rating.ViolenceGraphicRealistic,
 		"sexualContentOrNudity":                       rating.SexualContent,
-		"sexualContentGraphicAndNudity":               rating.SexualContent,
+		"sexualContentGraphicAndNudity":               rating.SexualContentGraphic,
 		"profanityOrCrudeHumor":                       rating.Profanity,
 		"alcoholTobaccoOrDrugUseOrReferences":         rating.Drugs,
 		"gamblingSimulated":                           rating.GamblingSimulation,
@@ -1372,21 +1436,25 @@ func appleAgeDeclaration(classification StoreClassification) map[string]any {
 		"gunsOrOtherWeapons":                          rating.Weapons,
 		"horrorOrFearThemes":                          rating.HorrorFear,
 		"medicalOrTreatmentInformation":               rating.MedicalInformation,
-		"healthOrWellnessTopics":                      rating.HealthWellness,
 		"matureOrSuggestiveThemes":                    rating.MatureThemes,
 	} {
-		attributes[key] = normalizeAppleRatingLevel(value)
+		setDefault(key, normalizeAppleRatingLevel(value))
 	}
-	attributes["unrestrictedWebAccess"] = rating.UnrestrictedWebAccess
-	attributes["gambling"] = rating.RealMoneyGambling
-	attributes["lootBox"] = rating.LootBoxes
-	attributes["advertising"] = rating.Advertising
-	attributes["messagingAndChat"] = rating.MessagingChat
-	attributes["userGeneratedContent"] = rating.UserGeneratedContent
-	attributes["parentalControls"] = rating.ParentalControls
-	attributes["ageAssurance"] = rating.AgeAssurance
-	attributes["socialMedia"] = rating.SocialMedia
-	attributes["socialMediaAgeRestricted"] = rating.SocialMediaAgeGate
+	for key, value := range map[string]bool{
+		"healthOrWellnessTopics":   rating.HealthWellness,
+		"unrestrictedWebAccess":    rating.UnrestrictedWebAccess,
+		"gambling":                 rating.RealMoneyGambling,
+		"lootBox":                  rating.LootBoxes,
+		"advertising":              rating.Advertising,
+		"messagingAndChat":         rating.MessagingChat,
+		"userGeneratedContent":     rating.UserGeneratedContent,
+		"parentalControls":         rating.ParentalControls,
+		"ageAssurance":             rating.AgeAssurance,
+		"socialMedia":              rating.SocialMedia,
+		"socialMediaAgeRestricted": rating.SocialMediaAgeGate,
+	} {
+		setDefault(key, value)
+	}
 	return attributes
 }
 
@@ -1745,6 +1813,11 @@ func (a *App) applyAppleStoreConfigScopes(d *Deployment, doc StoreDocument, scop
 }
 
 func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
+	if scopes.has("classification") {
+		if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+			return nil, err
+		}
+	}
 	bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -1997,8 +2070,11 @@ func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, loca
 func appleVersionLocalizationInput(loc StoreLocalization, includeWhatsNew bool) map[string]any {
 	input := map[string]any{
 		"description": loc.Description, "keywords": strings.Join(loc.Keywords, ","),
-		"marketingUrl": loc.MarketingURL, "promotionalText": loc.PromotionalText,
-		"supportUrl": loc.SupportURL,
+		"promotionalText": loc.PromotionalText, "supportUrl": loc.SupportURL,
+	}
+	// Apple rejects an empty marketingUrl as an invalid URL; omit it instead.
+	if strings.TrimSpace(loc.MarketingURL) != "" {
+		input["marketingUrl"] = strings.TrimSpace(loc.MarketingURL)
 	}
 	if includeWhatsNew && strings.TrimSpace(loc.WhatsNew) != "" {
 		input["whatsNew"] = loc.WhatsNew
@@ -2042,6 +2118,11 @@ func (a *App) applyAppleReviewDetail(bound *sdk.BoundIntegration, versionID stri
 }
 
 func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc StoreDocument, scopes storeScopeSet) error {
+	if scopes.has("classification") {
+		if err := validateAppleAgeDeclaration(appleAgeDeclaration(doc.Classification)); err != nil {
+			return err
+		}
+	}
 	if !scopes.any("localizations", "classification", "privacy", "distribution", "compliance") {
 		return nil
 	}
@@ -2471,6 +2552,11 @@ func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deplo
 }
 
 func uploadGooglePlayImage(bound *sdk.BoundIntegration, packageName, editID, locale, imageType, path string) (json.RawMessage, error) {
+	if c := googlePlayCoordinatorForContext(); c != nil {
+		if err := c.before(bound.ConnectionID); err != nil {
+			return nil, err
+		}
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -2508,7 +2594,7 @@ func uploadGooglePlayImage(bound *sdk.BoundIntegration, packageName, editID, loc
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("Google Play image upload returned HTTP %d: %s", resp.StatusCode, truncateString(string(raw), 800))
+			return nil, googlePlayHTTPError(bound, "upload_listing_image", resp.StatusCode, resp.Header, json.RawMessage(raw))
 		}
 		return raw, nil
 	}
@@ -2684,7 +2770,9 @@ func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
 	if meta.AppStoreVersionID == "" {
 		return nil, errors.New("release has no App Store version id")
 	}
-	if rel.ExternalStatus != "pending_apple_release" && rel.ExternalStatus != "approved_pending_release" {
+	// Pending Apple Release is an Apple-held release, not a manual developer release.
+	// Legacy aliases must be synced to refresh Apple's actual state first.
+	if rel.ExternalStatus != "pending_developer_release" {
 		return nil, fmt.Errorf("App Store version is not waiting for manual release (state=%s)", rel.ExternalStatus)
 	}
 	bound, err := selectedIntegration("app_store", releaseBindingConfig(&meta))
@@ -2695,6 +2783,8 @@ func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
 		return nil, err
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_status": "release_requested"})
+	// Apple's answer changes soon after a release request; don't wait out a long interval.
+	restartReleaseSync(globalCtx.AppDB(), rel.ID)
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "manual_release_requested", mustJSON(map[string]any{"version_id": meta.AppStoreVersionID}))
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }

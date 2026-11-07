@@ -54,7 +54,7 @@ func TestSessionPolicyDistinguishesRegularAndContinuous(t *testing.T) {
 		t.Fatalf("equity session violation = %#v", v)
 	}
 	crypto := defaultVenueProfile("simulation", "crypto")
-	if v := validateExecutionOrderAt(crypto, defaultInstrument("BTC-USD", "crypto", "binance", closed), &Mark{Source: "binance-public"}, 1, 200, closed); v != nil {
+	if v := validateExecutionOrderAt(crypto, defaultInstrument("BTC-USD", "crypto", coinbasePublicSource, closed), &Mark{Source: coinbasePublicSource}, 1, 200, closed); v != nil {
 		t.Fatalf("24x7 crypto rejected: %#v", v)
 	}
 }

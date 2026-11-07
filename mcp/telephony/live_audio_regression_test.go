@@ -59,7 +59,7 @@ func TestLiveAudioDurationAgeAndExactDropAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = p.audioSnapshot()
-	if s.StaleBytes != 960 || s.SentBytes != 960 || s.EnqueuedBytes != s.StaleBytes+s.SentBytes+s.OverflowBytes+s.FlushedBytes {
+	if s.StaleBytes != 960 || s.WriteTimeoutBytes != 0 || s.SentBytes != 960 || s.EnqueuedBytes != s.WriteTimeoutBytes+s.StaleBytes+s.SentBytes+s.OverflowBytes+s.FlushedBytes {
 		t.Fatalf("accounting: %+v", s)
 	}
 }
@@ -103,13 +103,17 @@ func TestLiveAudioBlockedPeerDoesNotBlockHoldOrOtherDirection(t *testing.T) {
 	if len(browser.audio) != 0 || len(writer.audio) != 0 {
 		t.Fatal("hold did not flush both directions")
 	}
+	deadline := time.Now().Add(time.Second)
+	for writer.audioSnapshot().WriteErrors == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s := writer.audioSnapshot(); s.WriteErrors != 1 || s.WriteTimeoutDrops != 1 || s.WriteTimeoutBytes != 960 || s.StaleBytes != 0 || s.FailedBytes != 0 {
+		t.Fatalf("missing bounded, unsent stale write diagnostic: %+v", s)
+	}
 	select {
 	case <-writer.done:
-	case <-time.After(time.Second):
-		t.Fatal("wedged audio write exceeded deadline")
-	}
-	if writer.audioSnapshot().WriteErrors != 1 {
-		t.Fatal("missing stalled write diagnostic")
+		t.Fatal("an entirely unsent expired frame closed the media socket")
+	default:
 	}
 }
 

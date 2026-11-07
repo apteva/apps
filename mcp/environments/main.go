@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.10
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.10 adds server-owned manual clocks, dated fixtures, clock inspection, and snapshot restore.
+version: 0.7.15
+description: Isolated environments with reliable voice finalization evidence, bounded silent connections, and unpaused simulated callers.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -68,6 +68,7 @@ provides:
     - { name: snapshot.created, description: "A reusable environment snapshot was captured." }
     - { name: environment.voice_call.started, description: "A simulated realtime voice call started." }
     - { name: environment.voice_call.progress, description: "A simulated voice call produced additional transcript turns." }
+    - { name: environment.voice_call.cancelled, description: "An operator-cancelled operation finished bounded cleanup." }
     - { name: environment.voice_call.completed, description: "A simulated realtime voice call completed." }
     - { name: environment.voice_call.invalid, description: "A simulated voice call did not produce a valid two-sided conversation." }
     - { name: environment.voice_call.failed, description: "A simulated realtime voice call failed." }
@@ -75,7 +76,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.10, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.15, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

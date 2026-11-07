@@ -40,7 +40,7 @@ import (
 
 const (
 	transferTimeout     = 2 * time.Hour
-	responseHeaderLimit = 30 * time.Second
+	responseHeaderLimit = transferTimeout
 	maxManifestBytes    = 4 << 20
 )
 
@@ -85,7 +85,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		if err := prepareScope(ctx, &scope); err != nil {
 			return nil, err
 		}
-		return enqueueInstanceRun(ctx, dest, policy, scope)
+		return enqueueInteractiveRun(ctx, dest, policy, scope)
 	}
 	run := &Run{
 		DestinationID:   dest.ID,
@@ -143,6 +143,14 @@ func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, p
 	}
 
 	// 2) Stream snapshot to a temp file, hashing as we go.
+	if err := requireDiskSpace(os.TempDir(), 0); err != nil {
+		return finish("failed", err.Error(), 0, "", "", "", false)
+	}
+	if backupPassphrase(ctx) != "" {
+		if err := requireEncryptionMemory(); err != nil {
+			return finish("failed", err.Error(), 0, "", "", "", false)
+		}
+	}
 	tmp, err := os.CreateTemp("", "apteva-snapshot-*.tar.gz")
 	if err != nil {
 		return finish("failed", "tempfile: "+err.Error(), 0, "", "", "", false)
@@ -151,13 +159,18 @@ func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, p
 	defer os.Remove(tmpPath)
 
 	hash := sha256.New()
+	archiveLimit := int64(1 << 40)
+	if scope.Kind == "platform" {
+		archiveLimit = platformArchiveLimit
+	}
+	sink := &archiveDiskWriter{ctx: opCtx, out: io.MultiWriter(tmp, hash), path: filepath.Dir(tmpPath), remaining: archiveLimit}
 	_ = dbUpdateRunStage(ctx.AppDB(), id, "snapshotting")
 	var written int64
 	var providerManifest string
 	if scope.Kind == "instance" {
-		written, err = streamInstanceSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), run)
+		written, err = streamInstanceSnapshot(opCtx, ctx, sink, run)
 	} else {
-		written, providerManifest, err = writeSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), scope)
+		written, providerManifest, err = writeSnapshot(opCtx, ctx, sink, scope)
 	}
 	if errClose := tmp.Close(); err == nil {
 		err = errClose
@@ -170,7 +183,7 @@ func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, p
 	// 3) Crack the tar to extract manifest.json — useful for forensic
 	// diffs across runs ("which install was added between these two?").
 	_ = dbUpdateRunStage(ctx.AppDB(), id, "validating")
-	manifestJSON, err := validateSnapshotArchive(tmpPath)
+	manifestJSON, err := validateSnapshotArchiveContext(opCtx, tmpPath, scope.Kind == "platform")
 	if err != nil {
 		return finish("failed", "validate snapshot: "+err.Error(), written, sha, "", "", false)
 	}
@@ -246,7 +259,7 @@ func streamSnapshot(ctx context.Context, appCtx *sdk.AppCtx, dst io.Writer) (int
 		return 0, normalizePlatformBackupError(err)
 	}
 	defer reader.Close()
-	return io.Copy(dst, reader)
+	return io.Copy(dst, contextReader{ctx: ctx, r: reader})
 }
 
 func writeSnapshot(opCtx context.Context, ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
@@ -293,7 +306,7 @@ func streamProviderSnapshot(opCtx context.Context, ctx *sdk.AppCtx, dst io.Write
 		args["tenant_id"] = scope.ID
 	}
 	var resp providerSnapshotResponse
-	if err := ctx.PlatformAPI().CallAppResult(scope.SourceApp, tool, args, &resp); err != nil {
+	if err := sdk.CallAppResultContext(opCtx, ctx.PlatformAPI(), scope.SourceApp, tool, args, &resp); err != nil {
 		return 0, "", fmt.Errorf("%s.%s: %w", scope.SourceApp, tool, err)
 	}
 	manifest := ""
@@ -376,18 +389,36 @@ func providerRestoreTool(scope Scope) (string, error) {
 // alone only proves stored bytes were unchanged; this pass proves those bytes
 // are structurally restorable before a run is marked successful.
 func validateSnapshotArchive(path string) (string, error) {
+	return validateSnapshotArchiveContext(context.Background(), path, false)
+}
+func validateSnapshotArchiveContext(ctx context.Context, path string, platform bool) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if platform && info.Size() > platformArchiveLimit {
+		return "", fmt.Errorf("snapshot exceeds compressed restore limit")
+	}
+	gz, err := gzip.NewReader(contextReader{ctx: ctx, r: f})
 	if err != nil {
 		return "", err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	streamLimit := int64(1<<40) + int64(2000000)*8192 + (1 << 20)
+	if platform {
+		streamLimit = platformExpandedLimit + int64(platformEntryLimit)*8192 + (1 << 20)
+	}
+	expandedStream := &io.LimitedReader{R: gz, N: streamLimit + 1}
+	tr := tar.NewReader(expandedStream)
 	manifest := ""
+	var expanded, maxEntry int64
+	entries := 0
+	seen := map[string]bool{}
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -396,6 +427,21 @@ func validateSnapshotArchive(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		entries++
+		if h.Size < 0 || h.Size > (1<<40)-expanded || entries > 2000000 {
+			return "", fmt.Errorf("snapshot exceeds archive limits")
+		}
+		expanded += h.Size
+		if platform && (entries > platformEntryLimit || expanded > platformExpandedLimit || h.Size > platformFileLimit) {
+			return "", fmt.Errorf("snapshot exceeds platform restore limits")
+		}
+		if h.Size > maxEntry {
+			maxEntry = h.Size
+		}
+		if seen[h.Name] {
+			return "", fmt.Errorf("duplicate snapshot entry %s", h.Name)
+		}
+		seen[h.Name] = true
 		if h.Name != "manifest.json" {
 			continue
 		}
@@ -414,11 +460,17 @@ func validateSnapshotArchive(path string) (string, error) {
 		}
 		manifest = string(bs)
 	}
-	if _, err := io.Copy(io.Discard, gz); err != nil {
+	if _, err := io.Copy(io.Discard, expandedStream); err != nil {
 		return "", fmt.Errorf("gzip trailer: %w", err)
+	}
+	if expandedStream.N == 0 {
+		return "", fmt.Errorf("snapshot expanded stream exceeds limits")
 	}
 	if manifest == "" {
 		return "", errors.New("snapshot missing manifest.json")
+	}
+	if platform && (entries > platformEntryLimit || expanded > platformExpandedLimit || maxEntry > platformFileLimit) {
+		return "", fmt.Errorf("snapshot exceeds platform restore limits")
 	}
 	return manifest, nil
 }

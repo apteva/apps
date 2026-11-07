@@ -42,18 +42,15 @@ func reconcileBackoff(failures int) time.Duration {
 	return delay
 }
 
-func reconcileBlocked(d *Definition, now time.Time) bool {
-	if d == nil {
-		return false
-	}
-	if d.ReconcileStatus == "degraded" {
+func reconcileBlocked(status string, nextAt *time.Time, now time.Time) bool {
+	if status == "degraded" {
 		return true
 	}
-	return d.ReconcileNextAt != nil && now.Before(*d.ReconcileNextAt)
+	return nextAt != nil && now.Before(*nextAt)
 }
 
 func (s *service) recordReconcileFailure(id, message string, threshold int) error {
-	d, err := s.db.getDefinition(id)
+	d, err := s.db.getDefinitionLifecycle(id)
 	if err != nil || d == nil {
 		return err
 	}

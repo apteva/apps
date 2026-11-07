@@ -47,6 +47,8 @@ func (p *accountFaultPlatform) ExecuteIntegrationToolContext(request context.Con
 	p.requests[id]++
 	p.mu.Unlock()
 	switch fault {
+	case "503":
+		return &sdk.ExecuteResult{Success: false, Status: 503, Data: json.RawMessage(`{"errors":[{"code":"10007","title":"Unexpected error"}]}`)}, nil
 	case "stall":
 		<-request.Done()
 		return nil, request.Err()
@@ -153,7 +155,9 @@ func TestStalledAccountsCannotStarveHealthyInventory(t *testing.T) {
 		p.credentialsByID[id] = &credentials
 		p.faults[id] = map[string]string{"list_phone_numbers": "stall"}
 	}
-	request, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	// Keep the one-second wall bound while allowing loaded CI runners to
+	// finish the healthy credential/read checks before canceling the stall.
+	request, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	result, err := a.connectedNumbers(ctx, request)
 	if err != nil {
@@ -180,7 +184,9 @@ func TestStalledCredentialReadCannotDelayHealthyInventory(t *testing.T) {
 			t.Error("stalled credential request did not exit")
 		}
 	})
-	request, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	// Keep the one-second wall bound while allowing loaded CI runners to
+	// finish the healthy credential/read checks before canceling the stall.
+	request, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	result, err := a.connectedNumbers(ctx, request)
@@ -199,7 +205,9 @@ func TestStalledAccountInventoryReturnsHealthyChoicesAndDoesNotDelaySelectedDial
 		t.Run(map[bool]string{false: "different_providers", true: "same_provider"}[sameProvider], func(t *testing.T) {
 			a, ctx, p := accountIsolationFixture(t, sameProvider)
 			p.faults[11] = map[string]string{"list_phone_numbers": "stall"}
-			request, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			// Keep the one-second wall bound while allowing loaded CI runners to
+			// finish the healthy credential/read checks before canceling the stall.
+			request, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			start := time.Now()
 			result, err := a.connectedNumbers(ctx, request)

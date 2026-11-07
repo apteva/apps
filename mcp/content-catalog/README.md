@@ -1,5 +1,329 @@
 # Content Catalog
 
+## Version 0.6.13 — Catalog display titles
+
+Assets support an optional human-readable `title` in Catalog. Cards, details,
+playback labels, tag editing and publication asset choices use it as the
+heading. Cards reserve two lines for the title and show the source filename
+underneath. An empty title uses the source filename as the heading.
+
+Edit a title through **Edit title / labels** in asset details, or call
+`content_catalog_assets_labels_update` with one `asset_ids` entry, `title`
+and `expected_revisions`. Titles are trimmed, limited to 300 characters and
+saved with a revision check. Empty `title` clears it. Omitting it preserves
+the current value, including during bulk tag edits.
+
+Asset detail, session list and search responses include `title`. The existing
+`name` field contains the source filename. Both fields are searchable,
+including title matches beyond the first candidate page. Session name sorting
+follows the displayed title. Titles live in Catalog and can be copied from an
+existing Media title through an explicit edit.
+
+## Version 0.6.12: per-asset tag editing
+
+Asset cards in session grids, grouped outputs and search results expose **Edit
+tags**. Asset details offer the same action. The tag editor shows every saved
+tag as a removable chip and accepts comma-separated additions, including
+namespaced tags such as `review:hold`. Saving includes the asset's expected
+revision. A conflict offers an explicit reload before retrying.
+
+`content_catalog_assets_labels_update` supports `tags_add` and `tags_remove`
+alongside its existing `tags` replacement field. Supply one Catalog asset ID
+in `asset_ids` for a single-asset edit, or up to 100 for an atomic bulk edit.
+Delta edits preserve unrelated tags. Adding an existing tag or removing a
+missing tag is harmless. A tag cannot be both added and removed in one call,
+and delta fields cannot be combined with `tags`. The final tag set remains
+limited to 25 normalized tags. The response includes saved tags and revisions.
+
+Read the asset with `content_catalog_assets_get` first, then supply
+`expected_revisions` from that result. To remove one hold tag while keeping
+the other tags, call the label-update tool with the following arguments.
+
+```json
+{
+  "asset_ids": ["<catalog-asset-id>"],
+  "expected_revisions": {"<catalog-asset-id>": 7},
+  "tags_remove": ["review:hold"]
+}
+```
+
+Tags remain generic Catalog metadata. Editorial review rationale continues to
+live in Editorial.
+
+## Version 0.6.11: delivery verification receipts
+
+`content_catalog_hosting_check` now verifies delivery after the provider reports
+ready and stores a durable receipt on the hosting record. Provider readiness
+(`status`) and delivery verification (`delivery_status`) are separate:
+
+- `delivery_status`: `pending`, `verified` or `failed`, with `delivery_reason`
+  and `delivery_verified_at`.
+- `delivery.source`: Storage file ID, the hash recorded at upload
+  (`hosted_sha256`), Storage's current verified hash, Media's source hash and
+  `hash_match` (`verified`, `mismatch`, `unavailable`). Bunny's `originalHash`,
+  when present, is recorded as `provider_hash`; it counts only as an exact SHA-256
+  match, otherwise it is `unrecognized` or `unavailable` and never fails delivery.
+- `delivery.destination`: provider, connection, library, collection, video ID,
+  GUID/library/collection confirmation and provider stage.
+- `delivery.duration`: Media `source_ms`, provider whole-second
+  `provider_seconds`, `difference_ms`, the part explained by provider rounding
+  (`provider_rounding_ms`, up to 1000 ms), the remaining audio/container
+  difference (`container_difference_ms`) and `tolerance_ms` (1500 ms).
+- `warnings`, `checked_at`, `verified_at`, `next_check_at`.
+
+Delivery is **verified** only when the hosted source hash equals Storage's
+current verified master hash, the provider confirms the video ID and library,
+and Media's duration for the same source hash is within tolerance of the
+provider length. A replaced master (`source_hash_mismatch`), a length outside
+tolerance (`duration_mismatch`) or a provider failure (`provider_failed`) is
+**failed**. Missing evidence stays **pending** with a specific reason:
+`provider_processing`, `provider_identity_unconfirmed`,
+`provider_library_unconfirmed`, `storage_checksum_unavailable`,
+`storage_checksum_<status>`, `hosted_source_hash_unknown`,
+`provider_duration_unavailable`, `media_not_bound`,
+`source_timing_unavailable` or `source_timing_not_hash_bound`.
+
+The background checker retries pending delivery for ready videos with backoff
+(up to 20 attempts; `media_not_bound` is not retried). Network failures leave
+delivery pending. Checks only read Storage, Media and the provider's video
+record: they never upload, re-fetch or read player pages or the CDN. Linking an
+existing Bunny video queues a delivery check. Historical hosting records keep
+their data and stay `pending` / `not_checked` until someone runs
+`content_catalog_hosting_check`; they are not swept automatically. Card
+summaries include `delivery_status`.
+
+SOP: after hosting, call `content_catalog_hosting_check` (or read
+`content_catalog_hosting_list`) and act on `delivery_status`. Report `verified`
+with the receipt, stop and report `failed` with its reason, and treat `pending`
+as "Catalog is still checking". Do not re-request hosting or compare durations
+yourself.
+
+## Version 0.6.10: exact asset ID on session lists
+
+`content_catalog_assets_list` and HTTP `GET /assets` now honor optional `id` as
+an exact **Catalog asset ID**, within the required `session_id`. The filter is
+applied before ordering/limits and combined with project, lifecycle and purpose
+visibility. Results contain zero or one asset. An unknown ID, a different
+session/project, or a visibility exclusion never falls back to a whole-session
+list. Explicit empty/non-string IDs fail; repeated HTTP `id` parameters fail.
+Omitting `id` retains the normal session listing.
+
+For individual inspection, especially when the session is unknown or an asset
+is archived/intermediate, workers should call `content_catalog_assets_get` with
+its Catalog `id`. Always verify the returned asset ID before downstream action;
+a filtered empty list is not an instruction to use the first session asset.
+Storage file IDs are a different namespace. Read-only MCP annotations remain
+unchanged. No business records, files, SOPs or publishing Actors are changed.
+
+## Version 0.6.9: provider-neutral publication audiences
+
+Existing shared posts now have `audience_type` (`public`, `restricted`, `private`,
+`unknown`), optional provider `access_policy` (e.g. `membership`), `group_scope`
+(`all_eligible`, `selected`, `unknown`), provider `group_ids` and optional
+`group_labels`. Selected groups require distinct IDs; the other scopes have no
+ID list. Policies and groups require a restricted audience and a stable platform
+account. Group labels are caller-supplied provider names, never business presets.
+Existing free-text `audience` is preserved as a legacy note; migration never
+infers structured access from it or from asset intent, filenames or prices.
+
+Both single-asset and multi-asset record tools accept these fields. An optional
+`publisher_ref` (`app`, `install_id`, `record_id`) preserves the publisher's native
+reference alongside `evidence_source`, external ID and link. Catalog does not
+fetch provider data, scan folders, upload, publish, or automatically reconcile
+historical assets.
+
+Post lists also accept exact `external_post_id` with platform and account, so
+workers can read the canonical record/revision before a correction.
+
+New imports with a nonempty platform, account and external post ID reconcile by
+that exact project-scoped identity. Identical imports return `unchanged=true`
+without duplicate records or audit events. Audience corrections require
+`expected_revision`; verified audience corrections also require explicit new
+`evidence_source`. Historically verified post membership and known external identity
+remain immutable. Missing native/account identity may be filled explicitly with
+a revision guard and new verification evidence; it is never inferred. Legacy duplicate identities stay intact and ambiguous imports
+fail for review rather than silently merging or selecting one. Posts without a
+complete external identity retain the existing explicit create/update behavior.
+
+`actual_at` can be empty even for `verified_published` when the original publication
+time is unknown. Verified state still requires a native ID/link and evidence.
+`observed_at` is separate and defaults to the current verification time for a new
+observed outcome; callers may supply a known RFC3339 observation time. Never use
+an upload date, screenshot capture date or observation time as publication time.
+Editing audience in the UI preserves the exact existing publication date.
+
+`content_catalog_search`, `content_catalog_posts_list` and
+`content_catalog_asset_publications_list` accept exact `destination`,
+`account_ref`, `audience_type`, `access_policy`, `group_scope`, and `group_id`
+filters. Policy/group filters require platform and account; group IDs belong to
+that account. Confirmed `all_eligible` covers any eligible provider group in the
+account; selected coverage matches only explicit IDs; unknown never proves group
+coverage. `never_used`, `not_published` and `ready_to_publish` use the same target.
+Public sharing does not satisfy restricted sharing, and another platform/account
+never satisfies this one. Unknown compatible account/audience/group scope blocks
+**automatic readiness** instead of guessing that an asset is safely unshared.
+
+Verified search/availability checks match historical **audience snapshots**, not
+just a post's current audience. Publication changes therefore cannot reassign old
+Public evidence to Members or erase earlier verified use. The compact `uses`
+summary and `publications` expose audience, publisher reference, observation time
+and recorded/verified scope history (`recorded_audiences` / `verified_audiences`). Membership and history lookups are batched for search
+and publication-list pages. Lists use `limit` (1–200) and `cursor`; follow nonempty
+`next_cursor` with unchanged filters. `/posts/<id>` and MCP `posts_get` return the
+post revision plus latest 100 before/after audit snapshots, observation time and
+recording time. Historical events without audience evidence remain unknown.
+
+Cards show clickable platform/audience/status badges. Details show native IDs,
+external links, account, provider group labels/IDs, publisher reference, evidence,
+unknown publication dates, observation dates and audience history. The session
+filter modal and global search expose audience and account group filters. Post
+forms support the same structured fields and explicitly allow unknown dates.
+Content approval, suitability rating, lifecycle, favorites, tags and Patreon
+intent remain independent.
+
+## Version 0.6.8: guarded source corrections
+
+`content_catalog_assets_link_source` now returns `status=inserted`, `unchanged`
+(identical saved edge), or `conflict` with `linked=false`. A conflict is not a
+successful link or correction. The response includes the actual saved source
+list and child revision. Inserted links advance the child revision and retain
+before/after evidence; identical links and conflicts do not change it.
+
+Use `content_catalog_assets_sources_replace` for explicit corrections or removal:
+
+```json
+{
+  "child_asset_id": "<child Catalog ID>",
+  "expected_revision": 3,
+  "expected_sources": [
+    {"asset_id": "<parent ID>", "relation": "derived_from", "source_order": 0, "media_render_id": 123}
+  ],
+  "sources": [
+    {"asset_id": "<parent ID>", "relation": "cropped", "source_order": 0, "media_render_id": 123}
+  ],
+  "idempotency_key": "<stable key for this exact correction>",
+  "reason": "Correct the recorded immediate crop parent"
+}
+```
+
+Read the child's revision and complete immediate source list first. Supply all
+four edge fields explicitly; extra readback display fields are ignored. Edge
+comparison is independent of array order. `sources=[]` removes all immediate
+links. The operation validates child/parent ownership, prevents self-links and
+cycles, checks both concurrency guards, replaces the entire list, increments the
+revision only when changed, and saves the before/after evidence in one SQLite
+transaction. Lineage writers acquire the database writer lock before inspecting
+the graph, so concurrent edits cannot jointly create a cycle.
+
+Reuse the identical arguments and key after an uncertain response: successful
+retries do not increment revisions or duplicate audit events. Reusing a key for
+another request fails. If lineage changed after a saved operation, a replay
+fails explicitly instead of pretending the saved state is current. A new key
+with an old revision or stale source list also fails. The result reports the
+actual saved `sources`, `revision`, `status`, `audit_event_id`, and `replayed`.
+Asset detail exposes project-scoped `source_history`, including before/after
+edges, revisions, reason, operation key and time (latest 100 events).
+
+Only Catalog relationships change. Storage files, render IDs, Media metadata,
+lifecycle, review, hosting and publication records remain intact. Source assets
+may be archived or intermediate: their provenance remains readable. This tool
+does not authorize processing those sources or bypass eligibility safeguards.
+
+## Version 0.6.7: content purpose and hidden provenance
+
+Assets have an explicit `role`: `unspecified`, `main`, `derivative`, or
+`intermediate`, independent of their source links, media type, review and
+lifecycle. A cleaned master can be Main and keep its archived original as a
+source. Existing records default to Unclassified; migration does not infer roles,
+classify historical files, or rewrite business records. Optional `output_type`
+is a generic lowercase category token, such as reel, screenshot, portrait or
+trailer. Categories drive the grouped card counts; unspecified categories show
+media kinds instead of guessing from filenames.
+
+The asset modal and bulk editor set purpose/category through
+`content_catalog_assets_labels_update`, with required expected revisions for
+purpose changes. Updates are transactional, append purpose audit events and
+preserve files, source links, hosting and publications. Stale batches fail with
+no partial changes. Exact source search, global search, asset lists and session
+reads accept `role`, `output_type` and `include_intermediates` (default false).
+An explicit `role=intermediate` also enables inspection of that role. Lifecycle
+remains independent: seeing intermediates does not expose archived cards.
+
+Default cards and agent selection exclude intermediates. Direct reads expose
+them and their provenance; eligibility is false and new hosting/publication
+requests reject them. Recorded hosting checks and historical reads remain
+available. Descendant and ancestor traversal still follows intermediates and
+archived ancestors; only result cards are filtered. This changes Catalog only.
+Media is unchanged, and Catalog cannot intercept direct calls to other apps.
+
+**Grouped by main** is the default for browsers without a saved display choice.
+It follows project-scoped recorded ancestry through hidden or archived context
+nodes to a visible main asset, returning each selected output once. Main assets
+stay roots even when they have parents. Context never becomes a card or counts
+as an output. Main-only filtering keeps the selected main's outputs accessible.
+Grid and search also guard lifecycle before rendering to avoid stale archived
+cards after changing scope. Archive/All and intermediate inspection are explicit.
+
+An asset's `ancestors` array contains thin provenance nodes (identity, purpose,
+category, lifecycle and source links), batched across the page. These nodes are
+context only, not extra content results. The original `sources` are unchanged.
+
+For the reported collection, assign the eight masters Main, the four supporting
+frames Intermediate, and the 104 selected outputs Derivative with their output
+categories. The result is eight main cards, each with 3 reels, 5 screenshots and
+5 portraits. These counts are data-driven; they are not coded into the app.
+
+
+## Version 0.6.6: exact source search
+
+`content_catalog_search` and HTTP `/search` accept `source_asset_id` (an exact
+Catalog asset ID) and optional boolean `include_descendants`, default false.
+Direct mode returns assets whose recorded sources include that ID. Descendant
+mode follows recorded links through all intermediate assets in the same project.
+The source itself is excluded. Each result appears once with its source links;
+filenames and descriptions never establish ancestry. Unknown or inaccessible
+source IDs fail explicitly. Descendant mode requires a source ID.
+
+These are asset filters: use `entity_type=assets` (or `all`, which returns only
+asset matches for this query). Existing brand, session, date, lifecycle, review,
+text and publication filters continue to apply to returned assets before
+pagination. Intermediate nodes are not restricted by result filters; for
+example an image query can traverse a video intermediate, and active crops can
+still be inspected when a parent has been archived. Active remains the default
+lifecycle for returned assets and their sessions.
+
+### Generic planning workflow
+
+1. Resolve the source's exact Catalog ID; do not identify its images by filename.
+2. Search with `source_asset_id`, `kind=image`, and the required review/lifecycle
+   filters. Enable descendants when linked crops or other nested outputs are needed.
+3. Collect every page: a nonempty `assets.next_cursor` means more matches remain.
+   Pass that value as `cursors.assets` with the same filters until no cursor is
+   returned. The limit of 100 is a page size, never an inventory count.
+4. Exclude published or otherwise unavailable assets using recorded publication
+   evidence, then check the planning app's reservations separately. Catalog
+   publication filters cannot see reservations stored only in Editorial or
+   another planner. Treat related crops of a reserved frame as the same moment.
+5. Recheck Catalog eligibility before processing or publishing selected assets.
+   Missing lineage or failed searches are uncertainty, not proof of exhaustion.
+
+Example (replace the source ID with the selected source):
+
+```json
+{
+  "entity_type": "assets",
+  "source_asset_id": "<catalog-source-id>",
+  "include_descendants": true,
+  "kind": "image",
+  "review_status": "approved",
+  "lifecycle": "active",
+  "limit": 100
+}
+```
+
+This release adds a source lookup index and read-only search behavior. It does
+not create source links, scan folders, reserve assets, or change other apps.
+
 ## Version 0.6.5: session hosting tool discovery
 
 The read-only hosting list advertises both asset and session queries with an

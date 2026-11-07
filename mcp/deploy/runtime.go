@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,16 +36,19 @@ type Runtime interface {
 }
 
 type ReleaseSpec struct {
-	Activated    <-chan struct{}
-	ReleaseID    int64
-	DeploymentID int64
-	Name         string // for log/process labels
-	Framework    string // 'go' | 'node' | 'bun' | 'static' | 'blank'
-	ArtifactDir  string // /data/builds/<id>/dist/
-	Entrypoint   string // relative path within ArtifactDir; "" = static FileServer
-	StartCmd     string // override; if non-empty wins over framework default
-	Port         int    // assigned port
-	Env          map[string]string
+	Activated          <-chan struct{}
+	ReleaseID          int64
+	DeploymentID       int64
+	EnvironmentID      int64
+	PreviousStaticRoot string // seed assets from a release launched before delivery caching existed
+	PreviousReleaseID  int64
+	Name               string // for log/process labels
+	Framework          string // 'go' | 'node' | 'bun' | 'static' | 'blank'
+	ArtifactDir        string // /data/builds/<id>/dist/
+	Entrypoint         string // relative path within ArtifactDir; "" = static FileServer
+	StartCmd           string // override; if non-empty wins over framework default
+	Port               int    // assigned port
+	Env                map[string]string
 }
 
 // RunningRelease is the supervisor's view of a live process. The
@@ -138,11 +140,28 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 		logF.Close()
 		return nil, fmt.Errorf("locate self for static-server re-exec: %w", err)
 	}
+	assetCache := ""
+	if spec.DeploymentID > 0 {
+		assetCache = filepath.Join(r.dataDir, "static-assets", fmt.Sprint(spec.DeploymentID), fmt.Sprint(spec.EnvironmentID))
+		if spec.PreviousStaticRoot != "" && spec.PreviousReleaseID > 0 {
+			if err := retainStaticAssets(spec.PreviousStaticRoot, assetCache, spec.PreviousReleaseID, time.Now()); err != nil {
+				logF.Close()
+				return nil, fmt.Errorf("retain previous static assets: %w", err)
+			}
+		}
+		if err := retainStaticAssets(root, assetCache, spec.ReleaseID, time.Now()); err != nil {
+			logF.Close()
+			return nil, fmt.Errorf("retain static assets: %w", err)
+		}
+	}
 	args := []string{
 		"--static-server",
 		"--port", strconv.Itoa(spec.Port),
 		"--root", root,
 		"--log-path", logPath,
+	}
+	if assetCache != "" {
+		args = append(args, "--asset-cache", assetCache)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, self, args...)
@@ -394,55 +413,6 @@ func resolveCommand(spec ReleaseSpec) (string, []string, error) {
 		return "", nil, errors.New("blank framework requires start_cmd")
 	default:
 		return "", nil, fmt.Errorf("no default start command for framework %q", spec.Framework)
-	}
-}
-
-// staticHandler serves files from root, with a SPA-friendly miss
-// policy: 404.html (status 404) wins if present, else index.html
-// (status 200, the SPA fallback so client routers see the URL), else
-// real 404. No config needed — matches the GitHub Pages / Netlify
-// convention. A multipage site that wants real 404s ships a 404.html.
-func staticHandler(root string) http.HandlerFunc {
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		absRoot = root
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Clean prefixed with "/" to neutralise traversal via encoded
-		// "..". HasPrefix check is the standard belt-and-braces guard
-		// that http.FileServer uses internally.
-		clean := filepath.Clean("/" + r.URL.Path)
-		p := filepath.Join(absRoot, clean)
-		if !strings.HasPrefix(p, absRoot) {
-			http.NotFound(w, r)
-			return
-		}
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			http.ServeFile(w, r, p)
-			return
-		}
-		// Directory request: prefer the directory's index.html (normal
-		// static behavior) before falling back to root fallbacks.
-		if info, err := os.Stat(p); err == nil && info.IsDir() {
-			if dirIndex := filepath.Join(p, "index.html"); fileExists(dirIndex) {
-				http.ServeFile(w, r, dirIndex)
-				return
-			}
-		}
-		if notFoundPage := filepath.Join(absRoot, "404.html"); fileExists(notFoundPage) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusNotFound)
-			body, err := os.ReadFile(notFoundPage)
-			if err == nil {
-				_, _ = w.Write(body)
-			}
-			return
-		}
-		if indexPage := filepath.Join(absRoot, "index.html"); fileExists(indexPage) {
-			http.ServeFile(w, r, indexPage)
-			return
-		}
-		http.NotFound(w, r)
 	}
 }
 

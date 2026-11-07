@@ -247,15 +247,17 @@ func setRecipients(db *sql.DB, projectID string, envelopeID int64, specs []map[s
 		if p.Role != "signer" && p.Role != "approver" {
 			return nil, fmt.Errorf("recipients[%d].role must be signer or approver", i)
 		}
-		if p.Order < 1 || orders[p.Order] {
-			return nil, errors.New("signing_order values must be unique positive integers")
+		if p.Order < 1 {
+			return nil, errors.New("signing_order values must be positive integers")
 		}
 		orders[p.Order] = true
 		parsedSpecs = append(parsedSpecs, p)
 	}
-	sort.Slice(parsedSpecs, func(i, j int) bool { return parsedSpecs[i].Order < parsedSpecs[j].Order })
-	for i, p := range parsedSpecs {
-		if p.Order != i+1 {
+	// Recipients sharing a signing_order sign in parallel; the distinct
+	// orders must still run 1, 2, 3… so every group is reachable.
+	sort.SliceStable(parsedSpecs, func(i, j int) bool { return parsedSpecs[i].Order < parsedSpecs[j].Order })
+	for order := 1; order <= len(orders); order++ {
+		if !orders[order] {
 			return nil, errors.New("signing_order values must form a contiguous sequence starting at 1")
 		}
 	}
@@ -271,10 +273,10 @@ func setRecipients(db *sql.DB, projectID string, envelopeID int64, specs []map[s
 		return nil, err
 	}
 	now := nowUTC()
-	for _, p := range parsedSpecs {
+	for position, p := range parsedSpecs {
 		if _, err := tx.Exec(`
-			INSERT INTO recipients (envelope_id, project_id, name, email, role, signing_order, status, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`, envelopeID, projectID, p.Name, p.Email, p.Role, p.Order, now, now); err != nil {
+			INSERT INTO recipients (envelope_id, project_id, name, email, role, signing_order, signing_group, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`, envelopeID, projectID, p.Name, p.Email, p.Role, position+1, p.Order, now, now); err != nil {
 			return nil, err
 		}
 	}
@@ -289,7 +291,7 @@ func setRecipients(db *sql.DB, projectID string, envelopeID int64, specs []map[s
 
 func listRecipients(db *sql.DB, projectID string, envelopeID int64) ([]Recipient, error) {
 	rows, err := db.Query(`
-		SELECT id, envelope_id, project_id, name, email, role, signing_order, status,
+		SELECT id, envelope_id, project_id, name, email, role, COALESCE(signing_group, signing_order), status,
 		       COALESCE(token_expires_at, ''), COALESCE(viewed_at, ''), COALESCE(completed_at, ''),
 		       declined_reason, created_at, updated_at
 		FROM recipients WHERE envelope_id = ? AND project_id = ? ORDER BY signing_order`, envelopeID, projectID)
@@ -311,7 +313,7 @@ func listRecipients(db *sql.DB, projectID string, envelopeID int64) ([]Recipient
 
 func getRecipient(db *sql.DB, projectID string, envelopeID, recipientID int64) (*Recipient, error) {
 	row := db.QueryRow(`
-		SELECT id, envelope_id, project_id, name, email, role, signing_order, status,
+		SELECT id, envelope_id, project_id, name, email, role, COALESCE(signing_group, signing_order), status,
 		       COALESCE(token_expires_at, ''), COALESCE(viewed_at, ''), COALESCE(completed_at, ''),
 		       declined_reason, created_at, updated_at
 		FROM recipients WHERE id = ? AND envelope_id = ? AND project_id = ?`, recipientID, envelopeID, projectID)
@@ -485,7 +487,7 @@ func validateEnvelope(db *sql.DB, projectID string, envelopeID int64, pageCount 
 	return errorsOut
 }
 
-func activateEnvelope(db *sql.DB, projectID string, envelopeID int64, deliveryMode, idempotencyKey string) (*Envelope, *Recipient, error) {
+func activateEnvelope(db *sql.DB, projectID string, envelopeID int64, deliveryMode, idempotencyKey string) (*Envelope, []Recipient, error) {
 	if deliveryMode != "manual" && deliveryMode != "messaging" {
 		return nil, nil, errors.New("delivery_mode must be manual or messaging")
 	}
@@ -507,8 +509,8 @@ func activateEnvelope(db *sql.DB, projectID string, envelopeID int64, deliveryMo
 			if err != nil {
 				return nil, nil, err
 			}
-			recipient, err := currentRecipient(db, projectID, envelopeID)
-			return env, recipient, err
+			active, err := activeRecipients(db, projectID, envelopeID)
+			return env, active, err
 		}
 		return nil, nil, errors.New("only draft envelopes can be sent")
 	}
@@ -516,11 +518,11 @@ func activateEnvelope(db *sql.DB, projectID string, envelopeID int64, deliveryMo
 	if _, err := tx.Exec(`UPDATE envelopes SET status = 'sent', delivery_mode = ?, idempotency_key = NULLIF(?, ''), sent_at = ?, updated_at = ? WHERE id = ? AND project_id = ? AND status = 'draft'`, deliveryMode, idempotencyKey, now, now, envelopeID, projectID); err != nil {
 		return nil, nil, err
 	}
-	res, err := tx.Exec(`UPDATE recipients SET status = 'ready', updated_at = ? WHERE id = (SELECT id FROM recipients WHERE envelope_id = ? AND project_id = ? ORDER BY signing_order LIMIT 1)`, now, envelopeID, projectID)
+	res, err := tx.Exec(`UPDATE recipients SET status = 'ready', updated_at = ? WHERE envelope_id = ? AND project_id = ? AND COALESCE(signing_group, signing_order) = (SELECT MIN(COALESCE(signing_group, signing_order)) FROM recipients WHERE envelope_id = ? AND project_id = ?)`, now, envelopeID, projectID, envelopeID, projectID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	if n, _ := res.RowsAffected(); n < 1 {
 		return nil, nil, errors.New("envelope has no recipients")
 	}
 	if err := addAuditTx(tx, envelopeID, projectID, 0, "envelope.sent", map[string]any{"delivery_mode": deliveryMode}); err != nil {
@@ -533,8 +535,8 @@ func activateEnvelope(db *sql.DB, projectID string, envelopeID int64, deliveryMo
 	if err != nil {
 		return nil, nil, err
 	}
-	recipient, err := currentRecipient(db, projectID, envelopeID)
-	return env, recipient, err
+	active, err := activeRecipients(db, projectID, envelopeID)
+	return env, active, err
 }
 
 func sendIdempotencyMatches(db *sql.DB, projectID string, envelopeID int64, key string) (bool, error) {
@@ -549,20 +551,20 @@ func sendIdempotencyMatches(db *sql.DB, projectID string, envelopeID int64, key 
 	return stored == key, nil
 }
 
-func currentRecipient(db *sql.DB, projectID string, envelopeID int64) (*Recipient, error) {
-	row := db.QueryRow(`
-		SELECT id, envelope_id, project_id, name, email, role, signing_order, status,
-		       COALESCE(token_expires_at, ''), COALESCE(viewed_at, ''), COALESCE(completed_at, ''),
-		       declined_reason, created_at, updated_at
-		FROM recipients WHERE envelope_id = ? AND project_id = ? AND status IN ('ready','viewed')
-		ORDER BY signing_order LIMIT 1`, envelopeID, projectID)
-	var r Recipient
-	err := row.Scan(&r.ID, &r.EnvelopeID, &r.ProjectID, &r.Name, &r.Email, &r.Role, &r.SigningOrder,
-		&r.Status, &r.TokenExpiresAt, &r.ViewedAt, &r.CompletedAt, &r.DeclinedReason, &r.CreatedAt, &r.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+// activeRecipients returns every recipient who can sign right now: the
+// whole lowest signing group that has not finished.
+func activeRecipients(db *sql.DB, projectID string, envelopeID int64) ([]Recipient, error) {
+	recipients, err := listRecipients(db, projectID, envelopeID)
+	if err != nil {
+		return nil, err
 	}
-	return &r, err
+	active := []Recipient{}
+	for _, r := range recipients {
+		if r.Status == "ready" || r.Status == "viewed" {
+			active = append(active, r)
+		}
+	}
+	return active, nil
 }
 
 func createRecipientToken(db *sql.DB, projectID string, envelopeID, recipientID int64) (*Envelope, *Recipient, string, error) {
@@ -581,7 +583,7 @@ func createRecipientToken(db *sql.DB, projectID string, envelopeID, recipientID 
 		return nil, nil, "", sql.ErrNoRows
 	}
 	if recipient.Status != "ready" && recipient.Status != "viewed" {
-		return nil, nil, "", errors.New("recipient is not the current signer")
+		return nil, nil, "", errors.New("recipient is not an active signer")
 	}
 	token, err := randomToken(32)
 	if err != nil {
@@ -659,7 +661,7 @@ func markRecipientViewed(db *sql.DB, session *SigningSession) (bool, error) {
 	return false, nil
 }
 
-func completeRecipient(db *sql.DB, token, legalName string, values map[int64]string) (*Envelope, *Recipient, *Recipient, bool, error) {
+func completeRecipient(db *sql.DB, token, legalName string, values map[int64]string) (*Envelope, *Recipient, []Recipient, bool, error) {
 	session, err := sessionByToken(db, token)
 	if err != nil || session == nil {
 		if err == nil {
@@ -737,17 +739,24 @@ func completeRecipient(db *sql.DB, token, legalName string, values map[int64]str
 	if err := addAuditTx(tx, session.Envelope.ID, session.Envelope.ProjectID, session.Recipient.ID, eventType, map[string]any{"legal_name": legalName}); err != nil {
 		return nil, nil, nil, false, err
 	}
-	var nextID int64
-	err = tx.QueryRow(`SELECT id FROM recipients WHERE envelope_id = ? AND project_id = ? AND status = 'pending' ORDER BY signing_order LIMIT 1`, session.Envelope.ID, session.Envelope.ProjectID).Scan(&nextID)
-	needFinalize := errors.Is(err, sql.ErrNoRows)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// Advance only when this recipient's parallel group is done; the
+	// last signer of the last group triggers finalization.
+	var stillActive int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM recipients WHERE envelope_id = ? AND project_id = ? AND status IN ('ready','viewed')`, session.Envelope.ID, session.Envelope.ProjectID).Scan(&stillActive); err != nil {
 		return nil, nil, nil, false, err
 	}
-	if nextID != 0 {
-		if _, err := tx.Exec(`UPDATE recipients SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'pending'`, now, nextID); err != nil {
+	var nextOrder sql.NullInt64
+	if stillActive == 0 {
+		if err := tx.QueryRow(`SELECT MIN(COALESCE(signing_group, signing_order)) FROM recipients WHERE envelope_id = ? AND project_id = ? AND status = 'pending'`, session.Envelope.ID, session.Envelope.ProjectID).Scan(&nextOrder); err != nil {
 			return nil, nil, nil, false, err
 		}
+		if nextOrder.Valid {
+			if _, err := tx.Exec(`UPDATE recipients SET status = 'ready', updated_at = ? WHERE envelope_id = ? AND project_id = ? AND COALESCE(signing_group, signing_order) = ? AND status = 'pending'`, now, session.Envelope.ID, session.Envelope.ProjectID, nextOrder.Int64); err != nil {
+				return nil, nil, nil, false, err
+			}
+		}
 	}
+	needFinalize := stillActive == 0 && !nextOrder.Valid
 	if err := tx.Commit(); err != nil {
 		return nil, nil, nil, false, err
 	}
@@ -756,9 +765,9 @@ func completeRecipient(db *sql.DB, token, legalName string, values map[int64]str
 		return nil, nil, nil, false, err
 	}
 	completed, _ := getRecipient(db, env.ProjectID, env.ID, session.Recipient.ID)
-	var next *Recipient
-	if nextID != 0 {
-		next, _ = getRecipient(db, env.ProjectID, env.ID, nextID)
+	var next []Recipient
+	if nextOrder.Valid {
+		next, _ = activeRecipients(db, env.ProjectID, env.ID)
 	}
 	return env, completed, next, needFinalize, nil
 }

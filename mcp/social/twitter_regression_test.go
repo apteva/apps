@@ -20,8 +20,18 @@ func TestEmbeddedManifestVersionMatchesAppManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if embedded := (&App{}).Manifest(); embedded.Version != fileManifest.Version {
+	embedded := (&App{}).Manifest()
+	if embedded.Version != fileManifest.Version {
 		t.Fatalf("embedded manifest version %q != apteva.yaml version %q", embedded.Version, fileManifest.Version)
+	}
+	for name, manifest := range map[string]sdk.Manifest{"file": *fileManifest, "embedded": embedded} {
+		source := manifest.Runtime.Source
+		if source == nil || source.Ref != "social/v"+manifest.Version {
+			t.Fatalf("%s runtime source must pin this release version %s; got %+v", name, manifest.Version, source)
+		}
+		if source.Repo != "github.com/apteva/apps" || source.Entry != "mcp/social" {
+			t.Fatalf("%s runtime source points to a different app: %+v", name, source)
+		}
 	}
 }
 

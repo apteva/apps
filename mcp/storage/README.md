@@ -1,8 +1,8 @@
-# Storage 0.12.9
+# Storage 0.13.0
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
-sidecar uses app-sdk v0.96.0; the build requires Go 1.26.8 or newer. The React
+sidecar uses app-sdk v0.106.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
 
 Direct multipart completions expose `checksum_status=pending` while a durable
@@ -17,6 +17,43 @@ receipt. Completion replay retries stale cleanup; failed releases are logged
 and queued for repair. Startup, periodic sweeps, and new upload admission
 reconcile reservations against completion receipts and cleanup jobs without
 changing saved files or genuine unfinished uploads.
+
+## Version 0.13.0: reading files into model context
+
+`files_read({id})` returns images as native MCP image blocks and UTF-8 text or
+DOCX body text as readable text. PDFs are rendered to images, so scanned pages,
+figures, and form values are visible to vision-capable models. PDF reads default
+to page 1; use `pages: "2-4"` or `pages: "1,3"` for up to four pages per call.
+The result includes `total_pages` and the selected page numbers.
+
+Text reads default to 12,000 Unicode characters. Use `max_chars` (up to 60,000)
+and `offset`; follow `next_offset` when `truncated` is true. DOCX reads include
+body paragraphs and table text, without embedded images, headers or footers.
+PNG, JPEG, GIF (first frame) and WebP are normalized to JPEG on white and resized
+to a maximum 1,600-pixel edge. Source images are limited to 20 million pixels.
+Files are capped at 25 MiB and DOCX body XML at 8 MiB. PDF rendering uses bundled
+PDFium WASM in one isolated child process, bounded raster dimensions and 256 MiB
+WASM memory. A 45-second deadline kills and waits for the child safely; an
+optional local Wazero compilation cache avoids recompiling each document.
+Legacy DOC, XLSX, PPTX and arbitrary binary formats are unsupported.
+
+The tool checks `files.read` on the source folder, reads the configured disk or
+S3 backend directly, and does not create public URLs or change the stored file.
+`files_get_content` retains its existing lossless base64 response for app callers.
+Image interpretation requires a Core runtime that preserves native MCP media
+through its proxy and omits empty Responses text blocks. SDK v0.106.0 supplies
+the native-content transport used by this release.
+
+The real-model regression preloads private fixtures whose contents are absent
+from the prompt, and checks image quadrants, PDF page 2, DOCX and text:
+
+```sh
+apteva test --provider openai-codex --model gpt-6.1-sol --app-dir . scenarios/07-read-files.yaml
+```
+
+Use `GOWORK=off` to validate the published SDK pin. Codex credentials are supplied
+through `OPENAI_CODEX_ACCESS_TOKEN` and optionally `OPENAI_CODEX_ACCOUNT_ID`, or
+through the runner's existing authenticated server support.
 
 ## Version 0.12.9: reliable pending-upload quota release
 

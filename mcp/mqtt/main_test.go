@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -43,6 +44,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	paths, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
@@ -99,10 +101,10 @@ func TestTopicMatch(t *testing.T) {
 // helpers and verify the password hashes correctly with bcrypt.
 func TestUserAuth_AddListVerify(t *testing.T) {
 	db := openTestDB(t)
-	if err := addUser(db, "alice", "swordfish", []string{"home/+"}, []string{"#"}); err != nil {
+	if err := addUser(db, "test", "alice", "swordfish", []string{scopeTopicRoot("test") + "home/+"}, []string{scopeTopicRoot("test") + "#"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := getUser(db, "alice")
+	got, err := getUser(db, "test", "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,47 +120,47 @@ func TestUserAuth_AddListVerify(t *testing.T) {
 	if err := bcrypt.CompareHashAndPassword([]byte(got.passwordHash), []byte("wrong")); err == nil {
 		t.Errorf("wrong password verified successfully")
 	}
-	if len(got.AllowPublishTopics) != 1 || got.AllowPublishTopics[0] != "home/+" {
+	if len(got.AllowPublishTopics) != 1 || got.AllowPublishTopics[0] != scopeTopicRoot("test")+"home/+" {
 		t.Errorf("publish ACL = %v", got.AllowPublishTopics)
 	}
 }
 
 func TestExplicitCredentialLifecycleKeepsPasswordAndACLSeparate(t *testing.T) {
 	db := openTestDB(t)
-	if err := createUser(db, "device-1", "first", []string{"devices/1/#"}, []string{"devices/1/commands"}); err != nil {
+	if err := createUser(db, "test", "device-1", "first", []string{scopeTopicRoot("test") + "devices/1/#"}, []string{scopeTopicRoot("test") + "devices/1/commands"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := createUser(db, "device-1", "replacement", nil, nil); err == nil {
+	if err := createUser(db, "test", "device-1", "replacement", nil, nil); err == nil {
 		t.Fatal("duplicate create unexpectedly replaced user")
 	}
-	before, err := getUser(db, "device-1")
+	before, err := getUser(db, "test", "device-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := updateUserACL(db, "device-1", []string{"devices/1/telemetry"}, nil); err != nil {
+	if err := updateUserACL(db, "test", "device-1", []string{scopeTopicRoot("test") + "devices/1/telemetry"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	afterACL, err := getUser(db, "device-1")
+	afterACL, err := getUser(db, "test", "device-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if before.passwordHash != afterACL.passwordHash {
 		t.Fatal("ACL update changed password hash")
 	}
-	if len(afterACL.AllowPublishTopics) != 1 || afterACL.AllowPublishTopics[0] != "devices/1/telemetry" || afterACL.AllowSubscribeTopics[0] != "devices/1/commands" {
+	if len(afterACL.AllowPublishTopics) != 1 || afterACL.AllowPublishTopics[0] != scopeTopicRoot("test")+"devices/1/telemetry" || afterACL.AllowSubscribeTopics[0] != scopeTopicRoot("test")+"devices/1/commands" {
 		t.Fatalf("ACL after update=%#v", afterACL)
 	}
-	if err := rotateUserPassword(db, "device-1", "second"); err != nil {
+	if err := rotateUserPassword(db, "test", "device-1", "second"); err != nil {
 		t.Fatal(err)
 	}
-	afterRotate, err := getUser(db, "device-1")
+	afterRotate, err := getUser(db, "test", "device-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if afterRotate.passwordHash == afterACL.passwordHash {
 		t.Fatal("password rotation did not change hash")
 	}
-	if afterRotate.AllowPublishTopics[0] != "devices/1/telemetry" {
+	if afterRotate.AllowPublishTopics[0] != scopeTopicRoot("test")+"devices/1/telemetry" {
 		t.Fatal("password rotation changed ACL")
 	}
 }
@@ -216,15 +218,15 @@ func TestHADiscoveryParser(t *testing.T) {
 	app := &App{ctx: ctx}
 	const fixture = `{
 		"name":"Living Room Light","unique_id":"lr1",
-		"state_topic":"home/livingroom/light/state",
-		"command_topic":"home/livingroom/light/set",
+		"state_topic":"scopes/cHJvai10ZXN0/home/livingroom/light/state",
+		"command_topic":"scopes/cHJvai10ZXN0/home/livingroom/light/set",
 		"device":{"manufacturer":"Aqara","model":"ZB-CL01","name":"Aqara CL01","identifiers":["aqara-cl01-1"]}
 	}`
-	app.handleHAConfig("homeassistant/light/livingroom/config", []byte(fixture))
+	app.handleHAConfig(scopeTopicRoot("proj-test")+"homeassistant/light/livingroom/config", []byte(fixture))
 
 	var name, manuf, model, st string
 	err := ctx.AppDB().QueryRow(`SELECT display_name, manufacturer, model, state_topic
-		FROM mqtt_devices WHERE slug = 'homeassistant/light/livingroom'`).
+		FROM mqtt_devices WHERE slug = 'scopes/cHJvai10ZXN0/homeassistant/light/livingroom'`).
 		Scan(&name, &manuf, &model, &st)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -232,12 +234,12 @@ func TestHADiscoveryParser(t *testing.T) {
 	if name != "Living Room Light" || manuf != "Aqara" || model != "ZB-CL01" {
 		t.Errorf("got %q / %q / %q", name, manuf, model)
 	}
-	if st != "home/livingroom/light/state" {
+	if st != scopeTopicRoot("proj-test")+"home/livingroom/light/state" {
 		t.Errorf("state_topic = %q", st)
 	}
 
 	// Empty payload should remove.
-	app.handleHAConfig("homeassistant/light/livingroom/config", []byte(""))
+	app.handleHAConfig(scopeTopicRoot("proj-test")+"homeassistant/light/livingroom/config", []byte(""))
 	var n int
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM mqtt_devices`).Scan(&n)
 	if n != 0 {
@@ -250,7 +252,7 @@ func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
 	app := &App{ctx: ctx}
 	hook := &retainedHook{app: app}
 	pk := packets.Packet{
-		TopicName: "devices/lamp/state", Payload: []byte(`{"on":true}`),
+		TopicName: scopeTopicRoot("proj-test") + "devices/lamp/state", Payload: []byte(`{"on":true}`),
 		FixedHeader: packets.FixedHeader{Type: packets.Publish, Qos: 1, Retain: true},
 	}
 	hook.OnRetainMessage(nil, pk, 1)
@@ -270,16 +272,16 @@ func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
 
 func TestRetainedPublicHelpersFilterGetAndDelete(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := db.Exec(`INSERT INTO mqtt_retained(topic,payload,qos,properties) VALUES
-		('devices/one/state','on',1,'{}'), ('other/state','off',0,'{}')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO mqtt_retained(scope_id,topic,payload,qos,properties) VALUES
+ ('test','scopes/dGVzdA/devices/one/state','on',1,'{}'), ('test','scopes/dGVzdA/other/state','off',0,'{}')`); err != nil {
 		t.Fatal(err)
 	}
-	list, err := listRetainedMessages(db, "devices/+/state", 100)
-	if err != nil || len(list) != 1 || list[0].Topic != "devices/one/state" || list[0].Payload != "on" {
+	list, err := listRetainedMessages(db, "test", scopeTopicRoot("test")+"devices/+/state", 100)
+	if err != nil || len(list) != 1 || list[0].Topic != scopeTopicRoot("test")+"devices/one/state" || list[0].Payload != "on" {
 		t.Fatalf("retained list=%#v err=%v", list, err)
 	}
-	got, err := getRetainedMessage(db, "devices/one/state")
-	if err != nil || got.Topic != "devices/one/state" || got.QoS != 1 {
+	got, err := getRetainedMessage(db, "test", scopeTopicRoot("test")+"devices/one/state")
+	if err != nil || got.Topic != scopeTopicRoot("test")+"devices/one/state" || got.QoS != 1 {
 		t.Fatalf("retained get=%#v err=%v", got, err)
 	}
 }
@@ -304,7 +306,7 @@ func TestAuditPayloadIsBounded(t *testing.T) {
 	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"max_log_payload_bytes": "4"}))
 	app := &App{ctx: ctx, messageLogCh: make(chan messageRecord, 1)}
 	hook := &busHook{app: app}
-	hook.recordMessage("client", "device", packets.Packet{Payload: []byte("abcdef")})
+	hook.recordMessage("client", "device", packets.Packet{TopicName: scopeTopicRoot("test") + "audit", Payload: []byte("abcdef")})
 	rec := <-app.messageLogCh
 	if string(rec.payload) != "abcd" || rec.payloadSize != 6 || !rec.truncated {
 		t.Fatalf("record=%#v", rec)
@@ -313,18 +315,18 @@ func TestAuditPayloadIsBounded(t *testing.T) {
 
 func TestBusSubscriptionUpsertReturnsStableIDAndScopesByProject(t *testing.T) {
 	db := openTestDB(t)
-	first, err := addBusSubscription(db, "p1", "devices/+/state", "device.state", "test")
+	first, err := addBusSubscription(db, "p1", scopeTopicRoot("p1")+"devices/+/state", "device.state", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := addBusSubscription(db, "p1", "devices/+/state", "device.state", "test")
+	second, err := addBusSubscription(db, "p1", scopeTopicRoot("p1")+"devices/+/state", "device.state", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.ID <= 0 || second.ID != first.ID {
 		t.Fatalf("IDs first=%d second=%d", first.ID, second.ID)
 	}
-	if _, err := addBusSubscription(db, "p2", "devices/+/state", "device.state", "test"); err != nil {
+	if _, err := addBusSubscription(db, "p2", scopeTopicRoot("p2")+"devices/+/state", "device.state", "test"); err != nil {
 		t.Fatal(err)
 	}
 	subs, err := listBusSubscriptions(db, "p1")
@@ -372,7 +374,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 			"ha_discovery_enabled": "false",
 		}),
 	)
-	if err := createUser(ctx.AppDB(), "device-one", "secret", []string{"devices/#"}, []string{"devices/#"}); err != nil {
+	if err := createUser(ctx.AppDB(), "proj-test", "device-one", "secret", []string{scopeTopicRoot("proj-test") + "devices/#"}, []string{scopeTopicRoot("proj-test") + "devices/#"}); err != nil {
 		t.Fatal(err)
 	}
 	app := &App{}
@@ -404,13 +406,14 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 
 	// MQTT 3.1.1 CONNECT with clean-session, client id "test1", and
 	// an authenticated device identity.
-	connectPacket := []byte{
-		0x10, 0x25,
-		0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0xc2, 0x00, 0x3c,
-		0x00, 0x05, 't', 'e', 's', 't', '1',
-		0x00, 0x0a, 'd', 'e', 'v', 'i', 'c', 'e', '-', 'o', 'n', 'e',
-		0x00, 0x06, 's', 'e', 'c', 'r', 'e', 't',
+	username, _ := credentialName("proj-test", "device-one")
+	connect := packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Connect}, ProtocolVersion: 4,
+		Connect: packets.ConnectParams{ProtocolName: []byte("MQTT"), Clean: true, Keepalive: 60, ClientIdentifier: "test1", UsernameFlag: true, PasswordFlag: true, Username: []byte(username), Password: []byte("secret")}}
+	var encoded bytes.Buffer
+	if err := connect.ConnectEncode(&encoded); err != nil {
+		t.Fatal(err)
 	}
+	connectPacket := encoded.Bytes()
 	if _, err := conn.Write(connectPacket); err != nil {
 		t.Fatal(err)
 	}
@@ -422,14 +425,14 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		t.Fatalf("CONNACK = %x", connack)
 	}
 	firstBridge, err := app.toolSubscribe(ctx, map[string]any{
-		"topic_pattern": "devices/+/+",
+		"topic_pattern": scopeTopicRoot("proj-test") + "devices/+/+",
 		"bus_topic":     "devices.message",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondBridge, err := app.toolSubscribe(ctx, map[string]any{
-		"topic_pattern": "devices/+/+",
+		"topic_pattern": scopeTopicRoot("proj-test") + "devices/+/+",
 		"bus_topic":     "devices.message",
 	})
 	if err != nil {
@@ -439,7 +442,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		t.Fatalf("ensure bridge IDs differ: %#v %#v", firstBridge, secondBridge)
 	}
 
-	topic := "devices/test/state"
+	topic := scopeTopicRoot("proj-test") + "devices/test/state"
 	payload := []byte(`{"on":true}`)
 	remaining := 2 + len(topic) + len(payload)
 	if remaining >= 128 {
@@ -468,7 +471,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if data == nil || data["payload"] != string(payload) || data["username"] != "device-one" {
+	if data == nil || data["payload"] != string(payload) || data["username"] != username {
 		t.Fatalf("matching mqtt.message data = %#v", data)
 	}
 	deviceEvents := recorder.EventsByTopic("mqtt.devices.message")
@@ -476,7 +479,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		t.Fatalf("filtered device events=%#v", deviceEvents)
 	}
 	deviceData, _ := deviceEvents[0].Data.(map[string]any)
-	if deviceData["username"] != "device-one" || deviceData["topic"] != topic {
+	if deviceData["username"] != username || deviceData["topic"] != topic {
 		t.Fatalf("filtered device data=%#v", deviceData)
 	}
 	connected := recorder.EventsByTopic("mqtt.client.connected")
@@ -484,7 +487,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		t.Fatalf("connected events=%#v", connected)
 	}
 	connectedData, _ := connected[0].Data.(map[string]any)
-	if connectedData["username"] != "device-one" || connectedData["client_id"] != "test1" {
+	if connectedData["username"] != username || connectedData["client_id"] != "test1" {
 		t.Fatalf("connected data=%#v", connectedData)
 	}
 	logDeadline := time.Now().Add(2 * time.Second)
@@ -500,7 +503,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		t.Fatalf("message log count=%d err=%v", count, err)
 	}
 	var loggedUsername string
-	if err := ctx.AppDB().QueryRow(`SELECT username FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&loggedUsername); err != nil || loggedUsername != "device-one" {
+	if err := ctx.AppDB().QueryRow(`SELECT username FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&loggedUsername); err != nil || loggedUsername != username {
 		t.Fatalf("logged username=%q err=%v", loggedUsername, err)
 	}
 

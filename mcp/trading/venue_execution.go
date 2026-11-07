@@ -430,6 +430,10 @@ func validateExecutionOrderAt(profile VenueExecutionProfile, instrument *Instrum
 		return &executionViolation{Code: "venue_circuit_open", Detail: fmt.Sprintf("%s temporarily unavailable after repeated broker errors; retry after %s", profile.VenueSlug, retry.Format(time.RFC3339))}
 	}
 	if instrument != nil {
+		if profile.VenueSlug == "simulation" && instrument.AssetClass == "crypto" &&
+			strings.HasSuffix(instrument.Symbol, "-USD") && (instrument.QuoteCurrency != "USD" || (mark != nil && mark.Source == "binance-public")) {
+			return &executionViolation{Code: "quote_currency_mismatch", Detail: fmt.Sprintf("%s requires USD market data; received %s", instrument.Symbol, instrument.QuoteCurrency)}
+		}
 		if !instrument.Active {
 			return &executionViolation{Code: "instrument_inactive", Detail: fmt.Sprintf("%s is not active", instrument.Symbol)}
 		}

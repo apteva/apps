@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.6.2
+version: 0.15.0
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
   Contabo, Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
-  Linode, OVHcloud, or RunPod; provider-specific
+  Clouding.io, UpCloud, Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
   Foundation layer for higher-level apps that run workloads
@@ -33,7 +33,7 @@ icon_style: monochrome
 tags: [instances, hosts, vps, compute, infrastructure, object-storage, s3]
 
 scopes: [global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.87.4"
 
 requires:
   permissions:
@@ -52,7 +52,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS providers
       hint: |
         Optional — local instance always available. Bind one or more VPS
@@ -64,10 +64,41 @@ requires:
         installs Linux after delivery; macOS hosts have Apple's mandatory
         24-hour minimum allocation before Destroy becomes available.
 
+config_schema:
+  - name: native_snapshot_max_archive_bytes
+    label: Native snapshot archive limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum compressed archive size. Default 8 GiB; hard maximum 16 GiB (17179869184 bytes). Applies after app restart."
+  - name: native_snapshot_max_state_bytes
+    label: Native snapshot expanded-state limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum cumulative file content and individual file size. Default 8 GiB; hard maximum 16 GiB. Tar metadata has a separate bounded allowance."
+  - name: native_snapshot_timeout_seconds
+    label: Native snapshot operation timeout (seconds)
+    type: text
+    default: "7200"
+    description: "Complete snapshot or restore deadline, from 60 to 21600 seconds. Default 2 hours. Server must use a compatible deadline."
+
 provides:
   http_routes:
     - prefix: /
+    - prefix: /_apteva/runtime/backends/native
+    - prefix: /_apteva/ingress/providers/caddy
   mcp_tools:
+    - name: instance_firewall_capabilities
+      description: Discover managed firewall capabilities for a provider or instance.
+    - name: instance_firewall_get
+      description: Read owned policies and optionally verify provider rules and attachments.
+    - name: instance_firewall_apply
+      description: Apply an owner-scoped inbound policy while retaining SSH and other owners.
+    - name: instance_firewall_release
+      description: Release one owner's rules while retaining other owners and SSH.
+    - name: instance_quote
+      description: Review an OVH contract-product order and its prices before purchase.
+    - name: instance_order_status
+      description: Inspect or resume OVH delivery and confirm service cancellation with a provider email token.
     - name: instance_list_providers
       description: List the VPS provider connections bound to this Instances install and identify the default provider.
     - name: instance_create
@@ -140,6 +171,8 @@ provides:
       description: Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage.
     - name: instance_metrics_incidents
       description: List spike incidents or retrieve a bounded recording and best-effort process attribution.
+    - name: instance_network_evidence
+      description: "Bounded timestamped TCP probes, host counters and route evidence between registered instances. Args: id, target_id, port?, samples?."
     - name: instance_monitoring
       description: Read collector health/version or enable/disable automatic background monitoring.
     - name: instance_metrics
@@ -234,7 +267,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.6.2
+    ref: instances/v0.15.0
     entry: mcp/instances
   port: 8080
   health_check: /health

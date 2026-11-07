@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.16.6
+version: 0.24.5
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -53,6 +53,16 @@ requires:
       required: false
       label: "Jobs (optional)"
       hint: "Without jobs, scheduled posts publish synchronously when the app's worker tick fires; with jobs, scheduling is durable + retried with exponential backoff."
+    - role: editorial
+      kind: app
+      compatible_app_names: [editorial]
+      required: false
+      label: "Editorial record repair (optional)"
+    - role: content-catalog
+      kind: app
+      compatible_app_names: [content-catalog]
+      required: false
+      label: "Content Catalog record repair (optional)"
     - role: social_provider
       kind: integration
       compatible_slugs: [zernio]
@@ -73,13 +83,26 @@ provides:
       schedule: "@every 1h"
     - name: provider_reconciler
       schedule: "@every 15m"
+    - name: event_publisher
+      schedule: "@every 1m"
+    - name: youtube_thumbnails
+      schedule: "@every 1m"
   mcp_tools:
+    - { name: account_list_connections, description: "Choose an active direct connection or connect another account." }
+    - { name: destination_list, description: "List publishing destinations under an account." }
+    - { name: destination_create, description: "Create a publishing destination when supported." }
+    - { name: account_set_default_destination, description: "Set the default for new posts; existing targets retain their destination." }
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
-    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels/boards (including Pinterest boards)." }
-    - { name: account_finalize,            description: "Commit a pending account into the active account list. For destination-based platforms, supply page_id." }
+    - { name: account_list_pending_pages,  description: "List selectable publishing identities (pages/channels) when required." }
+    - { name: account_finalize,            description: "Commit a pending account into the active account list. For identity-selection platforms, supply page_id." }
     - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio. Publishing remains available while automatic history import defaults to managed_only." }
     - { name: account_list,                description: "List connected social accounts in this project, including provider import mode." }
+    - { name: account_history_sync, description: "Bounded resumable native history sync for one Social account; no publishing or automatic-policy changes." }
+    - { name: account_history_status, description: "Read history coverage and freshness for one Social account." }
+    - { name: post_inspect, description: "Read native metadata through Social without publishing or implying membership." }
     - { name: account_provider_sync_update, description: "Set automatic provider synchronization to off, managed_only (safe default), or explicitly opted-in full_history without changing publishing access." }
+    - { name: account_audience_capabilities, description: "Optional account audience capabilities; no provider calls." }
+    - { name: account_membership_levels, description: "Optional cached tier discovery; refresh=true queries the existing integration connection." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
     - { name: account_disconnect,          description: "Disconnect an account while preserving history; explicit confirmed hard delete can remove local history." }
     - { name: post_create,                 description: "Create a post with required explicit mode=draft|schedule|publish. Draft is optional and may omit targets; schedule remains a direct path and requires schedule_at; publish is immediate. Omitting mode never publishes. Args: mode, body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
@@ -90,6 +113,10 @@ provides:
     - { name: post_draft_reject,           description: "Reject the exact revision currently in review with a reason." }
     - { name: post_draft_publish,          description: "Publish now or schedule a stored draft using explicit mode=publish|schedule and expected_revision." }
     - { name: post_list,                   description: "List stored posts with profile filters, pagination, and separate post/target totals." }
+    - { name: post_publication_reconcile, description: "Preview or apply account-scoped publication link/time corrections; repair existing linked records without publishing." }
+    - { name: post_delivery_inspect, description: "Inspect one target and native operation without resubmitting." }
+    - { name: post_delivery_revalidate, description: "Audit source and remote state; prepare an expiring recovery decision." }
+    - { name: post_delivery_recover, description: "Explicitly consume one audited recovery decision for one target." }
     - { name: post_retry,                  description: "Re-attempt retryable failures only. Deterministic duplicate/content errors fail once and return failure_code plus existing_post_id instead of being retried." }
     - { name: post_publish_scheduled,      description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result. Args: post_id." }
     - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
@@ -97,13 +124,15 @@ provides:
     - { name: inbox_mark_read,             description: "Mark one or more inbox items as read (local-only state)." }
     - { name: inbox_mark_unread,           description: "Mark one or more inbox items as unread (local-only state)." }
     - { name: inbox_archive,               description: "Archive one or more inbox items (hides from default list view)." }
-    - { name: inbox_reply,                 description: "Reply to a comment or DM with text and, where supported, image/video/audio/file attachments from Storage or a public HTTPS URL. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies. Returns the standard {status, reason?, error?, external_id?, permalink?, deliveries?} envelope." }
+    - { name: inbox_reply,                 description: "Reply to a comment or DM with text and, where supported, image/video/audio/file attachments from Storage or a public HTTPS URL. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies. Pass idempotency_key to make retries safe. Returns the standard {status, reason?, error?, external_id?, permalink?, deliveries?, send_id, send_state} envelope." }
     - { name: inbox_private_reply,         description: "Compatibility alias for inbox_reply with mode=private." }
-    - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram). Unsupported elsewhere." }
+    - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram, YouTube). Unsupported elsewhere." }
     - { name: inbox_unhide,                description: "Reverse inbox_hide." }
     - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }
     - { name: inbox_delete,                description: "Delete a comment where the platform permits it." }
     - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll; the same project-scoped sync also runs automatically." }
+    - { name: inbox_coverage,              description: "Per-account inbox coverage: supported actions, missing access, last successful sync and whether coverage is complete." }
+    - { name: post_retention,              description: "Audience retention curve for a published video (YouTube, Facebook Page videos), decimals kept, with opening drop-off summary." }
   ui_panels:
     - slot: project.page
       label: Social
@@ -119,7 +148,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.awaiting_audience_setup, post.audience_confirmed, target.failed, profile.accounts_moved, account.deleted]
       settings_schema:
         type: object
         properties:
@@ -139,7 +168,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      refresh_topics: [metrics.updated, destinations.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
       settings_schema:
         type: object
         properties:
@@ -158,7 +187,7 @@ provides:
           profile_id: { type: integer }
           social_account_id: { type: integer }
           view: { type: string, enum: [week, month] }
-          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected, awaiting_audience_setup] }
           anchor_date: { type: string }
       preview_props:
         preview: true
@@ -179,7 +208,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: social/v0.24.5
     entry: mcp/social
   port: 8080
   health_check: /health

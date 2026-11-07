@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	filippo.io/age v1.2.1
-	github.com/apteva/app-sdk v0.77.0
+	github.com/apteva/app-sdk v0.107.0
 	github.com/minio/minio-go/v7 v7.1.0
 	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0

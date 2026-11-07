@@ -52,6 +52,9 @@ const (
 // SIP code onto the fixed reason vocabulary. The raw values stay alongside it.
 func terminationReasonFor(status, cause, code string) string {
 	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(cause)))
+	if normalized == terminationAIInactivity || normalized == terminationAIMaxDuration || normalized == terminationAIPolicyFailure {
+		return normalized
+	}
 	code = strings.TrimSpace(code)
 	timeLimit := strings.Contains(normalized, "time_limit") || strings.Contains(normalized, "max_duration") || strings.Contains(normalized, "timelimit")
 	switch status {

@@ -52,7 +52,7 @@ func pinBroker(ctx *sdk.AppCtx, pf *Portfolio, connectionID int64) error {
 
 func orderIntentHash(args map[string]any) string {
 	intent := map[string]any{}
-	for _, key := range []string{"symbol", "side", "type", "outcome", "qty", "tif", "limit_price", "stop_price", "strategy_id", "assignment_id"} {
+	for _, key := range []string{"symbol", "side", "type", "outcome", "qty", "tif", "limit_price", "stop_price", "strategy_id", "assignment_id", "decision_ref", "external_strategy_id", "external_strategy_version", "_origin_app", "_origin_install_id"} {
 		if v, ok := args[key]; ok {
 			intent[key] = v
 		}

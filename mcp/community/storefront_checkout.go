@@ -14,6 +14,7 @@ import (
 )
 
 type guestCheckoutSession struct {
+	BumpCents         int64           `json:"-"`
 	ID                int64           `json:"id"`
 	CartID            int64           `json:"cart_id"`
 	ProviderSessionID string          `json:"provider_session_id,omitempty"`
@@ -34,29 +35,32 @@ type guestCheckoutCart struct {
 }
 
 type guestCheckoutItem struct {
-	PriceID         int64   `json:"price_id"`
-	ProductID       int64   `json:"product_id"`
-	UnitAmountCents int64   `json:"unit_amount_cents"`
-	Currency        string  `json:"currency"`
-	Quantity        float64 `json:"quantity"`
+	PriceID         int64           `json:"price_id"`
+	ProductID       int64           `json:"product_id"`
+	UnitAmountCents int64           `json:"unit_amount_cents"`
+	Currency        string          `json:"currency"`
+	Quantity        float64         `json:"quantity"`
+	Metadata        json.RawMessage `json:"metadata"`
 }
 
 type preparedStorefrontCheckout struct {
-	OfferKind          string   `json:"offer_kind"`
-	CheckoutID         int64    `json:"checkout_session_id"`
-	RecoveryToken      string   `json:"recovery_token,omitempty"`
-	SessionToken       string   `json:"session_token,omitempty"`
-	InvoiceID          int64    `json:"invoice_id,omitempty"`
-	InvoiceNumber      string   `json:"invoice_number,omitempty"`
-	Presentation       string   `json:"presentation"`
-	Mode               string   `json:"mode,omitempty"`
-	AmountCents        int64    `json:"amount_cents"`
-	Currency           string   `json:"currency"`
-	PaymentMethodTypes []string `json:"payment_method_types,omitempty"`
-	PaymentIntentID    string   `json:"payment_intent_id,omitempty"`
-	ClientSecret       string   `json:"client_secret,omitempty"`
-	PublishableKey     string   `json:"publishable_key"`
-	CheckoutURL        string   `json:"checkout_url,omitempty"`
+	OrderBumps         []storefrontOrderBump `json:"order_bumps"`
+	SelectionsLocked   bool                  `json:"selections_locked"`
+	OfferKind          string                `json:"offer_kind"`
+	CheckoutID         int64                 `json:"checkout_session_id"`
+	RecoveryToken      string                `json:"recovery_token,omitempty"`
+	SessionToken       string                `json:"session_token,omitempty"`
+	InvoiceID          int64                 `json:"invoice_id,omitempty"`
+	InvoiceNumber      string                `json:"invoice_number,omitempty"`
+	Presentation       string                `json:"presentation"`
+	Mode               string                `json:"mode,omitempty"`
+	AmountCents        int64                 `json:"amount_cents"`
+	Currency           string                `json:"currency"`
+	PaymentMethodTypes []string              `json:"payment_method_types,omitempty"`
+	PaymentIntentID    string                `json:"payment_intent_id,omitempty"`
+	ClientSecret       string                `json:"client_secret,omitempty"`
+	PublishableKey     string                `json:"publishable_key"`
+	CheckoutURL        string                `json:"checkout_url,omitempty"`
 }
 
 type storefrontOfferTarget struct {
@@ -113,13 +117,15 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var input struct {
-		CatalogPriceID int64  `json:"catalog_price_id"`
-		Email          string `json:"email"`
-		CustomerName   string `json:"customer_name"`
-		RecoveryToken  string `json:"recovery_token"`
-		ReturnURL      string `json:"return_url"`
-		SuccessURL     string `json:"success_url"`
-		CancelURL      string `json:"cancel_url"`
+		CatalogPriceID int64             `json:"catalog_price_id"`
+		Email          string            `json:"email"`
+		CustomerName   string            `json:"customer_name"`
+		RecoveryToken  string            `json:"recovery_token"`
+		ReturnURL      string            `json:"return_url"`
+		SuccessURL     string            `json:"success_url"`
+		CancelURL      string            `json:"cancel_url"`
+		PromotionCode  string            `json:"promotion_code"`
+		Attribution    map[string]string `json:"attribution"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	decoder.DisallowUnknownFields()
@@ -152,7 +158,7 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 			urls[name] = value
 		}
 	}
-	prepared, err := prepareCheckoutWithCheckoutApp(requestAppCtx(r), community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls)
+	prepared, err := prepareCheckoutWithCheckoutApp(requestAppCtx(r), community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls, storefrontAcquisitionInput{PromotionCode: input.PromotionCode, Attribution: input.Attribution})
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "secure checkout could not be prepared")
 		return
@@ -185,7 +191,7 @@ func validateStorefrontReturnURL(r *http.Request, raw string, communities ...*Co
 	return "", errors.New("checkout return URL must use this portal origin")
 }
 
-func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target storefrontOfferTarget, email, name, recoveryToken string, urls map[string]string) (*preparedStorefrontCheckout, error) {
+func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target storefrontOfferTarget, email, name, recoveryToken string, urls map[string]string, acquisition ...storefrontAcquisitionInput) (*preparedStorefrontCheckout, error) {
 	pid := scopeProject(ctx)
 	var session guestCheckoutSession
 	var cart guestCheckoutCart
@@ -201,13 +207,24 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 		if err := validatePreparedCheckout(communityID, target, session, cart); err != nil {
 			return nil, err
 		}
+		session.BumpCents = storefrontBumpTotal(cart, target.Price)
+		saved, err := checkoutContext(ctx.AppDB(), session.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err = validateStorefrontContext(saved, communityID, target, session); err != nil {
+			return nil, err
+		}
+		if len(acquisition) > 0 && saved != nil && saved.Code != strings.TrimSpace(acquisition[0].PromotionCode) {
+			return nil, errors.New("checkout promotion changed")
+		}
 	} else {
 		var created struct {
 			Cart guestCheckoutCart `json:"cart"`
 		}
 		if err := callAppResult(ctx, "checkout", "cart_create", map[string]any{
 			"_project_id": pid,
-			"metadata":    map[string]any{"source_app": "community", "community_id": communityID, "catalog_price_id": target.Price, "offer_kind": target.Kind},
+			"metadata":    map[string]any{"source_app": "community", "community_id": communityID, "context_ref": communityID, "catalog_price_id": target.Price, "offer_kind": target.Kind},
 		}, &created); err != nil {
 			return nil, fmt.Errorf("create Checkout cart: %w", err)
 		}
@@ -245,6 +262,13 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 			return nil, fmt.Errorf("label Checkout session: %w", err)
 		}
 		session = updated.Session
+		input := storefrontAcquisitionInput{}
+		if len(acquisition) > 0 {
+			input = acquisition[0]
+		}
+		if err := prepareStorefrontContext(ctx, communityID, target, session, input); err != nil {
+			return nil, err
+		}
 	}
 	var prepared struct {
 		Session guestCheckoutSession `json:"session"`
@@ -262,7 +286,12 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 	}, &prepared); err != nil {
 		return nil, fmt.Errorf("prepare Checkout Elements: %w", err)
 	}
+	bumps, err := getStorefrontBumps(ctx, communityID, session.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &preparedStorefrontCheckout{
+		OrderBumps: bumps, SelectionsLocked: session.Status != "started",
 		OfferKind: target.Kind, CheckoutID: prepared.Session.ID, RecoveryToken: recoveryToken,
 		SessionToken: cart.SessionToken, Presentation: prepared.Payment.Presentation,
 		Mode: prepared.Payment.Mode, AmountCents: prepared.Payment.AmountCents,
@@ -278,9 +307,20 @@ func validatePreparedCheckout(communityID string, target storefrontOfferTarget, 
 	if metadataString(session.Metadata, "community_id") != communityID || metadataString(session.Metadata, "catalog_price_id") != fmt.Sprint(target.Price) || metadataString(session.Metadata, "offer_kind") != target.Kind {
 		return errors.New("prepared checkout does not match this offer")
 	}
-	if len(cart.Items) != 1 || cart.Items[0].PriceID != target.Price || cart.Items[0].ProductID != target.Product || cart.Items[0].Quantity != 1 || cart.Items[0].UnitAmountCents != target.Amount || !strings.EqualFold(cart.Items[0].Currency, target.Currency) {
+	baseCount := 0
+	for _, it := range cart.Items {
+		if it.PriceID == target.Price && it.ProductID == target.Product && it.Quantity == 1 && it.UnitAmountCents == target.Amount && strings.EqualFold(it.Currency, target.Currency) {
+			baseCount++
+			continue
+		}
+		if metadataString(it.Metadata, "order_bump_id") == "" || it.Quantity != 1 || !strings.EqualFold(it.Currency, target.Currency) {
+			return errors.New("checkout contains an invalid add-on")
+		}
+	}
+	if baseCount != 1 {
 		return errors.New("prepared checkout totals no longer match this offer")
 	}
+
 	return nil
 }
 
@@ -318,8 +358,23 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := validatePreparedCheckout(communityID, target, restored.Session, restored.Cart); err != nil {
 		return nil, err
 	}
+	if err := validateStorefrontCartBumps(ctx, communityID, target, restored.Session, restored.Cart); err != nil && restored.Session.Status == "started" {
+		return nil, err
+	}
+	restored.Session.BumpCents = storefrontBumpTotal(restored.Cart, target.Price)
 	if restored.Session.Email != "" && !strings.EqualFold(restored.Session.Email, email) {
 		return nil, errors.New("prepared checkout belongs to another email address")
+	}
+	memberID := strArg(args, "_viewer_member_id", strArg(args, "member_id", ""))
+	if target.Kind == "one_time" {
+		if err := verifyMember(ctx.AppDB(), communityID, memberID); err != nil {
+			return nil, err
+		}
+		if active, err := hasActiveCourseEnrollment(ctx.AppDB(), target.SpaceID, memberID); err != nil {
+			return nil, err
+		} else if active {
+			return map[string]any{"enrolled": true, "access_active": true}, nil
+		}
 	}
 	pid := scopeProject(ctx)
 	if restored.Session.Status == "started" {
@@ -327,16 +382,49 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 			Session guestCheckoutSession `json:"session"`
 		}
 		if err := callAppResult(ctx, "checkout", "checkout_update", map[string]any{
-			"_project_id": pid, "session_id": restored.Session.ID, "patch": map[string]any{"email": email},
+			"_project_id": pid, "session_id": restored.Session.ID, "patch": map[string]any{"email": email, "metadata": checkoutBuyerMetadata(restored.Session.Metadata, memberID, strArg(args, "_auth_subject_id", ""))},
 		}, &updated); err != nil {
 			return nil, fmt.Errorf("bind verified buyer to Checkout session: %w", err)
 		}
 		restored.Session = updated.Session
+		restored.Session.BumpCents = storefrontBumpTotal(restored.Cart, target.Price)
+	}
+	if prepareOnly, _ := args["prepare_only"].(bool); prepareOnly {
+		return map[string]any{"claimed": true}, nil
+	}
+	if err := reserveStorefrontPromotion(ctx, communityID, target, restored.Session, email); err != nil {
+		return nil, err
+	}
+	for _, it := range restored.Cart.Items {
+		if restored.Session.Status != "started" {
+			break
+		}
+		if it.PriceID == target.Price || metadataString(it.Metadata, "fulfillment_app") != "community" {
+			continue
+		}
+		spaceID := metadataString(it.Metadata, "fulfillment_ref")
+		if err := validateCommunityBumpCourse(ctx, communityID, it.ProductID, spaceID); err != nil {
+			return nil, err
+		}
+		if err = validateCourseSaleWindow(ctx.AppDB(), spaceID, memberID); err != nil {
+			return nil, err
+		}
+		if active, err := hasActiveCourseEnrollment(ctx.AppDB(), spaceID, memberID); err != nil {
+			return nil, err
+		} else if active {
+			return nil, errors.New("you already own an add-on course; remove it before paying")
+		}
 	}
 	paymentArgs := map[string]any{
 		"_project_id": pid, "session_id": restored.Session.ID, "provider": "stripe", "presentation": "deferred",
 		"idempotency_key": fmt.Sprintf("community-storefront:%s:%d", communityID, restored.Session.ID),
 	}
+	paymentArgs["expected_total_cents"] = restored.Session.TotalCents
+	expectedPrices := []int64{}
+	for _, it := range restored.Cart.Items {
+		expectedPrices = append(expectedPrices, it.PriceID)
+	}
+	paymentArgs["expected_price_ids"] = expectedPrices
 	if target.Kind == "recurring" {
 		paymentArgs["save_payment_method"] = true
 		paymentArgs["set_default_payment_method"] = true
@@ -353,7 +441,9 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if paid.InvoiceID == 0 || paid.Session.InvoiceID == nil {
 		return nil, errors.New("Checkout returned no Billing invoice")
 	}
-	memberID := strArg(args, "_viewer_member_id", strArg(args, "member_id", ""))
+	if err := registerStorefrontItems(ctx, communityID, memberID, target, paid.Session, restored.Cart); err != nil {
+		return nil, err
+	}
 	result := map[string]any{
 		"offer_kind": target.Kind, "presentation": "deferred", "invoice_id": paid.InvoiceID,
 		"invoice_number": paid.InvoiceNumber, "payment_intent_id": strArg(paid.Payment, "payment_intent_id", ""),
@@ -396,6 +486,11 @@ func claimCourseCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memberID
 		if err := validateCourseSaleWindow(ctx.AppDB(), space.ID, memberID); err != nil {
 			return nil, err
 		}
+		if saved, e := checkoutContext(ctx.AppDB(), session.ID); e != nil {
+			return nil, e
+		} else if saved != nil {
+			offer.UnitAmountCents = saved.Subtotal - saved.Discount
+		}
 		purchase, err = createCoursePurchase(ctx.AppDB(), space, memberID, email, session.CustomerName, authSubjectID, offer)
 		if err != nil {
 			return nil, err
@@ -408,12 +503,39 @@ func claimCourseCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memberID
 	if err != nil {
 		return nil, err
 	}
-	if invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
+	if invoice.ID != *session.InvoiceID || invoice.TotalCents != purchase.UnitAmountCents || !strings.EqualFold(invoice.Currency, target.Currency) {
 		return nil, errors.New("Billing invoice does not match this course offer")
 	}
 	_, err = ctx.AppDB().Exec(`UPDATE course_purchases SET billing_customer_id=?,billing_invoice_id=?,billing_session_id=?,checkout_url=NULL,status='awaiting_payment',last_error='',updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		invoice.CustomerID, *session.InvoiceID, nullIfEmpty(session.ProviderSessionID), purchase.ID)
 	if err != nil {
+		return nil, err
+	}
+	var metadata map[string]any
+	if err = json.Unmarshal(invoice.Metadata, &metadata); err != nil && len(invoice.Metadata) > 0 {
+		return nil, err
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["source_app"] = "community"
+	metadata["community_purchase_id"] = purchase.ID
+	metadata["community_id"] = space.CommunityID
+	metadata["checkout_session_id"] = session.ID
+	if saved, e := checkoutContext(ctx.AppDB(), session.ID); e != nil {
+		return nil, e
+	} else if saved != nil {
+		metadata["attribution"] = saved.Attribution
+		metadata["promotion_code"] = saved.Code
+		metadata["catalog_subtotal_cents"] = saved.Subtotal
+		metadata["discount_cents"] = saved.Discount
+		metadata["discount_reservation_id"] = saved.Reservation
+	}
+	var invoiceUpdated any
+	if err = callAppResult(ctx, "billing", "invoices_update", map[string]any{"id": invoice.ID, "patch": map[string]any{"metadata": metadata}}, &invoiceUpdated); err != nil {
+		return nil, err
+	}
+	if err = bindStorefrontPurchase(ctx, session.ID, purchase.ID); err != nil {
 		return nil, err
 	}
 	purchase, err = loadCoursePurchase(ctx.AppDB(), purchase.ID)
@@ -443,7 +565,7 @@ func claimMembershipCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memb
 	if err != nil {
 		return nil, err
 	}
-	if invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
+	if invoice.ID != *session.InvoiceID || invoice.TotalCents != target.Amount || !strings.EqualFold(invoice.Currency, target.Currency) {
 		return nil, errors.New("Billing invoice does not match this membership offer")
 	}
 	msID := newID("msub")
@@ -498,5 +620,6 @@ func storefrontBillingInvoice(ctx *sdk.AppCtx, invoiceID int64) (*billingInvoice
 	if out.Invoice.ID == 0 || (out.Invoice.Status != "open" && out.Invoice.Status != "paid") {
 		return nil, errors.New("Billing invoice is not payable")
 	}
-	return &out.Invoice, nil
+	projected, err := projectStorefrontInvoice(ctx, out.Invoice)
+	return &projected, err
 }

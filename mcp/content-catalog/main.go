@@ -82,6 +82,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/assets/", Handler: a.handleAsset},
 		{Pattern: "/publications", Handler: a.handleList("content_catalog_asset_publications_list")},
 		{Pattern: "/posts", Handler: a.handleList("content_catalog_posts_list")},
+		{Pattern: "/posts/", Handler: a.handlePost},
 		{Pattern: "/hostings", Handler: a.handleList("content_catalog_hosting_list")},
 		{Pattern: "/video-hosts", Handler: a.handleVideoHosts},
 		{Pattern: "/action", Handler: a.handleAction},
@@ -92,67 +93,75 @@ func schema(required ...string) map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": true, "required": required}
 }
 
-func searchSchema() map[string]any {
+func baseSearchSchema() map[string]any {
 	field := func(description string) map[string]any {
 		return map[string]any{"type": "string", "description": description}
 	}
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"lifecycle":      map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
-			"entity_type":    map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
-			"query":          field("Text in file names, session notes/titles and current Media descriptions."),
-			"brand_id":       field("Limit results to one explicit Catalog brand ID."),
-			"session_id":     field("Limit asset results to one session ID."),
-			"date_from":      field("Inclusive YYYY-MM-DD session date."),
-			"date_to":        field("Inclusive YYYY-MM-DD session date."),
-			"kind":           field("Asset kind, such as video, image, or audio."),
-			"lineage":        map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
-			"sort":           map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
-			"review_status":  map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
-			"tag":            field("One exact generic asset tag, such as share-next or best-take."),
-			"favorite":       map[string]any{"type": "boolean", "description": "Limit assets to favorites."},
-			"patreon_intent": map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}, "description": "Catalog intent only; does not publish to Patreon."},
-			"destination":    field("Network or channel, such as instagram. Required for destination availability filters."),
-			"account_ref":    field("Specific destination account or tier reference; requires destination."),
-			"availability":   map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
-			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
-			"cursors":        map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions")}, "additionalProperties": false},
+			"lifecycle":             map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
+			"entity_type":           map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
+			"query":                 field("Text in Catalog display titles, current Media descriptions, source file names and session notes/titles."),
+			"brand_id":              field("Limit results to one explicit Catalog brand ID."),
+			"session_id":            field("Limit asset results to one session ID."),
+			"source_asset_id":       field("Return assets directly derived from this exact Catalog asset ID using recorded source links. Excludes the source itself; asset results only."),
+			"include_descendants":   map[string]any{"type": "boolean", "default": false, "description": "Include indirect derivatives through recorded source links. Requires source_asset_id. Filters apply to returned assets, not intermediate ancestors."},
+			"date_from":             field("Inclusive YYYY-MM-DD session date."),
+			"date_to":               field("Inclusive YYYY-MM-DD session date."),
+			"role":                  map[string]any{"type": "string", "enum": []string{"unspecified", "main", "derivative", "intermediate"}, "description": "Explicit purpose, independent of lineage. Main assets may have parents."},
+			"output_type":           field("Exact generic output category such as reel, screenshot or portrait."),
+			"include_intermediates": map[string]any{"type": "boolean", "default": false, "description": "Explicit inspection of supporting assets. Default content selection excludes intermediates; descendant traversal still follows their links."},
+			"kind":                  field("Asset kind, such as video, image, or audio."),
+			"lineage":               map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
+			"sort":                  map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
+			"review_status":         map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
+			"tag":                   field("One exact generic asset tag, such as share-next or best-take."),
+			"favorite":              map[string]any{"type": "boolean", "description": "Limit assets to favorites."},
+			"patreon_intent":        map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}, "description": "Catalog intent only; does not publish to Patreon."},
+			"destination":           field("Network or channel, such as instagram. Required for destination availability filters."),
+			"account_ref":           field("Specific destination account or tier reference; requires destination."),
+			"availability":          map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
+			"limit":                 map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
+			"cursors":               map[string]any{"type": "object", "properties": map[string]any{"assets": field("Pass assets.next_cursor here with the same filters while nonempty; more matching assets remain."), "sessions": field("Pass sessions.next_cursor here with the same filters while nonempty; more matching sessions remain.")}, "additionalProperties": false},
 		},
 	}
 }
 
+func searchSchema() map[string]any { return publicationAudienceSchema(baseSearchSchema(), true) }
+
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "content_catalog_overview", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Count brands, sessions, assets, per-asset publication records, and hosting records.", InputSchema: schema(), Handler: a.overview},
-		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Published means verified live. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
+		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets, including Catalog display titles and current Media descriptions. Asset title is the editable Catalog display title; name is the source filename. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Purpose role is independent of lineage; use role=main with kind=video for main videos. Intermediate assets are excluded by default; include_intermediates=true or role=intermediate is explicit inspection. Use source_asset_id for exact direct derivatives; include_descendants=true includes nested derivatives. Follow assets.next_cursor via cursors.assets until empty before declaring inventory exhausted. Published means verified live. Publication filters include exact platform/account, audience_type, access_policy and group_scope/group_id. Confirmed all_eligible covers account group IDs; unknown scope never confirms a group and blocks automatic readiness when overlap is uncertain. Historical verified filters match the original audience snapshots. Publication filters do not detect reservations held only in planning apps; check those separately, including related crops of reserved moments. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
 		{Name: "content_catalog_sessions_create", Description: "Create a stable production session. Args: brand_id, title; optional session_date (YYYY-MM-DD, empty means unknown), notes, host_collection_id. Writes only Catalog.", InputSchema: schema("brand_id", "title"), Handler: a.sessionCreate},
 		{Name: "content_catalog_sessions_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List sessions; brand_id optional. Defaults to active lifecycle; archived/all are explicit inspection views.", InputSchema: lifecycleListSchema(), Handler: a.sessionsList},
-		{Name: "content_catalog_sessions_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: lifecycleListSchema("id"), Handler: a.sessionGet},
+		{Name: "content_catalog_sessions_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: assetListSchema("id"), Handler: a.sessionGet},
 		{Name: "content_catalog_sessions_update", Description: "Edit an existing session's title, notes, recording date, or optional host_collection_id override. Args: id and fields to change. Empty session_date means unknown. Storage folder remains stable.", InputSchema: schema("id"), Handler: a.sessionUpdate},
 		{Name: "content_catalog_sessions_link_gig", Description: "Read an existing Gig, then link it to a Catalog session. Args: session_id, gig_id, role?. Does not change Gigs.", InputSchema: schema("session_id", "gig_id"), Handler: a.sessionLinkGig},
 		{Name: "content_catalog_assets_attach", Description: "Read an existing Storage file, then link it to a session. Args: session_id, storage_file_id, kind?. Does not upload or change Storage.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttach},
 		{Name: "content_catalog_session_upload_target", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Return the exact Storage folder and install ID for explicit uploads into a session. Does not scan or upload. Args: session_id.", InputSchema: schema("session_id"), Handler: a.sessionUploadTarget},
 		{Name: "content_catalog_assets_attach_uploaded", Description: "Attach a file uploaded to the session's exact Storage folder after verifying its Storage metadata. Idempotent. Args: session_id, storage_file_id.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttachUploaded},
 		{Name: "content_catalog_import_preview", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read up to 200 Storage files under a session brand root. Return candidates needing human review; no files or Catalog records are changed. Args: session_id.", InputSchema: schema("session_id"), Handler: a.importPreview},
-		{Name: "content_catalog_assets_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List session assets, active by default. lifecycle=archived/all enables inspection; archived parent sessions also make assets ineligible.", InputSchema: lifecycleListSchema("session_id"), Handler: a.assetsList},
-		{Name: "content_catalog_assets_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get an asset with lifecycle, eligibility, revision, original session, source lineage, hosting, and publication history. Archived identities remain readable. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
-		{Name: "content_catalog_assets_link_source", Description: "Record one source relationship, supporting multi-input derivatives. Args: child_asset_id, source_asset_id, relation?, source_order?, media_render_id?.", InputSchema: schema("child_asset_id", "source_asset_id"), Handler: a.assetLinkSource},
+		{Name: "content_catalog_assets_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List session assets, active by default. Each asset includes its Catalog display title and original filename in name. Optional id is an exact Catalog asset ID filter: zero or one match within the specified session, project and visibility filters, never an unfiltered fallback. Use content_catalog_assets_get(id) for direct reads when the session is unknown or for archived/intermediate inspection. Workers must check returned asset IDs before acting. lifecycle=archived/all enables inspection; archived parent sessions also make assets ineligible.", InputSchema: sessionAssetListSchema(), Handler: a.assetsList},
+		{Name: "content_catalog_assets_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get an asset with its Catalog display title, lifecycle, eligibility, revision, original session, source lineage, hosting, and publication history. title is the human-readable Catalog title when set; name is the original source filename. Archived identities remain readable. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
+		{Name: "content_catalog_assets_link_source", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}, Description: "Add one immediate source link. Returns status=inserted, unchanged (identical), or conflict with linked=false and actual saved sources. Existing values are never silently overwritten; correct them with content_catalog_assets_sources_replace. New links increment the child revision and retain audit evidence. Writes only Catalog.", InputSchema: sourceLinkSchema(false), Handler: a.assetLinkSource},
+		{Name: "content_catalog_assets_sources_replace", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true}, Description: "Explicitly replace the entire immediate source list atomically, including removing unwanted links. Requires expected_revision, expected_sources (all four saved edge fields), sources, reason and a stable idempotency_key. Read the child first; reuse identical arguments/key on retry. Ownership, cycle checks, revision and before/after audit are transactional. Empty sources removes all links. Returns actual saved sources and revision. Changes Catalog lineage only; never changes files, renders, review, hosting or publication.", InputSchema: sourceLinkSchema(true), Handler: a.assetSourcesReplace},
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
-		{Name: "content_catalog_assets_labels_update", Description: "Set generic Catalog labels on 1–100 assets. Replace tags, favorite, and Patreon intent (unset/free/paid); does not publish or modify Media. Use expected_revisions for safe bulk edits.", InputSchema: assetLabelsSchema(), Handler: a.assetLabelsUpdate},
-		{Name: "content_catalog_asset_publications_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
-		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
-		{Name: "content_catalog_posts_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Each post contains its asset IDs and one observed outcome.", InputSchema: lifecycleListSchema(), Handler: a.postsList},
-		{Name: "content_catalog_posts_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one shared platform post and its asset IDs. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
-		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
+		{Name: "content_catalog_assets_labels_update", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}, Description: "Set Catalog labels on 1–100 assets. Optional title sets one asset’s display title and requires expected_revisions. Empty title restores the filename heading. Set purpose role, generic output_type, favorite and Patreon intent (unset/free/paid). tags replaces the entire tag set (empty clears); tags_add/tags_remove edit exact tags while preserving others. Use one asset_ids entry for per-asset edits, and expected_revisions from assets_get for safe edits. Returns saved tags and revisions. Writes Catalog only.", InputSchema: assetLabelsSchema(), Handler: a.assetLabelsUpdate},
+		{Name: "content_catalog_asset_publications_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: postListSchema(true), Handler: a.assetPublicationsList},
+		{Name: "content_catalog_asset_publications_record", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}, Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: postRecordSchema(true), Handler: a.assetPublicationRecord},
+		{Name: "content_catalog_posts_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Filters: exact destination/account, audience_type, access_policy, group_scope/group_id, external_post_id, status and cursor/limit (max200); follow next_cursor until empty. Each post includes audience and verification evidence.", InputSchema: postListSchema(false), Handler: a.postsList},
+		{Name: "content_catalog_posts_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one shared platform post, its asset IDs, revision and audience before/after history. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
+		{Name: "content_catalog_posts_record", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}, Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Reconciles by project/platform/account/external_post_id without duplicate imports. Structured audience fields are provider-neutral; unknown scope is never all groups. Audience or identity corrections require expected_revision; verified audience changes need explicit evidence_source. Actual publication time may be unknown; observed_at is separate. Writes Catalog evidence only; does not publish externally.", InputSchema: postRecordSchema(false), Handler: a.postsRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Persists explicit hosting intent, waits for Storage checksum verification and automatically resumes after eligibility and destination checks. Optional title overrides the Media title / session-and-filename default. Pending uploads are checked automatically; existing hosted titles are unchanged. If no session or brand collection is configured, creates/reuses a collection named after the session and saves its ID. Does not publish to a channel.", InputSchema: hostingRequestSchema(), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_cancel", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}, Description: "Cancel a checksum-waiting hosting intent before transfer. Cannot cancel an upload already started. Args: intent_id.", InputSchema: schema("intent_id"), Handler: a.hostingCancel},
-		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
+		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id, then verify delivery once ready: Storage master hash vs the hosted source hash, video ID, library, collection, and provider length vs Media's hash-bound duration (whole-second provider rounding plus audio/container tolerance). Returns hosting plus a durable delivery receipt: delivery_status pending|verified|failed, reason, source hashes, destination identity, measured durations, warnings, checked_at, verified_at, next_check_at. Pending delivery is retried automatically by the background checker. Never uploads or re-fetches. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
 		{Name: "content_catalog_hosting_link_existing", Description: "Backfill a video asset with an existing Bunny GUID using only get_video. Args: asset_id, remote_id, connection_id. Confirms library, collection, duration, and readiness; never calls fetch_video. Media checksum is supporting Storage evidence, not a Bunny source-file match.", InputSchema: schema("asset_id", "remote_id", "connection_id"), Handler: a.hostingLinkExisting},
-		{Name: "content_catalog_hosting_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read recorded hosting progress and durable intents for exactly one asset_id or session_id. Does not contact a provider or start an upload.", InputSchema: hostingListSchema(), Handler: a.hostingsList},
+		{Name: "content_catalog_hosting_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read recorded hosting progress, delivery receipts (delivery_status, delivery_reason, delivery) and durable intents for exactly one asset_id or session_id. Does not contact a provider or start an upload.", InputSchema: hostingListSchema(), Handler: a.hostingsList},
 		{Name: "content_catalog_assets_archive", Description: "Archive assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "archive"), Handler: a.lifecycleMutation("asset", "archive")},
 		{Name: "content_catalog_assets_move", Description: "Move assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "move"), Handler: a.lifecycleMutation("asset", "move")},
 		{Name: "content_catalog_assets_restore", Description: "Restore assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "restore"), Handler: a.lifecycleMutation("asset", "restore")},
@@ -220,12 +229,12 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{}
-	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
+	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "source_asset_id", "include_descendants", "role", "output_type", "include_intermediates", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "audience_type", "access_policy", "group_scope", "group_id", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
 		if v := r.URL.Query().Get(key); v != "" {
-			if key == "favorite" {
+			if key == "favorite" || key == "include_descendants" || key == "include_intermediates" {
 				parsed, err := strconv.ParseBool(v)
 				if err != nil {
-					http.Error(w, "favorite must be boolean", http.StatusBadRequest)
+					http.Error(w, key+" must be boolean", http.StatusBadRequest)
 					return
 				}
 				args[key] = parsed
@@ -267,13 +276,53 @@ func (a *App) handleList(name string) http.HandlerFunc {
 			return
 		}
 		args := map[string]any{}
-		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "id", "entity_type"} {
+		if name == "content_catalog_assets_list" {
+			if ids, present := r.URL.Query()["id"]; present {
+				if len(ids) != 1 || strings.TrimSpace(ids[0]) == "" {
+					http.Error(w, "id must be one nonempty Catalog asset ID", http.StatusBadRequest)
+					return
+				}
+				args["id"] = ids[0]
+			}
+		}
+
+		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "role", "output_type", "include_intermediates", "id", "entity_type", "destination", "account_ref", "audience_type", "access_policy", "group_scope", "group_id", "status", "cursor", "limit", "external_post_id"} {
 			if v := r.URL.Query().Get(key); v != "" {
-				args[key] = v
+				if key == "include_intermediates" {
+					parsed, err := strconv.ParseBool(v)
+					if err != nil {
+						http.Error(w, "include_intermediates must be boolean", 400)
+						return
+					}
+					args[key] = parsed
+				} else {
+					if key == "limit" {
+						parsed, err := strconv.ParseInt(v, 10, 64)
+						if err != nil {
+							http.Error(w, "invalid limit", 400)
+							return
+						}
+						args[key] = parsed
+					} else {
+						args[key] = v
+					}
+				}
 			}
 		}
 		a.callHTTP(w, r, name, args)
 	}
+}
+func (a *App) handlePost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", 405)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/posts/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	a.callHTTP(w, r, "content_catalog_posts_get", map[string]any{"id": id})
 }
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -304,7 +353,16 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(out)
 		return
 	}
-	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id, "lifecycle": r.URL.Query().Get("lifecycle")})
+	include := false
+	if raw := r.URL.Query().Get("include_intermediates"); raw != "" {
+		var err error
+		include, err = strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "include_intermediates must be boolean", 400)
+			return
+		}
+	}
+	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id, "lifecycle": r.URL.Query().Get("lifecycle"), "role": r.URL.Query().Get("role"), "output_type": r.URL.Query().Get("output_type"), "include_intermediates": include})
 }
 func (a *App) handleAsset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -707,7 +765,7 @@ func (a *App) sessionGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	assetsAny, err := a.assetsList(ctx, map[string]any{"session_id": s.ID, "lifecycle": args["lifecycle"]})
+	assetsAny, err := a.assetsList(ctx, map[string]any{"session_id": s.ID, "lifecycle": args["lifecycle"], "role": args["role"], "output_type": args["output_type"], "include_intermediates": args["include_intermediates"]})
 	if err != nil {
 		return nil, err
 	}

@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--resume", action="store_true", help="continue unattempted trials, preserving existing logs/results")
     parser.add_argument("--trials", nargs="+", help="run only these adapter-rows-runN trial names")
     args = parser.parse_args()
-    valid_trials = {f"{adapter}-{count}-run{repeat}" for count in args.rows for repeat in range(1, args.repeats + 1) for adapter in ("sqlite", "pebble")}
+    valid_trials = {f"{adapter}-{count}-run{repeat}" for count in args.rows for repeat in range(1, args.repeats + 1) for adapter in ("sqlite", "pebble", "aptevadb")}
     if args.trials and not set(args.trials) <= valid_trials:
         parser.error("--trials must name trials in the selected rows/repeats matrix")
     if (args.output / "machine.json").exists() and not args.resume:
@@ -58,7 +58,9 @@ def main():
         failures = []
         for count in args.rows:
             for repeat in range(1, args.repeats + 1):
-                adapters = ["sqlite", "pebble"] if repeat % 2 else ["pebble", "sqlite"]
+                adapters = ["sqlite", "pebble", "aptevadb"]
+                rotation = (repeat - 1) % len(adapters)
+                adapters = adapters[rotation:] + adapters[:rotation]
                 for adapter in adapters:
                     stem = f"{adapter}-{count}-run{repeat}"
                     if args.trials and stem not in args.trials:

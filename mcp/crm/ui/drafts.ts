@@ -5,6 +5,7 @@ export interface ReplyDraftContent {
   attachments?: Record<string, unknown>[];
 }
 export interface SavedReplyDraft {
+  mode?: "reply" | "message";
   id: number; contact_id: number; conversation_id: number; reply_to_activity_id: number;
   content: ReplyDraftContent; revision: number;
   status: "draft" | "sending" | "send_failed" | "sent" | "discarded";
@@ -12,6 +13,7 @@ export interface SavedReplyDraft {
   send_retry_at?: string;
 }
 export interface ReplyDraftSummary {
+  mode?: "reply" | "message";
   id: number; contact_id: number; conversation_id: number; channel: string; from: string; to: string;
   subject: string; preview: string; revision: number; status: SavedReplyDraft["status"];
   created_by: string; updated_by: string; updated_at: string; last_error?: string;

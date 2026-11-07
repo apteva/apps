@@ -16,12 +16,16 @@ import (
 )
 
 type service struct {
-	ctx          *sdk.AppCtx
-	db           store
-	fixtureMu    sync.Mutex
-	catalogMu    sync.Mutex
-	catalogValue map[string]any
-	catalogUntil time.Time
+	ctx              *sdk.AppCtx
+	db               store
+	fixtureMu        sync.Mutex
+	catalogMu        sync.Mutex
+	catalogValue     map[string]any
+	catalogUntil     time.Time
+	voiceMu          sync.Mutex
+	voiceOperations  map[string]map[*voiceOperation]bool
+	runStops         map[string]*runStopOperation
+	voiceStopTimeout time.Duration
 }
 
 const startingRunGracePeriod = 2 * time.Minute
@@ -242,10 +246,7 @@ func (s *service) stopDefinition(id string) error {
 	}
 	return firstErr
 }
-func (s *service) stopRun(run *Run) error {
-	if err := s.db.updateRun(run.ID, "stopping", ""); err != nil {
-		return err
-	}
+func (s *service) destroyStoppedRun(run *Run) error {
 	if err := s.db.setWebFixturesStatus(run.ID, "stopping"); err != nil {
 		return err
 	}
@@ -254,10 +255,9 @@ func (s *service) stopRun(run *Run) error {
 	}
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
 	if err != nil && !runtimeNotFound(err) {
-		_ = s.db.updateRun(run.ID, "stopping", err.Error())
 		return err
 	}
-	if err := s.db.updateRun(run.ID, "stopped", ""); err != nil {
+	if _, err := s.db.db.Exec(`UPDATE environment_runs SET status='stopped',stopped_at=COALESCE(stopped_at,?) WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), run.ID); err != nil {
 		return err
 	}
 	if err := s.db.setWebFixturesStatus(run.ID, "stopped"); err != nil {
@@ -279,11 +279,11 @@ func (s *service) reconcile(context.Context) error {
 	if err != nil {
 		return err
 	}
-	defs, err := s.db.listDefinitions()
+	defs, err := s.db.listDefinitionLifecycles()
 	if err != nil {
 		return err
 	}
-	byID := make(map[string]*Definition, len(defs))
+	byID := make(map[string]*definitionLifecycle, len(defs))
 	for i := range defs {
 		byID[defs[i].ID] = &defs[i]
 	}
@@ -298,7 +298,7 @@ func (s *service) reconcile(context.Context) error {
 			continue
 		}
 		if r.Status == "stopping" {
-			if reconcileBlocked(d, time.Now()) {
+			if d != nil && reconcileBlocked(d.ReconcileStatus, d.ReconcileNextAt, time.Now()) {
 				continue
 			}
 			if err := s.stopRun(r); err != nil {
@@ -345,18 +345,18 @@ func (s *service) reconcile(context.Context) error {
 	}
 	// Reload after active-run recovery because it may have advanced backoff or
 	// moved a definition into the terminal degraded state.
-	defs, err = s.db.listDefinitions()
+	defs, err = s.db.listDefinitionLifecycles()
 	if err != nil {
 		return err
 	}
 	for i := range defs {
 		d := defs[i]
 		if d.DesiredState == "running" {
-			if d.ActiveRun == nil {
-				if reconcileBlocked(&d, time.Now()) {
+			if !d.HasActiveRun {
+				if reconcileBlocked(d.ReconcileStatus, d.ReconcileNextAt, time.Now()) {
 					continue
 				}
-				if _, err := s.start(d.ID, "reconcile", d.Spec); err != nil {
+				if err := s.startReconciledDefinition(d.ID); err != nil {
 					s.ctx.Logger().Error("environment reconcile start failed", "id", d.ID, "err", err)
 					if stateErr := s.recordReconcileFailure(d.ID, err.Error(), threshold); stateErr != nil {
 						return stateErr
@@ -366,6 +366,20 @@ func (s *service) reconcile(context.Context) error {
 		}
 	}
 	return s.pruneHistory()
+}
+
+func (s *service) startReconciledDefinition(id string) error {
+	// Read the current spec only for an eligible start. Recheck lifecycle state
+	// because a user may have stopped or updated the definition since polling.
+	d, err := s.db.getDefinition(id)
+	if err != nil || d == nil {
+		return err
+	}
+	if d.DesiredState != "running" || d.ActiveRun != nil || reconcileBlocked(d.ReconcileStatus, d.ReconcileNextAt, time.Now()) {
+		return nil
+	}
+	_, err = s.start(d.ID, "reconcile", d.Spec)
+	return err
 }
 
 func (s *service) snapshot(environmentID, description string) (*Snapshot, error) {

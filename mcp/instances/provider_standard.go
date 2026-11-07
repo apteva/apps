@@ -18,6 +18,8 @@ import (
 // apiProviderSlugs are REST-backed VPS integrations that share the same
 // Instances lifecycle but expose different request and response shapes.
 var apiProviderSlugs = []string{
+	"clouding",
+	"upcloud",
 	"contabo",
 	"vultr",
 	"aws-ec2",
@@ -74,13 +76,19 @@ func executeProviderToolUncached(ctx *sdk.AppCtx, connectionID int64, provider, 
 }
 
 func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
+	if provider == "ovhcloud" {
+		return ovhServerTypes(ctx)
+	}
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudServerTypes(ctx, provider)
+	}
 	if provider == "contabo" {
 		return contaboServerTypes(), nil
 	}
 	tool, args := "", map[string]any{}
 	switch provider {
 	case "vultr":
-		tool, args = "list_plans", map[string]any{"type": "vc2", "per_page": 500}
+		return vultrServerTypes(ctx)
 	case "aws-ec2":
 		tool, args = "list_instance_types", map[string]any{"Action": "DescribeInstanceTypes", "Version": "2016-11-15", "MaxResults": 100}
 	case "scaleway":
@@ -102,19 +110,7 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 	if err != nil {
 		return nil, err
 	}
-	if provider == "vultr" {
-		// Keep the existing Cloud Compute family and include VX1. Both use
-		// the same create API; pagination and account-scoped caching apply.
-		data, err := executeProviderTool(ctx, provider, "list_plans", map[string]any{"type": "vx1", "per_page": 500})
-		if err != nil {
-			return nil, err
-		}
-		vx1, err := parseProviderServerTypes(provider, data)
-		if err != nil {
-			return nil, err
-		}
-		types = append(types, vx1...)
-	}
+
 	for i := range types {
 		if types[i].Platform == "" {
 			types[i].Platform = "linux"
@@ -163,6 +159,12 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 }
 
 func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
+	if provider == "ovhcloud" {
+		return ovhLocations(ctx)
+	}
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudLocations(ctx, provider)
+	}
 	if provider == "contabo" {
 		return contaboLocations(), nil
 	}
@@ -192,6 +194,12 @@ func apiProviderListLocations(ctx *sdk.AppCtx, provider string) ([]Location, err
 }
 
 func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
+	if provider == "ovhcloud" {
+		return ovhImages(ctx)
+	}
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudImages(ctx, provider)
+	}
 	tool, args := "", map[string]any{}
 	switch provider {
 	case "contabo":
@@ -235,7 +243,7 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 		if images[i].Platform == "" {
 			images[i].Platform = "linux"
 		}
-		if images[i].ResourceClass == "" {
+		if images[i].ResourceClass == "" && provider != "vultr" {
 			images[i].ResourceClass = "virtual"
 		}
 	}
@@ -289,7 +297,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if provider == "scaleway" && isScalewayElasticMetalSize(in.Size) {
 		return scalewayElasticMetalProvision(ctx, in)
 	}
-	privKey, pubKey, err := generateSSHKeypair()
+	privKey, pubKey, err := generateProviderSSHKeypair(provider)
 	if err != nil {
 		return nil, fmt.Errorf("generate ssh keypair: %w", err)
 	}
@@ -299,7 +307,9 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	in.SSHPublicKey = pubKey
 	in.SSHUser = "root"
 	in.Platform = "linux"
-	in.ResourceClass = "virtual"
+	if in.ResourceClass == "" {
+		in.ResourceClass = "virtual"
+	}
 	appleMac := provider == "scaleway" && isScalewayAppleSize(in.Size)
 	if appleMac {
 		in.Platform = "macos"
@@ -319,7 +329,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 			}
 		}
 	}
-	if in.MonthlyCostCents == 0 {
+	if in.MonthlyCostCents == 0 && provider != "vultr" {
 		in.MonthlyCostCents = apiProviderMonthlyCostCents(ctx, provider, in.Size)
 	}
 
@@ -328,6 +338,13 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		return nil, err
 	}
 	defer trackInstanceCreation(ctx, inst.ID)()
+	if in.Firewall != nil {
+		if _, e := firewallReconcile(ctx, inst, true); e != nil {
+			finishInstanceCreation(ctx, inst.ID)
+			failInstanceStage(ctx, inst.ID, "Firewall", e)
+			return nil, e
+		}
+	}
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "ProviderCreate"})
@@ -349,12 +366,26 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 			"type": scalewayAppleID(in.Size), "os_id": scalewayAppleID(in.Image),
 			"commitment_type": "duration_24h", "enable_vpc": false, "enable_kext": false,
 		}
+	} else if provider == "clouding" || provider == "upcloud" {
+		tool, args, err = cloudingUpcloudCreateRequest(ctx, inst, in, pubKey)
 	} else {
 		tool, args, err = apiProviderCreateRequest(ctx, provider, in, pubKey)
 	}
 	if err != nil {
+		// Request construction failed before the compute create call. Preserve any
+		// ancillary-resource identities, but do not mislabel a server as in flight.
+		finishInstanceCreation(ctx, inst.ID)
 		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
+	}
+	if s, e := firewallLoad(ctx.AppDB(), inst.ID); e == nil && s.ResourceID != "" {
+		switch provider {
+		case "vultr":
+			args["firewall_group_id"] = s.ResourceID
+		case "linode":
+			args["firewall_id"] = mustFirewallInt(s.ResourceID)
+			args["interface_generation"] = "legacy_config"
+		}
 	}
 	data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, tool, args)
 	if err != nil {
@@ -380,6 +411,14 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		return nil, err
 	}
 	persistFields := map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6, "lifecycle_stage": "Boot"}
+	if provider == "upcloud" {
+		meta := cloudingUpcloudMeta(inst.ProviderMetadataJSON)
+		meta.BootID = upcloudOwnedBoot(data, meta.BootTitle)
+		encoded, _ := json.Marshal(meta)
+		inst.ProviderMetadataJSON = string(encoded)
+		persistFields["provider_metadata_json"] = string(encoded)
+	}
+
 	if appleMac {
 		for key, value := range scalewayAppleResponseFields(data) {
 			persistFields[key] = value
@@ -388,6 +427,9 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, persistFields); err != nil {
 		orphan := *inst
 		orphan.ProviderID, orphan.PublicIPv4, orphan.PublicIPv6 = provID, ipv4, ipv6
+		if provider == "vultr" && vultrMeta(inst.ProviderMetadataJSON).BootLabel != "" {
+			return nil, fmt.Errorf("persist Vultr resource %s identity: %w; owned boot label %s retained for reconciliation", provID, err, vultrMeta(inst.ProviderMetadataJSON).BootLabel)
+		}
 		cleanupErr := apiProviderDestroy(ctx, &orphan)
 		ctx.Logger().Error("instances: failed to persist provider identity", "provider", provider, "id", inst.ID, "provider_id", provID, "err", err, "cleanup_err", cleanupErr)
 		if cleanupErr != nil {
@@ -430,7 +472,15 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		if len(types) == 0 {
 			return fmt.Errorf("%s returned no provisionable server types", provider)
 		}
-		in.Size = types[0].Name
+		for _, t := range types {
+			if t.Available == nil || *t.Available {
+				in.Size = t.Name
+				break
+			}
+		}
+		if in.Size == "" {
+			return fmt.Errorf("%s has no currently available on-demand types", provider)
+		}
 	}
 	for i := range types {
 		if types[i].Name == in.Size {
@@ -440,15 +490,13 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 	}
 	if provider == "vultr" {
 		if selectedType == nil {
-			return fmt.Errorf("Vultr plan %s is not available in the supported local-disk catalog; diskless VX1 boot volumes are not supported", in.Size)
+			return fmt.Errorf("Vultr plan %s is not present in the complete provider catalog", in.Size)
 		}
-		if selectedType.MonthlyPriceUSD <= 0 {
-			return fmt.Errorf("Vultr plan %s has no valid price; refresh the catalog before provisioning", in.Size)
+		if err := configureVultrPlan(in, *selectedType); err != nil {
+			return err
 		}
-		// Always use the selected account's provider quote, including when a
-		// caller supplies a cost. Missing catalog data must not imply free.
-		in.MonthlyCostCents = int(selectedType.MonthlyPriceUSD*100 + 0.5)
 	}
+
 	if in.Region == "" {
 		locations, err := apiProviderListLocations(ctx, provider)
 		if err != nil {
@@ -465,6 +513,17 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 	if selectedType != nil && len(selectedType.AvailableIn) > 0 && !containsString(selectedType.AvailableIn, in.Region) {
 		return fmt.Errorf("%s is unavailable in %s", in.Size, in.Region)
 	}
+	if provider == "vultr" {
+		quote := selectedType.MonthlyPriceUSD
+		if price, ok := selectedType.LocationPrices[in.Region]; ok {
+			if !price.Known {
+				return fmt.Errorf("Vultr regional price unavailable for %s", in.Region)
+			}
+			quote = price.Monthly
+		}
+		in.MonthlyCostCents = int(quote*100 + 0.5)
+	}
+
 	scoped, release := scopedCatalog(ctx, catalogOptions{ConnectionID: in.ProviderConnectionID, Zone: in.Region, ResourceClass: catalogScope(ctx).ResourceClass})
 	defer release()
 	ctx = scoped
@@ -568,6 +627,12 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			}
 		}
 	}
+	if provider == "clouding" || provider == "upcloud" {
+		return validateCloudingUpcloudCreate(ctx, provider, in, selectedType)
+	}
+	if provider == "vultr" {
+		return validateVultrAvailability(ctx, in)
+	}
 	return nil
 }
 
@@ -590,11 +655,7 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 			"userData": cloudInit, "displayName": in.Name, "period": 1, "defaultUser": "root",
 		}, nil
 	case "vultr":
-		osID, err := strconv.Atoi(in.Image)
-		if err != nil {
-			return "", nil, fmt.Errorf("vultr image must be a numeric OS id, got %q", in.Image)
-		}
-		return "create_instance", map[string]any{"region": in.Region, "plan": in.Size, "os_id": osID, "label": in.Name, "hostname": in.Name, "user_data": base64.StdEncoding.EncodeToString([]byte(cloudInit)), "enable_ipv6": true}, nil
+		return vultrCreateRequest(in, pubKey)
 	case "aws-ec2":
 		args := map[string]any{
 			"Action": "RunInstances", "Version": "2016-11-15", "ImageId": in.Image, "InstanceType": in.Size,
@@ -705,6 +766,12 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 
 func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	provider := normalizeProvider(inst.Provider)
+	if isOVHContract(inst) {
+		return ovhContractDestroy(ctx, inst, "")
+	}
+	if provider == "clouding" || provider == "upcloud" {
+		return cloudingUpcloudDestroy(ctx, inst)
+	}
 	if isScalewayElasticMetalInstance(inst) {
 		return scalewayElasticMetalDestroy(ctx, inst)
 	}
@@ -726,6 +793,9 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 		return errors.New("contabo does not support immediate instance deletion; cancel the service from Contabo and remove it from Instances only after it has terminated")
 	case "vultr":
 		tool, args = "delete_instance", map[string]any{"instance_id": inst.ProviderID}
+		if isVultrMetal(inst) {
+			tool, args = "delete_bare_metal", map[string]any{"baremetal_id": inst.ProviderID}
+		}
 	case "aws-ec2":
 		tool, args = "terminate_instance", map[string]any{"Action": "TerminateInstances", "Version": "2016-11-15", "InstanceId.1": inst.ProviderID}
 	case "scaleway":
@@ -939,6 +1009,10 @@ func scalewaySSHProbeError(ctx *sdk.AppCtx, inst *Instance, probeErr error) erro
 }
 
 func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
+	if inst, e := dbGetInstance(ctx.AppDB(), id); e == nil && isOVHContract(inst) {
+		kickOVHContract(ctx, id)
+		return
+	}
 	if !finishInstanceCreation(ctx, id) {
 		return
 	}
@@ -961,11 +1035,23 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		if fresh.PublicIPv4 == "" && fresh.PublicIPv6 == "" {
 			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Network"})
 			provider := fresh.Provider
-			fresh, err = waitAPIProviderNetwork(ctx, fresh, 5*time.Minute)
+			networkTimeout := 5 * time.Minute
+			if isVultrMetal(fresh) {
+				networkTimeout = 30 * time.Minute
+			}
+			fresh, err = waitAPIProviderNetwork(ctx, fresh, networkTimeout)
 			if err != nil {
 				failInstanceStage(ctx, id, "Network", fmt.Errorf("%s network: %w", provider, err))
 				return
 			}
+		}
+		if err = reconcileCloudingUpcloudBoot(ctx, fresh); err != nil {
+			failInstanceStage(ctx, id, "Storage", err)
+			return
+		}
+		if err = reconcileVultrBootStorage(ctx, fresh); err != nil {
+			failInstanceStage(ctx, id, "Storage", err)
+			return
 		}
 		if err = reconcileAWSBootStorage(ctx, fresh); err != nil {
 			failInstanceStage(ctx, id, "Storage", err)
@@ -985,7 +1071,11 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		}
 		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "SSH"})
 		fresh.workContext = work
-		if err := probeSSHWithRetriesUsing(probe, fresh, 3, 2*time.Minute); err != nil {
+		sshTimeout := 2 * time.Minute
+		if isVultrMetal(fresh) {
+			sshTimeout = 5 * time.Minute
+		}
+		if err := probeSSHWithRetriesUsing(probe, fresh, 3, sshTimeout); err != nil {
 			failInstanceStage(ctx, id, "SSH", scalewaySSHProbeError(ctx, fresh, err))
 			return
 		}
@@ -1056,6 +1146,9 @@ func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
 	if cleanupErr == nil {
 		cleanupErr = destroyProviderInstance(ctx, inst)
 	}
+	if cleanupErr == nil {
+		cleanupErr = firewallDestroy(ctx, inst)
+	}
 	fields := map[string]any{"lifecycle_stage": stage}
 	if cleanupErr != nil {
 		fields["cleanup_error"] = cleanupErr.Error()
@@ -1069,11 +1162,11 @@ func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
 }
 
 func usesCloudInit(inst *Instance) bool {
-	if inst.Platform == "macos" || isScalewayDediboxInstance(inst) {
+	if inst.Platform == "macos" || isScalewayDediboxInstance(inst) || isOVHContract(inst) {
 		return false
 	}
 	// Linode and OVH install keys through their native image/config APIs.
-	return inst.Provider != "linode" && inst.Provider != "ovhcloud"
+	return inst.Provider != "linode" && inst.Provider != "ovhcloud" && inst.Provider != "clouding" && inst.Provider != "upcloud"
 }
 
 func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
@@ -1117,10 +1210,25 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 }
 
 func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
+	if isOVHContract(inst) {
+		product, _ := ovhSizeParts(inst.Size)
+		prefix := "dedicated"
+		if product == "vps" {
+			prefix = "vps"
+		}
+		return prefix + "_get", map[string]any{"serviceName": inst.ProviderID}, nil
+	}
 	switch inst.Provider {
+	case "clouding":
+		return "get_server", map[string]any{"id": inst.ProviderID}, nil
+	case "upcloud":
+		return "get_server", map[string]any{"server_id": inst.ProviderID}, nil
 	case "contabo":
 		return "instance_get", map[string]any{"request_id": newRequestID(), "instanceId": numericOrString(inst.ProviderID)}, nil
 	case "vultr":
+		if isVultrMetal(inst) {
+			return "get_bare_metal", map[string]any{"baremetal_id": inst.ProviderID}, nil
+		}
 		return "get_instance", map[string]any{"instance_id": inst.ProviderID}, nil
 	case "aws-ec2":
 		return "list_instances", map[string]any{"Action": "DescribeInstances", "Version": "2016-11-15", "InstanceId.1": inst.ProviderID}, nil
@@ -1154,6 +1262,10 @@ func reconcileAPIProviderProvisioning(ctx *sdk.AppCtx) {
 			continue
 		}
 		for _, inst := range rows {
+			if isOVHContract(inst) {
+				kickOVHContract(ctx, inst.ID)
+				continue
+			}
 			if isScalewayDediboxInstance(inst) {
 				kickScalewayDediboxProvisioning(ctx, inst.ID)
 				continue

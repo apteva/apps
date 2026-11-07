@@ -17,6 +17,8 @@ const (
 
 type cloudBackendSetupInput struct {
 	Provider      string
+	ConnectionID  int64
+	ConfigJSON    string
 	RepositoryURL string
 	TeamID        string
 	WorkflowID    string
@@ -42,6 +44,8 @@ func cloudBackendBootstrapperFor(provider string) (cloudBackendBootstrapper, err
 	switch normalizeBuildBackend(provider) {
 	case buildBackendCodemagic:
 		return codemagicCloudBootstrapper{}, nil
+	case buildBackendBitrise, buildBackendAppcircle:
+		return configuredMobileBootstrapper{provider: normalizeBuildBackend(provider)}, nil
 	default:
 		return nil, fmt.Errorf("build provider %q does not expose an automated bootstrap adapter", provider)
 	}
@@ -56,7 +60,21 @@ func (a *App) setupCloudBackend(ctx context.Context, d *Deployment, input cloudB
 	if err != nil {
 		return nil, err
 	}
-	bound, err := cloudIntegrationFor(provider)
+	selection := cloudBuildConfig{ConnectionID: input.ConnectionID}
+	if input.ConfigJSON != "" {
+		if err := json.Unmarshal([]byte(input.ConfigJSON), &selection); err != nil {
+			return nil, errors.New("invalid build_backend_config_json")
+		}
+		if input.ConnectionID > 0 {
+			selection.ConnectionID = input.ConnectionID
+		}
+	} else if normalizeBuildBackend(d.BuildBackend) == provider {
+		_ = json.Unmarshal([]byte(d.BuildBackendJSON), &selection)
+		if input.ConnectionID > 0 {
+			selection.ConnectionID = input.ConnectionID
+		}
+	}
+	bound, err := cloudIntegrationForConfig(provider, selection)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +164,7 @@ func (codemagicCloudBootstrapper) Setup(
 		created = true
 	}
 
+	cfg.ConnectionID = bound.ConnectionID
 	cfg.AppID = appID
 	cfg.WorkflowID = workflowID
 	cfg.Branch = branch
@@ -163,6 +182,15 @@ func (codemagicCloudBootstrapper) Setup(
 			cfg.ArtifactMode = "file"
 			cfg.ArtifactFile = "app.aab"
 		}
+	}
+	if pipeline, err := pipelineConfig(d.TargetConfigJSON); err != nil {
+		return nil, err
+	} else if pipeline != nil {
+		primary, err := cloudPipelinePrimary(pipeline, d.TargetKind)
+		if err != nil {
+			return nil, err
+		}
+		cfg.ArtifactFile = primary
 	}
 	body, err := json.Marshal(cfg)
 	if err != nil {
@@ -279,4 +307,72 @@ func normalizeRepositoryURL(value string) string {
 	value = strings.TrimSuffix(value, "/")
 	value = strings.TrimSuffix(value, ".git")
 	return value
+}
+
+// Existing provider apps/workflows use the same maintained capsule runner.
+// Account creation and repository authorization remain in the provider UI.
+type configuredMobileBootstrapper struct{ provider string }
+
+func (b configuredMobileBootstrapper) Name() string { return b.provider }
+func (b configuredMobileBootstrapper) Setup(_ context.Context, bound *sdk.BoundIntegration, d *Deployment, input cloudBackendSetupInput) (*cloudBackendSetupResult, error) {
+	if !isAppPlatform(d.TargetKind) {
+		return nil, errors.New("the maintained mobile adapter requires an iOS, macOS, or Android target")
+	}
+	raw := input.ConfigJSON
+	if raw == "" && normalizeBuildBackend(d.BuildBackend) == b.provider {
+		raw = d.BuildBackendJSON
+	}
+	var cfg cloudBuildConfig
+	if err := json.Unmarshal([]byte(defaultStr(raw, "{}")), &cfg); err != nil {
+		return nil, errors.New("invalid build_backend_config_json")
+	}
+	cfg.ConnectionID = bound.ConnectionID
+	cfg.SourceMode = "bundle"
+	cfg.ArtifactName = defaultStr(cfg.ArtifactName, defaultCloudArtifactName)
+	cfg.WorkflowID = defaultStr(input.WorkflowID, cfg.WorkflowID)
+	if b.provider == buildBackendBitrise {
+		cfg.WorkflowID = defaultStr(cfg.WorkflowID, defaultCodemagicMobileWorkflow)
+		cfg.Branch = defaultStr(input.Branch, cfg.Branch)
+	}
+	cfg.ArtifactMode = defaultStr(input.ArtifactMode, defaultStr(cfg.ArtifactMode, "file"))
+	if pipeline, err := pipelineConfig(d.TargetConfigJSON); err != nil {
+		return nil, err
+	} else if pipeline != nil {
+		primary, err := cloudPipelinePrimary(pipeline, d.TargetKind)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.ArtifactFile != "" && cfg.ArtifactFile != primary {
+			return nil, fmt.Errorf("artifact_file must match pipeline primary %q", primary)
+		}
+		cfg.ArtifactFile = primary
+	}
+	if cfg.ArtifactFile == "" {
+		if isApplePlatform(d.TargetKind) {
+			cfg.ArtifactFile = "app.ipa"
+			if d.TargetKind == "macos" {
+				cfg.ArtifactFile = "app.pkg"
+			}
+		} else {
+			cfg.ArtifactFile = "app.aab"
+		}
+	}
+	cfg.AdapterRepository = defaultStr(input.RepositoryURL, defaultCodemagicAdapterRepository)
+	body := mustJSON(cfg)
+	if err := validateBuildBackendSelection(b.provider, body); err != nil {
+		return nil, err
+	}
+	if err := validateMobileCloudContract(d, cfg); err != nil {
+		return nil, err
+	}
+	var err error
+	if b.provider == buildBackendBitrise {
+		_, err = executeIntegration(bound, "get_app", map[string]any{"app_slug": cfg.AppID})
+	} else {
+		_, err = executeIntegration(bound, "get_build_configuration", map[string]any{"profileId": cfg.ProfileID, "configurationId": cfg.ConfigurationID})
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cloudBackendSetupResult{Provider: b.provider, AppID: cfg.AppID, RepositoryURL: cfg.AdapterRepository, WorkflowID: cfg.WorkflowID, ConfigJSON: body}, nil
 }

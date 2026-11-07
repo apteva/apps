@@ -16,8 +16,8 @@ func (a *App) httpDeploymentMobileSigningImport(w http.ResponseWriter, r *http.R
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	if d.TargetKind != "android" {
-		httpErr(w, http.StatusBadRequest, "PKCS#12 import currently applies to Android deployments")
+	if d.TargetKind != "android" && d.TargetKind != "ios" && d.TargetKind != "macos" {
+		httpErr(w, http.StatusBadRequest, "signing import requires an Android, iOS, or macOS deployment")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxMobileSigningImportBytes)
@@ -37,6 +37,10 @@ func (a *App) httpDeploymentMobileSigningImport(w http.ResponseWriter, r *http.R
 	pfx, err := io.ReadAll(io.LimitReader(file, maxMobileSigningImportBytes+1))
 	if err != nil || len(pfx) > maxMobileSigningImportBytes {
 		httpErr(w, http.StatusBadRequest, "read keystore")
+		return
+	}
+	if d.TargetKind != "android" {
+		a.httpAppleSigningImport(w, r, d, pfx)
 		return
 	}
 	if strings.EqualFold(r.FormValue("inspect_only"), "true") {

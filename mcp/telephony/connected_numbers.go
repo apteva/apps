@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -52,29 +53,31 @@ type connectedRouteView struct {
 }
 
 type connectedNumberView struct {
-	OutboundNumberEnabled  bool                  `json:"outbound_number_enabled"`
-	CarrierConnectionID    int64                 `json:"carrier_connection_id"`
-	OutboundEnabled        bool                  `json:"outbound_enabled"`
-	OutboundDisabledReason string                `json:"outbound_disabled_reason,omitempty"`
-	PhoneNumber            string                `json:"phone_number"`
-	Provider               string                `json:"provider"`
-	ProviderNumberID       string                `json:"provider_number_id,omitempty"`
-	FriendlyName           string                `json:"friendly_name,omitempty"`
-	Capabilities           []string              `json:"capabilities"`
-	CarrierStatus          string                `json:"carrier_status,omitempty"`
-	RouteStatus            string                `json:"route_status"`
-	Route                  *connectedRouteView   `json:"route,omitempty"`
-	VoiceWebhookStatus     string                `json:"voice_webhook_status"`
-	StatusCallbackState    string                `json:"status_callback_status"`
-	RoutingHealth          string                `json:"routing_health"`
-	HealthMessage          string                `json:"health_message,omitempty"`
-	Outbound               outboundReadinessView `json:"outbound"`
+	OutboundFallbackAllowed bool                      `json:"outbound_fallback_allowed,omitempty"`
+	OutboundVerification    *outboundVerificationView `json:"outbound_verification,omitempty"`
+	VerifiedAt              string                    `json:"verified_at,omitempty"`
+	OutboundNumberEnabled   bool                      `json:"outbound_number_enabled"`
+	CarrierConnectionID     int64                     `json:"carrier_connection_id"`
+	OutboundEnabled         bool                      `json:"outbound_enabled"`
+	OutboundDisabledReason  string                    `json:"outbound_disabled_reason,omitempty"`
+	PhoneNumber             string                    `json:"phone_number"`
+	Provider                string                    `json:"provider"`
+	ProviderNumberID        string                    `json:"provider_number_id,omitempty"`
+	FriendlyName            string                    `json:"friendly_name,omitempty"`
+	Capabilities            []string                  `json:"capabilities"`
+	CarrierStatus           string                    `json:"carrier_status,omitempty"`
+	RouteStatus             string                    `json:"route_status"`
+	Route                   *connectedRouteView       `json:"route,omitempty"`
+	VoiceWebhookStatus      string                    `json:"voice_webhook_status"`
+	StatusCallbackState     string                    `json:"status_callback_status"`
+	RoutingHealth           string                    `json:"routing_health"`
+	HealthMessage           string                    `json:"health_message,omitempty"`
+	OutboundTransport       outboundTransportView     `json:"outbound_transport"`
+	Outbound                outboundReadinessView     `json:"outbound"`
 }
 
-// resolveOutboundFrom selects and validates the caller ID independently of a
-// carrier's credential shape. Project routes are the fastest source of truth;
-// carrier inventory covers owned-but-unrouted numbers; credential phone_number
-// remains a legacy fallback for older connections.
+// resolveOutboundFrom checks authoritative ownership once. Temporary carrier
+// failures may use recent evidence for configured numbers under this binding.
 func (a *App) resolveOutboundFrom(
 	ctx *sdk.AppCtx,
 	projectID string,
@@ -82,6 +85,9 @@ func (a *App) resolveOutboundFrom(
 	creds *sdk.ConnectionCredentials,
 	requested string,
 ) (string, error) {
+	normalized := *creds
+	normalized.Slug = strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	creds = &normalized
 	requested = strings.TrimSpace(requested)
 	if requested != "" && !validE164(requested) {
 		return "", errors.New("from must be a valid E.164 number (+ followed by 8-15 digits)")
@@ -103,7 +109,7 @@ func (a *App) resolveOutboundFrom(
 	}
 	if requested == "" {
 		if len(routed) == 1 {
-			return routed[0], nil
+			requested = routed[0]
 		}
 		if len(routed) > 1 {
 			return "", errors.New("multiple connected caller-ID numbers are available; choose a from number")
@@ -111,22 +117,18 @@ func (a *App) resolveOutboundFrom(
 	}
 
 	legacy := strings.TrimSpace(creds.Fields["phone_number"])
-	if validE164(legacy) {
-		if requested == "" || compactPhoneNumber(legacy) == compactPhoneNumber(requested) {
-			return legacy, nil
-		}
+	if requested == "" && validE164(legacy) {
+		requested = legacy
 	}
 
-	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
-	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	owned, err := a.outboundOwnedNumbers(ctx, projectID, bound, creds)
 	if err != nil {
 		return "", fmt.Errorf("list owned caller-ID numbers: %w", err)
 	}
 	available := make([]string, 0, len(owned))
 	for _, number := range owned {
 		phone := strings.TrimSpace(number.PhoneNumber)
-		if !validE164(phone) || (len(number.Capabilities) > 0 && !containsString(number.Capabilities, "voice")) {
+		if !voiceOwnedNumber(number) {
 			continue
 		}
 		if requested != "" && compactPhoneNumber(phone) == compactPhoneNumber(requested) {
@@ -158,6 +160,16 @@ func (a *App) resolveOutboundCarrierCredentials(
 	creds *sdk.ConnectionCredentials,
 	from string,
 ) (*sdk.ConnectionCredentials, error) {
+	normalized := *creds
+	normalized.Slug = strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	creds = &normalized
+	sipCreds, selected, err := a.resolveOutboundSIPCredentials(ctx, projectID, bound, creds, from)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return sipCreds, nil
+	}
 	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
 	if slug != "telnyx" {
 		return creds, nil
@@ -166,7 +178,7 @@ func (a *App) resolveOutboundCarrierCredentials(
 	if err != nil {
 		return nil, err
 	}
-	if err := a.ensureOutboundReady(ctx, slug, bound.ConnectionID, connectionID); err != nil {
+	if err := a.ensureOutboundReadyWithEvidence(ctx, projectID, bound.ConnectionID, creds, connectionID); err != nil {
 		return nil, err
 	}
 
@@ -205,10 +217,17 @@ func (a *App) resolveTelnyxApplicationID(
 	}
 
 	if applicationID == "" {
-		provider := &numberProvider{Slug: "telnyx", ConnID: bound.ConnectionID, Fields: creds.Fields}
-		owned, listErr := listOwnedCarrierNumbers(ctx, provider)
-		if listErr != nil {
-			return "", fmt.Errorf("resolve Telnyx connection for %s: %w", from, listErr)
+		// Selection has just verified ownership (or its bounded outage
+		// evidence). Reuse that snapshot to resolve the associated application
+		// rather than introducing a second independent inventory outage gate.
+		var owned []ownedNumber
+		_, proofErr := a.carrierVerification(projectID, bound.ConnectionID, creds, "numbers", "", &owned)
+		if proofErr != nil {
+			var listErr error
+			owned, listErr = a.outboundOwnedNumbers(ctx, projectID, bound, creds)
+			if listErr != nil {
+				return "", fmt.Errorf("resolve Telnyx connection for %s: %w", from, listErr)
+			}
 		}
 		for _, number := range owned {
 			if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(from) && validProviderResourceID(number.ConnectionID) {
@@ -292,8 +311,29 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 			}
 			warnings = append(warnings, numberInventoryWarning{slug, bound.ConnectionID, code, "Carrier account number inventory is unavailable; other accounts remain usable"})
 			status["inventory_status"] = "unavailable"
+			if inventory.provider != nil {
+				if temporaryCarrierVerificationError(err) {
+					if cached, e := a.cachedConnectedNumbers(ctx, project, inventory.provider); e == nil {
+						sipState := a.inventorySIPState(ctx, inventory.provider.Slug)
+						for i := range cached {
+							if cached[i].OutboundTransport.Transport == inboundTransportSIPDirect && (sipState["available"] == false || sipState["ready"] == false && sipState["enabled"] == true) {
+								cached[i].OutboundFallbackAllowed = false
+								cached[i].Outbound.Status = outboundConfigError
+								cached[i].Outbound.Message = "SIP gateway unavailable: " + stringValue(sipState["reason"])
+							}
+						}
+						result = map[string]any{"numbers": cached, "direct_sip": sipState}
+					}
+				} else if !errors.Is(err, context.Canceled) {
+					p := inventory.provider
+					_ = a.forgetCarrierVerification(project, p.ConnID, &sdk.ConnectionCredentials{Slug: p.Slug, Fields: p.Fields}, "numbers", "")
+				}
+			}
 		} else {
 			successes++
+			status["verified_at"] = result["verified_at"]
+		}
+		if result != nil {
 			for _, n := range result["numbers"].([]connectedNumberView) {
 				n.CarrierConnectionID = bound.ConnectionID
 				e := a.checkOutboundAdmission(project, slug, bound.ConnectionID, n.PhoneNumber)
@@ -303,6 +343,7 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 				n.OutboundEnabled = e == nil
 				if e != nil {
 					n.OutboundDisabledReason = "outbound_disabled"
+					n.OutboundFallbackAllowed = false
 				}
 				n.OutboundNumberEnabled, e = a.outboundScopeEnabled(project, "number", n.PhoneNumber)
 				if e != nil {
@@ -316,6 +357,7 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 		}
 		statuses = append(statuses, status)
 	}
+
 	sort.SliceStable(numbers, func(i, j int) bool {
 		li := numbers[i].Route != nil && numbers[i].Route.Enabled
 		lj := numbers[j].Route != nil && numbers[j].Route.Enabled
@@ -337,6 +379,15 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 	state := "available"
 	if successes == 0 {
 		state = "unavailable"
+		// Partial data includes still-eligible configured caller IDs from
+		// bounded verification evidence. Provider status and warnings retain
+		// the failed live lookup; this does not assert fresh inventory.
+		for _, n := range numbers {
+			if n.OutboundFallbackAllowed && n.OutboundEnabled && n.OutboundNumberEnabled {
+				state = "partial"
+				break
+			}
+		}
 	} else if len(warnings) > 0 {
 		state = "partial"
 	}
@@ -349,15 +400,39 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 	if projectID == "" {
 		return nil, errors.New("project context required for connected numbers")
 	}
-	owned, err := listOwnedCarrierNumbers(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
 	routes, err := a.db().listRoutesForProjectConnection(projectID, provider.ConnID)
 	if err != nil {
 		return nil, fmt.Errorf("list project routes: %w", err)
 	}
 	routes = currentRoutesByNumber(routes)
+	request := provider.inventoryContext
+	if request == nil {
+		request = context.Background()
+	}
+	scope, err := inventoryScope(a.installID, projectID, provider, routes, ctx.IntegrationsFor("carrier"))
+	if err != nil {
+		return nil, err
+	}
+	freshAfter, fresh := request.Value(inventoryFreshKey{}).(time.Time)
+	publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(provider.Fields["public_key"]))
+	loader := &inventoryReadSession{app: a, ctx: ctx, request: request, provider: provider,
+		scope: scope,
+		fresh: fresh, freshAfter: freshAfter, results: map[string]inventoryReadResult{},
+		publicKeyValid: keyErr == nil && len(publicKey) == ed25519.PublicKeySize}
+	provider.inventoryReads = loader
+	started := time.Now()
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	creds := &sdk.ConnectionCredentials{Slug: provider.Slug, Fields: provider.Fields}
+	verified := loader.verifiedAt
+	if verified.IsZero() || verified.After(started) {
+		verified = started
+	}
+	if err = a.saveCarrierVerification(projectID, provider.ConnID, creds, "numbers", "", owned, verified); err != nil {
+		return nil, err
+	}
 
 	routesByID := make(map[string]*routeRow, len(routes))
 	routesByPhone := make(map[string]*routeRow, len(routes))
@@ -377,6 +452,32 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 	}
 
+	if provider.Slug == "telnyx" {
+		seen := map[string]bool{}
+		ids := []string{}
+		add := func(id string) {
+			if validProviderResourceID(id) && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		for _, n := range owned {
+			v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
+			if e != nil {
+				return nil, e
+			}
+			if v.Transport != inboundTransportSIPDirect {
+				add(telnyxRouteApplicationID(routesByPhone[compactPhoneNumber(n.PhoneNumber)], n.ConnectionID))
+			}
+		}
+		for _, r := range routes {
+			add(telnyxRouteApplicationID(&r, ""))
+		}
+		loader.prefetchApplications(ids)
+	}
+	if err := request.Err(); err != nil {
+		return nil, err
+	}
 	agentNames := make(map[int64]string)
 	resolveAgentName := func(agentID int64) string {
 		if name, ok := agentNames[agentID]; ok {
@@ -394,13 +495,21 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 	}
 
 	usedRoutes := make(map[string]bool, len(routes))
+	transportByPhone := map[string]outboundTransportView{}
+	for _, n := range owned {
+		v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
+		if e != nil {
+			return nil, e
+		}
+		transportByPhone[n.PhoneNumber] = v
+	}
 	numbers := make([]connectedNumberView, 0, len(owned)+len(routes))
 	for _, number := range owned {
 		route := routesByID[strings.TrimSpace(number.ProviderNumberID)]
 		if route == nil {
 			route = routesByPhone[compactPhoneNumber(number.PhoneNumber)]
 		}
-		view := a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName)
+		view := a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName, loader)
 		if route != nil {
 			usedRoutes[route.ID] = true
 		}
@@ -420,15 +529,20 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			Capabilities:     []string{},
 			CarrierStatus:    "not_found",
 		}
-		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName))
+		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName, loader))
 	}
+	readinessErrors := map[string]error{}
 	if provider.Slug == "telnyx" {
-		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID, provider.inventoryContext)
+		profiles, profileErr := listTelnyxOutboundProfilesWithLoader(ctx, provider.ConnID, loader, provider.inventoryContext)
 		readinessCache := map[string]outboundReadinessView{}
 		for i := range numbers {
+			if transportByPhone[numbers[i].PhoneNumber].Transport == inboundTransportSIPDirect {
+				continue
+			}
 			phone := compactPhoneNumber(numbers[i].PhoneNumber)
 			applicationID := telnyxRouteApplicationID(routesByPhone[phone], ownedConnectionsByPhone[phone])
 			if profileErr != nil {
+				readinessErrors[applicationID] = profileErr
 				numbers[i].Outbound = outboundReadinessView{
 					Required: true, Status: outboundConfigError, ApplicationID: applicationID,
 					Profiles: []outboundProfileOption{}, Message: profileErr.Error(),
@@ -439,8 +553,10 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 				numbers[i].Outbound = cached
 				continue
 			}
-			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles, provider.inventoryContext)
+			readiness, readinessErr := a.telnyxOutboundReadinessWithLoader(ctx, provider.ConnID, applicationID, profiles, loader, provider.inventoryContext)
+			readiness.profilesVerified = profileErr == nil
 			if readinessErr != nil {
+				readinessErrors[applicationID] = readinessErr
 				readiness.Status = outboundConfigError
 				readiness.Message = readinessErr.Error()
 			}
@@ -449,6 +565,80 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 	}
 
+	sipReadiness := map[string]outboundReadinessView{}
+	for i := range numbers {
+		v, ok := transportByPhone[numbers[i].PhoneNumber]
+		if !ok {
+			v, _, _, err = a.outboundTransport(projectID, provider.ConnID, numbers[i].PhoneNumber)
+			if err != nil {
+				return nil, err
+			}
+		}
+		numbers[i].OutboundTransport = v
+		if v.Transport == inboundTransportSIPDirect {
+			numbers[i].Outbound = outboundReadinessView{Status: outboundConfigError, Message: "SIP configuration unavailable", Profiles: []outboundProfileOption{}}
+			// Provider setup remains independently verified; number ownership
+			// alone cannot authorize a cached trunk/profile.
+			if v.Config != nil {
+				key := sipVerificationKey(*v.Config)
+				r, ok := sipReadiness[key]
+				var e error
+				if !ok {
+					r, e = a.inventorySIPReadiness(ctx, projectID, provider, *v.Config, fresh)
+					if e != nil && r.Status != previouslyVerified {
+						r = outboundReadinessView{Status: outboundConfigError, Message: e.Error(), Profiles: []outboundProfileOption{}}
+					}
+					sipReadiness[key] = r
+				}
+				if e == nil || r.Status == previouslyVerified {
+					numbers[i].Outbound = r
+				} else {
+					numbers[i].Outbound = outboundReadinessView{Status: outboundConfigError, Message: e.Error(), Profiles: []outboundProfileOption{}}
+				}
+				if r.Status == previouslyVerified {
+					a.markOutboundFallback(projectID, provider, &numbers[i], key, verified)
+				}
+			}
+		} else {
+			key := programmableVerificationKey(provider.Slug, numbers[i].Outbound.ApplicationID)
+			if numbers[i].Outbound.Status == outboundReady {
+				if e := a.saveCarrierVerification(projectID, provider.ConnID, creds, "ready", key, numbers[i].Outbound, verified); e != nil {
+					return nil, e
+				}
+			} else if e := readinessErrors[numbers[i].Outbound.ApplicationID]; temporaryCarrierVerificationError(e) {
+				prior, _, priorErr := a.cachedOutboundReadiness(projectID, provider.ConnID, creds, key)
+				allow := priorErr == nil
+				if numbers[i].Outbound.profilesVerified {
+					allow = false
+					for _, p := range numbers[i].Outbound.Profiles {
+						if p.ID == prior.ProfileID && p.Enabled {
+							allow = priorErr == nil
+						}
+					}
+				}
+				if allow {
+					prior.Status = previouslyVerified
+					numbers[i].Outbound = prior
+					a.markOutboundFallback(projectID, provider, &numbers[i], key, verified)
+				} else {
+					_ = a.forgetCarrierVerification(projectID, provider.ConnID, creds, "ready", key)
+				}
+			} else {
+				_ = a.forgetCarrierVerification(projectID, provider.ConnID, creds, "ready", key)
+			}
+		}
+	}
+	for i := range numbers {
+		if numbers[i].Outbound.Status == previouslyVerified {
+			if numbers[i].OutboundFallbackAllowed {
+				numbers[i].Outbound.Status = outboundReady
+				numbers[i].Outbound.Message = "Carrier verification temporarily unavailable; using recently verified outbound configuration"
+			} else {
+				numbers[i].Outbound.Status = outboundConfigError
+				numbers[i].Outbound.Message = "Carrier verification unavailable; no eligible verified fallback"
+			}
+		}
+	}
 	sort.SliceStable(numbers, func(i, j int) bool {
 		leftRouted := numbers[i].Route != nil && numbers[i].Route.Enabled
 		rightRouted := numbers[j].Route != nil && numbers[j].Route.Enabled
@@ -457,8 +647,36 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 		return numbers[i].PhoneNumber < numbers[j].PhoneNumber
 	})
+	if err := request.Err(); err != nil {
+		return nil, err
+	}
+	directSIP := a.inventorySIPState(ctx, provider.Slug)
+	for i := range numbers {
+		if numbers[i].OutboundTransport.Transport == inboundTransportSIPDirect && (directSIP["available"] == false || directSIP["ready"] == false && directSIP["enabled"] == true) {
+			numbers[i].Outbound.Status = outboundConfigError
+			numbers[i].Outbound.Message = "SIP gateway unavailable: " + stringValue(directSIP["reason"])
+			numbers[i].OutboundFallbackAllowed = false
+		}
+	}
+	for i := range numbers {
+		if !loader.verifiedAt.IsZero() {
+			numbers[i].VerifiedAt = loader.verifiedAt.Format(time.RFC3339Nano)
+		}
+	}
+	return map[string]any{
+		"provider":    provider.Slug,
+		"count":       len(numbers),
+		"numbers":     numbers,
+		"direct_sip":  directSIP,
+		"verified_at": loader.verifiedAt.Format(time.RFC3339Nano),
+	}, nil
+}
+
+// Local listener/certificate health stays current even when carrier REST
+// inventory is unavailable. This performs no carrier network requests.
+func (a *App) inventorySIPState(ctx *sdk.AppCtx, provider string) map[string]any {
 	directSIP := map[string]any{
-		"supported": provider.Slug == "twilio" || provider.Slug == "telnyx",
+		"supported": provider == "twilio" || provider == "telnyx",
 		"enabled":   false,
 		"ready":     false,
 		"managed":   true,
@@ -476,7 +694,7 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 				directSIP["reason"] = state["error"]
 			}
 		}
-	} else if provider.Slug == "twilio" || provider.Slug == "telnyx" {
+	} else if provider == "twilio" || provider == "telnyx" {
 		cfg, configErr := a.resolveSIPGatewayConfig(ctx, true)
 		if configErr != nil {
 			directSIP["available"] = false
@@ -488,19 +706,14 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			directSIP["srtp"] = cfg.SRTPMode
 		}
 	}
-	return map[string]any{
-		"provider":   provider.Slug,
-		"count":      len(numbers),
-		"numbers":    numbers,
-		"direct_sip": directSIP,
-	}, nil
+	return directSIP
 }
 
 // toolNumbersConnected exposes the same carrier-owned inventory used by the
 // Numbers panel. Unlike telephony_routes_list, it includes purchased numbers
 // that have not been configured with an inbound Telephony route yet.
-func (a *App) toolNumbersConnected(request context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	result, err := a.connectedNumbers(ctx, request)
+func (a *App) toolNumbersConnected(request context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	result, err := a.connectedNumbers(ctx, inventoryFreshContext(request, boolArg(args, "fresh", false)))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -822,7 +1035,7 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 	return out, nil
 }
 
-func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number ownedNumber, route *routeRow, agentName func(int64) string) connectedNumberView {
+func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number ownedNumber, route *routeRow, agentName func(int64) string, loaders ...*inventoryReadSession) connectedNumberView {
 	view := connectedNumberView{
 		PhoneNumber:      number.PhoneNumber,
 		Provider:         provider,
@@ -905,7 +1118,7 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 		}
 		return view
 	}
-	view.VoiceWebhookStatus, view.StatusCallbackState, view.HealthMessage = a.routeWebhookHealth(ctx, provider, number, *route)
+	view.VoiceWebhookStatus, view.StatusCallbackState, view.HealthMessage = a.routeWebhookHealth(ctx, provider, number, *route, loaders...)
 	switch {
 	case view.VoiceWebhookStatus == webhookConfigured && view.StatusCallbackState == webhookConfigured:
 		view.RoutingHealth = "healthy"
@@ -917,18 +1130,34 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 	return view
 }
 
-func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedNumber, route routeRow) (string, string, string) {
+func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedNumber, route routeRow, loaders ...*inventoryReadSession) (string, string, string) {
+	var loader *inventoryReadSession
+	if len(loaders) > 0 {
+		loader = loaders[0]
+	}
+	read := func(tool string, input map[string]any) ([]byte, error) {
+		if loader != nil && loader.provider.ConnID == route.CarrierConnectionID {
+			return loader.read(tool, input)
+		}
+		return executeCarrierTool(ctx, route.CarrierConnectionID, tool, input)
+	}
 	switch provider {
 	case "twilio":
 		return webhookURLState(number.VoiceURL, a.inboundRouteURL(route), number.VoiceMethod),
 			webhookURLState(number.StatusCallback, a.twilioRouteStatusURL(route), number.StatusMethod), ""
 	case "telnyx":
-		creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
-		if err != nil {
-			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx webhook signing key."
+		validKey := false
+		if loader != nil && loader.provider.ConnID == route.CarrierConnectionID {
+			validKey = loader.publicKeyValid
+		} else {
+			creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
+			if err != nil {
+				return webhookUnknown, webhookUnknown, "Could not verify the Telnyx webhook signing key."
+			}
+			publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
+			validKey = keyErr == nil && len(publicKey) == ed25519.PublicKeySize
 		}
-		publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
-		if keyErr != nil || len(publicKey) != ed25519.PublicKeySize {
+		if !validKey {
 			return webhookMissing, webhookMissing, "A valid Telnyx webhook public key is required before this route can receive calls."
 		}
 		var config telnyxRouteConfig
@@ -941,7 +1170,7 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		if number.ConnectionID != config.ApplicationID {
 			return webhookMismatch, webhookMismatch, "The Telnyx number is assigned to a different voice application."
 		}
-		raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "get_call_control_application", map[string]any{"id": config.ApplicationID})
+		raw, err := read("get_call_control_application", map[string]any{"id": config.ApplicationID})
 		if err != nil {
 			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx application."
 		}
@@ -963,7 +1192,7 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		if number.ApplicationID != config.ApplicationID {
 			return webhookMismatch, webhookMismatch, "The Plivo number is assigned to a different voice application."
 		}
-		raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "get_application", map[string]any{"app_id": config.ApplicationID})
+		raw, err := read("get_application", map[string]any{"app_id": config.ApplicationID})
 		if err != nil {
 			return webhookUnknown, webhookUnknown, "Could not verify the Plivo application."
 		}

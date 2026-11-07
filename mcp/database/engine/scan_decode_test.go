@@ -66,7 +66,7 @@ func TestScanDecoderValuesAndOwnership(t *testing.T) {
 
 func TestScanIteratorKeysAndPagination(t *testing.T) {
 	m := manager(t)
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		call(t, m, "p", "database_create", Request{Database: adapter, Adapter: adapter})
 		call(t, m, "p", "collection_create", Request{Database: adapter, Collection: "items", PrimaryKey: []string{"n", "label"}, Fields: []Field{{"n", "number", false}, {"label", "text", false}, {"rank", "integer", true}, {"data", "json", true}}})
 		records := []Record{}
@@ -86,11 +86,14 @@ func TestScanIteratorKeysAndPagination(t *testing.T) {
 		{Limit: 7},
 		{OrderBy: []Order{{"n", "desc"}}, Limit: 5},
 		{OrderBy: []Order{{"label", "desc"}}, Limit: 8},
+		{OrderBy: []Order{{"rank", "desc"}}, Limit: 3},
 		{Where: &Filter{Field: "rank", Op: "gte", Value: "60"}, OrderBy: []Order{{"rank", "desc"}}, Limit: 3, RequireIndex: true},
+		{Where: &Filter{Field: "rank", Op: "in", Value: []any{"60", "80", "99"}}, Limit: 2},
+		{Where: &Filter{Field: "rank", Op: "ne", Value: "80"}, Limit: 5},
 		{Where: &Filter{Or: []Filter{{Field: "rank", Op: "is_null"}, {Field: "n", Op: "lt", Value: 0.}}}, OrderBy: []Order{{"label", "desc"}, {"n", "desc"}}, Limit: 6},
 	} {
 		var expected []Record
-		for _, adapter := range []string{"sqlite", "pebble"} {
+		for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 			query := q
 			var got []Record
 			for page := 0; ; page++ {
@@ -119,16 +122,18 @@ func TestScanIteratorKeysAndPagination(t *testing.T) {
 	for _, groupBy := range [][]string{nil, {"n"}, {"rank"}, {"label", "n"}} {
 		for _, where := range []*Filter{nil, {Field: "n", Op: "gt", Value: 1000.}} {
 			r := Request{Collection: "items", GroupBy: groupBy, Query: Query{Where: where}, Metrics: []Metric{
-				{"rows", "count", ""}, {"ranked", "count", "rank"}, {"documents", "count", "data"},
-				{"total", "sum", "rank"}, {"average", "avg", "rank"}, {"lowest", "min", "rank"}, {"highest", "max", "rank"},
-				{"numeric_total", "sum", "n"}, {"numeric_average", "avg", "n"}, {"first_label", "min", "label"}, {"last_label", "max", "label"},
+				{"rows", "count", "", nil}, {"ranked", "count", "rank", nil}, {"documents", "count", "data", nil},
+				{"total", "sum", "rank", nil}, {"average", "avg", "rank", nil}, {"lowest", "min", "rank", nil}, {"highest", "max", "rank", nil},
+				{"numeric_total", "sum", "n", nil}, {"numeric_average", "avg", "n", nil}, {"first_label", "min", "label", nil}, {"last_label", "max", "label", nil},
 			}}
 			r.Database = "sqlite"
 			want := call(t, m, "p", "aggregate", r)
-			r.Database = "pebble"
-			got := call(t, m, "p", "aggregate", r)
-			if !equalJSON(got, want) {
-				t.Fatalf("aggregate mismatch for %v: got %s, want %s", groupBy, marshal(got), marshal(want))
+			for _, adapter := range []string{"pebble", "aptevadb"} {
+				r.Database = adapter
+				got := call(t, m, "p", "aggregate", r)
+				if !equalJSON(got, want) {
+					t.Fatalf("%s aggregate mismatch for %v: got %s, want %s", adapter, groupBy, marshal(got), marshal(want))
+				}
 			}
 		}
 	}

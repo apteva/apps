@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
-import { groupPostsByLocalDay, localDateKey, moveCalendarCursor, postLifecycleDate } from "./postCalendar";
+import { groupPostsByLocalDay, localDateKey, moveCalendarCursor, postLifecycleDate, postLifecycleDateLabel } from "./postCalendar";
 import { postStatusVariant, postTitle, type SocialPost } from "./socialCardData";
 import { platformPresentation } from "./platformPresentation";
 import { previewPublishingSummary, publishingWindow, socialPageLink, useWidgetData, widgetPreferences, widgetURL, type HomeWidgetProps, type PublishingSummary } from "./homeWidgetData";
@@ -24,9 +24,10 @@ export default function SocialPublishingCalendarWidget(props: HomeWidgetProps) {
           <p className="mt-1 text-[11px] text-text-dim">{prefs.mode === "calendar" ? `${shortDate(range.start)} – ${shortDate(range.days[6])}` : `Scheduled over the next ${prefs.horizonDays} days`}</p></div>
         <a href={openCalendar} className="shrink-0 text-[11px] text-text-muted hover:text-accent">Open calendar →</a>
       </header>
-      {prefs.showAttention && data && (data.attention.failed + data.attention.approval + data.attention.overdue > 0) && (
+      {prefs.showAttention && data && (data.attention.failed + data.attention.approval + data.attention.overdue + (data.attention.membership || 0) > 0) && (
         <div className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border bg-bg-input/40 px-4 py-2 text-[11px]">
           {data.attention.failed > 0 && <a href={socialPageLink(props, { status: "attention" })} className="text-error hover:underline">{data.attention.failed} failed or partial</a>}
+          {(data.attention.membership || 0) > 0 && <a href={socialPageLink(props, { status: "awaiting_audience_setup" })} className="text-warn hover:underline">{data.attention.membership} awaiting membership setup</a>}
           {data.attention.approval > 0 && <a href={socialPageLink(props, { status: "in_review" })} className="text-warn hover:underline">{data.attention.approval} awaiting approval</a>}
           {data.attention.overdue > 0 && <a href={socialPageLink(props, { status: "scheduled" })} className="text-warn hover:underline">{data.attention.overdue} overdue</a>}
         </div>
@@ -77,7 +78,7 @@ function PostRow({ post, props, compact = false }: { post: SocialPost; props: Ho
     {lead && <img src={lead} alt="" loading="lazy" onError={event => { event.currentTarget.hidden = true; }} className={`rounded object-cover ${compact ? "h-16 w-full" : "h-10 w-10 shrink-0"}`} />}
     <div className="min-w-0 flex-1"><p className={`text-xs font-semibold text-text ${compact ? "line-clamp-2" : "truncate"}`}>{postTitle(post)}</p>
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-text-muted">
-        <span>{date?.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>
+        <span title={postLifecycleDateLabel(post)}>{date?.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>
         {platforms.map(platform => { const item = platformPresentation(platform); return <span key={platform} title={item.label} aria-label={item.label} className="rounded border border-border px-1 font-bold" style={{ color: item.key === "x" || item.key === "threads" ? "var(--text)" : item.color }}>{item.mark}</span>; })}
         <span className={variant === "error" ? "text-error" : variant === "warn" ? "text-warn" : variant === "live" ? "text-success" : "text-text-dim"}>{post.status.replace(/_/g, " ")}</span>
       </div>

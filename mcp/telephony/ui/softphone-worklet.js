@@ -1,5 +1,6 @@
 const FRAME_SAMPLES = Math.round(sampleRate / 50);
 const CROSSFADE_MS = 5;
+const LATENESS_WINDOW_MS = 30_000;
 
 class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -40,7 +41,11 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
         };
         this.transport.start?.();
       } else if (event.data?.type === "muted") {
-        this.muted = Boolean(event.data.value);
+        const muted = Boolean(event.data.value);
+        // Readiness can repeat the current gate. Preserve partial speech and
+        // DSP history unless the user actually changes mute state.
+        if (muted === this.muted) return;
+        this.muted = muted;
         this.buffer.fill(0); this.filled = 0;
         this.delay.fill(0); this.delayOffset = 0; this.peakHead = this.peakTail = this.sampleIndex = 0;
         this.hpX = this.hpY = 0; this.limiterGain = 1;
@@ -135,6 +140,12 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     this.offset = 0;
     this.playing = false;
     this.startupWaitSamples = 0;
+    this.hasPlayed = false;
+    this.shortTailStartup = false;
+    this.shortTailRemaining = null;
+    this.playbackEvents = [];
+    this.playbackEventSerial = 0;
+    this.lastAdjustmentEventMS = -Infinity;
     this.underruns = 0;
     this.underrunSamples = 0;
     this.underrunEvents = [];
@@ -148,6 +159,10 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     this.maxQueuedSamples = 0;
     this.processedSinceStats = 0;
     this.stableSamples = 0;
+    // Recent lateness the target must keep covering, on the render clock.
+    // The target decays toward its max, so one stall does not pin latency.
+    this.latenessEvents = [];
+    this.decaySamples = 0;
     this.dropEvents = [];
     this.sequenceGaps = 0;
     this.lastArrivalMS = null;
@@ -195,7 +210,9 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       this.queue = []; this.queued = 0; this.offset = 0; this.playing = false;
       this.underrunPending = false;
       this.resetReserveAdjustment();
-      this.startupWaitSamples = this.stableSamples = 0;
+      this.startupWaitSamples = this.stableSamples = this.decaySamples = 0;
+      this.latenessEvents = [];
+      this.shortTailStartup = false;this.shortTailRemaining=null;
       this.expectedSequence = null; this.lastArrivalMS = null;
       this.targetMs = this.initialTargetMs;
       this.needsCrossfade = false; this.lastOutputTail.fill(0);
@@ -214,8 +231,13 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     if (this.lastArrivalMS !== null) {
       const excess = now - this.lastArrivalMS - this.lastFrameMS;
       if (excess > 20) {
-        this.targetMs = Math.min(this.maxTargetMs, Math.max(this.targetMs, Math.ceil((excess + this.minTargetMs) / 10) * 10));
-        this.stableSamples = 0;
+        const prior = this.targetMs;
+        const needed = Math.min(this.maxTargetMs, Math.ceil((excess + this.minTargetMs) / 10) * 10);
+        this.rememberLateness(now, needed);
+        this.targetMs = Math.max(this.targetMs, needed);
+        if (prior !== this.targetMs) this.playbackEvent("target_changed", "arrival_jitter");
+        // Lateness the current cushion already absorbs is not instability.
+        if (needed > prior) this.stableSamples = 0;
       }
     }
     this.lastArrivalMS = now;
@@ -231,6 +253,26 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
   }
 
   msToSamples(ms) { return Math.round(sampleRate * ms / 1000); }
+
+  rememberLateness(now, needed) {
+    this.latenessEvents.push({at: now, needed});
+    while (this.latenessEvents.length && (this.latenessEvents[0].at < now - LATENESS_WINDOW_MS || this.latenessEvents.length > 64)) this.latenessEvents.shift();
+  }
+
+  // Lowest target that still covers every lateness seen in the window.
+  latenessFloorMs(now) {
+    let floor = this.minTargetMs;
+    for (const event of this.latenessEvents) if (event.at >= now - LATENESS_WINDOW_MS) floor = Math.max(floor, event.needed);
+    return Math.min(this.maxTargetMs, floor);
+  }
+
+  playbackEvent(kind, reason, extra = {}) {
+    this.playbackEvents.push({id:`${this.underrunEpoch}:playback:${++this.playbackEventSerial}`,
+      timestamp:new Date().toISOString(), audio_time_ms:currentTime*1000, kind, reason,
+      phase:this.playing ? "playing" : this.hasPlayed ? "rebuffer" : "startup", queue_ms:this.queued*1000/sampleRate,
+      target_ms:this.targetMs, wait_ms:this.startupWaitSamples*1000/sampleRate, ...extra});
+    if (this.playbackEvents.length > 64) this.playbackEvents.shift();
+  }
 
   resetReserveAdjustment() {
     this.reserveHistoryCount = this.reserveHistoryPosition = 0;
@@ -307,6 +349,10 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     if (bestScore > .005) { this.reserveMatchRejections++; return 0; }
     this.reserveCredit -= best;
     this.reserveAdjustments++;
+    if (currentTime*1000-this.lastAdjustmentEventMS >= 250) {
+      this.lastAdjustmentEventMS = currentTime*1000;
+      this.playbackEvent("reserve_adjustment", expand ? "expansion" : "compression", {phase:"playing",duration_ms:best*1000/sampleRate,match_score:bestScore});
+    }
     if (expand) {
       for(let i=0;i<best;i++) this.reservePending[i]=this.reserveHistory[(this.reserveHistoryPosition-best+i+size)%size];
       for(let i=0;i<compare;i++) {
@@ -422,6 +468,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       type: "stats", queue_ms: Math.round(this.queued * 1000 / sampleRate), target_ms: this.targetMs,
       underruns: this.underruns, dropped_ms: Math.round(this.droppedSamples * 1000 / sampleRate),
       reserve_expanded_ms:this.reserveExpandedSamples*1000/sampleRate, reserve_compressed_ms:this.reserveCompressedSamples*1000/sampleRate, reserve_adjustments:this.reserveAdjustments, reserve_match_rejections:this.reserveMatchRejections,
+      playback_events:this.playbackEvents.slice(),
       underrun_ms: this.underrunSamples * 1000 / sampleRate, underrun_events: this.underrunEvents.map(event => this.underrunSnapshot(event)),
       max_queue_ms: Math.round(this.maxQueuedSamples * 1000 / sampleRate),
       playback_sequence_gaps: this.sequenceGaps, drop_events: this.dropEvents.slice(-100),
@@ -440,7 +487,27 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
       this.dropOldest(this.queue[0].frame.length - this.offset, "playback_age_limit");
     }
     if (!this.playing && this.queued > 0) this.startupWaitSamples += out.length;
-    if (!this.playing && this.queued > 0 && (this.queued >= this.msToSamples(this.targetMs) || this.startupWaitSamples >= this.msToSamples(this.targetMs))) { this.playing = true; this.startupWaitSamples = 0; }
+    if (!this.playing && this.queued > 0) {
+      const waitMS=this.startupWaitSamples*1000/sampleRate;
+      const timeoutMS=Math.min(300,Math.max(120,this.targetMs+40));
+      const reserveMS=Math.min(this.targetMs,Math.max(40,this.minTargetMs));
+      const full=this.queued >= this.msToSamples(this.targetMs);
+      const minimum=this.queued >= this.msToSamples(reserveMS);
+      // Resampler startup and render-block boundaries can leave a near-full
+      // reserve slightly below the target. After the target wait, tolerate one
+      // render block rather than requiring another entire carrier packet.
+      const roundedReserve=waitMS>=this.targetMs && this.queued>=Math.max(this.msToSamples(40),this.msToSamples(this.targetMs)-out.length);
+      // Timeout cannot start continuous playback with an underfilled packet.
+      // A bounded short-tail drain preserves short utterances without assuming
+      // more speech exists or manufacturing an initial startup underrun.
+      const tail=waitMS>=timeoutMS && !minimum && currentTime*1000-this.lastArrivalMS>=60;
+      if (full || roundedReserve || (waitMS>=timeoutMS && minimum) || tail) {
+        this.shortTailStartup=tail && !this.hasPlayed;
+        this.shortTailRemaining=tail ? this.queued : null;
+        this.playbackEvent("playback_start", full ? "target_ready" : roundedReserve ? "render_quantum_ready" : tail ? "short_tail" : "minimum_after_timeout", {minimum_ms:reserveMS});
+        this.playing=true;this.startupWaitSamples=0;
+      }
+    }
     if (this.queued === 0) this.startupWaitSamples = 0;
     let written = 0, consumed = 0;
     if (this.playing) {
@@ -448,7 +515,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
         this.endUnderrun("recovered", currentTime * 1000, this.queue[0].sequence);
         this.underrunPending = false;
       }
-      consumed += this.adjustLiveReserve(out.length);
+      consumed += this.shortTailRemaining===null ? this.adjustLiveReserve(out.length) : 0;
       if (this.reservePendingLength > 0 && this.queue.length > 0) {
         const take=Math.min(out.length, this.reservePendingLength-this.reservePendingOffset);
         out.set(this.reservePending.subarray(this.reservePendingOffset,this.reservePendingOffset+take));
@@ -460,7 +527,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
         this.lastPlayedSequence = item.sequence;
         this.maxResidenceMS = Math.max(this.maxResidenceMS, currentTime * 1000 - item.arrived_ms);
         this.applyCrossfade(item);
-        const take = Math.min(out.length - written, item.frame.length - this.offset);
+        const take = Math.min(out.length - written, item.frame.length - this.offset,this.shortTailRemaining ?? Infinity);
         out.set(item.frame.subarray(this.offset, this.offset + take), written);
         const fade=Math.min(take,this.reserveFadeLength-this.reserveFadeOffset);
         for(let i=0;i<fade;i++) {
@@ -470,17 +537,30 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
         this.reserveFadeOffset+=fade;
         written += take; consumed += take; this.offset += take; this.queued -= take;
         if (this.offset >= item.frame.length) { this.queue.shift(); this.offset = 0; }
+        if(this.shortTailRemaining!==null) {this.shortTailRemaining-=take;if(this.shortTailRemaining===0)break;}
       }
-      if (written < out.length) {
+      if (written > 0 && !this.shortTailStartup) this.hasPlayed = true;
+      if ((written < out.length || this.shortTailRemaining===0) && this.shortTailStartup) {
+        this.playing=false;this.shortTailStartup=false;this.shortTailRemaining=null;this.resetReserveAdjustment();
+        this.playbackEvent("short_tail_drained", "insufficient_continuation");
+      } else if (written < out.length || this.shortTailRemaining===0) {
+        this.shortTailRemaining=null;
         this.underruns += 1; this.targetMs = Math.min(this.maxTargetMs, this.targetMs + 20);
+        this.rememberLateness(currentTime * 1000, this.targetMs);
+        this.playbackEvent("rebuffer", "underrun");
         this.playing = false; this.stableSamples = 0;
         this.resetReserveAdjustment();
         this.underrunPending = true;
         this.beginUnderrun(currentTime * 1000 + written * 1000 / sampleRate);
       } else {
         this.stableSamples += out.length;
-        if (this.stableSamples >= sampleRate * 30 && this.targetMs > this.minTargetMs) {
-          this.targetMs = Math.max(this.minTargetMs, this.targetMs - 10); this.stableSamples = 0;
+        this.decaySamples += out.length;
+        // Step a quarter of the way toward the recent-lateness floor every
+        // 2s of stable playback; stableSamples keeps counting for compression.
+        const floor = this.latenessFloorMs(currentTime * 1000);
+        if (this.stableSamples >= sampleRate * 2 && this.decaySamples >= sampleRate * 2 && this.targetMs > floor) {
+          this.targetMs = Math.max(floor, this.targetMs - Math.max(10, Math.round((this.targetMs - floor) / 40) * 10)); this.decaySamples = 0;
+          this.playbackEvent("target_changed", "stable_playback", {phase:"playing"});
         }
       }
     }

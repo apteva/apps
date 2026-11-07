@@ -97,7 +97,7 @@ func (s *Service) Build(ctx context.Context, designID, revisionID int64, request
 			buildStatus = "failed"
 			break
 		}
-		if check.Status == "warning" && buildStatus == "passed" {
+		if (check.Status == "warning" || check.Status == "indeterminate" || check.Status == "not_checked") && buildStatus == "passed" {
 			buildStatus = "warning"
 		}
 	}
@@ -194,11 +194,17 @@ func (s *Service) persistEngineArtifacts(design *Design, revision *Revision, run
 		})
 	}
 	if wanted["3mf"] {
-		body, err := meshTo3MF(meshBody)
+		printMesh, hasPrint, err := printableMesh(meshBody, partMeshes, definition)
 		if err != nil {
 			return nil, err
 		}
-		generated = append(generated, generatedArtifact{Format: "3mf", ContentType: "model/3mf", Body: body})
+		if hasPrint && definition.Assembly == nil {
+			body, err := meshTo3MF(printMesh)
+			if err != nil {
+				return nil, err
+			}
+			generated = append(generated, generatedArtifact{Format: "3mf", ContentType: "model/3mf", Body: body})
+		}
 		for _, part := range definition.Parts {
 			mesh, ok := partMeshes[part.ID]
 			if !ok {
@@ -249,7 +255,7 @@ func (s *Service) persistArtifactForPart(design *Design, revision *Revision, run
 		base += "-" + safeFilename(partID)
 	}
 	name := fmt.Sprintf("%s-r%d.%s", base, revision.RevisionNumber, ext)
-	dir := filepath.Join(s.artifactRoot, fmt.Sprintf("design-%d", design.ID), fmt.Sprintf("revision-%d", revision.ID))
+	dir := filepath.Join(s.artifactRoot, fmt.Sprintf("design-%d", design.ID), fmt.Sprintf("revision-%d", revision.ID), hashText)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -369,9 +375,21 @@ func (s *Service) ManufacturingPackage(ctx context.Context, designID, revisionID
 	if err := json.Unmarshal(revision.Definition, &definition); err != nil {
 		return nil, fmt.Errorf("decode manufacturing definition: %w", err)
 	}
+	records, err := s.physicalEvidence(revision.ID)
+	if err != nil {
+		return nil, err
+	}
+	if definition.Release != nil {
+		definition.Release.PhysicalTests = append(definition.Release.PhysicalTests, records...)
+	}
+	if err := validateReleaseEvidence(&definition, revision, result); err != nil {
+		return nil, err
+	}
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
+	packageHashes := map[string]string{}
 	add := func(name string, body []byte) error {
+		packageHashes[name] = digest(body)
 		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
 		if err != nil {
 			return err
@@ -410,6 +428,55 @@ func (s *Service) ManufacturingPackage(ctx context.Context, designID, revisionID
 	if err := add("dependencies.json", dependencies); err != nil {
 		return nil, err
 	}
+	portable, sources, err := s.portableDefinition(revision.ID, revision.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if err = add("resolved-design.json", portable); err != nil {
+		return nil, err
+	}
+	for name, body := range sources {
+		if err = add(name, body); err != nil {
+			return nil, err
+		}
+	}
+	if definition.Release != nil {
+		b, _ := json.MarshalIndent(definition.Release, "", "  ")
+		if err = add("release-evidence.json", b); err != nil {
+			return nil, err
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if artifact.Format != "mesh-json" {
+			continue
+		}
+		var metadata map[string]any
+		_ = json.Unmarshal(artifact.Metadata, &metadata)
+		if metadata["part_id"] != nil {
+			continue
+		}
+		body, err := os.ReadFile(artifact.LocalPath)
+		if err != nil {
+			return nil, err
+		}
+		images, err := inspectionPNGs(body, definition.Release)
+		if err != nil {
+			return nil, err
+		}
+		for name, image := range images {
+			if err = add("inspection/"+name, image); err != nil {
+				return nil, err
+			}
+		}
+		break
+	}
+	views := inspectionSVGs(result.Report, definition.Release)
+	for name, body := range views {
+		if err = add("inspection/"+name, body); err != nil {
+			return nil, err
+		}
+	}
+
 	profiles, _ := json.MarshalIndent(definition.PrintProfiles, "", "  ")
 	if err := add("print-profiles.json", profiles); err != nil {
 		return nil, err
@@ -433,7 +500,7 @@ func (s *Service) ManufacturingPackage(ctx context.Context, designID, revisionID
 		"schema": "apteva-manufacturing-package/v1", "design_id": design.ID,
 		"revision_id": revision.ID, "revision_number": revision.RevisionNumber,
 		"source_sha256": revision.SourceSHA256, "units": "mm", "engine": engineVersion,
-		"validation_status": result.Run.Status, "created_at": time.Now().UTC().Format(time.RFC3339),
+		"validation_status": result.Run.Status, "release_stage": releaseStage(&definition), "created_at": time.Now().UTC().Format(time.RFC3339),
 		"part_count": len(definition.Parts), "assembly_instance_count": len(assemblyInstances(&definition)),
 		"dependency_count": len(result.Dependencies),
 	}
@@ -453,10 +520,25 @@ func (s *Service) ManufacturingPackage(ctx context.Context, designID, revisionID
 			archive.Close()
 			return nil, err
 		}
-		if err := add("files/"+artifact.Name, body); err != nil {
+		directory := "assembly/"
+		if artifact.Format == "stl" || artifact.Format == "3mf" {
+			directory = "print/"
+		}
+		if artifact.Format == "step" {
+			var metadata map[string]any
+			_ = json.Unmarshal(artifact.Metadata, &metadata)
+			if metadata["part_id"] != nil {
+				directory = "parts/"
+			}
+		}
+		if err := add(directory+artifact.Name, body); err != nil {
 			_ = archive.Close()
 			return nil, err
 		}
+	}
+	hashes, _ := json.MarshalIndent(packageHashes, "", "  ")
+	if err := add("checksums.json", hashes); err != nil {
+		return nil, err
 	}
 	if err := archive.Close(); err != nil {
 		return nil, err

@@ -366,7 +366,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("tenant_update only works on local + hosted tenants; for connected-remote upgrade out-of-band")
 	}
 	requested := strings.TrimSpace(getStr(args, "version"))
-	if requested == "" {
+	if requested == "" || requested == "latest" {
 		v, lookupErr := npmLatestVersion(context.Background())
 		if lookupErr != nil {
 			return nil, fmt.Errorf("resolve latest version: %w", lookupErr)
@@ -377,7 +377,41 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if requested == t.CurrentVersion && requested == t.TargetVersion {
+	if handled, out, err := a.tryStableHostUpdate(context.Background(), ctx, t, requested); handled {
+		return out, err
+	}
+	if hostedTenantExpectedRunning(t.Status) {
+		base, err := a.internalTenantBaseURL(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		// A healthy legacy process can have drifted from Fleet's saved row.
+		// Use the observed release as the rollback identity. An offline tenant
+		// may still be repaired using its last verified release and preflight.
+		if ok, actual, _, probeErr := probeHealth(context.Background(), base, ""); probeErr == nil && ok {
+			if actual == "" {
+				return nil, errors.New("serving tenant health has no version; update identity is unverified")
+			}
+			if actual != t.CurrentVersion {
+				if err := a.store.setCurrentVersion(t.ID, actual); err != nil {
+					return nil, err
+				}
+				t.CurrentVersion = actual
+			}
+		}
+	}
+	// Cached metadata never proves that a running legacy tenant serves this
+	// version. Stopped tenants only prepare a target; they do not report it live.
+	if requested == t.CurrentVersion && hostedTenantExpectedRunning(t.Status) {
+		base, err := a.internalTenantBaseURL(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := requireRuntimeHealthVersion(context.Background(), base, requested); err != nil {
+			return nil, err
+		}
+	}
+	if requested == t.CurrentVersion && requested == t.TargetVersion && hostedTenantExpectedRunning(t.Status) {
 		if t.IsHosted() {
 			if err := a.store.clearOperationLease(t.ID); err != nil {
 				return nil, fmt.Errorf("clear completed update lease: %w", err)
@@ -389,7 +423,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"reason":  "already at requested version",
 		}, nil
 	}
-	if requested == t.CurrentVersion {
+	if requested == t.CurrentVersion && hostedTenantExpectedRunning(t.Status) {
 		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
 			return nil, err
 		}
@@ -455,7 +489,8 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if ierr != nil {
 			return nil, ierr
 		}
-		if _, _, err := a.ensureHostedVersionInstalled(ctx, t.InstanceID, requested); err != nil {
+		runtime, _, err := a.ensureHostedVersionInstalled(ctx, t.InstanceID, requested)
+		if err != nil {
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 				map[string]any{"version": requested, "stage": "install", "error": err.Error()})
 			return nil, err
@@ -475,6 +510,15 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"started": false, "status": t.Status,
 				"note": "version prepared; tenant remained stopped",
 			}, nil
+		}
+		preflight, err := a.legacyUpdatePreflight(context.Background(), ctx, t, runtime.Server, requested)
+		if err != nil {
+			restoreTarget()
+			return nil, err
+		}
+		if !versionAtLeast(requested, oldVersion) && !rollbackCompatible(preflight) {
+			restoreTarget()
+			return nil, errors.New("downgrade requires a matching, rollback-safe database preflight")
 		}
 		if err := setLeasePhase("stopping"); err != nil {
 			return nil, err
@@ -501,13 +545,31 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		newSpec.AptevaVer = requested
 		_, _, sErr := a.spawnHostedTenant(ctx, newSpec)
 		if sErr != nil {
-			restoreTarget()
+			previous, _, prepErr := a.ensureHostedVersionInstalled(ctx, t.InstanceID, oldVersion)
+			if prepErr == nil {
+				prepErr = a.legacyRollbackAllowed(context.Background(), ctx, t, preflight, previous.Server, oldVersion)
+			}
+			if prepErr != nil {
+				preserveLease = true
+				a.requireRecovery(t.ID, prepErr)
+				_ = a.store.setOperationLeasePhase(t.ID, "recovery_required")
+				_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
+				return nil, fmt.Errorf("update failed: %v; database preserved; recovery required: %w", sErr, prepErr)
+			}
 			if err := setLeasePhase("rollback_starting"); err != nil {
 				return nil, fmt.Errorf("respawn hosted with apteva@%s: %v; %w", requested, sErr, err)
 			}
 			rollbackSpec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
 			rollbackSpec.AptevaVer = oldVersion
 			_, _, rollbackErr := a.spawnHostedTenant(ctx, rollbackSpec)
+			if rollbackErr == nil {
+				base, e := a.internalTenantBaseURL(ctx, t)
+				if e != nil {
+					rollbackErr = e
+				} else {
+					_, rollbackErr = requireRuntimeHealthVersion(context.Background(), base, oldVersion)
+				}
+			}
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error(), "rollback_error": errorString(rollbackErr)})
 			if rollbackErr != nil {
@@ -516,6 +578,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
 				return nil, fmt.Errorf("respawn hosted with apteva@%s: %v; rollback to %s also failed: %w", requested, sErr, oldVersion, rollbackErr)
 			}
+			restoreTarget()
 			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w (previous version restored)", requested, sErr)
 		}
 		if err := a.store.setCurrentVersion(t.ID, requested); err != nil {
@@ -560,11 +623,17 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if oldVersion != requested {
 		if prepared, prepErr := ensureVersionInstalled(context.Background(), oldVersion); prepErr == nil {
 			oldBin = prepared
-		} else if fallback, fallbackErr := resolveAptevaBin(""); fallbackErr == nil {
-			oldBin = fallback
 		} else {
 			return nil, fmt.Errorf("prepare update rollback binary for %s: %w", oldVersion, prepErr)
 		}
+	}
+	newRuntime, _ := versionedRuntimeFromCLI(bin)
+	preflight, err := a.legacyUpdatePreflight(context.Background(), ctx, t, newRuntime.Server, requested)
+	if err != nil {
+		return nil, err
+	}
+	if !versionAtLeast(requested, oldVersion) && !rollbackCompatible(preflight) {
+		return nil, errors.New("downgrade requires a matching, rollback-safe database preflight")
 	}
 
 	// Persist target_version BEFORE the spawn so an auto-respawn after
@@ -583,8 +652,16 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	_, proc, spawnErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, bin, port, false)
 	if spawnErr != nil {
-		restoreTarget()
+		previousRuntime, _ := versionedRuntimeFromCLI(oldBin)
+		if err := a.legacyRollbackAllowed(context.Background(), ctx, t, preflight, previousRuntime.Server, oldVersion); err != nil {
+			a.requireRecovery(t.ID, err)
+			_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
+			return nil, fmt.Errorf("update failed: %v; database preserved; recovery required: %w", spawnErr, err)
+		}
 		_, oldProc, rollbackErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, oldBin, port, false)
+		if rollbackErr == nil {
+			_, rollbackErr = requireRuntimeHealthVersion(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port), oldVersion)
+		}
 		if rollbackErr == nil {
 			a.procMu.Lock()
 			a.procs[t.Slug] = oldProc
@@ -593,9 +670,11 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 			map[string]any{"version": requested, "stage": "spawn", "error": spawnErr.Error(), "rollback_error": errorString(rollbackErr)})
 		if rollbackErr != nil {
+			a.requireRecovery(t.ID, rollbackErr)
 			_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
 			return nil, fmt.Errorf("respawn with apteva@%s: %v; rollback to %s also failed: %w", requested, spawnErr, oldVersion, rollbackErr)
 		}
+		restoreTarget()
 		return nil, fmt.Errorf("respawn with apteva@%s: %w (previous version restored)", requested, spawnErr)
 	}
 	a.procMu.Lock()

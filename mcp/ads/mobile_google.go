@@ -248,12 +248,15 @@ func (a *App) googleConversionMetadata(ctx *sdk.AppCtx, acct *adAccount, v map[s
 	typ := firstString(v, "type")
 	appID := firstString(v, "appId", "app_id")
 	category := firstString(v, "category")
-	metadata := map[string]any{"type": typ, "category": category, "app_id": appID, "owner_customer": firstString(v, "ownerCustomer", "owner_customer"), "eligible": strings.EqualFold(firstString(v, "status"), "ENABLED"), "observation": "unknown"}
+	metadata := map[string]any{"origin": firstString(v, "origin"), "type": typ, "category": category, "app_id": appID, "owner_customer": firstString(v, "ownerCustomer", "owner_customer"), "eligible": strings.EqualFold(firstString(v, "status"), "ENABLED"), "observation": "unknown"}
 	if primary, ok := v["primaryForGoal"].(bool); ok && !primary {
 		metadata["eligible"] = false
 	}
 	if primary, ok := v["primary_for_goal"].(bool); ok && !primary {
 		metadata["eligible"] = false
+	}
+	if event := googleHostedEvent(v); event != "" {
+		metadata["event"] = event
 	}
 	if appID != "" && googleMobileConversionType(typ) {
 		metadata["event"] = googleConversionEvent(v)

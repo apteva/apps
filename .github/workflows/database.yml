@@ -1,0 +1,39 @@
+name: Database checks
+on:
+  push:
+    branches: [main]
+    tags: ['database/v*']
+    paths: ['mcp/database/**', '.github/workflows/database.yml']
+  pull_request:
+    paths: ['mcp/database/**', '.github/workflows/database.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: mcp/database
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/database/go.mod
+          cache-dependency-path: mcp/database/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go mod verify
+      - run: bun test ui/realtime-client.test.ts
+      - name: Build and verify the Database panel
+        run: bun run ../../scripts/build-panels.ts --app database
+      - name: Build standalone source application
+        run: go build -o /tmp/apteva-database .

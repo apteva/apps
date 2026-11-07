@@ -150,6 +150,12 @@ func transitionInstanceAndEmit(ctx *sdk.AppCtx, id int64, from []string, to stri
 	if err != nil {
 		return nil, false, err
 	}
+	if to == "ready" && before.Status == "provisioning" {
+		if err := firewallBeforeReady(ctx, before); err != nil {
+			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "lifecycle_stage": "Firewall", "error_message": "Firewall not confirmed; retry instance_firewall_apply or instance_wait_ready", "primary_error": err.Error()})
+			return before, false, err
+		}
+	}
 	if to == "ready" && before.Status == "provisioning" && before.Setup != nil {
 		if err := prepareInstance(ctx, before); err != nil {
 			return before, false, err

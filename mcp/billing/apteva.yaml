@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.13.2
+version: 0.14.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -10,6 +10,8 @@ description: |
   created only when explicitly requested. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
+  v0.14.0 marks read-only tools for multi-project agent grants and names
+  the project on catalog price lookups from a global install.
   v0.13.2 returns expiring signed invoice PDF links through linked Storage,
   uploads new PDFs privately, and preserves rendered bytes when saving fails.
   v0.13.1 improves existing customer search with ranked phrase matches,
@@ -378,7 +380,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.13.0
+    ref: billing/v0.14.0
     entry: mcp/billing
   port: 8080
   health_check: /health

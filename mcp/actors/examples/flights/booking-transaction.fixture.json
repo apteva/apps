@@ -1,0 +1,1594 @@
+{
+  "schema_version": 1,
+  "allowed_hosts": [
+    "checkout.fixture.test"
+  ],
+  "browser": {
+    "backend": "browserbase",
+    "context_id": "{{booking_context_id}}",
+    "persist": true
+  },
+  "limits": {
+    "max_pages": 30,
+    "max_items": 50,
+    "max_duration_seconds": 60,
+    "step_retries": 0
+  },
+  "operations": {
+    "payment_preflight": {
+      "required_explicit_inputs": [
+        "provider",
+        "origin",
+        "destination",
+        "departure_date",
+        "flight_number",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "checked_bags",
+        "seat",
+        "currency",
+        "payment_last4",
+        "checkout_url",
+        "booking_context_id",
+        "reviewed_total",
+        "maximum_total",
+        "reviewed_pay_label"
+      ],
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{checkout_url}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "checkout.fixture.test",
+          "path_prefix": "/checkout"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "provider": {
+              "selector": "[data-booking=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-booking=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-booking=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-booking=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-booking=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-booking=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-booking=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-booking=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-booking=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-booking=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-booking=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-booking=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "fare": {
+              "selector": "[data-booking=\"fare\"]",
+              "type": "number",
+              "required": true
+            },
+            "taxes": {
+              "selector": "[data-booking=\"taxes\"]",
+              "type": "number",
+              "required": true
+            },
+            "baggage_fee": {
+              "selector": "[data-booking=\"baggage_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "seat_fee": {
+              "selector": "[data-booking=\"seat_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "payment_fee": {
+              "selector": "[data-booking=\"payment_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-booking=\"total\"]",
+              "type": "number",
+              "required": true
+            },
+            "pay_label": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true
+            },
+            "button_amount": {
+              "selector": "#pay-reviewed-booking",
+              "type": "number",
+              "required": true,
+              "pattern": "^Pay EUR ([0-9]+\\.[0-9]{2})$"
+            },
+            "button_currency": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true,
+              "pattern": "^Pay ([A-Z]{3}) "
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "less_than_or_equal": "{{maximum_total}}",
+              "sum_of": [
+                "fare",
+                "taxes",
+                "baggage_fee",
+                "seat_fee",
+                "payment_fee"
+              ],
+              "tolerance": 0.001
+            },
+            "button_amount": {
+              "equals_field": "total",
+              "tolerance": 0.001
+            },
+            "button_currency": {
+              "equals_field": "currency"
+            },
+            "pay_label": {
+              "equals_exact": "{{reviewed_pay_label}}"
+            }
+          }
+        }
+      ]
+    },
+    "submit_booking": {
+      "required_explicit_inputs": [
+        "provider",
+        "origin",
+        "destination",
+        "departure_date",
+        "flight_number",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "checked_bags",
+        "seat",
+        "currency",
+        "payment_last4",
+        "checkout_url",
+        "booking_context_id",
+        "reviewed_total",
+        "maximum_total",
+        "reviewed_pay_label"
+      ],
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{checkout_url}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "checkout.fixture.test",
+          "path_prefix": "/checkout"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "provider": {
+              "selector": "[data-booking=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-booking=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-booking=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-booking=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-booking=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-booking=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-booking=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-booking=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-booking=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-booking=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-booking=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-booking=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "fare": {
+              "selector": "[data-booking=\"fare\"]",
+              "type": "number",
+              "required": true
+            },
+            "taxes": {
+              "selector": "[data-booking=\"taxes\"]",
+              "type": "number",
+              "required": true
+            },
+            "baggage_fee": {
+              "selector": "[data-booking=\"baggage_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "seat_fee": {
+              "selector": "[data-booking=\"seat_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "payment_fee": {
+              "selector": "[data-booking=\"payment_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-booking=\"total\"]",
+              "type": "number",
+              "required": true
+            },
+            "pay_label": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true
+            },
+            "button_amount": {
+              "selector": "#pay-reviewed-booking",
+              "type": "number",
+              "required": true,
+              "pattern": "^Pay EUR ([0-9]+\\.[0-9]{2})$"
+            },
+            "button_currency": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true,
+              "pattern": "^Pay ([A-Z]{3}) "
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "less_than_or_equal": "{{maximum_total}}",
+              "sum_of": [
+                "fare",
+                "taxes",
+                "baggage_fee",
+                "seat_fee",
+                "payment_fee"
+              ],
+              "tolerance": 0.001
+            },
+            "button_amount": {
+              "equals_field": "total",
+              "tolerance": 0.001
+            },
+            "button_currency": {
+              "equals_field": "currency"
+            },
+            "pay_label": {
+              "equals_exact": "{{reviewed_pay_label}}"
+            }
+          }
+        },
+        {
+          "action": "click_verified",
+          "verified_field": "pay_label",
+          "expected_effect": "financial_action",
+          "confirm_consequence": "financial_action",
+          "once_scope": "flight_ticket_purchase",
+          "once_key": "{{provider}}:{{origin}}:{{destination}}:{{departure_date}}:{{flight_number}}:{{passenger_first_name}}:{{passenger_last_name}}",
+          "effect_phase": "commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-confirmation=\"booking_status\"]"
+            }
+          ],
+          "timeout_ms": 500
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "payment_status": {
+              "selector": "[data-confirmation=\"payment_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_status": {
+              "selector": "[data-confirmation=\"booking_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_reference": {
+              "selector": "[data-confirmation=\"booking_reference\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([A-Z0-9]{6})$"
+            },
+            "ticket_number": {
+              "selector": "[data-confirmation=\"ticket_number\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([0-9]{13})$"
+            },
+            "provider": {
+              "selector": "[data-confirmation=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-confirmation=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-confirmation=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-confirmation=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-confirmation=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-confirmation=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-confirmation=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-confirmation=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-confirmation=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-confirmation=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-confirmation=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-confirmation=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-confirmation=\"total\"]",
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "payment_status": {
+              "equals_exact": "paid"
+            },
+            "booking_status": {
+              "equals_exact": "confirmed"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "tolerance": 0.001
+            },
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            }
+          }
+        }
+      ]
+    },
+    "submit_booking_alias": {
+      "required_explicit_inputs": [
+        "provider",
+        "origin",
+        "destination",
+        "departure_date",
+        "flight_number",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "checked_bags",
+        "seat",
+        "currency",
+        "payment_last4",
+        "checkout_url",
+        "booking_context_id",
+        "reviewed_total",
+        "maximum_total",
+        "reviewed_pay_label"
+      ],
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{checkout_url}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "checkout.fixture.test",
+          "path_prefix": "/checkout"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "provider": {
+              "selector": "[data-booking=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-booking=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-booking=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-booking=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-booking=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-booking=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-booking=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-booking=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-booking=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-booking=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-booking=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-booking=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "fare": {
+              "selector": "[data-booking=\"fare\"]",
+              "type": "number",
+              "required": true
+            },
+            "taxes": {
+              "selector": "[data-booking=\"taxes\"]",
+              "type": "number",
+              "required": true
+            },
+            "baggage_fee": {
+              "selector": "[data-booking=\"baggage_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "seat_fee": {
+              "selector": "[data-booking=\"seat_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "payment_fee": {
+              "selector": "[data-booking=\"payment_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-booking=\"total\"]",
+              "type": "number",
+              "required": true
+            },
+            "pay_label": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true
+            },
+            "button_amount": {
+              "selector": "#pay-reviewed-booking",
+              "type": "number",
+              "required": true,
+              "pattern": "^Pay EUR ([0-9]+\\.[0-9]{2})$"
+            },
+            "button_currency": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true,
+              "pattern": "^Pay ([A-Z]{3}) "
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "less_than_or_equal": "{{maximum_total}}",
+              "sum_of": [
+                "fare",
+                "taxes",
+                "baggage_fee",
+                "seat_fee",
+                "payment_fee"
+              ],
+              "tolerance": 0.001
+            },
+            "button_amount": {
+              "equals_field": "total",
+              "tolerance": 0.001
+            },
+            "button_currency": {
+              "equals_field": "currency"
+            },
+            "pay_label": {
+              "equals_exact": "{{reviewed_pay_label}}"
+            }
+          }
+        },
+        {
+          "action": "click_verified",
+          "verified_field": "pay_label",
+          "expected_effect": "financial_action",
+          "confirm_consequence": "financial_action",
+          "once_scope": "flight_ticket_purchase",
+          "once_key": "{{provider}}:{{origin}}:{{destination}}:{{departure_date}}:{{flight_number}}:{{passenger_first_name}}:{{passenger_last_name}}",
+          "effect_phase": "commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-confirmation=\"booking_status\"]"
+            }
+          ],
+          "timeout_ms": 500
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "payment_status": {
+              "selector": "[data-confirmation=\"payment_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_status": {
+              "selector": "[data-confirmation=\"booking_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_reference": {
+              "selector": "[data-confirmation=\"booking_reference\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([A-Z0-9]{6})$"
+            },
+            "ticket_number": {
+              "selector": "[data-confirmation=\"ticket_number\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([0-9]{13})$"
+            },
+            "provider": {
+              "selector": "[data-confirmation=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-confirmation=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-confirmation=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-confirmation=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-confirmation=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-confirmation=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-confirmation=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-confirmation=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-confirmation=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-confirmation=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-confirmation=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-confirmation=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-confirmation=\"total\"]",
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "payment_status": {
+              "equals_exact": "paid"
+            },
+            "booking_status": {
+              "equals_exact": "confirmed"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "tolerance": 0.001
+            },
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            }
+          }
+        }
+      ]
+    },
+    "prepare_and_submit_booking": {
+      "required_explicit_inputs": [
+        "provider",
+        "origin",
+        "destination",
+        "departure_date",
+        "flight_number",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "checked_bags",
+        "seat",
+        "currency",
+        "payment_last4",
+        "checkout_url",
+        "booking_context_id",
+        "reviewed_total",
+        "maximum_total",
+        "reviewed_pay_label",
+        "payment_number_ref",
+        "payment_expiry_ref",
+        "payment_cvv_ref"
+      ],
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{checkout_url}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "checkout.fixture.test",
+          "path_prefix": "/checkout"
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "#name_0"
+          },
+          "text": "{{passenger_first_name}}"
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "#first_surname_0"
+          },
+          "text": "{{passenger_last_name}}"
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "#contact_email"
+          },
+          "text": "{{contact_email}}"
+        },
+        {
+          "action": "select_option",
+          "locator": {
+            "selector": "#checked-bags"
+          },
+          "value": "{{checked_bags}}"
+        },
+        {
+          "action": "select_option",
+          "locator": {
+            "selector": "#seat-choice"
+          },
+          "value": "{{seat}}"
+        },
+        {
+          "action": "fill_secret",
+          "locator": {
+            "selector": "#card-number"
+          },
+          "secret_ref": "{{payment_number_ref}}"
+        },
+        {
+          "action": "fill_secret",
+          "locator": {
+            "selector": "#card-expiry"
+          },
+          "secret_ref": "{{payment_expiry_ref}}"
+        },
+        {
+          "action": "fill_secret",
+          "locator": {
+            "selector": "#card-cvv"
+          },
+          "secret_ref": "{{payment_cvv_ref}}"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "provider": {
+              "selector": "[data-booking=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-booking=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-booking=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-booking=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-booking=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-booking=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-booking=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-booking=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-booking=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-booking=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-booking=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-booking=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "fare": {
+              "selector": "[data-booking=\"fare\"]",
+              "type": "number",
+              "required": true
+            },
+            "taxes": {
+              "selector": "[data-booking=\"taxes\"]",
+              "type": "number",
+              "required": true
+            },
+            "baggage_fee": {
+              "selector": "[data-booking=\"baggage_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "seat_fee": {
+              "selector": "[data-booking=\"seat_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "payment_fee": {
+              "selector": "[data-booking=\"payment_fee\"]",
+              "type": "number",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-booking=\"total\"]",
+              "type": "number",
+              "required": true
+            },
+            "pay_label": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true
+            },
+            "button_amount": {
+              "selector": "#pay-reviewed-booking",
+              "type": "number",
+              "required": true,
+              "pattern": "^Pay EUR ([0-9]+\\.[0-9]{2})$"
+            },
+            "button_currency": {
+              "selector": "#pay-reviewed-booking",
+              "type": "text",
+              "required": true,
+              "pattern": "^Pay ([A-Z]{3}) "
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "less_than_or_equal": "{{maximum_total}}",
+              "sum_of": [
+                "fare",
+                "taxes",
+                "baggage_fee",
+                "seat_fee",
+                "payment_fee"
+              ],
+              "tolerance": 0.001
+            },
+            "button_amount": {
+              "equals_field": "total",
+              "tolerance": 0.001
+            },
+            "button_currency": {
+              "equals_field": "currency"
+            },
+            "pay_label": {
+              "equals_exact": "{{reviewed_pay_label}}"
+            }
+          }
+        },
+        {
+          "action": "click_verified",
+          "verified_field": "pay_label",
+          "expected_effect": "financial_action",
+          "confirm_consequence": "financial_action",
+          "once_scope": "flight_ticket_purchase",
+          "once_key": "{{provider}}:{{origin}}:{{destination}}:{{departure_date}}:{{flight_number}}:{{passenger_first_name}}:{{passenger_last_name}}",
+          "effect_phase": "commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-confirmation=\"booking_status\"]"
+            }
+          ],
+          "timeout_ms": 500
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "payment_status": {
+              "selector": "[data-confirmation=\"payment_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_status": {
+              "selector": "[data-confirmation=\"booking_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_reference": {
+              "selector": "[data-confirmation=\"booking_reference\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([A-Z0-9]{6})$"
+            },
+            "ticket_number": {
+              "selector": "[data-confirmation=\"ticket_number\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([0-9]{13})$"
+            },
+            "provider": {
+              "selector": "[data-confirmation=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-confirmation=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-confirmation=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-confirmation=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-confirmation=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-confirmation=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-confirmation=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-confirmation=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-confirmation=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-confirmation=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-confirmation=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-confirmation=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-confirmation=\"total\"]",
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "payment_status": {
+              "equals_exact": "paid"
+            },
+            "booking_status": {
+              "equals_exact": "confirmed"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "tolerance": 0.001
+            },
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            }
+          }
+        }
+      ]
+    },
+    "inspect_confirmation": {
+      "required_explicit_inputs": [
+        "provider",
+        "origin",
+        "destination",
+        "departure_date",
+        "flight_number",
+        "passenger_first_name",
+        "passenger_last_name",
+        "contact_email",
+        "checked_bags",
+        "seat",
+        "currency",
+        "payment_last4",
+        "checkout_url",
+        "booking_context_id",
+        "reviewed_total",
+        "maximum_total",
+        "reviewed_pay_label"
+      ],
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{checkout_url}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "checkout.fixture.test",
+          "path_prefix": "/checkout"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[data-confirmation=\"booking_status\"]"
+            }
+          ],
+          "timeout_ms": 500
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "payment_status": {
+              "selector": "[data-confirmation=\"payment_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_status": {
+              "selector": "[data-confirmation=\"booking_status\"]",
+              "type": "text",
+              "required": true
+            },
+            "booking_reference": {
+              "selector": "[data-confirmation=\"booking_reference\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([A-Z0-9]{6})$"
+            },
+            "ticket_number": {
+              "selector": "[data-confirmation=\"ticket_number\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^([0-9]{13})$"
+            },
+            "provider": {
+              "selector": "[data-confirmation=\"provider\"]",
+              "type": "text",
+              "required": true
+            },
+            "origin": {
+              "selector": "[data-confirmation=\"origin\"]",
+              "type": "text",
+              "required": true
+            },
+            "destination": {
+              "selector": "[data-confirmation=\"destination\"]",
+              "type": "text",
+              "required": true
+            },
+            "departure_date": {
+              "selector": "[data-confirmation=\"departure_date\"]",
+              "type": "text",
+              "required": true
+            },
+            "flight_number": {
+              "selector": "[data-confirmation=\"flight_number\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_first_name": {
+              "selector": "[data-confirmation=\"passenger_first_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "passenger_last_name": {
+              "selector": "[data-confirmation=\"passenger_last_name\"]",
+              "type": "text",
+              "required": true
+            },
+            "contact_email": {
+              "selector": "[data-confirmation=\"contact_email\"]",
+              "type": "text",
+              "required": true
+            },
+            "checked_bags": {
+              "selector": "[data-confirmation=\"checked_bags\"]",
+              "type": "text",
+              "required": true
+            },
+            "seat": {
+              "selector": "[data-confirmation=\"seat\"]",
+              "type": "text",
+              "required": true
+            },
+            "currency": {
+              "selector": "[data-confirmation=\"currency\"]",
+              "type": "text",
+              "required": true
+            },
+            "payment_last4": {
+              "selector": "[data-confirmation=\"payment_last4\"]",
+              "type": "text",
+              "required": true
+            },
+            "total": {
+              "selector": "[data-confirmation=\"total\"]",
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "payment_status": {
+              "equals_exact": "paid"
+            },
+            "booking_status": {
+              "equals_exact": "confirmed"
+            },
+            "total": {
+              "equals": "{{reviewed_total}}",
+              "tolerance": 0.001
+            },
+            "provider": {
+              "equals_exact": "{{provider}}"
+            },
+            "origin": {
+              "equals_exact": "{{origin}}"
+            },
+            "destination": {
+              "equals_exact": "{{destination}}"
+            },
+            "departure_date": {
+              "equals_exact": "{{departure_date}}"
+            },
+            "flight_number": {
+              "equals_exact": "{{flight_number}}"
+            },
+            "passenger_first_name": {
+              "equals_exact": "{{passenger_first_name}}"
+            },
+            "passenger_last_name": {
+              "equals_exact": "{{passenger_last_name}}"
+            },
+            "contact_email": {
+              "equals_exact": "{{contact_email}}"
+            },
+            "checked_bags": {
+              "equals_exact": "{{checked_bags}}"
+            },
+            "seat": {
+              "equals_exact": "{{seat}}"
+            },
+            "currency": {
+              "equals_exact": "{{currency}}"
+            },
+            "payment_last4": {
+              "equals_exact": "{{payment_last4}}"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

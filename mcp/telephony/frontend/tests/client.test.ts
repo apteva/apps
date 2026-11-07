@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { TelephonyClient, telephonyExtension, type CallControlResult, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, callTerminationLabel, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -54,6 +54,61 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("answer prepares microphone and scripts before claiming a carrier call", async () => {
+  const f = fixture(), gate = deferred();
+  f.setPreflight(() => gate.promise);
+  const pending = f.phone.answer("call-1");
+  await Bun.sleep(1);
+  expect(f.preflighted).toBe(1);
+  expect(f.requests).toHaveLength(0);
+  gate.resolve(); await pending;
+  expect(f.requests[0].url.pathname).toEndWith("/answer/call-1");
+  f.phone.dispose();
+});
+
+test("failed or cancelled inbound preflight never claims the call", async () => {
+  const failed = fixture(); failed.setPreflight(async () => { throw new Error("permission denied"); });
+  await expect(failed.phone.answer("call-1")).rejects.toThrow("permission denied");
+  expect(failed.requests).toHaveLength(0); failed.phone.dispose();
+  const f = fixture(), gate = deferred(); f.setPreflight(() => gate.promise);
+  const pending = f.phone.answer("call-1").catch(error => error);
+  await f.phone.hangup();
+  expect((await pending).message).toContain("cancelled");
+  gate.resolve(); await Bun.sleep(1);
+  expect(f.requests).toHaveLength(0); f.phone.dispose();
+});
+
+test("reconnect preparation keeps live audio and ownership until ready", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const before = f.requests.length, stopped = f.stopped, gate = deferred();
+  f.runtime.prepare = async () => { await gate.promise; };
+  const pending = f.phone.reconnect(); await Bun.sleep(1);
+  expect(f.stopped).toBe(stopped);
+  expect(f.requests).toHaveLength(before);
+  gate.resolve(); await pending;
+  expect(f.requests[before].url.pathname).toEndWith("/attach/call-1");
+  f.phone.dispose();
+});
+
+test("failed reconnect preparation leaves the current audio running", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const before = f.requests.length, stopped = f.stopped;
+  f.runtime.prepare = async () => { throw new Error("asset unavailable"); };
+  await expect(f.phone.reconnect()).rejects.toThrow("asset unavailable");
+  expect(f.stopped).toBe(stopped); expect(f.requests).toHaveLength(before);
+  expect(f.phone.getSnapshot().audioState).toBe("live"); f.phone.dispose();
+});
+
+test("ending during preparation cannot acquire a replacement session later", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const gate = deferred(); f.runtime.prepare = () => gate.promise;
+  const pending = f.phone.reconnect().catch(error => error);
+  await f.phone.hangup(); expect((await pending).message).toContain("cancelled");
+  gate.resolve(); await Bun.sleep(1);
+  expect(f.requests.filter(request => request.url.pathname.includes("/attach/"))).toHaveLength(0);
+  expect(f.phone.getSnapshot().callId).toBeUndefined(); f.phone.dispose();
+});
+
 describe("Telephony extension", () => {
   test("outbound choices use the authorized headless endpoint and preserve provider warnings", async () => {
     const f=fixture();
@@ -62,6 +117,17 @@ describe("Telephony extension", () => {
     expect(await f.client.outboundNumbers()).toEqual(result);
     const request=f.requests[0];
     expect(request.url.pathname).toEndWith("/softphone/numbers");
+    expect(request.url.searchParams.get("project_id")).toBe("p1");
+    expect(request.url.searchParams.get("install_id")).toBe("42");
+    expect(request.headers.get("Authorization")).toBe("Bearer first");
+  });
+
+  test("fresh inventory keeps authorization and project scoping", async () => {
+    const f = fixture();
+    f.setResponse(async () => ({ numbers: [], inventory_status: "available", warnings: [] }));
+    await f.client.outboundNumbers({ fresh: true });
+    const request = f.requests[0];
+    expect(request.url.searchParams.get("fresh")).toBe("true");
     expect(request.url.searchParams.get("project_id")).toBe("p1");
     expect(request.url.searchParams.get("install_id")).toBe("42");
     expect(request.headers.get("Authorization")).toBe("Bearer first");
@@ -481,4 +547,192 @@ test("late automatic authorization cannot revive a terminated call",async()=>{
  const pending=f.callbacks.refreshMediaURL!();
  f.phone.observeCall({id:"call-1",status:"completed"});resolve(f.session);
  await expect(pending).rejects.toThrow("cancelled");expect(f.phone.getSnapshot().callId).toBeUndefined();expect(f.started).toBe(1);f.phone.dispose();
+});
+
+
+test("AI policy endings have intentional, localized labels", () => {
+ expect(callTerminationLabel({reason:"ai_max_duration"}, "fr")).toBe("Durée maximale atteinte");
+ expect(callTerminationLabel({reason:"ai_inactivity"}, "en")).toBe("Call ended: no response");
+ expect(callTerminationLabel({reason:"ai_inactivity"}, "fr")).toBe("Fin de l’appel : aucune réponse");
+ expect(callTerminationLabel({reason:"ai_policy_failure"}, "en")).toBe("AI inactivity reminder failed");
+});
+
+test("headless recovery carries attempt IDs and session generations without changing call control",async()=>{
+ const f=fixture();let generation=0;
+ f.setResponse(async(url)=>{
+  if(url.pathname.endsWith("/calls"))return {calls:[{id:"call-1",status:"answered"}]};
+  return {...f.session,session_generation:`session-${(++generation).toString(16)}`,session_token:`secret-${generation}`,media_url:f.session.media_url};
+ });
+ await f.phone.dial({to:"+33123456789",from:"+33912345678"});
+ await f.phone.reconnect(undefined,"audio_device_change");
+ const explicit=f.requests.filter(r=>r.url.pathname.includes("/attach/")).at(-1)!.body.media_diagnostics;
+ expect(explicit.initiating_action).toBe("audio_device_change");expect(explicit.previous_session_id).toBe("session-1");
+ expect(explicit.recovery_id).toStartWith("recovery-");expect(explicit.attempt_id).toStartWith("attempt-");
+ const context={recovery_id:"recovery-a",attempt_id:"attempt-b",initiating_action:"automatic_retry" as const};
+ const refresh=f.callbacks.refreshMediaURL!;const first=refresh(context),second=refresh({...context,attempt_id:"attempt-c"});
+ expect(first).toBe(second);await first;
+ const automatic=f.requests.filter(r=>r.url.pathname.includes("/attach/")).at(-1)!.body.media_diagnostics;
+ expect(automatic).toMatchObject(context);expect(automatic.previous_session_id).toBe("session-2");
+ expect(JSON.stringify(automatic)).not.toContain("secret");
+ expect(f.requests.filter(r=>r.url.pathname.includes("/place")).length).toBe(1);
+ expect(f.requests.filter(r=>r.url.pathname.includes("/answer/")||r.url.pathname.endsWith("/hangup"))).toHaveLength(0);
+ f.phone.dispose();
+});
+
+test("outbound transport configuration uses the installation and project scope",async()=>{
+ const f=fixture();
+ f.setResponse(async()=>({ok:true,outbound_transport:{transport:"sip_direct",scope:"number",credentials_configured:true}}));
+ const r=await f.client.outboundTransport({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",config:{host:"sip.telnyx.com",resource_id:"sip-1",auth_mode:"ip",media_encryption:"srtp_sdes"}});
+ expect(r.outbound_transport?.transport).toBe("sip_direct");
+ expect(f.requests[0].url.pathname).toBe("/api/apps/telephony/numbers/outbound-transport");
+ expect(f.requests[0].url.searchParams.get("project_id")).toBe("p1");
+ expect(f.requests[0].url.searchParams.get("install_id")).toBe("42");
+ expect(f.requests[0].body.carrier_connection_id).toBe(10);
+});
+
+test("automatic SIP setup and profile policy use the same headless account scope",async()=>{
+ const f=fixture();
+ f.setResponse(async()=>({ok:true,setup_options:{automatic_supported:true,profiles:[{id:"profile-1",name:"France",enabled:true,destinations:["FR"],daily_spend_limit_enabled:true,daily_spend_limit:"20.00"}]}}));
+ const options=await f.client.outboundTransport({carrier_connection_id:10,setup_options:true});
+ expect(options.setup_options?.profiles[0]?.destinations).toEqual(["FR"]);
+ await f.client.outboundTransport({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",provision:true,profile_policy:{destinations:["FR"],daily_spend_limit:"20.00"}});
+ expect(f.requests[1].body).toEqual({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",provision:true,profile_policy:{destinations:["FR"],daily_spend_limit:"20.00"}});
+ expect(f.requests[1].headers.get("Authorization")).toBe("Bearer first");
+ expect(f.requests[1].url.searchParams.get("project_id")).toBe("p1");
+ expect(f.requests[1].url.searchParams.get("install_id")).toBe("42");
+});
+
+test("standalone status push reduces polls while live and retains old-server fallback",async()=>{
+ const f=fixture();const phone=f.client.createSoftphone({audioRuntime:f.runtime,pollIntervalMs:100});
+ try{
+  await phone.answer("call-1");
+  await Bun.sleep(120);
+  const count=()=>f.requests.filter(r=>r.url.pathname.endsWith("/calls")).length;
+  expect(count()).toBeGreaterThan(0);
+  f.callbacks.onCallStatus?.({call_id:"call-1",status:"in-progress"});
+  const before=count();await Bun.sleep(350);expect(count()).toBe(before);
+  f.callbacks.onState?.("connecting");await Bun.sleep(150);expect(count()).toBeGreaterThan(before);
+ }finally{phone.dispose();}
+});
+
+
+test("aborted old status request cannot disable push reconciliation on a reconnected call",async()=>{
+ const f=fixture();let polls=0;
+ let rejectFirst!:(error:Error)=>void;
+ const blocked=new Promise<never>((_,reject)=>{rejectFirst=reject;});
+ f.setResponse(async url=>{
+  if(url.pathname.endsWith("/calls")){polls++;if(polls===1)return blocked;return {calls:[{id:"call-1",status:"in-progress"}]};}
+  return f.session;
+ });
+ const phone=f.client.createSoftphone({audioRuntime:f.runtime,pollIntervalMs:100});
+ try{
+  await phone.answer("call-1");
+  const until=Date.now()+1000;while(!polls&&Date.now()<until)await Bun.sleep(1);expect(polls).toBe(1);
+  await phone.reconnect();
+  f.callbacks.onCallStatus?.({call_id:"call-1",status:"in-progress"});
+  const before=polls;rejectFirst(new Error("old request canceled"));await Bun.sleep(350);
+  expect(polls).toBe(before);
+ }finally{rejectFirst(new Error("cleanup"));phone.dispose();}
+});
+
+test("network recovery rejoins the existing call with a guarded session and preserves mute",async()=>{
+ const f=fixture();let generation=0;f.setResponse(async(url)=>url.pathname.endsWith("/calls")?{calls:[{id:"call-1",status:"answered"}]}:{...f.session,session_generation:`session-${(++generation).toString(16)}`,attachment_guard_version:1});
+ await f.phone.dial({to:"+12025550100"});f.phone.setMuted(true);
+ f.callbacks.onState?.("error","temporary outage",{recoverable:true});expect(f.phone.getSnapshot().audioState).toBe("reconnecting");
+ const recorded:any[]=[];const phone=f.phone as any;phone.options.onSessionEvent=(e:any)=>recorded.push(e);
+ const loop=phone.automaticRecovery;await loop.tick();
+ const complete=recorded.find(e=>e.action==="network_recovery"&&e.outcome==="connected");expect(complete?.recovery_id).toStartWith("recovery-");expect(complete?.attempt_id).toStartWith("attempt-");
+ expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.phone.getSnapshot().muted).toBe(true);
+ const attach=f.requests.find(r=>r.url.pathname.includes("/attach/"));expect(attach?.body.attachment_guard.expected_generation).toBe("session-1");
+ expect(f.requests.filter(r=>r.url.pathname.includes("/place"))).toHaveLength(1);expect(f.requests.filter(r=>r.url.pathname.endsWith("/hangup"))).toHaveLength(0);f.phone.dispose();
+});
+test("unknown attachment outcome retries the same mutation; hangup stops the loop",async()=>{
+ const f=fixture();let stage=0;f.setResponse(async(url)=>{if(url.pathname.endsWith("/calls"))return {calls:[{id:"call-1",status:"answered"}]};if(url.pathname.includes("/attach/")){if(stage++===0)throw Error("response lost");return {...f.session,session_generation:"session-2",attachment_guard_version:1};}return {...f.session,session_generation:"session-1",attachment_guard_version:1};});
+ await f.phone.dial({to:"+12025550100"});f.callbacks.onState?.("error","network",{recoverable:true});const loop=(f.phone as any).automaticRecovery;await loop.tick();await loop.tick();
+ const calls=f.requests.filter(r=>r.url.pathname.includes("/attach/"));expect(calls).toHaveLength(2);expect(calls[0].body.attachment_guard).toEqual(calls[1].body.attachment_guard);
+ f.callbacks.onState?.("error","network",{recoverable:true});const stopped=(f.phone as any).automaticRecovery;await f.phone.hangup();await stopped.tick();expect(f.requests.filter(r=>r.url.pathname.includes("/attach/"))).toHaveLength(2);f.phone.dispose();
+});
+test("permanent media and microphone failures do not restart audio",async()=>{
+ const f=fixture();await f.phone.dial({to:"+12025550100"});f.callbacks.onState?.("error","denied");expect((f.phone as any).automaticRecovery).toBeUndefined();f.phone.dispose();
+});
+
+test("background network check never holds inbound answer or outbound placement",async()=>{
+ for(const direction of ["inbound","outbound"]){
+  const f=fixture(),policyGate=deferred();
+  f.setResponse(async(url)=>{if(url.pathname.endsWith("/network-policy")){await policyGate.promise;return {effective:{media_transport:"webrtc"}};}return f.session;});
+  const checking=f.phone.checkNetwork();await Bun.sleep(1);
+  if(direction==="inbound")await f.phone.answer("call-1");else await f.phone.dial({to:"+33123456789"});
+  expect(f.phone.getSnapshot().audioState).toBe("live");expect((await checking).state).toBe("cancelled");expect(f.started).toBe(1);
+  expect(f.requests.some(r=>r.url.pathname.endsWith("/network-check"))).toBe(false);
+  expect(f.startedOptions[0].mediaTransport).toBeUndefined();
+  policyGate.resolve();await Bun.sleep(1);expect(f.started).toBe(1);expect(f.phone.getSnapshot().audioState).toBe("live");f.phone.dispose();
+ }
+});
+
+test("network checks do not mark a phone busy, change live controls or survive disposal",async()=>{
+ const f=fixture(),gate=deferred();f.setResponse(async()=>{await gate.promise;return {};});
+ const pending=f.phone.checkNetwork();await Bun.sleep(1);expect(f.phone.getSnapshot().busy).toBe(false);expect(f.phone.getSnapshot().phase).toBe("idle");
+ f.phone.dispose();expect((await pending).state).toBe("cancelled");gate.resolve();await Bun.sleep(1);expect(f.started).toBe(0);expect(f.phone.getSnapshot().busy).toBe(false);
+});
+
+test("incoming offers stop even policy discovery and prevent a later probe from starting",async()=>{
+ const f=fixture(),gate=deferred();f.setResponse(async url=>{
+  if(url.pathname.endsWith("/network-policy")){await gate.promise;return {effective:{}};}
+  if(url.pathname.endsWith("/calls"))return {calls:[{id:"incoming-2",status:"pending",direction:"inbound",peer_kind:"human",answerable:true}]};return f.session;
+ });
+ const checking=f.phone.checkNetwork();await Bun.sleep(1);await f.client.listCalls();expect((await checking).state).toBe("cancelled");
+ await expect(f.phone.checkNetwork()).rejects.toThrow("incoming offers");gate.resolve();await Bun.sleep(1);
+ expect(f.requests.some(r=>r.url.pathname.endsWith("/network-check"))).toBe(false);expect(f.phone.getSnapshot().busy).toBe(false);f.phone.dispose();
+});
+
+test("network profiles affect the next attachment and restore inherited transport",async()=>{
+ const {validateNetworkPolicy}=await import("../src/network-policy");
+ const f=fixture();f.phone.configureAudio({mediaTransport:"websocket"});
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"webrtc",initial_bitrate_bps:24000,max_bitrate_bps:24000,playback_target_ms:80}));
+ await f.phone.answer("call-1");expect(f.startedOptions[0].mediaTransport).toBe("webrtc");expect(f.startedOptions[0].playbackTargetMs).toBe(80);
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"inherit"}));
+ expect(f.started).toBe(1);expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.startedOptions[0].mediaTransport).toBe("webrtc");
+ await f.phone.reconnect();expect(f.startedOptions[1].mediaTransport).toBe("websocket");expect(f.startedOptions[1].networkProfile?.initial_bitrate_bps).toBe(32000);f.phone.dispose();
+});
+
+test("unsaved network defaults never overwrite existing host playback preferences",async()=>{
+ const {DEFAULT_NETWORK_POLICY}=await import("../src/network-policy");const f=fixture();
+ f.phone.configureAudio({mediaTransport:"webrtc",playbackTargetMs:100,playbackMaxMs:280});
+ f.setResponse(async url=>url.pathname.endsWith("/network-policy")?{configured:false,effective:DEFAULT_NETWORK_POLICY}:f.session);
+ expect((await f.phone.checkNetwork()).state).toBe("unavailable");await f.phone.answer("call-1");
+ expect(f.startedOptions[0].playbackTargetMs).toBe(100);expect(f.startedOptions[0].playbackMaxMs).toBe(280);expect(f.startedOptions[0].mediaTransport).toBe("webrtc");f.phone.dispose();
+});
+
+test("removing a network override restores host playback and does not restart live audio",async()=>{
+ const {validateNetworkPolicy}=await import("../src/network-policy");const f=fixture();
+ f.phone.configureAudio({mediaTransport:"websocket",playbackTargetMs:100,playbackMinMs:80,playbackMaxMs:280});
+ f.phone.applyNetworkPolicy(validateNetworkPolicy({media_transport:"webrtc",playback_target_ms:60}));
+ await f.phone.answer("call-1");expect(f.startedOptions[0].playbackTargetMs).toBe(60);expect(f.startedOptions[0].playbackMinMs).toBe(60);
+ f.phone.applyNetworkPolicy();expect(f.started).toBe(1);await f.phone.reconnect();
+ expect(f.startedOptions[1]).toMatchObject({mediaTransport:"websocket",playbackTargetMs:100,playbackMinMs:80,playbackMaxMs:280});expect(f.startedOptions[1].networkProfile).toBeUndefined();f.phone.dispose();
+});
+
+
+test("device/worklet stall after answer releases the claim and allows a fresh answer",async()=>{
+ const f=fixture(),pending=deferred();let cancels=0;f.runtime.cancelPreparation=()=>{cancels++;};
+ f.setStart(()=>pending.promise);
+ const original=setTimeout;
+ const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:number,...args:any[])=>original(fn,ms===20000?5:ms,...args)) as typeof setTimeout);
+ try {
+  await expect(f.phone.answer("call-1")).rejects.toThrow("Audio setup timed out");
+  expect(f.requests.filter(r=>r.url.pathname.includes("/release/"))).toHaveLength(1);
+  expect(f.phone.getSnapshot().busy).toBe(false);expect(f.phone.getSnapshot().callId).toBeUndefined();
+  expect(f.stopped).toBe(1);expect(cancels).toBeGreaterThan(0);
+  f.setStart(async()=>{f.callbacks.onState?.("live");});await f.phone.answer("call-1");
+  pending.resolve();await Bun.sleep(0);
+  expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.stopped).toBe(1);
+ }finally{timer.mockRestore();f.phone.dispose();}
+});
+
+test("answer request failure and cancelled preflight release prepared local devices",async()=>{
+ const f=fixture();let cleaned=0;f.runtime.cancelPreparation=()=>{cleaned++;};
+ f.setResponse(async()=>new Response("gone",{status:410}));await expect(f.phone.answer("call-1")).rejects.toThrow();
+ expect(cleaned).toBeGreaterThanOrEqual(2);expect(f.started).toBe(0);
+ const gate=deferred();f.setPreflight(()=>gate.promise);const starting=f.phone.answer("call-1").catch(e=>e);
+ const before=cleaned;await f.phone.hangup();expect(cleaned).toBeGreaterThan(before);await starting;gate.resolve();f.phone.dispose();
 });

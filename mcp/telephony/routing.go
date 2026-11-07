@@ -114,6 +114,7 @@ type inboundRoutingPlan struct {
 	DecisionNotBefore                                           string
 	RoutingResolution                                           string
 	CallbackOnAI                                                bool
+	TurnDetection                                               *sdk.RealtimeTurnDetection `json:",omitempty"`
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -249,6 +250,52 @@ func validateRoutingDefinition(def routingDefinition) []string {
 		}
 	}
 	return uniqueStrings(errs)
+}
+
+// routingOverflowCycleErrors re-runs cycle detection with the implicit
+// ring-group overflow edges added. A cycle through an overflow edge re-enters a
+// ring node whose run already exists, so no offers are created and the caller
+// waits for the run deadline.
+func routingOverflowCycleErrors(def routingDefinition, overflowEdges map[string]string) []string {
+	if len(overflowEdges) == 0 {
+		return nil
+	}
+	nodes := make(map[string]routingNode, len(def.Nodes))
+	for _, node := range def.Nodes {
+		nodes[node.ID] = node
+	}
+	errs := []string{}
+	state := map[string]int{}
+	var visit func(string)
+	visit = func(id string) {
+		if state[id] == 1 {
+			errs = append(errs, fmt.Sprintf("flow contains a cycle through ring-group overflow at node %q", id))
+			return
+		}
+		if state[id] == 2 {
+			return
+		}
+		state[id] = 1
+		edges := routingNodeEdges(nodes[id])
+		if extra, ok := overflowEdges[id]; ok {
+			edges = append(edges, extra)
+		}
+		for _, edge := range edges {
+			if _, ok := nodes[edge]; ok {
+				visit(edge)
+			}
+		}
+		state[id] = 2
+	}
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		visit(id)
+	}
+	return errs
 }
 
 func routingNodeEdges(node routingNode) []string {
@@ -488,10 +535,8 @@ func validateRoutingVariablesForRoute(value any, route *routeRow) error {
 	if err != nil {
 		return err
 	}
-	if mode == recordingModeAlways && route.InboundTransport == inboundTransportSIPDirect {
-		return errors.New("provider-cloud recording is unavailable on direct SIP routes")
-	}
-	if mode == recordingModeAlways && !providerSupportsRecording(route.CarrierSlug) {
+
+	if mode == recordingModeAlways && route.InboundTransport != inboundTransportSIPDirect && !providerSupportsRecording(route.CarrierSlug) {
 		return fmt.Errorf("call recording is not implemented for provider %s", route.CarrierSlug)
 	}
 	return nil
@@ -658,6 +703,7 @@ func (a *App) validateRoutingReferences(project string, def routingDefinition) [
 			}
 		}
 	}
+	overflowEdges := map[string]string{}
 	groups, err := a.listRingGroups(project)
 	if err != nil {
 		errs = append(errs, err.Error())
@@ -695,11 +741,16 @@ func (a *App) validateRoutingReferences(project string, def routingDefinition) [
 					}
 					if !found {
 						errs = append(errs, "ring group overflow node does not exist in the flow")
+					} else if strings.TrimSpace(node.Branches["no_answer"]) == "" && strings.TrimSpace(node.Next) == "" {
+						// resolveRoutingDefinition falls back to the group's overflow
+						// node only when the flow node has no no_answer/next edge.
+						overflowEdges[node.ID] = group.OverflowNodeID
 					}
 				}
 			}
 		}
 	}
+	errs = append(errs, routingOverflowCycleErrors(def, overflowEdges)...)
 	return uniqueStrings(errs)
 }
 
@@ -709,7 +760,32 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 	}
 	errs := []string{}
 	capabilities := inboundCapabilities(route)
+	var mediaSettings localMediaSettings
+	if route.InboundTransport == inboundTransportSIPDirect {
+		var err error
+		mediaSettings, err = a.localMediaSettings(project, route.ID)
+		if err != nil {
+			errs = append(errs, "local media settings unavailable")
+		}
+	}
 	for _, node := range def.Nodes {
+		if route.InboundTransport == inboundTransportSIPDirect && (node.Type == "announcement" || node.Type == "dtmf_menu" || node.Type == "voicemail") {
+			field := "prompt"
+			if node.Type == "announcement" {
+				field = "text"
+			}
+			config := node.Config
+			if expanded, ok := expandRoutingValue(config, routingTemplateVariables(route)).(map[string]any); ok {
+				config = expanded
+			}
+			text := routingConfigString(config, field)
+			if node.Type == "voicemail" && text == "" {
+				text = "Please leave a message after the tone."
+			}
+			if text != "" && mediaSettings.Prompts[text] == 0 && (mediaSettings.SpeechTool == "" || globalCtx == nil || globalCtx.WithProject(project).IntegrationFor("speech") == nil) {
+				errs = append(errs, "direct SIP announcements require a speech integration or a prerecorded prompt")
+			}
+		}
 		if node.Type == "decision" && !capabilities.Decisions {
 			errs = append(errs, fmt.Sprintf("%s %s routes do not support routing decisions", route.CarrierSlug, route.InboundTransport))
 		}
@@ -756,6 +832,14 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 			if destination.Kind == "pstn" || destination.Kind == "sip" {
 				if !capabilities.ExternalDestinations {
 					errs = append(errs, "external ring destinations are not supported on this carrier route")
+				}
+			}
+			if destination.Kind == "voicemail" && route.InboundTransport == inboundTransportSIPDirect {
+				var config map[string]any
+				_ = json.Unmarshal([]byte(destination.ConfigJSON), &config)
+				text := firstNonEmpty(routingConfigString(config, "prompt"), "Please leave a message after the tone.")
+				if mediaSettings.Prompts[text] == 0 && (mediaSettings.SpeechTool == "" || globalCtx == nil || globalCtx.WithProject(project).IntegrationFor("speech") == nil) {
+					errs = append(errs, "direct SIP voicemail requires a speech integration or a prerecorded prompt")
 				}
 			}
 			if destination.Kind == "voicemail" && !capabilities.Voicemail {
@@ -968,6 +1052,15 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	}
 	if capacity.Limit > 0 && kind != "browser" {
 		return nil, errors.New("individual capacity is only supported for browser destinations")
+	}
+	if _, err := destinationTurnDetection(kind, string(raw)); err != nil {
+		return nil, err
+	}
+	if _, err := destinationAICallPolicy(kind, string(raw), projectAICallPolicy(nil)); err != nil {
+		return nil, err
+	}
+	if _, err := destinationAIContext(kind, string(raw)); err != nil {
+		return nil, err
 	}
 	switch kind {
 	case "agent", "ai":
@@ -1312,6 +1405,14 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 			break
 		}
 	}
+	if simulation.TerminalType == "voicemail" {
+		for _, node := range def.Nodes {
+			if node.ID == simulation.TerminalNodeID {
+				plan.Prompt = routingConfigString(node.Config, "prompt")
+				break
+			}
+		}
+	}
 	if simulation.RingGroupID != "" {
 		group, ok := def.Groups[simulation.RingGroupID]
 		if !ok {
@@ -1368,7 +1469,19 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 				copy := *destination
 				destination = &copy
 				destination.Kind = map[string]string{answerModeHumanBrowser: "browser", answerModeRealtimeImmediate: "ai", answerModeAgent: "agent"}[route.AnswerMode]
-				raw, _ := json.Marshal(map[string]any{"agent_id": route.AgentID, "directive": route.AutoDirective, "voice": route.AutoVoice, "greeting": route.AutoGreeting, "hold_prompt": route.HoldPrompt, "timeout_sec": route.TimeoutSec})
+				config := map[string]any{"agent_id": route.AgentID, "directive": route.AutoDirective, "voice": route.AutoVoice, "greeting": route.AutoGreeting, "hold_prompt": route.HoldPrompt, "timeout_sec": route.TimeoutSec}
+				// Legacy route fields remain authoritative, but turn detection is
+				// destination-only and may have been explicitly added to its snapshot.
+				var destinationConfig map[string]json.RawMessage
+				if json.Unmarshal([]byte(destination.ConfigJSON), &destinationConfig) == nil {
+					if policy, ok := destinationConfig["ai_call_policy"]; ok {
+						config["ai_call_policy"] = policy
+					}
+					if turn, ok := destinationConfig["turn_detection"]; ok {
+						config["turn_detection"] = turn
+					}
+				}
+				raw, _ := json.Marshal(config)
 				destination.ConfigJSON = string(raw)
 			}
 		}
@@ -1386,6 +1499,14 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 		plan.HoldPrompt = routingConfigString(config, "hold_prompt")
 		plan.TimeoutSec = routingConfigInt(config, "timeout_sec", plan.TimeoutSec)
 		plan.AgentID = int64(routingConfigInt(config, "agent_id", int(plan.AgentID)))
+		configJSON, err := json.Marshal(config)
+		if err != nil {
+			return nil, err
+		}
+		plan.TurnDetection, err = destinationTurnDetection(destination.Kind, string(configJSON))
+		if err != nil {
+			return nil, err
+		}
 		switch destination.Kind {
 		case "browser":
 			plan.AnswerMode = answerModeHumanBrowser
@@ -1395,10 +1516,9 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 			plan.AnswerMode = answerModeAgent
 		case "voicemail":
 			plan.TerminalType = "voicemail"
+			plan.Prompt = routingConfigString(config, "prompt")
 		case "pstn", "sip":
-			if route.InboundTransport == inboundTransportSIPDirect {
-				return nil, errors.New("external destinations require a provider webhook route")
-			}
+
 			timeout := plan.TimeoutSec
 			if timeout < 5 {
 				timeout = 20
@@ -1598,6 +1718,12 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 		plan.AgentID = row.AgentID
 		plan.Directive = row.Directive
 		plan.Voice = row.Voice
+		if dest, ok := plan.GroupDestinations[row.RoutingDestinationID]; ok {
+			plan.TurnDetection, err = destinationTurnDetection(dest.Kind, dest.ConfigJSON)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 		if row.PeerKind == peerKindHuman {
 			plan.AnswerMode = answerModeHumanBrowser
 		} else {
@@ -1700,7 +1826,7 @@ func writeRoutingProgressTx(tx *sql.Tx, callID, project string, plan *inboundRou
 	}
 	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" {
 		message := fmt.Sprintf("Incoming routed phone call. call_id=%s. Answer with telephony_answer_call or decline with telephony_reject_call.", callID)
-		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox(call_id,project_id,agent_id,message,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET agent_id=excluded.agent_id,message=excluded.message,delivered_at='',next_attempt_at=excluded.next_attempt_at WHERE inbound_event_outbox.agent_id<>excluded.agent_id`, callID, project, plan.AgentID, message, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox(call_id,project_id,agent_id,message,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET agent_id=excluded.agent_id,message=excluded.message,delivered_at='',lease_token='',next_attempt_at=excluded.next_attempt_at WHERE inbound_event_outbox.agent_id<>excluded.agent_id`, callID, project, plan.AgentID, message, time.Now().UTC().Format(time.RFC3339)); err != nil {
 			return err
 		}
 	}
@@ -1728,10 +1854,9 @@ func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan,
 	if globalCtx == nil || plan == nil {
 		return
 	}
-	ctx := globalCtx.WithProject(project)
 	base := map[string]any{"call_id": callID, "flow_id": plan.FlowID, "flow_version_id": plan.VersionID, "destination_id": plan.DestinationID, "ring_group_id": plan.RingGroupID, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if started {
-		ctx.Emit("call.routing.started", base)
+		a.saveCallNotification(project, callID, "call.routing.started", base)
 	}
 	for _, step := range plan.Trace {
 		payload := map[string]any{}
@@ -1739,10 +1864,10 @@ func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan,
 			payload[key] = value
 		}
 		payload["node_id"], payload["node_type"], payload["outcome"] = step.NodeID, step.NodeType, step.Outcome
-		ctx.Emit("call.routing.node_entered", payload)
+		a.saveCallNotification(project, callID, "call.routing.node_entered", payload)
 	}
 	if started && plan.RingGroupID != "" {
-		ctx.Emit("call.offered", base)
+		a.saveCallNotification(project, callID, "call.offered", base)
 	}
 }
 
@@ -1923,7 +2048,7 @@ func (a *App) startTelnyxGather(ctx *sdk.AppCtx, row *callRow, plan *inboundRout
 	return err
 }
 
-func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
+func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow, requests ...context.Context) error {
 	input := map[string]any{
 		"call_control_id": row.CarrierSID,
 		"stream_url":      a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
@@ -1935,7 +2060,7 @@ func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
 	// L16 bridge and caused an endless reconnect loop after the operator
 	// accepted the routed call.
 	applyTelnyxMediaProfile(input)
-	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", input)
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", input, requests...)
 	return err
 }
 
@@ -2466,8 +2591,11 @@ func (a *App) toolFlowsCreate(_ context.Context, ctx *sdk.AppCtx, args map[strin
 	return routingFlowPublic(*flow), nil
 }
 
-func (a *App) toolFlowsUpdate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolFlowsUpdate(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strArg(args, "flow_id", "")
+	if err := a.requireRoutingFlowOwned(callerCtx, ctx, id); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	flow, err := a.findRoutingFlow(currentProject(ctx), id)
 	if err != nil || flow == nil {
 		return mcpError("unknown flow"), nil
@@ -2554,9 +2682,44 @@ func (a *App) toolRingGroupsCreate(_ context.Context, ctx *sdk.AppCtx, args map[
 	return ringGroupPublic(*row), nil
 }
 
-func (a *App) toolRoutesSetFlow(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRoutesSetFlow(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	args["route_ids"] = []any{strArg(args, "route_id", "")}
-	return a.toolFlowsAssignNumbers(context.Background(), ctx, args)
+	return a.toolFlowsAssignNumbers(callerCtx, ctx, args)
+}
+
+// requireRoutingRoutesOwned applies the route ownership rule of routeForCaller
+// to routing tools. Flows and destinations are project-shared, but changing
+// which flow answers a number is a route mutation, so agents may only touch
+// routes they own. Platform principals (no agent id) keep project-wide access.
+func (a *App) requireRoutingRoutesOwned(callerCtx context.Context, ctx *sdk.AppCtx, routeIDs []string) error {
+	agentID := callerAgentID(callerCtx)
+	if agentID == 0 {
+		return nil
+	}
+	for _, routeID := range routeIDs {
+		if _, err := a.routeForCaller(ctx, routeID, agentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requireRoutingFlowOwned rejects agent changes to a shared flow that is
+// assigned to another agent's route: publishing re-points every assigned
+// route, and a draft edit becomes live on the next publish.
+func (a *App) requireRoutingFlowOwned(callerCtx context.Context, ctx *sdk.AppCtx, flowID string) error {
+	agentID := callerAgentID(callerCtx)
+	if agentID == 0 {
+		return nil
+	}
+	var foreign int
+	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM inbound_routes WHERE project_id=? AND flow_id=? AND agent_id<>?`, currentProject(ctx), strings.TrimSpace(flowID), agentID).Scan(&foreign); err != nil {
+		return err
+	}
+	if foreign > 0 {
+		return errors.New("flow is assigned to routes owned by another agent")
+	}
+	return nil
 }
 
 func routingRouteIDsArg(args map[string]any) []string {
@@ -2594,7 +2757,10 @@ func (a *App) toolFlowsValidateNumbers(_ context.Context, ctx *sdk.AppCtx, args 
 	return validation, nil
 }
 
-func (a *App) toolFlowsAssignNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolFlowsAssignNumbers(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.requireRoutingRoutesOwned(callerCtx, ctx, routingRouteIDsArg(args)); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	validation, err := a.assignRoutingFlowToNumbers(currentProject(ctx), strArg(args, "flow_id", ""), routingRouteIDsArg(args), routingVariablesByRouteArg(args))
 	if err != nil {
 		return mcpError(err.Error()), nil
@@ -2605,7 +2771,10 @@ func (a *App) toolFlowsAssignNumbers(_ context.Context, ctx *sdk.AppCtx, args ma
 	return map[string]any{"ok": true, "valid": true, "flow_id": validation.FlowID, "version_id": validation.VersionID, "numbers": validation.Numbers}, nil
 }
 
-func (a *App) toolFlowsUnassignNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolFlowsUnassignNumbers(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.requireRoutingRoutesOwned(callerCtx, ctx, routingRouteIDsArg(args)); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	validation, err := a.unassignRoutingFlowFromNumbers(currentProject(ctx), strArg(args, "flow_id", ""), routingRouteIDsArg(args))
 	if err != nil {
 		return mcpError(err.Error()), nil
@@ -2631,7 +2800,10 @@ func (a *App) toolFlowsListNumbers(_ context.Context, ctx *sdk.AppCtx, args map[
 	}
 	return map[string]any{"flow_id": flowID, "numbers": numbers}, nil
 }
-func (a *App) toolFlowsPublish(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolFlowsPublish(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := a.requireRoutingFlowOwned(callerCtx, ctx, strArg(args, "flow_id", "")); err != nil {
+		return mcpError(err.Error()), nil
+	}
 	version, validation, err := a.publishRoutingFlow(currentProject(ctx), strArg(args, "flow_id", ""))
 	if err != nil {
 		return mcpError(err.Error()), nil

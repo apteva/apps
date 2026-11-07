@@ -27,7 +27,8 @@ Bun.serve({
         target.protocol = "ws:";
         const upstream = new WebSocket(target.href);
         upstream.binaryType = "arraybuffer";
-        await new Promise<void>((resolve, reject) => { upstream.onopen = () => resolve(); upstream.onerror = () => reject(new Error("Upstream media failed")); });
+        try { await new Promise<void>((resolve, reject) => { upstream.onopen = () => resolve(); upstream.onerror = () => reject(new Error("Upstream media failed")); }); }
+        catch { upstream.close(); return new Response("Media unavailable", { status: 503 }); }
         const queued: Array<string | ArrayBuffer> = [];
         upstream.onmessage = e => queued.push(e.data);
         if (server.upgrade(request, { data: { upstream, queued } })) return;

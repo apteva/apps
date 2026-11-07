@@ -288,7 +288,9 @@ func TestAccountAdd_RollsBackPendingOnStartOAuthError(t *testing.T) {
 }
 
 func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{{ID: 42, AppSlug: platforms["facebook"].IntegrationSlug, ProjectID: "test-proj", Status: "active"}}
+	ctx := newSocialCtx(t, pf)
 	app := &App{}
 
 	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
@@ -337,7 +339,9 @@ func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
 }
 
 func TestHandleAccountsStart_ForwardsProfileID(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{{ID: 42, AppSlug: platforms["facebook"].IntegrationSlug, ProjectID: "test-proj", Status: "active"}}
+	ctx := newSocialCtx(t, pf)
 	app := &App{}
 
 	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
@@ -774,8 +778,8 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	if targets[0]["platform_post_id"] != "123" {
 		t.Fatalf("post_create target platform_post_id = %v, want 123", targets[0]["platform_post_id"])
 	}
-	if purl, _ := targets[0]["platform_url"].(string); !strings.Contains(purl, "/status/123") {
-		t.Fatalf("post_create target platform_url = %q, want twitter status URL", purl)
+	if purl, _ := targets[0]["platform_url"].(string); purl != "" {
+		t.Fatalf("post_create target platform_url = %q, want unknown URL until the provider returns one", purl)
 	}
 
 	// post_tweet was called with text=body (Twitter's BodyField is "text").
@@ -801,7 +805,7 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	if ppid != "123" {
 		t.Errorf("platform_post_id = %q", ppid)
 	}
-	if !strings.Contains(purl, "/status/123") {
+	if purl != "" {
 		t.Errorf("platform_url = %q", purl)
 	}
 
@@ -1986,7 +1990,7 @@ func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *test
 		}
 		if status != "published" || requestedMode != postModePublish || source != "provider" ||
 			createdAt != "2026-02-26T14:33:43.886Z" || scheduleAt != "2026-02-26T14:33:42.520Z" ||
-			publishedAt != "2026-02-26T14:33:46.829Z" {
+			publishedAt != "" {
 			t.Fatalf("stored parent = status=%q mode=%q source=%q created=%q scheduled=%q published=%q",
 				status, requestedMode, source, createdAt, scheduleAt, publishedAt)
 		}
@@ -2000,7 +2004,7 @@ func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *test
 		}
 		if targetStatus != "published" || platformID != "urn:li:share:7432795016680497152" ||
 			platformURL != "https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/" ||
-			targetPublishedAt != "2026-02-26T14:33:46.829Z" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
+			targetPublishedAt != "" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
 			t.Fatalf("stored target = status=%q platform_id=%q url=%q published=%q provider_id=%q attempts=%d",
 				targetStatus, platformID, platformURL, targetPublishedAt, providerID, attempts)
 		}
@@ -2125,7 +2129,7 @@ func TestProviderReconcilerManagedOnlyReadsExactKnownPost(t *testing.T) {
 	).Scan(&parentStatus, &targetStatus, &platformID, &publishedAt); err != nil {
 		t.Fatal(err)
 	}
-	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "2026-08-01T09:05:00Z" {
+	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "" {
 		t.Fatalf("managed reconciliation stored parent=%q target=%q id=%q published=%q", parentStatus, targetStatus, platformID, publishedAt)
 	}
 }
@@ -3000,6 +3004,51 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 	}
 }
 
+func TestPublishInstagram_ReelCover(t *testing.T) {
+	const coverURL = "https://cdn.test/cover.jpg"
+	for _, tt := range []struct {
+		name    string
+		options map[string]any
+		field   string
+		want    any
+	}{
+		{"image takes precedence", map[string]any{"thumbnail_storage_id": int64(77), "thumbnail_frame_ms": int64(1500)}, "cover_url", coverURL},
+		{"video frame", map[string]any{"thumbnail_frame_ms": int64(1500)}, "thumb_offset", int64(1500)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pf := newRecordingPlatform()
+			pf.callAppResponses["storage:files_get"] = json.RawMessage(`{"id":77,"content_type":"image/jpeg"}`)
+			pf.callAppResponses["storage:files_get_url"] = json.RawMessage(`{"url":"https://cdn.test/cover.jpg"}`)
+			pf.executeResponses["create_media_container"] = graphOK(`{"id":"container_42"}`)
+			pf.executeResponses["get_container_status"] = graphOK(`{"status_code":"FINISHED"}`)
+			pf.executeResponses["publish_media_container"] = graphOK(`{"id":"ig_999"}`)
+
+			id, _, err := (&App{}).publishInstagram(newSocialCtx(t, pf), platforms["instagram"], publishJob{
+				connID:  42,
+				extID:   "ig-acct-1",
+				media:   []mediaItem{{URL: "https://cdn.test/reel.mp4", Mime: "video/mp4"}},
+				options: tt.options,
+			})
+			if err != nil || id != "ig_999" {
+				t.Fatalf("publish Reel returned id=%q err=%v", id, err)
+			}
+			if len(pf.executeCalls) < 3 || pf.executeCalls[0].Tool != "create_media_container" ||
+				pf.executeCalls[1].Tool != "get_container_status" || pf.executeCalls[2].Tool != "publish_media_container" {
+				t.Fatalf("unexpected Reel publishing steps: %+v", pf.executeCalls)
+			}
+			input := pf.executeCalls[0].Input
+			if input["media_type"] != "REELS" || input[tt.field] != tt.want {
+				t.Fatalf("unexpected container input: %+v", input)
+			}
+			for _, field := range []string{"coverUrl", "thumbOffset", "cover_url", "thumb_offset"} {
+				if _, ok := input[field]; ok && field != tt.field {
+					t.Errorf("unexpected cover field %q in %+v", field, input)
+				}
+			}
+		})
+	}
+}
+
 func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)
@@ -3052,6 +3101,7 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
 	}
+	configureTestVideo(t, pf, 7, videoBytes)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3108,7 +3158,7 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 	}
 }
 
-func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
+func TestPublishTikTok_UsesValidatedBytesWhenDeliveryReady(t *testing.T) {
 	ready := true
 	pf := newRecordingPlatform()
 	pf.urlPropertyReady = &ready
@@ -3120,6 +3170,11 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 	)
 	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"publish_id":"pull_pub_1"}}`)}
 	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":["video_post_1"]}}`)}
+	configureTestVideo(t, pf, 17, 4194304)
+	upload := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusCreated) }))
+	t.Cleanup(upload.Close)
+	init, _ := json.Marshal(map[string]any{"data": map[string]any{"publish_id": "pull_pub_1", "upload_url": upload.URL}})
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: init}
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3136,11 +3191,8 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 		t.Fatalf("expected post_video: %+v", pf.nonCreatorInfoCalls())
 	}
 	source := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
-	if source["source"] != "PULL_FROM_URL" || source["video_url"] == "" {
-		t.Fatalf("expected PULL_FROM_URL input, got %+v", source)
-	}
-	if _, exists := source["video_size"]; exists {
-		t.Fatalf("pull input must not contain FILE_UPLOAD fields: %+v", source)
+	if source["source"] != "FILE_UPLOAD" || source["video_size"] != int64(4194304) {
+		t.Fatalf("expected verified bytes via FILE_UPLOAD, got %+v", source)
 	}
 }
 
@@ -3160,6 +3212,7 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
 	}
+	configureTestVideo(t, pf, 8, videoBytes)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3193,20 +3246,22 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 }
 
 func TestPublishTikTok_PhotoPostInput(t *testing.T) {
+	source := fixturePNG(t, 16, 16)
+	delivery, _, err := normalizeDeliveryImage(source, tikTokPhotoPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("preflight method = %s, want GET", r.Method)
-		}
-		if got := r.Header.Get("Range"); got != "bytes=0-0" {
-			t.Errorf("preflight Range = %q, want bytes=0-0", got)
+		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
+			t.Error("preflight must GET complete image")
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
-		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write([]byte{0xff})
+		_, _ = w.Write(delivery)
 	}))
 	defer mediaSrv.Close()
 
 	pf := newRecordingPlatform()
+	storageImageFixture(pf, source, 109)
 	pf.callAppResponses["storage:files_get"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":9,\"content_type\":\"image/jpeg\",\"size_bytes\":12345}"}]}}`,
 	)
@@ -3303,95 +3358,6 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	}
 }
 
-func TestPrepareTikTokPhotoStoresHiddenJPEGDerivative(t *testing.T) {
-	sourceImage := image.NewNRGBA(image.Rect(0, 0, 16, 16))
-	for y := 4; y < 12; y++ {
-		for x := 4; x < 12; x++ {
-			i := sourceImage.PixOffset(x, y)
-			sourceImage.Pix[i] = 255
-			sourceImage.Pix[i+3] = 128
-		}
-	}
-	var source bytes.Buffer
-	if err := png.Encode(&source, sourceImage); err != nil {
-		t.Fatal(err)
-	}
-
-	pf := newRecordingPlatform()
-	pf.callAppResponses["storage:files_get_content"] = json.RawMessage(
-		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":%q}]}}`,
-			`{"content_base64":"`+base64.StdEncoding.EncodeToString(source.Bytes())+`"}`),
-	)
-	pf.callAppResponses["storage:files_upload"] = json.RawMessage(
-		`{"result":{"content":[{"type":"text","text":"{\"id\":109,\"name\":\"9-tiktok-photo-jpeg-v1.jpg\",\"size_bytes\":456}"}]}}`,
-	)
-	ctx := newSocialCtx(t, pf)
-	prepared, err := (&App{}).prepareTikTokPhoto(ctx, mediaItem{
-		ID: 9, Mime: "image/png", Name: "source.png", Bytes: int64(source.Len()),
-	}, "media-proj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared.ID != 109 || prepared.Mime != "image/jpeg" || prepared.Name != "9-tiktok-photo-jpeg-v1.jpg" {
-		t.Fatalf("prepared media = %+v", prepared)
-	}
-
-	var upload *callAppCall
-	for i := range pf.callAppCalls {
-		call := &pf.callAppCalls[i]
-		if call.AppName == "storage" && call.Tool == "files_upload" {
-			upload = call
-			break
-		}
-	}
-	if upload == nil {
-		t.Fatalf("files_upload was not called: %+v", pf.callAppCalls)
-	}
-	if upload.Input["folder"] != tiktokJPEGFolder || upload.Input["source"] != "social-tiktok-derivative" {
-		t.Fatalf("hidden derivative identity = %+v", upload.Input)
-	}
-	if upload.Input["content_type"] != "image/jpeg" || upload.Input["visibility"] != "private" {
-		t.Fatalf("derivative delivery metadata = %+v", upload.Input)
-	}
-	if upload.Input["_project_id"] != "media-proj" {
-		t.Fatalf("derivative project = %v, want media-proj", upload.Input["_project_id"])
-	}
-	tags, ok := upload.Input["tags"].([]string)
-	if !ok || strings.Join(tags, ",") != "internal,derived,tiktok" {
-		t.Fatalf("derivative tags = %#v", upload.Input["tags"])
-	}
-	jpegBody, err := base64.StdEncoding.DecodeString(upload.Input["content_base64"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
-	converted, err := jpeg.Decode(bytes.NewReader(jpegBody))
-	if err != nil {
-		t.Fatalf("uploaded derivative is not JPEG: %v", err)
-	}
-	r, g, b, _ := converted.At(0, 0).RGBA()
-	if r < 50000 || g < 50000 || b < 50000 {
-		t.Fatalf("transparent background was not composited onto white: rgb16=(%d,%d,%d)", r, g, b)
-	}
-}
-
-func TestPrepareTikTokPhotoPassesSupportedFormatsThrough(t *testing.T) {
-	pf := newRecordingPlatform()
-	ctx := newSocialCtx(t, pf)
-	for _, mime := range []string{"image/jpeg", "image/webp"} {
-		item := mediaItem{ID: 9, URL: "https://cdn.test/image", Mime: mime, Name: "image"}
-		got, err := (&App{}).prepareTikTokPhoto(ctx, item, "media-proj")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != item {
-			t.Fatalf("%s changed: got %+v want %+v", mime, got, item)
-		}
-	}
-	if len(pf.callAppCalls) != 0 {
-		t.Fatalf("supported formats touched Storage: %+v", pf.callAppCalls)
-	}
-}
-
 func TestPreflightTikTokPhotoURLRejectsRedirect(t *testing.T) {
 	destinationHit := false
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -3477,6 +3443,7 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
 	)
+	configureTestVideo(t, pf, 1, 24)
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3498,6 +3465,9 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 		if c.Tool == "upload_video_init" {
 			sawInit = true
 			snippet, _ := c.Input["snippet"].(map[string]any)
+			if snippet["categoryId"] != "22" {
+				t.Errorf("missing default category: %+v", snippet)
+			}
 			if snippet["title"] != "My video title" {
 				t.Errorf("snippet.title = %v, want body", snippet["title"])
 			}
@@ -3529,7 +3499,7 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
 		Success: true,
 		Data: json.RawMessage(`{
-			"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
+			"items":[{"id":"fixture-channel","contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
 		}`),
 	}
 	pf.executeResponses["list_playlist_items"] = &sdk.ExecuteResult{
@@ -3546,6 +3516,8 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 			}]
 		}`),
 	}
+	pf.executeResponses["get_video"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[{"id":"video-1","snippet":{"channelId":"fixture-channel","title":"A distinct YouTube title","description":"The full YouTube description.\n\nWith a second paragraph.","publishedAt":"2026-08-23T12:00:00Z"},"status":{"privacyStatus":"public"}}]}`)}
+
 	ctx := newSocialCtx(t, pf)
 	accountRes, err := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -3556,15 +3528,7 @@ func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
 	}
 	accountID, _ := accountRes.LastInsertId()
 
-	result := (&App{}).importYoutubePosts(
-		ctx,
-		"test-proj",
-		importResult{AccountID: accountID, Platform: "youtube"},
-		accountID,
-		42,
-		0,
-		25,
-	)
+	result := (&App{}).importAccountPosts(ctx, "test-proj", accountID, 25)
 	if result.Status != "ok" || result.Imported != 1 {
 		t.Fatalf("import result = %+v, want one imported post", result)
 	}
@@ -4566,7 +4530,6 @@ func TestYouTubeThumbnailOnlyEditDoesNotRewriteMetadata(t *testing.T) {
 		`{"id":4903,"content_type":"image/png","size_bytes":9}`,
 	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(fmt.Sprintf(`{"url":%q}`, imageServer.URL))
-	pf.executeResponses["set_thumbnail"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[]}`)}
 	ctx := newSocialCtx(t, pf)
 	acct, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -4592,9 +4555,20 @@ func TestYouTubeThumbnailOnlyEditDoesNotRewriteMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "set_thumbnail" {
+	if len(pf.executeCalls) != 0 || out.(map[string]any)["targets"].([]targetEditOutcome)[0].ThumbnailStatus != "pending" {
 		t.Fatalf("thumbnail-only edit rewrote metadata: calls=%+v out=%+v", pf.executeCalls, out)
 	}
+	assertYouTubeThumbnailState(t, ctx, postID, "video-1", "pending", 0)
+	pf.executeQueues["get_video"] = []*sdk.ExecuteResult{
+		youtubeThumbnailRead("video-1", "succeeded", "", false),
+		graphOK(`{"items":[{"id":"video-1","contentDetails":{"hasCustomThumbnail":true},
+			"snippet":{"thumbnails":{"high":{"url":"https://i.ytimg.com/vi/video-1/hqdefault.jpg"}}}}]}`),
+	}
+	pf.executeResponses["set_thumbnail"] = graphOK(`{"items":[{"high":{"url":"https://i.ytimg.com/vi/video-1/hqdefault.jpg"}}]}`)
+	runYouTubeThumbnailTick(t, ctx, postID)
+	runYouTubeThumbnailTick(t, ctx, postID)
+	assertYouTubeThumbnailState(t, ctx, postID, "video-1", "verified", 0)
+	assertYouTubeThumbnailCalls(t, pf, "video-1", "get_video", "set_thumbnail", "get_video")
 }
 
 func TestExtractContainerID(t *testing.T) {
@@ -4637,11 +4611,11 @@ func TestWalkPath(t *testing.T) {
 
 func TestExtractPostIdentity(t *testing.T) {
 	id, url := extractPostIdentity("twitter", json.RawMessage(`{"data":{"id":"123"}}`))
-	if id != "123" || !strings.Contains(url, "/status/123") {
+	if id != "123" || url != "" {
 		t.Errorf("twitter: id=%q url=%q", id, url)
 	}
 	id, url = extractPostIdentity("facebook", json.RawMessage(`{"id":"100_500"}`))
-	if id != "100_500" || !strings.Contains(url, "100_500") {
+	if id != "100_500" || url != "" {
 		t.Errorf("facebook: id=%q url=%q", id, url)
 	}
 }
@@ -5188,7 +5162,9 @@ func TestYouTubeBreakdownMapsDeviceFilterAndRows(t *testing.T) {
 		RangeDays: 28,
 		Filters:   map[string][]string{"device": {"tv"}},
 	})
-	if got.Status != "ok" || len(got.Rows) != 2 {
+	// YouTube rejects a breakdown filtered on its own dimension, so the
+	// filter keeps the matching rows instead of going upstream.
+	if got.Status != "ok" || len(got.Rows) != 1 {
 		t.Fatalf("breakdown = %+v", got)
 	}
 	if got.Rows[0].Dimensions["device"] != "tv" || got.Rows[0].Metrics["views"] != 420 || got.Rows[0].Metrics["watch_time_minutes"] != 900 {
@@ -5198,7 +5174,7 @@ func TestYouTubeBreakdownMapsDeviceFilterAndRows(t *testing.T) {
 		t.Fatalf("calls = %d, want 1", len(pf.executeCalls))
 	}
 	input := pf.executeCalls[0].Input
-	if input["dimensions"] != "deviceType" || input["filters"] != "deviceType==TV" || input["sort"] != "-views" {
+	if _, filtered := input["filters"]; input["dimensions"] != "deviceType" || filtered || input["sort"] != "-views" {
 		t.Fatalf("query input = %+v", input)
 	}
 }

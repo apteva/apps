@@ -211,14 +211,18 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send_message",
-			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body?. Attachment-only messages are supported. " +
+			Description: "Send a new message with channel (email|sms|whatsapp), to (string|string[]), optional from and body; or reply using reply_to_message_id and new content, without channel/to/from. Attachment-only messages are supported. " +
+				"Reply mode derives sender, recipients, subject, RFC references and Gmail thread/account from a project-owned original. Inbound replies honor Reply-To, then From; outbound follow-ups retain To. reply_all (email only, default false) adds Cc and excludes own mailboxes. Bcc and original attachments are never copied. Addressing/threading overrides are rejected in reply mode. " +
+				"Preserves subject ticket tokens, tagged reply addresses, and valid X-Ticket-ID/X-Ticket-Number headers; other original headers are not copied. Reply retry keys are scoped to the original message. reply_to sets the email Reply-To address, distinct from reply_to_message_id. " +
 				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers. " +
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, message_id_header?, attachments:[normalized metadata]}. provider_message_id is the provider's opaque ID; message_id_header is the RFC email Message-ID when known and is the value to use for threading. " +
 				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
-			InputSchema: schemaObject(map[string]any{
+			InputSchema: sendMessageInputSchema(map[string]any{
+				"reply_to_message_id":    map[string]any{"type": "integer", "minimum": 1, "description": "Reply to this project-owned message. Omit channel, from, to, subject and threading fields; they are derived from the original."},
+				"reply_all":              map[string]any{"type": "boolean", "description": "Email reply mode only: include original To/Cc participants, excluding own mailboxes. Defaults to false."},
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
 				"connection_id":          map[string]any{"type": "integer", "description": "Optional bound email connection. Registered sender connection always takes precedence."},
@@ -241,7 +245,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"template_id":            map[string]any{"type": "integer"},
 				"vars":                   map[string]any{"type": "object"},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"channel", "to"}),
+			}),
 			Handler: a.toolSendMessage,
 		},
 		{
@@ -612,7 +616,7 @@ func normaliseAddress(channel, raw string) (string, error) {
 	}
 	switch channel {
 	case channelEmail:
-		addr := strings.ToLower(raw)
+		addr := canonicalAddrForChannel(channelEmail, raw)
 		if !looksLikeEmail(addr) {
 			return "", fmt.Errorf("invalid email %q", raw)
 		}
@@ -816,6 +820,7 @@ type DeliveryEvent struct {
 	ID              int64           `json:"id"`
 	MessageID       int64           `json:"message_id"`
 	ProviderEventID string          `json:"provider_event_id,omitempty"`
+	ProviderKind    string          `json:"provider_kind,omitempty"`
 	Kind            string          `json:"kind"`
 	Recipient       string          `json:"recipient,omitempty"`
 	Reason          string          `json:"reason,omitempty"`
@@ -842,6 +847,16 @@ type providerEvent struct {
 // ─── send_message ──────────────────────────────────────────────────
 
 func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, replying := args["reply_to_message_id"]; replying {
+		return a.sendReply(ctx, args)
+	}
+	if _, present := args["reply_all"]; present {
+		return nil, errors.New("reply_all requires reply_to_message_id")
+	}
+	return a.sendMessage(ctx, args, 0)
+}
+
+func (a *App) sendMessage(ctx *sdk.AppCtx, args map[string]any, replyToMessageID int64) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -1017,7 +1032,22 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	headers, _ := args["headers"].(map[string]any)
-	headersJSON, _ := json.Marshal(headers)
+	// Persist Reply-To as well as emitting it so future anchored follow-ups
+	// retain tagged ticket addresses. Keep it out of the custom-header map
+	// sent to the provider, which writes the dedicated Reply-To field itself.
+	storedHeaders := make(map[string]any, len(headers)+1)
+	for key, value := range headers {
+		storedHeaders[key] = value
+	}
+	if replyTo != "" {
+		for key := range storedHeaders {
+			if strings.EqualFold(key, "Reply-To") {
+				delete(storedHeaders, key)
+			}
+		}
+		storedHeaders["Reply-To"] = replyTo
+	}
+	headersJSON, _ := json.Marshal(storedHeaders)
 	if len(headersJSON) == 0 {
 		headersJSON = []byte("{}")
 	}
@@ -1112,8 +1142,15 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		MessageID:        id,
 		ProjectID:        pid,
 	}
-	if channel == channelEmail && emailBound.AppSlug == "gmail" && inReplyTo != "" {
-		_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND provider_slug='gmail' AND provider_connection_id=? AND message_id_header=? AND provider_thread_id<>'' ORDER BY id DESC LIMIT 1`, pid, emailBound.ConnectionID, inReplyTo).Scan(&in.ProviderThreadID)
+	if channel == channelEmail && emailBound.AppSlug == "gmail" {
+		if replyToMessageID > 0 {
+			// The server-resolved anchor also preserves Gmail threads when the
+			// original RFC Message-ID is unavailable. Never use a provider ID
+			// as an RFC header, or a thread from another project/connection.
+			_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND id=? AND provider_slug='gmail' AND provider_connection_id=?`, pid, replyToMessageID, emailBound.ConnectionID).Scan(&in.ProviderThreadID)
+		} else if inReplyTo != "" {
+			_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND provider_slug='gmail' AND provider_connection_id=? AND message_id_header=? AND provider_thread_id<>'' ORDER BY id DESC LIMIT 1`, pid, emailBound.ConnectionID, inReplyTo).Scan(&in.ProviderThreadID)
+		}
 	}
 
 	// Re-check at the last possible point before the external provider call.
@@ -1221,7 +1258,7 @@ func sendResponse(m *Message) map[string]any {
 		status := m.Status
 		if len(m.RecipientStatuses) > 0 {
 			status = "sent"
-			if value, ok := m.RecipientStatuses[strings.ToLower(r)]; ok {
+			if value, ok := m.RecipientStatuses[canonicalAddrForChannel(m.Channel, r)]; ok {
 				status = value
 			}
 		}
@@ -4763,7 +4800,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	}
 	status := mapSESKindToStatus(ev.Kind)
 	if status != "" && ev.Recipient != "" {
-		recipient := strings.ToLower(ev.Recipient)
+		recipient := canonicalAddrForChannel(msg.Channel, ev.Recipient)
 		var prior string
 		if err := tx.QueryRow(`SELECT status FROM recipient_delivery_status WHERE message_id=? AND recipient=?`, msg.ID, recipient).Scan(&prior); err != nil && err != sql.ErrNoRows {
 			return false, err
@@ -4787,12 +4824,27 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 			return false, fmt.Errorf("update message event time: %w", err)
 		}
 	}
+	corrected, err := reconcileAutoResponsesTx(tx, msg)
+	if err != nil {
+		return false, err
+	}
+	if corrected {
+		if err = rebuildDeliverySummaryTx(tx, msg); err != nil {
+			return false, err
+		}
+	}
+	var effectiveKind string
+	if err = tx.QueryRow(`SELECT effective_kind FROM effective_delivery_events WHERE provider_event_id=?`, eventID).Scan(&effectiveKind); err != nil {
+		return false, err
+	}
+	var finalStatus string
+	if err = tx.QueryRow(`SELECT status FROM messages WHERE id=?`, msg.ID).Scan(&finalStatus); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit provider event: %w", err)
 	}
-	if promote {
-		msg.Status = status
-	}
+	msg.Status = finalStatus
 	if suppression != nil {
 		if stored, lookupErr := dbSuppressionGetExact(ctx.AppDB(), suppression.ProjectID, suppression.Channel, suppression.Kind, suppression.Address); lookupErr == nil && stored != nil {
 			suppression = stored
@@ -4806,8 +4858,9 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 		"channel":             msg.Channel,
 		"provider":            ev.Provider,
 		"provider_message_id": ev.ProviderMessageID,
-		"kind":                ev.Kind,
-		"recipient":           ev.Recipient,
+		"kind":                effectiveKind,
+		"provider_kind":       ev.Kind,
+		"recipient":           canonicalAddrForChannel(msg.Channel, ev.Recipient),
 		"occurred_at":         occurred,
 		"metadata":            ev.Metadata,
 		"permanent":           ev.Permanent,
@@ -4819,7 +4872,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	} else if ev.Reason != "" {
 		payload["reason"] = ev.Reason
 	}
-	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
+	emitMessagingEvent(ctx, msg.ProjectID, "message."+effectiveKind, payload)
 	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
 	return true, nil
 }
@@ -5457,6 +5510,9 @@ func canonicalAddrForChannel(channel, addr string) string {
 	addr = strings.TrimSpace(stripScheme(addr))
 	switch channel {
 	case channelEmail:
+		if parsed, err := mail.ParseAddress(addr); err == nil {
+			return strings.ToLower(parsed.Address)
+		}
 		return strings.ToLower(addr)
 	}
 	return addr
@@ -6511,7 +6567,7 @@ func dbDeliveryEventCountsBatch(db *sql.DB, messageIDs []int64) map[int64]map[st
 	for i, id := range messageIDs {
 		args[i] = id
 	}
-	rows, err := db.Query(`SELECT message_id, kind, COUNT(*) FROM delivery_events WHERE message_id IN (`+placeholders+`) GROUP BY message_id, kind`, args...)
+	rows, err := db.Query(`SELECT message_id, effective_kind, COUNT(*) FROM effective_delivery_events WHERE message_id IN (`+placeholders+`) GROUP BY message_id, effective_kind`, args...)
 	if err != nil {
 		return out
 	}
@@ -6532,9 +6588,9 @@ func dbDeliveryEventCountsBatch(db *sql.DB, messageIDs []int64) map[int64]map[st
 
 func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	rows, err := db.Query(
-		`SELECT id, message_id, COALESCE(provider_event_id,''), kind, COALESCE(recipient,''), COALESCE(reason,''),
+		`SELECT id, message_id, COALESCE(provider_event_id,''), kind, effective_kind, COALESCE(recipient,''), COALESCE(reason,''),
 		        raw, COALESCE(occurred_at,'')
-		 FROM delivery_events WHERE message_id = ? ORDER BY id`,
+		 FROM effective_delivery_events WHERE message_id = ? ORDER BY id`,
 		msgID,
 	)
 	if err != nil {
@@ -6545,7 +6601,7 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	for rows.Next() {
 		e := &DeliveryEvent{}
 		var raw string
-		if err := rows.Scan(&e.ID, &e.MessageID, &e.ProviderEventID, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
+		if err := rows.Scan(&e.ID, &e.MessageID, &e.ProviderEventID, &e.ProviderKind, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
 			e.Raw = json.RawMessage(raw)
 			out = append(out, e)
 		}
@@ -6555,7 +6611,7 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 
 func dbDeliveryEventCounts(db *sql.DB, msgID int64) map[string]int {
 	rows, err := db.Query(
-		`SELECT kind, COUNT(*) FROM delivery_events WHERE message_id = ? GROUP BY kind`,
+		`SELECT effective_kind, COUNT(*) FROM effective_delivery_events WHERE message_id = ? GROUP BY effective_kind`,
 		msgID,
 	)
 	if err != nil {

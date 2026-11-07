@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -45,24 +46,37 @@ import (
 )
 
 const manifestYAML = `schema: apteva-app/v1
+
 name: telephony
 display_name: Telephony
-version: 0.11.1
+version: 0.18.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
-  sub-threads in core; carrier audio is bridged through this sidecar.
+  sub-threads that the agent controls via send/done — the same
+  shape as text workers, with carrier audio bridged through a provider
+  media stream. Audio I/O stays in this sidecar; conversation state
+  lives in the realtime thread; tool decisions stay with the parent
+  agent.
+
 author: Apteva
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
+homepage: https://github.com/apteva/apps/tree/main/mcp/telephony
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [voice, telephony, communication]
+
 scopes: [project, global]
-min_apteva_version: "0.25.12"
+min_apteva_version: "0.94.1"
+
 requires:
   permissions:
     - db.write.app
     - platform.apps.call
-    - platform.connections.execute
-    - platform.connections.read_credentials
-    - platform.instances.read
-    - platform.realtime.spawn
+    - platform.connections.execute        # invoke carrier API
+    - platform.connections.read_credentials  # read carrier phone_number to fill From=
+    - platform.instances.read             # resolve assigned agent names in the routing panel
+    - platform.realtime.spawn             # open realtime threads in core
+    - platform.threads.write              # deliver AI inactivity reminders to their call thread
+    - platform.telemetry.read             # observe scoped AI conversation phases
   apps:
     - name: functions
       optional: true
@@ -71,16 +85,44 @@ requires:
       version: ">=0.8.1"
       optional: true
       reason: stores private durable copies of provider call recordings and optionally supplies signed hold music; without it recordings remain with the carrier and hold music requires a direct HTTPS URL
+    - name: turn
+      version: ">=0.3.0"
+      optional: true
+      reason: "Temporary TURN credentials for optional browser WebRTC relaying"
   integrations:
     - role: carrier
       kind: integration
       mode: multiple
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
+      # Carrier tool names are provider-specific (for example, Twilio uses
+      # make_call while Telnyx uses dial_call). The generic carrier adapter
+      # resolves those contracts at runtime instead of declaring a false
+      # one-size-fits-all mapping here.
       required: true
       label: "Voice carrier"
+      hint: "Provide a supported voice connection with a voice-capable phone number. DIDWW outbound calls require its SIP trunk host and credentials plus a configured TLS/SRTP gateway; its REST API key alone cannot place calls. Provider-specific recording and call controls appear only where implemented."
+
+    - role: speech
+      kind: integration
+      compatible_slugs: [elevenlabs, fish-audio, minimax-audio, venice-ai]
+      required: false
+      label: "Local SIP prompt speech"
+
+    - role: turn
+      kind: app
+      compatible_app_names: [turn]
+      required: false
+      label: "TURN relay (optional)"
+      hint: "Bind TURN 0.3.0 or newer to enable temporary browser relay credentials. Project and adviser policies control usage; unbound installations retain their existing ICE configuration."
+
 provides:
   http_routes:
+    - { prefix: /_apteva/runtime/app/ }
+    - { prefix: /runtime-endpoints }
+    - { prefix: /runtime-browser-bootstrap }
+    - { prefix: /runtime-browser/, no_auth: true }
+    - { prefix: /media-diagnostics }
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
     - { prefix: /inbound/, no_auth: true }
@@ -105,27 +147,31 @@ provides:
     - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call." }
-    - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
-    - { name: telephony_reject_call,  description: "Reject a pending inbound call." }
-    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?, machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup). Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
+    - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Agents own what they create; API keys and panel sessions pass agent_id. Args: phone_number?, phone_number_id?, agent_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
+    - { name: telephony_carrier_media_settings, description: "Configure optional carrier jitter buffering for an authorized SIP resource. Disabled by default; applies only while the shared connection is idle." }
+    - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
+    - { name: telephony_agent_audio_profile, description: "Configure continuous-agent audio policies for future calls." }
+    - { name: telephony_sip_audio_profile, description: "Configure bounded SIP audio profiles for future calls, per project, direction, inbound route or outbound account/number." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
-    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
+    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
     - { name: telephony_outbound_policy, description: "Read or change project outbound admission controls for a number, provider or connection; platform principals only." }
-    - { name: telephony_routes_disable, description: "Disable new inbound admission; retain carrier resources and existing calls." }
+    - { name: telephony_routes_disable, description: "Disable new inbound admission on a route without changing carrier resources or active calls. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
-    - { name: telephony_flows_get, description: "Get one routing flow." }
+    - { name: telephony_flows_get, description: "Get one routing flow and its draft." }
     - { name: telephony_flows_update, description: "Update a routing-flow draft." }
     - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
-    - { name: telephony_flows_publish, description: "Publish a routing flow." }
-    - { name: telephony_flows_simulate, description: "Simulate a routing flow." }
-    - { name: telephony_destinations_create, description: "Create a routing destination." }
-    - { name: telephony_destinations_list, description: "List routing destinations." }
+    - { name: telephony_flows_publish, description: "Publish an immutable routing-flow version." }
+    - { name: telephony_flows_simulate, description: "Simulate a routing flow without placing a call." }
+    - { name: telephony_destinations_create, description: "Create a reusable routing destination." }
+    - { name: telephony_destinations_list, description: "List reusable routing destinations." }
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
     - { name: telephony_ring_groups_list, description: "List ring groups." }
     - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
@@ -133,43 +179,49 @@ provides:
     - { name: telephony_flows_assign_numbers, description: "Atomically assign a published flow to several inbound numbers." }
     - { name: telephony_flows_unassign_numbers, description: "Atomically remove a flow from several inbound numbers." }
     - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
-    - { name: telephony_pending_calls, description: "List pending inbound calls." }
-    - { name: telephony_hangup,       description: "End an active call." }
-    - { name: telephony_active_calls, description: "List ongoing calls." }
+    - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
+    - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
+    - { name: telephony_send_dtmf,    description: "Press keypad keys (DTMF) on a connected call. Args: call_id, digits, idempotency_key?." }
+    - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
+    - { name: telephony_live_occupancy, description: "Read a complete project-scoped snapshot of active human call ownership; optionally filter by direction." }
+    - { name: telephony_audio_incident, description: "Read-only report of browser audio drops across a project in a time window: what stopped first on each call, when it reconnected, which calls stayed healthy, alerts and network checks. Args: from?, to? (RFC 3339, at most 6 hours; default the last 15 minutes)." }
     - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
-    - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
-    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
-    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults (answering machine detection)." }
-    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls." }
-    - { name: telephony_recordings_list, description: "List call recordings." }
-    - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
-    - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
-    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
-    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier with their Telephony routing and outbound status." }
-    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
-    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
-    - { name: telephony_addresses_list, description: "List provider addresses." }
-    - { name: telephony_address_create, description: "Create and validate a provider address." }
-    - { name: telephony_identities_list, description: "List provider regulatory identities." }
-    - { name: telephony_identity_create, description: "Create a provider regulatory identity." }
-    - { name: telephony_identity_get, description: "Get a provider regulatory identity." }
-    - { name: telephony_regulatory_requirements, description: "Discover current provider regulatory requirements." }
-    - { name: telephony_regulatory_bundles_list, description: "List provider regulatory bundles." }
-    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle." }
-    - { name: telephony_regulatory_bundle_get, description: "Get a regulatory bundle, requirements, and items." }
-    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document to a bundle." }
-    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance." }
-    - { name: telephony_regulatory_bundle_submit, description: "Submit a compliant bundle for review." }
-    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles." }
-    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile." }
-    - { name: telephony_compliance_profile_get, description: "Get a provider compliance profile and its requirements." }
-    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document." }
-    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness." }
-    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review." }
+    - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, storage_format?, retention_days?, max_file_bytes?." }
+    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls, including automatic SIP setup. Platform principal only; SIP credentials are write-only." }
+    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
+    - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
+    - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
+    - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
+    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
+    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier, including purchased numbers without a route, with Telephony routing and outbound status." }
+    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
+    - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
+    - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities. Args: identity_type?, limit?." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity. DIDWW supports personal and business identities." }
+    - { name: telephony_identity_get, description: "Get one provider regulatory identity. Args: identity_id." }
+    - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
+    - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
+    - { name: telephony_regulatory_bundle_get, description: "Get a bundle with its regulation and assigned items. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document. Args: bundle_sid, kind, friendly_name, type, attributes, file?, file_name?." }
+    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_submit, description: "Evaluate and submit a compliant bundle for review. Args: bundle_sid." }
+    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles. Args: country?, number_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile. Args depend on the bound provider." }
+    - { name: telephony_compliance_profile_get, description: "Get a compliance profile and its requirements. Args: compliance_id." }
+    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document. Args: compliance_id plus provider requirement fields." }
+    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
+    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   publishes:
+    - { name: telephony.account.issue, description: "Carrier account operation reported a normalized issue; durable and deduplicated.", payload: { event_id: string, issue_id: string, revision: integer, provider: string, carrier_connection_id: integer, reason: string, severity: string, affected_operations: array, message: string, source: string, call_id: string, occurred_at: string } }
+    - { name: telephony.account.recovered, description: "An affected carrier operation recovered; does not imply all account operations are healthy.", payload: { event_id: string, issue_id: string, revision: integer, provider: string, carrier_connection_id: integer, reason: string, severity: string, affected_operations: array, message: string, source: string, call_id: string, occurred_at: string } }
     - { name: telephony.routing.requested, description: "Durable correlated routing outcome: requested.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.accepted, description: "Durable correlated routing outcome: accepted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.rejected, description: "Durable correlated routing outcome: rejected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
@@ -193,9 +245,11 @@ provides:
     - { name: telephony.routing.call.busy, description: "Durable correlated routing outcome: call.busy.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.no-answer, description: "Durable correlated routing outcome: call.no-answer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.canceled, description: "Durable correlated routing outcome: call.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
-    - { name: call.routing.started, description: "A call began a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, occurred_at: string } }
-    - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
-    - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
+    - { name: telephony.ai_context.succeeded, description: "An AI destination context lookup returned validated business facts before the agent started.", payload: { event_id: string, revision: integer, call_id: string, context_id: string, destination_id: string, function_id: integer, status: string, duration_ms: integer, occurred_at: string } }
+    - { name: telephony.ai_context.failed, description: "An AI destination context lookup timed out, failed or returned an invalid response; the call continued or took its fallback.", payload: { event_id: string, revision: integer, call_id: string, context_id: string, destination_id: string, function_id: integer, status: string, reason: string, duration_ms: integer, occurred_at: string } }
+    - { name: call.routing.started, description: "A call pinned and began executing a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, destination_id: string, ring_group_id: string, occurred_at: string } }
+    - { name: call.routing.node_entered, description: "A call entered a routing-flow node.", payload: { call_id: string, flow_id: string, flow_version_id: string, node_id: string, node_type: string, outcome: string, occurred_at: string } }
+    - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
     - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - { name: telephony.audio.degraded, description: "Recoverable audio delivery impairment; call status is unchanged.", payload: { call_id: string, provider: string, stage: string, reason: string, occurred_at: string } }
     - { name: telephony.audio.recovered, description: "An audio delivery stage recovered or became inactive.", payload: { call_id: string, provider: string, stage: string, state: string, occurred_at: string } }
@@ -241,6 +295,8 @@ provides:
         routing_resolution: string
         callback_opportunity_id: string
         termination: object
+        answered_by: string
+        synthesized: boolean
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -309,32 +365,87 @@ provides:
             default: 6
             minimum: 3
             maximum: 12
+
 runtime:
+  resource_policy:
+    workloads: [recording_import, recording_playback, maintenance, diagnostics]
+    traffic_classes: [sip_media, webrtc_media]
+    defaults:
+      workloads:
+        recording_import: {concurrency: 1, queue: 8, weight: 2}
+        recording_playback: {concurrency: 1, queue: 8, weight: 2}
+        maintenance: {concurrency: 1, queue: 8, weight: 1}
+        diagnostics: {concurrency: 4, queue: 16, weight: 4}
+      network:
+        sip_media: {}
+        webrtc_media: {}
+  ingress:
+    browser_path: /runtime-browser
+    endpoints: {browser: "", media: "", signaling: "", callbacks: "", carrier_media: ""}
+    routes:
+      - {path: /runtime-browser/*}
+      - {path: /media/telnyx/*}
+      - {path: /media/twilio/*}
+      - {path: /media/plivo/*}
+      - {path: /media/vonage/*}
+      - {path: /media/sinch/*}
+      - {path: /media/bandwidth/*}
+      - {path: /inbound/telnyx/*}
+      - {path: /inbound/twilio/*}
+      - {path: /inbound/plivo/*}
+      - {path: /inbound/bandwidth/*}
+      - {path: /webhook/*}
+      - {path: /xml/plivo/*}
+      - {path: /xml/bandwidth/*}
+      - {path: /ivr/*}
+  package:
+    app_capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
   kind: source
+  activation_strategy: exclusive
+  startup_timeout_seconds: 60
+  database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: telephony/v0.18.0
     entry: mcp/telephony
   port: 8080
   health_check: /health
+
 db:
   driver: sqlite
   path: /data/telephony.db
   migrations: migrations/
+
 config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
-  - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. WebSocket remains the client default. Requires reachable ICE/UDP or configured TURN." }
+  - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. The built-in panel prefers WebRTC when available; embedded clients choose their transport. Requires reachable ICE/UDP or configured TURN." }
+  - { name: softphone_webrtc_path_recovery, type: boolean, default: false, label: "Restart a stalled WebRTC audio path", description: "When a browser reports its audio path disconnected for 3 seconds, try an ICE restart on the existing connection. If signaling does not answer and audio has stopped, reconnect at once instead of waiting. Applies to new browser connections." }
+  - { name: softphone_webrtc_handover, type: boolean, default: false, label: "Keep audio during a signaling reconnect", description: "When signaling drops while WebRTC audio is still flowing, keep the current audio until a replacement connection is ready, for up to 20 seconds. Revocation, takeover, lease expiry and hangup still stop it at once. Applies to new browser connections." }
+  - { name: softphone_webrtc_receive_estimator, type: select, options: ["fixed", "distribution"], default: "distribution", label: "WebRTC receive delay estimator", description: "Optional bounded delay-distribution adaptation (60–100 ms) for new browser and coaching receive sessions. Timeline recovery is automatic in both modes. Existing 320 ms rejection and 250 ms downstream age limits remain." }
+  - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
   - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
+  - { name: softphone_network_check_udp_port_min, type: text, label: "Network check UDP range start", description: "Optional dedicated range for background diagnostics. Configure both bounds and forward separately; must not overlap live WebRTC ports. Empty uses OS ephemeral ports outside the call range." }
+  - { name: softphone_network_check_udp_port_max, type: text, label: "Network check UDP range end", description: "Inclusive diagnostic UDP upper bound, 1024–65535. Diagnostic failure never blocks a call." }
   - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
   - { name: softphone_webrtc_udp_port_max, type: text, label: "WebRTC UDP range end", description: "Inclusive UDP range end; must be greater than or equal to the start." }
-  - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Optional comma-separated CIDRs. Only these immediate proxies may supply X-Forwarded-For; otherwise telemetry hashes the socket peer address. Hashes are scoped to this process and contain no raw IP." }
+  - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Legacy setting; client IP now uses Server-signed SDK metadata, with socket-peer fallback. Configure trusted proxies in Server. This setting no longer accepts unsigned forwarded addresses." }
+  - { name: audio_telemetry_local_proxy_cidrs, type: text, label: "Local proxy for browser addresses", description: "Off when empty. Set to 127.0.0.1/32 or ::1/128 only when a proxy on this same server connects directly to Telephony and overwrites X-Forwarded-For, so audio events record the real browser address. Only loopback ranges are accepted. A label for diagnostics, never used for access. Stored for the browser network event retention period." }
+  - { name: audio_incident_probe_targets, type: text, label: "Network check targets", description: "Comma-separated host:port list checked from this server when 3 or more browser calls drop within 15 seconds, at most once every 5 minutes. A TCP connection only; nothing is sent. Empty uses the platform gateway, sip.telnyx.com:5060 and 1.1.1.1:443. Set to off to disable." }
   - { name: audio_telemetry_known_vpn_exits, type: text, label: "Known office VPN exits", description: "Optional comma-separated IPv4/IPv6 addresses or CIDRs. Observational known_vpn_exit/unknown labels only; never blocks calls or media." }
   - { name: audio_telemetry_network_retention_days, type: text, default: "7", label: "Browser network event retention (days)", description: "1–31 days, snapshotted per connection. Raw IP connection events are operator-only; expired events are hidden and purged in background batches. No effect on calls." }
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
   - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
   - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
+  - { name: ai_call_max_duration_seconds, type: text, default: "1200", label: "AI handling duration limit (seconds)", description: "60–14400 seconds from AI media activation. New AI calls only; destination ai_call_policy may override. Reconnects do not reset it." }
+  - { name: ai_call_inactivity_timeout_seconds, type: text, default: "30", label: "AI caller inactivity timeout (seconds)", description: "0–300 seconds while listening for the caller; 0 disables reminders. AI speech, tools, hold, unknown phase and media recovery pause it." }
+  - { name: ai_call_response_window_seconds, type: text, default: "15", label: "AI inactivity reminder response window (seconds)", description: "5–120 seconds after reminder playback completes. Caller speech or DTMF cancels the pending inactivity termination." }
   - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
   - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
@@ -350,6 +461,7 @@ config_schema:
   - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
   - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
   - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
+  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}, with a bounded retry for the verified sip.telnyx.eu regional identity. Custom identities remain exact. Certificate trust and hostname verification remain required.' }
   - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
   - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
@@ -358,30 +470,57 @@ config_schema:
   - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
+
 upgrade_policy: auto-patch
 `
 
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	outboundHints    outboundInventoryHints
-	admissionMu      sync.RWMutex
-	audioPeerHasher  audioPeerHasher
-	audioNetworks    audioNetworkCollector
-	audioAlerts      audioAlertCorrelator
-	decisionWG       sync.WaitGroup
-	decisionStopping bool
-	aiRecovering     map[string]bool
-	dispatchMu       sync.Mutex
-	burstMu          sync.Mutex
-	dispatcher       *routingDispatcher
-	callChanges      callChangeHub
-	installID        int64
-	sip              sipRuntimeHolder
-	softphones       softphoneRegistry
-	listeners        callListenerRegistry
-	preparations     realtimePreparations
-	eventDispatcher  *routingDispatcher
+	networkChecks      networkCheckRegistry
+	legacyAdmission    atomic.Uint32
+	legacyWork         atomic.Int64
+	recordingWriters   atomic.Int64
+	legacyLifecycleMu  sync.Mutex
+	legacyDeployment   string
+	legacyGeneration   int64
+	runtime            *telephonyRuntime
+	runtimeBrowsers    runtimeBrowserSessions
+	mediaDiagnostics   mediaDiagnosticRegistry
+	aiPolicies         aiPolicyRegistry
+	agentAudioSessions sync.Map
+	mediaBridges       carrierBridgeRegistry
+	callReads          callReadCache
+	idleWorkers        idleWorkerGate
+	dashboardExtras    dashboardExtrasCache
+	inventoryReads     inventoryReadCache
+	policyReads        phonePolicyCache
+	outboundHints      outboundInventoryHints
+	admissionMu        sync.RWMutex
+	carrierMediaDrains sync.Map
+	audioPeerHasher    audioPeerHasher
+	audioNetworks      audioNetworkCollector
+	audioProbes        audioProbeMonitor
+	notifications      callNotificationQueue
+	audioTransports    audioTransportCollector
+	carrierTelemetry   carrierTelemetryCollector
+	audioAlerts        audioAlertCorrelator
+	decisionWG         sync.WaitGroup
+	decisionStopping   bool
+	aiRecovering       map[string]bool
+	dispatchMu         sync.Mutex
+	dispatchCancel     context.CancelFunc
+	burstMu            sync.Mutex
+	dispatcher         *routingDispatcher
+	callChanges        callChangeHub
+	installID          int64
+	sip                sipRuntimeHolder
+	autoAnswerMu       sync.Mutex
+	softphones         softphoneRegistry
+	phoneAttachments   phoneAttachmentCache
+	listeners          callListenerRegistry
+	preparations       realtimePreparations
+	eventDispatcher    *routingDispatcher
 }
 
 const (
@@ -401,7 +540,12 @@ const (
 	inboundTransportSIPDirect    = "sip_direct"
 )
 
-func main() { sdk.Run(&App{}) }
+func main() {
+	if isRecordingMP3Worker(os.Args) {
+		os.Exit(recordingMP3WorkerMain(os.Stdin, os.Stdout))
+	}
+	sdk.Run(&App{})
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -412,10 +556,22 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if err := a.prepareRuntime(ctx); err != nil {
+		return err
+	}
+	a.mediaDiagnostics.start()
 	if ctx.AppDB() == nil {
 		return errors.New("telephony requires a db block")
 	}
 	globalCtx = ctx
+
+	initRTCOpusBundle(ctx.DataDir())
+	opusSource, opusVersion, opusErr := rtcNativeAvailability()
+	if opusErr != nil {
+		ctx.Logger().Warn("WebRTC native Opus unavailable; portable fallback active", "reason", "native_initialization_failed")
+	} else {
+		ctx.Logger().Info("WebRTC Opus ready", "source", opusSource, "library_version", opusVersion)
+	}
 	identity, err := ctx.PlatformAPI().WhoAmI()
 	if err != nil {
 		return fmt.Errorf("resolve telephony installation identity: %w", err)
@@ -424,8 +580,46 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("resolve telephony installation identity: platform returned no install id")
 	}
 	a.installID = identity.InstallID
+	if a.runtime == nil {
+		if err := a.initializeActiveRuntime(ctx); err != nil {
+			return err
+		}
+	} else {
+		// Read-only preflight: an invalid restored original must fail readiness,
+		// before Server commits ownership and before references are rewritten.
+		if _, err := a.managedRecordingPathChanges(); err != nil {
+			return fmt.Errorf("validate managed recording state: %w", err)
+		}
+		if err := a.startSIPGateway(ctx); err != nil {
+			return fmt.Errorf("start direct SIP gateway: %w", err)
+		}
+		a.runtime.initialize = func() error { return a.initializeActiveRuntime(ctx) }
+		a.startRuntimeOwnership(ctx)
+	}
+	ctx.Logger().Info("telephony mounted")
+	return nil
+}
+
+// Recovery mutates call state and may invoke carriers. A managed candidate must
+// not run it until Server has committed its execution ownership.
+func (a *App) initializeActiveRuntime(ctx *sdk.AppCtx) error {
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
+	}
+	if err := initializeRecordingTemporaryFiles(ctx.DataDir()); err != nil {
+		ctx.Logger().Warn("recording temporary directory unavailable", "err", err)
+	}
+	if err := a.relocateRecordingPaths(); err != nil {
+		return err
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
+	}
 	if err := a.ensureLegacyRoutingFlows(ctx); err != nil {
 		return fmt.Errorf("migrate existing inbound routes to routing flows: %w", err)
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE calls SET media_active = 0,
         media_status = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'disconnected' ELSE media_status END,
@@ -445,31 +639,61 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
         last_error = 'recording import interrupted by app restart', import_started_at = '',
         next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
-	if err := a.startSIPGateway(ctx); err != nil {
-		return fmt.Errorf("start direct SIP gateway: %w", err)
+	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET provider_status='failed',storage_status='failed',last_error='local recording interrupted by app restart' WHERE provider='telephony' AND provider_status='in-progress'`)
+	if n, err := a.reconcileAbandonedDirectSIPCalls(ctx); err != nil {
+		return fmt.Errorf("reconcile direct SIP calls abandoned by restart: %w", err)
+	} else if n > 0 {
+		ctx.Logger().Info("ended direct SIP calls abandoned by restart", "calls", n)
+	}
+	if err := a.restoreAIPolicyRuntimes(); err != nil {
+		return fmt.Errorf("restore AI call policies: %w", err)
+	}
+	if a.runtime == nil {
+		if err := a.startSIPGateway(ctx); err != nil {
+			return fmt.Errorf("start direct SIP gateway: %w", err)
+		}
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
 	}
 	a.startRoutingDispatcher(ctx)
-	ctx.Logger().Info("telephony mounted")
+	a.startCarrierMediaRecovery(ctx)
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if a.runtime != nil && a.runtime.cancel != nil {
+		a.runtime.cancel()
+		if a.runtime.done != nil {
+			<-a.runtime.done
+		}
+		a.runtime.initWG.Wait()
+	}
+	a.mediaDiagnostics.stop()
+	a.stopAIPolicies()
+	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
 	a.stopSIPGateway()
+	if err := a.flushCarrierTelemetryOnShutdown(); err != nil && ctx != nil {
+		ctx.Logger().Warn("carrier telemetry shutdown flush incomplete", "error", err)
+	}
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{
+	workers := []sdk.Worker{
+		{Workload: "maintenance", Name: "sip-resource-retirement", Schedule: "@every 30s", Run: a.runRetiredSIPResources},
+		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
+		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
+		{Name: "carrier-telemetry", Schedule: "@every 1s", Run: a.runCarrierTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
-		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
-		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
-		{Name: "ring-legs", Schedule: "@every 1s", Run: a.runRingLegTick},
+		{Name: "routing-reconciliation", Schedule: "@every 30s", Run: a.runRoutingReconciliation},
+		{Workload: "maintenance", Name: "historical-housekeeping", Schedule: "@every 1m", Run: a.runHousekeeping},
 		{
 			Name:     "call-auto-answer",
-			Schedule: "@every 1s",
+			Schedule: "@every 30s",
 			Run:      a.runAutoAnswerTick,
 		},
 		{
@@ -479,10 +703,25 @@ func (a *App) Workers() []sdk.Worker {
 		},
 		{
 			Name:     "recording-import",
+			Workload: "recording_import",
 			Schedule: "@every 5s",
 			Run:      a.runRecordingTick,
 		},
 	}
+	for i := range workers {
+		run := workers[i].Run
+		name := workers[i].Name
+		workers[i].Run = func(c context.Context, ctx *sdk.AppCtx) error {
+			done, err := a.runtimeBegin(false)
+			if err != nil {
+				return nil
+			}
+			defer done()
+			return a.runIdleGated(name, run, c, ctx)
+		}
+	}
+	return workers
+
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -490,6 +729,14 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Method: "GET", Pattern: "/health", Handler: a.handleRuntimeHealth, NoAuth: true},
+		{Pattern: runtimeAppPrefix, Handler: a.handleRuntimeLifecycle},
+		{Pattern: "/runtime-endpoints", Handler: a.handleRuntimeEndpoints},
+		{Pattern: "/runtime-browser-bootstrap", Handler: a.handleRuntimeBrowserBootstrap},
+		{Pattern: runtimeBrowserPrefix + "/", Handler: a.handleRuntimeBrowser, NoAuth: true},
+		{Pattern: "/media-diagnostics", Handler: a.handleMediaDiagnostics},
+		{Pattern: "/media-diagnostics/", Handler: a.handleMediaDiagnostics},
+		{Pattern: "/media/diagnostic/echo", Handler: a.handleDiagnosticEcho, NoAuth: true},
 		// Carrier media stream WS — opened by the carrier when the call connects.
 		{Pattern: "/media/twilio/", Handler: a.handleTwilioMediaStream, NoAuth: true},
 		{Pattern: "/media/signalwire/", Handler: a.handleSignalWireMediaStream, NoAuth: true},
@@ -538,8 +785,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 	for i := range routes {
-		if !routes[i].NoAuth && routes[i].Pattern != runtimeBindingsPath {
+		if !routes[i].NoAuth && routes[i].Pattern != runtimeBindingsPath && routes[i].Pattern != runtimeAppPrefix {
 			routes[i].Handler = a.applicationUserHTTP(routes[i].Handler)
+		}
+	}
+	for i := range routes {
+		if routes[i].Pattern != runtimeAppPrefix && routes[i].Pattern != "/health" {
+			routes[i].Handler = a.runtimeHTTP(routes[i].Handler, runtimeNewHTTP(routes[i].Pattern))
+		}
+	}
+	for i := range routes {
+		if routes[i].Pattern == "/calls" || routes[i].Pattern == "/calls/" || routes[i].Pattern == "/calls/events" || routes[i].Pattern == "/softphone/" {
+			routes[i].Handler = a.deliveryRequestHTTP(routes[i].Handler)
 		}
 	}
 	return routes
@@ -549,6 +806,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
+		{Name: "telephony_agent_audio_profile", Description: "Read, save or reset an agent audio policy for new calls. Project-local scopes: project, inbound/outbound, agent/id, route/id, account/id or number/E.164. Config: mode auto/traditional/continuous, interruption auto/local/provider/off, preprocessing analysis_only/noise_suppression, transport websocket/webrtc (Core to provider), format pcm16/g711_ulaw/g711_alaw (bridge audio), speech_start_ms, send_ahead_ms (20..200 ms; initial/idle playout reserve for continuous direct SIP, send-ahead limit for carrier streams), backlog_ms; playout {mode fixed/adaptive, min_reserve_ms, max_reserve_ms, recovery_idle_ms, stable_ms, speed_percent 0..3 (experimental, default 0), match_correlation .95..1, trace_frames 0..2000 (default 0)}. playout.drift_percent (default 6) and playout.drift_lead_ms (default 160) tune direct-SIP drift compensation, which lengthens speech only when a provider streams slower than real time; playout.drift \"off\" disables it. ttl_seconds optionally expires a test without restarting or changing active calls.", InputSchema: schemaObject(map[string]any{"scope": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "reset": map[string]any{"type": "boolean"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}}, nil), HandlerCtx: a.toolAgentAudioProfile},
+		{Name: "telephony_sip_audio_profile", Description: "Read, save or reset a bounded SIP audio profile for new calls. Scope by optional direction, route_id or outbound carrier_connection_id/phone_number. config includes preset (balanced/resilient/reference/custom), codecs and rtp_playback. expires_at optionally reverts a test within 24h. No carrier changes, restart or active-call mutation.", InputSchema: schemaObject(map[string]any{"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}}, "route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "expires_at": map[string]any{"type": "string"}, "ttl_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}, "reset": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolSIPAudioProfile},
 		{
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
@@ -577,18 +836,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "telephony_routes_create",
 			Description: "Create an inbound route from a carrier phone number to an agent. Agents own the routes they create. Platform callers (API key, panel session) must pass agent_id naming the owning agent in this project. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, agent_id? (required for non-agent callers), hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
-				"phone_number":      map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
-				"agent_id":          map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
-				"phone_number_id":   map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
-				"phone_number_sid":  map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
-				"hold_prompt":       map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
-				"timeout_sec":       map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
-				"answer_mode":       map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
-				"directive":         map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
-				"voice":             map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
-				"greeting":          map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
-				"recording_mode":    map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
-				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}, "default": inboundTransportProgrammable},
+				"phone_number":          map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
+				"agent_id":              map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
+				"phone_number_id":       map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
+				"phone_number_sid":      map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
+				"hold_prompt":           map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
+				"timeout_sec":           map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+				"answer_mode":           map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
+				"directive":             map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
+				"voice":                 map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
+				"greeting":              map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
+				"recording_mode":        map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
+				"carrier_connection_id": map[string]any{"type": "integer", "description": "Optional authorized carrier account for this number."},
+				"inbound_transport":     map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}, "default": inboundTransportProgrammable},
 			}, nil),
 			HandlerCtx: a.toolRoutesCreate,
 		},
@@ -615,12 +875,25 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_set_transport",
-			Description: "Select the inbound carrier transport for a route. programmable_websocket uses provider webhooks/media streaming; sip_direct sends SIP/RTP directly to this Telephony installation. Carrier configuration must be applied afterward with telephony_routes_configure_carrier.",
+			Description: "Select the inbound carrier transport for a route. programmable_websocket uses provider webhooks/media streaming; sip_direct sends SIP/RTP directly to this Telephony installation. The default configure=true applies carrier setup now; changes affect new calls and preserve existing dialogs.",
 			InputSchema: schemaObject(map[string]any{
 				"route_id":          map[string]any{"type": "string"},
 				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
+				"configure":         map[string]any{"type": "boolean", "default": true},
 			}, []string{"route_id", "inbound_transport"}),
 			HandlerCtx: a.toolRoutesSetTransport,
+		},
+		{
+			Name:        "telephony_carrier_media_settings",
+			Description: "Read or configure optional carrier jitter buffering. Disabled by default. Select route_id for inbound or carrier_connection_id and optional phone_number for outbound. Shared carrier resource scope: affects all numbers/routes using it. carrier_jitter_buffer={enabled,min_ms,max_ms}; Telnyx supports 40–400ms, defaults 60–200ms. apply=true patches only while the binding is idle, otherwise returns pending; retry apply when idle. fresh=true verifies current carrier settings. Platform principals only. Does not change local automatic SIP recovery.",
+			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "carrier_connection_id": map[string]any{"type": "integer"}, "phone_number": map[string]any{"type": "string"}, "carrier_jitter_buffer": map[string]any{"type": "object", "properties": map[string]any{"enabled": map[string]any{"type": "boolean"}, "min_ms": map[string]any{"type": "integer", "minimum": 40, "maximum": 400}, "max_ms": map[string]any{"type": "integer", "minimum": 40, "maximum": 400}}}, "fresh": map[string]any{"type": "boolean"}, "apply": map[string]any{"type": "boolean"}}, nil),
+			HandlerCtx:  a.toolCarrierMedia,
+		},
+		{
+			Name:        "telephony_local_media_settings",
+			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds, voicemail_max_seconds and bounded rtp_playback (target_ms, max_target_ms, capacity_ms, max_age_ms, concealment, clock_drift, resynchronize). SIP playout recovery is automatic. Legacy resynchronize values remain readable but no longer disable recovery. Physical residence and queue bounds remain enforced. inherit=true removes a route override.",
+			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "inherit": map[string]any{"type": "boolean"}}, nil),
+			HandlerCtx:  a.toolLocalMediaSettings,
 		},
 		{
 			Name:        "telephony_routes_configure_carrier",
@@ -705,6 +978,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolHangup,
 		},
 		{
+			Name:        "telephony_send_dtmf",
+			Description: "Press keypad keys on a connected call, e.g. to navigate a phone menu. Sends real DTMF tones, not speech. Args: call_id (required), digits (required, 1-16 of 0-9 * #), idempotency_key (optional; a retry with the same key does not press the keys again).",
+			InputSchema: schemaObject(map[string]any{
+				"call_id":         map[string]any{"type": "string", "description": "The call to press keys on (the current call's id)."},
+				"digits":          map[string]any{"type": "string", "description": "Keys to press in order: 0-9, * and #, at most 16."},
+				"idempotency_key": map[string]any{"type": "string", "description": "Optional key identifying this press, e.g. call_id:menu-step:1. Reusing it returns the first outcome."},
+			}, []string{"call_id", "digits"}),
+			HandlerCtx: a.toolSendDTMF,
+		},
+		{
 			Name:        "telephony_active_calls",
 			Description: "List currently-ongoing calls with their thread IDs, durations, and statuses. Use sparingly — prefer reacting to send()/done() events.",
 			InputSchema: schemaObject(map[string]any{}, nil),
@@ -732,7 +1015,26 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			HandlerCtx: a.toolCallGet,
 		},
+		{
+			Name:        "telephony_live_occupancy",
+			Description: "Read a complete current project snapshot of active human call owners, including connecting calls. Optional direction: inbound or outbound. No pagination. Observational only: retain routing reservations and atomic capacity checks.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			InputSchema: schemaObject(map[string]any{
+				"direction": map[string]any{"type": "string", "enum": []string{"inbound", "outbound"}},
+			}, nil),
+			HandlerCtx: a.toolLiveOccupancy,
+		},
 		{Name: "telephony_decisions_list", Description: "List project-scoped routing decision requests, results, deadlines and fallback reasons for a call.", InputSchema: schemaObject(map[string]any{"call_id": map[string]any{"type": "string"}}, []string{"call_id"}), HandlerCtx: a.toolDecisionsList},
+		{
+			Name:        "telephony_audio_incident",
+			Description: "Read-only report of browser audio drops across a project in a time window: what stopped first on each call (audio, signaling, both or neither), when it reconnected, which active calls stayed healthy, alerts and network checks. Args: from?, to? (RFC 3339, at most 6 hours; default the last 15 minutes).",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			InputSchema: schemaObject(map[string]any{
+				"from": map[string]any{"type": "string", "format": "date-time"},
+				"to":   map[string]any{"type": "string", "format": "date-time"},
+			}, nil),
+			HandlerCtx: a.toolAudioIncident,
+		},
 		{
 			Name:        "telephony_call_events_list",
 			Description: "List durable normalized lifecycle events for a project call. Args: call_id, cursor?, limit?.",
@@ -751,14 +1053,40 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_recording_settings_set",
-			Description: "Set recording defaults for future calls. Recording is opt-in. Args: default_mode (off|always), channels (mono|dual), storage_mode (copy_to_storage|copy_then_delete_provider), retention_days (0 keeps indefinitely).",
+			Description: "Set recording defaults for future calls. Recording is opt-in. Args: default_mode (off|always), channels (mono|dual), storage_mode (copy_to_storage|copy_then_delete_provider), storage_format (mp3 default|wav, applies to pending/future imports; existing stored files unchanged), retention_days (0 keeps indefinitely), max_file_bytes (1 MiB–1 GiB import/playback ceiling; capture is unchanged).",
 			InputSchema: schemaObject(map[string]any{
 				"default_mode":   map[string]any{"type": "string", "enum": []string{"off", "always"}},
 				"channels":       map[string]any{"type": "string", "enum": []string{"mono", "dual"}},
+				"storage_format": map[string]any{"type": "string", "enum": []string{"mp3", "wav"}, "description": "Stored audio format; default MP3 128 kbps. Capture remains WAV. Applies to pending and future imports."},
 				"storage_mode":   map[string]any{"type": "string", "enum": []string{"copy_to_storage", "copy_then_delete_provider"}},
 				"retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650},
+				"max_file_bytes": map[string]any{"type": "integer", "minimum": 1 << 20, "maximum": maxRecordingFileBytes, "description": "Import and playback file-size ceiling, default 1 GiB. Does not stop or truncate recording capture."},
 			}, nil),
 			HandlerCtx: a.toolRecordingSettingsSet,
+		},
+		{
+			Name:        "telephony_outbound_transport",
+			Description: "Read/configure outbound transport for a bound carrier account or one owned number. Platform principal only. Changes affect new human and AI calls; existing calls and inbound routes remain unchanged. Set provision=true to automatically create/reuse a dedicated Telnyx SIP connection or Twilio Elastic trunk with encrypted SIP credentials. TLS/SRTP gateway configuration is required. Telnyx reuses the sole enabled profile; otherwise select outbound_profile_id or supply profile_policy. Advanced config supports existing resources. Password is write-only. Omit transport to read; inherit=true removes an override.",
+			InputSchema: schemaObject(map[string]any{
+				"carrier_connection_id": map[string]any{"type": "integer"},
+				"phone_number":          map[string]any{"type": "string"},
+				"transport":             map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
+				"inherit":               map[string]any{"type": "boolean"},
+				"provision":             map[string]any{"type": "boolean", "description": "Automatically provision and verify outbound SIP before selecting it for new calls."},
+				"setup_options":         map[string]any{"type": "boolean", "description": "Include available profiles when reading settings."},
+				"outbound_profile_id":   map[string]any{"type": "string"},
+				"profile_policy": map[string]any{"type": "object", "properties": map[string]any{
+					"destinations":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"daily_spend_limit": map[string]any{"type": "string", "description": "Positive USD daily limit for a new Telnyx profile."},
+				}, "required": []string{"destinations", "daily_spend_limit"}},
+				"config": map[string]any{"type": "object", "properties": map[string]any{
+					"host": map[string]any{"type": "string"}, "resource_id": map[string]any{"type": "string"}, "resource_type": map[string]any{"type": "string"},
+					"auth_mode": map[string]any{"type": "string", "enum": []string{"digest", "ip"}}, "media_encryption": map[string]any{"type": "string", "enum": []string{"srtp_sdes", "disabled"}},
+					"codecs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				}},
+				"username": map[string]any{"type": "string"}, "password": map[string]any{"type": "string"},
+			}, []string{"carrier_connection_id"}),
+			HandlerCtx: a.toolOutboundTransport,
 		},
 		{
 			Name:        "telephony_outbound_settings_get",
@@ -807,7 +1135,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_numbers_connected",
 			Description: "List every phone number owned by the bound carrier, including purchased numbers that do not have a Telephony route. " +
 				"Returns normalized capabilities, carrier status, inbound route and routing health, outbound readiness, and direct-SIP status. This operation is read-only.",
-			InputSchema: schemaObject(map[string]any{}, nil),
+			InputSchema: schemaObject(map[string]any{"fresh": map[string]any{"type": "boolean", "description": "Bypass the 25-second carrier read cache; simultaneous refreshes still share reads."}}, nil),
 			HandlerCtx:  a.toolNumbersConnected,
 		},
 		{
@@ -1020,7 +1348,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	for i := range tools {
 		if tools[i].HandlerCtx != nil {
-			tools[i].HandlerCtx = operatorPhoneTool(tools[i].HandlerCtx)
+			tools[i].HandlerCtx = operatorPhoneTool(a.runtimeTool(tools[i].Name, tools[i].HandlerCtx))
 		}
 	}
 	return tools
@@ -1123,7 +1451,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		}
 	}
 	carrierSlug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	if recordingMode == recordingModeAlways && !providerSupportsRecording(carrierSlug) {
+	if recordingMode == recordingModeAlways && carrierSlug != "didww" && !providerSupportsRecording(carrierSlug) {
 		return mcpError("call recording is not implemented for the bound carrier " + carrierSlug), nil
 	}
 	machineDetection, machineDetectionAction, err := a.resolveMachineDetection(ctx, projectID, carrierSlug,
@@ -1132,11 +1460,16 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		return mcpError(err.Error()), nil
 	}
 
+	if creds.Fields["outbound_transport"] == inboundTransportSIPDirect && machineDetection != machineDetectionOff {
+		return mcpError("direct SIP does not support provider answering machine detection"), nil
+	}
+
 	callID := newCallID()
 	threadID := "tel-" + callID
 	callbackSecret := newSecret()
 	now := time.Now().UTC()
 	spawnCall := callRow{
+		ProjectID: projectID, AgentID: agentID, CarrierConnectionID: bound.ConnectionID,
 		ID:          callID,
 		Direction:   "outbound",
 		CarrierSlug: carrierSlug,
@@ -1144,9 +1477,15 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		FromNumber:  from,
 		IngressPath: "outbound",
 	}
-	effectiveDirective := strings.TrimSpace(directive)
+	aiPolicy := projectAICallPolicy(ctx)
+	effectiveDirective := aiPolicyDirective(directive, aiPolicy)
+	mediaProfile, err := a.resolveAgentAudioForCall(&spawnCall)
+	if err != nil {
+		return mcpError("agent audio profile unavailable: " + err.Error()), nil
+	}
 
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
+		RealtimeMedia:              mediaProfile.mediaRequest(),
 		AgentID:                    agentID,
 		ThreadID:                   threadID,
 		Directive:                  effectiveDirective,
@@ -1177,6 +1516,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	// the call, so the bridge route must already be able to resolve
 	// callID -> audio_bridge_url.
 	row := callRow{
+		preparedAgentAudio:  &mediaProfile,
 		ID:                  callID,
 		ThreadID:            threadID,
 		Direction:           "outbound",
@@ -1201,6 +1541,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               peerKindRealtime,
+		AIPolicy:               &aiPolicy,
 		MachineDetection:       machineDetection,
 		MachineDetectionAction: machineDetectionAction,
 	}
@@ -1223,6 +1564,9 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 // caller passes a KillThread closure; the softphone caller passes nil, because
 // a human call has no thread.
 func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *callRow, timeout, maxDuration int, onUnwind func()) error {
+	if _, ok := carrier.(*sipOutboundCarrier); ok {
+		row.IngressPath = inboundTransportSIPDirect
+	}
 	if row.MaxDurationSec == 0 {
 		configureCallDuration(ctx, row, maxDuration)
 	}
@@ -1242,6 +1586,28 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+	if row.PeerKind == peerKindRealtime {
+		if _, err := a.pinAgentAudioProfile(row); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "agent audio profile unavailable")
+			unwind()
+			return err
+		}
+	}
+	if native, ok := carrier.(*sipOutboundCarrier); ok {
+		_, err := a.db().db.Exec(`INSERT INTO outbound_sip_calls(call_id,resource_id,host,codecs_json) VALUES(?,?,?,?)`, row.ID, native.fields["sip_resource_id"], native.fields["sip_host"], native.fields["sip_codecs"])
+		if err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "persist SIP carrier context")
+			unwind()
+			return errors.New("persist SIP carrier context")
+		}
+	}
+	if row.PeerKind == peerKindRealtime && row.AIPolicy != nil {
+		if err := a.registerAIPolicy(ctx, row, row.ThreadID, *row.AIPolicy, time.Now().UTC()); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "could not persist AI call policy")
+			unwind()
+			return fmt.Errorf("persist AI call policy: %w", err)
+		}
 	}
 	if row.ApplicationUser != nil {
 		if err := a.setPhoneOwner(row, row.ApplicationUser, ""); err != nil {
@@ -1350,9 +1716,6 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 			if err != nil {
 				continue // An inaccessible binding cannot authorize this caller ID.
 			}
-			if !a.outboundNumberBelongsToBinding(ctx, projectID, candidate, creds, requestedFrom) {
-				continue
-			}
 			from, err := a.resolveOutboundFrom(ctx, projectID, candidate, creds, requestedFrom)
 			if err != nil {
 				continue
@@ -1377,45 +1740,17 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 	return bound, creds, from, nil
 }
 
-// outboundNumberBelongsToBinding performs the cross-carrier ownership check
-// used before selecting an explicit caller ID. Routes and the legacy
-// phone_number credential are accepted as local durable evidence; when the
-// provider inventory is available it is authoritative and must report voice.
-func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string) bool {
+// outboundNumberBelongsToBinding uses the same ownership checks as placement.
+// Configuration alone never authorizes a previously unverified caller ID.
+func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string, requests ...context.Context) bool {
 	if bound == nil || creds == nil || !validE164(requested) {
 		return false
 	}
-	requestedKey := compactPhoneNumber(requested)
-	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	owned, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields})
-	if err == nil {
-		for _, number := range owned {
-			if compactPhoneNumber(number.PhoneNumber) == requestedKey {
-				return len(number.Capabilities) == 0 || containsString(number.Capabilities, "voice")
-			}
-		}
-		// Older connections expose only their configured default number in
-		// credentials. Keep that durable provider assertion usable when the
-		// inventory endpoint omits legacy metadata.
-		if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
-			return true
-		}
-		// A successful inventory response that omits a number is authoritative.
+	if len(requests) > 0 && requests[0] != nil && requests[0].Err() != nil {
 		return false
 	}
-	// Preserve legacy connections that cannot enumerate inventory while still
-	// requiring durable project or credential evidence for the selected number.
-	if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
-		return true
-	}
-	if routes, routeErr := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID); routeErr == nil {
-		for _, route := range currentRoutesByNumber(routes) {
-			if route.Enabled && compactPhoneNumber(route.PhoneNumber) == requestedKey {
-				return true
-			}
-		}
-	}
-	return false
+	_, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requested)
+	return err == nil
 }
 
 func callToolResult(callID, threadID, to string) map[string]any {
@@ -1531,10 +1866,17 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectI
 		}
 		return ""
 	}
-	if row.CarrierSID == "" {
+	if row.CarrierSID == "" && !a.callUsesDirectSIP(row) {
+		// Plivo can be cancelled by request UUID before its call UUID arrives.
+		if err := a.terminateUnidentifiedCarrierCall(ctx, row); err != nil {
+			if errors.Is(err, errCarrierCallIDUnavailable) {
+				return "carrier call id is not available yet"
+			}
+			return "carrier cancel failed: " + err.Error()
+		}
+	} else if row.CarrierSID == "" {
 		return "carrier call id is not available yet"
-	}
-	if a.callUsesDirectSIP(row) {
+	} else if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {
 			return "direct SIP gateway is not running"
@@ -1613,6 +1955,18 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 		return nil, "", errors.New("agent_id required")
 	}
 	bound := ctx.IntegrationFor("carrier")
+	if selected := int64(intArg(args, "carrier_connection_id", 0)); selected > 0 {
+		bound = nil
+		for _, candidate := range ctx.IntegrationsFor("carrier") {
+			if candidate != nil && candidate.ConnectionID == selected {
+				bound = candidate
+				break
+			}
+		}
+		if bound == nil {
+			return nil, "", errors.New("carrier connection is not bound to this installation")
+		}
+	}
 	if bound == nil {
 		return nil, "", errors.New("no carrier bound")
 	}
@@ -1677,10 +2031,8 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 	if err != nil {
 		return nil, "", err
 	}
-	if recordingMode == recordingModeAlways && transport == inboundTransportSIPDirect {
-		return nil, "", errors.New("provider-cloud recording is unavailable on direct SIP routes; set recording_mode to off or inherit")
-	}
-	if recordingMode == recordingModeAlways && !providerSupportsRecording(slug) {
+
+	if recordingMode == recordingModeAlways && transport != inboundTransportSIPDirect && !providerSupportsRecording(slug) {
 		return nil, "", errors.New("call recording is not implemented for provider " + slug)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1792,6 +2144,8 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 }
 
 func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	if route == nil {
 		return errors.New("route required")
 	}
@@ -1909,7 +2263,7 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.ProjectID != currentProject(ctx) || (row.AgentID != agentID && !a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID)) {
 		return mcpError("this call is routed to another agent"), nil
 	}
-	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
+	if !a.callUsesDirectSIP(row) && row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
 		return mcpError("answer is not implemented for inbound provider " + row.CarrierSlug), nil
 	}
 	if a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID) {
@@ -1982,7 +2336,12 @@ func (a *App) answerCallOwned(ctx *sdk.AppCtx, row *callRow, directive, voice, g
 	}
 	if err := a.answerInboundCarrierCall(ctx, row); err != nil {
 		_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
-		if terminalOnCarrierError {
+		if a.callUsesDirectSIP(row) {
+			// Core readiness is not carrier activation. Retire this ready attempt
+			// rather than leaving a pending call with an unretryable ready journal.
+			_ = a.failSIPAIActivation(row.ID, threadID)
+			_ = a.db().releaseRealtimePreparation(row.ID, threadID)
+		} else if terminalOnCarrierError {
 			_, _ = a.db().updateStatusWithFacts(row.ID, "failed", "carrier answer failed: "+err.Error(), lifecycleFacts{Source: "telephony", ExpectedThreadID: threadID})
 		} else {
 			_ = a.db().releaseRealtimePreparation(row.ID, threadID)
@@ -2296,7 +2655,7 @@ func (a *App) disableTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	return nil
 }
 
-func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow, requests ...context.Context) error {
 	if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {
@@ -2309,7 +2668,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		twiml := a.twilioStreamTwiML(row)
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"CallSid": row.CarrierSID, "Twiml": twiml,
-		})
+		}, requests...)
 		return err
 	case "telnyx":
 		// A Telnyx IVR answers the carrier leg before it offers the selected
@@ -2317,7 +2676,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		// the already-answered leg; issuing answer_call twice is rejected by the
 		// carrier and leaves the browser stuck in "answering".
 		if carrierAnswerObserved(row) {
-			return a.startTelnyxStream(ctx, row)
+			return a.startTelnyxStream(ctx, row, requests...)
 		}
 		input := map[string]any{
 			"call_control_id":    row.CarrierSID,
@@ -2334,39 +2693,41 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 			input["record_format"] = "wav"
 			input["record_track"] = "both"
 		}
-		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input)
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input, requests...)
 		return err
 	case "plivo":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"call_uuid":   row.CarrierSID,
 			"aleg_url":    plivoReliableCallbackURL(a.plivoXMLURL(row.ID, row.CallbackSecret, row.ProjectID)),
 			"aleg_method": "POST",
-		})
+		}, requests...)
 		return err
 	case "bandwidth":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"callId": row.CarrierSID, "state": "active", "redirectUrl": a.bandwidthXMLURL(row.ID, row.CallbackSecret, row.ProjectID), "redirectMethod": "POST",
-		})
+		}, requests...)
 		return err
 	default:
 		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)
 	}
 }
 
+// rejectInboundCarrierCall ends an inbound call that should not proceed. Once
+// it has been answered a rejection is no longer possible, so the decision is
+// delegated to terminateCarrierCall, which never calls back here.
 func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row == nil {
 		return errors.New("call unavailable")
 	}
-	if carrierAnswerObserved(row) {
+	if a.callUsesDirectSIP(row) || carrierAnswerObserved(row) {
 		return a.terminateCarrierCall(ctx, row)
 	}
-	if a.callUsesDirectSIP(row) {
-		gateway := a.directSIPGateway()
-		if gateway == nil {
-			return errors.New("direct SIP gateway is not running")
-		}
-		return gateway.Reject(row)
-	}
+	return a.rejectUnansweredCarrierCall(ctx, row)
+}
+
+// rejectUnansweredCarrierCall is the provider's reject operation for a ringing
+// inbound carrier call. It is a leaf: it never re-dispatches.
+func (a *App) rejectUnansweredCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	switch row.CarrierSlug {
 	case "twilio":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
@@ -2392,6 +2753,9 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) killCallThread(ctx *sdk.AppCtx, row *callRow) error {
+	if row != nil {
+		a.cancelCarrierBridge(row.ID)
+	}
 	// Human softphone calls use a synthetic thread ID for call persistence but
 	// do not spawn a Core agent thread. Avoid asking the platform to kill agent
 	// zero when their carrier leg ends.
@@ -2412,7 +2776,7 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 		return a.peerLoopbackURL(row), nil
 	}
 	if row.MediaStatus != "disconnected" && row.MediaStatus != "error" {
-		return row.AudioBridgeURL, nil
+		return agentBridgeURL(row.AudioBridgeURL, row), nil
 	}
 	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
 		return "", errors.New("app context unavailable")
@@ -2428,12 +2792,13 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 		return "", fmt.Errorf("persist renewed audio bridge: %w", err)
 	}
 	row.AudioBridgeURL = renewed.AudioBridgeURL
-	return row.AudioBridgeURL, nil
+	return agentBridgeURL(row.AudioBridgeURL, row), nil
 }
 
 // ─── webhook + panel handlers ──────────────────────────────────────
 
 func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
+	receivedAt := ringTime(time.Now())
 	callID := strings.TrimPrefix(r.URL.Path, "/webhook/status/")
 	callID = strings.TrimSuffix(callID, "/")
 	if callID == "" {
@@ -2487,11 +2852,15 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 	}
 	update := callbackUpdateFor(row.CarrierSlug, r)
+	if row.CarrierSlug == "telnyx" {
+		update.SignatureValidation = "verified"
+		update.ReceivedAt = receivedAt
+	}
 	if row.CarrierSlug == "sinch" && (update.Status == "" || update.CarrierSID == "") {
 		http.Error(w, "invalid Sinch callback", http.StatusBadRequest)
 		return
 	}
-	if (row.CarrierSlug == "bandwidth" || row.CarrierSlug == "sinch") && update.CarrierSID != "" && row.CarrierSID != "" && update.CarrierSID != row.CarrierSID {
+	if (row.CarrierSlug == "bandwidth" || row.CarrierSlug == "sinch" || row.CarrierSlug == "vonage") && update.CarrierSID != "" && row.CarrierSID != "" && update.CarrierSID != row.CarrierSID {
 		http.Error(w, "carrier call ID mismatch", http.StatusForbidden)
 		return
 	}
@@ -2505,7 +2874,7 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if update.MediaStatus != "" {
+	if update.MediaStatus != "" && !a.carrierStreamEvent(row, update) {
 		closeCode := 0
 		closeReason := update.MediaError
 		closeLeg := ""
@@ -2514,8 +2883,8 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			closeLeg = string(mediaCloseLegCarrier)
 		}
 		if update.MediaStatus == "error" {
-			closeCode = 1011
-			closeLeg = string(mediaCloseLegCarrier)
+			closeCode = 0 // Provider callbacks are not WebSocket close frames.
+			closeLeg = "provider_event"
 		}
 		if err := a.db().updateMediaStatusWithLeg(callID, update.MediaStatus, update.MediaError, closeCode, closeReason, closeLeg); err != nil {
 			http.Error(w, "persist media status", http.StatusInternalServerError)
@@ -2623,6 +2992,7 @@ func (a *App) handleTwilioStreamStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "persist stream notification", http.StatusInternalServerError)
 			return
 		}
+		a.recordCarrierBridgeObservation(row, carrierBridgeEvidence{Kind: "provider_" + event, Leg: "provider", StreamID: strings.TrimSpace(r.FormValue("StreamSid")), Detail: strings.TrimSpace(r.FormValue("StreamError"))})
 		// Do not log request URLs, callback credentials, or provider error text.
 		globalCtx.Logger().Info("twilio provider stream notification", "call", callID,
 			"event", event, "recorded", recorded)
@@ -2690,6 +3060,11 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if errors.Is(err, errRuntimeAdmission) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Telephony is draining; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2839,6 +3214,11 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		applyRoutingPlanToRoute(route, plan)
 		return existing, false, nil
 	}
+	runtimeDone, err := a.runtimeBegin(true)
+	if err != nil {
+		return nil, false, err
+	}
+	defer runtimeDone()
 	a.admissionMu.RLock()
 	defer a.admissionMu.RUnlock()
 	if err := a.checkInboundAdmission(route); err != nil {
@@ -2885,13 +3265,16 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 	if route.RecordingMode != "" && route.RecordingMode != recordingModeInherit {
 		recordingMode = route.RecordingMode
 	}
-	if !providerSupportsRecording(route.CarrierSlug) {
+	if route.InboundTransport != inboundTransportSIPDirect && !providerSupportsRecording(route.CarrierSlug) {
 		recordingMode = recordingModeOff
 	}
-	meta := inboundCallMetadata{IngressPath: "direct_or_unreported"}
+	meta := inboundCallMetadata{IngressPath: inboundTransportProgrammable}
 	if len(metadata) > 0 {
 		meta = metadata[0]
-		meta.IngressPath = firstNonEmpty(meta.IngressPath, "direct_or_unreported")
+		meta.IngressPath = firstNonEmpty(meta.IngressPath, inboundTransportProgrammable)
+		if meta.IngressPath == "direct_or_unreported" {
+			meta.IngressPath = inboundTransportProgrammable
+		}
 	}
 	call := callRow{
 		ID:                  callID,
@@ -2991,6 +3374,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 }
 
 func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
+	receivedAt := ringTime(time.Now())
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3042,6 +3426,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				HangupCause   string          `json:"hangup_cause"`
 				HangupSource  string          `json:"hangup_source"`
 				SIPCode       string          `json:"sip_hangup_cause"`
+				Digit         string          `json:"digit"`
 				Digits        string          `json:"digits"`
 				GatherID      string          `json:"gather_id"`
 			} `json:"payload"`
@@ -3077,9 +3462,16 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		if row != nil {
 			if media := telnyxMediaStatusFromEvent(event.Data.EventType); media != "" {
-				if err := a.db().updateMediaStatusWithLeg(row.ID, media, "", 0, "", string(mediaCloseLegCarrier)); err != nil {
-					http.Error(w, "persist carrier media", 500)
-					return
+				// Inbound routes and outbound status callbacks use the same parser
+				// and generation checks, including failure_reason and stream_id.
+				u := telnyxCallbackUpdate(&http.Request{Body: io.NopCloser(strings.NewReader(string(body)))})
+				u.SignatureValidation = "verified"
+				u.ReceivedAt = receivedAt
+				if !a.carrierStreamEvent(row, u) {
+					if err := a.db().updateMediaStatusWithLeg(row.ID, media, u.MediaError, 0, u.MediaError, "provider_event"); err != nil {
+						http.Error(w, "persist carrier media", 500)
+						return
+					}
 				}
 			}
 		}
@@ -3099,8 +3491,11 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 			if created && globalCtx != nil {
 				_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), row.ID)
 			}
-			if isTerminalStatus(status) && globalCtx != nil {
-				_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
+			if isTerminalStatus(status) {
+				_, _ = a.db().reconcileTerminalCarrierMediaStop(row.ID, event.Data.OccurredAt, true)
+				if globalCtx != nil {
+					_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
+				}
 			}
 		}
 		if row != nil {
@@ -3150,6 +3545,10 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				if err := a.completeTelnyxAnnouncementEvent(ctx, row); err != nil {
 					http.Error(w, "terminal hangup pending; retry", 503)
 					return
+				}
+			case "call.dtmf.received":
+				if validDTMFDigits(event.Data.Payload.Digit) {
+					a.observeAICaller(row, true, time.Now().UTC())
 				}
 			case "call.gather.ended":
 				defer lockRoutingCall(row.ID)()
@@ -3204,6 +3603,11 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if errors.Is(err, errRuntimeAdmission) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Telephony is draining; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3403,20 +3807,12 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, detail, phoneUserFrom(r) == nil)})
 		return
 	}
-	rows, err := a.recentPhoneCalls(r, project, 100)
+	model, checked, err := a.phoneCallRead(r, project, 100, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "call state unavailable", http.StatusInternalServerError)
 		return
 	}
-	if err := a.db().attachRingOffers(project, rows); err != nil {
-		http.Error(w, "load ring offers", 500)
-		return
-	}
-	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
-		http.Error(w, "load recording summaries", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, a.filterPhoneCalls(r, rows), false)})
+	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(checked, model.rows, false)})
 }
 
 func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
@@ -3514,6 +3910,9 @@ func (a *App) publicBase() string {
 // own routes. Apps live under /api/apps/<name>/... per the
 // platform's MCP gateway convention.
 func (a *App) publicAppURL() string {
+	if endpoint := a.runtimeEndpoint("callbacks", ""); endpoint != "" {
+		return runtimeHTTPURL(endpoint)
+	}
 	base := a.publicBase()
 	if base == "" {
 		return ""
@@ -3522,6 +3921,9 @@ func (a *App) publicAppURL() string {
 }
 
 func (a *App) publicInstalledAppURL() string {
+	if endpoint := a.runtimeEndpoint("callbacks", ""); endpoint != "" {
+		return runtimeHTTPURL(endpoint)
+	}
 	base := a.publicBase()
 	if base == "" || a.installID <= 0 {
 		return ""
@@ -3533,12 +3935,21 @@ func (a *App) publicInstalledAppURL() string {
 // Streams. Real carriers require wss (TLS); a public_url over plain
 // http is only useful for local mock testing.
 func (a *App) publicWSStreamURL(provider, callID, secret string) string {
-	base := a.publicInstalledAppURL()
-	path := "/media/" + url.PathEscape(provider) + "/" + url.PathEscape(callID) + "/" + url.PathEscape(secret)
-	if strings.HasPrefix(base, "https://") {
-		return "wss://" + strings.TrimPrefix(base, "https://") + path
+	return a.publicWSMediaBase() + "/media/" + url.PathEscape(provider) + "/" + url.PathEscape(callID) + "/" + url.PathEscape(secret)
+}
+
+// publicWSMediaBase is the origin carriers dial for /media/ streams. Request
+// signature checks must rebuild against this same base, because a split
+// ingress may serve carrier_media on a different prefix than callbacks.
+func (a *App) publicWSMediaBase() string {
+	if endpoint := a.runtimeEndpoint("carrier_media", ""); endpoint != "" {
+		return websocketURL(endpoint)
 	}
-	return "ws://" + strings.TrimPrefix(base, "http://") + path
+	base := a.publicInstalledAppURL()
+	if strings.HasPrefix(base, "https://") {
+		return "wss://" + strings.TrimPrefix(base, "https://")
+	}
+	return "ws://" + strings.TrimPrefix(base, "http://")
 }
 
 func (a *App) statusCallbackURL(callID, secret, projectID string) string {
@@ -3571,8 +3982,14 @@ func (a *App) twilioStreamTwiML(row *callRow) string {
 		recording = fmt.Sprintf(`<Start><Recording name="call-%s" channels="%s" track="both" recordingStatusCallback="%s" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed absent"/></Start>`,
 			xmlEscape(row.ID), channels, xmlEscape(a.twilioRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 	}
-	return fmt.Sprintf(`<Response>%s<Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect></Response>`,
-		recording,
+	return `<Response>` + recording + a.twilioConnectStreamTwiML(row) + `</Response>`
+}
+
+// twilioConnectStreamTwiML attaches the call's media stream. A recording
+// started with <Start> continues across later TwiML updates, so updates that
+// only replace the stream use this alone.
+func (a *App) twilioConnectStreamTwiML(row *callRow) string {
+	return fmt.Sprintf(`<Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect>`,
 		xmlEscape(a.publicWSStreamURL("twilio", row.ID, row.CallbackSecret)),
 		xmlEscape(a.twilioStreamStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 }
@@ -3687,6 +4104,7 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"flow_id":                   r.FlowID,
 		"published_flow_version_id": r.PublishedFlowVersionID,
 		"routing_variables":         routingVariablesPublic(r.RoutingVariablesJSON),
+		"inbound_sip_auth":          directSIPRouteAuthStatus(r),
 		"created_at":                r.CreatedAt,
 		"updated_at":                r.UpdatedAt,
 	}
@@ -4051,7 +4469,9 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
-	ApplicationUser *phonePrincipal // transient placement context, persisted separately before dialing
+	preparedAgentAudio *agentAudioProfile
+	AIPolicy           *aiCallPolicy   // transient, frozen before carrier placement
+	ApplicationUser    *phonePrincipal // transient placement context, persisted separately before dialing
 
 	RingOffers               []ringOffer
 	ID                       string
@@ -4451,12 +4871,19 @@ func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
 }
 
 func (c *callsDB) releaseAnswerClaim(id string) error {
-	_, err := c.db.Exec(`UPDATE calls SET status = 'pending'
-        WHERE id = ? AND status = 'answering' AND thread_id LIKE 'pending-%'`, id)
+	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE calls SET status = 'pending'
+        WHERE id = ? AND status = 'answering' AND thread_id LIKE 'pending-%'`, id); err != nil {
+		return err
+	}
+	if err = releaseRingClaimTx(tx, id); err != nil {
+		return err
+	}
+	return c.commitCall(tx, id)
 }
 
 func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
@@ -4490,10 +4917,10 @@ func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
 			return err
 		}
 	}
-	if err = c.commitCall(tx, id); err != nil {
+	if err = releaseRingClaimTx(tx, id); err != nil {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	return c.commitCall(tx, id)
 }
 
 func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice string) error {
@@ -4528,7 +4955,16 @@ func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
 }
 
 func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
-	rows, err := c.db.Query(`SELECT `+callSelectColumns+` FROM calls WHERE `+where, argv...)
+	return c.listWhereOn("", where, argv...)
+}
+
+// Index names are compile-time application constants, never request input.
+func (c *callsDB) listWhereOn(index, where string, argv ...any) ([]callRow, error) {
+	source := "calls"
+	if index != "" {
+		source += " INDEXED BY " + index
+	}
+	rows, err := c.db.Query(`SELECT `+callSelectColumns+` FROM `+source+` WHERE `+where, argv...)
 	if err != nil {
 		return nil, err
 	}
@@ -4586,9 +5022,14 @@ func (c *callsDB) updateMediaStatus(id, status, errMsg string, closeCode int, cl
 	return c.updateMediaStatusWithLeg(id, status, errMsg, closeCode, closeReason, "")
 }
 
-// Media status never grants or releases the exclusive socket claim. The owning
-// handler retains it until releaseMedia, including during error/close cleanup.
-func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string) error {
+// Status writes never grant or release a socket claim. The managed bridge
+// lifecycle performs generation-scoped claims/releases; legacy SIP owns its
+// explicit releaseMedia call.
+func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string, generations ...string) error {
+	generation := ""
+	if len(generations) > 0 {
+		generation = generations[0]
+	}
 	switch status {
 	case "idle", "connecting", "connected", "disconnected", "degraded", "error":
 	default:
@@ -4624,10 +5065,10 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		    WHEN ? <> '' THEN ? ELSE media_close_leg
 		END,
         updated_at = ?
-        WHERE id = ? AND (? <> 'connected' OR status NOT IN ('completed','failed','busy','no-answer','canceled'))`,
+        WHERE id = ? AND (?='' OR (media_generation=? AND (status NOT IN ('completed','failed','busy','no-answer','canceled') OR ?='disconnected'))) AND (? <> 'connected' OR status NOT IN ('completed','failed','busy','no-answer','canceled'))`,
 		status, status, errMsg, errMsg, status,
 		status, now, status, terminalMedia, now, status, closeCode, closeCode,
-		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id, status)
+		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id, generation, generation, status, status)
 	return err
 }
 
@@ -4643,9 +5084,24 @@ func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, termi
 	if !terminalEvent && !isTerminalStatus(row.Status) {
 		return false, nil
 	}
-	if row.MediaStatus != "error" || row.MediaCloseLeg != string(mediaCloseLegCarrier) ||
-		row.MediaCloseCode != 1011 || row.MediaCloseReason != "media bridge transport error" {
+	if row.MediaStatus != "error" || row.MediaCloseLeg != string(mediaCloseLegCarrier) {
 		return false, nil
+	}
+	legacy := row.MediaCloseCode == 1011 && row.MediaCloseReason == "media bridge transport error"
+	if !legacy {
+		var raw string
+		if err := c.db.QueryRow(`SELECT b.first_failure_json FROM carrier_media_bridges b JOIN calls x ON x.id=b.call_id AND x.media_generation=b.generation WHERE x.id=?`, id).Scan(&raw); err != nil {
+			return false, nil
+		}
+		var cause carrierBridgeEvidence
+		if json.Unmarshal([]byte(raw), &cause) != nil {
+			return false, nil
+		}
+		normal := cause.ActualCloseCode == 1000 || cause.ActualCloseCode == 1001 || (cause.Kind == "bridge_ended" && cause.LocalCloseCode == 1000)
+		eof := (cause.Kind == "socket_read" || cause.Kind == "transport_read_error") && (strings.HasSuffix(cause.Detail, ": EOF") || strings.HasSuffix(cause.Detail, ": unexpected EOF"))
+		if !normal && !eof {
+			return false, nil
+		}
 	}
 	mediaEnded, err := time.Parse(time.RFC3339Nano, row.MediaDisconnectedAt)
 	if err != nil {
@@ -4672,7 +5128,7 @@ func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, termi
         media_close_reason = 'carrier stream ended with call', media_close_leg = 'carrier',
         state_expires_at = '', updated_at = ?
         WHERE id = ? AND media_status = 'error' AND media_close_leg = 'carrier'
-          AND media_close_code = 1011 AND media_close_reason = 'media bridge transport error'`, now, id)
+          AND media_close_code = ? AND media_close_reason = ? AND media_error_message=?`, now, id, row.MediaCloseCode, row.MediaCloseReason, row.MediaErrorMessage)
 	if err != nil {
 		return false, err
 	}

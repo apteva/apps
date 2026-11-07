@@ -1,0 +1,25 @@
+{
+  "release": "0.13.0",
+  "date": "2026-10-28",
+  "go_test": {"command": "GOWORK=off go test ./... -count=1", "result": "pass", "tests": 1327},
+  "race": {"command": "bun run test:race", "result": "pass", "tests": 1327, "shards": 8, "wall_seconds": 761, "data_races": 0, "retried_alone": 0},
+  "frontend": {"command": "bun run test:frontend && bun run typecheck", "result": "pass", "tests": [283, 164]},
+  "loopback_tone_continuity": {
+    "command": "bun run benchmark:agent-audio --core <core> --server <server>",
+    "legs": 12,
+    "clicks": 0,
+    "hard_edges": 0,
+    "note": "500 Hz tone through actual Core/Server/Telephony on all carrier legs, real-time delivery and a 300 ms mid-reply stall"
+  },
+  "live_openai": {
+    "model": "gpt-live-1",
+    "path": "Telnyx loopback -> Telephony -> Server proxy -> Core -> OpenAI Live",
+    "runs": {"0.12.61": {"passed": 1, "failed": 2, "hard_edges": 4, "gaps": 19, "gap_ms": 1113},
+             "0.13.0": {"passed": 3, "failed": 0, "hard_edges": 0, "gaps": 19, "gap_ms": 1144}},
+    "note": "Gaps follow live provider delivery pacing and match between builds; 0.13.0 fades every gap"
+  },
+  "live_latency_sip_g722": {
+    "caller_end_to_first_reply_s": {"0.12.61": [1.705, 1.426, 1.840], "0.13.0": [1.482, 1.422, 1.621]}
+  },
+  "no_pstn_calls": true
+}

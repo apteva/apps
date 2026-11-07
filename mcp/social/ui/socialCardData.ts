@@ -109,7 +109,7 @@ export function postStatusVariant(status: string): "muted" | "live" | "warn" | "
   switch (status) {
     case "published": return "live";
     case "failed": return "error";
-    case "partial": return "warn";
+    case "partial": case "awaiting_audience_setup": return "warn";
     default: return "muted";
   }
 }
@@ -118,7 +118,7 @@ export function postStatusColor(status: string): string {
   switch (status) {
     case "published": return "#22C55E";
     case "failed": return "#EF4444";
-    case "partial": return "#F59E0B";
+    case "partial": case "awaiting_audience_setup": return "#F59E0B";
     case "scheduled": return "#38BDF8";
     default: return "#A1A1AA";
   }

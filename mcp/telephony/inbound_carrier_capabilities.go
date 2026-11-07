@@ -23,10 +23,10 @@ func inboundCapabilities(route *routeRow) inboundCarrierCapabilities {
 	if route.InboundTransport == inboundTransportSIPDirect {
 		// The local SIP dialog can stay ringing through a decision loop and can
 		// be claimed by exactly one browser adviser or answered by Core. It has
-		// no independent speech, digit-gather, or recording engine yet.
+		// a local speech, digit-gather and recording engine.
 		switch route.CarrierSlug {
 		case "twilio", "telnyx", "didww":
-			return inboundCarrierCapabilities{Decisions: true}
+			return inboundCarrierCapabilities{Decisions: true, DTMFMenu: true, Voicemail: true, ExternalDestinations: true, TerminalAnnouncements: true}
 		default:
 			return inboundCarrierCapabilities{}
 		}

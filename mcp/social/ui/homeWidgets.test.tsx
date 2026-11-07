@@ -133,8 +133,12 @@ test("calendar links open the weekly view and override a stored profile", async 
   const calendarRequest = requests.find(url => url.pathname.endsWith("/posts") && url.searchParams.has("from"));
   expect(calendarRequest).toBeTruthy();
   expect(calendarRequest!.searchParams.has("profile_id")).toBe(false);
-  const duration = Date.parse(calendarRequest!.searchParams.get("to")!) - Date.parse(calendarRequest!.searchParams.get("from")!);
-  expect(duration).toBe(7 * 86400000);
+  const start = new Date(calendarRequest!.searchParams.get("from")!);
+  const end = new Date(calendarRequest!.searchParams.get("to")!);
+  const expectedEnd = new Date(start);
+  expectedEnd.setDate(expectedEnd.getDate() + 7);
+  // A local week can be 167 or 169 hours across a daylight-saving change.
+  expect(end.getTime()).toBe(expectedEnd.getTime());
 });
 
 test("post links load details even when the post is outside the recent list", async () => {

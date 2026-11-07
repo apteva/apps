@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -23,16 +25,17 @@ const sipStatusDecline = 603
 var e164InSIPValue = regexp.MustCompile(`\+[1-9][0-9]{7,14}`)
 
 type sipGateway struct {
-	app             *App
-	appCtx          *sdk.AppCtx
-	cfg             sipGatewayConfig
-	ua              *sipgo.UserAgent
-	client          *sipgo.Client
-	server          *sipgo.Server
-	dialogs         *sipgo.DialogServerCache
-	outboundDialogs *sipgo.DialogClientCache
-	ctx             context.Context
-	cancel          context.CancelFunc
+	dialogTransports sipDialogTransports
+	app              *App
+	appCtx           *sdk.AppCtx
+	cfg              sipGatewayConfig
+	ua               *sipgo.UserAgent
+	client           *sipgo.Client
+	server           *sipgo.Server
+	dialogs          *sipgo.DialogServerCache
+	outboundDialogs  *sipgo.DialogClientCache
+	ctx              context.Context
+	cancel           context.CancelFunc
 
 	mu                     sync.RWMutex
 	byProviderCall         map[string]*sipSession
@@ -40,39 +43,51 @@ type sipGateway struct {
 	outboundByCall         map[string]*outboundSIPSession
 	outboundByProviderCall map[string]*outboundSIPSession
 	outboundReserved       map[string]bool
+	outboundPending        map[string]context.CancelFunc
 	reserved               map[string]bool
 	ackTimeout             time.Duration
 	work                   sync.WaitGroup
 	stopping               bool
 	stopDeadline           time.Time
+	listenerDone           chan struct{}
+	routeAuthWarned        sync.Map
 }
 
 type sipSession struct {
-	gateway *sipGateway
-	dialog  *sipgo.DialogServerSession
-	route   *routeRow
-	call    *callRow
-	offer   sipMediaOffer
-	media   *sipRTPMedia
-	ctx     context.Context
-	cancel  context.CancelFunc
+	diagnostics *sipLiveDiagnostics
+	gateway     *sipGateway
+	dialog      *sipgo.DialogServerSession
+	route       *routeRow
+	call        *callRow
+	offer       sipMediaOffer
+	media       *sipRTPMedia
+	ctx         context.Context
+	cancel      context.CancelFunc
 
-	answerMu      sync.Mutex
-	ended         atomic.Bool
-	mediaOnce     sync.Once
-	inviteTx      sip.ServerTransaction
-	initialACK    chan struct{}
-	ackOnce       sync.Once
-	signalMu      sync.Mutex
-	refreshMu     sync.Mutex
-	refreshACK    chan struct{}
-	refreshCSeq   uint32
-	remoteSeq     atomic.Uint32
-	localSDP      []byte
-	remoteTarget  sip.Uri
-	timer         sipSessionTimer
-	timerUpdated  time.Time
-	refreshCancel context.CancelFunc
+	local          sipLocalRuntime
+	recorder       atomic.Pointer[localCallRecorder]
+	answerMu       sync.Mutex
+	peerEnded      atomic.Bool // Set only after a validated in-dialog carrier BYE.
+	ended          atomic.Bool
+	finalSent      atomic.Bool // a non-2xx final INVITE response was sent
+	mediaOnce      sync.Once
+	bridgeStarted  atomic.Bool
+	preparedMu     sync.Mutex
+	preparedBridge net.Conn
+	inviteTx       sip.ServerTransaction
+	initialACK     chan struct{}
+	ackOnce        sync.Once
+	signalMu       sync.Mutex
+	refreshMu      sync.Mutex
+	refreshACK     chan struct{}
+	refreshCSeq    uint32
+	remoteSeq      atomic.Uint32
+	localSDP       []byte
+	remoteTarget   sip.Uri
+	timer          sipSessionTimer
+	timerUpdated   time.Time
+	timerWake      chan struct{}
+	refreshCancel  context.CancelFunc
 }
 
 func (a *App) startSIPGateway(ctx *sdk.AppCtx) error {
@@ -80,7 +95,11 @@ func (a *App) startSIPGateway(ctx *sdk.AppCtx) error {
 	if err != nil {
 		return fmt.Errorf("count direct SIP routes: %w", err)
 	}
-	eager := configBool(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", false) || routeCount > 0
+	var outboundCount int
+	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM outbound_transports WHERE transport='sip_direct'`).Scan(&outboundCount); err != nil {
+		return fmt.Errorf("count direct SIP outbound selections: %w", err)
+	}
+	eager := configBool(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", false) || routeCount > 0 || outboundCount > 0
 	if !eager {
 		return nil
 	}
@@ -118,6 +137,12 @@ func (a *App) ensureSIPGateway(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) resolveSIPGatewayConfig(ctx *sdk.AppCtx, forceEnabled bool) (sipGatewayConfig, error) {
+	if a.runtime != nil && (forceEnabled || configValue(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", "false") == "true") {
+		if strings.TrimSpace(configValue(ctx.Config(), "sip_public_host", "TELEPHONY_SIP_PUBLIC_HOST", "")) == "" || strings.TrimSpace(configValue(ctx.Config(), "sip_public_ip", "TELEPHONY_SIP_PUBLIC_IP", "")) == "" {
+			return sipGatewayConfig{}, errors.New("managed SIP requires explicit sip_public_host and sip_public_ip for the execution host")
+		}
+	}
+
 	publicURL := ""
 	if a != nil {
 		publicURL = a.publicBase()
@@ -127,19 +152,22 @@ func (a *App) resolveSIPGatewayConfig(ctx *sdk.AppCtx, forceEnabled bool) (sipGa
 			publicURL = info.PublicURL
 		}
 	}
-	return loadSIPGatewayConfigWithOptions(ctx.Config(), sipConfigOptions{
+	cfg, err := loadSIPGatewayConfigWithOptions(ctx.Config(), sipConfigOptions{
 		ForceEnabled: forceEnabled,
 		PublicURL:    publicURL,
 	})
+	cfg.socketPolicy = func(conn *net.UDPConn) sdk.SocketPolicyResult { return ctx.ApplyUDPSocketPolicy(conn, "sip_media") }
+	return cfg, err
 }
 
-func (a *App) stopSIPGateway() {
+func (a *App) stopSIPGateway() { a.stopSIPGatewayWithReason("application_shutdown") }
+func (a *App) stopSIPGatewayWithReason(reason string) {
 	a.sip.mu.Lock()
 	gateway := a.sip.gateway
 	a.sip.gateway = nil
 	a.sip.mu.Unlock()
 	if gateway != nil {
-		gateway.Stop()
+		gateway.stopWithReason(reason)
 	}
 }
 
@@ -198,15 +226,21 @@ func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGate
 		outboundReserved: make(map[string]bool),
 		reserved:         make(map[string]bool), ackTimeout: 32 * time.Second,
 	}
+	client.TxRequester = sipDialogRequester{gateway: gateway}
 	gateway.registerHandlers()
 	return gateway, nil
 }
 
 func (g *sipGateway) Start() error {
+	g.mu.Lock()
+	g.listenerDone = make(chan struct{})
+	listenerDone := g.listenerDone
+	g.mu.Unlock()
 	ready := make(chan struct{})
 	listenCtx := context.WithValue(g.ctx, sipgo.ListenReadyCtxKey, sipgo.ListenReadyCtxValue(ready))
 	errCh := make(chan error, 1)
 	go func() {
+		defer close(listenerDone)
 		var err error
 		if g.cfg.Transport == "tls" {
 			tlsConfig, tlsErr := g.cfg.tlsConfig()
@@ -233,7 +267,15 @@ func (g *sipGateway) Start() error {
 	}
 }
 
-func (g *sipGateway) Stop() {
+func (g *sipGateway) Stop() { g.stopWithReason("application_shutdown") }
+
+// Zero until the gateway starts stopping.
+func (g *sipGateway) signalStopDeadline() time.Time {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.stopDeadline
+}
+func (g *sipGateway) stopWithReason(reason string) {
 	if g == nil {
 		return
 	}
@@ -241,7 +283,14 @@ func (g *sipGateway) Stop() {
 	g.stopping = true
 	g.stopDeadline = time.Now().Add(5 * time.Second)
 	g.mu.Unlock()
-	g.cancel()
+	g.mu.RLock()
+	for _, session := range g.byCall {
+		session.diagnostics.event("sip_shutdown", "local", reason, 0)
+	}
+	for _, session := range g.outboundByCall {
+		session.diagnostics.event("sip_shutdown", "local", reason, 0)
+	}
+	g.mu.RUnlock()
 	g.mu.RLock()
 	sessions := make([]*sipSession, 0, len(g.byCall))
 	for _, session := range g.byCall {
@@ -259,7 +308,7 @@ func (g *sipGateway) Stop() {
 		go func() {
 			defer finishing.Done()
 			for session := range jobs {
-				session.finish("local_error", errors.New("direct SIP gateway stopped"))
+				session.finish("local_error", fmt.Errorf("direct SIP gateway stopped: %s", reason))
 			}
 		}()
 	}
@@ -271,19 +320,53 @@ func (g *sipGateway) Stop() {
 	}
 	g.mu.RUnlock()
 	for _, session := range outbound {
-		session.finish("local_error", errors.New("SIP gateway stopped"))
+		session.finish("local_error", fmt.Errorf("SIP gateway stopped: %s", reason))
+	}
+	// Mark dialogs ended before canceling their shared parent. Otherwise an
+	// outbound signaling owner can exit before it knows a BYE is required.
+	g.cancel()
+	// Allow the signaling owners to send their bounded BYEs before releasing
+	// transports. All sessions share the same shutdown deadline.
+	g.mu.RLock()
+	signalDeadline := g.stopDeadline
+	g.mu.RUnlock()
+	for _, session := range outbound {
+		timer := time.NewTimer(max(0, time.Until(signalDeadline)))
+		select {
+		case <-session.inviteDone:
+		case <-timer.C:
+		}
+		timer.Stop()
 	}
 	if g.ua != nil {
+		g.dialogTransports.close()
 		_ = g.ua.Close()
 	}
 	g.work.Wait()
+	// ListenAndServe owns the socket and releases it asynchronously on cancel.
+	// Do not report shutdown complete before its accept loop has exited.
+	g.mu.RLock()
+	listenerDone, deadline := g.listenerDone, g.stopDeadline
+	g.mu.RUnlock()
+	if listenerDone != nil {
+		timer := time.NewTimer(max(0, time.Until(deadline)))
+		defer timer.Stop()
+		select {
+		case <-listenerDone:
+		case <-timer.C:
+			if g.appCtx != nil {
+				g.appCtx.Logger().Warn("SIP listener did not stop within shutdown budget")
+			}
+		}
+	}
 }
 
-func (g *sipGateway) registerHandlers() {
-	g.server.OnInvite(g.trackHandler(g.handleInvite))
-	g.server.OnAck(g.trackHandler(g.handleACK))
-	g.server.OnUpdate(g.trackHandler(g.handleRefresh))
-	g.server.OnBye(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+func (g *sipGateway) registerHandlers() { g.registerServerHandlers(g.server) }
+func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
+	server.OnInvite(g.trackHandler(g.handleInvite))
+	server.OnAck(g.trackHandler(g.handleACK))
+	server.OnUpdate(g.trackHandler(g.handleRefresh))
+	server.OnBye(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, 403, "Forbidden", nil))
 			return
@@ -294,6 +377,8 @@ func (g *sipGateway) registerHandlers() {
 				_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 				return
 			}
+			outbound.peerEnded.Store(true)
+			outbound.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
 			outbound.finish("carrier", nil)
 			return
 		}
@@ -306,11 +391,11 @@ func (g *sipGateway) registerHandlers() {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 			return
 		}
-		if session := g.sessionByProviderCall(providerCallID); session != nil {
-			session.finish("carrier", nil)
-		}
+		session.peerEnded.Store(true)
+		session.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
+		session.finish("carrier", nil)
 	}))
-	g.server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+	server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		// Matched CANCEL is handled by sipgo's INVITE transaction. An
 		// unmatched CANCEL must never end a dialog using Call-ID alone.
 		status := 481
@@ -319,13 +404,14 @@ func (g *sipGateway) registerHandlers() {
 		}
 		_ = transaction.Respond(sip.NewResponseFromRequest(request, status, "No Matching Transaction", nil))
 	}))
-	g.server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+	server.OnInfo(g.trackHandler(g.handleInfo))
+	server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusForbidden, "Forbidden", nil))
 			return
 		}
 		response := sip.NewResponseFromRequest(request, sip.StatusOK, "OK", nil)
-		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE"))
+		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO"))
 		_ = transaction.Respond(response)
 	}))
 }
@@ -342,6 +428,12 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		g.handleRefresh(request, transaction)
 		return
 	}
+	done, admissionErr := g.app.runtimeBegin(true)
+	if admissionErr != nil {
+		respond(sip.StatusServiceUnavailable, "Telephony Draining")
+		return
+	}
+	defer done()
 	providerCallID := sipCallID(request)
 	if providerCallID == "" || request.Contact() == nil {
 		respond(sip.StatusBadRequest, "Missing Dialog Headers")
@@ -361,13 +453,12 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		_ = transaction.Respond(res)
 		return
 	}
-	offer, err := parseSIPMediaOffer(request.Body(), g.cfg)
-	if err != nil {
-		g.appCtx.Logger().Warn("direct SIP offer rejected", "source", request.Source(), "err", err)
-		respond(sip.StatusNotAcceptableHere, "Unsupported Media")
+	route, calledNumber, err := g.findRouteForInvite(request)
+	if errors.Is(err, errSIPRouteForbidden) {
+		g.appCtx.Logger().Warn("direct SIP INVITE rejected by route authentication", "source", request.Source(), "err", err)
+		respond(sip.StatusForbidden, "Forbidden")
 		return
 	}
-	route, calledNumber, err := g.findRouteForInvite(request)
 	if err != nil {
 		g.appCtx.Logger().Warn("direct SIP route lookup failed", "source", request.Source(), "err", err)
 		respond(sip.StatusInternalServerError, "Route Lookup Failed")
@@ -375,6 +466,16 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	if route == nil {
 		respond(sip.StatusNotFound, "No Route")
+		return
+	}
+	settings, err := g.app.localMediaSettingsForCall(route.ProjectID, route.ID, "inbound", route.CarrierConnectionID, route.PhoneNumber)
+	if err != nil {
+		respond(500, "Media Settings Unavailable")
+		return
+	}
+	offer, err := parseSIPMediaOfferCodecs(request.Body(), g.cfg, settings.Codecs)
+	if err != nil {
+		respond(488, "Unsupported Media")
 		return
 	}
 	if err := g.app.validatePublishedFlowForInboundRoute(route); err != nil {
@@ -389,9 +490,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	caller := sipCallerNumber(request)
 	routeForCall := *route
-	// Direct SIP bypasses provider call control, so provider-cloud recording
-	// cannot be requested even when the project default is enabled.
-	routeForCall.RecordingMode = recordingModeOff
+	// Local recording preserves the same project/route policy on SIP.
 	call, created, err := g.app.recordInboundCall(&routeForCall, providerCallID, caller, calledNumber, inboundCallMetadata{
 		IngressPath: "sip_direct",
 	})
@@ -419,10 +518,18 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	sessionCtx, cancel := context.WithCancel(g.ctx)
 	session := &sipSession{
 		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
-		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
+		timerWake: make(chan struct{}, 1), ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
+	session.diagnostics = g.app.newSIPDiagnostics(call, dialog.ID)
+	session.diagnostics.codecs(request.Body(), settings.Codecs, offer.Codec, "inbound_offer")
+	session.local.config = settings
 	session.remoteSeq.Store(request.CSeq().SeqNo)
 	dialog.OnState(func(state sip.DialogState) {
+		session.diagnostics.mu.Lock()
+		if !session.diagnostics.ended.Load() {
+			session.diagnostics.signal.State = state.String()
+		}
+		session.diagnostics.mu.Unlock()
 		if state == sip.DialogStateEnded {
 			g.runTask(func() { session.finish("carrier", nil) })
 		}
@@ -446,9 +553,9 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	if err := g.app.deliverOutboxCall(projectCtx, call.ID); err != nil {
 		projectCtx.Logger().Warn("deliver direct SIP incoming call event", "call", call.ID, "err", err)
 	}
-	if routeForCall.RoutingTerminalType == "hangup" || routeForCall.RoutingTerminalType == "reject" {
-		if err := g.app.expireCall(projectCtx, call); err != nil {
-			projectCtx.Logger().Warn("finish direct SIP terminal route", "call", call.ID, "err", err)
+	if plan, err := g.app.resolveInboundRoutingPlan(&routeForCall, caller, nil); err == nil && plan != nil {
+		if err = g.app.executeSIPRoutingPlan(projectCtx, call, plan); err != nil {
+			session.finish("local_error", err)
 		}
 	} else {
 		g.app.enqueueImmediateAnswer(&routeForCall, call.ID)
@@ -463,27 +570,104 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 }
 
+var errSIPRouteForbidden = errors.New("direct SIP route authentication failed")
+
+// Carrier networks are shared by all of a carrier's customers, so a source
+// allowlist alone lets any customer reach any number. A route is only reachable
+// from its own carrier's network and, once its secret is enforced, only with it.
+// Forwarding headers are a fallback limited to the attributed carrier's routes.
 func (g *sipGateway) findRouteForInvite(request *sip.Request) (*routeRow, string, error) {
-	for _, phone := range sipCalledNumberCandidates(request) {
+	sourceCarrier := g.cfg.sourceCarrier(request.Source())
+	primary, forwarded := sipCalledNumberCandidateSets(request)
+	for _, phone := range primary {
 		route, err := g.app.db().findDirectSIPRouteByNumber(phone)
 		if err != nil {
 			return nil, "", err
 		}
 		if route != nil {
+			if err := g.authorizeInboundRoute(request, route, sourceCarrier); err != nil {
+				return nil, "", err
+			}
+			return route, route.PhoneNumber, nil
+		}
+	}
+	if sourceCarrier == "" {
+		return nil, "", nil
+	}
+	for _, phone := range forwarded {
+		route, err := g.app.db().findDirectSIPRouteByNumber(phone)
+		if err != nil {
+			return nil, "", err
+		}
+		if route != nil && route.CarrierSlug == sourceCarrier {
+			if err := g.authorizeInboundRoute(request, route, sourceCarrier); err != nil {
+				return nil, "", err
+			}
 			return route, route.PhoneNumber, nil
 		}
 	}
 	return nil, "", nil
 }
 
+func (g *sipGateway) authorizeInboundRoute(request *sip.Request, route *routeRow, sourceCarrier string) error {
+	if sourceCarrier != "" && sourceCarrier != route.CarrierSlug {
+		return fmt.Errorf("%w: %s source for %s route", errSIPRouteForbidden, sourceCarrier, route.CarrierSlug)
+	}
+	if sourceCarrier == "" {
+		g.warnRouteAuthOnce("unattributed:"+route.ID, "direct SIP INVITE from an unlabelled sip_allowed_cidrs range; label it carrier=cidr to bind it to a carrier",
+			"route", route.ID, "source", request.Source())
+	}
+	state, ok := directSIPRouteSecret(route)
+	if !ok {
+		if route.CarrierSlug != "telnyx" {
+			g.warnRouteAuthOnce("secret:"+route.ID, "direct SIP route has no route secret; re-apply inbound_transport=sip_direct to provision one",
+				"route", route.ID)
+		}
+		return nil
+	}
+	presented := sipRequestRouteTokens(request)
+	for _, token := range presented {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(state.InboundToken)) == 1 {
+			if !state.InboundTokenVerified {
+				previous := route.TransportConfig
+				state.InboundTokenVerified = true
+				encoded, _ := json.Marshal(state)
+				if err := g.app.db().markDirectSIPRouteSecretVerified(route.ID, previous, string(encoded)); err != nil {
+					g.appCtx.Logger().Warn("enforce direct SIP route secret", "route", route.ID, "err", err)
+				}
+			}
+			return nil
+		}
+	}
+	// A present but wrong secret is rejected even before enforcement.
+	if state.InboundTokenVerified || len(presented) > 0 {
+		return fmt.Errorf("%w: route secret missing or invalid", errSIPRouteForbidden)
+	}
+	g.warnRouteAuthOnce("pending:"+route.ID, "direct SIP route secret not yet delivered by the carrier; it is enforced after the first call that carries it",
+		"route", route.ID)
+	return nil
+}
+
+func (g *sipGateway) warnRouteAuthOnce(key, message string, args ...any) {
+	if _, seen := g.routeAuthWarned.LoadOrStore(key, true); !seen && g.appCtx != nil {
+		g.appCtx.Logger().Warn(message, args...)
+	}
+}
+
 func (g *sipGateway) Answer(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
 	}
-	defer g.work.Done()
+	defer g.finishWork()
+	if rowUsesOutboundSIP(row) {
+		return errors.New("outbound SIP is answered by the remote party")
+	}
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
+	}
+	if err := session.prepareBridge(row); err != nil {
+		return fmt.Errorf("prepare direct SIP audio before answer: %w", err)
 	}
 	return session.answer()
 }
@@ -493,24 +677,54 @@ func (g *sipGateway) StartMedia(row *callRow) error {
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
 	}
+	if err := session.prepareBridge(row); err != nil {
+		return fmt.Errorf("prepare direct SIP audio before activation: %w", err)
+	}
 	return session.startMedia()
+}
+
+// Distinguish a dialog that is already gone, or already answered, from a
+// failed command so termination can choose its operation without guessing.
+var (
+	errSIPDialogGone      = errors.New("direct SIP dialog is no longer active")
+	errSIPAlreadyAnswered = errors.New("direct SIP call has already been answered")
+)
+
+// End ends a direct SIP call by its live dialog state: an inbound INVITE we
+// have not answered is declined, an answered dialog (ours or an adviser's) is
+// hung up. A dialog that has already ended needs nothing, so ending twice is
+// safe. Persisted answer timestamps are not consulted: the gateway's own 200 OK
+// sets carrier_answered_at before any adviser answers.
+func (g *sipGateway) End(row *callRow) error {
+	if rowUsesOutboundSIP(row) {
+		return g.Hangup(row)
+	}
+	err := g.Reject(row)
+	if errors.Is(err, errSIPAlreadyAnswered) {
+		err = g.Hangup(row)
+	}
+	if errors.Is(err, errSIPDialogGone) {
+		return nil
+	}
+	return err
 }
 
 func (g *sipGateway) Reject(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
 	}
-	defer g.work.Done()
+	defer g.finishWork()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
-		return errors.New("direct SIP dialog is no longer active")
+		return errSIPDialogGone
 	}
 	session.answerMu.Lock()
 	answered := session.media != nil
 	session.answerMu.Unlock()
 	if answered {
-		return errors.New("direct SIP call has already been answered")
+		return errSIPAlreadyAnswered
 	}
+	session.finalSent.Store(true)
 	if err := session.dialog.Respond(sipStatusDecline, "Decline", nil); err != nil {
 		return err
 	}
@@ -519,9 +733,19 @@ func (g *sipGateway) Reject(row *callRow) error {
 }
 
 func (g *sipGateway) Hangup(row *callRow) error {
+	if !g.startWork() {
+		return errors.New("SIP gateway stopping")
+	}
+	defer g.finishWork()
+	if rowUsesOutboundSIP(row) {
+		if s := g.outboundSessionByCall(row.ID); s != nil {
+			return s.hangup()
+		}
+		return hangupOutboundSIP(g.app, row)
+	}
 	session := g.sessionByCall(row.ID)
 	if session == nil {
-		return errors.New("direct SIP dialog is no longer active")
+		return errSIPDialogGone
 	}
 	return session.hangup()
 }
@@ -548,15 +772,18 @@ func (s *sipSession) answer() error {
 		return err
 	}
 	s.media = media
+	s.diagnostics.attach(media, s.dialog.ID)
 	s.localSDP = answer
 	s.answerMu.Unlock()
 	// Dialog state callbacks may synchronously finish the session.
 	response := sip.NewSDPResponseFromRequest(s.dialog.InviteRequest, answer)
 	addSIPTimerHeaders(response, s.timer)
+	s.diagnostics.event("sip_answer_attempt", "signaling", "", 200)
 	if err := s.dialog.WriteResponse(response); err != nil {
 		s.finish("local_error", err)
 		return err
 	}
+	s.diagnostics.event("sip_answer", "signaling", "", 200)
 	s.answerMu.Lock()
 	s.timerUpdated = time.Now()
 	s.answerMu.Unlock()
@@ -565,14 +792,34 @@ func (s *sipSession) answer() error {
 }
 
 func (s *sipSession) startMedia() error {
+	if err := s.stopLocalMedia(); err != nil {
+		return err
+	}
 	s.answerMu.Lock()
 	answered := s.media != nil && !s.ended.Load()
 	s.answerMu.Unlock()
 	if !answered {
 		return errors.New("direct SIP call has not been answered")
 	}
+	if s.initialACK != nil {
+		select {
+		case <-s.initialACK:
+		case <-s.ctx.Done():
+			return errAnswerCallEnded
+		}
+	}
 	var launchErr error
 	s.mediaOnce.Do(func() {
+		s.bridgeStarted.Store(true)
+		// Local IVR reception has stopped and ACK ownership is verified above.
+		// Drain immediately while DB/recording/bridge preparation completes.
+		s.answerMu.Lock()
+		media := s.media
+		if !s.ended.Load() && media != nil {
+			media.startEarlyReceiver()
+			media.early.answered.Store(true)
+		}
+		s.answerMu.Unlock()
 		if !s.gateway.runTask(func() { s.gateway.app.bridgeDirectSIPMedia(s) }) {
 			launchErr = errors.New("SIP gateway stopping")
 		}
@@ -587,32 +834,42 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if !s.ended.CompareAndSwap(false, true) {
 		return nil
 	}
+	s.diagnostics.end(leg, cause)
+	var signalingErr error
+	// A ringing call's final response precedes s.cancel(): cancel lets
+	// handleInvite return, after which sipgo may end the dialog first and a
+	// dialog-state guard would skip the 487 entirely.
+	if leg != "carrier" && s.dialog != nil && s.inviteTx != nil &&
+		s.dialog.LoadState() < sip.DialogStateEstablished && s.finalSent.CompareAndSwap(false, true) {
+		signalingErr = s.inviteTx.Respond(sip.NewResponseFromRequest(s.dialog.InviteRequest, 487, "Request Terminated", nil))
+	}
 	s.answerMu.Lock()
 	refreshCancel := s.refreshCancel
 	s.answerMu.Unlock()
 	if refreshCancel != nil {
 		refreshCancel()
 	}
-	var signalingErr error
+	s.cancel()
+	s.closePreparedBridge()
+	if leg == "carrier" {
+		_ = s.stopLocalMedia()
+	}
 	if leg != "carrier" && s.dialog != nil {
 		if s.dialog.LoadState() >= sip.DialogStateEstablished && s.dialog.LoadState() != sip.DialogStateEnded {
 			s.signalMu.Lock()
-			deadline := time.Now().Add(3 * time.Second)
-			s.gateway.mu.RLock()
-			stopDeadline := s.gateway.stopDeadline
-			s.gateway.mu.RUnlock()
-			if !stopDeadline.IsZero() && stopDeadline.Before(deadline) {
-				deadline = stopDeadline
-			}
-			ctx, cancel := context.WithDeadline(context.Background(), deadline)
 			s.answerMu.Lock()
 			target := s.remoteTarget
 			s.answerMu.Unlock()
-			signalingErr = s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
-			cancel()
+			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
+			var retried bool
+			signalingErr, retried = sendSIPByeWithRetry(func(ctx context.Context) error {
+				return s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
+			}, func() bool { return s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded }, s.gateway.signalStopDeadline, func(err error) {
+				s.diagnostics.event("sip_bye_retry", "local", transportEvidenceError(err), 0)
+			})
+			signalingErr = sipTerminationResult(s.diagnostics, signalingErr,
+				s.peerEnded.Load() || s.dialog.LoadState() == sip.DialogStateEnded || sipByeRetryFinished(signalingErr, retried))
 			s.signalMu.Unlock()
-		} else if s.inviteTx != nil && s.dialog.LoadState() != sip.DialogStateEnded {
-			signalingErr = s.inviteTx.Respond(sip.NewResponseFromRequest(s.dialog.InviteRequest, 487, "Request Terminated", nil))
 		}
 	}
 	func() {
@@ -633,6 +890,10 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 		if !isTerminalStatus(row.Status) {
 			status := "completed"
 			message := ""
+			if signalingErr != nil {
+				status = "failed"
+				message = "SIP termination unconfirmed: " + transportEvidenceError(signalingErr)
+			}
 			if row.Status == "pending" || row.Status == "answering" {
 				status = "canceled"
 			}
@@ -686,6 +947,14 @@ func (g *sipGateway) sessionByCall(id string) *sipSession {
 	return g.byCall[id]
 }
 
+// hasCall reports whether the gateway holds a live inbound or outbound dialog
+// for the call.
+func (g *sipGateway) hasCall(id string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.byCall[id] != nil || g.outboundByCall[id] != nil
+}
+
 func (g *sipGateway) sessionCount() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -704,18 +973,37 @@ func sipCallID(request *sip.Request) string {
 }
 
 func sipCalledNumberCandidates(request *sip.Request) []string {
-	var values []string
+	primary, forwarded := sipCalledNumberCandidateSets(request)
+	seen := make(map[string]bool)
+	var out []string
+	for _, value := range append(primary, forwarded...) {
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// sipCalledNumberCandidateSets separates the Request-URI/To identity from the
+// forwarding headers, which are only trusted as a fallback.
+func sipCalledNumberCandidateSets(request *sip.Request) (primary, forwarded []string) {
+	var direct, forwarding []string
 	if request != nil {
-		values = append(values, request.Recipient.User)
+		direct = append(direct, request.Recipient.User)
 		if header := request.To(); header != nil {
-			values = append(values, header.Address.User)
+			direct = append(direct, header.Address.User)
 		}
 		for _, name := range []string{"Diversion", "P-Called-Party-ID", "X-Original-To"} {
 			for _, header := range request.GetHeaders(name) {
-				values = append(values, header.Value())
+				forwarding = append(forwarding, header.Value())
 			}
 		}
 	}
+	return sipE164Candidates(direct), sipE164Candidates(forwarding)
+}
+
+func sipE164Candidates(values []string) []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, value := range values {

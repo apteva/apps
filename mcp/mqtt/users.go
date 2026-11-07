@@ -1,17 +1,3 @@
-// users.go — broker auth + ACL.
-//
-// The aclHook satisfies mochi's hook interface for connect-time
-// authentication and per-publish/subscribe ACL checks. We back
-// everything with the mqtt_users table (bcrypt password_hash + per-
-// user publish/subscribe glob lists) and stamp every decision into
-// mqtt_acl_log so the panel can show why something was refused.
-//
-// Empty / locked password_hash = denied. allow_anonymous=true in
-// config skips the password check on connect, but ACL still runs
-// against an "anonymous" pseudo-user with the configured global
-// allow lists. The seeded apteva-default user lets the operator
-// actually connect from a panel test form on first install.
-
 package main
 
 import (
@@ -29,6 +15,8 @@ import (
 
 // MQTTUser represents one row of mqtt_users, in-memory.
 type MQTTUser struct {
+	Revision             int64    `json:"-"`
+	ScopeID              string   `json:"scope_id"`
 	ID                   int64    `json:"id"`
 	Username             string   `json:"username"`
 	AllowPublishTopics   []string `json:"allow_publish"`
@@ -53,96 +41,144 @@ func (h *aclHook) ID() string { return "apteva-acl" }
 // Order matters: declare every one we override.
 func (h *aclHook) Provides(b byte) bool {
 	switch b {
-	case mqtt.OnConnectAuthenticate, mqtt.OnACLCheck:
+	case mqtt.OnConnectAuthenticate, mqtt.OnACLCheck, mqtt.OnPacketRead, mqtt.OnPacketEncode, mqtt.OnWill:
 		return true
 	}
 	return false
 }
 
 func (h *aclHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
 	username := string(pk.Connect.Username)
-	password := string(pk.Connect.Password)
-	allowAnon := configFlag(h.app.ctx, "allow_anonymous", false)
-
-	if username == "" {
-		if allowAnon {
-			h.logACL("anonymous", "connect", "", true, "anonymous allowed")
-			return true
-		}
-		h.logACL("", "connect", "", false, "anonymous refused (allow_anonymous=false)")
-		h.app.authRejected.Add(1)
-		return false
-	}
 	u := h.app.cachedUser(username)
-	if u == nil {
-		h.logACL(username, "connect", "", false, "no such user")
+	reject := func(reason string) bool {
+		h.logACL(username, "connect", "", false, reason)
 		h.app.authRejected.Add(1)
+		if u != nil {
+			h.app.counters(u.ScopeID).authRejected.Add(1)
+		}
 		return false
 	}
-	if !u.Enabled {
-		h.logACL(username, "connect", "", false, "user disabled")
-		h.app.authRejected.Add(1)
-		return false
+	if u == nil || !u.Enabled || !validScope(u.ScopeID) {
+		return reject("authentication refused")
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(u.passwordHash), []byte(password)); err != nil {
-		h.logACL(username, "connect", "", false, "bad password")
-		h.app.authRejected.Add(1)
-		return false
+	if fixed := h.app.ctx.CurrentProject(); fixed != "" && u.ScopeID != fixed {
+		return reject("authentication refused")
 	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.passwordHash), pk.Connect.Password); err != nil {
+		return reject("authentication refused")
+	}
+	if pk.Connect.WillFlag {
+		if !authorizedFilter(u, pk.Connect.WillTopic, true) ||
+			(pk.Connect.WillProperties.ResponseTopic != "" && !scopedTopic(u.ScopeID, pk.Connect.WillProperties.ResponseTopic)) ||
+			pk.Connect.WillProperties.WillDelayInterval > 0 {
+			return reject("will topic not permitted or delayed will unsupported")
+		}
+	}
+	if err := h.app.bindClientID(cl.ID, u); err != nil {
+		return reject("client id unavailable")
+	}
+	cl.Properties.Props.TopicAliasMaximum = 0
+	h.app.authenticatedClients.Store(cl, &authenticatedIdentity{credentialID: u.ID, scope: u.ScopeID, username: u.Username, revision: u.Revision})
 	h.logACL(username, "connect", "", true, "")
 	return true
 }
 
 func (h *aclHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
-	username := string(cl.Properties.Username)
+	if cl.Net.Inline {
+		return true
+	}
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
+	u := h.app.currentClientUser(cl)
+	allowed := authorizedFilter(u, topic, write)
 	action := "subscribe"
 	if write {
 		action = "publish"
 	}
-	// Inline-client subscriptions originate from this app itself —
-	// always allow so the bus bridge + HA discovery work.
-	if cl.Net.Inline {
-		return true
+	username := ""
+	scope := ""
+	if identity := h.app.clientIdentity(cl); identity != nil {
+		username = identity.username
+		scope = identity.scope
 	}
-	if username == "" {
-		if !configFlag(h.app.ctx, "allow_anonymous", false) {
-			h.app.aclRejected.Add(1)
-			return false
-		}
-		// Anonymous: allow everything. Operators wanting tighter
-		// rules should set allow_anonymous=false and create a real
-		// user with scoped globs.
-		h.logACL("anonymous", action, topic, true, "anonymous")
-		return true
-	}
-	u := h.app.cachedUser(username)
-	if u == nil || !u.Enabled {
-		h.logACL(username, action, topic, false, "user gone")
+	reason := ""
+	if !allowed {
+		reason = "topic not permitted"
 		h.app.aclRejected.Add(1)
-		return false
+		h.app.counters(scope).aclRejected.Add(1)
 	}
-	allow := u.AllowPublishTopics
-	if !write {
-		allow = u.AllowSubscribeTopics
-	}
-	if topicMatchesAny(topic, allow) {
-		h.logACL(username, action, topic, true, "")
-		return true
-	}
-	h.logACL(username, action, topic, false, "no matching ACL")
-	h.app.aclRejected.Add(1)
-	return false
+	h.logACL(username, action, topic, allowed, reason)
+	return allowed
 }
 
-// topicMatchesAny — does `topic` match any glob in `patterns`?
-// MQTT wildcards: + matches one level, # matches all remaining.
-func topicMatchesAny(topic string, patterns []string) bool {
-	for _, p := range patterns {
-		if mqttTopicMatch(p, topic) {
-			return true
-		}
+// Validate MQTT 5 response topics before processing. The broker's later ACL
+// check authorizes the resolved publish topic, including incoming aliases.
+// OnPublish errors are not fatal for all protocol/QoS combinations in Mochi.
+func (h *aclHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
+	if cl.Net.Inline || pk.FixedHeader.Type == packets.Connect {
+		return pk, nil
 	}
-	return false
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
+	u := h.app.currentClientUser(cl)
+	if u == nil || !u.Enabled || (pk.FixedHeader.Type == packets.Publish && pk.Properties.ResponseTopic != "" && !scopedTopic(u.ScopeID, pk.Properties.ResponseTopic)) {
+		// Hooks.OnPacketRead ignores ordinary errors. ErrRejectPacket is the
+		// broker's explicit fatal read rejection, before routing or PUBACK.
+		return pk, packets.ErrRejectPacket
+	}
+	if pk.FixedHeader.Type == packets.Publish && pk.Properties.TopicAliasFlag {
+		// Mochi checks ACLs before resolving aliases. Resolve the client-local
+		// alias here so both authorization and retained storage see a full name.
+		alias := pk.Properties.TopicAlias
+		maximum := uint16(65535)
+		if h.app.broker != nil && h.app.broker.server != nil {
+			maximum = h.app.broker.server.Options.Capabilities.TopicAliasMaximum
+		}
+		if alias == 0 || alias > maximum || cl.State.TopicAliases.Inbound == nil {
+			return pk, packets.ErrRejectPacket
+		}
+		topic := pk.TopicName
+		if topic == "" {
+			topic = cl.State.TopicAliases.Inbound.Set(alias, "")
+		}
+		if !authorizedFilter(u, topic, true) {
+			return pk, packets.ErrRejectPacket
+		}
+		cl.State.TopicAliases.Inbound.Set(alias, topic)
+		pk.TopicName = topic
+		// An inbound alias belongs only to its connection, never to a retained
+		// message or a different subscriber's outbound connection.
+		pk.Properties.TopicAlias, pk.Properties.TopicAliasFlag = 0, false
+	}
+	return pk, nil
+}
+
+// Also guard queued/inflight retransmissions, which bypass publishToClient's
+// ACL check. Disable outbound topic aliases so the check sees the real topic.
+func (h *aclHook) OnPacketEncode(cl *mqtt.Client, pk packets.Packet) packets.Packet {
+	if cl.Net.Inline || pk.FixedHeader.Type != packets.Publish {
+		return pk
+	}
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
+	if !authorizedFilter(h.app.currentClientUser(cl), pk.TopicName, false) {
+		cl.Stop(packets.ErrNotAuthorized)
+		return packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Disconnect}, ProtocolVersion: pk.ProtocolVersion, ReasonCode: packets.ErrNotAuthorized.Code}
+	}
+	return pk
+}
+
+// Mochi routes wills outside OnPublish. Neutralize a revoked will rather than
+// returning an error (Mochi logs OnWill errors and continues with the old will).
+func (h *aclHook) OnWill(cl *mqtt.Client, will mqtt.Will) (mqtt.Will, error) {
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
+	if !authorizedFilter(h.app.currentClientUser(cl), will.TopicName, true) {
+		return mqtt.Will{}, nil
+	}
+	return will, nil
 }
 
 // mqttTopicMatch — left-anchored level-by-level match. Returns true
@@ -150,6 +186,9 @@ func topicMatchesAny(topic string, patterns []string) bool {
 // "+" matches exactly one level; "#" matches the remainder and must
 // be the last segment.
 func mqttTopicMatch(filter, topic string) bool {
+	if strings.HasPrefix(topic, "$") && !strings.HasPrefix(filter, "$") {
+		return false
+	}
 	fParts := strings.Split(filter, "/")
 	tParts := strings.Split(topic, "/")
 	for i, f := range fParts {
@@ -171,15 +210,19 @@ func mqttTopicMatch(filter, topic string) bool {
 
 // ─── DB layer ───────────────────────────────────────────────────────
 
-func getUser(db *sql.DB, username string) (*MQTTUser, error) {
+func getUser(db *sql.DB, scope, username string) (*MQTTUser, error) {
+	username, nameErr := credentialName(scope, username)
+	if nameErr != nil {
+		return nil, nameErr
+	}
 	var u MQTTUser
 	var pubJSON, subJSON string
 	var en int
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, allow_publish_topics_json,
+		`SELECT id, scope_id, revision, username, password_hash, allow_publish_topics_json,
 		        allow_subscribe_topics_json, enabled, created_at
-		   FROM mqtt_users WHERE username = ?`, username,
-	).Scan(&u.ID, &u.Username, &u.passwordHash, &pubJSON, &subJSON, &en, &u.CreatedAt)
+		   FROM mqtt_users WHERE scope_id = ? AND username = ?`, scope, username,
+	).Scan(&u.ID, &u.ScopeID, &u.Revision, &u.Username, &u.passwordHash, &pubJSON, &subJSON, &en, &u.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -196,11 +239,23 @@ func getUser(db *sql.DB, username string) (*MQTTUser, error) {
 	return &u, nil
 }
 
-func listUsers(db *sql.DB) ([]MQTTUser, error) {
-	rows, err := db.Query(
-		`SELECT id, username, password_hash, allow_publish_topics_json,
-		        allow_subscribe_topics_json, enabled, created_at
-		   FROM mqtt_users ORDER BY id`)
+func listUsers(db *sql.DB, scope string) ([]MQTTUser, error) {
+	if !validScope(scope) {
+		return nil, fmt.Errorf("ownership scope required")
+	}
+	return readUsers(db, scope, false)
+}
+
+func readUsers(db *sql.DB, scope string, all bool) ([]MQTTUser, error) {
+	query := `SELECT id, scope_id, revision, username, password_hash, allow_publish_topics_json,
+ allow_subscribe_topics_json, enabled, created_at FROM mqtt_users`
+	args := []any{}
+	if !all {
+		query += ` WHERE scope_id = ?`
+		args = append(args, scope)
+	}
+	query += ` ORDER BY id`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +265,7 @@ func listUsers(db *sql.DB) ([]MQTTUser, error) {
 		var u MQTTUser
 		var pubJSON, subJSON string
 		var en int
-		if err := rows.Scan(&u.ID, &u.Username, &u.passwordHash, &pubJSON, &subJSON, &en, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.ScopeID, &u.Revision, &u.Username, &u.passwordHash, &pubJSON, &subJSON, &en, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		u.Enabled = en == 1
@@ -225,68 +280,70 @@ func listUsers(db *sql.DB) ([]MQTTUser, error) {
 	return out, rows.Err()
 }
 
-func addUser(db *sql.DB, username, password string, allowPub, allowSub []string) error {
-	return writeUser(db, username, password, allowPub, allowSub, true)
+// The legacy name is create-only: credentials are never implicitly replaced.
+func addUser(db *sql.DB, scope, username, password string, allowPub, allowSub []string) error {
+	return createUser(db, scope, username, password, allowPub, allowSub)
 }
 
-func createUser(db *sql.DB, username, password string, allowPub, allowSub []string) error {
-	return writeUser(db, username, password, allowPub, allowSub, false)
+func createUser(db *sql.DB, scope, username, password string, allowPub, allowSub []string) error {
+	return writeUser(db, scope, username, password, allowPub, allowSub)
 }
 
-func writeUser(db *sql.DB, username, password string, allowPub, allowSub []string, upsert bool) error {
+func writeUser(db *sql.DB, scope, username, password string, allowPub, allowSub []string) error {
+	if !validScope(scope) {
+		return fmt.Errorf("ownership scope required")
+	}
+	if allowPub == nil || allowSub == nil {
+		return fmt.Errorf("explicit allow_publish and allow_subscribe arrays required; [] denies access")
+	}
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("username required")
 	}
-	if len(username) > 256 {
-		return fmt.Errorf("username must be at most 256 characters")
+	var nameErr error
+	username, nameErr = credentialName(scope, username)
+	if nameErr != nil {
+		return nameErr
 	}
 	if password == "" {
 		return fmt.Errorf("password required")
 	}
-	if len(password) > 4096 {
-		return fmt.Errorf("password must be at most 4096 bytes")
+	if len(password) > 72 {
+		return fmt.Errorf("password must be at most 72 bytes")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	if len(allowPub) == 0 {
-		allowPub = []string{"#"}
-	}
-	if len(allowSub) == 0 {
-		allowSub = []string{"#"}
-	}
-	allowPub, err = normalizeTopicFilters(allowPub)
+	allowPub, err = normalizeScopedFilters(scope, allowPub)
 	if err != nil {
 		return err
 	}
-	allowSub, err = normalizeTopicFilters(allowSub)
+	allowSub, err = normalizeScopedFilters(scope, allowSub)
 	if err != nil {
 		return err
 	}
 	pubJSON, _ := json.Marshal(allowPub)
 	subJSON, _ := json.Marshal(allowSub)
 	query := `INSERT INTO mqtt_users
-		   (username, password_hash, allow_publish_topics_json,
+		   (scope_id, username, password_hash, allow_publish_topics_json,
 		    allow_subscribe_topics_json, enabled)
-		 VALUES (?, ?, ?, ?, 1)`
-	if upsert {
-		query += ` ON CONFLICT(username) DO UPDATE SET
-		   password_hash = excluded.password_hash,
-		   allow_publish_topics_json = excluded.allow_publish_topics_json,
-		   allow_subscribe_topics_json = excluded.allow_subscribe_topics_json,
-		   enabled = 1`
-	}
+		 VALUES (?, ?, ?, ?, ?, 1)`
 	_, err = db.Exec(query,
-		username, string(hash), string(pubJSON), string(subJSON))
-	if err != nil && !upsert && strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return fmt.Errorf("mqtt user %q already exists", username)
+		scope, username, string(hash), string(pubJSON), string(subJSON))
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique") {
+		return fmt.Errorf("username unavailable")
 	}
 	return err
 }
 
-func updateUserACL(db *sql.DB, username string, allowPub, allowSub []string) error {
+func updateUserACL(db *sql.DB, scope, username string, allowPub, allowSub []string) error {
+	var nameErr error
+	username, nameErr = credentialName(scope, strings.TrimSpace(username))
+	if nameErr != nil {
+		return nameErr
+	}
+
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("username required")
@@ -299,7 +356,7 @@ func updateUserACL(db *sql.DB, username string, allowPub, allowSub []string) err
 		args []any
 	)
 	if allowPub != nil {
-		normalized, err := normalizeTopicFilters(allowPub)
+		normalized, err := normalizeScopedFilters(scope, allowPub)
 		if err != nil {
 			return err
 		}
@@ -308,7 +365,7 @@ func updateUserACL(db *sql.DB, username string, allowPub, allowSub []string) err
 		args = append(args, string(encoded))
 	}
 	if allowSub != nil {
-		normalized, err := normalizeTopicFilters(allowSub)
+		normalized, err := normalizeScopedFilters(scope, allowSub)
 		if err != nil {
 			return err
 		}
@@ -316,15 +373,21 @@ func updateUserACL(db *sql.DB, username string, allowPub, allowSub []string) err
 		sets = append(sets, "allow_subscribe_topics_json = ?")
 		args = append(args, string(encoded))
 	}
-	args = append(args, username)
-	result, err := db.Exec(`UPDATE mqtt_users SET `+strings.Join(sets, ", ")+` WHERE username = ?`, args...)
+	args = append(args, scope, username)
+	result, err := db.Exec(`UPDATE mqtt_users SET revision=revision+1, `+strings.Join(sets, ", ")+` WHERE scope_id = ? AND username = ?`, args...)
 	if err != nil {
 		return err
 	}
 	return requireAffectedUser(result, username)
 }
 
-func rotateUserPassword(db *sql.DB, username, password string) error {
+func rotateUserPassword(db *sql.DB, scope, username, password string) error {
+	var nameErr error
+	username, nameErr = credentialName(scope, strings.TrimSpace(username))
+	if nameErr != nil {
+		return nameErr
+	}
+
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("username required")
@@ -332,14 +395,14 @@ func rotateUserPassword(db *sql.DB, username, password string) error {
 	if password == "" {
 		return fmt.Errorf("password required")
 	}
-	if len(password) > 4096 {
-		return fmt.Errorf("password must be at most 4096 bytes")
+	if len(password) > 72 {
+		return fmt.Errorf("password must be at most 72 bytes")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	result, err := db.Exec(`UPDATE mqtt_users SET password_hash = ? WHERE username = ?`, string(hash), username)
+	result, err := db.Exec(`UPDATE mqtt_users SET revision=revision+1, password_hash = ? WHERE scope_id = ? AND username = ?`, string(hash), scope, username)
 	if err != nil {
 		return err
 	}
@@ -370,7 +433,7 @@ func normalizeTopicFilters(filters []string) ([]string, error) {
 }
 
 func (a *App) reloadUserCache() error {
-	users, err := listUsers(a.ctx.AppDB())
+	users, err := readUsers(a.ctx.AppDB(), "", true)
 	if err != nil {
 		return err
 	}
@@ -399,50 +462,36 @@ func (a *App) cachedUser(username string) *MQTTUser {
 	return &copy
 }
 
-func deleteUser(db *sql.DB, username string) error {
-	result, err := db.Exec(`DELETE FROM mqtt_users WHERE username = ?`, username)
+func deleteUser(db *sql.DB, scope, username string) error {
+	var nameErr error
+	username, nameErr = credentialName(scope, strings.TrimSpace(username))
+	if nameErr != nil {
+		return nameErr
+	}
+
+	result, err := db.Exec(`DELETE FROM mqtt_users WHERE scope_id = ? AND username = ?`, scope, username)
 	if err != nil {
 		return err
 	}
 	return requireAffectedUser(result, username)
 }
 
-func setUserEnabled(db *sql.DB, username string, enabled bool) error {
+func setUserEnabled(db *sql.DB, scope, username string, enabled bool) error {
+	var nameErr error
+	username, nameErr = credentialName(scope, strings.TrimSpace(username))
+	if nameErr != nil {
+		return nameErr
+	}
+
 	v := 0
 	if enabled {
 		v = 1
 	}
-	result, err := db.Exec(`UPDATE mqtt_users SET enabled = ? WHERE username = ?`, v, username)
+	result, err := db.Exec(`UPDATE mqtt_users SET revision=revision+1, enabled = ? WHERE scope_id = ? AND username = ?`, v, scope, username)
 	if err != nil {
 		return err
 	}
 	return requireAffectedUser(result, username)
-}
-
-// seedDefaultUserIfNeeded creates an `apteva-default` user with a
-// random password on first mount. We log the password ONCE — the
-// operator copies it from the server log; subsequent restarts reuse
-// the existing row. Avoids the "broker installed but no way to
-// connect" trap when allow_anonymous=false.
-func (a *App) seedDefaultUserIfNeeded() error {
-	users, err := listUsers(a.ctx.AppDB())
-	if err != nil {
-		return err
-	}
-	if len(users) > 0 {
-		return nil
-	}
-	password := randomPassword(24)
-	if err := addUser(a.ctx.AppDB(), "apteva-default", password,
-		[]string{"#"}, []string{"#"}); err != nil {
-		return err
-	}
-	a.ctx.Logger().Info(
-		"seeded default mqtt user — copy password to a client config now; not shown again",
-		"username", "apteva-default",
-		"password", password,
-	)
-	return nil
 }
 
 func randomPassword(n int) string {
@@ -458,10 +507,46 @@ func randomPassword(n int) string {
 // ─── ACL log ────────────────────────────────────────────────────────
 
 func (h *aclHook) logACL(username, action, topic string, allowed bool, reason string) {
-	record := aclRecord{username: username, action: action, topic: topic, allowed: allowed, reason: reason}
+	scope := ""
+	if u := h.app.cachedUser(username); u != nil {
+		scope = u.ScopeID
+	}
+	record := aclRecord{scope: scope, username: username, action: action, topic: topic, allowed: allowed, reason: reason}
 	select {
 	case h.app.aclLogCh <- record:
 	default:
 		h.app.droppedLogs.Add(1)
+		h.app.counters(scope).droppedLogs.Add(1)
+	}
+}
+
+func normalizeScopedFilters(scope string, filters []string) ([]string, error) {
+	normalized, err := normalizeTopicFilters(filters)
+	if err != nil {
+		return nil, err
+	}
+	for _, filter := range normalized {
+		if !scopedFilter(scope, filter) {
+			return nil, fmt.Errorf("ACL filters must be under %s", scopeTopicRoot(scope))
+		}
+	}
+	return normalized, nil
+}
+
+func (a *App) revokeUser(username string) {
+	if a.broker == nil {
+		return
+	}
+	for _, cl := range a.broker.server.Clients.GetAll() {
+		identity := a.clientIdentity(cl)
+		if identity == nil || identity.username != username {
+			continue
+		}
+		// Stop first: writing DISCONNECT to a slow peer must not delay revocation
+		// while holding the credential lock. OnWill rechecks the revision after
+		// this mutation releases that lock, so a revoked will is neutralized.
+		cl.Stop(packets.ErrNotAuthorized)
+		a.broker.server.UnsubscribeClient(cl)
+		cl.ClearInflights()
 	}
 }

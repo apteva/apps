@@ -1,0 +1,50 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/database/engine
+cpu: Apple M1 Pro
+                                          │ round2-alpha10.txt │     round2-alpha10-optimized.txt     │
+                                          │       sec/op       │    sec/op      vs base               │
+AptevaPaths/get-10                                6.233µ ±  1%   6.315µ ±  19%   +1.32% (p=0.037 n=6)
+AptevaPaths/find_indexed_page-10                  302.6µ ±  6%   239.9µ ±  37%        ~ (p=0.065 n=6)
+AptevaPaths/find_unindexed_sorted-10              174.2m ± 36%   106.9m ±  46%  -38.63% (p=0.002 n=6)
+AptevaPaths/count_unindexed-10                    28.05m ±  7%   27.97m ±  24%        ~ (p=0.937 n=6)
+AptevaPaths/agg_4_groups-10                       8.732m ± 26%   9.196m ±   8%        ~ (p=0.699 n=6)
+AptevaPaths/agg_4_groups_int_sum-10               9.567m ±  8%   9.838m ±  24%        ~ (p=0.394 n=6)
+AptevaPaths/agg_1000_groups-10                    12.59m ± 11%   11.65m ±   2%        ~ (p=0.180 n=6)
+AptevaPaths/agg_indexed_tenant-10                 163.3µ ± 11%   144.5µ ±  24%  -11.50% (p=0.041 n=6)
+AptevaPaths/agg_filtered-10                      36.242m ± 20%   9.569m ±   4%  -73.60% (p=0.002 n=6)
+AptevaPaths/agg_high_cardinality_spill-10         224.1m ± 33%   249.8m ±  33%        ~ (p=0.310 n=6)
+AptevaPaths/update_indexed_where-10               7.567m ± 77%   7.605m ± 142%        ~ (p=1.000 n=6)
+geomean                                           5.324m         4.419m         -16.99%
+
+                                          │ round2-alpha10.txt │      round2-alpha10-optimized.txt       │
+                                          │        B/op        │     B/op       vs base                  │
+AptevaPaths/get-10                                5.865Ki ± 0%    5.865Ki ± 0%         ~ (p=1.000 n=6) ¹
+AptevaPaths/find_indexed_page-10                  257.9Ki ± 0%    172.0Ki ± 0%   -33.33% (p=0.002 n=6)
+AptevaPaths/find_unindexed_sorted-10             139.07Mi ± 0%    55.52Mi ± 0%   -60.07% (p=0.002 n=6)
+AptevaPaths/count_unindexed-10                    72.15Ki ± 0%    72.18Ki ± 0%         ~ (p=0.331 n=6)
+AptevaPaths/agg_4_groups-10                       110.7Ki ± 1%    110.3Ki ± 0%    -0.36% (p=0.009 n=6)
+AptevaPaths/agg_4_groups_int_sum-10               102.6Ki ± 0%    102.4Ki ± 0%    -0.24% (p=0.002 n=6)
+AptevaPaths/agg_1000_groups-10                    3.663Mi ± 0%    3.668Mi ± 0%         ~ (p=0.485 n=6)
+AptevaPaths/agg_indexed_tenant-10                 46.54Ki ± 0%   100.65Ki ± 0%  +116.26% (p=0.002 n=6)
+AptevaPaths/agg_filtered-10                       719.9Ki ± 1%   1233.2Ki ± 0%   +71.29% (p=0.002 n=6)
+AptevaPaths/agg_high_cardinality_spill-10         306.1Mi ± 0%    306.0Mi ± 0%         ~ (p=0.589 n=6)
+AptevaPaths/update_indexed_where-10               1.959Mi ± 0%    1.625Mi ± 0%   -17.05% (p=0.002 n=6)
+geomean                                           678.2Ki         665.6Ki         -1.85%
+¹ all samples are equal
+
+                                          │ round2-alpha10.txt │     round2-alpha10-optimized.txt     │
+                                          │     allocs/op      │  allocs/op   vs base                 │
+AptevaPaths/get-10                                  87.00 ± 0%    87.00 ± 0%        ~ (p=1.000 n=6) ¹
+AptevaPaths/find_indexed_page-10                   4.435k ± 0%   3.629k ± 0%  -18.17% (p=0.002 n=6)
+AptevaPaths/find_unindexed_sorted-10               2.202M ± 0%   1.402M ± 0%  -36.33% (p=0.002 n=6)
+AptevaPaths/count_unindexed-10                      116.0 ± 0%    116.0 ± 0%        ~ (p=1.000 n=6) ¹
+AptevaPaths/agg_4_groups-10                         505.0 ± 0%    493.0 ± 0%   -2.38% (p=0.002 n=6)
+AptevaPaths/agg_4_groups_int_sum-10                 416.0 ± 0%    404.5 ± 0%   -2.76% (p=0.002 n=6)
+AptevaPaths/agg_1000_groups-10                     28.26k ± 0%   28.25k ± 0%   -0.04% (p=0.002 n=6)
+AptevaPaths/agg_indexed_tenant-10                   539.0 ± 0%    582.0 ± 0%   +7.98% (p=0.002 n=6)
+AptevaPaths/agg_filtered-10                        10.06k ± 0%   10.24k ± 0%   +1.72% (p=0.002 n=6)
+AptevaPaths/agg_high_cardinality_spill-10          1.634M ± 0%   1.634M ± 0%        ~ (p=1.000 n=6)
+AptevaPaths/update_indexed_where-10                23.64k ± 0%   20.45k ± 0%  -13.49% (p=0.002 n=6)
+geomean                                            5.437k        5.076k        -6.64%
+¹ all samples are equal

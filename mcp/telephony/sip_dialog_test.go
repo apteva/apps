@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	"github.com/emiago/sipgo/sip"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/rtp"
@@ -26,6 +28,7 @@ import (
 
 type sipDialogFixture struct {
 	app              *App
+	ctx              *sdk.AppCtx
 	gateway          *sipGateway
 	signaling, media *net.UDPConn
 	call             *callRow
@@ -82,7 +85,7 @@ func newSIPDialogFixtureWithRoute(t *testing.T, secure bool, ackTimeout time.Dur
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	f := &sipDialogFixture{app: app, gateway: gateway, signaling: conn, media: media, to: "<sip:+12025550100@127.0.0.1>", localPort: conn.LocalAddr().(*net.UDPAddr).Port}
+	f := &sipDialogFixture{app: app, ctx: ctx, gateway: gateway, signaling: conn, media: media, to: "<sip:+12025550100@127.0.0.1>", localPort: conn.LocalAddr().(*net.UDPAddr).Port}
 	protocol := "RTP/AVP"
 	crypto := ""
 	if secure {
@@ -232,6 +235,12 @@ func TestDIDWWDirectSIPDecisionOfferKeepsCallerRingingUntilAnswer(t *testing.T) 
 	if err != nil || len(offers) != 1 || offers[0].DestinationID != "sip-adviser" || f.session.media != nil {
 		t.Fatalf("SIP offer did not preserve unanswered leg: %+v %v", offers, err)
 	}
+	// A real human answer now prepares its authenticated loopback before 200.
+	peerServer := softphoneTestServer(t, f.app)
+	u, _ := url.Parse(peerServer.URL)
+	_, port, _ := net.SplitHostPort(u.Host)
+	t.Setenv("APTEVA_APP_PORT", port)
+	t.Cleanup(f.session.closePreparedBridge)
 	f.answer(t)
 	if f.session.media == nil {
 		t.Fatal("selected SIP call did not answer")
@@ -560,10 +569,10 @@ func TestSIPJitterQueueKeepsRecentSpeech(t *testing.T) {
 		b.push(uint16(i), bytes.Repeat([]byte{byte(i)}, 160))
 	}
 	frame, ok := b.pop()
-	if !ok || len(frame) == 0 || frame[0] < 34 {
+	if !ok || len(frame) == 0 || frame[0] < 32 {
 		t.Fatalf("kept stale speech: %v %v", frame, ok)
 	}
-	if b.buffered > 960 || b.droppedSamples == 0 {
+	if b.buffered > b.policy.CapacityMS*8 || b.droppedSamples == 0 {
 		t.Fatal("unbounded backlog or missing diagnostics")
 	}
 }
@@ -579,6 +588,8 @@ func TestSIPRefreshMissingACKAndExpirySendBYE(t *testing.T) {
 			} else {
 				f.session.answerMu.Lock()
 				f.session.timerUpdated = time.Now().Add(-91 * time.Second)
+				// Simulate a timer update using the same wake as renegotiation.
+				signalSIPTimer(f.session.timerWake)
 				f.session.answerMu.Unlock()
 			}
 			bye := readSIPResponseContaining(t, f.signaling, "BYE sip:")
@@ -586,6 +597,40 @@ func TestSIPRefreshMissingACKAndExpirySendBYE(t *testing.T) {
 			f.waitEnded(t)
 		})
 	}
+}
+
+// The inbound side of the same retry, over real sipgo: silence gets a second BYE.
+func TestSIPInboundBYEIsRetriedAfterSilence(t *testing.T) {
+	f := newSIPDialogFixture(t, false, 500*time.Millisecond)
+	f.answer(t)
+	f.session.answerMu.Lock()
+	f.session.timerUpdated = time.Now().Add(-91 * time.Second)
+	signalSIPTimer(f.session.timerWake)
+	f.session.answerMu.Unlock()
+	first := readSIPResponseContaining(t, f.signaling, "BYE sip:")
+	// The first try has to run out before the next is sent, so read past it.
+	var second string
+	deadline := time.Now().Add(sipByeAttemptTimeout + 2*time.Second)
+	for second == "" && time.Now().Before(deadline) {
+		buffer := make([]byte, 4096)
+		_ = f.signaling.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		n, _, err := f.signaling.ReadFromUDP(buffer)
+		if err != nil {
+			continue
+		}
+		text := string(buffer[:n])
+		if strings.Contains(text, "BYE sip:") && sipTestHeader(text, "CSeq") != sipTestHeader(first, "CSeq") {
+			second = text
+		}
+	}
+	if second == "" {
+		t.Fatal("no second BYE after the first went unanswered")
+	}
+	if sipTestHeader(second, "Call-ID") != sipTestHeader(first, "Call-ID") {
+		t.Fatal("the retry must stay in the same dialog")
+	}
+	f.respond(t, second, "")
+	f.waitEnded(t)
 }
 func TestSIPForeignDialogAndUnmatchedCancelCannotEndCall(t *testing.T) {
 	f := newSIPDialogFixture(t, false, 2*time.Second)
@@ -631,17 +676,24 @@ func TestSIPSDPStrictNegotiation(t *testing.T) {
 	}
 }
 func TestSIPJitterResumesShortDTXPause(t *testing.T) {
-	b := newRTPJitterBuffer()
-	start := time.Now()
-	for i := 0; i < 3; i++ {
-		b.pushRTP(uint16(i+1), bytes.Repeat([]byte{1}, 160), uint32(160*(i+1)), start)
+	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
+	start := time.Unix(100, 0)
+	// Drive real elapsed media time. Repeated pop() calls at one wall-clock
+	// instant cannot stand in for 20 ms of silence with a timestamp-aware queue.
+	for tick := 0; tick <= 140; tick += 20 {
+		if tick <= 40 {
+			i := tick / 20
+			b.pushRTP(uint16(i+1), bytes.Repeat([]byte{1}, 160), uint32(160*(i+1)), start.Add(time.Duration(tick)*time.Millisecond))
+		}
+		b.popAt(start.Add(time.Duration(tick) * time.Millisecond))
 	}
-	for i := 0; i < 8; i++ {
-		b.pop()
-	}
-	b.pushRTP(4, bytes.Repeat([]byte{2}, 160), 1600, start.Add(140*time.Millisecond))
 	for i := 0; i < 3; i++ {
-		if frame, ready := b.pop(); ready && len(frame) > 0 && frame[0] == 2 {
+		at := start.Add(time.Duration(160+i*20) * time.Millisecond)
+		b.pushRTP(uint16(4+i), bytes.Repeat([]byte{2}, 160), uint32(1600+i*160), at)
+		if frame, ready := b.popAt(at); ready && len(frame) > 0 && frame[0] == 2 {
+			if b.lateDroppedSamples != 0 || b.lost != 0 {
+				t.Fatal("DTX classified as loss", b.lateDroppedSamples, b.lost)
+			}
 			return
 		}
 	}

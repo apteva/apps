@@ -111,6 +111,10 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	if !g.cfg.sourceAllowed(req.Source()) || req.CSeq() == nil {
 		return
 	}
+	if outbound := g.outboundSessionByProviderCall(sipCallID(req)); outbound != nil {
+		outbound.handleACK(req)
+		return
+	}
 	dialog, err := g.dialogs.MatchDialogRequest(req)
 	if err != nil {
 		return
@@ -121,9 +125,10 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	s.answerMu.Lock()
 	if s.refreshACK != nil && req.CSeq().SeqNo == s.refreshCSeq {
+		s.diagnostics.event("sip_refresh_ack", "carrier", "", 0)
 		ack := s.refreshACK
 		if len(req.Body()) > 0 {
-			offer, err := parseSIPMediaOffer(req.Body(), g.cfg)
+			offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
 			if err != nil || !sameSIPMedia(offer, s.offer) {
 				s.answerMu.Unlock()
 				g.runTask(func() { s.finish("local_error", errors.New("unsupported refresh ACK media")) })
@@ -140,16 +145,34 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	initial := req.CSeq().SeqNo == s.dialog.InviteRequest.CSeq().SeqNo
 	s.answerMu.Unlock()
 	if initial && dialog.ReadAck(req, tx) == nil {
-		s.ackOnce.Do(func() { close(s.initialACK) })
+		s.diagnostics.event("sip_ack", "carrier", "", 0)
+		s.ackOnce.Do(func() {
+			if !s.ended.Load() {
+				_, _ = g.app.db().db.Exec(`UPDATE calls SET carrier_answered_at=CASE WHEN carrier_answered_at='' THEN ? ELSE carrier_answered_at END WHERE id=? AND status NOT IN ('completed','failed','canceled','no-answer','busy')`, ringTime(time.Now()), s.call.ID)
+			}
+			close(s.initialACK)
+		})
 	}
 }
+
+// a is the new offer; its c=0.0.0.0 hold keeps the established address.
 func sameSIPMedia(a, b sipMediaOffer) bool {
-	return a.RemoteAddress == b.RemoteAddress && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
+	return (a.RemoteAddress == b.RemoteAddress || a.RemoteAddress.IsUnspecified()) && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.DTMFPayloadType == b.DTMFPayloadType && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
 }
 func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
-	reply := func(status int, reason string) { _ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil)) }
+	var observed *sipLiveDiagnostics
+	reply := func(status int, reason string) {
+		if observed != nil {
+			observed.event("sip_refresh_result", "carrier", reason, status)
+		}
+		_ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil))
+	}
 	if !g.cfg.sourceAllowed(req.Source()) {
 		reply(403, "Forbidden")
+		return
+	}
+	if outbound := g.outboundSessionByProviderCall(sipCallID(req)); outbound != nil {
+		outbound.handleRefresh(req, tx)
 		return
 	}
 	dialog, err := g.dialogs.MatchDialogRequest(req)
@@ -158,11 +181,13 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		reply(481, "Call Does Not Exist")
 		return
 	}
+	observed = s.diagnostics
 	if dialog.LoadState() != sip.DialogStateConfirmed || !s.refreshMu.TryLock() {
 		reply(491, "Request Pending")
 		return
 	}
 	defer s.refreshMu.Unlock()
+	s.diagnostics.event("sip_refresh_attempt", "carrier", string(req.Method), 0)
 	if req.CSeq() == nil || req.CSeq().SeqNo <= s.remoteSeq.Load() {
 		reply(500, "Invalid CSeq")
 		return
@@ -183,20 +208,26 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		if status == 422 {
 			res.AppendHeader(sip.NewHeader("Min-SE", "90"))
 		}
+		s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), status)
 		_ = tx.Respond(res)
 		return
 	}
+	direction := "sendrecv"
+	previousSDP := answer
 	if len(req.Body()) > 0 {
-		offer, err := parseSIPMediaOffer(req.Body(), g.cfg)
+		offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
 		if err != nil || !sameSIPMedia(offer, s.offer) {
 			reply(488, "Media Change Not Supported")
 			return
 		}
+		direction = offer.Direction
 		// Echo the current offer's crypto tag even when keys/media are unchanged.
 		if offer.Secure {
-			answer = bytes.Replace(answer, []byte("a=crypto:"+s.offer.CryptoTag+" "), []byte("a=crypto:"+offer.CryptoTag+" "), 1)
+			answer = sipSDPWithCryptoTag(answer, offer.CryptoTag)
 		}
 	}
+	// Same o= session; its version increments only when the SDP changed.
+	answer = nextSIPLocalSDP(previousSDP, sipSDPWithDirection(answer, sipAnswerDirection(direction)))
 	var response *sip.Response
 	if req.Method == sip.INVITE || len(req.Body()) > 0 {
 		response = sip.NewSDPResponseFromRequest(req, answer)
@@ -213,25 +244,41 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		s.answerMu.Unlock()
 		defer func() { s.answerMu.Lock(); s.refreshACK = nil; s.answerMu.Unlock() }()
 		if err = s.respondRefresh(tx, response, ack); err != nil {
+			s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), 0)
 			s.finish("local_error", err)
 			return
 		}
 	} else if err = tx.Respond(response); err != nil {
+		s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), 0)
 		return
 	}
+	s.diagnostics.event("sip_refresh_result", "carrier", "", 200)
 	s.answerMu.Lock()
+	if s.media != nil {
+		s.media.remoteMode.Store(sipRemoteMediaMode(direction))
+	}
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	if req.Method == sip.INVITE || len(req.Body()) > 0 {
+		s.localSDP = answer
+	}
+	signalSIPTimer(s.timerWake)
 	if contact := req.Contact(); contact != nil {
 		s.remoteTarget = contact.Address
 	}
 	s.answerMu.Unlock()
 }
 func (s *sipSession) respondRefresh(tx sip.ServerTransaction, res *sip.Response, ack <-chan struct{}) error {
+	return respondSIPRefresh(s.ctx, s.gateway.ackTimeout, tx, res, ack)
+}
+func respondSIPRefresh(ctx context.Context, timeout time.Duration, tx sip.ServerTransaction, res *sip.Response, ack <-chan struct{}) error {
 	if err := tx.Respond(res); err != nil {
 		return err
 	}
-	deadline := time.NewTimer(s.gateway.ackTimeout)
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	retry := time.NewTimer(sip.T1)
 	defer retry.Stop()
@@ -240,8 +287,8 @@ func (s *sipSession) respondRefresh(tx sip.ServerTransaction, res *sip.Response,
 		select {
 		case <-ack:
 			return nil
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-deadline.C:
 			return errors.New("SIP refresh ACK timed out")
 		case <-retry.C:
@@ -269,31 +316,61 @@ func (s *sipSession) watchInitialACK() {
 	}
 }
 func (s *sipSession) runSessionTimer() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timerClock := time.NewTimer(time.Hour)
+	timerClock.Stop()
+	defer timerClock.Stop()
+	retryAt := time.Time{}
 	for {
+		s.answerMu.Lock()
+		timer, updated := s.timer, s.timerUpdated
+		s.answerMu.Unlock()
+		var due <-chan time.Time
+		if timer.interval > 0 {
+			deadline := updated.Add(timer.interval)
+			if timer.local {
+				deadline = updated.Add(timer.interval / 2)
+				if retryAt.After(deadline) {
+					deadline = retryAt
+				}
+				if expiry := updated.Add(timer.interval); expiry.Before(deadline) {
+					deadline = expiry
+				}
+			}
+			if !timerClock.Stop() {
+				select {
+				case <-timerClock.C:
+				default:
+				}
+			}
+			timerClock.Reset(max(time.Until(deadline), time.Microsecond))
+			due = timerClock.C
+		}
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			s.answerMu.Lock()
-			timer, updated := s.timer, s.timerUpdated
-			s.answerMu.Unlock()
-			if timer.interval == 0 {
-				continue
-			}
-			elapsed := time.Since(updated)
-			if elapsed >= timer.interval {
-				s.finish("local_error", errors.New("SIP session refresh expired"))
-				return
-			}
-			if timer.local && elapsed >= timer.interval/2 && s.refreshMu.TryLock() {
+		case <-s.timerWake:
+			retryAt = time.Time{}
+			continue
+		case <-due:
+		}
+		// Recheck after waking: a remote refresh may have extended this deadline.
+		s.answerMu.Lock()
+		timer, updated = s.timer, s.timerUpdated
+		s.answerMu.Unlock()
+		if timer.interval == 0 {
+			continue
+		}
+		elapsed := time.Since(updated)
+		if elapsed >= timer.interval {
+			s.finish("local_error", errors.New("SIP session refresh expired"))
+			return
+		}
+		if timer.local && elapsed >= timer.interval/2 {
+			retryAt = time.Now().Add(time.Second)
+			if s.refreshMu.TryLock() {
 				err := s.sendSessionRefresh(timer)
 				s.refreshMu.Unlock()
-				if err != nil {
-					if errors.Is(err, errSIPRefreshPending) {
-						continue
-					}
+				if err != nil && !errors.Is(err, errSIPRefreshPending) {
 					s.finish("local_error", err)
 					return
 				}
@@ -304,7 +381,16 @@ func (s *sipSession) runSessionTimer() {
 
 var errSIPRefreshPending = errors.New("SIP refresh collision")
 
-func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
+func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) (result error) {
+	status := 0
+	s.diagnostics.event("sip_refresh_attempt", "local", "INVITE", 0)
+	defer func() {
+		detail := ""
+		if result != nil {
+			detail = transportEvidenceError(result)
+		}
+		s.diagnostics.event("sip_refresh_result", "local", detail, status)
+	}()
 	s.signalMu.Lock()
 	defer s.signalMu.Unlock()
 	if s.ended.Load() {
@@ -333,6 +419,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
 	if err != nil {
 		return err
 	}
+	status = response.StatusCode
 	if response.StatusCode == 491 {
 		return errSIPRefreshPending
 	}
@@ -344,7 +431,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
 	if err = s.dialog.WriteRequest(ack); err != nil {
 		return err
 	}
-	offer, err := parseSIPMediaOffer(response.Body(), s.gateway.cfg)
+	offer, err := parseSIPMediaOfferOptions(response.Body(), s.gateway.cfg, []string{s.offer.Codec}, true)
 	if err != nil || !sameSIPMedia(offer, s.offer) {
 		return errors.New("SIP refresh response changed unsupported media")
 	}
@@ -362,6 +449,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
 	s.answerMu.Lock()
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	signalSIPTimer(s.timerWake)
 	if c := response.Contact(); c != nil {
 		s.remoteTarget = c.Address
 	}
@@ -377,22 +465,45 @@ func (g *sipGateway) startWork() bool {
 	if g.stopping {
 		return false
 	}
+	if g.app != nil {
+		if _, err := g.app.runtimeBegin(false); err != nil {
+			return false
+		}
+	}
 	g.work.Add(1)
 	return true
+}
+func (g *sipGateway) finishWork() {
+	defer g.work.Done()
+	if g.app != nil {
+		g.app.runtimeEnd()
+	}
 }
 func (g *sipGateway) runTask(fn func()) bool {
 	if !g.startWork() {
 		return false
 	}
-	go func() { defer g.work.Done(); fn() }()
+	go func() { defer g.finishWork(); fn() }()
 	return true
 }
 func (g *sipGateway) trackHandler(fn func(*sip.Request, sip.ServerTransaction)) func(*sip.Request, sip.ServerTransaction) {
 	return func(req *sip.Request, tx sip.ServerTransaction) {
 		if !g.startWork() {
+			// A bound standby listener must reject promptly. Silently ignoring an
+			// INVITE over TCP/TLS can leave the carrier waiting for its SIP timeout.
+			if tx != nil && req.Method != sip.ACK {
+				_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusServiceUnavailable, "Telephony Unavailable", nil))
+			}
 			return
 		}
-		defer g.work.Done()
+		defer g.finishWork()
 		fn(req, tx)
+	}
+}
+
+func signalSIPTimer(wake chan struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
 	}
 }

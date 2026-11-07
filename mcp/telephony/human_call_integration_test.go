@@ -27,6 +27,8 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"net/http/httputil"
+	"sync/atomic"
 )
 
 const (
@@ -52,6 +54,21 @@ type tier2PlatformGateway struct {
 	publicKeyB64 string
 	carrierCalls chan tier2CarrierCall
 	events       chan tier2AppEvent
+	// Auth as the platform serves it: identity providers must be on the gateway.
+	auth atomic.Pointer[httputil.ReverseProxy]
+}
+
+const tier2AuthPath = "/api/apps/auth/_install/11"
+
+func (g *tier2PlatformGateway) serveAuth(t *testing.T, sidecar string) string {
+	t.Helper()
+	target, err := url.Parse(sidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	g.auth.Store(proxy)
+	return g.server.URL + tier2AuthPath
 }
 
 func newTier2PlatformGateway(t *testing.T) *tier2PlatformGateway {
@@ -70,6 +87,11 @@ func newTier2PlatformGateway(t *testing.T) *tier2PlatformGateway {
 }
 
 func (g *tier2PlatformGateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if proxy := g.auth.Load(); proxy != nil && strings.HasPrefix(r.URL.Path, tier2AuthPath+"/") {
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, tier2AuthPath)
+		proxy.ServeHTTP(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
@@ -547,13 +569,24 @@ func TestTier2HumanBrowserCallEndToEnd(t *testing.T) {
 	var detail struct {
 		Calls []map[string]any `json:"calls"`
 	}
-	status, body := tier2Request(t, sc, http.MethodGet, "/calls?project_id="+tier2Project+"&call_id="+callID, nil, &detail, tier2Headers())
-	if status != http.StatusOK || len(detail.Calls) != 1 {
-		t.Fatalf("call detail=%d %s", status, body)
-	}
-	completed = detail.Calls[0]
-	if diagnostics, _ := completed["browser_audio_diagnostics"].(map[string]any); diagnostics["auto_gain_control"] != false || diagnostics["rtt_ms"] != float64(42) {
-		t.Fatalf("persisted browser diagnostics=%v", completed["browser_audio_diagnostics"])
+	// Telemetry is coalesced by the socket watcher, independently of HTTP
+	// and media. Fast list reads can finish this call before its first flush.
+	// Wait for the durable detail, not for an arbitrary sleep or a list cache.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := tier2Request(t, sc, http.MethodGet, "/calls?project_id="+tier2Project+"&call_id="+callID, nil, &detail, tier2Headers())
+		if status != http.StatusOK || len(detail.Calls) != 1 {
+			t.Fatalf("call detail=%d %s", status, body)
+		}
+		completed = detail.Calls[0]
+		diagnostics, _ := completed["browser_audio_diagnostics"].(map[string]any)
+		if diagnostics["auto_gain_control"] == false && diagnostics["rtt_ms"] == float64(42) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("persisted browser diagnostics=%v", diagnostics)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	events := tier2MCPAs(t, sc, "telephony_call_events_list", map[string]any{"call_id": callID})
 	if !strings.Contains(fmt.Sprint(events), "completed") || !strings.Contains(fmt.Sprint(events), "answered") {

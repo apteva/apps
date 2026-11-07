@@ -1,0 +1,114 @@
+{
+  "date": "2026-10-28",
+  "scope": "Server-to-browser WebRTC outgoing partial-frame fix, validated locally; release checks recorded separately in release-0.12.61.json",
+  "baseline": "telephony/v0.12.60 sendRTCAudio tick-selection logic",
+  "change": "Expire stale partials as before; flush a live partial only when no full frame was selected for the tick. Never enqueue padded extra audio behind a selected full frame.",
+  "unchanged": [
+    "six-frame/120 ms queue bound",
+    "source age and frame deadlines",
+    "20 ms pacing",
+    "codec/resampler configuration"
+  ],
+  "replay": {
+    "duration_seconds": 8,
+    "input_samples_per_trace": 192000,
+    "sample_rate_hz": 24000,
+    "chunks": 400,
+    "chunk_variation_samples": [
+      -1,
+      0,
+      1
+    ],
+    "arrival_variation_ms": [
+      -1,
+      0,
+      1
+    ],
+    "clock": "deterministic virtual clock; actual production framer, queue and fixed selector",
+    "traces": [
+      {
+        "seed": 1,
+        "baseline_overflow_ms": 380,
+        "fixed_overflow_ms": 0,
+        "baseline_padding_ms": 460,
+        "fixed_padding_ms": 20,
+        "baseline_max_queue_ms": 120,
+        "fixed_max_queue_ms": 40,
+        "fixed_real_pcm_bit_identical_and_ordered": true
+      },
+      {
+        "seed": 2,
+        "baseline_overflow_ms": 400,
+        "fixed_overflow_ms": 0,
+        "baseline_padding_ms": 500,
+        "fixed_padding_ms": 20,
+        "baseline_max_queue_ms": 120,
+        "fixed_max_queue_ms": 40,
+        "fixed_real_pcm_bit_identical_and_ordered": true
+      },
+      {
+        "seed": 3,
+        "baseline_overflow_ms": 320,
+        "fixed_overflow_ms": 0,
+        "baseline_padding_ms": 420,
+        "fixed_padding_ms": 20,
+        "baseline_max_queue_ms": 120,
+        "fixed_max_queue_ms": 40,
+        "fixed_real_pcm_bit_identical_and_ordered": true
+      },
+      {
+        "seed": 4,
+        "baseline_overflow_ms": 200,
+        "fixed_overflow_ms": 0,
+        "baseline_padding_ms": 260,
+        "fixed_padding_ms": 0,
+        "baseline_max_queue_ms": 120,
+        "fixed_max_queue_ms": 60,
+        "fixed_real_pcm_bit_identical_and_ordered": true
+      },
+      {
+        "seed": 5,
+        "baseline_overflow_ms": 380,
+        "fixed_overflow_ms": 0,
+        "baseline_padding_ms": 460,
+        "fixed_padding_ms": 20,
+        "baseline_max_queue_ms": 120,
+        "fixed_max_queue_ms": 40,
+        "fixed_real_pcm_bit_identical_and_ordered": true
+      }
+    ]
+  },
+  "verification": {
+    "focused_tests": {
+      "result": "passed",
+      "seconds": 1.23
+    },
+    "focused_race_tests": {
+      "result": "passed",
+      "seconds": 7.384,
+      "command": "GOWORK=off go test -race -count=1 -timeout 3m -run '^Test(RTCOutgoingTail|RTCPlaybackTick|RTCTail|RTCFrame|RTCOutputQueue)' -v ."
+    },
+    "go_vet": {
+      "result": "passed",
+      "command": "GOWORK=off go vet ./..."
+    },
+    "coverage": [
+      "five deterministic variation traces",
+      "bit-identical real PCM preservation in fixed selector",
+      "natural speech fixture through 24 and 48 kHz encoder paths, resampling, Opus encoding/decoding, serialized RTP and timestamp/sequence wrap",
+      "existing local Pion WebRTC test delivering a final partial without another carrier chunk",
+      "partial expiry with a fresh full frame selected",
+      "final tail preserved once with original deadline",
+      "expired full and partial frames after 400 ms scheduling pause",
+      "closed queue remains closed",
+      "media direction retained in partial expiry event"
+    ],
+    "full_app_suite_rerun": false
+  },
+  "limits": [
+    "Confirms the framing defect, not the exact packet-by-packet cause of the reported production drops.",
+    "Opus speech checks verify delivery/decodability and an energy sanity check, not subjective listening quality or MOS.",
+    "No new real phone call or deployment performed.",
+    "Pause checks cover framer/queue deadlines, not every downstream resampler remainder timing condition."
+  ]
+}

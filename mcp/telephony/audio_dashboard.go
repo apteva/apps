@@ -15,18 +15,20 @@ import (
 )
 
 // Values describe observation boundaries, not a diagnosis of the network or carrier.
-var audioDashboardIssues = map[string]bool{"playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
-var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true}
+var audioDashboardIssues = map[string]bool{"concealed_audio": true, "playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true, "carrier_error": true, "processing_error": true}
+var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true, "internal_processing": true}
 
 type audioDashboardSummary struct {
-	BrowserState string              `json:"browser_state,omitempty"`
-	ContextState string              `json:"context_state,omitempty"`
-	ObservedAt   string              `json:"observed_at"`
-	Telemetry    bool                `json:"telemetry"`
-	Issues       []string            `json:"issues"`
-	Stages       []string            `json:"stages"`
-	Health       audioHealthSnapshot `json:"health"`
-	Metrics      map[string]float64  `json:"metrics"`
+	CarrierTransport string                      `json:"carrier_transport,omitempty"`
+	Boundaries       map[string]audioHealthStage `json:"boundaries,omitempty"`
+	BrowserState     string                      `json:"browser_state,omitempty"`
+	ContextState     string                      `json:"context_state,omitempty"`
+	ObservedAt       string                      `json:"observed_at"`
+	Telemetry        bool                        `json:"telemetry"`
+	Issues           []string                    `json:"issues"`
+	Stages           []string                    `json:"stages"`
+	Health           audioHealthSnapshot         `json:"health"`
+	Metrics          map[string]float64          `json:"metrics"`
 }
 type audioDashboardCall struct {
 	ID           string `json:"call_id"`
@@ -56,6 +58,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	_ = json.Unmarshal([]byte(row.CarrierAudioDiagnostics), &c)
 	s := audioDashboardSummary{Issues: []string{}, Stages: []string{}, Metrics: map[string]float64{}, Health: audioHealthSnapshot{Stages: map[string]audioHealthStage{}}}
 	observed := max(audioDashboardTime(b.ReceivedAt), audioDashboardTime(c.UpdatedAt))
+	s.Boundaries = audioBoundarySummary(b)
 	s.BrowserState = b.ConnectionState
 	s.ContextState = b.AudioContextState
 	s.Telemetry = b.ReceivedAt != "" || c.UpdatedAt != "" || b.Server != nil
@@ -70,9 +73,17 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		}
 	}
 	m := s.Metrics
+	if b.ReceivedAt != "" {
+		m["browser_observed"] = 1
+	}
+	if c.UpdatedAt != "" {
+		m["carrier_observed"] = 1
+	}
 	m["playback_dropped_ms"] = float64(b.PlaybackDroppedMS)
-	m["playback_underruns"] = float64(b.PlaybackUnderruns)
-	m["playback_underrun_ms"] = b.PlaybackUnderrunMS
+	if b.MediaTransport != "webrtc" {
+		m["playback_underruns"] = float64(b.PlaybackUnderruns)
+		m["playback_underrun_ms"] = b.PlaybackUnderrunMS
+	}
 	m["browser_queue_ms"] = float64(b.PlaybackQueueMS)
 	m["browser_max_queue_ms"] = float64(b.PlaybackMaxQueueMS)
 	m["playback_sequence_gaps"] = float64(b.PlaybackSequenceGaps)
@@ -80,10 +91,16 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	if b.WebRTC != nil {
 		m["webrtc_packets_lost"] = b.WebRTC.PacketsLost
 		m["webrtc_packets_discarded"] = b.WebRTC.PacketsDiscarded
-		m["webrtc_concealed_ms"] = b.WebRTC.ConcealedMS
+		if b.WebRTC.ConcealedMS != nil {
+			m["webrtc_concealed_ms"] = *b.WebRTC.ConcealedMS
+			add("concealed_audio", "telephony_to_browser", *b.WebRTC.ConcealedMS > 0)
+		}
 		m["webrtc_jitter_buffer_ms"] = b.WebRTC.JitterBufferMS
 		add("dropped_audio", "telephony_to_browser", b.WebRTC.PacketsDiscarded > 0)
-		add("audio_degraded", "telephony_to_browser", b.WebRTC.JitterBufferMS > 320)
+		if b.WebRTC.JitterBufferIntervalMS != nil {
+			m["webrtc_jitter_buffer_interval_ms"] = *b.WebRTC.JitterBufferIntervalMS
+			add("audio_degraded", "telephony_to_browser", *b.WebRTC.JitterBufferIntervalMS > 320 && browserReportFresh(b.WebRTC.JitterBufferObservedAt, time.Now()))
+		}
 	}
 	add("playback_underrun", "telephony_to_browser", b.PlaybackUnderrunMS > 0)
 	if b.RTTMS != nil {
@@ -94,6 +111,10 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	m["carrier_send_dropped_ms"] = float64(c.DroppedStaleMS)
 	m["carrier_send_max_queue_ms"] = float64(c.MaxQueuedMS)
 	m["carrier_sequence_gaps"] = float64(c.CarrierSequenceGaps)
+	if c.AgentAudio != nil {
+		m["agent_reply_core_wait_ms"] = c.AgentAudio.ReplyTiming.MaxCoreWaitMS
+		m["agent_reply_dispatch_ms"] = c.AgentAudio.ReplyTiming.MaxDispatchMS
+	}
 	add("dropped_audio", "telephony_to_browser", b.PlaybackDroppedMS > 0)
 	add("sequence_gaps", "telephony_to_browser", b.PlaybackSequenceGaps > 0)
 	add("sequence_gaps", "browser_to_telephony", b.CaptureSequenceGaps > 0)
@@ -122,11 +143,33 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		add("dropped_audio", "telephony_to_browser", tr.PlaybackTransportDroppedMS+tr.PlaybackSourceDroppedMS > 0)
 	}
 	if b.Server != nil {
+		m["browser_ingress_max_gap_ms"] = b.Server.WebRTC.Ingress.MaxArrivalGapMS
+		m["browser_ingress_max_processing_wait_ms"] = b.Server.WebRTC.Ingress.MaxQueueWaitMS
+		m["browser_ingress_observations_skipped"] = float64(b.Server.WebRTC.Ingress.Skipped)
 		v := b.Server
+		if v.Startup.PhaseSchema == 1 {
+			m["microphone_initial_dropped_ms"] = v.Startup.InitialDroppedMS
+			m["microphone_reconnect_dropped_ms"] = v.Startup.ReconnectDroppedMS
+			m["microphone_ending_dropped_ms"] = v.Startup.EndingDroppedMS
+			m["microphone_hold_dropped_ms"] = v.Startup.HoldDroppedMS
+		}
 		m["server_webrtc_outbound_dropped_ms"] = float64(v.WebRTC.OutboundDroppedMS)
+		m["server_webrtc_ingress_discarded_ms"] = float64(v.WebRTC.IngressDiscardedMS)
+		m["server_webrtc_capture_max_queue_ms"] = float64(v.WebRTC.CaptureMaxQueueMS)
+		if v.WebRTC.Ingress.KernelTimestampPackets > 0 {
+			m["browser_ingress_kernel_socket_wait_ms"] = v.WebRTC.Ingress.MaxSocketWaitMS
+			m["browser_ingress_pion_wait_ms"] = v.WebRTC.Ingress.MaxPionWaitMS
+			if v.WebRTC.Ingress.SocketDropsAvailable {
+				m["browser_ingress_socket_drops"] = float64(v.WebRTC.Ingress.SocketDrops)
+			}
+		}
+		add("dropped_audio", "browser_to_telephony", v.WebRTC.IngressDiscardedMS > 0)
 		m["server_webrtc_pacing_skipped_ms"] = float64(v.WebRTC.PacingSkippedMS)
+		m["server_webrtc_pacing_catchup_frames"] = float64(v.WebRTC.PacingCatchupFrames)
 		add("audio_degraded", "telephony_to_browser", v.WebRTC.PacingSkippedMS > 0)
 		m["server_webrtc_ingress_rejected_packets"] = float64(v.WebRTC.IngressRejectedPackets + v.WebRTC.IngressQueueDrops + v.WebRTC.DecodeErrors)
+		m["server_webrtc_ingress_concealed_ms"] = float64(v.WebRTC.IngressConcealedMS)
+		add("concealed_audio", "browser_to_telephony", v.WebRTC.IngressConcealedMS > 0)
 		add("dropped_audio", "telephony_to_browser", v.WebRTC.OutboundDroppedMS > 0)
 		add("dropped_audio", "browser_to_telephony", m["server_webrtc_ingress_rejected_packets"] > 0)
 		observed = max(observed, audioDashboardTime(v.UpdatedAt))
@@ -172,11 +215,20 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["server_browser_max_queue_ms"] = float64(v.ToBrowser.MaxQueuedMS)
 		m["browser_max_write_ms"] = float64(v.ToBrowser.MaxWriteMS)
 		m["browser_max_queue_delay_ms"] = float64(v.ToBrowser.MaxResidenceMS)
-		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes) / 48
+		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes+v.ToBrowser.WriteTimeoutBytes) / 48
+		for _, e := range v.CaptureDropEvents {
+			if e.BrowserDropTimestamp != "" {
+				m["capture_correlated_missing_ms"] += float64(e.DurationMS)
+			}
+		}
+		m["browser_socket_write_timeouts"] = float64(v.ToBrowser.Transport.WriteTimeouts)
+		m["browser_socket_write_timeout_dropped_ms"] = float64(v.ToBrowser.WriteTimeoutBytes) / 48
 		m["server_capture_dropped_ms"] = float64(v.CaptureStaleBytes) / 48
 		m["capture_muted_frames"] = max(m["capture_muted_frames"], float64(v.CaptureMutedFrames))
 		m["capture_muted_ms"] = max(m["capture_muted_ms"], float64(v.CaptureMutedMS))
 		m["carrier_max_write_ms"] = float64(v.CarrierPacer.MaxWriteMS)
+		m["carrier_pacer_max_source_age_ms"] = float64(v.CarrierPacer.MaxSourceAgeMS)
+		m["carrier_pacer_max_residence_ms"] = float64(v.CarrierPacer.MaxResidenceMS)
 		add("carrier_stall", "carrier_to_telephony", v.Reception.Stalls > 0 || v.Reception.GapsOverBudget > 0)
 		add("dropped_audio", "carrier_to_telephony", v.Reception.StaleDroppedMS > 0)
 		add("dropped_audio", "telephony_to_browser", m["server_browser_dropped_ms"] > 0)
@@ -187,13 +239,19 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 			add("audio_degraded", stage, h.State == "audio_degraded" || h.LastBadAt != "")
 		}
 		for _, e := range v.Socket.Events {
-			add("browser_error", "", e.Code != 0 && e.Code != 1000 && e.Code != 1001)
+			add("browser_error", "", audioBrowserCloseError(row, e.Code, e.At, e.ShutdownIntent))
 		}
 	}
 	for _, e := range b.SessionEvents {
 		add("browser_error", "", e.Outcome == "audio_error" || e.Outcome == "error" || e.Outcome == "transport_error" || e.Status >= 400 || e.Outcome == "failed" || e.Outcome == "revoked" || e.Outcome == "expired")
 	}
-	add("browser_error", "", row.MediaErrorMessage != "" || row.MediaCloseCode != 0 && row.MediaCloseCode != 1000 && row.MediaCloseCode != 1001)
+	if row.MediaErrorMessage != "" || audioBrowserCloseError(row, row.MediaCloseCode, row.MediaDisconnectedAt, "") {
+		if row.MediaCloseLeg == "carrier" || row.MediaCloseLeg == "provider_event" {
+			add("carrier_error", "carrier_to_telephony", true)
+		} else {
+			add("processing_error", "internal_processing", true)
+		}
+	}
 	add("dropped_audio", "telephony_to_browser", m["playback_dropped_ms"]+m["browser_transport_dropped_ms"]+m["browser_source_dropped_ms"] > 0)
 	add("dropped_audio", "browser_to_telephony", m["capture_dropped_ms"] > 0)
 	add("sequence_gaps", "telephony_to_browser", m["playback_sequence_gaps"]+m["browser_transport_sequence_gaps"] > 0)
@@ -253,14 +311,32 @@ func (c *callsDB) refreshAudioDashboardAndNotify(ctx context.Context, notify fun
 	changed := map[string][]string{}
 	for _, id := range ids {
 		var r callRow
-		err = tx.QueryRowContext(ctx, `SELECT id,project_id,carrier_slug,placed_at,COALESCE(browser_audio_diagnostics,'{}'),COALESCE(carrier_audio_diagnostics,'{}'),COALESCE(media_error_message,''),COALESCE(media_close_code,0),COALESCE(peer_kind,'') FROM calls WHERE id=?`, id).Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.PlacedAt, &r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics, &r.MediaErrorMessage, &r.MediaCloseCode, &r.PeerKind)
+		err = tx.QueryRowContext(ctx, `SELECT id,project_id,carrier_slug,placed_at,COALESCE(browser_audio_diagnostics,'{}'),COALESCE(carrier_audio_diagnostics,'{}'),COALESCE(media_error_message,''),COALESCE(media_close_code,0),COALESCE(peer_kind,''),COALESCE(media_close_leg,'') FROM calls WHERE id=?`, id).Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.PlacedAt, &r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics, &r.MediaErrorMessage, &r.MediaCloseCode, &r.PeerKind, &r.MediaCloseLeg)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman {
+		var carrierRecord *carrierTelemetryRecord
+		if err == nil {
+			var raw string
+			e := tx.QueryRowContext(ctx, `SELECT sample_json FROM telephony_carrier_transport_latest WHERE project_id=? AND call_id=?`, r.ProjectID, id).Scan(&raw)
+			if e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if e == nil {
+				var value carrierTelemetryRecord
+				if e = json.Unmarshal([]byte(raw), &value); e != nil {
+					return e
+				}
+				carrierRecord = &value
+			}
+		}
+		savedCarrier := strings.TrimSpace(r.CarrierAudioDiagnostics)
+		hasSavedCarrier := savedCarrier != "" && savedCarrier != "{}" && savedCarrier != "null"
+		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman && carrierRecord == nil && !hasSavedCarrier {
 			_, err = tx.ExecContext(ctx, `DELETE FROM telephony_audio_reports WHERE call_id=?`, id)
 		} else {
 			s := summarizeAudioDashboard(&r)
+			addCarrierAudioSummary(&s, carrierRecord)
 			raw, e := json.Marshal(s)
 			if e != nil {
 				return e
@@ -296,6 +372,8 @@ func (c *callsDB) saveAudioDashboardAlert(alert audioAlert) error {
 }
 
 type audioDashboardFilter struct {
+	IncludeCharts                                               bool
+	OmitTotals, OmitFacets                                      bool
 	From, Until                                                 int64
 	Provider, Adviser, Destination, Stage, Issue, State, Search string
 	Limit                                                       int
@@ -305,6 +383,22 @@ type audioDashboardFilter struct {
 func parseAudioDashboardFilter(r *http.Request, now time.Time) (audioDashboardFilter, error) {
 	q := r.URL.Query()
 	f := audioDashboardFilter{From: now.Add(-24 * time.Hour).UnixMilli(), Until: now.UnixMilli(), Provider: q.Get("provider"), Adviser: q.Get("adviser"), Destination: q.Get("destination"), Stage: q.Get("stage"), Issue: q.Get("issue"), State: q.Get("state"), Search: strings.TrimSpace(q.Get("search")), Limit: 50, Cursor: q.Get("cursor")}
+	if q.Has("include_charts") {
+		b, err := strconv.ParseBool(q.Get("include_charts"))
+		if err != nil {
+			return f, errors.New("invalid include_charts")
+		}
+		f.IncludeCharts = b
+	}
+	for key, flag := range map[string]*bool{"include_totals": &f.OmitTotals, "include_facets": &f.OmitFacets} {
+		if v := q.Get(key); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return f, fmt.Errorf("invalid %s", key)
+			}
+			*flag = !b
+		}
+	}
 	for k, p := range map[string]*int64{"from": &f.From, "until": &f.Until} {
 		if q.Get(k) != "" {
 			t, e := time.Parse(time.RFC3339Nano, q.Get(k))
@@ -420,6 +514,25 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operator access required", 403)
 		return
 	}
+	if globalCtx == nil {
+		a.serveAudioDashboard(w, r, project)
+		return
+	}
+	err = globalCtx.WithProject(project).WithWorkload(r.Context(), "diagnostics", func(ctx context.Context) error { a.serveAudioDashboard(w, r.WithContext(ctx), project); return nil })
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "diagnostics busy; retry shortly", 503)
+	}
+}
+func (a *App) serveAudioDashboard(w http.ResponseWriter, r *http.Request, project string) {
+	if r.URL.Query().Get("view") == "statistics" {
+		a.serveCallStatistics(w, r, project)
+		return
+	}
+	if r.URL.Query().Get("view") == "incident" {
+		a.serveAudioIncident(w, r, project)
+		return
+	}
 	if id := r.URL.Query().Get("call_id"); id != "" {
 		row, e := a.db().findCall(id)
 		if e != nil {
@@ -430,12 +543,85 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		// Lightweight call identity/lifecycle travels with every diagnostic read so
+		// an open inspector follows hangup even when the call list has not refreshed.
+		call := map[string]any{"call_id": row.ID, "status": row.Status, "active": !isTerminalStatus(row.Status), "direction": row.Direction, "provider": row.CarrierSlug, "peer_kind": row.PeerKind, "started_at": row.PlacedAt, "answered_at": row.AnsweredAt, "ended_at": row.EndedAt, "media_status": row.MediaStatus}
+		generatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		historyMode := r.URL.Query().Get("history")
+		if historyMode != "" && historyMode != "none" && historyMode != "incremental" {
+			http.Error(w, "invalid history mode", 400)
+			return
+		}
+		delivery, deliveryErr := a.browserOfferTelemetry(project, id, "")
+		if deliveryErr != nil {
+			http.Error(w, "pickup diagnostics unavailable", 503)
+			return
+		}
+		if historyMode == "none" {
+			_, live, err := a.db().carrierTransportCurrent(r.Context(), project, id)
+			if err != nil {
+				http.Error(w, "load live diagnostics", 500)
+				return
+			}
+			writeJSON(w, map[string]any{"offer_delivery": delivery, "call": call, "generated_at": generatedAt, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live})
+			return
+		}
 		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
 		if err != nil {
 			http.Error(w, "load network diagnostics", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
+		samples, err := a.db().browserTransportSamples(r.Context(), project, id, time.Now())
+		if err != nil {
+			http.Error(w, "load transport diagnostics", 500)
+			return
+		}
+		bridges, err := a.db().carrierBridgeHistory(project, id)
+		if err != nil {
+			http.Error(w, "load carrier bridge diagnostics", 500)
+			return
+		}
+		policy, err := a.aiPolicyDiagnostics(project, id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "load AI policy diagnostics", 500)
+			return
+		}
+		var history []carrierTelemetryRecord
+		var live *carrierTelemetryRecord
+		var page *carrierHistoryPage
+		if historyMode == "incremental" {
+			got, e := a.db().carrierHistoryPage(r.Context(), project, id, r.URL.Query().Get("history_cursor"))
+			if e != nil {
+				status := 500
+				if errors.Is(e, errHistoryCursor) {
+					status = 400
+				}
+				http.Error(w, "load carrier history", status)
+				return
+			}
+			page = &got
+			history = got.Records
+			_, live, err = a.db().carrierTransportCurrent(r.Context(), project, id)
+		} else {
+			history, live, err = a.db().carrierTransportEvidence(r.Context(), project, id)
+		}
+		if err != nil {
+			http.Error(w, "load carrier transport evidence", 500)
+			return
+		}
+		commands, err := a.carrierCommandHistory(project, id)
+		if err != nil {
+			http.Error(w, "load carrier commands", 500)
+			return
+		}
+		result := map[string]any{"offer_delivery": delivery, "call": call, "generated_at": generatedAt, "carrier_transport_history": history, "agent_audio_live": a.liveAgentAudio(row.ID), "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		if r.URL.Query().Get("include_packet_timing") == "true" {
+			result["sip_packet_timing"] = a.sipPacketTimingForCall(project, id)
+		}
+		if page != nil {
+			result["carrier_history"] = page
+		}
+		writeJSON(w, result)
 		return
 	}
 	now := time.Now()
@@ -444,27 +630,46 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	result, err := a.db().audioDashboard(r.Context(), project, f, now)
+	result, err := a.db().audioDashboard(r.Context(), project, f, now, &a.dashboardExtras)
 	if err != nil {
 		http.Error(w, "load audio health", 500)
 		return
 	}
+	if f.IncludeCharts {
+		charts, e := a.db().audioDashboardCharts(r.Context(), project, f, now)
+		if e != nil {
+			http.Error(w, "load audio health charts", 503)
+			return
+		}
+		result["charts"] = charts
+		result["chart_basis"] = "latest_audio_observation_cumulative_call_metrics"
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, result)
 }
-func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDashboardFilter, now time.Time) (map[string]any, error) {
+func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDashboardFilter, now time.Time, caches ...*dashboardExtrasCache) (map[string]any, error) {
 	where, args := f.where(project, now)
 	totals := map[string]int64{}
-	var total, affected, active, degraded, unobserved int64
-	err := c.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(a.has_issues),0),COALESCE(sum(CASE WHEN `+audioDashboardActive+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN `+audioDashboardDegraded+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN json_extract(a.summary_json,'$.telemetry')=0 THEN 1 ELSE 0 END),0)`+audioDashboardJoin+`WHERE `+where, append([]any{now.Add(-20 * time.Second).UnixMilli()}, args...)...).Scan(&total, &affected, &active, &degraded, &unobserved)
-	if err != nil {
-		return nil, err
+	facets := map[string]any{}
+	var err error
+	var cache *dashboardExtrasCache
+	if len(caches) > 0 {
+		cache = caches[0]
 	}
-	totals["calls"] = total
-	totals["affected"] = affected
-	totals["active"] = active
-	totals["degraded"] = degraded
-	totals["unobserved"] = unobserved
+	if !f.OmitTotals {
+		v, e := c.dashboardExtra(ctx, project, f, now, "totals", cache, func() (any, error) { return c.audioDashboardTotals(ctx, project, f, now) })
+		if e != nil {
+			return nil, e
+		}
+		totals = v.(map[string]int64)
+	}
+	if !f.OmitFacets {
+		v, e := c.dashboardExtra(ctx, project, f, now, "facets", cache, func() (any, error) { return c.audioDashboardFacets(ctx, project, f) })
+		if e != nil {
+			return nil, e
+		}
+		facets = v.(map[string]any)
+	}
 	listWhere := where
 	listArgs := append([]any{}, args...)
 	if f.Cursor != "" {
@@ -531,7 +736,61 @@ func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDas
 		}{ats[f.Limit-1], calls[f.Limit-1].ID})
 		cursor = base64.RawURLEncoding.EncodeToString(raw)
 	}
-	// Facets use the full time window, independent of the current row filters.
+	alerts := []audioAlert{}
+	aw := `project_id=? AND occurred_ms BETWEEN ? AND ?`
+	aa := []any{project, f.From, f.Until}
+	if f.Provider != "" {
+		aw += " AND provider=?"
+		aa = append(aa, f.Provider)
+	}
+	if f.Stage != "" {
+		aw += " AND stage=?"
+		aa = append(aa, f.Stage)
+	}
+	ar, err := c.db.QueryContext(ctx, `SELECT payload_json FROM telephony_audio_alert_history WHERE `+aw+` ORDER BY occurred_ms DESC,id DESC LIMIT 20`, aa...)
+	if err != nil {
+		return nil, err
+	}
+	for ar.Next() {
+		var raw string
+		if err = ar.Scan(&raw); err != nil {
+			ar.Close()
+			return nil, err
+		}
+		var v audioAlert
+		if json.Unmarshal([]byte(raw), &v) == nil {
+			alerts = append(alerts, v)
+		}
+	}
+	err = ar.Err()
+	ar.Close()
+	if err != nil {
+		return nil, err
+	}
+	var pending int
+	err = c.db.QueryRowContext(ctx, `SELECT count(*) FROM telephony_audio_pending p JOIN calls c ON c.id=p.call_id WHERE c.project_id=?`, project).Scan(&pending)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"calls": calls, "totals": totals, "facets": facets, "alerts": alerts, "next_cursor": cursor, "pending_reports": pending, "generated_at": now.UTC().Format(time.RFC3339Nano), "from": time.UnixMilli(f.From).UTC().Format(time.RFC3339Nano), "until": time.UnixMilli(f.Until).UTC().Format(time.RFC3339Nano)}, nil
+}
+
+func (c *callsDB) audioDashboardTotals(ctx context.Context, project string, f audioDashboardFilter, now time.Time) (map[string]int64, error) {
+	where, args := f.where(project, now)
+	totals := map[string]int64{}
+	var total, affected, active, degraded, unobserved int64
+	err := c.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(a.has_issues),0),COALESCE(sum(CASE WHEN `+audioDashboardActive+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN `+audioDashboardDegraded+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN json_extract(a.summary_json,'$.telemetry')=0 THEN 1 ELSE 0 END),0)`+audioDashboardJoin+`WHERE `+where, append([]any{now.Add(-20 * time.Second).UnixMilli()}, args...)...).Scan(&total, &affected, &active, &degraded, &unobserved)
+	if err != nil {
+		return nil, err
+	}
+	totals["calls"] = total
+	totals["affected"] = affected
+	totals["active"] = active
+	totals["degraded"] = degraded
+	totals["unobserved"] = unobserved
+	return totals, nil
+}
+func (c *callsDB) audioDashboardFacets(ctx context.Context, project string, f audioDashboardFilter) (map[string]any, error) {
 	facets := map[string]any{}
 	for _, field := range []string{"provider", "adviser", "destination"} {
 		expr := "a.provider"
@@ -572,41 +831,5 @@ func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDas
 		}
 		facets[field] = options
 	}
-	alerts := []audioAlert{}
-	aw := `project_id=? AND occurred_ms BETWEEN ? AND ?`
-	aa := []any{project, f.From, f.Until}
-	if f.Provider != "" {
-		aw += " AND provider=?"
-		aa = append(aa, f.Provider)
-	}
-	if f.Stage != "" {
-		aw += " AND stage=?"
-		aa = append(aa, f.Stage)
-	}
-	ar, err := c.db.QueryContext(ctx, `SELECT payload_json FROM telephony_audio_alert_history WHERE `+aw+` ORDER BY occurred_ms DESC,id DESC LIMIT 20`, aa...)
-	if err != nil {
-		return nil, err
-	}
-	for ar.Next() {
-		var raw string
-		if err = ar.Scan(&raw); err != nil {
-			ar.Close()
-			return nil, err
-		}
-		var v audioAlert
-		if json.Unmarshal([]byte(raw), &v) == nil {
-			alerts = append(alerts, v)
-		}
-	}
-	err = ar.Err()
-	ar.Close()
-	if err != nil {
-		return nil, err
-	}
-	var pending int
-	err = c.db.QueryRowContext(ctx, `SELECT count(*) FROM telephony_audio_pending p JOIN calls c ON c.id=p.call_id WHERE c.project_id=?`, project).Scan(&pending)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"calls": calls, "totals": totals, "facets": facets, "alerts": alerts, "next_cursor": cursor, "pending_reports": pending, "generated_at": now.UTC().Format(time.RFC3339Nano), "from": time.UnixMilli(f.From).UTC().Format(time.RFC3339Nano), "until": time.UnixMilli(f.Until).UTC().Format(time.RFC3339Nano)}, nil
+	return facets, nil
 }

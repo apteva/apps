@@ -11,6 +11,7 @@ function worklet(rate = 24000) {
     registerProcessor(name: string, ctor: any) { constructors[name] = ctor; },
   });
   vm.runInContext(readFileSync(new URL("./softphone-worklet.js", import.meta.url), "utf8"), context);
+  constructors.clock=context;
   return constructors;
 }
 
@@ -45,11 +46,12 @@ test("audit: unmute must not replay the pre-mute limiter delay", () => {
 });
 
 test("audit: short playback bursts should not stay buffered forever", () => {
-  const C = worklet()["softphone-playback"];
+  const constructors=worklet();
+  const C = constructors["softphone-playback"];
   const p = new C({processorOptions:{initialTargetMs:80}});
   p.handleMessage({frame:new Float32Array(480).fill(0.2),sequence:0,timestamp_ms:0});
   let heard = 0;
-  for (let n=0;n<375;n++) { const output=new Float32Array(128); p.process([],[[output]]); for (const x of output) heard+=Math.abs(x); }
+  for (let n=0;n<375;n++) { const output=new Float32Array(128); p.process([],[[output]]); for (const x of output) heard+=Math.abs(x); constructors.clock.currentTime+=128/24000; }
   expect(heard).toBeGreaterThan(0);
 });
 

@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -44,55 +45,62 @@ import (
 )
 
 // softphoneHub joins one carrier-facing peer socket to one operator browser
-// socket. Both sides are optional at any instant; audio arriving for an
-// unattached side is dropped rather than buffered, because late audio on a
-// phone call is worse than no audio.
+// socket. Both sides are optional at any instant. After answer, a bounded fresh
+// microphone reserve covers carrier attachment; other unattached audio is
+// dropped to avoid replaying stale speech.
 type softphoneHub struct {
-	telemetry               audioCallTelemetry
-	pacerStats              *livePacerStats
-	captureStaleBytes       int64
-	carrierForward          *websocketWriterPump
-	completedCarrierForward liveAudioQueueSnapshot
-	captureTransitBase      float64
-	captureTransitSet       bool
-	captureTransitExcessMS  float64
-	callID                  string
-	timeline                liveAudioTimeline
-	playbackSequence        uint32
-	framedVersion           int
-	reception               carrierReception
-	deliveryNotice          string
-	framedBrowser           *websocketWriterPump
-	captureTimestampMS      float64
-	captureWorkerAgeMS      float64
-	completedBrowser        liveAudioQueueSnapshot
-	completedPeer           liveAudioQueueSnapshot
-	completedRTC            rtcMediaSnapshot
+	sipMedia                                                 atomic.Pointer[sipRTPMedia]
+	readinessBrowser                                         *websocketWriterPump
+	readinessReason                                          string
+	readinessRevision, readinessGeneration, bridgeGeneration uint64
+	telemetry                                                audioCallTelemetry
+	pacerStats                                               *livePacerStats
+	captureStaleBytes                                        int64
+	carrierForward                                           *websocketWriterPump
+	completedCarrierForward                                  liveAudioQueueSnapshot
+	captureTransitFloor                                      transitFloor
+	captureTransitSet                                        bool
+	captureTransitExcessMS                                   float64
+	callID                                                   string
+	timeline                                                 liveAudioTimeline
+	playbackSequence                                         uint32
+	framedVersion                                            int
+	reception                                                carrierReception
+	deliveryNotice                                           string
+	framedBrowser                                            *websocketWriterPump
+	captureTimestampMS                                       float64
+	captureWorkerAgeMS                                       float64
+	completedBrowser                                         liveAudioQueueSnapshot
+	completedPeer                                            liveAudioQueueSnapshot
+	completedRTC                                             rtcMediaSnapshot
 
 	mu      sync.Mutex
 	peer    *websocketWriterPump
 	browser *websocketWriterPump
 	// readyBrowser is the browser writer that has received the ready frame;
 	// pushed call.status frames only follow that handshake.
-	readyBrowser        *websocketWriterPump
-	direction           string
-	status              string
-	preAnswerMicSamples int64
-	captureSequenceSet  bool
-	captureExpected     uint32
-	captureSequenceGaps int
-	captureDropEvents   []audioDropEvent
-	captureMutedRanges  []captureMutedRange
-	captureMutedEvents  []captureMutedEvent
-	captureMutedFrames  uint64
-	captureMuteSeen     bool
-	captureMuteLast     uint32
-	whisperBrowser      *websocketWriterPump
-	browserEpoch        string
-	coach               *callListener
-	coachEpoch          uint32
-	closed              bool
-	held                bool
+	readyBrowser          *websocketWriterPump
+	direction             string
+	status                string
+	preAnswerMicSamples   int64
+	startup               microphoneStartup
+	attachmentEstablished bool
+	pendingMicrophone     []startupPCM
+	captureSequenceSet    bool
+	captureExpected       uint32
+	captureSequenceGaps   int
+	captureDropEvents     []audioDropEvent
+	captureMutedRanges    []captureMutedRange
+	captureMutedEvents    []captureMutedEvent
+	captureMutedFrames    uint64
+	captureMuteSeen       bool
+	captureMuteLast       uint32
+	whisperBrowser        *websocketWriterPump
+	browserEpoch          string
+	coach                 *callListener
+	coachEpoch            uint32
+	closed                bool
+	held                  bool
 }
 
 const softphoneAudioFrameMagic uint32 = 0x31545041
@@ -149,6 +157,15 @@ func (h *softphoneHub) setCallState(direction, status string) {
 	if h.status != "answered" && h.status != "in-progress" {
 		h.stopCoachLocked(nil, "call_state_changed")
 	}
+	if h.status == "answered" || h.status == "in-progress" {
+		if h.startup.AnsweredAt == "" {
+			h.startup.AnsweredAt = ringTime(time.Now())
+		}
+		h.flushStartupMicrophoneLocked(time.Now())
+	} else {
+		h.clearStartupMicrophoneLocked("call_not_answered", time.Now())
+	}
+	h.publishReadinessLocked()
 	h.reception.pause(h.held || (h.status != "answered" && h.status != "in-progress"))
 }
 
@@ -156,8 +173,12 @@ func (h *softphoneHub) setHeld(held bool) {
 	h.mu.Lock()
 	h.held = held
 	if held {
+		h.clearStartupMicrophoneLocked("hold", time.Now())
+	}
+	if held {
 		h.stopCoachLocked(nil, "call_held")
 	}
+	h.publishReadinessLocked()
 	h.reception.pause(held || (h.status != "answered" && h.status != "in-progress"))
 	if held && h.browser != nil {
 		h.browser.FlushAudio()
@@ -196,6 +217,16 @@ func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWrite
 		h.stopCoachLocked(nil, "carrier_reconnected")
 	}
 	replaced, h.peer = h.peer, w
+	if w != nil && replaced != w {
+		h.bridgeGeneration++
+	}
+	if w != nil {
+		if h.startup.PeerAttachedAt == "" {
+			h.startup.PeerAttachedAt = ringTime(time.Now())
+		}
+		h.flushStartupMicrophoneLocked(time.Now())
+	}
+	h.publishReadinessLocked()
 	return replaced
 }
 
@@ -203,6 +234,7 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.stopCoachLocked(nil, "adviser_reconnected")
+	h.clearStartupMicrophoneLocked("browser_replaced", time.Now())
 	replaced, h.browser = h.browser, w
 	h.browserEpoch = newSecret()
 	h.whisperBrowser = nil
@@ -225,6 +257,7 @@ func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 	if h.peer == w {
 		h.stopCoachLocked(nil, "carrier_disconnected")
 		h.peer = nil
+		h.publishReadinessLocked()
 		return true
 	}
 	return false
@@ -240,6 +273,7 @@ func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	if h.browser == w {
 		h.stopCoachLocked(nil, "adviser_disconnected")
 		h.browserEpoch = newSecret()
+		h.clearStartupMicrophoneLocked("browser_disconnected", time.Now())
 		h.browser = nil
 	}
 }
@@ -260,6 +294,7 @@ func (h *softphoneHub) markReady(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.readyBrowser = w
+	h.publishReadinessLocked()
 }
 
 // readyBrowserWriter returns the browser writer only after it has been sent
@@ -318,18 +353,36 @@ func (h *softphoneHub) toPeer(op ws.OpCode, data []byte) {
 // Source ownership, hold and answer state are checked atomically with enqueue.
 // An old browser completing a read after reconnect cannot inject microphone audio.
 func (h *softphoneHub) forwardMicrophone(source *websocketWriterPump, data []byte) {
+	h.forwardMicrophoneAt(source, data, time.Now(), false)
+}
+
+func (h *softphoneHub) forwardMicrophoneAt(source *websocketWriterPump, data []byte, at time.Time, sourced bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed || h.browser != source || h.held {
 		return
 	}
+	now := time.Now()
+	if h.startup.FirstCaptureAt == "" {
+		h.startup.FirstCaptureAt = ringTime(now)
+	}
 	if h.status != "answered" && h.status != "in-progress" {
 		h.preAnswerMicSamples += int64(len(data) / 2)
+		if h.startup.FirstPreAnswerAt == "" {
+			h.startup.FirstPreAnswerAt = ringTime(now)
+		}
+		h.startup.LastPreAnswerAt = ringTime(now)
 		return
 	}
-	if h.peer != nil {
-		h.peer.QueueAudio(data)
+	h.flushStartupMicrophoneLocked(now)
+	if h.peer == nil {
+		h.bufferStartupMicrophoneAtLocked(data, at, sourced)
+		return
 	}
+	if h.startup.FirstForwardedAt == "" {
+		h.startup.FirstForwardedAt = ringTime(now)
+	}
+	queueMicrophoneSource(h.peer, data, at, sourced)
 }
 
 type softphoneRegistry struct {
@@ -382,6 +435,26 @@ func (r *softphoneRegistry) hubFor(callID string) *softphoneHub {
 	}
 	hub := &softphoneHub{callID: callID}
 	r.hubs[callID] = hub
+	return hub
+}
+
+// attach get-or-creates the live hub and runs fn (which attaches a socket)
+// under the registry lock. dropIfEmpty takes the same lock, so a reconnecting
+// socket can never attach to a hub that was concurrently closed and removed
+// after hubFor returned it. fn must only use hub methods: lock order is
+// registry, then hub.
+func (r *softphoneRegistry) attach(callID string, fn func(*softphoneHub)) *softphoneHub {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hubs == nil {
+		r.hubs = map[string]*softphoneHub{}
+	}
+	hub, ok := r.hubs[callID]
+	if !ok {
+		hub = &softphoneHub{callID: callID}
+		r.hubs[callID] = hub
+	}
+	fn(hub)
 	return hub
 }
 
@@ -484,12 +557,15 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
-	hub := a.softphones.hubFor(callID)
-	hub.setCallState(row.Direction, row.Status)
-	hub.setHeld(row.HoldState != "active")
 	// A fresh carrier bridge owns the peer side immediately. Stop a superseded
 	// socket so it cannot keep delivering stale audio after a fast reconnect.
-	if previous := hub.setPeer(writer); previous != nil {
+	var previous *websocketWriterPump
+	hub := a.softphones.attach(callID, func(hub *softphoneHub) {
+		hub.setCallState(row.Direction, row.Status)
+		hub.setHeld(row.HoldState != "active")
+		previous = hub.setPeer(writer)
+	})
+	if previous != nil {
 		previous.Stop()
 		_ = previous.conn.Close()
 	}
@@ -499,8 +575,8 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() {
-		wasCurrent := hub.clearPeer(writer)
 		closer.Close(ws.StatusNormalClosure, "softphone peer closed")
+		wasCurrent := hub.clearPeer(writer)
 		// A peer socket can disappear because the carrier network blipped or a
 		// blue-green app handoff moved the bridge. Keep the browser attached and
 		// let the replacement peer rejoin this hub. The durable call status poll
@@ -556,9 +632,25 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	reason, verifiedExpiry, identity := a.phoneMediaCheckDetails(row, token)
+	reason, verifiedExpiry, identity, sessionCorrelation := a.phoneMediaCheckState(row, token, true)
+	// A candidate connects on its own grant, here and over WebRTC only.
+	handover := false
+	if reason == "media_token_replaced" && r.URL.Query().Get("transport") == "webrtc" {
+		if pendingReason, expiry, pendingIdentity, pendingSession, pending := a.phoneMediaPendingCheck(row, token); pending {
+			handover = true
+			reason, verifiedExpiry, identity, sessionCorrelation = pendingReason, expiry, pendingIdentity, pendingSession
+		}
+	}
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
+		if reason == "media_token_replaced" {
+			network := audioNetworkEvent{ProxyConnectionID: boundedTransportID(r.Header.Get(proxyConnectionHeader)), ID: newAudioConnectionID() + ":rejected", CallID: row.ID, ProjectID: row.ProjectID,
+				Event: "softphone.browser.attachment_rejected", Action: "rejected", Reason: reason, CurrentSessionID: sessionCorrelation.SessionID,
+				Session: audioSessionCorrelation{SessionID: safeAudioDiagnosticID(r.URL.Query().Get("session_generation"))}, Retention: 7 * 24 * time.Hour}
+			network.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
+			network.ExpiresAt = time.Now().Add(network.Retention).UTC().Format(time.RFC3339Nano)
+			a.audioNetworks.enqueue(network)
+		}
 		status := http.StatusForbidden
 		if temporaryMediaFailure(reason) {
 			status = http.StatusServiceUnavailable
@@ -566,6 +658,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
+	// Only a validated session may identify a call to the proxy.
+	authenticatedCarrierHeaders(w, r, row)
 	if isTerminalStatus(row.Status) {
 		http.Error(w, "call has ended", http.StatusGone)
 		return
@@ -576,6 +670,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "unsupported_media_transport"})
 		return
 	}
+	if transport != "webrtc" {
+		policy, e := a.resolvedTURNPolicy(row.ProjectID, identity, r.URL.Query())
+		if e != nil {
+			http.Error(w, "relay policy unavailable", 503)
+			return
+		}
+		if policy.ICEPolicy == "relay" {
+			writeJSONStatus(w, 426, map[string]any{"code": "turn_relay_required", "message": "Select WebRTC for the required relay policy"})
+			return
+		}
+	}
 	var rtcConfig softphoneRTCConfig
 	if transport == "webrtc" {
 		config := map[string]string{}
@@ -583,18 +688,49 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			config = globalCtx.WithProject(row.ProjectID).Config()
 		}
 		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		attachRTCResourcePolicy(&rtcConfig, globalCtx)
 		if err != nil || !rtcConfig.Enabled {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "webrtc_unavailable"})
 			return
 		}
+		rtcConfig.FEC, err = parseRTCFECPreference(r.URL.Query())
+		if err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "invalid_webrtc_fec"})
+			return
+		}
 	}
 
+	if transport == "webrtc" {
+		if err = a.configureManagedTURN(&rtcConfig, row, token, identity, false, r.URL.Query()); err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_turn_policy", "message": err.Error()})
+			return
+		}
+	}
+
+	networkConfig := map[string]string{}
+	if globalCtx != nil {
+		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
+	}
+	networkAddress, metadataErr := resolveAudioNetworkAddress(r, networkConfig["audio_telemetry_local_proxy_cidrs"])
+	if metadataErr != nil {
+		// SDK error messages are fixed reason strings: never log assertion values,
+		// media URLs or credentials. Observational failures do not reject media.
+		logSoftphone("browser client IP assertion rejected", "call", callID, "reason", metadataErr.Error())
+	}
+	networkContext := newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig)
+	networkContext.ConnectionID = newAudioConnectionID()
+	networkContext.Session = sessionCorrelation
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
-		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
+		class, detail := audioSocketError(err)
+		logSoftphone("browser ws upgrade failed", "call", callID, "error_class", class)
+		enqueueAudioAttachmentFailure(networkContext, "softphone.browser.attachment_failed", 0, "websocket_upgrade_failed", &audioDisconnectInfo{ErrorClass: class, ErrorDetail: detail, Transport: "websocket"}, a.audioNetworks.enqueue)
 		return
 	}
 	if transport == "webrtc" {
+		rtcConfig.NetworkContext = networkContext
+		rtcConfig.KnownVPNExits = networkConfig["audio_telemetry_known_vpn_exits"]
+		rtcConfig.CollectNetwork = a.collectBrowserNetwork
 		// Negotiate before replacing the browser or answering the carrier. Failed
 		// setup leaves the existing hub/carrier untouched, including auto fallback.
 		var stopRTC func()
@@ -605,43 +741,52 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer stopRTC()
+		if hubConn, ok := conn.(*rtcHubConn); ok {
+			networkContext.Setup = hubConn.setup
+		}
 		readConn = conn
 		unlock = a.softphones.lockClaim(callID)
 		current, findErr := a.db().findCall(callID)
 		if findErr != nil || current == nil || isTerminalStatus(current.Status) {
 			return
 		}
-		reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
-		if reason != "" {
-			return
+		if handover {
+			if verifiedExpiry, identity, err = a.commitHandover(current, token, networkContext); err != nil {
+				return
+			}
+		} else {
+			reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
+			if reason != "" {
+				return
+			}
 		}
 		row = current
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
-	hub := a.softphones.hubFor(callID)
+	var previous *websocketWriterPump
+	hub := a.softphones.attach(callID, func(hub *softphoneHub) {
+		hub.setCallState(row.Direction, row.Status)
+		hub.setHeld(row.HoldState != "active")
+		previous = hub.setBrowser(writer)
+	})
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
-	networkConfig := map[string]string{}
-	if globalCtx != nil {
-		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
-	}
-	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, networkConfig["audio_telemetry_trusted_proxy_cidrs"])
-	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContext(row, identity, r, networkConfig), a.audioNetworks.enqueue)
+	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, networkContext, a.collectBrowserNetwork)
+	writer.setDiagnosticID(connectionID)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
+		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		hub.clearBrowser(writer)
 		if err := a.persistAudioTelemetry(callID, hub); err != nil {
 			logSoftphone("persist audio telemetry failed", "call", callID, "err", err)
 		}
-		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
 	}()
-	hub.setCallState(row.Direction, row.Status)
-	hub.setHeld(row.HoldState != "active")
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
-	if previous := hub.setBrowser(writer); previous != nil {
+	if previous != nil {
 		hub.telemetry.closed(previous, "session_replaced", nil)
 		_ = previous.Write(ws.OpText, softphoneEvent("session.replaced", ""))
 		previous.Stop()
@@ -665,15 +810,22 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := globalCtx.WithProject(row.ProjectID)
-		if err := a.answerInboundCarrierCall(ctx, row); err != nil {
-			_ = a.db().resetAnswerClaim(callID)
-			logSoftphone("softphone carrier answer failed", "call", callID, "provider", row.CarrierSlug, "err", err)
+		// Carrier APIs may open their media socket before returning. Reserve under
+		// the claim lock, then perform network work with that lock released.
+		unlock()
+		unlock = nil
+		current, activationErr := a.activateHumanCarrier(r.Context(), ctx, row)
+		unlock = a.softphones.lockClaim(callID)
+		if activationErr != nil {
+			logSoftphone("softphone carrier answer failed", "call", callID, "provider", row.CarrierSlug, "err", activationErr)
 			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The carrier could not answer the call."))
 			return
 		}
-		if err := a.db().updateStatus(callID, "answered", ""); err != nil {
-			logSoftphone("softphone answered status failed", "call", callID, "err", err)
-			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The call connected, but Telephony could not save its status."))
+		row, err = a.db().findCall(callID)
+		if err != nil || row == nil || isTerminalStatus(row.Status) || row.PeerToken != current.PeerToken {
+			return
+		}
+		if reason, _, _ := a.phoneMediaCheckDetails(row, token); reason != "" {
 			return
 		}
 		if a.callUsesDirectSIP(row) {
@@ -707,12 +859,14 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		ticks := 0
+		lastCheckReason := ""
 		for {
 			select {
 			case <-done:
 				return
 			case <-ticker.C:
 				ticks++
+				hub.publishReadiness()
 				hub.carrierDeliveryNotice()
 				a.sampleAudioHealth(row, hub, writer, time.Now())
 				if (ticks%5 == 0 || hub.telemetry.pending()) && hub.readyBrowserWriter() == writer {
@@ -722,8 +876,21 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				}
 				reason, expiry := a.phoneMediaCheck(row, token)
 				if reason == "" {
+					if lastCheckReason != "" {
+						hub.telemetry.leaseCheckEvent(writer, "lease_check_recovered", "", expiry)
+					}
+					lastCheckReason = ""
 					verifiedExpiry = expiry
 					continue
+				}
+				reason = establishedMediaLeaseReason(reason, verifiedExpiry, time.Now().Unix())
+				if reason != lastCheckReason {
+					action := "lease_check_failed"
+					if temporaryMediaFailure(reason) {
+						action = "lease_check_deferred"
+					}
+					hub.telemetry.leaseCheckEvent(writer, action, reason, verifiedExpiry)
+					lastCheckReason = reason
 				}
 				if temporaryMediaFailure(reason) && verifiedExpiry > time.Now().Unix() {
 					continue
@@ -745,6 +912,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		case ws.OpBinary:
 			// Operator microphone audio, PCM16LE @ 24 kHz.
 			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
+			sourceAt, sourced := time.Now(), false
+			if _, rtc := writer.conn.(*rtcHubConn); rtc {
+				if pcm, at, ok := decodeMicrophoneSource(data); ok {
+					payload, sourceAt, sourced = pcm, at, true
+				}
+			}
 			sourceSequence := ""
 			if framed {
 				hub.observeCaptureFrame(sequence, connectionID)
@@ -759,7 +932,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			if len(payload) == 0 {
 				continue
 			}
-			hub.forwardMicrophone(writer, payload)
+			hub.forwardMicrophoneAt(writer, payload, sourceAt, sourced)
 		case ws.OpText:
 			var control struct {
 				Type          string                   `json:"type"`
@@ -778,6 +951,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			switch control.Type {
+			case "media.shutdown":
+				hub.telemetry.shutdown(writer, control.Reason)
 			case "capture.omitted":
 				if control.Reason == "muted" {
 					hub.observeMutedCaptureRange(writer, control.FirstSequence, control.LastSequence, control.Frames, connectionID)
@@ -808,9 +983,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				reply, _ := json.Marshal(map[string]any{"type": "media.clock", "nonce": control.Nonce, "received_ms": received, "sent_ms": mediaClockMS()})
 				_ = writer.Write(ws.OpText, reply)
 			case "ping":
+				activityWriter := writer
+				if rtc, ok := writer.conn.(*rtcHubConn); ok && rtc.disconnect != nil {
+					activityWriter = rtc.disconnect.writer
+				}
+				activityWriter.activity.ping.Store(time.Now().UnixNano())
 				gaps, _ := hub.captureDiagnostics()
 				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce, "capture_sequence_gaps": gaps})
-				_ = writer.Write(ws.OpText, pong)
+				if writer.Write(ws.OpText, pong) == nil {
+					activityWriter.activity.pong.Store(time.Now().UnixNano())
+				}
 			case "interrupt":
 				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
 				hub.toPeer(ws.OpText, payload)
@@ -830,11 +1012,22 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
+			case "transport.samples":
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					parts := normalizeTransportSamples(control.Diagnostics.TransportSamples, time.Now())
+					parts = hub.telemetry.attributeTransportSamples(writer, control.Diagnostics.ClientEpoch, parts)
+					a.audioTransports.enqueue(parts, row)
+				}
 			case "diagnostics":
 				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
 					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
-					hub.telemetry.observeBrowserConnection(writer, normalized)
+					samples := hub.telemetry.observeBrowserConnection(writer, normalized)
+					a.audioTransports.enqueue(samples, row)
 					// Coalesce reports in memory; the watcher persists off the frame path.
+				}
+			case "diagnostics.events":
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					hub.telemetry.observeRTCEventsConnection(writer, normalizeBrowserAudioDiagnostics(*control.Diagnostics))
 				}
 			}
 		}
@@ -860,7 +1053,11 @@ func (c hijackedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 // upgradeBuffered performs the WebSocket upgrade and returns a connection whose
 // reads start from the buffered data rather than from the socket.
 func upgradeBuffered(w http.ResponseWriter, r *http.Request) (net.Conn, net.Conn, error) {
-	conn, brw, _, err := ws.UpgradeHTTP(r, w)
+	upgrader := ws.DefaultHTTPUpgrader
+	if id := boundedTransportID(w.Header().Get("X-Apteva-Call-ID")); id != "" {
+		upgrader.Header = http.Header{"X-Apteva-Call-ID": []string{id}}
+	}
+	conn, brw, _, err := upgrader.Upgrade(r, w)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -907,11 +1104,87 @@ func logSoftphone(msg string, args ...any) {
 // ─── /softphone/... — panel actions ────────────────────────────────
 
 func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/softphone/offer-telemetry/") && r.Method == "GET" {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/softphone/offer-telemetry/")
+		row, err := a.db().findCall(id)
+		if err != nil {
+			http.Error(w, "diagnostics unavailable", 503)
+			return
+		}
+		if row == nil || row.ProjectID != project {
+			http.NotFound(w, r)
+			return
+		}
+		principal := ""
+		if p := phoneUserFrom(r); p != nil {
+			if !a.phoneCallAllowed(p, row, true) && !a.phoneCanAccessSettledOffer(p, row, "") {
+				http.Error(w, "call not visible", 403)
+				return
+			}
+			principal = p.Identity.key()
+		}
+		result, err := a.browserOfferTelemetry(project, id, principal)
+		if err != nil {
+			http.Error(w, "diagnostics unavailable", 503)
+			return
+		}
+		writeJSON(w, result)
+		return
+	}
+
+	if r.URL.Path == "/softphone/telemetry" {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		a.handleBrowserTelemetry(w, r, project)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/softphone/auto-answer-") {
+		project, err := a.panelProject(r)
+		if err != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		a.handleAutoAnswer(w, r, project)
+		return
+	}
 	// /softphone/media/ has its own NoAuth route; a request reaching this
 	// authenticated handler with that prefix means the mux matched the shorter
 	// pattern, so reject rather than treating it as an action.
 	if strings.HasPrefix(r.URL.Path, "/softphone/media/") {
 		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/softphone/network-check" {
+		a.handleNetworkCheck(w, r)
+		return
+	}
+	if r.URL.Path == "/softphone/turn-policy" || r.URL.Path == "/softphone/network-policy" {
+		if globalCtx == nil {
+			http.Error(w, "app context unavailable", 503)
+			return
+		}
+		project, e := a.panelProject(r)
+		if e != nil {
+			http.Error(w, "project not allowed", 403)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if r.URL.Path == "/softphone/network-policy" {
+			a.handleSelfNetworkPolicy(w, r, project)
+		} else {
+			a.handleSelfTURNPolicy(w, r, project)
+		}
 		return
 	}
 	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
@@ -927,6 +1200,9 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
+	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/softphone/place" || strings.HasPrefix(r.URL.Path, "/softphone/answer/") || strings.HasPrefix(r.URL.Path, "/softphone/attach/") || strings.HasPrefix(r.URL.Path, "/softphone/listen/") || strings.HasPrefix(r.URL.Path, "/softphone/coach/")) {
+		a.networkChecks.stopOwner(project, networkCheckOwner(r))
 	}
 	if r.URL.Path == "/softphone/numbers" {
 		a.handleSoftphoneNumbers(w, r, project)
@@ -947,6 +1223,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 			a.handleListenAction(w, r, project, name, strings.TrimPrefix(action, name+"/"))
 			return
 		}
+	}
+	if strings.HasPrefix(action, "recovery/") {
+		a.handleMediaRecoveryRecord(w, r, project, strings.TrimPrefix(action, "recovery/"))
+		return
 	}
 	for _, name := range []string{"attach", "takeover", "renew"} {
 		if strings.HasPrefix(action, name+"/") {
@@ -971,12 +1251,15 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 }
 
 type softphoneSession struct {
-	CallID       string `json:"call_id"`
-	MediaURL     string `json:"media_url"`
-	SessionToken string `json:"session_token,omitempty"`
-	LeaseSeconds int    `json:"lease_seconds,omitempty"`
-	To           string `json:"to,omitempty"`
-	From         string `json:"from,omitempty"`
+	AttachmentGuardVersion int    `json:"attachment_guard_version,omitempty"`
+	HandoverPending        bool   `json:"handover_pending,omitempty"`
+	SessionGeneration      string `json:"session_generation,omitempty"`
+	CallID                 string `json:"call_id"`
+	MediaURL               string `json:"media_url"`
+	SessionToken           string `json:"session_token,omitempty"`
+	LeaseSeconds           int    `json:"lease_seconds,omitempty"`
+	To                     string `json:"to,omitempty"`
+	From                   string `json:"from,omitempty"`
 }
 
 // softphoneMediaURL is the install-scoped path the operator's browser dials.
@@ -1056,19 +1339,26 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 			http.Error(w, "call ownership unavailable", 500)
 			return
 		}
-		session, e = a.issuePhoneSession(row, p)
+		session, e = a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "dial"})
 		if e != nil {
 			writePhoneSessionFailure(w, e)
 			return
 		}
 	}
+	if p == nil {
+		session.AttachmentGuardVersion = 1
+	}
 	writeJSON(w, session)
 }
 
 func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, callID string) {
+	a.autoAnswerMu.Lock()
+	defer a.autoAnswerMu.Unlock()
 	var request struct {
-		DestinationID string `json:"destination_id"`
-		Rejoin        bool   `json:"rejoin"`
+		DestinationID              string `json:"destination_id"`
+		Rejoin                     bool   `json:"rejoin"`
+		AutoAnswerSession          string `json:"auto_answer_session,omitempty"`
+		AutoAnswerWarningCompleted bool   `json:"auto_answer_warning_completed,omitempty"`
 	}
 	if r.ContentLength != 0 {
 		if err := decodeJSONBody(r, &request); err != nil {
@@ -1118,6 +1408,10 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "call has ended", http.StatusGone)
 		return
 	}
+	if request.AutoAnswerSession != "" && (request.Rejoin || row.Status != "pending") {
+		http.Error(w, "automatic pickup requires a pending offer", 409)
+		return
+	}
 	offers, err := a.db().activeRingOffers(callID, project)
 	if err != nil {
 		http.Error(w, "load ring offers", 500)
@@ -1139,7 +1433,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			return
 		}
 		if p != nil {
-			session, e := a.issuePhoneSession(row, p)
+			session, e := a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "answer"})
 			if e != nil {
 				writePhoneSessionFailure(w, e)
 				return
@@ -1151,7 +1445,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		var managed int
 		_ = a.db().db.QueryRow(`SELECT COUNT(*) FROM telephony_media_sessions WHERE call_id=?`, row.ID).Scan(&managed)
 		if owner, _, _ := a.phoneOwner(row.ID); owner != "" || managed > 0 {
-			session, e := a.issuePhoneSession(row, nil)
+			session, e := a.issuePhoneSession(row, nil, audioSessionCorrelation{InitiatingAction: "attach"})
 			if e != nil {
 				http.Error(w, "session unavailable", 500)
 				return
@@ -1160,11 +1454,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			return
 		}
 		writeJSON(w, softphoneSession{
-			CallID:       row.ID,
-			MediaURL:     a.softphoneMediaURL(row.ID, row.PeerToken),
-			SessionToken: row.PeerToken,
-			To:           row.ToNumber,
-			From:         row.FromNumber,
+			AttachmentGuardVersion: 1,
+			CallID:                 row.ID,
+			MediaURL:               a.softphoneMediaURL(row.ID, row.PeerToken),
+			SessionToken:           row.PeerToken,
+			To:                     row.ToNumber,
+			From:                   row.FromNumber,
 		})
 		return
 	}
@@ -1173,6 +1468,16 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 
+	if request.AutoAnswerSession != "" {
+		if err := a.validateAutoAnswer(r, row, request.AutoAnswerSession, request.DestinationID, request.AutoAnswerWarningCompleted); err != nil {
+			if err.Error() == "auto_answer_warning_required" {
+				writeJSONStatus(w, 409, map[string]any{"code": "auto_answer_warning_required"})
+				return
+			}
+			http.Error(w, err.Error(), 409)
+			return
+		}
+	}
 	claimed, err := a.db().claimPendingCallForHuman(callID, project, request.DestinationID)
 	if err != nil {
 		http.Error(w, "claim pending call: "+err.Error(), http.StatusInternalServerError)
@@ -1196,7 +1501,9 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	if err := a.db().settleHumanOffers(callID, project); err != nil {
-		_ = a.db().releaseAnswerClaim(callID)
+		if releaseErr := a.db().releaseAnswerClaim(callID); releaseErr != nil {
+			logSoftphone("softphone answer claim release failed", "call", callID, "error", releaseErr)
+		}
 		http.Error(w, "claim ring-group offer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1208,7 +1515,9 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	peerToken := newSecret()
 	row.PeerToken = peerToken
 	if err := a.db().attachHumanCall(callID, a.peerLoopbackURL(row), peerToken); err != nil {
-		_ = a.db().releaseAnswerClaim(callID)
+		if releaseErr := a.db().releaseAnswerClaim(callID); releaseErr != nil {
+			logSoftphone("softphone answer claim release failed", "call", callID, "error", releaseErr)
+		}
 		http.Error(w, "persist call answer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1218,7 +1527,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			http.Error(w, "ownership unavailable", 500)
 			return
 		}
-		session, e := a.issuePhoneSession(row, p)
+		session, e := a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "answer"})
 		if e != nil {
 			_ = a.db().resetAnswerClaim(callID, peerToken)
 			writePhoneSessionFailure(w, e)
@@ -1228,11 +1537,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	writeJSON(w, softphoneSession{
-		CallID:       callID,
-		MediaURL:     a.softphoneMediaURL(callID, peerToken),
-		SessionToken: peerToken,
-		To:           row.ToNumber,
-		From:         row.FromNumber,
+		AttachmentGuardVersion: 1,
+		CallID:                 callID,
+		MediaURL:               a.softphoneMediaURL(callID, peerToken),
+		SessionToken:           peerToken,
+		To:                     row.ToNumber,
+		From:                   row.FromNumber,
 	})
 }
 
@@ -1256,7 +1566,11 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	unlock := a.softphones.lockClaim(callID)
-	defer unlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	row, err := a.db().findCall(callID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1275,6 +1589,21 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 	}
 	if phoneUserFrom(r) == nil && a.validPhoneMedia(row, body.SessionToken) {
 		body.SessionToken = row.PeerToken
+	}
+	if row.Status == "answering" && secureEqual(body.SessionToken, row.PeerToken) {
+		// Wait for the existing command's outcome, with the socket claim lock free.
+		unlock()
+		unlock = nil
+		if err := a.waitCarrierCommand(r.Context(), callID); err != nil {
+			http.Error(w, "carrier answer is still pending", http.StatusConflict)
+			return
+		}
+		unlock = a.softphones.lockClaim(callID)
+		row, err = a.db().findCall(callID)
+		if err != nil || row == nil {
+			http.Error(w, "reload answer claim", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	if row.Status != "answering" || row.PeerKind != peerKindHuman ||
 		row.PeerToken == "" || !secureEqual(body.SessionToken, row.PeerToken) {
@@ -1398,6 +1727,10 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 	if err != nil {
 		return nil, err
 	}
+	if creds.Fields["outbound_transport"] == inboundTransportSIPDirect && machineDetection != machineDetectionOff {
+		return nil, errors.New("direct SIP does not support provider answering machine detection")
+	}
+
 	if timeoutSec == 0 {
 		timeoutSec = a.outboundTimeoutDefault(projectID, 60)
 	}

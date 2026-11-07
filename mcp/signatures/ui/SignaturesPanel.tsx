@@ -80,6 +80,33 @@ const FIELD_DEFAULTS: Record<Field["field_type"], { width: number; height: numbe
 // demand; the dynamic non-literal import keeps the bundler from
 // inlining ~450KB into the panel bundle.
 let pdfjsPromise: Promise<any> | null = null;
+type Layout = {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  recipients: Array<{ label: string; role: string; signing_order: number }>;
+  fields: unknown[];
+};
+
+type SealInfo = {
+  source: "configured" | "self_signed";
+  subject: string;
+  issuer: string;
+  sha256_fingerprint: string;
+  not_after: string;
+  timestamp_url?: string;
+  trust_note: string;
+};
+
+type SealVerification = {
+  sealed: boolean;
+  intact: boolean;
+  signer_subject?: string;
+  matches_this_install_seal: boolean;
+  problems?: string[];
+};
+
 function loadPdfjs(): Promise<any> {
   if (!pdfjsPromise) {
     const entry = new URL("./vendor/pdf.min.mjs", import.meta.url).href;
@@ -102,6 +129,12 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   const [pickedFile, setPickedFile] = useState<StorageFile | null>(null);
   const [recipientDrafts, setRecipientDrafts] = useState<Array<Pick<Recipient, "name" | "email" | "role" | "signing_order">>>([]);
   const [fieldDrafts, setFieldDrafts] = useState<Field[]>([]);
+  const [signTogether, setSignTogether] = useState(false);
+  const [layouts, setLayouts] = useState<Layout[]>([]);
+  const [layoutSlug, setLayoutSlug] = useState("");
+  const [layoutPeople, setLayoutPeople] = useState<Array<{ name: string; email: string }>>([]);
+  const [seal, setSeal] = useState<SealInfo | null>(null);
+  const [showSeal, setShowSeal] = useState(false);
 
   const url = useCallback((path: string) => {
     const sep = path.includes("?") ? "&" : "?";
@@ -146,6 +179,8 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         role: recipient.role,
         signing_order: recipient.signing_order,
       })));
+      const loaded = envelope.recipients || [];
+      setSignTogether(loaded.length > 1 && loaded.every((recipient) => recipient.signing_order === loaded[0].signing_order));
       setFieldDrafts((envelope.fields || []).map((field) => ({ ...field })));
     } catch (error) {
       setMessage((error as Error).message);
@@ -155,8 +190,12 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => { loadDetail(selectedId); }, [loadDetail, selectedId]);
 
+  const activeRecipients = useMemo(
+    () => (detail?.recipients || []).filter((recipient) => recipient.status === "ready" || recipient.status === "viewed"),
+    [detail],
+  );
   const currentRecipient = useMemo(
-    () => detail?.recipients?.find((recipient) => recipient.status === "ready" || recipient.status === "viewed") || null,
+    () => activeRecipients[0] || null,
     [detail],
   );
 
@@ -174,6 +213,21 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const selectedLayout = layouts.find((layout) => layout.slug === layoutSlug) || null;
+
+  const openCreate = () => run(async () => {
+    setShowSeal(false);
+    setCreating(true);
+    const data = await request("/layouts");
+    setLayouts(data.layouts || []);
+  });
+
+  const chooseLayout = (slug: string) => {
+    setLayoutSlug(slug);
+    const layout = layouts.find((item) => item.slug === slug);
+    setLayoutPeople((layout?.recipients || []).map(() => ({ name: "", email: "" })));
+  };
+
   const createEnvelope = () => run(async () => {
     if (!pickedFile) throw new Error("Pick a PDF first.");
     const data = await request("/envelopes", {
@@ -183,20 +237,34 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         title: newEnvelope.title || pickedFile.name.replace(/\.pdf$/i, ""),
         sender_name: newEnvelope.sender_name,
         message: newEnvelope.message,
+        ...(selectedLayout ? { layout: selectedLayout.slug, recipients: layoutPeople } : {}),
       }),
     });
     setCreating(false);
     setNewEnvelope({ title: "", sender_name: "", message: "" });
     setPickedFile(null);
+    setLayoutSlug("");
+    setLayoutPeople([]);
     setSelectedId(data.envelope.id);
-    setMessage("Draft created. Add recipients, then place their fields on the document.");
+    await loadList();
+    setMessage(selectedLayout
+      ? `Draft created with the ${selectedLayout.name} layout. Check the field positions, then send.`
+      : "Draft created. Add recipients, then place their fields on the document.");
+  });
+
+  const saveAsLayout = () => run(async () => {
+    if (!detail) return;
+    const name = window.prompt("Layout name", detail.title);
+    if (!name) return;
+    const data = await request("/layouts", { method: "POST", body: JSON.stringify({ envelope_id: detail.id, name }) });
+    setMessage(`Saved layout "${data.layout.name}". Pick it under New envelope to reuse these recipients and field positions.`);
   });
 
   const saveRecipients = () => run(async () => {
     if (!detail) return;
     await request(`/envelopes/${detail.id}/recipients`, {
       method: "POST",
-      body: JSON.stringify({ recipients: recipientDrafts.map((recipient, index) => ({ ...recipient, signing_order: index + 1 })) }),
+      body: JSON.stringify({ recipients: recipientDrafts.map((recipient, index) => ({ ...recipient, signing_order: signTogether ? 1 : index + 1 })) }),
     });
     setMessage("Recipients saved. Existing fields were cleared because recipient IDs changed.");
   });
@@ -213,19 +281,19 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
       method: "POST",
       body: JSON.stringify({ delivery_mode, idempotency_key: crypto.randomUUID() }),
     });
-    setMessage(delivery_mode === "manual" ? "Envelope activated. Copy the current recipient link next." : "Envelope activated and invitation requested.");
+    setMessage(delivery_mode === "manual" ? "Envelope activated. Copy each active recipient's link next." : "Envelope activated and invitation requested.");
   });
 
-  const copyLink = () => run(async () => {
-    if (!detail || !currentRecipient) return;
-    const data = await request(`/envelopes/${detail.id}/link`, { method: "POST", body: JSON.stringify({ recipient_id: currentRecipient.id }) });
+  const copyLink = (recipient: Recipient) => run(async () => {
+    if (!detail) return;
+    const data = await request(`/envelopes/${detail.id}/link`, { method: "POST", body: JSON.stringify({ recipient_id: recipient.id }) });
     await navigator.clipboard.writeText(data.url);
-    setMessage("A new signing link was copied. Any previous link for this recipient was revoked.");
+    setMessage(`A new signing link for ${recipient.name} was copied. Any previous link for this recipient was revoked.`);
   });
 
-  const remind = () => run(async () => {
-    if (!detail || !currentRecipient) return;
-    await request(`/envelopes/${detail.id}/remind`, { method: "POST", body: JSON.stringify({ recipient_id: currentRecipient.id }) });
+  const remind = (recipient: Recipient) => run(async () => {
+    if (!detail) return;
+    await request(`/envelopes/${detail.id}/remind`, { method: "POST", body: JSON.stringify({ recipient_id: recipient.id }) });
     setMessage("Reminder requested through Messaging.");
   });
 
@@ -233,6 +301,24 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
     if (!detail || !window.confirm("Void this envelope? Active signing links will stop working.")) return;
     await request(`/envelopes/${detail.id}/void`, { method: "POST", body: JSON.stringify({ reason: "Voided from dashboard" }) });
     setMessage("Envelope voided.");
+  });
+
+  const openSeal = () => run(async () => {
+    const data = await request("/seal");
+    setSeal(data.seal);
+    setCreating(false);
+    setShowSeal(true);
+  });
+
+  const verifySeal = () => run(async () => {
+    if (!detail?.completed_file_id) return;
+    const data = await request("/seal/verify", { method: "POST", body: JSON.stringify({ file_id: detail.completed_file_id }) });
+    const result: SealVerification = data.verification;
+    if (result.intact) {
+      setMessage(`Seal intact: every byte is covered by a valid signature from ${result.signer_subject || "the seal"}${result.matches_this_install_seal ? " (this install's seal)" : ""}.`);
+    } else {
+      setMessage(`Seal check failed: ${(result.problems || []).join("; ") || "unknown problem"}.`);
+    }
   });
 
   const finalize = () => run(async () => {
@@ -246,10 +332,11 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
         <div>
           <h1 className="text-sm font-semibold">Signatures</h1>
-          <p className="text-xs text-text-muted">Send Storage PDFs for simple electronic signature.</p>
+          <p className="text-xs text-text-muted">Send Storage PDFs for electronic signature. Completed PDFs are digitally sealed.</p>
         </div>
         <button type="button" onClick={loadList} className="ml-auto px-3 py-1.5 text-xs border border-border rounded">Refresh</button>
-        <button type="button" onClick={() => setCreating(true)} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
+        <button type="button" onClick={openSeal} className="px-3 py-1.5 text-xs border border-border rounded">Document seal</button>
+        <button type="button" onClick={openCreate} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New envelope</button>
       </header>
 
       {message && <div className="shrink-0 px-4 py-2 text-xs border-b border-border bg-bg-input">{message}</div>}
@@ -260,7 +347,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
             <ul className="divide-y divide-border">
               {envelopes.map((envelope) => (
                 <li key={envelope.id}>
-                  <button type="button" onClick={() => setSelectedId(envelope.id)} className={`w-full text-left p-4 hover:bg-bg-input ${selectedId === envelope.id ? "bg-bg-input" : ""}`}>
+                  <button type="button" onClick={() => { setShowSeal(false); setSelectedId(envelope.id); }} className={`w-full text-left p-4 hover:bg-bg-input ${selectedId === envelope.id ? "bg-bg-input" : ""}`}>
                     <div className="flex gap-2 items-center"><span className="font-medium text-sm truncate">{envelope.title}</span><Status value={envelope.status} /></div>
                     <p className="text-xs text-text-muted mt-1 truncate">{envelope.source_name}</p>
                     <p className="text-xs text-text-dim mt-2">Expires {formatDate(envelope.expires_at)}</p>
@@ -272,13 +359,46 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
         </aside>
 
         <section className="min-h-0 overflow-auto p-5">
-          {creating ? (
+          {showSeal && seal ? (
+            <Card title="Document seal" right={<Secondary onClick={() => setShowSeal(false)}>Close</Secondary>}>
+              <div className="grid gap-3 max-w-3xl text-sm">
+                <p className="text-text-muted">Every completed PDF is sealed with a digital certification signature. PDF readers such as Adobe Acrobat show it in the signature panel, and any change to the file breaks it.</p>
+                <div className="grid md:grid-cols-2 gap-3 text-xs">
+                  <div><span className="block text-text-dim">Certificate</span>{seal.source === "configured" ? "Configured certificate" : "Self-signed install certificate"}</div>
+                  <div><span className="block text-text-dim">Subject</span>{seal.subject}</div>
+                  <div><span className="block text-text-dim">Issuer</span>{seal.issuer}</div>
+                  <div><span className="block text-text-dim">Valid until</span>{formatDate(seal.not_after)}</div>
+                  <div><span className="block text-text-dim">Timestamp authority</span>{seal.timestamp_url || "None (signing time from this server)"}</div>
+                  <div className="md:col-span-2"><span className="block text-text-dim">SHA-256 fingerprint</span><span className="font-mono break-all">{seal.sha256_fingerprint}</span></div>
+                </div>
+                <p className="text-xs text-text-muted">{seal.trust_note}</p>
+                <div><a className="inline-block px-3 py-1.5 text-xs border border-border rounded" href={url("/seal/certificate.cer")} download="signatures-seal.cer">Download certificate</a></div>
+              </div>
+            </Card>
+          ) : creating ? (
             <Card title="New envelope">
               <div className="grid gap-3 max-w-2xl">
                 <FilePicker projectId={projectId} picked={pickedFile} onPick={setPickedFile} onError={setMessage} />
                 <Input label="Title" value={newEnvelope.title} onChange={(value) => setNewEnvelope({ ...newEnvelope, title: value })} />
                 <Input label="Sender name" value={newEnvelope.sender_name} onChange={(value) => setNewEnvelope({ ...newEnvelope, sender_name: value })} />
                 <Input label="Message" value={newEnvelope.message} onChange={(value) => setNewEnvelope({ ...newEnvelope, message: value })} />
+                <label className="grid gap-1 text-xs text-text-muted">Layout
+                  <select className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text" value={layoutSlug} onChange={(event) => chooseLayout(event.target.value)}>
+                    <option value="">None (place fields by hand)</option>
+                    {layouts.map((layout) => <option key={layout.id} value={layout.slug}>{layout.name}</option>)}
+                  </select>
+                </label>
+                {selectedLayout && <div className="grid gap-2">
+                  {selectedLayout.description && <p className="text-xs text-text-muted">{selectedLayout.description}</p>}
+                  {selectedLayout.recipients.map((role, index) => (
+                    <div key={index} className="grid gap-2 items-center" style={{ gridTemplateColumns: "140px 1fr 1fr" }}>
+                      <span className="text-xs font-semibold" style={{ color: RECIPIENT_COLORS[index % RECIPIENT_COLORS.length] }}>{role.label}</span>
+                      <input className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" placeholder={`Name (default: ${role.label})`} value={layoutPeople[index]?.name || ""} onChange={(event) => updateAt(setLayoutPeople, layoutPeople, index, { name: event.target.value })} />
+                      <input className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" placeholder="Email (optional in manual mode)" value={layoutPeople[index]?.email || ""} onChange={(event) => updateAt(setLayoutPeople, layoutPeople, index, { email: event.target.value })} />
+                    </div>
+                  ))}
+                  <p className="text-xs text-text-dim">{new Set(selectedLayout.recipients.map((role) => role.signing_order)).size === 1 && selectedLayout.recipients.length > 1 ? "Everyone signs at the same time." : "Recipients sign in the layout's order."}</p>
+                </div>}
                 <div className="flex gap-2"><Primary onClick={createEnvelope} disabled={busy || !pickedFile}>Create draft</Primary><Secondary onClick={() => { setCreating(false); setPickedFile(null); }}>Cancel</Secondary></div>
               </div>
             </Card>
@@ -293,9 +413,11 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                 {detail.message && <p className="mt-3 text-sm">{detail.message}</p>}
                 <div className="mt-4 flex flex-wrap gap-2">
                   {detail.status === "draft" && <><Primary onClick={() => send("manual")} disabled={busy}>Send manually</Primary><Secondary onClick={() => send("messaging")} disabled={busy}>Send with Messaging</Secondary></>}
-                  {detail.status === "sent" && currentRecipient && <><Primary onClick={copyLink} disabled={busy}>Copy signing link</Primary>{currentRecipient.email && <Secondary onClick={remind} disabled={busy}>Send reminder</Secondary>}</>}
+                  {detail.status === "sent" && activeRecipients.map((recipient) => <span key={recipient.id} className="flex gap-2"><Primary onClick={() => copyLink(recipient)} disabled={busy}>{activeRecipients.length > 1 ? `Copy link: ${recipient.name}` : "Copy signing link"}</Primary>{recipient.email && <Secondary onClick={() => remind(recipient)} disabled={busy}>Send reminder</Secondary>}</span>)}
                   {detail.status === "sent" && !currentRecipient && <Secondary onClick={finalize} disabled={busy}>Retry finalization</Secondary>}
                   {(detail.status === "draft" || detail.status === "sent") && <Secondary onClick={voidEnvelope} disabled={busy}>Void</Secondary>}
+                  {(detail.fields?.length || 0) > 0 && <Secondary onClick={saveAsLayout} disabled={busy}>Save as layout</Secondary>}
+                  {detail.completed_file_id && <Secondary onClick={verifySeal} disabled={busy}>Verify seal</Secondary>}
                   {detail.completed_file_id && <span className="text-xs text-text-muted self-center">Completed file {detail.completed_file_id} · audit file {detail.audit_file_id}</span>}
                 </div>
               </Card>
@@ -311,6 +433,7 @@ export default function SignaturesPanel({ projectId }: NativePanelProps) {
                       <button type="button" onClick={() => setRecipientDrafts(recipientDrafts.filter((_, i) => i !== index))}>×</button>
                     </div>
                   ))}
+                  <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={signTogether} onChange={(event) => setSignTogether(event.target.checked)} /> Everyone signs at the same time (otherwise in the order listed)</label>
                   <div><Primary onClick={saveRecipients} disabled={busy || recipientDrafts.length === 0}>Save recipients</Primary></div>
                 </div>
               </Card>}

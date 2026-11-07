@@ -83,7 +83,9 @@ func TestLiveBrowserSpeechHarnessLocal(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		_ = wsutil.WriteServerText(conn, []byte(`{"type":"ready"}`))
 		_ = wsutil.WriteServerText(conn, []byte(`{"type":"peer.connected"}`))
+		_ = wsutil.WriteServerText(conn, []byte(`{"type":"call.status","call_id":"local","status":"answered"}`))
 		for {
 			data, op, err := wsutil.ReadClientData(conn)
 			if err != nil {

@@ -22,11 +22,16 @@ type managedTunnel struct {
 	key       tunnelKey
 	listener  net.Listener
 	localPort int
+	openedAt  time.Time
 	instance  *Instance
 
-	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
-	closed bool
+	mu            sync.Mutex
+	conns         map[net.Conn]struct{}
+	closed        bool
+	attempts      uint64
+	failures      uint64
+	lastAttempt   time.Time
+	lastConnected time.Time
 }
 
 type tunnelRegistry struct {
@@ -45,26 +50,43 @@ func newTunnelRegistry(dial func(*Instance, string) (net.Conn, error)) *tunnelRe
 }
 
 func dialInstanceLoopback(inst *Instance, target string) (net.Conn, error) {
-	client, fresh, err := globalSSHPool.get(inst)
+	return dialInstanceLoopbackWithTimeout(inst, target, 10*time.Second)
+}
+func dialInstanceLoopbackWithTimeout(inst *Instance, target string, timeout time.Duration) (net.Conn, error) {
+	client, fresh, err := globalSSHPool.getWithTimeout(inst, timeout)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialTunnelWithDeadline(client, target)
+	conn, err := dialTunnelWithTimeout(client, target, timeout)
 	if err == nil {
 		return conn, nil
 	}
-	if !fresh && !errors.Is(err, context.DeadlineExceeded) && isSSHConnError(err) {
+	if isSSHConnError(err) {
+		// A timed-out channel open can leave an apparently connected but unusable
+		// SSH transport cached forever. Evict it even on its first use. Only channel
+		// opening is retried: no HTTP request bytes have been forwarded yet.
 		globalSSHPool.drop(inst.ID, client)
-		client, _, redialErr := globalSSHPool.get(inst)
-		if redialErr != nil {
-			return nil, fmt.Errorf("ssh tunnel redial: %w", redialErr)
+		if !fresh && !errors.Is(err, context.DeadlineExceeded) {
+			client, _, redialErr := globalSSHPool.getWithTimeout(inst, timeout)
+			if redialErr != nil {
+				return nil, fmt.Errorf("ssh tunnel redial: %w", redialErr)
+			}
+			conn, err = dialTunnelWithTimeout(client, target, timeout)
+			if isSSHConnError(err) {
+				globalSSHPool.drop(inst.ID, client)
+			}
+			return conn, err
 		}
-		return dialTunnelWithDeadline(client, target)
 	}
 	return nil, err
 }
 
 func (r *tunnelRegistry) open(inst *Instance, targetPort int) (*managedTunnel, error) {
+	return r.openAt(inst, targetPort, 0)
+}
+
+// openAt restores a deployment-owned tunnel at its durable Server-facing port.
+func (r *tunnelRegistry) openAt(inst *Instance, targetPort, localPort int) (*managedTunnel, error) {
 	if inst == nil || inst.ID <= 0 || inst.IsLocal() {
 		return nil, errors.New("remote instance required")
 	}
@@ -75,16 +97,34 @@ func (r *tunnelRegistry) open(inst *Instance, targetPort int) (*managedTunnel, e
 
 	r.mu.Lock()
 	if existing := r.tunnels[key]; existing != nil {
-		r.mu.Unlock()
-		return existing, nil
+		if localPort != 0 && existing.localPort != localPort {
+			r.mu.Unlock()
+			return nil, errors.New("tunnel allocation conflicts with durable port")
+		}
+		existing.mu.Lock()
+		closed := existing.closed
+		existing.mu.Unlock()
+		if !closed {
+			r.mu.Unlock()
+			return existing, nil
+		}
+		if localPort == 0 {
+			localPort = existing.localPort
+		}
+		delete(r.tunnels, key)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if localPort < 0 || localPort > 65535 {
+		r.mu.Unlock()
+		return nil, errors.New("invalid tunnel port")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(localPort)))
 	if err != nil {
 		r.mu.Unlock()
 		return nil, err
 	}
 	t := &managedTunnel{
 		key:       key,
+		openedAt:  time.Now().UTC(),
 		listener:  ln,
 		localPort: ln.Addr().(*net.TCPAddr).Port,
 		instance:  inst,
@@ -102,6 +142,7 @@ func (r *tunnelRegistry) serve(t *managedTunnel) {
 	for {
 		local, err := t.listener.Accept()
 		if err != nil {
+			t.close()
 			return
 		}
 		go r.forward(t, local, target)
@@ -113,7 +154,18 @@ func (r *tunnelRegistry) forward(t *managedTunnel, local net.Conn, target string
 		return
 	}
 	defer t.track(local, false)
+	t.mu.Lock()
+	t.attempts++
+	t.lastAttempt = time.Now().UTC()
+	t.mu.Unlock()
 	remote, err := r.dial(t.instance, target)
+	t.mu.Lock()
+	if err != nil {
+		t.failures++
+	} else {
+		t.lastConnected = time.Now().UTC()
+	}
+	t.mu.Unlock()
 	if err != nil {
 		_ = local.Close()
 		return
@@ -236,7 +288,9 @@ func (a *App) toolOpenTunnel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"target_port": targetPort,
 		"local_host":  "127.0.0.1",
 		"local_port":  t.localPort,
-		"opened_at":   time.Now().UTC(),
+		"opened_at":   t.openedAt,
+		"observed_at": time.Now().UTC(),
+		"forwarding":  t.diagnostics(),
 	}, nil
 }
 
@@ -258,4 +312,12 @@ func dialTunnelWithTimeout(client *ssh.Client, target string, timeout time.Durat
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return client.DialContext(ctx, "tcp", target)
+}
+
+// A channel opening is not proof that an app answered. HTTP health and app
+// admission are observed separately by native inspection / Server.
+func (t *managedTunnel) diagnostics() map[string]any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return map[string]any{"listener_open": !t.closed, "channel_attempts": t.attempts, "channel_failures": t.failures, "last_attempt_at": t.lastAttempt, "last_channel_open_at": t.lastConnected}
 }

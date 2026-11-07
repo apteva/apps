@@ -9,7 +9,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-func TestPinterestPlatformDefinitionIsNativeAndBoardScoped(t *testing.T) {
+func TestPinterestPlatformDefinitionIsNativeAndAccountScoped(t *testing.T) {
 	def, ok := platforms["pinterest"]
 	if !ok {
 		t.Fatal("pinterest missing from native platform registry")
@@ -17,7 +17,7 @@ func TestPinterestPlatformDefinitionIsNativeAndBoardScoped(t *testing.T) {
 	if def.IntegrationSlug != "pinterest" || def.Strategy != "pinterest" || def.ExternalIDField != "board_id" {
 		t.Fatalf("unexpected pinterest definition: %+v", def)
 	}
-	if !def.MediaRequired || def.ListPagesTool != "list_boards" || def.DeleteTool != "delete_pin" {
+	if !def.MediaRequired || def.ListPagesTool != "" || def.DeleteTool != "delete_pin" {
 		t.Fatalf("incomplete pinterest lifecycle: %+v", def)
 	}
 }
@@ -30,7 +30,9 @@ func TestFetchPagesSupportsPinterestItemsAndBookmark(t *testing.T) {
 	}
 	ctx := newSocialCtx(t, pf)
 
-	pages, err := (&App{}).fetchPages(ctx, 42, platforms["pinterest"])
+	legacyDef := platforms["pinterest"]
+	legacyDef.ListPagesTool = "list_boards"
+	pages, err := (&App{}).fetchPages(ctx, 42, legacyDef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,7 @@ func TestPublishPinterestBuildsNestedImagePin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "987654321" || pinURL != "https://www.pinterest.com/pin/987654321/" {
+	if id != "987654321" || pinURL != "" {
 		t.Fatalf("identity = %q %q", id, pinURL)
 	}
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "create_pin" {
@@ -143,7 +145,7 @@ func TestImportPinterestPreservesDescriptionTitleAndUpstreamTime(t *testing.T) {
 	if body != "Full description" || publishedAt != "2026-02-03T04:05:06Z" || targetPublishedAt != publishedAt {
 		t.Fatalf("imported dates/body = %q %q %q", body, publishedAt, targetPublishedAt)
 	}
-	if platformURL != "https://www.pinterest.com/pin/pin-1/" || !containsJSONValue(targetOptions, "title", "Separate title") {
+	if platformURL != "" || !containsJSONValue(targetOptions, "title", "Separate title") {
 		t.Fatalf("url/options = %q %s", platformURL, targetOptions)
 	}
 }
@@ -158,7 +160,7 @@ func TestPinterestMetricsNormalizeClicksSavesAndImpressions(t *testing.T) {
 	out := (&App{}).getPostMetrics(ctx, metricsTarget{
 		TargetID: 1, SocialAccountID: 2, ConnID: 42, Platform: "pinterest", ExtPostID: "pin-1",
 	})
-	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Views != 120 || out.Metrics.Clicks != 3 || out.Metrics.Saves != 11 {
+	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Impressions != 120 || out.Metrics.Views != 0 || out.Metrics.PinClicks != 7 || out.Metrics.Clicks != 3 || out.Metrics.Saves != 11 {
 		t.Fatalf("metrics = %+v", out)
 	}
 }

@@ -134,7 +134,7 @@ func (p *appleMediaPlatform) ExecuteIntegrationTool(_ int64, tool string, input 
 	data := json.RawMessage(`{}`)
 	switch tool {
 	case "list_screenshot_sets":
-		data = json.RawMessage(`{"data":[{"id":"iphone-set","attributes":{"screenshotDisplayType":"APP_IPHONE_69"}},{"id":"ipad-set","attributes":{"screenshotDisplayType":"APP_IPAD_PRO_13"}}]}`)
+		data = json.RawMessage(`{"data":[{"id":"iphone-set","attributes":{"screenshotDisplayType":"APP_IPHONE_67"}},{"id":"ipad-set","attributes":{"screenshotDisplayType":"APP_IPAD_PRO_13"}}]}`)
 	case "list_screenshots":
 		if input["set_id"] == "ipad-set" {
 			p.readIPadSet = true
@@ -1230,6 +1230,17 @@ func TestAppleVersionLocalizationOmitsEmptyWhatsNew(t *testing.T) {
 	input = appleVersionLocalizationInput(StoreLocalization{WhatsNew: "Changes"}, true)
 	if input["whatsNew"] != "Changes" {
 		t.Fatalf("subsequent whatsNew missing: %#v", input)
+	}
+}
+
+func TestAppleVersionLocalizationOmitsEmptyMarketingURL(t *testing.T) {
+	input := appleVersionLocalizationInput(StoreLocalization{Description: "Description", MarketingURL: "  "}, true)
+	if _, ok := input["marketingUrl"]; ok {
+		t.Fatalf("empty marketingUrl was sent: %#v", input)
+	}
+	input = appleVersionLocalizationInput(StoreLocalization{MarketingURL: " https://example.com "}, true)
+	if input["marketingUrl"] != "https://example.com" {
+		t.Fatalf("marketingUrl missing: %#v", input)
 	}
 }
 

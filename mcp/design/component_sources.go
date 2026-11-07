@@ -32,6 +32,11 @@ func (s *Service) materializeComponentSources(ownerRevisionID int64, canonical [
 }
 
 func (s *Service) materializeDefinition(ownerRevisionID int64, canonical []byte, stack map[int64]bool, count *int) ([]byte, []ComponentDependency, error) {
+	var assetErr error
+	canonical, assetErr = s.materializeAssets(canonical)
+	if assetErr != nil {
+		return nil, nil, assetErr
+	}
 	if len(stack) > 16 {
 		return nil, nil, errors.New("component dependency depth exceeds 16 revisions")
 	}

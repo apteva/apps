@@ -11,6 +11,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/render", Handler: a.handleRender},
 		{Pattern: "/render-status/", Handler: a.handleRenderStatus},
 		{Pattern: "/render-font", Handler: a.handleRenderFont},
+		{Pattern: "/renderer-io/", Handler: a.handleRendererTransfer, NoAuth: true},
 		{Pattern: "/cards/composition/", Handler: a.handleCompositionCard},
 		{Pattern: "/cards/render/", Handler: a.handleRenderCard},
 		{Pattern: "/ai/generate", Handler: a.handleAIGenerate},
@@ -89,10 +90,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_render",
-			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder), wait? (default true for compatibility). Set wait=false for a durable background render: the call returns {render_id,status:'queued'} immediately, AI assets generate automatically, and render_status or the Composer render-card follows the result.",
+			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'component' — overrides the auto ladder; 'component' runs on the private renderer component), wait? (default true for compatibility). Set wait=false for a durable background render: the call returns {render_id,status:'queued'} immediately, AI assets generate automatically, and render_status or the Composer render-card follows the result.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                map[string]any{"type": "integer"},
-				"executor":          map[string]any{"type": "string", "enum": []string{"local", "remote"}},
+				"executor":          map[string]any{"type": "string", "enum": []string{"local", "component"}},
 				"wait":              map[string]any{"type": "boolean", "default": true},
 				"expected_revision": map[string]any{"type": "integer", "description": "Optional revision returned by create/update/get; rejects rendering if it changed."},
 			}, []string{"id"}),
@@ -150,7 +151,7 @@ func (a *App) procedureTools() []sdk.Tool {
 		"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer"}, "expected_revision": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"},
 	}
 	return []sdk.Tool{
-		{Name: "procedure_create", Description: "Create a reusable code-authored Composer procedure and immutable revision. The trusted local runner executes Python, Bun/TypeScript, and Go; Web Canvas is reserved by the contract but not executable yet.", InputSchema: schemaObject(sourceProps, []string{"name", "runtime"}), Handler: a.toolProcedureCreate},
+		{Name: "procedure_create", Description: "Create a reusable code-authored Composer procedure and immutable revision. The trusted local runner executes Python, Bun/TypeScript, and Go. web-canvas-1 (target clip|still, output video|image) takes an .html entrypoint that defines setTime(t) or calls composer.onTime(fn) and reads window.composer.parameters/canvas/timeline/assets/files; Composer captures it in headless Chrome and the panel previews it live.", InputSchema: schemaObject(sourceProps, []string{"name", "runtime"}), Handler: a.toolProcedureCreate},
 		{Name: "procedure_revision_create", Description: "Publish a new immutable procedure revision. Requires id and expected_revision.", InputSchema: schemaObject(sourceProps, []string{"id", "expected_revision", "runtime"}), Handler: a.toolProcedureRevisionCreate},
 		{Name: "procedure_get", Description: "Fetch one procedure and an exact or latest immutable revision.", InputSchema: schemaObject(sourceProps, []string{"id"}), Handler: a.toolProcedureGet},
 		{Name: "procedure_list", Description: "List reusable procedures in the current project.", InputSchema: schemaObject(sourceProps, nil), Handler: a.toolProcedureList},

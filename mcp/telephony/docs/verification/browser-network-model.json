@@ -1,0 +1,77 @@
+{
+  "scope": "deterministic packet/queue simulation, actual browser policy vs frozen 0.12.40 policy",
+  "results": [
+    {
+      "name": "healthy",
+      "before": {
+        "lostPackets": 0,
+        "deliveredPackets": 6000,
+        "addedDelayP95Ms": 12,
+        "maxQueueMs": 12,
+        "finalBitrate": 32000
+      },
+      "after": {
+        "lostPackets": 0,
+        "deliveredPackets": 6000,
+        "addedDelayP95Ms": 12,
+        "maxQueueMs": 12,
+        "finalBitrate": 32000
+      },
+      "afterResilientPreset": {
+        "lostPackets": 0,
+        "deliveredPackets": 6000,
+        "addedDelayP95Ms": 9.5,
+        "maxQueueMs": 9.5,
+        "finalBitrate": 20000
+      }
+    },
+    {
+      "name": "busy-upload",
+      "before": {
+        "lostPackets": 60,
+        "deliveredPackets": 5940,
+        "addedDelayP95Ms": 1593.8333333333335,
+        "maxQueueMs": 1604,
+        "finalBitrate": 32000
+      },
+      "after": {
+        "lostPackets": 60,
+        "deliveredPackets": 5940,
+        "addedDelayP95Ms": 1593.8333333333335,
+        "maxQueueMs": 1604,
+        "finalBitrate": 32000
+      },
+      "afterResilientPreset": {
+        "lostPackets": 0,
+        "deliveredPackets": 6000,
+        "addedDelayP95Ms": 19,
+        "maxQueueMs": 19,
+        "finalBitrate": 20000
+      }
+    },
+    {
+      "name": "severe-contention",
+      "before": {
+        "lostPackets": 76,
+        "deliveredPackets": 5924,
+        "addedDelayP95Ms": 1593.2727272727273,
+        "maxQueueMs": 1606.1818181818182,
+        "finalBitrate": 32000
+      },
+      "after": {
+        "lostPackets": 76,
+        "deliveredPackets": 5924,
+        "addedDelayP95Ms": 1593.2727272727273,
+        "maxQueueMs": 1606.1818181818182,
+        "finalBitrate": 32000
+      },
+      "afterResilientPreset": {
+        "lostPackets": 9,
+        "deliveredPackets": 5991,
+        "addedDelayP95Ms": 1581.090909090909,
+        "maxQueueMs": 1600.7272727272727,
+        "finalBitrate": 20000
+      }
+    }
+  ]
+}

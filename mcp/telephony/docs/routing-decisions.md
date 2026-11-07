@@ -144,6 +144,8 @@ capacity are recorded as errors. A configured loop may request another
 decision; otherwise it follows the saved fallback. The decoded response is
 limited to 16 KiB.
 Only explicitly configured `variables` are sent; no CRM data is fetched implicitly.
+To load business facts for an AI destination before the agent speaks, see
+[AI context lookup](ai-context-lookup.md).
 
 Use `decision_id` as the business reservation idempotency key. Respect
 `deadline_at` and give reservations an expiry. The deadline includes scheduling
@@ -157,6 +159,12 @@ caps outstanding invocations at 32. Do not rely on cancellation to undo business
 side effects; use TTLs and reconcile outcomes.
 
 ## Offers, capacity and recovery
+
+For a lightweight snapshot of existing human call owners, use
+[`telephony_live_occupancy`](live-occupancy.md), optionally filtered to outbound
+calls. It returns all matching owners in one consistent indexed read. Keep the
+function's reservation ledger and the atomic capacity checks described below;
+the snapshot does not reserve an adviser.
 
 A result, capacity reservation and one-member ring offer commit atomically.
 Duplicate provider callbacks never create another independent decision. A restart

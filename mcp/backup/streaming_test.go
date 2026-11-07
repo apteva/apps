@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,19 @@ type streamingProviderPlatform struct {
 	tk.BasePlatformClient
 	archiveURL string
 	input      map[string]any
+}
+
+func (p *streamingProviderPlatform) CallAppResultContext(ctx context.Context, app, tool string, input map[string]any, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.CallAppResult(app, tool, input, out)
+}
+func (p *streamingProviderPlatform) CallAppContext(ctx context.Context, app, tool string, input map[string]any) (json.RawMessage, error) {
+	return nil, fmt.Errorf("unused")
+}
+func (p *streamingProviderPlatform) CallAppBatchContext(ctx context.Context, app string, calls []sdk.AppCall, opts sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
+	return nil, fmt.Errorf("unused")
 }
 
 func (p *streamingProviderPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {

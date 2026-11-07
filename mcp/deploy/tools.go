@@ -34,7 +34,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"framework":                 map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -94,7 +94,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_extra_json":         map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -119,7 +119,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_extra_json":         map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -184,19 +184,21 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_cloud_backend_setup", Handler: a.toolCloudBackendSetup,
-			Description: "Discover or create a provider's shared build adapter and configure this deployment environment. Codemagic setup uses Deploy's maintained iOS/Android capsule workflow. Args: name OR id, environment?, provider?, repository_url?, team_id?, workflow_id?, branch?, artifact_mode?.",
+			Description: "Configure a cloud provider for this deployment environment. Codemagic discovers or creates its adapter app; Bitrise/Appcircle validate existing apps/configurations supplied in build_backend_config_json. All use Deploy's maintained native capsule runner. Args: name OR id, environment?, provider?, repository_url?, team_id?, workflow_id?, branch?, artifact_mode?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":           map[string]any{"type": "string"},
-					"id":             map[string]any{"type": "integer"},
-					"environment":    map[string]any{"type": "string"},
-					"provider":       map[string]any{"type": "string", "enum": []string{"codemagic"}},
-					"repository_url": map[string]any{"type": "string"},
-					"team_id":        map[string]any{"type": "string"},
-					"workflow_id":    map[string]any{"type": "string"},
-					"branch":         map[string]any{"type": "string"},
-					"artifact_mode":  map[string]any{"type": "string", "enum": []string{"file", "store_upload"}},
+					"name":                      map[string]any{"type": "string"},
+					"id":                        map[string]any{"type": "integer"},
+					"environment":               map[string]any{"type": "string"},
+					"provider":                  map[string]any{"type": "string", "enum": []string{"codemagic", "bitrise", "appcircle"}},
+					"connection_id":             map[string]any{"type": "integer"},
+					"build_backend_config_json": map[string]any{"type": "string"},
+					"repository_url":            map[string]any{"type": "string"},
+					"team_id":                   map[string]any{"type": "string"},
+					"workflow_id":               map[string]any{"type": "string"},
+					"branch":                    map[string]any{"type": "string"},
+					"artifact_mode":             map[string]any{"type": "string", "enum": []string{"file", "store_upload"}},
 				},
 			},
 		},
@@ -298,7 +300,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_distribution_update", Handler: a.toolDistributionUpdate,
-			Description: "Persist and reconcile the desired test audience for a mobile channel. Android uses exact Google Group replacement, including empty-list removal; iOS adds or invites individual testers without removing existing account access. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience?, google_groups?, install_url?.",
+			Description: "Reconcile the desired test audience for a mobile channel and save it once the provider accepts it; a refused update saves nothing. Android uses exact Google Group replacement, including empty-list removal; iOS adds or invites individual testers without removing existing account access. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience?, google_groups?, install_url?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -333,7 +335,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_release_sync", Handler: a.toolReleaseSync,
-			Description: "Refresh a mobile store release from its provider, including review submission/item state and the exact reviewed artifact when available. Also refreshes store readiness. Args: release_id.",
+			Description: "Refresh a mobile store release from its provider, including review submission/item state and the exact reviewed artifact when available. Also refreshes store readiness. Returns tester_warning when an internal TestFlight build is waiting and its group has no testers. Args: release_id.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"release_id": map[string]any{"type": "integer"}},
@@ -496,7 +498,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_ref":                map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -767,6 +769,7 @@ func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(env.ID, 10)))
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "static-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(env.ID, 10)))
 	emit("deploy.environment.destroyed", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name})
 	return map[string]any{"destroyed": true, "environment": env.Name, "environment_id": env.ID}, nil
 }
@@ -851,6 +854,7 @@ func (a *App) toolCloudBackendSetup(_ *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	return a.setupCloudBackend(context.Background(), d, cloudBackendSetupInput{
+		ConnectionID: int64(intArg(args, "connection_id")), ConfigJSON: strArg(args, "build_backend_config_json"),
 		Provider: strArg(args, "provider"), RepositoryURL: strArg(args, "repository_url"),
 		TeamID: strArg(args, "team_id"), WorkflowID: strArg(args, "workflow_id"),
 		Branch: strArg(args, "branch"), ArtifactMode: strArg(args, "artifact_mode"),
@@ -1291,6 +1295,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	a.removeBuildDirs(builds)
 	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10)))
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "static-assets", strconv.FormatInt(d.ID, 10)))
 	emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 	return map[string]any{"destroyed": true, "id": d.ID}, nil
 }

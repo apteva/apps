@@ -74,6 +74,19 @@ customer conversations, lists, segments, opportunities, and pipelines.
 
 ## Typed attributes and dossier readiness
 
+- Call the read-only `contacts_attribute_definitions_list` with `{}` before
+  research-to-CRM promotion or attribute writes. It returns `attribute_defs`
+  (keys, types, required flags, allowed `enum_values`, labels and system flags)
+  and `count`, including built-in defaults without database writes. Do not guess
+  keys/options or use `contacts_define_attribute` just to inspect definitions.
+- Batch updates use **an array inside patch.attributes**, not a dictionary:
+  `{"id":123,"patch":{"attributes":[{"key":"lead_score","value":88},{"key":"do_not_contact","value":false}]},"source":"agent:Research"}`.
+  Each item requires key/value and may override source. Update patches require
+  native JSON types; they do not perform legacy number/bool string conversion.
+  Omitted attributes and `[]` leave existing values unchanged; explicit
+  `value:null` clears only optional values. Missing values fail without clearing.
+  Invalid batches do not partially update the contact. Use
+  `patch.expected_updated_at` for stale-edit protection and verify readback.
 - `contacts_set_attribute` writes a value according to its project-owned
   definition. Use native JSON numbers for numeric scores and booleans for flags:
   `{"contact_id":123,"key":"opportunity_score","value":88}` and
@@ -113,12 +126,24 @@ customer conversations, lists, segments, opportunities, and pipelines.
   optional `reply_to_activity_id`, and proposed `body`/`body_html`/attachments.
   Saving never sends, creates message activities, or changes thread status.
   Multiple CRM-local drafts are supported; they are not synchronized to Gmail.
+- First outreach does NOT require an inbound conversation: save with
+  `{"mode":"message","contact_id":42,"channel":"email","subject":"Introduction","body":"Hello"}`.
+  The contact must already exist. Optional `to` must be a stored contact channel;
+  otherwise its primary channel is pinned. Saving creates no conversation.
+- For an outbound-only follow-up use
+  `{"mode":"message","conversation_id":123,"body":"Following up"}`. This pins
+  the original outgoing recipient/sender and keeps email threading at send.
+  With conversation_id, omitted mode still defaults to reply and requires an
+  inbound anchor. Message draft recipient/channel/mode/conversation cannot be
+  changed; create a separate draft for a different destination.
 - Inspect full content with `conversation_drafts_get`; `conversation_drafts_list`
-  returns paged summaries only. Use the returned `revision` as
+  returns paged summaries by conversation_id OR contact_id (including first
+  outreach drafts without a conversation). Use the returned `revision` as
   `expected_revision` for update/discard/send. Conflicts require reloading and
   reviewing the newer content, never blindly overwriting it.
 - `conversation_drafts_send` is a real external send, only after explicit user
-  approval. A draft's recipient and inbound reply anchor are pinned. Sending
+  approval. A draft's recipient is pinned; reply drafts also pin an inbound
+  anchor. First outreach creates a thread only when sent. Sending
   rechecks verified sender, Messaging binding, ownership, contact eligibility,
   suppression and WhatsApp reply window. Never silently redirect or switch
   transport. Freeform WhatsApp text can be drafted outside the 24-hour window
@@ -135,6 +160,20 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Replies use the inbound message's Reply-To/From and receiving identity. Use
   `reply_to_activity_id` for a specific inbound message; do not work around a
   blocked reply route by silently sending to a different address.
+- Normal email replies require Messaging v0.15.0+ and use its `send_message`
+  reply mode internally. Messaging derives RFC/Gmail threading, subject and
+  supported ticket identifiers from the selected/latest inbound message.
+  `reply_to_activity_id` also identifies its conversation when `conversation_id`
+  is omitted. Automatic deduplication is scoped to the selected inbound activity.
+  Intentional sender/subject overrides retain regular sends with the selected
+  RFC reference chain; unknown legacy source IDs are never looked up remotely.
+- For legacy activities without a usable Messaging anchor, both
+  `contacts_send_message` with an email `conversation_id` and `contacts_reply` inherit `Re: <original subject>` for omitted/blank subject,
+  before dispatch and automatic idempotency. Existing Re: prefixes are not
+  duplicated. Nonblank explicit subjects are preserved; if the conversation
+  subject is also blank, supply an explicit subject instead of accepting a
+  subjectless send. Standalone templates still own their Messaging subject.
+  Never resend earlier deliveries merely to repair their subject.
 - For an explicitly requested SMS fallback to WhatsApp, call `contacts_reply`
   with `channel: "sms"`, `conversation_id`, and a verified SMS `from` from
   `messaging_senders_list`. It keeps the exact inbound phone and conversation;

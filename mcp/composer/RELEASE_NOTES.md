@@ -1,3 +1,111 @@
+# Composer v0.11.3
+
+- Browser captures no longer depend on host fonts. The renderer worker
+  (`composer-renderer` 0.11.3) bundles Inter (SIL OFL 1.1) and Go Mono (BSD)
+  and gives Chrome its own fontconfig: generic, system and common named
+  families (`sans-serif`, `-apple-system`, `Helvetica`, `Arial`, `monospace`,
+  `Menlo`, `Courier New`, ...) resolve to the bundled fonts, with host font
+  directories as a fallback for other glyphs. On a minimal Debian host without
+  fonts, 0.11.2 completed browser renders and web-canvas-1 procedures with
+  blank text. If the bundled fonts cannot be installed, browser jobs now fail
+  explicitly instead of rendering. FFmpeg-only jobs keep the host environment.
+- Browser readiness is visible right after deploy. Mount starts provisioning
+  Chrome headless shell and Node.js in the background, as it does for FFmpeg,
+  and `capabilities` reports `browser_status`: `ready`, `provisioning`,
+  `missing_libraries`, `fonts` (`bundled`, `system` or `unavailable`) and the
+  last error. Jobs wait for that attempt; a failed attempt is retried by the
+  next browser job, so installing missing libraries needs no redeploy. The
+  `browser` key is kept for 0.11.2 parents.
+
+Validation: renderer worker tests (including under `-race`) and the full
+Composer Go suite; the generated fontconfig resolves the aliased families to
+the bundled faces with fontconfig's `fc-match`.
+
+---
+
+# Composer v0.11.2
+
+- The renderer worker (`composer-renderer` 0.11.2) no longer provisions
+  FFmpeg inside its startup budget. Unpacking the pinned release takes about
+  100 s on a one-vCPU host, so 0.11.1 workers on small Instances hosts failed
+  to mount and Server rolled the deployment back ("runtime readiness deadline
+  exceeded"). Mount now starts provisioning in the background. Jobs wait for
+  it, bounded by their own deadline, and a failed attempt is retried by the
+  next job. `capabilities` reports `ffmpeg_status`.
+
+Validation: renderer worker tests (including under `-race`) and the full Composer Go
+suite. The renderer component was deployed to a one-vCPU DigitalOcean host
+through the Instances native backend, where it activated in 18 s and rendered a
+V1 composition end to end once FFmpeg was ready.
+
+---
+
+# Composer v0.11.1
+
+Fixes found by deploying the 0.11.0 renderer on a real server:
+
+- The renderer worker (`composer-renderer` 0.11.1) reports lifecycle `load`
+  as a number. 0.11.0 sent an object, so Server never confirmed admission and
+  every renderer deployment rolled back after its startup timeout.
+- `/renderer-io/` is declared `no_auth` in the manifest. Server only lets
+  anonymous requests reach routes the manifest marks that way, so 0.11.0
+  workers got `401` on every upload. The relay still verifies the job grant.
+- `composition_render(executor)` and output render plans now steer browser V2
+  renders and `web-canvas-1` procedures too, not only V1 FFmpeg renders:
+  `local` keeps them in the sidecar even when `execution_mode=component`.
+
+Validation: full Composer Go suite and `go vet`, renderer worker tests, and a
+local deployment of the renderer component rendering V1, browser V2 (output
+identical to the local render) and a web-canvas procedure end to end.
+
+---
+
+# Composer v0.11.0
+
+Remote rendering moves from the Instances SSH path to Composer's private
+`renderer` owned component (`apteva.composer-renderer/v1`), deployed and placed
+by Server: on the Composer host or on any execution backend, such as an
+Instances host. Set `execution_mode=component` and V1 FFmpeg renders, browser
+V2 renders, and `web-canvas-1` procedures run on the renderer, which:
+
+- provisions pinned, checksum-verified FFmpeg, Chrome headless shell, and
+  Node.js builds;
+- reports progress, journals receipts, and confirms cancellation and drain;
+- uploads results through a job-scoped Storage relay, so Composer's platform
+  token never leaves the sidecar.
+
+Native V2 renders and script procedures stay local. Composer no longer depends
+on the Instances app; `render_host_id` and the panel host picker are removed.
+Installs that had `render_host_id` set keep offloading and fail explicitly
+until the renderer is deployed (`POST /api/apps/installs/<id>/components/renderer`).
+Migration 007 adds the renderer job tables and fails any render still running
+on an Instances host instead of replaying it.
+
+app-sdk moves from v0.77.1 to v0.113.0. Validation: full Composer Go suite and
+`go vet`, renderer worker tests, panel tests, and end-to-end tests that execute
+V1 FFmpeg, browser V2, and web-canvas plans through the relay into a fake
+Storage.
+
+---
+
+# Composer v0.10.0
+
+`web-canvas-1` procedures now run. The entrypoint is an HTML page that draws a
+frame for any time `t`: define `setTime(t)` (or call `composer.onTime(fn)`),
+optionally expose a `composerReady` promise, and read
+`window.composer.{parameters, canvas, timeline, assets, files}`. Local
+`<script src>` and stylesheet links are inlined into one document, which the
+renderer captures frame by frame with the existing headless-Chrome pipeline
+(target `clip` → mp4, `still` → png). The JSON tab previews the same document
+in a sandboxed iframe with play/scrub and a parameters editor that writes back
+into the clip binding, so retiming a scene no longer needs a render.
+
+No migration. Existing Python, Bun, and Go procedures are unchanged.
+Validation: full Composer Go suite, `go vet`, panel unit tests, and a real
+Chrome capture test for the new runtime.
+
+---
+
 # Composer v0.9.3
 
 `procedure_create` and `procedure_get` now return example assets with the

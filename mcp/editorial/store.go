@@ -541,7 +541,11 @@ func listItems(db *sql.DB, pid string, args map[string]any) (any, error) {
 	}
 	return map[string]any{"items": items, "releases": releases, "total": total, "limit": limit, "offset": offset}, nil
 }
-func itemDetail(db *sql.DB, pid string, id int64) (any, error) {
+func itemDetail(db *sql.DB, pid string, id int64, options ...map[string]any) (any, error) {
+	opts := map[string]any{}
+	if len(options) > 0 && options[0] != nil {
+		opts = options[0]
+	}
 	i, e := readItem(db, pid, id)
 	if e != nil {
 		return nil, e
@@ -572,6 +576,9 @@ func itemDetail(db *sql.DB, pid string, id int64) (any, error) {
 		}
 		releases = append(releases, r)
 	}
+	if !optionBool(opts, "include_history", true) {
+		return detailView(i, releases, []map[string]any{}, false, opts), nil
+	}
 	rows, e = db.Query("SELECT id,action,snapshot,created_at FROM editorial_history WHERE project_id=? AND item_id=? ORDER BY id DESC LIMIT 101", pid, id)
 	if e != nil {
 		return nil, e
@@ -593,7 +600,7 @@ func itemDetail(db *sql.DB, pid string, id int64) (any, error) {
 	if truncated {
 		log = log[:100]
 	}
-	return map[string]any{"item": i, "releases": releases, "history": log, "history_truncated": truncated}, nil
+	return detailView(i, releases, log, truncated, opts), nil
 }
 func saveSettings(db *sql.DB, pid string, args map[string]any) (Settings, error) {
 	tx, e := db.Begin()

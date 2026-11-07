@@ -27,19 +27,39 @@ func (h *lifecycleHook) OnSessionEstablished(cl *mqtt.Client, _ packets.Packet) 
 	if cl == nil || cl.Net.Inline {
 		return
 	}
+	auth := h.app.clientIdentity(cl)
+	if auth == nil {
+		return
+	}
+	h.app.credentialsMu.RLock()
+	defer h.app.credentialsMu.RUnlock()
+	if user := h.app.currentClientUser(cl); user == nil || !user.Enabled {
+		cl.Stop(packets.ErrNotAuthorized)
+		return
+	}
 	connectedAt := time.Now().UTC()
 	h.app.clientConnectedAt.Store(cl, connectedAt)
 	payload := clientEventPayload(cl)
 	identity := &connectedClientIdentity{client: cl, username: payload["username"].(string)}
 	h.app.clientIdentities.Store(cl.ID, identity)
 	payload["connected_at"] = connectedAt.Format(time.RFC3339Nano)
-	h.app.ctx.Emit("mqtt.client.connected", payload)
+	payload["scope_id"] = auth.scope
+	payload["credential_id"] = auth.credentialID
+	h.app.ctx.EmitWithProject("mqtt.client.connected", auth.scope, payload)
 	h.app.eventsEmitted.Add(1)
+	h.app.counters(auth.scope).eventsEmitted.Add(1)
 }
 
 func (h *lifecycleHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	if cl == nil || cl.Net.Inline {
 		return
+	}
+	auth := h.app.clientIdentity(cl)
+	if auth == nil {
+		return
+	}
+	if expire {
+		defer h.app.authenticatedClients.Delete(cl)
 	}
 	payload := clientEventPayload(cl)
 	if identity, ok := h.app.clientIdentities.Load(cl.ID); ok {
@@ -57,8 +77,11 @@ func (h *lifecycleHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	} else {
 		payload["reason"] = "client disconnected"
 	}
-	h.app.ctx.Emit("mqtt.client.disconnected", payload)
+	payload["scope_id"] = auth.scope
+	payload["credential_id"] = auth.credentialID
+	h.app.ctx.EmitWithProject("mqtt.client.disconnected", auth.scope, payload)
 	h.app.eventsEmitted.Add(1)
+	h.app.counters(auth.scope).eventsEmitted.Add(1)
 }
 
 func clientEventPayload(cl *mqtt.Client) map[string]any {

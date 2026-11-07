@@ -95,33 +95,57 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	return stored, true, nil
 }
 
+// outboxLease bounds how long a claimed-but-unfinished send (e.g. the process
+// died mid-send) blocks a retry.
+const outboxLease = 60 * time.Second
+
 func (a *App) deliverOutboxCall(ctx *sdk.AppCtx, callID string) error {
-	var event outboxRow
-	err := ctx.AppDB().QueryRow(`SELECT call_id, agent_id, message, attempts
-        FROM inbound_event_outbox WHERE call_id = ? AND delivered_at = ''`, callID).
-		Scan(&event.CallID, &event.AgentID, &event.Message, &event.Attempts)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return a.deliverOutboxEvent(ctx, event)
+	return a.deliverOutboxEvent(ctx, outboxRow{CallID: callID})
 }
 
-func (a *App) deliverOutboxEvent(ctx *sdk.AppCtx, event outboxRow) error {
-	err := ctx.PlatformAPI().SendEvent(event.AgentID, event.Message)
+// claimOutboxEvent leases a due, undelivered row with a fresh token and
+// returns the row as claimed. ok=false means another sender holds it, it is
+// not yet due, or it was already delivered.
+func claimOutboxEvent(ctx *sdk.AppCtx, callID string, now time.Time) (event outboxRow, token string, ok bool, err error) {
+	token = newCallID()
+	res, err := ctx.AppDB().Exec(`UPDATE inbound_event_outbox SET lease_token = ?, next_attempt_at = ?
+        WHERE call_id = ? AND delivered_at = '' AND next_attempt_at <= ?`,
+		token, now.Add(outboxLease).Format(time.RFC3339), callID, now.Format(time.RFC3339))
+	if err != nil {
+		return event, "", false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return event, "", false, err
+	}
+	err = ctx.AppDB().QueryRow(`SELECT call_id, agent_id, message, attempts
+        FROM inbound_event_outbox WHERE call_id = ? AND lease_token = ?`, callID, token).
+		Scan(&event.CallID, &event.AgentID, &event.Message, &event.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return event, "", false, nil
+	}
+	return event, token, err == nil, err
+}
+
+func (a *App) deliverOutboxEvent(ctx *sdk.AppCtx, due outboxRow) error {
+	now := time.Now().UTC()
+	event, token, ok, err := claimOutboxEvent(ctx, due.CallID, now)
+	if err != nil || !ok {
+		return err
+	}
+	err = ctx.PlatformAPI().SendEvent(event.AgentID, event.Message)
 	if err == nil {
+		// Conditional on the lease: a re-arm for a new agent clears the token,
+		// so this send cannot mark the new message delivered.
 		_, markErr := ctx.AppDB().Exec(`UPDATE inbound_event_outbox
-            SET delivered_at = ?, last_error = '' WHERE call_id = ? AND delivered_at = ''`,
-			time.Now().UTC().Format(time.RFC3339), event.CallID)
+            SET delivered_at = ?, last_error = '', lease_token = '' WHERE call_id = ? AND delivered_at = '' AND lease_token = ?`,
+			time.Now().UTC().Format(time.RFC3339), event.CallID, token)
 		return markErr
 	}
 	delaySeconds := math.Min(300, math.Pow(2, float64(min(event.Attempts, 8))))
 	_, _ = ctx.AppDB().Exec(`UPDATE inbound_event_outbox
-        SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?
-        WHERE call_id = ? AND delivered_at = ''`,
-		err.Error(), time.Now().UTC().Add(time.Duration(delaySeconds)*time.Second).Format(time.RFC3339), event.CallID)
+        SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, lease_token = ''
+        WHERE call_id = ? AND delivered_at = '' AND lease_token = ?`,
+		err.Error(), time.Now().UTC().Add(time.Duration(delaySeconds)*time.Second).Format(time.RFC3339), event.CallID, token)
 	return err
 }
 
@@ -131,7 +155,12 @@ func (a *App) enqueueImmediateAnswer(route *routeRow, callID string) {
 	}
 	routeCopy := *route
 	ctx := globalCtx.WithProject(route.ProjectID)
+	runtimeDone, err := a.runtimeBegin(false)
+	if err != nil {
+		return
+	}
 	go func() {
+		defer runtimeDone()
 		if err := a.answerImmediateCall(ctx, &routeCopy, callID); err != nil {
 			ctx.Logger().Warn("immediate inbound answer", "call", callID, "route", routeCopy.ID, "err", err)
 		}
@@ -155,19 +184,27 @@ func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID strin
 	if isSuppressedHandlingReason(row.HandlingReason) {
 		return nil
 	}
+	if !a.callUsesDirectSIP(row) && (row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo") {
+		// XML pull transports start media from their authenticated inbound/wait
+		// response. A background REST redirect would start it a second time,
+		// replacing the first stream while its bridge claim is still active.
+		// Recovery may prepare Core, but only that callback activates media.
+		_, err = a.prepareInboundRealtime(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting)
+		return err
+	}
 	_, err = a.answerCall(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, true)
 	return err
 }
 
-func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runAutoAnswerTick(workerCtx context.Context, ctx *sdk.AppCtx) error {
 	project := ctx.CurrentProject()
 	if project == "" {
 		return nil
 	}
 	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
-        FROM calls c JOIN inbound_routes r ON r.id = c.route_id
+        FROM calls c INDEXED BY idx_calls_pending_answer JOIN inbound_routes r ON r.id = c.route_id
         WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
-	          AND COALESCE(c.handling_reason,'')=''
+	          AND c.handling_reason=''
           AND r.enabled = 1
           AND (c.state_expires_at = '' OR c.state_expires_at > ?)
         ORDER BY c.placed_at LIMIT 20`, project, time.Now().UTC().Format(time.RFC3339))
@@ -212,8 +249,8 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
-	if err := a.runRoutingEffects(context.Background(), ctx); err != nil {
+func (a *App) runLifecycleTick(workerCtx context.Context, ctx *sdk.AppCtx) error {
+	if err := a.runRoutingEffects(workerCtx, ctx); err != nil {
 		return err
 	}
 	project := ctx.CurrentProject()
@@ -221,9 +258,15 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		return nil
 	}
 	now := time.Now().UTC()
-	_, _ = ctx.AppDB().Exec(`UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano))
-	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
+	if _, err := ctx.AppDB().ExecContext(workerCtx, `UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := a.publishLifecycleEventsContext(workerCtx, ctx, ""); err != nil {
 		ctx.Logger().Warn("publish pending call lifecycle events", "err", err)
+	}
+
+	if err := a.publishAccountEvents(workerCtx, ctx); err != nil {
+		ctx.Logger().Warn("publish pending carrier account events", "err", err)
 	}
 
 	rows, err := ctx.AppDB().Query(`SELECT call_id, agent_id, message, attempts
@@ -251,7 +294,7 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		}
 	}
 
-	expired, err := a.db().listWhere(`project_id = ?
+	expired, err := a.db().listWhereOn("idx_calls_live_lifecycle", `project_id = ?
         AND status NOT IN ('completed','failed','no-answer','busy','canceled')
         AND ((state_expires_at <> '' AND state_expires_at <= ?)
           OR (duration_started_at='' AND deadline_at <> '' AND deadline_at <= ?)
@@ -269,18 +312,6 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		}
 	}
 
-	_, _ = ctx.AppDB().Exec(`UPDATE calls SET callback_secret = '', audio_bridge_url = ''
-        WHERE project_id = ? AND ended_at <> '' AND ended_at < ?`,
-		project, now.Add(-24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_event_outbox WHERE call_id IN (
-        SELECT id FROM calls WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
-    )`, project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM calls
-		WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
-		  AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id AND r.deleted_at = '')`,
-		project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_attempts WHERE project_id=? AND received_at<?`, project, now.Add(-24*time.Hour).Unix())
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_cooldowns WHERE project_id=? AND expires_at<?`, project, now.Unix())
 	return nil
 }
 

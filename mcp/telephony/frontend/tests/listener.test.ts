@@ -22,7 +22,7 @@ describe("passive Telephony listener", () => {
     expect(f.requests[0].url.pathname).toEndWith("/user/softphone/listen/call");
     expect(f.requests[0].url.searchParams.get("auth_provider")).toBe("auth");
     await listener.stop();
-    expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
+    await Bun.sleep(5);expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
     expect(f.stopped).toBe(1);
     expect(f.requests.some(r => /\/answer\/|\/attach\/|\/takeover\/|\/hangup/.test(r.url.pathname))).toBe(false);
     await listener.dispose();
@@ -64,7 +64,7 @@ describe("passive Telephony listener", () => {
     resolve({ call_id: "call", media_url: "/api/apps/telephony/_install/42/softphone/listen-media/call/secret", session_token: "secret", lease_seconds: 60 });
     await pending;
     expect(listener.getSnapshot().state).toBe("idle");
-    expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
+    await Bun.sleep(5);expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
     expect(f.stopped).toBe(0);
     await listener.dispose();
   });
@@ -113,4 +113,27 @@ for(const coaching of [false,true]) test(`${coaching?'coaching':'listening'} kee
   expect(renews).toBe(2);expect(f.stopped).toBe(0);expect(listener.getSnapshot().state).toBe('listening');
   expect(events.some(e=>e.outcome==='retrying'&&e.status===503)).toBe(true);expect(events.at(-1).outcome).toBe('renewed');
  } finally {await listener.dispose();}
+});
+
+describe("listening/coaching audio settings",()=>{
+ test("shared client and softphone profiles are inherited with explicit listener overrides",async()=>{
+  const f=fixture();
+  const client=new TelephonyClient(f.client.app,{audio:{mediaTransport:"webrtc",webrtcFec:false,inputDeviceId:"desk",outputDeviceId:"speaker",outputVolume:.4,noiseSuppression:true,inputGainDB:3,playbackTargetMs:100}});
+  const listener=client.createCallListener({runtime:f.runtime});
+  expect(listener.getAudioOptions()).toMatchObject({mediaTransport:"webrtc",webrtcFec:false,inputDeviceId:"desk",outputVolume:.4,noiseSuppression:true,inputGainDB:3,playbackTargetMs:100,echoCancellation:true});
+  const overridden=client.createCallListener({audio:{mediaTransport:"auto",inputGainDB:2},mediaTransport:"websocket",webrtcFec:true,runtime:f.runtime});
+  expect(overridden.getAudioOptions()).toMatchObject({mediaTransport:"websocket",webrtcFec:true,inputDeviceId:"desk",inputGainDB:2});
+  const phone=client.createSoftphone({audio:{mediaTransport:"auto",inputGainDB:5}});
+  const inherited=phone.createCallListener({runtime:f.runtime});
+  expect(inherited.getAudioOptions()).toMatchObject({mediaTransport:"auto",inputGainDB:5,outputVolume:.4,webrtcFec:false});
+  await listener.listen("call");listener.setAudioOptions({mediaTransport:"websocket"});
+  expect(f.stopped).toBe(0);expect(listener.getSnapshot().state).toBe("listening");
+  expect(listener.getAudioOptions().mediaTransport).toBe("websocket");
+  await Promise.all([listener.dispose(),overridden.dispose(),inherited.dispose(),phone.dispose()]);
+ });
+ test("invalid settings are rejected without interrupting active audio",async()=>{
+  const f=fixture(),listener=f.client.createCallListener({runtime:f.runtime});await listener.listen("call");
+  for(const options of [{mediaTransport:"invalid"},{webrtcFec:"false"},{playbackTargetMs:1000},{outputVolume:NaN}])expect(()=>listener.setAudioOptions(options as any)).toThrow();
+  expect(listener.getSnapshot().state).toBe("listening");expect(f.stopped).toBe(0);await listener.dispose();
+ });
 });

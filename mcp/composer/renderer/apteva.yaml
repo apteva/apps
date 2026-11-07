@@ -1,0 +1,59 @@
+schema: apteva-app/v1
+name: composer-renderer
+display_name: Composer Renderer
+version: 0.11.3
+description: Private, bounded Composer render worker (FFmpeg and headless-browser capture). Placement is managed by Server owned components.
+scopes: [project, global]
+requires:
+  permissions: [net.egress]
+provides:
+  http_routes:
+    - prefix: /_apteva/runtime/app/
+  mcp_tools:
+    - name: capabilities
+      description: Report available render dependencies, execution limits and the gateway this worker reaches.
+    - name: submit
+      description: Submit an idempotent, deadline-bounded render plan from the owning Composer installation.
+    - name: get
+      description: Inspect a render attempt (status and progress) without replaying it.
+    - name: cancel
+      description: Cancel an attempt and confirm process-group termination.
+    - name: acknowledge
+      description: Compact a render receipt after the parent durably records it, retaining the idempotency tombstone.
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: composer-renderer/v0.11.3
+    entry: mcp/composer/renderer
+  port: 8080
+  health_check: /health
+  startup_timeout_seconds: 120
+  package:
+    app_capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
+config_schema:
+  - name: work_capacity
+    type: text
+    default: "2"
+    description: Weighted render capacity; browser captures weigh 2, encodes 1.
+  - name: ffmpeg_path
+    type: text
+    default: ffmpeg
+    description: FFmpeg executable on the execution target. A pinned static build is provisioned on Linux when missing.
+  - name: ffprobe_path
+    type: text
+    default: ffprobe
+    description: FFprobe executable on the execution target.
+  - name: chrome_path
+    type: text
+    default: ""
+    description: Chrome/Chromium executable for browser capture. Empty uses a local browser or provisions the pinned Chrome headless shell on Linux.
+  - name: node_path
+    type: text
+    default: ""
+    description: Node.js 22+ executable for browser capture. Empty uses node on PATH or provisions the pinned Node.js build on Linux.

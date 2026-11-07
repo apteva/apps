@@ -80,7 +80,8 @@ func TestCallNotificationsFilterOtherUsersAndRevoke(t *testing.T) {
 	phoneTestCall(t, a, "own-call", "pending")
 	a.callChanges.notify("project-a")
 	event := receiveSoon(t, events)
-	if event != `{"type":"calls.changed"}` || strings.Contains(event, "own-call") {
+	var changed map[string]string
+	if json.Unmarshal([]byte(event), &changed) != nil || changed["type"] != "calls.changed" || len(changed["state"]) != 64 || len(changed) != 2 || strings.Contains(event, "own-call") {
 		t.Fatal(event)
 	}
 	for i := range policy.Users {
@@ -108,6 +109,9 @@ func TestCallNotificationsOnlineSessionRevocationAndProjectIsolation(t *testing.
 		writeJSON(w, map[string]any{"user": map[string]any{"id": "alice", "organization_id": "org-1", "project_id": "project-a"}})
 	}))
 	defer provider.Close()
+	// Provider URLs must be public HTTPS or the gateway origin; the test provider
+	// stands in for the gateway-proxied Auth app.
+	t.Setenv("APTEVA_GATEWAY_URL", provider.URL)
 	policy.Providers = []phoneAuthProvider{{ID: "auth", IssuerApp: "auth", IssuerInstallID: "11", Format: "apteva-auth", URL: provider.URL, Actions: []string{"call.read"}}}
 	if result := phoneTestRequest(a, nil, "PUT", "/access/policy", policy); result.Code != 200 {
 		t.Fatal(result.Body)

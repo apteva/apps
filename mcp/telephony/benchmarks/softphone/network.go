@@ -14,6 +14,9 @@ import (
 )
 
 type Link struct {
+	UDPLossProbability  float64 `json:"udp_loss_probability,omitempty"`
+	UDPBurstAtMS        float64 `json:"udp_burst_at_ms,omitempty"`
+	UDPBurstMS          float64 `json:"udp_burst_ms,omitempty"`
 	Kbps                float64 `json:"kbps"`
 	LatencyMS           float64 `json:"latency_ms"`
 	JitterMS            float64 `json:"jitter_ms"`
@@ -68,6 +71,9 @@ func Profiles(path string) ([]Profile, error) {
 			links = append(links, *p.CarrierDown)
 		}
 		for _, l := range links {
+			if l.UDPLossProbability < 0 || l.UDPLossProbability > 1 || l.UDPBurstAtMS < 0 || l.UDPBurstMS < 0 || (!p.RTCUDP && (l.UDPLossProbability != 0 || l.UDPBurstMS != 0)) {
+				return nil, fmt.Errorf("invalid UDP impairment %s", p.Name)
+			}
 			if l.Kbps <= 0 || l.LatencyMS < 0 || l.JitterMS < 0 || l.RecoveryProbability < 0 || l.RecoveryProbability > 1 || l.RecoveryMS < 0 || l.OutageMS < 0 {
 				return nil, fmt.Errorf("invalid profile %s", p.Name)
 			}

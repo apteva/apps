@@ -2,8 +2,44 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.50
+version: 0.1.55
 description: |
+  v0.1.55 stops excess provider calls. A rate-limit response now closes one
+  cooldown per provider account (connection and native account), shared by
+  every project bound to it and persisted across restarts; no request is sent
+  until it ends, Meta usage headers lengthen it, and rate-limited calls are
+  no longer retried within milliseconds. Meta throttling codes, including
+  subcode 2446079, are recognized. Hierarchy failures in the collector now
+  back off instead of retrying every minute. Projects sharing an ad account
+  reuse one ad set and ad snapshot for ten minutes, invalidated by mutations,
+  with per-project filtering unchanged. adset_list and ad_list accept cached,
+  and the panel's passive refreshes read cached data. Collection runs every
+  15 minutes for campaigns and 30 for ad sets and ads.
+  v0.1.54 fixes Meta conversion totals, which summed every action whose name
+  contained "conversion" and so counted engagement such as post_save and
+  post_net_save as conversions. Totals now count purchase, lead and
+  complete_registration once each, cached rows are recounted on read, and
+  performance_get accepts conversion_events and reports conversion_definition.
+  Meta Pixels are created under the ad account's Business and shared with the
+  account, avoiding error 6200 on the ad-account edge. New
+  tracking_source_readiness_get checks association, events received overall,
+  per event and per domain, homepage installation and Meta diagnostics, and
+  states what the API cannot reveal about domain category restrictions.
+  tracking_source_test_event_send separates API acceptance from test-session
+  visibility. Installation configs list Lead and CompleteRegistration, and
+  Meta reports add outbound_clicks with click metric definitions. Business
+  Pixels, diagnostics and stats require integrations catalog v0.54.7 or newer.
+  v0.1.53 remembers verified audience provenance independently of provider
+  metadata across refreshes. Shared tools and UI record source identities,
+  interaction, evidence and verification time for every provider. Google
+  RULE_BASED audiences keep a neutral label until their source is verified.
+  v0.1.52 extends the shared audience lifecycle and UI with Google custom
+  keyword/URL/app segments, first-party seeded lookalikes, grouped composition,
+  interest discovery and named campaign targeting. Capabilities report provider
+  eligibility and lifecycle restrictions. Google custom segments require
+  integrations catalog v0.54.3 or newer. Existing Meta workflows remain compatible.
+  v0.1.51 adds structured Demand Gen campaigns, YouTube engagement goals,
+  placements, video/image/carousel ads, campaign-scoped goals and reporting.
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
   same account, resource, campaign, creative, delivery, and analytics tools.
@@ -115,6 +151,7 @@ description: |
   App campaigns and App ads, Meta/X/Reddit app wiring, source-separated
   conversion reports, CPI, and durable campaign creation request keys.
 
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
 icon: /ui/icon.svg
@@ -164,6 +201,8 @@ provides:
       description: "A performance refresh failed and was scheduled for retry."
     - name: audience.created
       description: "An audience was created and normalized into the account resource registry."
+    - name: audience.provenance.updated
+      description: "A local verified audience-source association was saved or cleared."
     - name: audience.updated
       description: "Audience metadata or targeting was updated."
     - name: audience.deleted
@@ -190,12 +229,16 @@ provides:
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
     - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source (Meta Pixel or Google conversion action) without installing website tracking code." }
     - { name: tracking_source_installation_get, description: "Return browser-public installation configuration for a normalized tracking source." }
+    - { name: tracking_source_readiness_get, description: "Verify a Meta Pixel receives events overall, per required event and per domain, is shared with the ad account, and passes Meta diagnostics." }
+    - { name: tracking_source_test_event_send, description: "Send a Conversions API test event and report API acceptance separately from test-session match and ad eligibility." }
     - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
     - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
     - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }
     - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
     - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
+    - { name: campaign_configuration_get, description: "Read structured campaign configuration and conversion goals." }
+    - { name: adset_configuration_get, description: "Read structured placements, audience and targeting." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account. channel_type selects the Google campaign shape; objective or bid_strategy selects its bidding strategy." }
     - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
     - { name: campaign_import,             description: "Import selected campaigns into this project." }
@@ -238,10 +281,11 @@ provides:
     - { name: creative_asset_status,        description: "Inspect processing/readiness for an uploaded creative asset such as a Meta video." }
     - { name: creative_asset_delete,        description: "Delete an uploaded creative asset when supported by the provider." }
     - { name: creative_list,                description: "List creatives in the ad account." }
-    - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
+    - { name: audience_create_custom,       description: "Create a reusable customer list, Google custom segment or grouped audience using structured fields." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
     - { name: audience_list,                description: "List audiences in the ad account." }
-    - { name: audience_capabilities_get,    description: "Get provider-supported audience kinds, operations, sources, and privacy behavior." }
+    - { name: audience_capabilities_get,    description: "Discover provider-supported audience kinds, creation fields, lifecycle operations, seed eligibility and API restrictions." }
+    - { name: audience_provenance_set, description: "Save or clear a locally verified source association with evidence; survives provider refreshes." }
     - { name: audience_get,                 description: "Get one normalized project-scoped audience." }
     - { name: audience_create,              description: "Create a normalized provider audience using capability-driven fields." }
     - { name: audience_update,              description: "Update supported audience metadata or saved targeting." }
@@ -269,7 +313,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.50
+    ref: ads/v0.1.55
     entry: mcp/ads
   port: 8080
   health_check: /health

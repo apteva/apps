@@ -1,0 +1,9 @@
+Found 1 panel source(s):
+   mcp/database/ui/DatabasePanel.tsx
+✓ mcp/database/ui/DatabasePanel.tsx → DatabasePanel.mjs (12.4 KB)
+
+Verifying panel imports against host React surface…
+vendor surface: 45 names (Activity, Children, Component, Fragment, Profiler, PureComponent…)
+✓ database/ui/DatabasePanel.mjs
+
+1 panel(s) all importable against the host React surface.

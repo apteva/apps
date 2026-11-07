@@ -1,4 +1,5 @@
 import OutputPresets from "./output-presets";
+import ProcedurePreview from "./procedure-preview";
 // ComposerPanel - AI-native multi-track editor for the stable Composer timeline.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -76,19 +77,20 @@ interface RenderRow {
   updated_at: string;
 }
 
-interface Bindings {
-  storage_bound: boolean;
-  instances_bound: boolean;
-  mediastudio_bound: boolean;
-  render_host_id: number;
-  ffmpeg_path: string;
-  render_executor?: string;
+interface RendererStatus {
+  execution_mode: "local" | "component";
+  deployed: boolean;
+  platform?: string;
+  error?: string;
+  browser?: { ready?: boolean; error?: string; missing_libraries?: string[] };
 }
 
-interface InstanceHost {
-  id: number;
-  name?: string;
-  status?: string;
+interface Bindings {
+  storage_bound: boolean;
+  mediastudio_bound: boolean;
+  renderer?: RendererStatus;
+  ffmpeg_path: string;
+  render_executor?: string;
 }
 
 type AssetType = "video" | "image";
@@ -1261,7 +1263,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [draft, setDraft] = useState<DraftState>(() => cloneDefault());
   const [selectedClipId, setSelectedClipId] = useState<string>("clip-1");
-  const [executor, setExecutor] = useState<"auto" | "local" | "remote">("auto");
+  const [executor, setExecutor] = useState<"auto" | "local" | "component">("auto");
   const [rendering, setRendering] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [lightbox, setLightbox] = useState<RenderRow | null>(null);
@@ -2202,12 +2204,12 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         <BindingStrip bindings={bindings} installId={installId} onChanged={loadBindings} setStatus={setStatus} />
         <select
           value={executor}
-          onChange={(e) => setExecutor(e.target.value as "auto" | "local" | "remote")}
+          onChange={(e) => setExecutor(e.target.value as "auto" | "local" | "component")}
           className="composer-executor bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
         >
           <option value="auto">auto</option>
           <option value="local">local</option>
-          <option value="remote">remote</option>
+          <option value="component">renderer</option>
         </select>
         {tab!=="outputs" && <button onClick={save} className="h-8 px-3 text-sm border border-border rounded flex items-center gap-2 hover:bg-bg-input"><Save size={15} />{dirty ? "Save changes" : "Save"}</button>}
         {tab!=="outputs" && <button
@@ -2348,6 +2350,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
             </div>
           ) : (
             <JSONEditor
+              projectId={projectId}
               editText={jsonEdit}
               outputText={jsonOutput}
               onEdit={(value) => { editEpoch.current++; setDirty(true); setJsonEdit(value); }}
@@ -2417,36 +2420,23 @@ function BindingStrip({
   onChanged: () => void;
   setStatus: (message: string) => void;
 }) {
-  const [hosts, setHosts] = useState<InstanceHost[]>([]);
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (!bindings?.instances_bound) {
-      setHosts([]);
-      return;
-    }
-    let cancelled = false;
-    fetch("/api/apps/instances/api/instances", { credentials: "same-origin" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!cancelled) setHosts(Array.isArray(data?.instances) ? data.instances : []);
-      })
-      .catch(() => {
-        if (!cancelled) setHosts([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [bindings?.instances_bound]);
-
   if (!bindings) return null;
+  const renderer = bindings.renderer;
+  const mode = renderer?.execution_mode ?? "local";
   const renderMode = bindings.render_executor
     ? bindings.render_executor
-    : bindings.render_host_id > 0
-      ? `host #${bindings.render_host_id}`
+    : mode === "component"
+      ? "renderer component"
       : "local ffmpeg";
-  const saveHost = async (hostId: string) => {
+  // The renderer is a private component placed by Server; this only selects
+  // where renders run. Deployment happens through the Components API.
+  const rendererTitle = renderer?.deployed
+    ? `Renderer deployed${renderer.platform ? ` (${renderer.platform})` : ""}${renderer.browser?.error ? `. Browser: ${renderer.browser.error}` : ""}`
+    : renderer?.error || "Renderer component not deployed";
+  const saveMode = async (next: string) => {
     if (!installId) {
-      setStatus("Cannot save render host: install id missing.");
+      setStatus("Cannot save render execution: install id missing.");
       return;
     }
     setSaving(true);
@@ -2455,14 +2445,14 @@ function BindingStrip({
         method: "PUT",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config: { render_host_id: hostId } }),
+        body: JSON.stringify({ config: { execution_mode: next } }),
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 300)}`);
-      setStatus(Number(hostId) > 0 ? `Remote render host set to #${hostId}.` : "Composer renders set to local ffmpeg.");
+      setStatus(next === "component" ? "Composer renders now run on the renderer component." : "Composer renders set to local ffmpeg.");
       onChanged();
     } catch (e) {
-      setStatus("Render host save failed: " + (e as Error).message);
+      setStatus("Render execution save failed: " + (e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -2472,25 +2462,19 @@ function BindingStrip({
       <Pill label={renderMode} active />
       <Pill label="storage" active={bindings.storage_bound} />
       <Pill label="media studio" active={bindings.mediastudio_bound} />
-      {bindings.instances_bound && (
-        <select
-          value={String(bindings.render_host_id || 0)}
-          onChange={(e) => saveHost(e.target.value)}
-          disabled={saving}
-          title="Remote render host"
-          className="bg-bg-input border border-border rounded px-2 py-1 text-xs text-text disabled:opacity-50"
-        >
-          <option value="0">local</option>
-          {hosts.map((host) => (
-            <option key={host.id} value={host.id}>
-              {host.name || `host #${host.id}`}{host.status ? ` (${host.status})` : ""}
-            </option>
-          ))}
-          {bindings.render_host_id > 0 && !hosts.some((host) => host.id === bindings.render_host_id) && (
-            <option value={bindings.render_host_id}>host #{bindings.render_host_id}</option>
-          )}
-        </select>
-      )}
+      <span title={rendererTitle}>
+        <Pill label={renderer?.deployed ? "renderer" : "no renderer"} active={!!renderer?.deployed} />
+      </span>
+      <select
+        value={mode}
+        onChange={(e) => saveMode(e.target.value)}
+        disabled={saving}
+        title="Where Composer renders run"
+        className="bg-bg-input border border-border rounded px-2 py-1 text-xs text-text disabled:opacity-50"
+      >
+        <option value="local">local</option>
+        <option value="component">renderer</option>
+      </select>
     </div>
   );
 }
@@ -4444,12 +4428,14 @@ function AIAssetEditor({
 }
 
 function JSONEditor({
+  projectId,
   editText,
   outputText,
   onEdit,
   onOutput,
   onApply,
 }: {
+  projectId: string;
   editText: string;
   outputText: string;
   onEdit: (s: string) => void;
@@ -4459,6 +4445,7 @@ function JSONEditor({
   const mono = "ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace";
   return (
     <div className="flex-1 overflow-auto p-4 space-y-4">
+      <ProcedurePreview projectId={projectId} editText={editText} outputText={outputText} onEdit={onEdit} />
       <Field label="Edit JSON">
         <textarea
           value={editText}

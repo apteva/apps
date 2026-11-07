@@ -33,21 +33,33 @@ type Collection struct {
 	PrimaryKey []string `json:"primaryKey"`
 	Indexes    []Index  `json:"indexes"`
 	Version    int64    `json:"version"`
+	// StorageVersion is internal SQLite physical-layout metadata. It is not
+	// part of the portable collection schema or cursor hash.
+	StorageVersion int `json:"-"`
 }
 type Filter struct {
 	And   []Filter `json:"and,omitempty"`
 	Or    []Filter `json:"or,omitempty"`
 	Field string   `json:"field,omitempty"`
-	Op    string   `json:"op,omitempty"`
-	Value any      `json:"value,omitempty"`
+	// Fields names the text fields a like_contains_ascii search joins.
+	Fields []string `json:"fields,omitempty"`
+	Op     string   `json:"op,omitempty"`
+	Value  any      `json:"value,omitempty"`
+	// Exists and NotExists test related records of another collection.
+	Exists    *ExistsClause `json:"exists,omitempty"`
+	NotExists *ExistsClause `json:"not_exists,omitempty"`
 }
 type Metric struct {
-	Name  string `json:"name"`
-	Op    string `json:"op"`
-	Field string `json:"field,omitempty"`
+	Name  string  `json:"name"`
+	Op    string  `json:"op"`
+	Field string  `json:"field,omitempty"`
+	Where *Filter `json:"where,omitempty"`
 }
 type Query struct {
-	after        Record   // authenticated cursor values, never accepted from JSON
+	after        Record // authenticated cursor values, never accepted from JSON
+	hint         string // index an exists probe seeks through
+	diag         *countDiagnostics
+	examined     *int64   // adds the documents a scan read
 	Where        *Filter  `json:"where,omitempty"`
 	Select       []string `json:"select,omitempty"`
 	OrderBy      []Order  `json:"orderBy,omitempty"`
@@ -56,27 +68,61 @@ type Query struct {
 	RequireIndex bool     `json:"requireIndex,omitempty"`
 }
 type Request struct {
-	TimeoutMS     int      `json:"timeoutMs,omitempty"`
-	Database      string   `json:"database,omitempty"`
-	Collection    string   `json:"collection,omitempty"`
-	Name          string   `json:"name,omitempty"`
-	Adapter       string   `json:"adapter,omitempty"`
-	Fields        []Field  `json:"fields,omitempty"`
-	PrimaryKey    []string `json:"primaryKey,omitempty"`
-	Index         *Index   `json:"index,omitempty"`
-	Key           Record   `json:"key,omitempty"`
-	Records       []Record `json:"records,omitempty"`
-	Set           Record   `json:"set,omitempty"`
-	Increment     Record   `json:"increment,omitempty"`
-	ConflictIndex string   `json:"conflictIndex,omitempty"`
-	IfVersion     int64    `json:"ifVersion,omitempty"`
-	MaxAffected   int      `json:"maxAffected,omitempty"`
-	All           bool     `json:"all,omitempty"`
-	Confirm       bool     `json:"confirm,omitempty"`
+	Pipeline         *ReadPipeline `json:"pipeline,omitempty"`
+	Version          int           `json:"version,omitempty"`
+	Nodes            []QueryNode   `json:"nodes,omitempty"`
+	Result           *QueryResult  `json:"result,omitempty"`
+	Limits           *QueryLimits  `json:"limits,omitempty"`
+	Collections      []string      `json:"collections,omitempty"`
+	After            string        `json:"after,omitempty"`
+	Initial          *Operation    `json:"initial,omitempty"`
+	Enabled          *bool         `json:"enabled,omitempty"`
+	RetentionBytes   int64         `json:"retentionBytes,omitempty"`
+	RetentionSeconds int           `json:"retentionSeconds,omitempty"`
+	WaitMS           int           `json:"waitMs,omitempty"`
+	WatchCaller      string        `json:"-"`
+	TimeoutMS        int           `json:"timeoutMs,omitempty"`
+	Diagnostics      bool          `json:"diagnostics,omitempty"`
+	Database         string        `json:"database,omitempty"`
+	Collection       string        `json:"collection,omitempty"`
+	Name             string        `json:"name,omitempty"`
+	Adapter          string        `json:"adapter,omitempty"`
+	Fields           []Field       `json:"fields,omitempty"`
+	PrimaryKey       []string      `json:"primaryKey,omitempty"`
+	Index            *Index        `json:"index,omitempty"`
+	Key              Record        `json:"key,omitempty"`
+	Records          []Record      `json:"records,omitempty"`
+	Set              Record        `json:"set,omitempty"`
+	Increment        Record        `json:"increment,omitempty"`
+	ConflictIndex    string        `json:"conflictIndex,omitempty"`
+	IfVersion        int64         `json:"ifVersion,omitempty"`
+	MaxAffected      int           `json:"maxAffected,omitempty"`
+	All              bool          `json:"all,omitempty"`
+	Confirm          bool          `json:"confirm,omitempty"`
+	App              string        `json:"app,omitempty"`
+	Access           string        `json:"access,omitempty"`
 	Query
 	GroupBy    []string    `json:"groupBy,omitempty"`
 	Metrics    []Metric    `json:"metrics,omitempty"`
+	Lookups    []Lookup    `json:"lookups,omitempty"`
+	Buckets    []Bucket    `json:"buckets,omitempty"`
 	Operations []Operation `json:"operations,omitempty"`
+	// Relational reads: related_read, joined_page and joined_aggregate.
+	As        string        `json:"as,omitempty"`
+	Joins     []RelJoin     `json:"joins,omitempty"`
+	Computed  []RelComputed `json:"computed,omitempty"`
+	Filter    *Filter       `json:"filter,omitempty"`
+	Distinct  []string      `json:"distinct,omitempty"`
+	Pick      *RelPick      `json:"pick,omitempty"`
+	Group     *RelGroup     `json:"group,omitempty"`
+	Relation  *RelRelation  `json:"relation,omitempty"`
+	Match     *Filter       `json:"match,omitempty"`
+	Derived   []RelDerived  `json:"derived,omitempty"`
+	Branches  []RelBranch   `json:"branches,omitempty"`
+	Rollup    *RelRollup    `json:"rollup,omitempty"`
+	Offset    int           `json:"offset,omitempty"`
+	Count     bool          `json:"count,omitempty"`
+	analytics *analyticsPlan
 }
 type Operation struct {
 	Op      string  `json:"op"`
@@ -93,6 +139,10 @@ func Invalid(format string, args ...any) error    { return fail("invalid_argumen
 
 const MaxRecords = 1000
 const MaxIndexBuildRecords = 10000
+
+// MaxNativeIndexBuildRecords bounds AptevaDB's synchronous index builds,
+// which run natively (0.5–0.9 s for 328k records of 600 bytes).
+const MaxNativeIndexBuildRecords = 1000000
 const MaxQueryWorkBytes = 16 << 20
 const MaxBytes = 4 << 20
 
@@ -274,7 +324,7 @@ func validateIndex(c Collection, idx *Index) error {
 	return nil
 }
 func normalizeRecord(c Collection, r Record) (Record, error) {
-	out := Record{}
+	out := make(Record, len(c.Fields)+3)
 	for k := range r {
 		if _, e := c.field(k); e != nil {
 			return nil, e
@@ -283,18 +333,60 @@ func normalizeRecord(c Collection, r Record) (Record, error) {
 			return nil, Invalid("metadata is read-only")
 		}
 	}
+	// Avoid marshaling every scalar record just to enforce the 1 MiB limit.
+	// JSON/map values still take the exact path; scalar records use a
+	// conservative escaped-size estimate and only marshal when near the limit.
+	sizeHint := 2
+	exactSize := false
 	for _, f := range c.Fields {
 		v, e := normalize(f, r[f.Name])
 		if e != nil {
 			return nil, e
 		}
 		out[f.Name] = v
+		sizeHint += len(f.Name) + 3 // quotes/colon plus comma slack
+		switch x := v.(type) {
+		case nil:
+			sizeHint += 4
+		case string:
+			sizeHint += jsonStringSize(x)
+		case bool:
+			if x {
+				sizeHint += 4
+			} else {
+				sizeHint += 5
+			}
+		case float64:
+			sizeHint += len(strconv.FormatFloat(x, 'g', -1, 64))
+		default:
+			exactSize = true
+		}
 	}
-	if len(marshal(out)) > 1<<20 {
-		return nil, fail("resource_limit", "record exceeds 1 MiB")
+	if exactSize || sizeHint > 1<<20 {
+		if len(marshal(out)) > 1<<20 {
+			return nil, fail("resource_limit", "record exceeds 1 MiB")
+		}
 	}
 	return out, nil
 }
+
+func jsonStringSize(s string) int {
+	n := 2 // surrounding quotes
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"', '\\':
+			n += 2
+		case '\b', '\f', '\n', '\r', '\t':
+			n += 2
+		case 0, 1, 2, 3, 4, 5, 6, 7, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31:
+			n += 6 // \\u00XX
+		default:
+			n++
+		}
+	}
+	return n
+}
+
 func primary(c Collection, r Record) (string, error) {
 	vals := []any{}
 	for _, p := range c.PrimaryKey {
@@ -310,6 +402,30 @@ func primary(c Collection, r Record) (string, error) {
 		return "", Invalid("primary key exceeds 2048 bytes")
 	}
 	return string(b), nil
+}
+
+func primaryNormalized(c Collection, r Record) (string, error) {
+	if len(c.PrimaryKey) == 1 {
+		p := c.PrimaryKey[0]
+		f, _ := c.field(p)
+		if (f.Type == "text" || f.Type == "integer" || f.Type == "datetime") && r[p] != nil {
+			s := r[p].(string)
+			simple := true
+			for i := 0; i < len(s); i++ {
+				if s[i] < 0x20 || s[i] == '"' || s[i] == '\\' {
+					simple = false
+					break
+				}
+			}
+			if simple {
+				if len(s)+4 > 2048 {
+					return "", Invalid("primary key exceeds 2048 bytes")
+				}
+				return `["` + s + `"]`, nil
+			}
+		}
+	}
+	return primary(c, r)
 }
 func keyOf(c Collection, r Record) Record {
 	k := Record{}

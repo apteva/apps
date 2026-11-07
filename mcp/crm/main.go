@@ -363,10 +363,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_update",
-			Description: "Partial-patch a contact. Args: id, patch (any subset of contact fields; channels [{kind,value,label,is_primary}] replaces the channel list), source.",
+			Description: "Partial-patch a contact with id, patch and optional source. Custom attributes MUST be patch.attributes:[{key,value,source?}], NOT a key/value object and not top-level attributes. Discover keys, types, required flags and enum_values with contacts_attribute_definitions_list. Preserve native JSON types: number=88, bool=false, multi_select=[allowed strings]; unlike contacts_set_attribute, patches never convert numeric/boolean strings. Attributes merge by key; omitted keys and [] remain unchanged. Explicit value:null clears an optional attribute; missing value is an error. channels replaces the entire channel list; primary_email/primary_phone are read-only. Optional patch.expected_updated_at guards stale edits. Example: {\"id\":123,\"patch\":{\"attributes\":[{\"key\":\"lead_score\",\"value\":88}]},\"source\":\"agent:Research\"}. Validation failures do not partially update the contact. Read back with contacts_get before promoting workflow readiness.",
 			InputSchema: schemaObject(map[string]any{
 				"id":     map[string]any{"type": "integer"},
-				"patch":  map[string]any{"type": "object"},
+				"patch":  contactPatchInputSchema(),
 				"source": map[string]any{"type": "string"},
 			}, []string{"id", "patch"}),
 			Handler: a.toolUpdate,
@@ -441,6 +441,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolSetAttribute,
 		},
 		{
+			Name:        "contacts_attribute_definitions_list",
+			Description: "READ ONLY. List all custom attribute definitions for the current project: attribute_defs:[{key,label,type,enum_values,required,sort_order,is_system}], count. Includes built-in defaults even before the project's first contact; persisted project definitions take precedence. enum_values is an array of allowed strings for select/multi_select and [] for unrestricted types. Types: text/number/date/bool/select/multi_select/url. Use before research-to-CRM promotion, contacts_update or contacts_set_attribute; do not guess keys or allowed values. No arguments required (project scope supplied by the platform). Never creates definitions, modifies contacts, emits events or sends messages. Example call: {}.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			HandlerCtx:  a.toolAttributeDefinitionsList,
+		},
+		{
 			Name:        "contacts_define_attribute",
 			Description: "Create or update an attribute definition. Args: key, label, type (text|number|date|bool|select|multi_select|url), enum_values (when type ∈ select/multi_select).",
 			InputSchema: schemaObject(map[string]any{
@@ -459,12 +466,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, OMIT template_id, content_sid, template_vars, and other unused optional fields. A message may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, OMIT template_id, content_sid, template_vars, and other unused optional fields. A message may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject (standalone templates supply their own). With an email conversation_id, omitted or whitespace-only subject uses the selected/latest inbound subject; legacy conversations inherit Re: <original subject> without duplicating Re:. Nonblank explicit subjects are preserved and unresolved legacy blank subjects are rejected. For normal email replies, Messaging v0.15.0+ derives subject and RFC/Gmail threading from the selected/latest inbound message via reply_to_message_id. Explicit sender/subject overrides retain the regular send contract and the selected RFC reference chain. Subject resolution happens before automatic idempotency calculation. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":                     map[string]any{"type": "integer", "minimum": 1},
 				"body":                   map[string]any{"type": "string"},
 				"channel":                map[string]any{"type": "string"},
-				"subject":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string", "description": "Email subject. With conversation_id, omitted/blank inherits the selected/latest inbound message subject through Messaging reply mode; legacy conversations inherit Re: <original subject>. Nonblank explicit subjects are preserved using the regular send contract. If the legacy conversation has no nonblank subject, supply one explicitly. New standalone email templates retain their Messaging-rendered subject."},
 				"body_html":              map[string]any{"type": "string"},
 				"from":                   map[string]any{"type": "string"},
 				"list_id":                map[string]any{"type": "integer"},
@@ -482,14 +489,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > original receiving identity > list.default_sender > install default. Recipient is selected inbound Reply-To/From; blocked replies never switch addresses. Select a specific inbound message with reply_to_activity_id. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars. Optional channel defaults to selected/latest inbound phone transport. Explicit SMS/WhatsApp switches keep this conversation and its exact remote phone; select a verified sender for the requested channel. Later replies to that exact sender return to this conversation. Never switch channels without user authorization; email threads cannot change transport.",
+			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). For normal email replies, Messaging v0.15.0+ derives addressing, subject, RFC/Gmail threading and supported ticket identifiers from the selected/latest inbound message via send_message(reply_to_message_id). Explicit sender/subject overrides retain the regular send contract and selected RFC reference chain. Automatically deduplicates identical replies to the same inbound message for five minutes unless idempotency_key is supplied. Sender precedence: from > original receiving identity > list.default_sender > install default. Recipient is selected inbound Reply-To/From; blocked replies never switch addresses. Select a specific inbound message with reply_to_activity_id; conversation_id can be omitted when selecting an activity. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars. Optional channel defaults to selected/latest inbound phone transport. Explicit SMS/WhatsApp switches keep this conversation and its exact remote phone; select a verified sender for the requested channel. Later replies to that exact sender return to this conversation. Never switch channels without user authorization; email threads cannot change transport.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":                     map[string]any{"type": "integer", "minimum": 1},
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}, "description": "Optional reply transport. Defaults to selected/latest inbound phone transport. Explicit SMS/WhatsApp switches stay in the same conversation, use its exact remote number, and require a verified sender for that channel. Email cannot switch transport."},
 				"body":                   map[string]any{"type": "string"},
 				"conversation_id":        map[string]any{"type": "integer"},
 				"reply_to_activity_id":   map[string]any{"type": "integer", "minimum": 1},
-				"subject":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string", "description": "Email subject. Omitted/blank inherits the selected/latest inbound message subject through Messaging reply mode; legacy conversations inherit Re: <original subject> without duplicating Re:. Nonblank explicit subjects are preserved using the regular send contract. If a legacy conversation subject is also blank, an explicit subject is required. Resolved before dispatch and automatic idempotency calculation."},
 				"body_html":              map[string]any{"type": "string"},
 				"from":                   map[string]any{"type": "string"},
 				"list_id":                map[string]any{"type": "integer"},
@@ -1371,6 +1378,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	patch, _ := args["patch"].(map[string]any)
 	if id == 0 || patch == nil {
 		return nil, errors.New("id and patch required")
+	}
+	if _, present := args["attributes"]; present {
+		return nil, errors.New("attributes must be inside patch.attributes as an array of {key,value,source?}; use contacts_attribute_definitions_list to discover keys and types")
 	}
 	source, _ := args["source"].(string)
 	c, verifications, err := updateContactWithEmailVerification(ctx, pid, id, patch, source)
@@ -2866,6 +2876,9 @@ func parseAttributeWrites(raw any, patchSource string) ([]attributeWrite, error)
 		if seen[key] {
 			return nil, fmt.Errorf("attributes[%d]: duplicate key %q", i, key)
 		}
+		if _, present := m["value"]; !present {
+			return nil, fmt.Errorf("attributes[%d]: 'value' required; use explicit null to clear an optional attribute", i)
+		}
 		seen[key] = true
 		src := strings.TrimSpace(anyString(m["source"]))
 		if src == "" {
@@ -3791,7 +3804,7 @@ func normaliseChannel(kind, value string) string {
 	value = strings.TrimSpace(value)
 	switch kind {
 	case "email":
-		return strings.ToLower(value)
+		return canonicalAddress(channelEmail, strings.TrimPrefix(value, "mailto:"))
 	case "phone":
 		// Keep only + and digits; drop spaces, dashes, parens.
 		var b strings.Builder

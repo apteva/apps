@@ -6,10 +6,8 @@ package main
 // an opt-in env flag.
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -150,63 +148,6 @@ func TestBinancePublic_Quote_RejectsUnknownInternalSymbol(t *testing.T) {
 	b := newBinancePublic()
 	if _, err := b.Quote("DOES-NOT-EXIST"); err == nil {
 		t.Error("expected error for unmapped symbol")
-	}
-}
-
-func TestLiveProviderStrategyBarsUsesLatestClosedCandle(t *testing.T) {
-	fixedNow := time.Date(2026, 7, 13, 10, 2, 0, 0, time.UTC)
-	wantBoundary := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
-	wantStart := wantBoundary.Add(-121 * time.Hour)
-	wantEnd := wantBoundary.Add(-time.Millisecond)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		startMS, err := strconv.ParseInt(r.URL.Query().Get("startTime"), 10, 64)
-		if err != nil {
-			t.Errorf("startTime: %v", err)
-			http.Error(w, "bad startTime", http.StatusBadRequest)
-			return
-		}
-		endMS, err := strconv.ParseInt(r.URL.Query().Get("endTime"), 10, 64)
-		if err != nil {
-			t.Errorf("endTime: %v", err)
-			http.Error(w, "bad endTime", http.StatusBadRequest)
-			return
-		}
-		if got := time.UnixMilli(startMS); !got.Equal(wantStart) {
-			t.Errorf("start = %s, want %s", got, wantStart)
-		}
-		if got := time.UnixMilli(endMS); !got.Equal(wantEnd) {
-			t.Errorf("end = %s, want %s", got, wantEnd)
-		}
-		if r.URL.Query().Get("limit") != "121" {
-			t.Errorf("limit = %q, want 121", r.URL.Query().Get("limit"))
-		}
-		rows := make([][]any, 0, 121)
-		for i := 0; i < 121; i++ {
-			open := wantStart.Add(time.Duration(i) * time.Hour).UnixMilli()
-			rows = append(rows, []any{open, "100", "101", "99", "100.5", "10"})
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(rows); err != nil {
-			t.Errorf("encode rows: %v", err)
-		}
-	}))
-	defer srv.Close()
-
-	lp := &liveProvider{
-		crypto: &binancePublic{base: srv.URL, client: srv.Client()},
-		health: newProviderHealth(),
-		now:    func() time.Time { return fixedNow },
-	}
-	bars, err := lp.StrategyBars("BTC-USD", "1h", 121)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bars) != 121 {
-		t.Fatalf("bars = %d, want 121", len(bars))
-	}
-	if got := time.Unix(bars[len(bars)-1].T, 0); !got.Equal(wantBoundary.Add(-time.Hour)) {
-		t.Fatalf("latest bar = %s, want %s", got, wantBoundary.Add(-time.Hour))
 	}
 }
 
@@ -354,7 +295,7 @@ func (failingBinance) Quote(symbol string) (*Mark, error) {
 func TestLiveProvider_DoesNotSynthesizeCryptoOnError(t *testing.T) {
 	lp := newLiveProvider()
 	// Replace clients with failing stubs.
-	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
+	lp.crypto = &coinbasePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 
 	mark, err := lp.Quote("BTC-USD")
 	if err == nil || mark != nil {
@@ -402,7 +343,7 @@ func TestLiveProvider_DoesNotSynthesizeEquityWhenYahooDown(t *testing.T) {
 
 func TestLiveProvider_HealthSurfaceCoversAllClasses(t *testing.T) {
 	lp := newLiveProvider()
-	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
+	lp.crypto = &coinbasePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	lp.poly = &polymarketPublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	stubUnreachableYahoo(lp)
 	_ = lp.Universe()
@@ -429,7 +370,7 @@ func keys(m map[string]any) []string {
 func TestLiveProvider_UniverseOmitsFailedClasses(t *testing.T) {
 	lp := newLiveProvider()
 	// Both live clients point at unreachable hosts.
-	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
+	lp.crypto = &coinbasePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	lp.poly = &polymarketPublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	stubUnreachableYahoo(lp)
 

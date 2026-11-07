@@ -36,8 +36,30 @@ func (a *App) startRingLeg(ctx *sdk.AppCtx, parent *callRow, offer ringOffer) er
 	// Use the inbound number's provider and owned caller ID. A team member cannot
 	// substitute another project's integration or an arbitrary caller ID.
 	fields := map[string]string{}
+	if parent.CarrierSlug == "didww" {
+		credentials, err := ctx.PlatformAPI().GetConnectionCredentials(parent.CarrierConnectionID)
+		if err != nil || credentials == nil || credentials.Slug != parent.CarrierSlug {
+			return firstError(err, errors.New("outbound SIP credentials unavailable"))
+		}
+		fields = credentials.Fields
+	}
 	if parent.CarrierSlug == "telnyx" {
 		route, err := a.db().findRoute(parent.RouteID)
+		if a.callUsesDirectSIP(parent) {
+			var raw string
+			e := a.db().db.QueryRow(`SELECT context_json FROM call_route_executions WHERE call_id=? AND project_id=?`, parent.ID, parent.ProjectID).Scan(&raw)
+			if e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if raw != "" {
+				var snapshot routingExecutionContext
+				if json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Route.ID != parent.RouteID || snapshot.Route.CarrierConnectionID != parent.CarrierConnectionID || snapshot.Route.CarrierSlug != parent.CarrierSlug {
+					return errors.New("ring route snapshot unavailable")
+				}
+				route = &snapshot.Route
+				err = nil
+			}
+		}
 		if err != nil || route == nil {
 			return firstError(err, errors.New("ring route unavailable"))
 		}
@@ -46,6 +68,13 @@ func (a *App) startRingLeg(ctx *sdk.AppCtx, parent *callRow, offer ringOffer) er
 			return err
 		}
 		fields["connection_id"] = saved.ApplicationID
+		if a.callUsesDirectSIP(parent) && fields["connection_id"] == "" {
+			var sipConfig directSIPProviderConfig
+			if json.Unmarshal([]byte(route.TransportConfig), &sipConfig) != nil || sipConfig.PreviousConnectionID == "" {
+				return errors.New("SIP route needs a programmable outbound application for external destinations")
+			}
+			fields["connection_id"] = sipConfig.PreviousConnectionID
+		}
 	}
 	carrier, err := a.carrierForSlug(parent.CarrierSlug, parent.CarrierConnectionID, fields)
 	if err != nil {
@@ -102,7 +131,7 @@ func (a *App) runRingLegTick(_ context.Context, ctx *sdk.AppCtx) error {
 	// its late callback supplies that ID. Exclude it from the bounded work batch
 	// so uncertain requests cannot starve newly answered calls. An in-flight
 	// placement is likewise picked up once its child call record exists.
-	rows, err := ctx.AppDB().Query(`SELECT l.id,l.call_id,l.offer_id FROM call_legs l JOIN calls child ON child.id=l.id JOIN call_offers o ON o.id=l.offer_id WHERE l.project_id=? AND (l.status NOT IN ('finished','canceled') OR o.status='offered') AND (l.status<>'cancel_pending' OR child.carrier_sid<>'' OR o.status='offered') ORDER BY COALESCE(NULLIF(child.answered_at,''),'9999'),l.started_at LIMIT 100`, ctx.CurrentProject())
+	rows, err := ctx.AppDB().Query(`SELECT l.id,l.call_id,l.offer_id FROM (SELECT id FROM call_legs INDEXED BY idx_call_legs_active WHERE project_id=? AND status NOT IN ('finished','canceled') UNION SELECT legs.id FROM call_offers offers INDEXED BY idx_call_offers_call_active CROSS JOIN call_legs legs WHERE offers.project_id=? AND offers.status='offered' AND legs.offer_id=offers.id AND legs.offer_id<>'') candidates JOIN call_legs l ON l.id=candidates.id JOIN calls child ON child.id=l.id JOIN call_offers o ON o.id=l.offer_id WHERE l.project_id=? AND (l.status<>'cancel_pending' OR child.carrier_sid<>'' OR o.status='offered') ORDER BY COALESCE(NULLIF(child.answered_at,''),'9999'),l.started_at LIMIT 100`, ctx.CurrentProject(), ctx.CurrentProject(), ctx.CurrentProject())
 	if err != nil {
 		return err
 	}
@@ -306,14 +335,17 @@ func (a *App) handleRingPeerSocket(w http.ResponseWriter, r *http.Request, row *
 		if parent.PeerKind != peerKindExternal || (parent.Status != "answered" && parent.Status != "in-progress") {
 			return false
 		}
-		hub = a.softphones.hubFor(parentID)
-		hub.setCallState(parent.Direction, parent.Status)
+		// Attach under the registry lock so a concurrent dropIfEmpty cannot
+		// orphan the hub between lookup and attachment.
 		var old *websocketWriterPump
-		if childSide {
-			old = hub.setBrowser(writer)
-		} else {
-			old = hub.setPeer(writer)
-		}
+		hub = a.softphones.attach(parentID, func(h *softphoneHub) {
+			h.setCallState(parent.Direction, parent.Status)
+			if childSide {
+				old = h.setBrowser(writer)
+			} else {
+				old = h.setPeer(writer)
+			}
+		})
 		if old != nil {
 			old.Stop()
 			_ = old.conn.Close()

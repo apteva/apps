@@ -1,0 +1,8 @@
+{
+  "name": "@apteva/calls",
+  "private": true,
+  "scripts": {
+    "build:frontend": "bun frontend/build.ts",
+    "typecheck": "tsc -p frontend/tsconfig.json"
+  }
+}

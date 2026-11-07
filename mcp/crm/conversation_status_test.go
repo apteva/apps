@@ -26,6 +26,7 @@ type crmRecordingPlatform struct {
 	calls            []crmCallAppCall
 	whoAmICalls      int
 	getInstanceCalls int
+	replyMessages    map[int64]map[string]any
 }
 
 func (p *crmRecordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -59,6 +60,10 @@ func (p *crmRecordingPlatform) CallAppResult(appName, tool string, input map[str
 			payload = map[string]any{"suppressed": false}
 		case "message_get":
 			id := int64FromAny(input["id"])
+			if message := p.replyMessages[id]; message != nil {
+				b, _ := json.Marshal(map[string]any{"message": message, "found": true})
+				return json.Unmarshal(b, out)
+			}
 			payload = map[string]any{
 				"found": true,
 				"message": map[string]any{

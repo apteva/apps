@@ -1,0 +1,172 @@
+{
+  "date": "2026-10-23",
+  "deployment": "local only; staging/production untouched",
+  "app_version": "0.12.33",
+  "sdk": "v0.105.0",
+  "repeatable_paths": [
+    {
+      "path": "sinch-inbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 58,
+      "natural_clip_start_to_clear_ms": 227.461583,
+      "clears": 4,
+      "evidence": "estimated",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "sinch-outbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 57,
+      "natural_clip_start_to_clear_ms": 223.49925,
+      "clears": 4,
+      "evidence": "estimated",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "sip-G722-inbound",
+      "carrier_frames": 69,
+      "caller_input_frames": 70,
+      "natural_clip_start_to_clear_ms": 317.271375,
+      "clears": 4,
+      "evidence": "rtp_transmitted",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "sip-G722-outbound",
+      "carrier_frames": 71,
+      "caller_input_frames": 69,
+      "natural_clip_start_to_clear_ms": 379.723125,
+      "clears": 4,
+      "evidence": "rtp_transmitted",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "sip-PCMA-inbound",
+      "carrier_frames": 65,
+      "caller_input_frames": 68,
+      "natural_clip_start_to_clear_ms": 267.733625,
+      "clears": 4,
+      "evidence": "rtp_transmitted",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "sip-PCMA-outbound",
+      "carrier_frames": 65,
+      "caller_input_frames": 68,
+      "natural_clip_start_to_clear_ms": 254.207125,
+      "clears": 4,
+      "evidence": "rtp_transmitted",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "telnyx-inbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 58,
+      "natural_clip_start_to_clear_ms": 229.115083,
+      "clears": 4,
+      "evidence": "carrier_mark",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "telnyx-outbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 58,
+      "natural_clip_start_to_clear_ms": 232.355,
+      "clears": 4,
+      "evidence": "carrier_mark",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "twilio-inbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 62,
+      "natural_clip_start_to_clear_ms": 223.96825,
+      "clears": 4,
+      "evidence": "carrier_mark",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "twilio-outbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 61,
+      "natural_clip_start_to_clear_ms": 217.59025,
+      "clears": 4,
+      "evidence": "carrier_mark",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "vonage-inbound",
+      "carrier_frames": 64,
+      "caller_input_frames": 67,
+      "natural_clip_start_to_clear_ms": 218.704875,
+      "clears": 4,
+      "evidence": "estimated",
+      "pending": 0,
+      "awaiting": 0
+    },
+    {
+      "path": "vonage-outbound",
+      "carrier_frames": 63,
+      "caller_input_frames": 65,
+      "natural_clip_start_to_clear_ms": 213.0465,
+      "clears": 4,
+      "evidence": "estimated",
+      "pending": 0,
+      "awaiting": 0
+    }
+  ],
+  "live_model": {
+    "model": "gpt-live-1",
+    "carrier": "local Telnyx media WebSocket fixture",
+    "real_components": [
+      "Telephony",
+      "Server proxy",
+      "Core",
+      "OpenAI Live"
+    ],
+    "clip_start_to_clear_command_ms": 219.479584,
+    "remote_clear_confirmed": false,
+    "response": "Vous avez demandé mardi.",
+    "evidence_directory": "/private/tmp/telephony-duplex-live-final/telnyx-outbound"
+  },
+  "verification": {
+    "telephony_full_suite": "PASS (384.458 s)",
+    "all_agent_audio_race_tests": "PASS",
+    "core_realtime_continuous_renderer_suite": "PASS",
+    "core_focused_race_tests": "PASS",
+    "server_proxy_race_tests": "PASS",
+    "local_carrier_scenarios": "PASS (12 paths, 48 interruptions)",
+    "real_openai_live_phone_protocol_path": "PASS",
+    "builds": [
+      "Telephony",
+      "Core",
+      "Server"
+    ],
+    "go_vet_telephony": "PASS"
+  },
+  "benchmarks": {
+    "cancellation_fence_allocations": 0,
+    "core_input_admission_allocations": 0,
+    "core_input_admission_ns": 34.24,
+    "frontend_allocations_per_frame": 2,
+    "frontend_bytes_per_frame_16khz": 1280,
+    "timing_note": "Shared-host frontend timings vary; no capacity or speedup claim."
+  },
+  "limits": [
+    "No real carrier/PSTN call or handset audibility verification",
+    "No concurrent-call capacity certification",
+    "No staging or production deployment",
+    "Core and Server changes are local and must ship with negotiated capability support"
+  ],
+  "release_verification": "Source refs, disk/embedded manifests and generated frontend metadata are checked together."
+}

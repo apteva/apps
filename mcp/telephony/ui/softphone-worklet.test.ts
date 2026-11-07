@@ -30,6 +30,40 @@ beforeAll(async () => {
 });
 
 describe("softphone realtime worklet", () => {
+  for (const nativeOutput of [false, true]) {
+    test(`redundant unmute preserves opening speech (${nativeOutput ? "RTC" : "PCM"})`, () => {
+      const Capture = processors.get("softphone-capture")!;
+      const control = new Capture({processorOptions:{nativeOutput}});
+      const repeated = new Capture({processorOptions:{nativeOutput}});
+      for (let block = 0; block < 30; block++) {
+        const input = Float32Array.from({length:128}, (_, i) => Math.sin((block * 128 + i) * .13) * .6);
+        const expected = new Float32Array(128), actual = new Float32Array(128);
+        repeated.port.onmessage?.({data:{type:"muted",value:false}});
+        control.process([[input]], [[expected]]);
+        repeated.process([[input]], [[actual]]);
+        expect(actual).toEqual(expected);
+      }
+      expect(repeated.port.messages).toEqual(control.port.messages);
+      if (!nativeOutput) expect(repeated.port.messages.filter(v => v instanceof Float32Array)).toHaveLength(8);
+
+      // A real transition must still erase both partial PCM and DSP history.
+      repeated.port.messages.length = 0;
+      repeated.process([[new Float32Array(128).fill(.5)]], [[new Float32Array(128)]]);
+      repeated.port.onmessage?.({data:{type:"muted",value:true}});
+      for (let block = 0; block < 4; block++) {
+        const output = new Float32Array(128);
+        repeated.process([[new Float32Array(128).fill(.5)]], [[output]]);
+        expect(output.every(v => v === 0)).toBe(true);
+      }
+      for (const frame of repeated.port.messages.filter(v => v instanceof Float32Array) as Float32Array[]) {
+        expect(frame.every(v => v === 0)).toBe(true);
+      }
+      repeated.port.onmessage?.({data:{type:"muted",value:false}});
+      const output = new Float32Array(128);
+      repeated.process([[new Float32Array(128)]], [[output]]);
+      expect(output.every(v => v === 0)).toBe(true);
+    });
+  }
   test("native RTC output preserves capture DSP and mute without PCM messages", () => {
     const Capture = processors.get("softphone-capture")!;
     const normal = new Capture({processorOptions:{inputGainDB:-3}});

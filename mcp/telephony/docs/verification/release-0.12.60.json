@@ -1,0 +1,40 @@
+{
+  "schema": "telephony-release-validation/v1",
+  "version": "0.12.60",
+  "validated_at": "2026-10-27T20:48:06.552175+00:00",
+  "source_base": "58702033349a4ee94d551f8e09aa5394b05d90ed",
+  "sdk": "v0.110.0",
+  "workspace_overlay": false,
+  "go_full": {
+    "passed": true,
+    "seconds": 422.721,
+    "command": "GOWORK=off go test -count=1 -timeout 18m ./..."
+  },
+  "race": {
+    "passed": true,
+    "seconds": 43.09,
+    "scope": "new SIP receive recovery, WebRTC timeline recovery, distribution estimation and concurrent timing snapshots"
+  },
+  "frontend": {
+    "passed": 437,
+    "failed": 0
+  },
+  "vet": true,
+  "typescript_and_panels": true,
+  "builds": [
+    {
+      "platform": "darwin/arm64",
+      "sha256": "3b61bee2279b71edac071cdb7e06c1c2421e5c1233d4966e4674857a651d92d1"
+    },
+    {
+      "platform": "linux/amd64",
+      "sha256": "4210473d8862e462248772a681d682d549310ba3f3ffc809d75b894df02da65c"
+    }
+  ],
+  "defaults": {
+    "sip_delay_estimator": "ewma",
+    "webrtc_receive_estimator": "fixed"
+  },
+  "rust_runtime_shipped": false,
+  "deployments_updated": false
+}

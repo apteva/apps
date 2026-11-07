@@ -170,8 +170,8 @@ func deletePolicy(db *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
-// Interactive instance backups use the same durable dispatcher as Jobs.
-func enqueueInstanceRun(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) (*Run, error) {
+// HTTP run-now and instance backups use the same durable dispatcher as Jobs.
+func enqueueInteractiveRun(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) (*Run, error) {
 	if policy != nil {
 		return enqueueBackup(ctx, dest, policy)
 	}
@@ -180,6 +180,17 @@ func enqueueInstanceRun(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scop
 		return nil, err
 	}
 	defer tx.Rollback()
+	if scope.Kind == "" {
+		scope = defaultScope()
+	}
+	var existing int64
+	err = tx.QueryRow(`SELECT id FROM runs WHERE policy_id IS NULL AND destination_id=? AND scope_kind=? AND scope_id=? AND source_app=? AND source_config=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1`, dest.ID, scope.Kind, scope.ID, scope.SourceApp, scope.Config).Scan(&existing)
+	if err == nil {
+		return dbGetRunAfterRollback(ctx.AppDB(), tx, existing)
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
 	run := &Run{DestinationID: dest.ID, DestinationName: dest.Name, Scope: scope, Status: "queued", Stage: "queued"}
 	id, err := dbInsertRun(tx, run)
 	if err != nil {

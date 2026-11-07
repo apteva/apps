@@ -1,0 +1,812 @@
+{
+  "aptevadb": {
+    "million_aggregates": {
+      "numeric_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 45.042666499999996,
+          "min_ms": 43.516125,
+          "max_ms": 53.607333,
+          "median_allocated_mib": 0.0523681640625,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 45.0837495,
+          "min_ms": 43.674084,
+          "max_ms": 51.387167,
+          "median_allocated_mib": 0.042144775390625,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "numeric_1000_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 50.23025,
+          "min_ms": 47.938709,
+          "max_ms": 56.785333,
+          "median_allocated_mib": 4.650913238525391,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 55.012645500000005,
+          "min_ms": 46.909084,
+          "max_ms": 61.002041,
+          "median_allocated_mib": 4.958820343017578,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "integer_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 48.0606045,
+          "min_ms": 46.822666,
+          "max_ms": 49.174958,
+          "median_allocated_mib": 0.053375244140625,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 53.742292,
+          "min_ms": 47.136417,
+          "max_ms": 58.527958999999996,
+          "median_allocated_mib": 0.041412353515625,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "nullable_count_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 51.2167495,
+          "min_ms": 47.522124999999996,
+          "max_ms": 59.573625,
+          "median_allocated_mib": 0.03777313232421875,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 50.604,
+          "min_ms": 46.965417,
+          "max_ms": 54.488291000000004,
+          "median_allocated_mib": 0.03143310546875,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "indexed_tenant": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 1.59425,
+          "min_ms": 0.943458,
+          "max_ms": 2.3119590000000003,
+          "median_allocated_mib": 0.0454559326171875,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 1.4173955,
+          "min_ms": 0.8891669999999999,
+          "max_ms": 1.721417,
+          "median_allocated_mib": 0.03078460693359375,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "one_group_per_record_top1": {
+        "app_engine": {
+          "samples": 6,
+          "median_ms": 5.4430625,
+          "min_ms": 3.863375,
+          "max_ms": 6.32475,
+          "median_allocated_mib": 13.642597198486328,
+          "errors": {
+            "resource_limit": 6
+          }
+        },
+        "native_driver": {
+          "samples": 6,
+          "median_ms": 5.7934165,
+          "min_ms": 4.967542,
+          "max_ms": 6.1337090000000005,
+          "median_allocated_mib": 13.722320556640625,
+          "errors": {
+            "resource_limit": 6
+          }
+        }
+      }
+    },
+    "fixtures": [
+      {
+        "peak_rss_mib": 495.625,
+        "load_seconds": 12.170975417,
+        "live_database_bytes": 477615520
+      },
+      {
+        "peak_rss_mib": 504.609375,
+        "load_seconds": 11.973068791,
+        "live_database_bytes": 477613968
+      }
+    ],
+    "driver_100k": {
+      "get": {
+        "app_engine": {
+          "samples": 3000,
+          "median_us": 5.25,
+          "min_us": 3.75,
+          "max_us": 124.375,
+          "trial_median_us": [
+            5,
+            5.417,
+            5.375
+          ]
+        },
+        "native_driver": {
+          "samples": 3000,
+          "median_us": 4.125,
+          "min_us": 3.084,
+          "max_us": 118.542,
+          "trial_median_us": [
+            4.208,
+            4.083,
+            4.125
+          ]
+        }
+      },
+      "count": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 3663.834,
+          "min_us": 3171.584,
+          "max_us": 4921.167,
+          "trial_median_us": [
+            3790.375,
+            3827,
+            3462.292
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 3222,
+          "min_us": 2972.292,
+          "max_us": 3954.75,
+          "trial_median_us": [
+            3300.917,
+            3134.542,
+            3233.708
+          ]
+        }
+      },
+      "sum": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 3350.041,
+          "min_us": 2432.042,
+          "max_us": 6932.917,
+          "trial_median_us": [
+            3323.375,
+            3891.542,
+            2801.709
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 3560.083,
+          "min_us": 2594.125,
+          "max_us": 5164.666,
+          "trial_median_us": [
+            3486.625,
+            4082.667,
+            3315.667
+          ]
+        }
+      },
+      "insert_1": {
+        "app_engine": {
+          "samples": 300,
+          "median_us": 4014.938,
+          "min_us": 2785.75,
+          "max_us": 8999.5,
+          "trial_median_us": [
+            3992.458,
+            4821.25,
+            3983.583
+          ]
+        },
+        "native_driver": {
+          "samples": 300,
+          "median_us": 4013.9790000000003,
+          "min_us": 1411.542,
+          "max_us": 10299.625,
+          "trial_median_us": [
+            3982.042,
+            5058.958,
+            3977.041
+          ]
+        }
+      },
+      "insert_1000": {
+        "app_engine": {
+          "samples": 60,
+          "median_us": 8764.2295,
+          "min_us": 6816.833,
+          "max_us": 12503.333,
+          "trial_median_us": [
+            8716.042,
+            9118.5,
+            8036.167
+          ]
+        },
+        "native_driver": {
+          "samples": 60,
+          "median_us": 7939.625,
+          "min_us": 6067,
+          "max_us": 12087.166,
+          "trial_median_us": [
+            7054.709,
+            8151.208,
+            7911.083
+          ]
+        }
+      }
+    }
+  },
+  "sqlite": {
+    "million_aggregates": {
+      "numeric_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 694.8998125,
+          "min_ms": 679.793708,
+          "max_ms": 744.751667,
+          "median_allocated_mib": 0.01264190673828125,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 701.4196665,
+          "min_ms": 674.9975000000001,
+          "max_ms": 767.804875,
+          "median_allocated_mib": 0.00948333740234375,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "numeric_1000_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 4100.953812,
+          "min_ms": 3975.774792,
+          "max_ms": 4256.132833,
+          "median_allocated_mib": 1.894317626953125,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 4082.5053749999997,
+          "min_ms": 3980.8325,
+          "max_ms": 4230.746291,
+          "median_allocated_mib": 1.7655448913574219,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "integer_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 610.265667,
+          "min_ms": 597.406833,
+          "max_ms": 646.8528329999999,
+          "median_allocated_mib": 0.01282501220703125,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 615.0952495,
+          "min_ms": 600.355458,
+          "max_ms": 635.146708,
+          "median_allocated_mib": 0.009613037109375,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "nullable_count_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 560.4207295,
+          "min_ms": 541.279458,
+          "max_ms": 604.6366250000001,
+          "median_allocated_mib": 0.00943756103515625,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 562.431708,
+          "min_ms": 538.5427090000001,
+          "max_ms": 594.057583,
+          "median_allocated_mib": 0.006927490234375,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "indexed_tenant": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 4.4038965,
+          "min_ms": 3.979042,
+          "max_ms": 5.272291999999999,
+          "median_allocated_mib": 0.00865936279296875,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 4.6159170000000005,
+          "min_ms": 3.591,
+          "max_ms": 5.059791,
+          "median_allocated_mib": 0.0038604736328125,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "one_group_per_record_top1": {
+        "app_engine": {
+          "samples": 6,
+          "median_ms": 461.4509795,
+          "min_ms": 448.927083,
+          "max_ms": 472.31537499999996,
+          "median_allocated_mib": 0.00559234619140625,
+          "errors": {
+            "": 6
+          }
+        },
+        "native_driver": {
+          "samples": 6,
+          "median_ms": 456.622125,
+          "min_ms": 407.48208400000004,
+          "max_ms": 468.527458,
+          "median_allocated_mib": 0.0034637451171875,
+          "errors": {
+            "": 6
+          }
+        }
+      }
+    },
+    "fixtures": [
+      {
+        "peak_rss_mib": 42.53125,
+        "load_seconds": 32.957700875,
+        "live_database_bytes": 319475272
+      },
+      {
+        "peak_rss_mib": 44.640625,
+        "load_seconds": 29.542782125,
+        "live_database_bytes": 319475272
+      }
+    ],
+    "driver_100k": {
+      "get": {
+        "app_engine": {
+          "samples": 3000,
+          "median_us": 11.541,
+          "min_us": 7.166,
+          "max_us": 404.208,
+          "trial_median_us": [
+            12.5,
+            10.958,
+            11.333
+          ]
+        },
+        "native_driver": {
+          "samples": 3000,
+          "median_us": 9.75,
+          "min_us": 6.459,
+          "max_us": 253.458,
+          "trial_median_us": [
+            9.75,
+            10,
+            9.375
+          ]
+        }
+      },
+      "count": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 8830.5,
+          "min_us": 7722.375,
+          "max_us": 14111.208,
+          "trial_median_us": [
+            9097.417,
+            9066.417,
+            8162.583
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 7004.416,
+          "min_us": 6348.209,
+          "max_us": 8432.791,
+          "trial_median_us": [
+            6740.375,
+            6921.125,
+            7235.583
+          ]
+        }
+      },
+      "sum": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 12801.709,
+          "min_us": 11801.292,
+          "max_us": 15585.25,
+          "trial_median_us": [
+            13878.917,
+            12768.042,
+            12335.916
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 13114.959,
+          "min_us": 12075.042,
+          "max_us": 24698.625,
+          "trial_median_us": [
+            13114.959,
+            13456.959,
+            12648.791
+          ]
+        }
+      },
+      "insert_1": {
+        "app_engine": {
+          "samples": 300,
+          "median_us": 84.3745,
+          "min_us": 55.833,
+          "max_us": 708.25,
+          "trial_median_us": [
+            77.542,
+            94.5,
+            80.041
+          ]
+        },
+        "native_driver": {
+          "samples": 300,
+          "median_us": 87.417,
+          "min_us": 56.958,
+          "max_us": 760.875,
+          "trial_median_us": [
+            83.583,
+            87.542,
+            95.125
+          ]
+        }
+      },
+      "insert_1000": {
+        "app_engine": {
+          "samples": 60,
+          "median_us": 4816.1875,
+          "min_us": 4227.25,
+          "max_us": 8131.958,
+          "trial_median_us": [
+            5246.25,
+            4609.667,
+            4806.083
+          ]
+        },
+        "native_driver": {
+          "samples": 60,
+          "median_us": 4084.063,
+          "min_us": 3346.25,
+          "max_us": 7422.25,
+          "trial_median_us": [
+            3954.041,
+            4225.084,
+            4332.5
+          ]
+        }
+      }
+    }
+  },
+  "pebble": {
+    "million_aggregates": {
+      "numeric_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 693.859583,
+          "min_ms": 684.990833,
+          "max_ms": 877.234042,
+          "median_allocated_mib": 543.6611022949219,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 685.8409790000001,
+          "min_ms": 675.589292,
+          "max_ms": 714.050583,
+          "median_allocated_mib": 543.6566047668457,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "numeric_1000_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 729.6928125,
+          "min_ms": 723.444708,
+          "max_ms": 775.915209,
+          "median_allocated_mib": 553.2308311462402,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 723.3069585000001,
+          "min_ms": 717.020875,
+          "max_ms": 818.291708,
+          "median_allocated_mib": 553.2282905578613,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "integer_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 774.5716044999999,
+          "min_ms": 761.1645,
+          "max_ms": 834.353958,
+          "median_allocated_mib": 558.6579093933105,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 775.4408334999999,
+          "min_ms": 761.93325,
+          "max_ms": 912.4248339999999,
+          "median_allocated_mib": 558.654182434082,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "nullable_count_four_groups": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 644.6752915,
+          "min_ms": 633.8515,
+          "max_ms": 655.875208,
+          "median_allocated_mib": 554.3411254882812,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 643.629396,
+          "min_ms": 635.917334,
+          "max_ms": 676.508833,
+          "median_allocated_mib": 554.3392677307129,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "indexed_tenant": {
+        "app_engine": {
+          "samples": 10,
+          "median_ms": 14.7982915,
+          "min_ms": 8.493,
+          "max_ms": 16.372459,
+          "median_allocated_mib": 25.39611053466797,
+          "errors": {
+            "": 10
+          }
+        },
+        "native_driver": {
+          "samples": 10,
+          "median_ms": 11.593000499999999,
+          "min_ms": 11.182833,
+          "max_ms": 13.062541000000001,
+          "median_allocated_mib": 17.557022094726562,
+          "errors": {
+            "": 10
+          }
+        }
+      },
+      "one_group_per_record_top1": {
+        "app_engine": {
+          "samples": 6,
+          "median_ms": 24.472167,
+          "min_ms": 23.825583,
+          "max_ms": 26.175583,
+          "median_allocated_mib": 25.038028717041016,
+          "errors": {
+            "resource_limit": 6
+          }
+        },
+        "native_driver": {
+          "samples": 6,
+          "median_ms": 25.105062500000003,
+          "min_ms": 24.425917,
+          "max_ms": 26.291416,
+          "median_allocated_mib": 25.035480499267578,
+          "errors": {
+            "resource_limit": 6
+          }
+        }
+      }
+    },
+    "fixtures": [
+      {
+        "peak_rss_mib": 68.015625,
+        "load_seconds": 47.681197459,
+        "live_database_bytes": 98121972
+      },
+      {
+        "peak_rss_mib": 67.015625,
+        "load_seconds": 45.659947625,
+        "live_database_bytes": 99390025
+      }
+    ],
+    "driver_100k": {
+      "get": {
+        "app_engine": {
+          "samples": 3000,
+          "median_us": 14.584,
+          "min_us": 6,
+          "max_us": 645.792,
+          "trial_median_us": [
+            14.333,
+            14.916,
+            14.5
+          ]
+        },
+        "native_driver": {
+          "samples": 3000,
+          "median_us": 13.917,
+          "min_us": 5.292,
+          "max_us": 259.208,
+          "trial_median_us": [
+            13.875,
+            14,
+            13.958
+          ]
+        }
+      },
+      "count": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 20880.542,
+          "min_us": 19026.958,
+          "max_us": 261668.625,
+          "trial_median_us": [
+            19796.917,
+            25052.208,
+            21343.667
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 19798.25,
+          "min_us": 18643.083,
+          "max_us": 33102.083,
+          "trial_median_us": [
+            19640.625,
+            19515.209,
+            21046.041
+          ]
+        }
+      },
+      "sum": {
+        "app_engine": {
+          "samples": 45,
+          "median_us": 41758.458,
+          "min_us": 39549.584,
+          "max_us": 73057.584,
+          "trial_median_us": [
+            40900.125,
+            41642.208,
+            46302.75
+          ]
+        },
+        "native_driver": {
+          "samples": 45,
+          "median_us": 46190.208,
+          "min_us": 44962.625,
+          "max_us": 52336.291,
+          "trial_median_us": [
+            45777.542,
+            45645,
+            47914.625
+          ]
+        }
+      },
+      "insert_1": {
+        "app_engine": {
+          "samples": 300,
+          "median_us": 3996.8540000000003,
+          "min_us": 1517.5,
+          "max_us": 17729.167,
+          "trial_median_us": [
+            3996.292,
+            4037,
+            3970.625
+          ]
+        },
+        "native_driver": {
+          "samples": 300,
+          "median_us": 4010.7705,
+          "min_us": 1593.25,
+          "max_us": 14896.833,
+          "trial_median_us": [
+            3997.083,
+            4012.75,
+            4019.917
+          ]
+        }
+      },
+      "insert_1000": {
+        "app_engine": {
+          "samples": 60,
+          "median_us": 28067.396,
+          "min_us": 16412.417,
+          "max_us": 56020.375,
+          "trial_median_us": [
+            27009.916,
+            28764.417,
+            28991.166
+          ]
+        },
+        "native_driver": {
+          "samples": 60,
+          "median_us": 26582.979,
+          "min_us": 16525.125,
+          "max_us": 45925.667,
+          "trial_median_us": [
+            25819.375,
+            29059.042,
+            27003.75
+          ]
+        }
+      }
+    }
+  }
+}

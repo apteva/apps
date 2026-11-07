@@ -182,6 +182,11 @@ func TestSoftphoneReconnectKeepsPersistedHoldGate(t *testing.T) {
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	readinessData, readinessOp, readinessErr := wsutil.ReadServerData(browser)
+	var readiness mediaReadinessEvent
+	if readinessErr != nil || readinessOp != ws.OpText || json.Unmarshal(readinessData, &readiness) != nil || readiness.Type != "media.not_ready" || readiness.Reason != "hold" {
+		t.Fatalf("initial held media readiness: %s %v", readinessData, readinessErr)
+	}
 	statusData, statusOp, statusErr := wsutil.ReadServerData(browser)
 	if statusErr != nil || statusOp != ws.OpText || !strings.Contains(string(statusData), `"hold_state":"held"`) {
 		t.Fatalf("initial hold status: %s %v", statusData, statusErr)
@@ -353,6 +358,9 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 
+	// HTTP upgrade precedes hub attachment; send the marker only once ready.
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+
 	for _, kind := range []string{"input.speech_started", "playback.progress", "playback.overflow"} {
 		payload, _ := json.Marshal(realtimeBridgeControl{Type: kind})
 		if err := wsutil.WriteClientText(peer, payload); err != nil {
@@ -379,7 +387,7 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 			return
 		}
 		var event map[string]any
-		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status") {
+		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status" || event["type"] == "audio.health" || event["type"] == "media.ready" || event["type"] == "media.not_ready") {
 			continue // hub-owned connection state, not realtime pacing control
 		}
 		t.Fatalf("realtime pacing control leaked to the browser: %s", data)
@@ -475,11 +483,13 @@ func TestSoftphoneBrowserReconnectResumesAudio(t *testing.T) {
 
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	first := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, first, "ready", 3*time.Second)
 	_ = first.Close()
 
 	// Give the server a moment to observe the closed socket before rejoining.
 	time.Sleep(150 * time.Millisecond)
 	second := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, second, "ready", 3*time.Second)
 
 	audio := pcm16ToBytes([]int16{11, 22, 33})
 	if err := wsutil.WriteClientBinary(peer, audio); err != nil {
@@ -568,7 +578,7 @@ func TestSoftphoneMediaRejectsRealtimeCall(t *testing.T) {
 
 // mediaBridgeURL is the single seam every carrier bridge resolves through.
 // Human calls must short-circuit to loopback; realtime calls must keep their
-// existing behavior byte for byte.
+// existing destination and authorization, opting into the renderer contract.
 func TestMediaBridgeURLRoutesHumanCallsToLoopback(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
@@ -590,8 +600,8 @@ func TestMediaBridgeURLRoutesHumanCallsToLoopback(t *testing.T) {
 	}
 
 	realtime := &callRow{ID: "c2", PeerKind: peerKindRealtime, AudioBridgeURL: "wss://core.example/b", MediaStatus: "idle"}
-	if got, err := app.mediaBridgeURL(realtime); err != nil || got != "wss://core.example/b" {
-		t.Fatalf("realtime bridge url = %q, %v; want unchanged Core URL", got, err)
+	if got, err := app.mediaBridgeURL(realtime); err != nil || got != "wss://core.example/b?audio_protocol=1" {
+		t.Fatalf("realtime bridge url = %q, %v; want Core URL with media protocol negotiation", got, err)
 	}
 }
 

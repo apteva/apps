@@ -1,6 +1,11 @@
 // Benchmark-only source and output tap. Production worklets remain unchanged.
 class MarkerSource extends AudioWorkletProcessor {
-  constructor(){super();this.start=Infinity;this.port.onmessage=e=>{this.start=e.data.start;};}
+  constructor(){super();this.start=Infinity;this.port.onmessage=e=>{
+    if(Number.isFinite(e.data.start))this.start=e.data.start;
+    if(e.data.clock_port){const port=e.data.clock_port;port.onmessage=e=>{
+      if(e.data.type==='clock.probe')port.postMessage({type:'clock.reply',nonce:e.data.nonce,audio_ms:currentTime*1000});
+    };port.start();}
+  };}
   process(_inputs,outputs){const out=outputs[0][0];for(let i=0;i<out.length;i++){
     const sample=Math.round((currentTime-this.start)*sampleRate)+i;
     if(sample<0||!Number.isFinite(sample)){out[i]=0;continue;}
@@ -11,7 +16,11 @@ class MarkerSource extends AudioWorkletProcessor {
   }return true;}
 }
 class OutputProbe extends AudioWorkletProcessor {
-  constructor(){super();this.frame=new Float32Array(Math.round(sampleRate/100));this.offset=0;}
+  constructor(){super();this.frame=new Float32Array(Math.round(sampleRate/100));this.offset=0;
+    this.port.onmessage=e=>{if(e.data.clock_port){const port=e.data.clock_port;port.onmessage=e=>{
+      if(e.data.type==='clock.probe')port.postMessage({type:'clock.reply',nonce:e.data.nonce,audio_ms:currentTime*1000});
+    };port.start();}};
+  }
   process(inputs,outputs){outputs[0][0]?.fill(0);const channel=inputs[0]?.[0];if(!channel)return true;
     for(let i=0;i<channel.length;i++){this.frame[this.offset++]=channel[i];if(this.offset===this.frame.length){
       const frame=this.frame;this.port.postMessage({frame,end:currentTime+(i+1)/sampleRate},[frame.buffer]);this.frame=new Float32Array(Math.round(sampleRate/100));this.offset=0;

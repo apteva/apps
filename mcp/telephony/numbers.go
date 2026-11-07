@@ -91,6 +91,7 @@ type numberPurchaseIntent struct {
 
 type numberProvider struct {
 	inventoryContext context.Context
+	inventoryReads   *inventoryReadSession
 	Slug             string
 	ConnID           int64
 	Fields           map[string]string
@@ -831,6 +832,8 @@ func searchSignalWireNumbers(ctx *sdk.AppCtx, connID int64, request numberSearch
 }
 
 func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID string) (map[string]any, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	token = strings.TrimSpace(token)
 	addressID = strings.TrimSpace(addressID)
 	complianceID = strings.TrimSpace(complianceID)
@@ -876,6 +879,11 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 				intent.ResponseJSON = string(raw)
 				return numberPurchaseResult(intent, true), nil
 			}
+		}
+		if abandoned, err := dbNumberPurchaseIntentAbandonStaleUnknown(ctx.AppDB(), token); err != nil {
+			return nil, err
+		} else if abandoned {
+			return nil, errors.New("purchase outcome stayed unknown past the reconciliation window and the carrier never listed the number; search for the number again")
 		}
 		return nil, errors.New("purchase outcome remains unknown; the carrier has not listed the number yet. Retry this same confirmation token to reconcile without buying again")
 	}
@@ -943,6 +951,21 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		return nil, err
 	}
 	if !claimed {
+		// An older succeeded intent for a number that has since been released
+		// must not block buying it again. Retire it only after the carrier
+		// inventory confirms the number is no longer owned.
+		retired, retireErr := a.retireReleasedNumberIntents(ctx, provider, intent)
+		if retireErr != nil {
+			return nil, retireErr
+		}
+		if retired {
+			claimed, err = dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token, addressID, complianceID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !claimed {
 		return nil, errors.New("number purchase is already in progress; do not retry automatically")
 	}
 	intent.SelectedAddressSID = addressID
@@ -980,6 +1003,12 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		err = fmt.Errorf("number purchase is unsupported for provider %s", intent.Provider)
 	}
 	if err != nil {
+		if numberPurchaseDefinitivelyRejected(err) {
+			// The carrier refused the order outright; nothing was bought, so the
+			// intent must not keep blocking this number.
+			_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "failed", nil, err.Error())
+			return nil, fmt.Errorf("provider rejected the purchase: %w", err)
+		}
 		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "unknown", nil, err.Error())
 		return nil, fmt.Errorf("provider purchase failed; do not retry automatically: %w", err)
 	}
@@ -1219,6 +1248,12 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	var result map[string]any
 	switch path {
+	case "/numbers/network-policy":
+		result, err = a.networkPolicies(ctx, body, nil)
+	case "/numbers/turn-policy":
+		result, err = a.turnPolicies(ctx, body, nil)
+	case "/numbers/outbound-transport":
+		result, err = a.configureOutboundTransport(ctx, body, r.Context())
 	case "/numbers/outbound-policy":
 		result, err = a.outboundPolicy(ctx, body)
 	case "/numbers/routes/enable":
@@ -1228,18 +1263,54 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 			result, err = a.setInboundRouteEnabled(route, true)
 		}
 	case "/numbers/connected":
-		result, err = a.connectedNumbers(ctx, r.Context())
+		result, err = a.connectedNumbers(ctx, inventoryFreshContext(r.Context(), boolArg(body, "fresh", false)))
 	case "/numbers/outbound-profile":
 		result, err = a.configureNumberOutboundProfile(ctx,
 			strings.TrimSpace(strArg(body, "phone_number", "")),
 			strings.TrimSpace(strArg(body, "profile_id", "")))
+	case "/numbers/carrier-media":
+		result, err = a.configureCarrierMedia(r.Context(), ctx, body)
+	case "/numbers/agent-audio-profile":
+		value, e := a.toolAgentAudioProfile(r.Context(), ctx, body)
+		err = e
+		if e == nil {
+			result = value.(map[string]any)
+		}
+	case "/numbers/sip-audio-profile":
+		result, err = a.sipAudioProfileSettings(ctx, body)
+	case "/numbers/local-media":
+		routeID := strArg(body, "route_id", "")
+		if routeID != "" {
+			if _, err = a.routeForCaller(ctx, routeID, 0); err != nil {
+				break
+			}
+		}
+		if boolArg(body, "inherit", false) && routeID != "" {
+			_, err = a.db().db.Exec(`DELETE FROM local_media_settings WHERE project_id=? AND route_id=?`, ctx.CurrentProject(), routeID)
+			a.inventoryReads.invalidate()
+			result = map[string]any{"ok": err == nil}
+			break
+		}
+		if body["config"] == nil {
+			var cfg localMediaSettings
+			cfg, err = a.localMediaSettings(ctx.CurrentProject(), routeID)
+			result = map[string]any{"config": cfg, "recovery_policy": playbackPolicyName(cfg.RTPPlayback), "legacy_resynchronize_deprecated": true}
+		} else {
+			var cfg localMediaSettings
+			raw, _ := json.Marshal(body["config"])
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.DisallowUnknownFields()
+			if err = decoder.Decode(&cfg); err == nil {
+				err = a.saveLocalMediaSettings(ctx, routeID, cfg)
+			}
+			result = map[string]any{"ok": err == nil, "config": cfg, "recovery_policy": playbackPolicyName(cfg.RTPPlayback), "legacy_resynchronize_deprecated": true}
+		}
 	case "/numbers/transport":
 		var route *routeRow
-		route, err = a.setRouteTransport(ctx,
-			strings.TrimSpace(strArg(body, "route_id", "")),
-			strings.TrimSpace(strArg(body, "inbound_transport", "")), 0)
-		if err == nil && boolArg(body, "configure", true) {
-			err = a.configureRouteCarrier(ctx, route)
+		if boolArg(body, "configure", true) {
+			route, err = a.applyRouteTransport(ctx, strArg(body, "route_id", ""), strArg(body, "inbound_transport", ""), 0)
+		} else {
+			route, err = a.setRouteTransport(ctx, strArg(body, "route_id", ""), strArg(body, "inbound_transport", ""), 0)
 		}
 		if err == nil {
 			result = map[string]any{
@@ -1357,12 +1428,74 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token, addressSID, bundleSID string) (bool, error) {
 	result, err := db.Exec(`UPDATE number_purchase_intents
         SET status = 'purchasing', selected_address_sid = ?, selected_bundle_sid = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND ((number_purchase_intents.phone_number<>'' AND other.phone_number=number_purchase_intents.phone_number) OR (number_purchase_intents.provider_resource_id<>'' AND other.provider_resource_id=number_purchase_intents.provider_resource_id)) AND other.token<>number_purchase_intents.token AND other.status IN ('purchasing','pending','unknown','succeeded'))`, addressSID, bundleSID, projectID, token)
+        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND ((number_purchase_intents.phone_number<>'' AND other.phone_number=number_purchase_intents.phone_number) OR (number_purchase_intents.provider_resource_id<>'' AND other.provider_resource_id=number_purchase_intents.provider_resource_id)) AND other.token<>number_purchase_intents.token AND (other.status IN ('purchasing','pending','succeeded') OR (other.status='unknown' AND other.updated_at > datetime('now', ?))))`, addressSID, bundleSID, projectID, token, numberPurchaseUnknownWindow)
 	if err != nil {
 		return false, err
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// numberPurchaseUnknownWindow bounds how long an ambiguous purchase blocks the
+// number. After it, the carrier inventory has had ample time to list a real
+// purchase, and the intent can be abandoned.
+const numberPurchaseUnknownWindow = "-24 hours"
+
+// numberPurchaseDefinitivelyRejected: a carrier 4xx means the order was
+// refused. 408/409/425/429 are excluded: a timeout, conflict (possibly an
+// already-placed order) or rate limit does not prove nothing was bought.
+func numberPurchaseDefinitivelyRejected(err error) bool {
+	var carrier *carrierHTTPError
+	if !errors.As(err, &carrier) || carrier.status < 400 || carrier.status > 499 {
+		return false
+	}
+	switch carrier.status {
+	case 408, 409, 425, 429:
+		return false
+	}
+	return true
+}
+
+func dbNumberPurchaseIntentAbandonStaleUnknown(db *sql.DB, token string) (bool, error) {
+	result, err := db.Exec(`UPDATE number_purchase_intents SET status='abandoned', updated_at=CURRENT_TIMESTAMP
+        WHERE token=? AND status='unknown' AND updated_at <= datetime('now', ?)`, token, numberPurchaseUnknownWindow)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+// dbNumberPurchaseIntentRetireSucceeded marks other tokens' succeeded intents
+// for the same number on the same carrier connection as released.
+func dbNumberPurchaseIntentRetireSucceeded(db *sql.DB, intent *numberPurchaseIntent) (bool, error) {
+	if intent.PhoneNumber == "" {
+		return false, nil
+	}
+	result, err := db.Exec(`UPDATE number_purchase_intents SET status='released', updated_at=CURRENT_TIMESTAMP
+        WHERE carrier_connection_id=? AND phone_number=? AND token<>? AND status='succeeded'`, intent.CarrierConnectionID, intent.PhoneNumber, intent.Token)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+func (a *App) retireReleasedNumberIntents(ctx *sdk.AppCtx, provider *numberProvider, intent *numberPurchaseIntent) (bool, error) {
+	var blocking int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM number_purchase_intents WHERE carrier_connection_id=? AND phone_number=? AND phone_number<>'' AND token<>? AND status='succeeded'`, intent.CarrierConnectionID, intent.PhoneNumber, intent.Token).Scan(&blocking); err != nil || blocking == 0 {
+		return false, err
+	}
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	if err != nil {
+		return false, fmt.Errorf("could not confirm the number was released: %w", err)
+	}
+	for _, number := range owned {
+		if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(intent.PhoneNumber) {
+			return false, nil
+		}
+	}
+	return dbNumberPurchaseIntentRetireSucceeded(ctx.AppDB(), intent)
 }
 
 func dbNumberPurchaseIntentStatus(db *sql.DB, token, status string, response json.RawMessage, errorMessage string) error {

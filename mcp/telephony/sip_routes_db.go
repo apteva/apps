@@ -59,6 +59,14 @@ func (c *callsDB) findDirectSIPRouteByNumber(phone string) (*routeRow, error) {
 	}
 }
 
+// markDirectSIPRouteSecretVerified enforces a route secret once the carrier has
+// delivered it. It is a compare-and-swap so a concurrent transport change wins.
+func (c *callsDB) markDirectSIPRouteSecretVerified(id, previous, next string) error {
+	_, err := c.db.Exec(`UPDATE inbound_routes SET transport_config = ?
+		WHERE id = ? AND inbound_transport = ? AND transport_config = ?`, next, id, inboundTransportSIPDirect, previous)
+	return err
+}
+
 func (c *callsDB) directSIPRouteCount() (int, error) {
 	var count int
 	err := c.db.QueryRow(`SELECT COUNT(*) FROM inbound_routes

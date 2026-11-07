@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -76,14 +78,30 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		return false, nil
 	}
 
+	// A failed AI hangup must not classify the later human owner's completion
+	// as an AI policy ending, even if the callback beats the policy worker.
+	if !isTerminalStatus(current.Status) && current.PeerKind != peerKindRealtime && current.TerminationInitiator == "telephony" && (current.TerminationReason == terminationAIMaxDuration || current.TerminationReason == terminationAIInactivity || current.TerminationReason == terminationAIPolicyFailure) {
+		current.TerminationReason = ""
+		current.TerminationCause = ""
+		current.TerminationInitiator = ""
+	}
 	// Carrier completion can race our intentional duration-limit hangup.
 	// Keep its durable reason and completed classification through late callbacks.
-	durationEnded := current.TerminationReason == terminationTimeLimit && current.TerminationInitiator == "telephony"
+	durationEnded := (current.TerminationReason == terminationTimeLimit || current.TerminationReason == terminationAIInactivity || current.TerminationReason == terminationAIMaxDuration) && current.TerminationInitiator == "telephony"
 	if durationEnded && isTerminalStatus(status) {
 		status = "completed"
-		facts.TerminationCause = "max_duration"
+		facts.TerminationCause = current.TerminationReason
+		if current.TerminationReason == terminationTimeLimit {
+			facts.TerminationCause = "max_duration"
+		}
 		facts.TerminationInitiator = "telephony"
 		errMsg = ""
+	}
+	if current.TerminationReason == terminationAIPolicyFailure && current.TerminationInitiator == "telephony" && isTerminalStatus(status) {
+		status = "failed"
+		facts.TerminationCause = terminationAIPolicyFailure
+		facts.TerminationInitiator = "telephony"
+		errMsg = firstNonEmpty(current.ErrorMessage, "AI inactivity reminder could not be delivered")
 	}
 	now := time.Now().UTC()
 	occurredAt := normalizedEventTime(facts.OccurredAt, now)
@@ -214,6 +232,11 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
+	}
+	if allowLateFacts && (transitionAccepted || current.Status == status) {
+		observed := facts
+		observed.OccurredAt = occurredAt
+		c.observeAccountCall(updated, status, errMsg, observed)
 	}
 	c.committed(current.ProjectID)
 	if c.afterTransition != nil && (transitionAccepted || created) {
@@ -472,13 +495,24 @@ func eventNotAfter(occurredAt, terminalAt string) bool {
 }
 
 func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
+	return a.publishLifecycleEventsContext(context.Background(), ctx, callID)
+}
+func (a *App) publishLifecycleEventsContext(workerCtx context.Context, ctx *sdk.AppCtx, callID string) error {
 	if ctx == nil {
 		return errors.New("app context unavailable")
 	}
-	rows, err := ctx.AppDB().Query(`SELECT event_id, call_id, project_id, topic, revision, occurred_at, payload_json
-        FROM call_events
-        WHERE published_at = '' AND (? = '' OR call_id = ?)
-        ORDER BY created_at, event_id LIMIT 100`, callID, callID)
+	where, index := "published_at = ''", "idx_call_events_unpublished"
+	var args []any
+	if callID != "" {
+		where += " AND call_id=?"
+		args = append(args, callID)
+	} else if project := ctx.CurrentProject(); project != "" {
+		where += " AND project_id=?"
+		args = append(args, project)
+		index = "idx_call_events_publish"
+	}
+	rows, err := ctx.AppDB().QueryContext(workerCtx, `SELECT event_id,call_id,project_id,topic,revision,occurred_at,payload_json
+ FROM call_events INDEXED BY `+index+` WHERE `+where+` ORDER BY created_at,event_id LIMIT 100`, args...)
 	if err != nil {
 		return err
 	}
@@ -504,7 +538,16 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 	if gateway == "" || token == "" {
 		return nil
 	} // Preserve pending events until a gateway is available.
-	batch, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The background worker (no callID) backs off after transient failures;
+	// explicit per-call publishes always try immediately.
+	backoffKey := ""
+	if callID == "" {
+		backoffKey = ctx.CurrentProject()
+		if lifecyclePublishBackoff.blocked(backoffKey, time.Now()) {
+			return nil
+		}
+	}
+	batch, cancel := context.WithTimeout(workerCtx, 2*time.Second)
 	defer cancel()
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for _, event := range events {
@@ -523,11 +566,29 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 		request.Header.Set("Content-Type", "application/json")
 		response, err := client.Do(request)
 		if err != nil {
+			if callID == "" {
+				lifecyclePublishBackoff.fail(backoffKey, time.Now())
+			}
 			return err
 		}
+		reason, _ := io.ReadAll(io.LimitReader(response.Body, 512))
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if lifecycleEventRejectedPermanently(response.StatusCode) {
+				// Park it so one bad event cannot block every later event in the
+				// project's oldest-first queue.
+				message := fmt.Sprintf("rejected %d: %s", response.StatusCode, strings.TrimSpace(string(reason)))
+				if _, err := ctx.AppDB().Exec(`UPDATE call_events SET published_at = ?, publish_error = ?
+            WHERE event_id = ? AND published_at = ''`, time.Now().UTC().Format(time.RFC3339Nano), message, event.EventID); err != nil {
+					return err
+				}
+				ctx.Logger().Warn("lifecycle event parked", "event", event.EventID, "topic", event.Topic, "status", response.StatusCode)
+				continue
+			}
+			if callID == "" {
+				lifecyclePublishBackoff.fail(backoffKey, time.Now())
+			}
 			return fmt.Errorf("lifecycle event publish returned %d", response.StatusCode)
 		}
 		if _, err := ctx.AppDB().Exec(`UPDATE call_events SET published_at = ?
@@ -535,7 +596,48 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 			return err
 		}
 	}
+	if callID == "" {
+		lifecyclePublishBackoff.reset(backoffKey)
+	}
 	return nil
+}
+
+// 408 and 429 are retryable; any other 4xx will not succeed on retry.
+func lifecycleEventRejectedPermanently(status int) bool {
+	return status >= 400 && status < 500 && status != 408 && status != 429
+}
+
+// lifecyclePublishBackoff spaces worker retries per project after transient
+// failures (network, 5xx, 408, 429): 1s doubling to 60s, reset on success.
+var lifecyclePublishBackoff = &publishBackoff{state: map[string]publishBackoffState{}}
+
+type publishBackoffState struct {
+	failures int
+	until    time.Time
+}
+type publishBackoff struct {
+	mu    sync.Mutex
+	state map[string]publishBackoffState
+}
+
+func (b *publishBackoff) blocked(key string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return now.Before(b.state[key].until)
+}
+func (b *publishBackoff) fail(key string, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.state[key]
+	s.failures++
+	delay := time.Duration(math.Min(60, math.Pow(2, float64(min(s.failures-1, 6))))) * time.Second
+	s.until = now.Add(delay)
+	b.state[key] = s
+}
+func (b *publishBackoff) reset(key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.state, key)
 }
 
 func (c *callsDB) listLifecycleEvents(callID string, afterRevision int64, limit int) ([]lifecycleEventRow, error) {
@@ -793,12 +895,15 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
-	Status        string
-	ProviderEvent string
-	Error         string
-	MediaStatus   string
-	MediaError    string
-	CarrierSID    string
+	SignatureValidation string
+	ReceivedAt          string
+	StreamID            string
+	Status              string
+	ProviderEvent       string
+	Error               string
+	MediaStatus         string
+	MediaError          string
+	CarrierSID          string
 	// AnsweredBy is a normalized answering machine detection result, empty
 	// when the callback carries none.
 	AnsweredBy string
@@ -926,6 +1031,8 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 			Payload    struct {
 				CallControlID string `json:"call_control_id"`
 				HangupCause   string `json:"hangup_cause"`
+				FailureReason string `json:"failure_reason"`
+				StreamID      string `json:"stream_id"`
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
 				Result        string `json:"result"`
@@ -944,9 +1051,10 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 	mediaStatus := telnyxMediaStatusFromEvent(body.Data.EventType)
 	mediaError := ""
 	if mediaStatus == "error" {
-		mediaError = firstNonEmpty(body.Data.Payload.HangupCause, "Telnyx media stream failed")
+		mediaError = firstNonEmpty(body.Data.Payload.FailureReason, body.Data.Payload.HangupCause, "Telnyx media stream failed")
 	}
 	return callbackUpdate{
+		StreamID: body.Data.Payload.StreamID, ProviderEvent: body.Data.EventType,
 		Status: status, Error: providerCallbackError(status, "", body.Data.Payload.HangupCause, body.Data.Payload.HangupSource),
 		MediaStatus: mediaStatus, MediaError: mediaError,
 		CarrierSID: body.Data.Payload.CallControlID, AnsweredBy: answeredBy,

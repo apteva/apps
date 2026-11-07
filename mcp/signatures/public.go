@@ -131,10 +131,12 @@ func (a *App) completeSigningHTTP(w http.ResponseWriter, r *http.Request, token 
 		topic = "recipient.approved"
 	}
 	emit(globalCtx, topic, env, recipient.ID)
-	if next != nil && env.DeliveryMode == "messaging" {
-		_, _, nextToken, tokenErr := createRecipientToken(globalCtx.AppDB(), env.ProjectID, env.ID, next.ID)
-		if tokenErr == nil {
-			_ = sendInvitation(globalCtx, env, next, nextToken, false)
+	if env.DeliveryMode == "messaging" {
+		for i := range next {
+			_, _, nextToken, tokenErr := createRecipientToken(globalCtx.AppDB(), env.ProjectID, env.ID, next[i].ID)
+			if tokenErr == nil {
+				_ = sendInvitation(globalCtx, env, &next[i], nextToken, false)
+			}
 		}
 	}
 	if finalize {

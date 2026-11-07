@@ -2,6 +2,7 @@ export interface CalendarPostLike {
   status: string;
   schedule_at?: string;
   published_at?: string;
+  delivery_recorded_at?: string;
   created_at: string;
   targets?: { social_account_id: number }[];
 }
@@ -63,7 +64,9 @@ export function postLifecycleDate(post: CalendarPostLike): Date | null {
   const source =
     (post.status === "published" || post.status === "partial") && post.published_at
       ? post.published_at
-      : post.schedule_at || post.created_at;
+      : (post.status === "published" || post.status === "partial")
+        ? post.delivery_recorded_at || post.created_at
+        : post.schedule_at || post.created_at;
   const parsed = new Date(source);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
@@ -155,4 +158,14 @@ export function groupPostsByLocalDay<T extends CalendarPostLike>(posts: T[]): Ma
       (postLifecycleDate(left)?.getTime() || 0) - (postLifecycleDate(right)?.getTime() || 0));
   }
   return grouped;
+}
+
+export function postLifecycleDateLabel(post: CalendarPostLike): string {
+  if (post.status === "published" || post.status === "partial") {
+    if (post.published_at) return "Native publication";
+    return post.delivery_recorded_at
+      ? "Delivery recorded; native publication time unknown"
+      : "Created; native publication time unknown";
+  }
+  return post.schedule_at ? "Scheduled" : "Created";
 }

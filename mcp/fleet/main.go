@@ -660,7 +660,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_update",
-			Description: "Update a tenant's apteva version. Resolves the version (npm latest if omitted), installs and validates the exact versioned CLI/server/core binaries, and records target_version. Active tenants restart and must report the requested health version; stopped tenants remain stopped until tenant_start. Other tenants are unaffected. Args: tenant_id, version?.",
+			Description: "Update a tenant's Apteva version. Stable-host tenants deploy through the private host protocol, retaining progress and verifying the serving version and active slot; retry the same version to reconcile an interrupted deployment. Legacy tenants restart with exact binaries and compatibility-gated rollback. Stopped tenants only prepare the target until tenant_start. Args: tenant_id, version?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FunctionActivityView } from "./FunctionActivityView";
+import { StorageView } from "./StorageView";
 import { PerformanceView } from "./PerformanceView";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
@@ -133,6 +134,7 @@ interface Version {
 }
 
 interface Invocation {
+ details_expired?: boolean;
  resources?: CallResources;
  build_ms?:number;queue_ms?:number;cold_start_ms?:number;execution_ms?:number;
   id: number;
@@ -440,13 +442,14 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 
       <main className="flex-1 overflow-auto">
         <FunctionActivityView
-          key={`${projectId}:${installId}`}
+          key={`activity:${projectId}:${installId}`}
           api={api}
           functions={functions}
           refreshToken={activityRevision}
           renderInvocation={id => <LoadedInvocation id={id} api={api} />}
         />
-        <PerformanceView key={`${projectId}:${installId}`} api={api} functions={functions} onSelect={select} renderInvocation={id => <LoadedInvocation id={id} api={api} />} />
+        <PerformanceView key={`performance:${projectId}:${installId}`} api={api} functions={functions} onSelect={select} renderInvocation={id => <LoadedInvocation id={id} api={api} />} />
+ <StorageView key={`storage:${projectId}:${installId}`} api={api}/>
  <CapacityView api={api}/>
         {error ? (
           <div className="p-6 text-red text-sm">{error}</div>
@@ -805,6 +808,7 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
           <pre className="text-[11px] bg-bg border border-border rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap font-mono">{inv.event_json}</pre>
         </div>
       )}
+      {inv.details_expired && <p className="text-xs text-text-muted">Detailed logs and payloads expired under the storage retention policy. Execution summary is retained.</p>}
       {inv.response_body && (
         <div>
           <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Return value</div>

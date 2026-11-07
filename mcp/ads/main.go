@@ -282,6 +282,12 @@ type App struct {
 	hierarchyMu       sync.Mutex
 	hierarchyInFlight map[string]*hierarchySyncCall
 	audienceMu        sync.Mutex
+
+	clock     func() time.Time // replaced in tests
+	gate      providerGate
+	hierarchy hierarchyCache
+	listedMu  sync.Mutex
+	listedAt  map[string]time.Time
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -563,7 +569,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tracking_source_create",
-			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel; this does not install browser or server-side tracking on a website.",
+			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel under the ad account's Business and shares it with the account (owner=auto); this does not install browser or server-side tracking on a website.",
 			InputSchema: trackingSourceCreateSchema(),
 			Handler:     a.toolTrackingSourceCreate,
 		},
@@ -572,6 +578,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Return browser-public installation configuration for a normalized tracking source. Resolves the account default when tracking_source_resource_id is omitted.",
 			InputSchema: trackingSourceInstallationSchema(),
 			Handler:     a.toolTrackingSourceInstallationGet,
+		},
+		{
+			Name:        "tracking_source_readiness_get",
+			Description: "Verify a Meta Pixel actually works: provider availability, ad-account association, events Meta received (overall, per required event, per domain), the Pixel in each domain's homepage HTML, and Meta's diagnostics. Returns ready, not_ready or unverified with blocking reasons.",
+			InputSchema: trackingSourceReadinessSchema(),
+			Handler:     a.toolTrackingSourceReadinessGet,
+		},
+		{
+			Name:        "tracking_source_test_event_send",
+			Description: "Send one Conversions API test event with a test_event_code from Events Manager. Reports API acceptance separately from test-session match and visibility; test events never count toward reporting or ad eligibility.",
+			InputSchema: trackingSourceTestEventSchema(),
+			Handler:     a.toolTrackingSourceTestEventSend,
 		},
 		{
 			Name:        "lead_form_create",
@@ -769,7 +787,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Get normalized advertising performance for one project-owned account. " +
 				"Supports account, campaign, ad_group, and ad reporting with integer micros for money, " +
 				"derived CTR/CPC/CPM/CPA/ROAS, local caching, and bounded live refreshes. " +
-				"Args: ad_account_id, level?, date_from, date_to, granularity? (day), entity_ids?, refresh? (default true).",
+				"Args: ad_account_id, level?, date_from, date_to, granularity? (day), entity_ids?, refresh? (default true), conversion_events? (Meta). " +
+				"Meta responses include conversion_definition, naming the action types counted.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"level":         map[string]any{"type": "string", "enum": []string{"account", "campaign", "ad_group", "ad"}, "default": "campaign"},
@@ -782,6 +801,13 @@ func (a *App) MCPTools() []sdk.Tool {
 					"items":    map[string]any{"type": "string", "pattern": `^[A-Za-z0-9_~-]+$`},
 				},
 				"refresh": map[string]any{"type": "boolean", "default": true},
+				"conversion_events": map[string]any{
+					"type":     "array",
+					"maxItems": 20,
+					"items":    map[string]any{"type": "string"},
+					"description": "Meta only. Which events count as conversions: kinds (purchase, lead, complete_registration) or exact action types such as offsite_conversion.fb_pixel_lead. " +
+						"Defaults to purchase, lead and complete_registration, each counted once. Engagement such as onsite_conversion.post_save is never counted unless named.",
+				},
 			}, []string{"ad_account_id", "date_from", "date_to"}),
 			Handler: a.toolPerformanceGet,
 		},
@@ -883,12 +909,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "adset_list",
-			Description: "List ad sets in an ad account, optionally filtered to one campaign. Args: ad_account_id, campaign_id?, limit?, after?.",
+			Description: "List ad sets in an ad account, optionally filtered to one campaign. Args: ad_account_id, campaign_id?, limit?, after?, cached? (read the local copy without calling the provider; cache_empty=true means it was never filled).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"campaign_id":   map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"after":         map[string]any{"type": "string"},
+				"cached":        map[string]any{"type": "boolean", "default": false},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolAdSetList,
 		},
@@ -1174,12 +1201,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "ad_list",
-			Description: "List ads under an ad set or ad account. Args: ad_account_id, adset_id?, limit?, after?.",
+			Description: "List ads under an ad set or ad account. Args: ad_account_id, adset_id?, limit?, after?, cached? (read the local copy without calling the provider; cache_empty=true means it was never filled).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"adset_id":      map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"after":         map[string]any{"type": "string"},
+				"cached":        map[string]any{"type": "boolean", "default": false},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolAdList,
 		},
@@ -1365,7 +1393,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "audience_create",
-			Description: "Create a normalized audience. Supported types are capability-driven: customer_list, website, app_activity, engagement, lookalike, and saved_targeting.",
+			Description: "Create a normalized audience using provider-supported create_kinds and by_kind fields from audience_capabilities_get.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
 				"type": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
@@ -1438,7 +1466,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "audience_create_custom",
-			Description: "Create a custom audience. Pass platform-specific source data via platform_options. Args: ad_account_id, name, description?, subtype? (e.g. CUSTOM, WEBSITE, ENGAGEMENT — Meta), platform_options.",
+			Description: "Create a reusable audience. Google audience_type=custom_segment or grouped uses structured fields; omitted audience_type retains the customer-list workflow. Provider-specific source fields remain available where supported.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":    map[string]any{"type": "integer"},
 				"name":             map[string]any{"type": "string"},
@@ -2160,6 +2188,7 @@ func providerRateLimited(res *sdk.ExecuteResult, body string) bool {
 		"RESOURCE_EXHAUSTED",
 		"RATE LIMIT",
 		"TOO MANY CALLS",
+		"TOO MANY API CALLS",
 		"USER REQUEST LIMIT REACHED",
 		"APPLICATION REQUEST LIMIT REACHED",
 	} {
@@ -2212,7 +2241,7 @@ func (a *App) metaResourceBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, too
 		if after != "" {
 			input["after"] = after
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		res, err := a.callProvider(ctx, acct, tool, input)
 		if err != nil {
 			return false, err
 		}
@@ -2263,7 +2292,7 @@ func (a *App) metaVideoBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, tool, 
 		if after != "" {
 			input["after"] = after
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		res, err := a.callProvider(ctx, acct, tool, input)
 		if err != nil {
 			return false, err
 		}
@@ -3620,6 +3649,12 @@ func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccoun
 }
 
 func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if strings.EqualFold(stringArgAny(args, "channel_type"), "demand_gen") && (len(asMap(args["platform_options"])) == 0 || args["optimization_goal"] != nil || args["conversion_action_resource_ids"] != nil) {
+		return a.googleDemandGenCampaignCreate(ctx, acct, args)
+	}
+	if strings.EqualFold(stringArgAny(args, "channel_type"), "video") {
+		return mcpError("Google Ads API cannot create traditional Video campaigns; use channel_type=demand_gen with structured video ads"), nil
+	}
 	if strings.EqualFold(stringArgAny(args, "channel_type"), "app") {
 		return a.googleAppCampaignCreate(ctx, acct, args)
 	}
@@ -3812,6 +3847,9 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 }
 
 func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if (a.isDemandGen(ctx, acct, firstString(args, "campaign_id")) && len(asMap(args["platform_options"])) == 0) || args["optimization_goal"] != nil || args["conversion_action_resource_ids"] != nil {
+		return a.googleDemandGenCampaignUpdate(ctx, acct, args)
+	}
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
@@ -3970,6 +4008,9 @@ func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 }
 
 func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if (a.isDemandGen(ctx, acct, firstString(args, "campaign_id")) && len(asMap(args["platform_options"])) == 0) || demandGenGroupRequested(args) {
+		return a.googleDemandGenGroupCreate(ctx, acct, args)
+	}
 	name, _ := args["name"].(string)
 	cid, _ := args["campaign_id"].(string)
 	if name == "" || cid == "" {
@@ -4020,6 +4061,9 @@ func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 }
 
 func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if demandGenGroupRequested(args) {
+		return a.googleDemandGenGroupUpdate(ctx, acct, args)
+	}
 	asid, _ := args["adset_id"].(string)
 	if asid == "" {
 		return mcpError("adset_id required"), nil
@@ -4115,6 +4159,22 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 			return out, nil
 		}
 	}
+	if demandGenFormats[firstString(args, "ad_format")] != "" {
+		if len(opts) > 0 {
+			return mcpError("structured ad_format conflicts with native options"), nil
+		}
+		built, err := googleDemandGenAd(args, acct.NativeAccountID)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		if out := a.validateDemandGenAdParent(ctx, acct, asid); out != nil {
+			return out, nil
+		}
+		if out := a.validateDemandGenAssets(ctx, acct, args); out != nil {
+			return out, nil
+		}
+		ad = built
+	}
 	if len(ad) == 0 && responsiveSearchAdRequested(args) {
 		built, rsaErr := googleResponsiveSearchAd(args)
 		if rsaErr != nil {
@@ -4146,6 +4206,9 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 }
 
 func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if demandGenFormats[firstString(args, "ad_format")] != "" {
+		return a.googleDemandGenAdUpdate(ctx, acct, args)
+	}
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
 		if failure := validateGoogleAdOperations(acct, args, ops, "update"); failure != nil {
@@ -4215,6 +4278,15 @@ func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 }
 
 func (googleAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "format") == "carousel" && len(asMap(args["platform_options"])) == 0 {
+		return a.googleDemandGenCardCreate(ctx, acct, args)
+	}
+	if firstString(args, "format") == "image" && firstString(args, "image_url") != "" && len(asMap(args["platform_options"])) == 0 {
+		upload := cloneMap(args)
+		upload["kind"] = "image"
+		upload["source_url"] = args["image_url"]
+		return (googleAdapter{}).CreativeUpload(a, ctx, acct, def, upload)
+	}
 	format := strings.ToLower(stringArgAny(args, "format"))
 	name := stringArgAny(args, "name")
 	opts, _ := args["platform_options"].(map[string]any)
@@ -4341,6 +4413,18 @@ func (googleAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 }
 
 func (googleAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		rows, out := a.googleResourceRows(ctx, acct, "SELECT audience.id, audience.name, audience.status, audience.description FROM audience")
+		if out != nil {
+			return out, nil
+		}
+		items := []any{}
+		for _, r := range rows {
+			v := mapAt(r, "audience")
+			items = append(items, map[string]any{"id": v["id"], "name": v["name"], "status": v["status"], "audience_type": "grouped"})
+		}
+		return map[string]any{"data": items}, nil
+	}
 	query := `SELECT user_list.id, user_list.name, user_list.type, user_list.size_for_display, user_list.size_for_search FROM user_list`
 	if limit := intArg(args, "limit", 0); limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
@@ -4349,6 +4433,9 @@ func (googleAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 }
 
 func (googleAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		return a.googleGroupedAudienceCreate(ctx, acct, args)
+	}
 	opts, _ := args["platform_options"].(map[string]any)
 	userList, _ := opts["user_list"].(map[string]any)
 	name, _ := args["name"].(string)
@@ -4368,11 +4455,15 @@ func (googleAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccou
 }
 
 func (googleAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	return mcpError("google audience_create_lookalike is not exposed as a generic operation; use audience_create_custom with platform_options.user_list"), nil
+	return a.googleStructuredAudienceCreate(ctx, acct, args, "lookalike")
 }
 
 func (a *App) toolAdSetCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	args, errOut = a.resolveGoogleAudienceTargeting(ctx, acct, args)
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4409,6 +4500,11 @@ func (a *App) toolAdSetCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, er
 			args["promoted_object"] = promotedObject
 		}
 	}
+	if mobileActivationRequested(args) {
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
+	}
 	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad_group"); id != "" {
@@ -4432,19 +4528,22 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	if acct.ManagementMode != managementModeSelected {
-		return platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
-	}
 	campaignID := stringArgAny(args, "campaign_id")
-	if campaignID != "" {
+	if acct.ManagementMode == managementModeSelected && campaignID != "" {
 		if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
 			return scopeErr, nil
 		}
+	}
+	if boolArg(args, "cached") {
+		return a.cachedEntityList(ctx, acct, "ad_group", campaignID, "")
+	}
+	if acct.ManagementMode != managementModeSelected || campaignID != "" {
 		out, err := platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
 		if err == nil && successfulProviderResult(out) {
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", resultRows(out), campaignID); persistErr != nil {
 				return nil, persistErr
 			}
+			a.markListed(acct, "ad_group", campaignID+"/")
 		}
 		return out, err
 	}
@@ -4460,6 +4559,10 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	args, errOut = a.resolveGoogleAudienceTargeting(ctx, acct, args)
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4518,6 +4621,11 @@ func (a *App) toolAdCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return scopeErr, nil
 	}
 	campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+	if mobileActivationRequested(args) {
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
+	}
 	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad"); id != "" {
@@ -4539,20 +4647,28 @@ func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	if acct.ManagementMode != managementModeSelected {
-		return platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
-	}
 	adSetID := stringArgAny(args, "adset_id")
-	if adSetID != "" {
-		if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
-			return scopeErr, nil
+	if boolArg(args, "cached") {
+		// The local copy only ever holds entities this project may see, so a
+		// cached read needs no provider ownership check.
+		return a.cachedEntityList(ctx, acct, "ad", "", adSetID)
+	}
+	if acct.ManagementMode != managementModeSelected || adSetID != "" {
+		if acct.ManagementMode == managementModeSelected {
+			if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
+				return scopeErr, nil
+			}
 		}
-		campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+		campaignID := ""
+		if adSetID != "" {
+			campaignID, _ = a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+		}
 		out, err := platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
 		if err == nil && successfulProviderResult(out) {
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad", resultRows(out), campaignID); persistErr != nil {
 				return nil, persistErr
 			}
+			a.markListed(acct, "ad", "/"+adSetID)
 		}
 		return out, err
 	}
@@ -4782,23 +4898,54 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── Audience tools ────────────────────────────────────────────────
 
 func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		for _, key := range []string{"provenance_status", "source_platform", "source_account_id", "source_channel_id", "source_asset_id", "interaction_type"} {
+			if firstString(args, key) != "" {
+				return mcpError("verified provenance filters use normalized audience_list with type=grouped, not legacy audience_type=grouped"), nil
+			}
+		}
+		acct, def, out := a.resolveAdAccount(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		if acct.Platform != "google" {
+			return mcpError("grouped audiences currently support Google"), nil
+		}
+		return (googleAdapter{}).AudienceList(a, ctx, acct, def, args)
+	}
 	return a.audienceList(ctx, args)
 }
 
 func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if firstString(args, "audience_type") == "grouped" {
+		acct, _, out := a.resolveAdAccount(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		if acct.Platform != "google" {
+			return mcpError("grouped audiences currently support Google"), nil
+		}
+		return a.withCreateRequest(ctx, args, "audience_group", func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			return a.googleGroupedAudienceCreate(ctx, acct, args)
+		})
+	}
 	copyArgs := cloneMap(args)
-	copyArgs["type"] = "customer_list"
-	return a.audienceCreate(ctx, copyArgs)
+	if kind := firstString(args, "audience_type"); kind == "custom_segment" {
+		copyArgs["type"] = kind
+	} else {
+		copyArgs["type"] = "customer_list"
+	}
+	return a.withCreateRequest(ctx, copyArgs, "audience", a.audienceCreate)
 }
 
 func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	copyArgs := cloneMap(args)
 	copyArgs["type"] = "lookalike"
-	return a.audienceCreate(ctx, copyArgs)
+	return a.withCreateRequest(ctx, copyArgs, "audience", a.audienceCreate)
 }
 
 func (a *App) toolAudienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.audienceCreate(ctx, args)
+	return a.withCreateRequest(ctx, args, "audience", a.audienceCreate)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -5320,7 +5467,7 @@ func normalizeMetaPerformance(acct *adAccount, row map[string]any) (map[string]a
 		"spend_micros":  spendMicros,
 		"impressions":   int64ArgAny(row["impressions"]),
 		"clicks":        int64ArgAny(row["clicks"]),
-		"conversions":   metaConversionValue(row),
+		"conversions":   metaRowCount(row),
 	}, nil
 }
 
@@ -5346,35 +5493,9 @@ func decimalToMicros(value any) (int64, error) {
 	return micros.Int64(), nil
 }
 
-func metaConversionValue(row map[string]any) float64 {
-	if direct := numericArgAny(row["conversion"]); direct != 0 {
-		return direct
-	}
-	for _, key := range []string{"conversions", "actions"} {
-		values := actionValues(row[key])
-		if len(values) == 0 {
-			continue
-		}
-		for _, aggregate := range []string{"offsite_conversion", "onsite_conversion", "conversion"} {
-			if value, ok := values[aggregate]; ok {
-				return value
-			}
-		}
-		total := 0.0
-		for actionType, value := range values {
-			lower := strings.ToLower(actionType)
-			if strings.Contains(lower, "conversion") ||
-				strings.Contains(lower, "purchase") ||
-				strings.Contains(lower, "lead") ||
-				strings.Contains(lower, "complete_registration") {
-				total += value
-			}
-		}
-		if total != 0 {
-			return total
-		}
-	}
-	return 0
+func metaRowCount(row map[string]any) float64 {
+	count, _ := metaRowConversions(row)
+	return count
 }
 
 func actionValues(value any) map[string]float64 {

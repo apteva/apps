@@ -63,6 +63,13 @@ func (s *carrierMediaSocket) writeJSON(value any) error {
 	return s.conn.WriteMessage(websocket.TextMessage, raw)
 }
 
+func (s *carrierMediaSocket) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "simulation_finished"), time.Now().Add(time.Second))
+	_ = s.conn.Close()
+}
+
 func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureSpec) (call *VoiceCall, err error) {
 	fixture, err := s.db.getProtocolFixture(run.ID, spec.ProtocolFixture)
 	if err != nil || fixture == nil {
@@ -85,6 +92,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	}
 	s.ctx.Emit("environment.voice_call.started", voiceCallEvent(call))
 	defer func() {
+		s.abortedVoiceCleanup(ctx, run.RuntimeID, call)
 		finished := time.Now().UTC()
 		call.FinishedAt = &finished
 		call.Metrics.DurationMS = finished.Sub(call.StartedAt).Milliseconds()
@@ -97,9 +105,12 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		} else if call.Status == "running" {
 			call.Status = "completed"
 		}
+		cancelVoiceResult(ctx, call)
 		_ = s.db.saveVoiceCall(call)
 		topic := "environment.voice_call.completed"
-		if call.Status == "failed" {
+		if call.Status == "cancelled" {
+			topic = "environment.voice_call.cancelled"
+		} else if call.Status == "failed" {
 			topic = "environment.voice_call.failed"
 		} else if call.Status == "invalid_simulation" {
 			topic = "environment.voice_call.invalid"
@@ -111,7 +122,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	callerDirective := voiceCallerDirective(spec)
 	if _, err = s.runtime().SpawnRuntimeAgent(run.RuntimeID, sdk.RuntimeAgentSpawnRequest{
 		Draft: &sdk.RuntimeAgentDraft{Name: firstNonEmpty(spec.CallerName, "Evaluation caller"), Directive: callerDirective, Mode: "autonomous"},
-		Alias: call.CallerAgentAlias, StartPaused: true,
+		Alias: call.CallerAgentAlias, StartPaused: false,
 	}); err != nil {
 		return call, fmt.Errorf("spawn caller agent: %w", err)
 	}
@@ -125,7 +136,19 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	if err != nil {
 		return call, fmt.Errorf("spawn caller voice: %w", err)
 	}
-	defer s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID)
+	if call.startedThreads == nil {
+		call.startedThreads = map[string]string{}
+	}
+	call.startedThreads[call.CallerAgentAlias] = call.CallerThreadID
+	callerThreadStopped := false
+	defer func() {
+		if !callerThreadStopped {
+			recordVoiceCleanupError(call, s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID))
+		}
+	}()
+	if ctx.Err() != nil {
+		return call, ctx.Err()
+	}
 	if caller.AudioBridgeURL == "" {
 		return call, errors.New("caller realtime thread returned no audio bridge")
 	}
@@ -154,6 +177,21 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		return call, err
 	}
 	twimlRaw, status, postErr := carrierPOST(ctx, inboundGatewayURL, route.InboundURL, inboundForm, stringConfig(fixture.Config, "auth_token", ""))
+	var response carrierTwiML
+	callbacksFinished, mediaStarted := false, false
+	if status >= 200 && status < 300 {
+		defer func() {
+			if callbacksFinished {
+				return
+			}
+			cleanupCtx, cancelCleanup := voiceCleanupContext(ctx, call)
+			defer cancelCleanup()
+			if mediaStarted && response.Connect.Stream.StatusCallback != "" {
+				recordVoiceCleanupError(call, s.deliverCarrierCallback(cleanupCtx, run.ID, fixture.ID, call.ID, "callback.stream_stopped", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamEvent": {"stream-stopped"}}, stringConfig(fixture.Config, "auth_token", "")))
+			}
+			recordVoiceCleanupError(call, s.deliverCarrierCallback(cleanupCtx, run.ID, fixture.ID, call.ID, "callback.call_completed", carrierInboundStatusURL(route.InboundURL), endpoint, url.Values{"CallSid": {callSID}, "From": {from}, "To": {to}, "CallStatus": {"completed"}}, stringConfig(fixture.Config, "auth_token", "")))
+		}()
+	}
 	s.addProtocolEvent(run.ID, fixture.ID, call.ID, "webhook.inbound", "fixture_to_app", map[string]any{"status": status, "call_sid": callSID, "from": from, "to": to})
 	if postErr != nil {
 		return call, fmt.Errorf("deliver inbound carrier webhook: %w", postErr)
@@ -161,7 +199,6 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	if status < 200 || status >= 300 {
 		return call, fmt.Errorf("inbound carrier webhook returned %d: %s", status, strings.TrimSpace(string(twimlRaw)))
 	}
-	var response carrierTwiML
 	if err := xml.Unmarshal(twimlRaw, &response); err != nil {
 		return call, fmt.Errorf("parse Telephony response: %w", err)
 	}
@@ -177,13 +214,21 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	if err != nil {
 		return call, err
 	}
-	defer s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
+	if call.startedThreads == nil {
+		call.startedThreads = map[string]string{}
+	}
+	call.startedThreads[spec.TargetAgent] = call.TargetThreadID
+	targetThreadStopped := false
+	defer func() {
+		if !targetThreadStopped {
+			recordVoiceCleanupError(call, s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID))
+		}
+	}()
 
-	callerConn, _, err := websocket.DefaultDialer.DialContext(ctx, caller.AudioBridgeURL, nil)
+	callerSocket, err := dialVoiceSocket(ctx, caller.AudioBridgeURL)
 	if err != nil {
 		return call, fmt.Errorf("connect caller audio: %w", err)
 	}
-	callerSocket := &voiceSocket{conn: callerConn}
 	defer callerSocket.close()
 
 	headers := http.Header{}
@@ -197,7 +242,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		return call, fmt.Errorf("connect simulated carrier media: %w", err)
 	}
 	media := &carrierMediaSocket{conn: mediaConn}
-	defer mediaConn.Close()
+	defer media.close()
 	streamSID := "MZ" + token(32)
 	if err := media.writeJSON(map[string]any{"event": "connected", "protocol": "Call", "version": "1.0.0"}); err != nil {
 		return call, err
@@ -205,12 +250,8 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	if err := media.writeJSON(map[string]any{"event": "start", "streamSid": streamSID, "start": map[string]any{"callSid": callSID, "accountSid": stringConfig(fixture.Config, "account_sid", ""), "tracks": []string{"inbound"}, "mediaFormat": map[string]any{"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1}}}); err != nil {
 		return call, err
 	}
+	mediaStarted = true
 	s.addProtocolEvent(run.ID, fixture.ID, call.ID, "media.connected", "bidirectional", map[string]any{"stream_sid": streamSID, "codec": "PCMU", "sample_rate": 8000})
-	if response.Connect.Stream.StatusCallback != "" {
-		if err = s.deliverCarrierCallback(ctx, run.ID, fixture.ID, call.ID, "callback.stream_started", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-started"}}, stringConfig(fixture.Config, "auth_token", "")); err != nil {
-			return call, err
-		}
-	}
 
 	call.StartedAt = time.Now().UTC()
 	bridgeCtx, cancel := context.WithCancel(ctx)
@@ -218,6 +259,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	var receptionistAudio, callerAudio, deliveredCallerAudio cappedAudio
 	bridgeExits := make(chan voiceBridgeExit, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
+	mediaActivity.microphoneMode = spec.MicrophoneMode
 	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, false)
 	var deliveredCapture *cappedAudio
 	if audioPipeline != nil {
@@ -226,94 +268,58 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	go relayCallerToCarrier(bridgeCtx, callerSocket, media, streamSID, mediaActivity, &callerAudio, deliveredCapture, audioPipeline, bridgeExits)
 	go relayCarrierToCaller(bridgeCtx, media, callerSocket, mediaActivity, &receptionistAudio, bridgeExits)
 
-	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
-	defer timeout.Stop()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	endedBy := ""
-	lastTranscript := ""
-	callerDone := false
-	for endedBy == "" {
-		select {
-		case <-ctx.Done():
-			return call, ctx.Err()
-		case <-timeout.C:
-			endedBy = "timeout"
-		case bridgeExit := <-bridgeExits:
-			appendVoiceBridgeExit(call, bridgeExit)
-			_ = s.db.saveVoiceCall(call)
-			s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
-			endedBy = s.classifyVoiceBridgeExit(history, ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
-		case <-ticker.C:
-			callerEvents, callerErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
-			if callerErr == nil && voiceCallerCompleted(callerEvents, call.CallerThreadID) {
-				callerDone = true
-			}
-			targetEvents, targetErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
-			if targetErr != nil {
-				continue
-			}
-			transcript := voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
-			raw, _ := json.Marshal(transcript)
-			delivery := voiceTurnDelivery(targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID)
-			applyVoiceTurnDeliveryMetrics(&call.Metrics, delivery)
-			progressSignature := string(raw) + fmt.Sprintf("|%d|%d|%d|%d",
-				delivery.receptionistSource, delivery.callerReceived,
-				delivery.callerSource, delivery.receptionistReceived,
-			)
-			if len(transcript) > 0 && progressSignature != lastTranscript {
-				lastTranscript = progressSignature
-				call.Transcript = transcript
-				call.TargetTelemetry = targetEvents
-				_ = s.db.saveVoiceCall(call)
-				s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
-			}
-			if callerErr == nil {
-				if callerDone && voiceRelayDeliverySettled(mediaActivity, targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID) {
-					endedBy = "caller_done"
-				} else if voiceConversationIsIdle(time.Now(), mediaActivity, transcript, targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID) {
-					endedBy = "conversation_idle"
-				}
-			}
-		}
+	// Media is ready before a possibly slow backend status callback. Keep its
+	// continuously paced microphone running while that callback is in flight.
+	var startCallbackErr error
+	if response.Connect.Stream.StatusCallback != "" {
+		startCallbackErr = s.deliverCarrierCallback(ctx, run.ID, fixture.ID, call.ID, "callback.stream_started", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-started"}}, stringConfig(fixture.Config, "auth_token", ""))
 	}
-	cancel()
+	endedBy, monitorErr := "carrier_start_callback_failed", startCallbackErr
+	if startCallbackErr == nil {
+		endedBy, monitorErr = s.monitorVoiceExchange(ctx, history, run.RuntimeID, call, mediaActivity, bridgeExits)
+	}
+	cleanupCtx, finishCleanup := voiceCleanupContext(ctx, call)
+	defer finishCleanup()
 	_ = media.writeJSON(map[string]any{"event": "stop", "streamSid": streamSID, "stop": map[string]any{"accountSid": stringConfig(fixture.Config, "account_sid", ""), "callSid": callSID}})
-	_ = mediaConn.Close()
+	media.close()
 	callerSocket.close()
+	cancel()
 	s.collectVoiceBridgeExits(call, bridgeExits, 2)
 
 	var callbackErr error
 	if response.Connect.Stream.StatusCallback != "" {
-		callbackErr = s.deliverCarrierCallback(context.Background(), run.ID, fixture.ID, call.ID, "callback.stream_stopped", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-stopped"}}, stringConfig(fixture.Config, "auth_token", ""))
+		callbackErr = s.deliverCarrierCallback(cleanupCtx, run.ID, fixture.ID, call.ID, "callback.stream_stopped", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-stopped"}}, stringConfig(fixture.Config, "auth_token", ""))
 	}
 	statusURL := carrierInboundStatusURL(route.InboundURL)
-	if e := s.deliverCarrierCallback(context.Background(), run.ID, fixture.ID, call.ID, "callback.call_completed", statusURL, endpoint, url.Values{"CallSid": {callSID}, "From": {from}, "To": {to}, "CallStatus": {"completed"}}, stringConfig(fixture.Config, "auth_token", "")); e != nil {
+	if e := s.deliverCarrierCallback(cleanupCtx, run.ID, fixture.ID, call.ID, "callback.call_completed", statusURL, endpoint, url.Values{"CallSid": {callSID}, "From": {from}, "To": {to}, "CallStatus": {"completed"}}, stringConfig(fixture.Config, "auth_token", "")); e != nil {
 		callbackErr = errors.Join(callbackErr, e)
 	}
 
-	targetEvents, targetErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
-	if targetErr != nil {
-		return call, fmt.Errorf("read receptionist telemetry: %w", targetErr)
-	}
-	callerEvents, callerErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
-	if callerErr != nil {
-		return call, fmt.Errorf("read caller telemetry: %w", callerErr)
-	}
-	call.TargetTelemetry = targetEvents
-	call.CallerTelemetry = callerEvents
-	call.Transcript = voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
+	callbacksFinished = true
 	call.Execution, _ = s.runtime().WaitRuntimeAgent(run.RuntimeID, spec.TargetAgent, sdk.RuntimeAgentWaitRequest{
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1, PostToolIdleSeconds: 1, RequireActivity: true,
 	})
+	// Stop only after the finishing period, then poll stored terminal evidence.
+	targetStopErr := s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
+	targetThreadStopped = true
+	callerStopErr := s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, call.CallerThreadID)
+	callerThreadStopped = true
+	finalizationErr := s.finalizeVoiceTelemetry(cleanupCtx, history, run.RuntimeID, call, mediaActivity, endedBy)
+	targetEvents, callerEvents := call.TargetTelemetry, call.CallerTelemetry
+
 	receptionistPCM, callerPCM, deliveredPCM := receptionistAudio.bytes(), callerAudio.bytes(), deliveredCallerAudio.bytes()
 	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistPCM, callerPCM, endedBy)
+	if call.FinalExchange != nil {
+		call.Metrics.CallerResponseUndelivered = call.FinalExchange.CallerAudio.UnforwardedBytes > 0
+	}
 	finalizeVoiceBridgeExits(call)
 	if audioPipeline != nil {
 		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredPCM)) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
 	}
+	setVoiceCleanup(call, callbackErr, finalizationErr, targetStopErr, callerStopErr)
 	call.Validity = assessVoiceCall(call)
+	cancelVoiceResult(ctx, call)
 	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistPCM); err != nil {
 		return call, err
 	}
@@ -328,7 +334,10 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	}
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
-	return call, callbackErr
+	if ctx.Err() != nil {
+		return call, nil
+	}
+	return call, monitorErr
 }
 
 func voiceCarrierRouteInput(spec VoiceFixtureSpec, virtualNumber string) map[string]any {
@@ -447,6 +456,10 @@ func carrierVirtualNumber(callID string) string {
 }
 
 func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carrierMediaSocket, streamSID string, activity *voiceMediaActivity, capture, delivered *cappedAudio, pipeline *voiceAudioPipeline, result chan<- voiceBridgeExit) {
+	defer activity.update("caller", false, time.Time{})
+	activity.inputConnected(voiceBridgeLegCallerToCarrier, "pcmu", 8000, continuousVoiceInput(activity.microphoneMode, voiceAudioCapabilities{}, true))
+	stopClose := context.AfterFunc(ctx, func() { caller.conn.Close(); media.conn.Close() })
+	defer stopClose()
 	incoming := make(chan voiceRelayEvent, 128)
 	go readVoiceAudio(ctx, caller, capture, incoming)
 
@@ -457,6 +470,12 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 	reporter := newVoiceBridgeExitReporter(ctx, result, voiceBridgeLegCallerToCarrier)
 	defer func() { reporter.finish(sourceExit, voiceBridgeCaller) }()
 	resampler := newCarrierResampler(24000, 8000)
+	// Prime the filter delay once, yielding 160 samples per input frame.
+	resampler.Process(make([]int16, resampler.half))
+	if err := caller.playbackReady(); err != nil {
+		reporter.report(voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "playback_ready", Err: err})
+		return
+	}
 	for {
 		input := (<-chan voiceRelayEvent)(incoming)
 		if sourceExit != nil || relay.queue.bytes >= maxVoiceRelayBuffer {
@@ -480,14 +499,24 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 					return
 				}
 			case event.interrupt:
-				relay.interrupt()
+				discarded := relay.interruptPlayback(event.interruptItem, event.interruptGeneration)
+				if caller.audioCapabilities().Version != 0 {
+					_ = caller.write(websocket.TextMessage, voiceClearReceipt(event, discarded))
+				}
 				activity.update("caller", false, time.Now())
 			case event.chunk != nil:
+				if !activity.accept("caller", *event.chunk) {
+					continue
+				}
 				relay.append(*event.chunk)
 				activity.update("caller", true, time.Now())
 			}
-		case <-ticker.C:
-			frame, _, acks, applyConditions, ok := relay.nextFrame()
+		case scheduled := <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			continuous := sourceExit == nil && continuousVoiceInput(activity.microphoneMode, voiceAudioCapabilities{}, true)
+			frame, _, acks, applyConditions, ok := relay.nextInputFrame(continuous)
 			if !ok {
 				activity.update("caller", false, time.Time{})
 				if sourceExit != nil {
@@ -496,14 +525,15 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				}
 				continue
 			}
-			activity.update("caller", true, time.Now())
+			activity.frameActivity("caller", &relay)
 			if applyConditions {
 				frame = pipeline.process(frame)
 			}
-			if delivered != nil {
-				delivered.append(frame)
-			}
 			pcm8 := resampler.Process(carrierBytesToPCM(frame))
+			if len(pcm8) != 160 {
+				reporter.report(voiceBridgeExit{Endpoint: voiceBridgeCarrier, Operation: "encode_audio", Err: fmt.Errorf("carrier frame has %d samples, expected 160", len(pcm8))})
+				return
+			}
 			for len(pcm8) > 0 {
 				count := 160
 				if len(pcm8) < count {
@@ -519,26 +549,36 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				}
 				pcm8 = pcm8[count:]
 			}
+			sent := time.Now()
+			ticker.Reset(voiceFrameDuration)
+			activity.inputFrame(voiceBridgeLegCallerToCarrier, "pcmu", 8000, 160, relay.lastSpeechBytes, continuous, scheduled, sent)
+			activity.forwarded("caller", relay.lastSpeechBytes)
+			if delivered != nil && (relay.lastSpeechBytes > 0 || applyConditions) {
+				delivered.append(frame)
+			}
 			for _, playback := range acks {
 				if sourceExit != nil {
 					continue
 				}
-				ack, _ := json.Marshal(map[string]any{
-					"type": "playback.progress", "item_id": playback.itemID, "audio_end_ms": playback.audioEndMS,
-				})
+				ack := voicePlaybackReceipt(playback)
 				if err := caller.write(websocket.TextMessage, ack); err != nil {
-					activity.update("caller", false, time.Now())
 					reporter.report(voiceBridgeExit{
 						Endpoint: voiceBridgeCaller, Operation: "write_playback_ack", Err: err,
 					})
-					return
+					activity.stopCaller(true)
+					continue
 				}
+				activity.acknowledged("caller", playback)
 			}
 		}
 	}
 }
 
 func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller *voiceSocket, activity *voiceMediaActivity, capture *cappedAudio, result chan<- voiceBridgeExit) {
+	defer activity.update("receptionist", false, time.Time{})
+	activity.inputConnected(voiceBridgeLegCarrierToCaller, "pcm16", voiceSampleRate, continuousVoiceInput(activity.microphoneMode, caller.audioCapabilities(), false))
+	stopClose := context.AfterFunc(ctx, func() { caller.conn.Close(); media.conn.Close() })
+	defer stopClose()
 	incoming := make(chan voiceRelayEvent, 128)
 	go readCarrierAudio(ctx, media, capture, incoming)
 
@@ -546,6 +586,8 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 	defer ticker.Stop()
 	var relay voiceMediaRelay
 	var sourceExit *voiceBridgeExit
+	var marks []voiceRelayEvent
+	var drainedBytes int64
 	reporter := newVoiceBridgeExitReporter(ctx, result, voiceBridgeLegCarrierToCaller)
 	defer func() { reporter.finish(sourceExit, voiceBridgeCarrier) }()
 	for {
@@ -564,19 +606,42 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 					ObservedAt: time.Now().UTC(),
 				}
 				sourceExit = &exit
-				if !relay.hasPendingPlayback() {
+				if !relay.hasPendingPlayback() && len(marks) == 0 {
 					activity.update("receptionist", false, time.Now())
 					reporter.report(exit)
 					return
 				}
 				continue
 			}
+			if event.markName != "" {
+				marks = append(marks, event)
+				continue
+			}
 			if event.chunk != nil {
+				activity.accept("receptionist", *event.chunk)
 				relay.append(*event.chunk)
 				activity.update("receptionist", true, time.Now())
 			}
-		case <-ticker.C:
-			frame, speechStarted, _, _, ok := relay.nextFrame()
+		case scheduled := <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			// Marks acknowledge only media already paced to the caller. A closed
+			// caller remains a capture sink and receives no fabricated receipt.
+			for len(marks) > 0 && marks[0].markAfterBytes <= drainedBytes {
+				mark := marks[0]
+				marks = marks[1:]
+				if activity.callerDisconnected() {
+					continue
+				}
+				if err := media.writeJSON(map[string]any{"event": "mark", "streamSid": mark.chunk.itemID, "mark": map[string]string{"name": mark.markName}}); err != nil {
+					reporter.report(voiceBridgeExit{Endpoint: voiceBridgeCarrier, Operation: "write_playback_ack", Err: err})
+					return
+				}
+				activity.carrierAcknowledged(mark.markAfterBytes)
+			}
+			continuous := sourceExit == nil && continuousVoiceInput(activity.microphoneMode, caller.audioCapabilities(), false)
+			frame, speechStarted, _, _, ok := relay.nextInputFrame(continuous)
 			if !ok {
 				activity.update("receptionist", false, time.Time{})
 				if sourceExit != nil {
@@ -585,29 +650,38 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 				}
 				continue
 			}
-			activity.update("receptionist", true, time.Now())
-			if speechStarted {
+			activity.frameActivity("receptionist", &relay)
+			drainedBytes += int64(relay.lastSpeechBytes)
+			if activity.callerDisconnected() {
+				continue
+			}
+			if speechStarted && caller.signalSpeechStarted() {
 				if err := caller.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
-					activity.update("receptionist", false, time.Now())
 					reporter.report(voiceBridgeExit{
 						Endpoint: voiceBridgeCaller, Operation: "write_speech_started", Err: err,
 					})
-					return
+					activity.stopCaller(true)
+					continue
 				}
 			}
 			if err := caller.write(websocket.BinaryMessage, frame); err != nil {
-				activity.update("receptionist", false, time.Now())
 				reporter.report(voiceBridgeExit{
 					Endpoint: voiceBridgeCaller, Operation: "write_audio", Err: err,
 				})
-				return
+				activity.stopCaller(true)
+				continue
 			}
+			sent := time.Now()
+			ticker.Reset(voiceFrameDuration)
+			activity.inputFrame(voiceBridgeLegCarrierToCaller, "pcm16", voiceSampleRate, len(frame), relay.lastSpeechBytes, continuous, scheduled, sent)
+			activity.forwarded("receptionist", relay.lastSpeechBytes)
 		}
 	}
 }
 
 func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
 	resampler := newCarrierResampler(8000, 24000)
+	var generatedBytes int64
 	for {
 		messageType, raw, err := media.conn.ReadMessage()
 		if err != nil {
@@ -634,7 +708,9 @@ func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *c
 			continue
 		}
 		if frame.Event == "mark" && frame.Mark != nil {
-			_ = media.writeJSON(map[string]any{"event": "mark", "streamSid": frame.StreamSID, "mark": map[string]string{"name": frame.Mark.Name}})
+			if !sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{markName: frame.Mark.Name, markAfterBytes: generatedBytes, chunk: &voiceAudioChunk{itemID: frame.StreamSID}}) {
+				return
+			}
 			continue
 		}
 		if frame.Event == "stop" {
@@ -653,6 +729,7 @@ func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *c
 		}
 		pcm24 := resampler.Process(carrierUlawToPCM(mu))
 		data := carrierPCMToBytes(pcm24)
+		generatedBytes += int64(len(data))
 		if len(data) == 0 {
 			continue
 		}

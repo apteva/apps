@@ -47,16 +47,17 @@ type benchmarkDirection struct {
 	TailReceived    int     `json:"final_two_seconds_markers"`
 }
 type benchmarkBrowserResult struct {
-	RTCCandidates   []map[string]any   `json:"rtc_candidates,omitempty"`
-	ClockProgress   map[string]float64 `json:"clock_progress,omitempty"`
-	WireDiagnostics []json.RawMessage  `json:"wire_diagnostics"`
-	Markers         []bench.Marker     `json:"markers"`
-	Notices         []map[string]any   `json:"notices"`
-	States          []map[string]any   `json:"states"`
-	Diagnostics     []map[string]any   `json:"diagnostics"`
-	PageErrors      []string           `json:"page_errors"`
-	BrowserVersion  string             `json:"browser_version"`
-	StartAt         int64              `json:"start_at"`
+	IndependentClocks map[string]any     `json:"independent_render_clocks,omitempty"`
+	RTCCandidates     []map[string]any   `json:"rtc_candidates,omitempty"`
+	ClockProgress     map[string]float64 `json:"clock_progress,omitempty"`
+	WireDiagnostics   []json.RawMessage  `json:"wire_diagnostics"`
+	Markers           []bench.Marker     `json:"markers"`
+	Notices           []map[string]any   `json:"notices"`
+	States            []map[string]any   `json:"states"`
+	Diagnostics       []map[string]any   `json:"diagnostics"`
+	PageErrors        []string           `json:"page_errors"`
+	BrowserVersion    string             `json:"browser_version"`
+	StartAt           int64              `json:"start_at"`
 }
 type benchmarkResult struct {
 	Profile           bench.Profile                    `json:"profile"`
@@ -171,7 +172,7 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 	}
 	git := exec.Command("git", "rev-parse", "HEAD")
 	revision, _ := git.Output()
-	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP, optional carrier TCP and forced-relay UDP profiles; synthetic acoustic markers; no live provider", "results": results}
+	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "network_profile": firstNonEmpty(os.Getenv("TELEPHONY_BENCHMARK_NETWORK_PROFILE"), "balanced"), "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP, optional carrier TCP and forced-relay UDP profiles; synthetic acoustic markers; no live provider", "results": results}
 	raw, _ := json.MarshalIndent(report, "", "  ")
 	if err = os.WriteFile(filepath.Join(output, "results.json"), append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
@@ -198,6 +199,23 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	result := benchmarkResult{Profile: profile, Outcome: "error"}
 	platform := newTier2PlatformGateway(t)
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true"}))
+	// Exercise the real persisted project policy rather than overriding fake
+	// browser statistics or bypassing the production encoder configuration.
+	if preset := os.Getenv("TELEPHONY_BENCHMARK_NETWORK_PROFILE"); preset != "" {
+		policy := defaultPhoneNetworkPolicy()
+		switch preset {
+		case "balanced":
+		case "guarded":
+			policy.UploadBitrateControl = "guarded"
+		case "unstable":
+			policy.InitialBitrate, policy.MaxBitrate, policy.PlaybackTarget = 20000, 20000, 80
+		default:
+			t.Fatalf("unknown browser network benchmark preset %q", preset)
+		}
+		if status, body := tier2Request(t, sc, "POST", "/numbers/network-policy?project_id="+tier2Project, map[string]any{"policy": policy}, nil, tier2Headers()); status != 200 {
+			t.Fatalf("network preset: %d %s", status, body)
+		}
+	}
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser", "recording_mode": "off"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})
@@ -297,7 +315,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			}
 			writeTier2JSON(w, map[string]any{"start_at": epoch.Load()})
 		default:
-			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
+			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/clock-observer.js": "benchmarks/softphone/clock-observer.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
 			path, ok := files[r.URL.Path]
 			if !ok {
 				http.NotFound(w, r)
@@ -451,6 +469,25 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	if row, ok := detail["call"].(map[string]any); ok {
 		result.ServerDiagnostics = map[string]any{"browser": row["browser_audio_diagnostics"], "carrier": row["carrier_audio_diagnostics"]}
 	}
+	var health map[string]any
+	if status, body := tier2Request(t, sc, "GET", "/audio-health?call_id="+id+"&project_id="+tier2Project, nil, &health, tier2Headers()); status != 200 {
+		result.Errors = append(result.Errors, fmt.Sprintf("transport history read: %d %s", status, body))
+	} else {
+		result.ServerDiagnostics["transport_samples"] = health["transport_samples"]
+		history, ok := health["transport_samples"].([]any)
+		if !ok || len(history) == 0 {
+			result.Errors = append(result.Errors, "transport history not persisted")
+		}
+		complete := false
+		for _, entry := range history {
+			if sample, ok := entry.(map[string]any); ok && sample["complete"] == true {
+				complete = true
+			}
+		}
+		if !complete {
+			result.Errors = append(result.Errors, "no complete paced transport sample persisted")
+		}
+	}
 	cancel()
 	<-carrierDone
 	select {
@@ -502,6 +539,18 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		if err := json.Unmarshal(wire, &control); err != nil {
 			result.Errors = append(result.Errors, "browser diagnostics protocol: "+err.Error())
 			break
+		}
+		if control.Diagnostics != nil {
+			samples := control.Diagnostics.TransportSamples
+			raw, _ := json.Marshal(samples)
+			if len(samples) > 2 || len(raw) > 8192 {
+				result.Errors = append(result.Errors, "transport history wire budget exceeded")
+			}
+			for _, sample := range samples {
+				if sample.Timestamp == "" || sample.ID == "" {
+					result.Errors = append(result.Errors, "transport sample missing source time or identity")
+				}
+			}
 		}
 	}
 	result.Errors = append(result.Errors, result.Browser.PageErrors...)

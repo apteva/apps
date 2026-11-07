@@ -27,9 +27,14 @@ func (a *App) launchAIRecovery(key string, run func()) bool {
 	if a.decisionStopping || a.aiRecovering[key] {
 		return false
 	}
+	runtimeDone, err := a.runtimeBegin(false)
+	if err != nil {
+		return false
+	}
 	select {
 	case aiRecoverySlots <- struct{}{}:
 	default:
+		runtimeDone()
 		return false
 	}
 	if a.aiRecovering == nil {
@@ -38,6 +43,7 @@ func (a *App) launchAIRecovery(key string, run func()) bool {
 	a.aiRecovering[key] = true
 	a.decisionWG.Add(1)
 	go func() {
+		defer runtimeDone()
 		defer a.decisionWG.Done()
 		defer func() { a.dispatchMu.Lock(); delete(a.aiRecovering, key); a.dispatchMu.Unlock(); <-aiRecoverySlots }()
 		run()
@@ -255,7 +261,7 @@ func (a *App) failAIHandoff(row *callRow, token, code string, retry bool) error 
 // bounded recovery, and an in-flight spawn must not hold the caller indefinitely.
 func (a *App) runAIHandoffs(_ context.Context, ctx *sdk.AppCtx) error {
 	now := ringTime(time.Now())
-	rows, err := a.db().db.Query(`SELECT call_id,status='retry' AND deadline_at>? FROM ai_handoffs WHERE project_id=? AND ((status='running' AND deadline_at<=?) OR (status='retry' AND (next_attempt_at<=? OR deadline_at<=?)) OR (status='failed' AND fallback_applied=0)) ORDER BY status='retry' AND deadline_at>?,next_attempt_at LIMIT 100`, now, ctx.CurrentProject(), now, now, now, now)
+	rows, err := a.db().db.Query(`SELECT call_id,status='retry' AND deadline_at>? FROM ai_handoffs INDEXED BY idx_ai_handoffs_work WHERE project_id=? AND (status IN ('running','retry') OR (status='failed' AND fallback_applied=0)) AND ((status='running' AND deadline_at<=?) OR (status='retry' AND (next_attempt_at<=? OR deadline_at<=?)) OR (status='failed' AND fallback_applied=0)) ORDER BY status='retry' AND deadline_at>?,next_attempt_at LIMIT 100`, now, ctx.CurrentProject(), now, now, now, now)
 	if err != nil {
 		return err
 	}
@@ -330,7 +336,7 @@ func (a *App) driveAIHandoff(ctx *sdk.AppCtx, id string) error {
 	}
 	// Pull transports resume on their authenticated wait callbacks. Push
 	// transports need a worker after a transient failure even without a decision.
-	if row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo" {
+	if !a.callUsesDirectSIP(row) && (row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo") {
 		return nil
 	}
 	defer lockRoutingCall(id)()
@@ -352,6 +358,10 @@ func (a *App) driveAIHandoff(ctx *sdk.AppCtx, id string) error {
 	}
 	_, plan, err := a.routingPlanForCall(row, nil)
 	if err != nil {
+		return err
+	}
+	if a.callUsesDirectSIP(row) {
+		_, err = a.answerCall(ctx, row, h.Directive, h.Voice, h.Greeting, false)
 		return err
 	}
 	if row.CarrierSlug == "telnyx" && plan != nil {
@@ -505,4 +515,28 @@ func (a *App) applyAIHandoffFallback(ctx *sdk.AppCtx, row *callRow, h *aiHandoff
 		})
 	}
 	return nil
+}
+
+// Local SIP failures have a defined terminal routing fallback. A missing dialog
+// or failed answer cannot be repaired by spawning another Core session.
+func (a *App) failSIPAIActivation(call, thread string) error {
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE ai_handoffs SET status='failed',error_code='sip_activation_failed' WHERE call_id=? AND status='ready' AND EXISTS(SELECT 1 FROM calls WHERE id=? AND thread_id=? AND media_connected_at='' AND status NOT IN ('completed','failed','canceled','no-answer','busy'))`, call, call, thread)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		if _, err = tx.Exec(`UPDATE ai_handoff_attempts SET outcome='failed',error_code='sip_activation_failed',completed_at=? WHERE call_id=? AND thread_id=?`, ringTime(time.Now()), call, thread); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

@@ -8,10 +8,11 @@ import (
 const (
 	designSchema  = "apteva-design/v1"
 	engineName    = "replicad-opencascade"
-	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.4"
+	engineVersion = "replicad-0.23.1-ocjs-0.23.0-ds0.5"
 )
 
 type ParameterSpec struct {
+	Fit         string   `json:"fit,omitempty"`
 	Type        string   `json:"type"`
 	Default     float64  `json:"default"`
 	Min         *float64 `json:"min,omitempty"`
@@ -20,6 +21,7 @@ type ParameterSpec struct {
 }
 
 type DesignDefinition struct {
+	FitProfileID  string                   `json:"fit_profile_id,omitempty"`
 	Schema        string                   `json:"schema"`
 	Units         string                   `json:"units"`
 	Parameters    map[string]ParameterSpec `json:"parameters,omitempty"`
@@ -32,6 +34,7 @@ type DesignDefinition struct {
 	PrintProfiles []PrintProfile           `json:"print_profiles,omitempty"`
 	Parts         []DesignPart             `json:"parts,omitempty"`
 	Assembly      *AssemblySpec            `json:"assembly,omitempty"`
+	Release       *ReleaseEvidence         `json:"release,omitempty"`
 	BOM           []BOMItem                `json:"bom,omitempty"`
 }
 
@@ -60,17 +63,18 @@ type MaterialSpec struct {
 }
 
 type PrintProfile struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	Process        string    `json:"process"`
-	MaterialID     string    `json:"material_id,omitempty"`
-	NozzleMM       float64   `json:"nozzle_mm,omitempty"`
-	LayerHeightMM  float64   `json:"layer_height_mm,omitempty"`
-	Walls          int       `json:"walls,omitempty"`
-	InfillPercent  float64   `json:"infill_percent,omitempty"`
-	Supports       string    `json:"supports,omitempty"`
-	MaxOverhangDeg float64   `json:"max_overhang_deg,omitempty"`
-	BedSizeMM      []float64 `json:"bed_size_mm,omitempty"`
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	Process        string             `json:"process"`
+	MaterialID     string             `json:"material_id,omitempty"`
+	NozzleMM       float64            `json:"nozzle_mm,omitempty"`
+	LayerHeightMM  float64            `json:"layer_height_mm,omitempty"`
+	Walls          int                `json:"walls,omitempty"`
+	InfillPercent  float64            `json:"infill_percent,omitempty"`
+	Supports       string             `json:"supports,omitempty"`
+	MaxOverhangDeg float64            `json:"max_overhang_deg,omitempty"`
+	Fits           map[string]float64 `json:"fits_mm,omitempty"`
+	BedSizeMM      []float64          `json:"bed_size_mm,omitempty"`
 }
 
 type PartManufacturing struct {
@@ -94,6 +98,7 @@ type DesignPart struct {
 	MaterialID    string               `json:"material_id,omitempty"`
 	Color         string               `json:"color,omitempty"`
 	Tags          []string             `json:"tags,omitempty"`
+	Evidence      *ComponentEvidence   `json:"evidence,omitempty"`
 	Manufacturing *PartManufacturing   `json:"manufacturing,omitempty"`
 }
 
@@ -137,6 +142,7 @@ type AssemblyInstance struct {
 	PartID    string            `json:"part_id"`
 	Quantity  int               `json:"quantity,omitempty"`
 	Transform AssemblyTransform `json:"transform,omitempty"`
+	Alignment *DatumAlignment   `json:"alignment,omitempty"`
 	Visible   *bool             `json:"visible,omitempty"`
 }
 
@@ -164,6 +170,7 @@ type AssemblySpec struct {
 	Name       string                `json:"name"`
 	Instances  []AssemblyInstance    `json:"instances"`
 	Interfaces []MechanicalInterface `json:"interfaces,omitempty"`
+	Keepouts   []ClearanceRegion     `json:"keepouts,omitempty"`
 	Joints     []JointSpec           `json:"joints,omitempty"`
 }
 
@@ -183,6 +190,7 @@ type BOMItem struct {
 // The source remains authoritative; refreshing always creates a new Design
 // Studio revision and never mutates an existing enclosure silently.
 type DesignProvenance struct {
+	AssemblyOptions      map[string]any   `json:"assembly_options,omitempty"`
 	Kind                 string           `json:"kind"`
 	SourceSchema         string           `json:"source_schema"`
 	SourceApp            string           `json:"source_app"`
@@ -271,6 +279,8 @@ type GeometryReport struct {
 	TriangleCount  int                  `json:"triangle_count"`
 	MassG          float64              `json:"mass_g,omitempty"`
 	CenterOfMass   [3]float64           `json:"center_of_mass,omitempty"`
+	ExactChecks    []CheckResult        `json:"exact_checks,omitempty"`
+	Topology       []TopologyReport     `json:"topology,omitempty"`
 	Parts          []PartGeometryReport `json:"parts,omitempty"`
 }
 
@@ -293,11 +303,14 @@ type Bounds struct {
 }
 
 type CheckResult struct {
-	Type     string `json:"type"`
-	Status   string `json:"status"`
-	Message  string `json:"message"`
-	Expected any    `json:"expected,omitempty"`
-	Actual   any    `json:"actual,omitempty"`
+	ID        string   `json:"id,omitempty"`
+	Instances []string `json:"instances,omitempty"`
+	Details   any      `json:"details,omitempty"`
+	Type      string   `json:"type"`
+	Status    string   `json:"status"`
+	Message   string   `json:"message"`
+	Expected  any      `json:"expected,omitempty"`
+	Actual    any      `json:"actual,omitempty"`
 }
 
 type EngineArtifact struct {

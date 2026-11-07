@@ -1,0 +1,90 @@
+{
+  "version": "0.12.14",
+  "status": "prepared locally; not published or installed",
+  "verified_at_utc": "2026-10-13T07:16:48.534810+00:00",
+  "sdk": "v0.100.0",
+  "base_telephony": "0.12.13",
+  "scope": "Telephony only",
+  "go": {
+    "command": "GOWORK=off go test -json -count=1 ./...",
+    "passed_cases_including_subtests": 1337,
+    "failed": 0,
+    "skipped": 9,
+    "skipped_cases": [
+      "TestQueryEfficiencyPerformance",
+      "TestLongSIPRecordingImportAndPlaybackMatrix",
+      "TestSIPPlaybackClockPacedLoad",
+      "TestSIPPlaybackRealSpeechReplay",
+      "TestSIPTelemetryCollectionCost",
+      "TestRTCCodecCPUStress",
+      "TestRTCVoiceSpeechDemo",
+      "TestTwilioLiveAccount",
+      "TestTwilioLiveOutboundCall"
+    ],
+    "package_results": [
+      {
+        "package": "github.com/apteva/apps/mcp/telephony/benchmarks/softphone",
+        "elapsed_seconds": 0.673
+      },
+      {
+        "package": "github.com/apteva/apps/mcp/telephony",
+        "elapsed_seconds": 287.855
+      }
+    ]
+  },
+  "frontend": {
+    "command": "bun run test:frontend",
+    "passed": 269,
+    "failed": 0
+  },
+  "managed_regression_functions": 20,
+  "race": {
+    "command": "GOWORK=off go test -race -run TestManagedRuntime -count=1 -timeout 90s .",
+    "result": "ok  \tgithub.com/apteva/apps/mcp/telephony\t42.362s",
+    "broader_focus": "SIP dialog/shutdown, softphone hub, local recordings and managed runtime focused race tests also passed"
+  },
+  "browser_example": {
+    "command": "bun run test:example",
+    "passed": 1,
+    "checks": [
+      "outgoing call",
+      "incoming answer",
+      "mute",
+      "reconnect",
+      "DTMF",
+      "hangup",
+      "desktop and mobile layout"
+    ],
+    "fixture_update": "Simulator now emits the existing production call.status and media.ready protocol."
+  },
+  "builds": {
+    "typecheck": "passed",
+    "go_vet": "passed",
+    "linux_amd64_cgo_disabled": "passed",
+    "headless_client": "rebuilt",
+    "panels": "rebuilt and import-verified"
+  },
+  "admission_microbenchmark": {
+    "host_cpu": "Apple M1 Pro",
+    "legacy_ns_per_operation": 33.07,
+    "managed_ns_per_operation": 80.44,
+    "bytes_per_operation": 16,
+    "allocations_per_operation": 1,
+    "scope": "Admission bookkeeping only; not end-to-end call CPU or network latency. No ownership/authorization HTTP checks run per audio frame."
+  },
+  "earlier_failure": {
+    "test": "TestHumanPacerStartupBatchUsesExistingLeadWithoutDiscard",
+    "observed": "First broad run while builds/race tests also ran delivered 4/10 Telnyx and 7/10 Twilio frames at the 20 ms lead.",
+    "follow_up": "Three isolated repetitions passed; subsequent full runs, including the final source, passed. Pacer implementation and stale-audio limits were not changed. Host contention remains a plausible explanation, not an independently proven attribution."
+  },
+  "integration_limits": [
+    "Concrete backend provisioning/DNS/TLS/networking adapter remains separate work.",
+    "Server legacy rollback initialization authorization must be corrected before a real move.",
+    "Raw SIP/RTP/certificate config must be supplied explicitly; named HTTPS/WSS endpoints alone do not allocate ports.",
+    "Native state transfers are limited by Server to 512 MiB.",
+    "Delegated customer credentials continue through the proxy; current direct credential contract covers platform users at the managed origin.",
+    "Existing browser clients must reload after placement/endpoints change.",
+    "Real carrier calls and remote deployment/migration/rollback have not been exercised."
+  ],
+  "production_or_staging_changes": false
+}

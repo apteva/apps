@@ -226,7 +226,7 @@ func buildRecordingVariant(sourcePath, variant string, contexts ...context.Conte
 	if err != nil {
 		return "", err
 	}
-	tmp, err := os.CreateTemp("", "apteva-telephony-playback-*.wav")
+	tmp, err := newRecordingTemporaryFile("apteva-telephony-playback-*.wav")
 	if err != nil {
 		return "", err
 	}

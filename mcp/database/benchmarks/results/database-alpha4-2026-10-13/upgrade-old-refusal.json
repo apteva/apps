@@ -1,0 +1,11 @@
+{
+  "old_binary_exit": 1,
+  "old_binary_error": "aptevadb: unsupported file format version: file is format 9, this build reads 8",
+  "file_hashes_unchanged": true,
+  "upgraded_file_hashes": {
+    "wal-00000001": "c8c99f741babdba0b774dbccff3d418c9e8507d2870b74615a146e4e860c21ba",
+    "LOCK": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "data": "a3a7aab4a5ba00f1c86bd7dc192543b3e46c708e6ea4e935581a21ada11aaabd"
+  },
+  "backup_directory": "upgrade-fixture-alpha3-backup"
+}

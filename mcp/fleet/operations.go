@@ -105,9 +105,24 @@ func (a *App) beginTenantOperation(tenantID, operation string) (func(), error) {
 		return nil, getErr
 	}
 	if tenant != nil {
-		snapshot, _ := json.Marshal(map[string]any{"source": tenant})
-		if _, err := a.store.db.Exec(`INSERT INTO fleet_active_operations(tenant_id,id,operation,snapshot) VALUES(?,?,?,?)`, tenantID, opID, operation, string(snapshot)); err != nil {
-			return nil, fmt.Errorf("tenant operation pending; inspect/recover before retrying: %w", err)
+		active, err := a.store.activeOperation(tenantID)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil {
+			var saved hostOperationSnapshot
+			if err := json.Unmarshal(active.Snapshot, &saved); err != nil {
+				return nil, err
+			}
+			if operation != "update" || (saved.Host == nil && !saved.Startup) {
+				return nil, fmt.Errorf("tenant operation pending; inspect/recover before retrying")
+			}
+			opID = active.ID
+		} else {
+			snapshot, _ := json.Marshal(map[string]any{"source": tenant})
+			if _, err := a.store.db.Exec(`INSERT INTO fleet_active_operations(tenant_id,id,operation,snapshot) VALUES(?,?,?,?)`, tenantID, opID, operation, string(snapshot)); err != nil {
+				return nil, fmt.Errorf("tenant operation pending; inspect/recover before retrying: %w", err)
+			}
 		}
 	}
 	a.operations[tenantID] = operation

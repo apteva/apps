@@ -277,7 +277,7 @@ func TestAuditMediaLimitDetectsOversize(t *testing.T) {
 }
 func TestAuditMultiImageNeverSilentlyDropsAttachments(t *testing.T) {
 	ctx, pf, _, _ := auditSeed(t, "facebook", "native", "draft")
-	_, _, e := (&App{}).publishSingle(ctx, platforms["facebook"], publishJob{connID: 7, platform: "facebook", extID: "destination", body: "two photos", media: []mediaItem{{URL: "https://example.com/1.jpg", Mime: "image/jpeg"}, {URL: "https://example.com/2.jpg", Mime: "image/jpeg"}}})
+	_, e := (&App{}).publishSingle(ctx, platforms["facebook"], publishJob{connID: 7, platform: "facebook", extID: "destination", body: "two photos", media: []mediaItem{{URL: "https://example.com/1.jpg", Mime: "image/jpeg"}, {URL: "https://example.com/2.jpg", Mime: "image/jpeg"}}})
 	if e == nil && len(pf.executeCalls) == 1 && !strings.Contains(fmt.Sprint(pf.executeCalls[0].Input), "2.jpg") {
 		t.Fatal("two-image post succeeded while only first image was sent")
 	}

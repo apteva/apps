@@ -1,12 +1,14 @@
 # Signatures
 
-Simple electronic signatures for PDFs stored in Apteva Storage.
+Electronic signatures for PDFs stored in Apteva Storage, with a digitally
+sealed completed PDF.
 
 ## What v0.2 does
 
 - Creates one-document envelopes from a Storage PDF — picked or uploaded
   straight from the dashboard panel.
-- Supports ordered signers and approvers.
+- Supports signers and approvers who sign in parallel (same `signing_order`,
+  like DocuSign) or in sequence (since v0.4).
 - Visual field placement: the panel renders the PDF (vendored pdf.js) and
   fields are dragged/resized on the page; coordinates stay normalized 0–1.
 - The signing page renders the document with each recipient's field boxes
@@ -20,6 +22,8 @@ Simple electronic signatures for PDFs stored in Apteva Storage.
 - Saves the completed PDF and JSON audit summary back to Storage; drawn
   signatures are recorded in the audit JSON as their SHA-256, not raw bytes.
 - Preserves source and completed SHA-256 hashes and an append-only audit trail.
+- Since v0.3: seals the completed PDF with a digital certification signature
+  (see below) and can verify any Storage PDF's seal (`signatures_seal_verify`).
 
 Storage is the only required app. Messaging is optional. Manual mode returns a
 link only through the explicit, permission-gated
@@ -33,8 +37,11 @@ draft -> sent -> completed
              -> declined | voided | expired
 ```
 
-Recipients sign sequentially. Only the current recipient can have an active
-link. Generating a new link revokes the previous one.
+Recipients with the same `signing_order` form one round and sign in parallel:
+each gets its own link at once, and the next round starts when all of them have
+finished. Distinct orders must run 1, 2, 3… Only recipients in the current
+round can have an active link. Generating a new link revokes that recipient's
+previous one.
 
 ## Local development
 
@@ -47,13 +54,57 @@ The module is listed in the workspace-root `go.work`, so local builds use the
 checked-out `app-sdk`. Standalone installs resolve the pinned SDK version from
 `go.mod`.
 
+## Saved layouts (v0.5)
+
+A layout stores signer roles (label, role, signing order — equal orders sign
+together) and every field's page position. `signatures_envelopes_create` with
+`layout: "<slug>"` and `recipients: [{name, email?}, …]` (one per role, in role
+order; missing names fall back to the role label) creates a draft with
+recipients and fields already placed, ready to send. Save a layout with
+`signatures_layouts_save`, or from a hand-placed draft with
+`signatures_layouts_save_from_envelope` (**Save as layout** in the panel); pick
+it under **New envelope → Layout**. Positions are normalized page coordinates,
+so a layout fits any PDF rendered from the same template.
+
+## Digital seal (v0.3)
+
+After the last recipient finishes, the stamped document and its completion
+page are sealed with one invisible **certification signature**
+(`adbe.pkcs7.detached`, SHA-256, DocMDP "no changes allowed") that covers every
+byte of the file. Acrobat shows it in the signature panel as "Certified by …";
+editing or re-saving the PDF in any tool invalidates it. Like DocuSign's
+envelope seal, the signature belongs to this install, not to each signer — the
+signers' marks and the audit trail are what the seal protects.
+
+Which certificate signs:
+
+- **`seal_certificate` configured** — a base64 PKCS#12 (`.p12`/`.pfx`, password
+  in `seal_certificate_password`) or PEM bundle with private key and chain. With
+  a document-signing certificate from a CA on the Adobe Approved Trust List
+  (AATL), Acrobat shows the seal as valid and trusted with no setup.
+- **Nothing configured** — a self-signed RSA-3072 certificate is generated once
+  per install and stored in the app DB. The seal is just as tamper-evident, but
+  Acrobat reports the signer identity as unknown until the certificate
+  (**Document seal → Download certificate** in the panel, or
+  `/seal/certificate.cer`) is added under Preferences → Signatures →
+  Identities & Trusted Certificates.
+
+`timestamp_url` (RFC 3161, e.g. `http://timestamp.digicert.com`) embeds a
+trusted signing time so the seal stays verifiable after the certificate
+expires.
+
+`signatures_seal_verify(file_id)` reports whether a PDF is sealed, whether the
+signature is intact *and* reaches the end of the file (an appended incremental
+update counts as tampering), and whether this install's seal made it.
+
 ## Assurance boundary
 
-This release records a simple electronic-signature workflow. Its completion
-page and audit JSON are evidence, not a qualified certificate. It does not
-claim AES, QES, PAdES, notarization, identity verification, or legal validity
-for every transaction or jurisdiction.
+The signers' marks are a simple electronic-signature workflow; the seal adds
+tamper evidence for the completed file. The completion page and audit JSON are
+evidence, not a qualified certificate. This release does not claim AES, QES,
+PAdES baseline profiles (it uses the `adbe.pkcs7.detached` sub-filter),
+notarization, identity verification, or legal validity for every transaction
+or jurisdiction.
 
-Typed signature marks are implemented first. Drawn/uploaded signature images,
-parallel routing, reusable templates, automatic scheduled reminders, provider
-adapters, and independently signed evidence bundles are later additions.
+Automatic scheduled reminders, provider
+adapters, and long-term-validation (DSS/LTV) data are later additions.

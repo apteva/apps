@@ -12,6 +12,10 @@ const coachCaptureMagic uint32 = 0x31435741  // AWC1: generation, sequence, capt
 const coachPlaybackMagic uint32 = 0x31575041 // APW1: epoch, server source clock, PCMU@8k
 const coachAudioMaxAge = 200 * time.Millisecond
 
+// A target check proves the adviser binding for slightly longer than one 1 s
+// supervisor tick. A stalled or failed check therefore silences coaching soon after.
+const coachTargetCheckTTL = 1500 * time.Millisecond
+
 type coachingGrant struct {
 	Enabled                           bool
 	PeerHash, OwnerHash, BrowserEpoch string
@@ -31,6 +35,17 @@ type coachingState struct {
 	received, dropped atomic.Int64
 	starts            atomic.Int64
 	expires           atomic.Int64
+	// Unix ms until which the last full target check (taken under the call's
+	// claim lock) authorizes coach audio. Zero means unverified.
+	verifiedUntil atomic.Int64
+}
+
+func (c *coachingState) markTargetVerified() {
+	c.verifiedUntil.Store(time.Now().Add(coachTargetCheckTTL).UnixMilli())
+}
+func (c *coachingState) clearTargetVerified() { c.verifiedUntil.Store(0) }
+func (c *coachingState) targetVerified() bool {
+	return time.Now().UnixMilli() < c.verifiedUntil.Load()
 }
 
 func (a *App) phoneCanCoach(p *phonePrincipal, row *callRow) bool {
@@ -66,6 +81,17 @@ func (a *App) coachCapability(row *callRow) (bool, string) {
 		return false, "adviser_client_unsupported"
 	}
 	return true, ""
+}
+
+// The adviser hub may already be gone; callers must not assume it still exists.
+func (a *App) coachingBrowserEpoch(id string) (string, bool) {
+	h := a.softphones.lookup(id)
+	if h == nil {
+		return "", false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.browserEpoch, true
 }
 
 func (a *App) coachingTargetValid(row *callRow, g coachingGrant) bool {
@@ -184,14 +210,13 @@ func (h *softphoneHub) forwardCoach(l *callListener, generation uint32, pcmu []b
 	})
 }
 
-// Indexed target checks are serialized with answer/attach/takeover. The primary
-// call pipeline never waits for this supervisor-side authorization work.
+// Indexed target checks run on the 1 s supervisor tick and on coach.start /
+// keepalive, serialized with answer/attach/takeover. The 20 ms coach media path
+// only reads their cached result, so it neither queries the DB nor holds the
+// claim lock. In-memory adviser binding (epoch, browser, hold) is still checked
+// per frame by forwardCoach.
 func (a *App) forwardCoachFrame(id string, l *callListener, generation uint32, pcmu []byte, sourceClock float64) bool {
-	unlock := a.softphones.lockClaim(id)
-	defer unlock()
-	row, err := a.db().findCall(id)
-	if err != nil || row == nil || !a.coachingTargetValid(row, l.coaching.grant) {
-		l.close("coach_target_changed")
+	if !l.coaching.targetVerified() {
 		return false
 	}
 	h := a.softphones.lookup(id)

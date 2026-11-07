@@ -1,3 +1,8 @@
+import AutoAnswerSettings,{AutoAnswerAvailability} from "./AutoAnswerSettings";
+import type {NetworkPolicyView} from "../frontend/src/network-policy";
+import NetworkSettings,{NetworkCheckControl} from "./NetworkSettings";
+import TurnSettings,{type TURNPolicyView} from "./TurnSettings";
+import RecordingPlayer from "./RecordingPlayer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MicrophoneTestSession,
@@ -5,13 +10,19 @@ import {
   type MicrophoneTestResult,
   type SoftphoneAudioOptions,
   type SoftphoneDiagnostics,
+  type AudioObservationEvent,
 } from "./softphone-audio";
 import {
+  DEFAULT_PANEL_AUDIO_OPTIONS,
   loadAudioOptions,
   persistAudioOptions,
 } from "./audio-settings";
 
 import AudioHealthView from "./AudioHealthView";
+import CallDiagnostics from "./CallDiagnostics";
+import CallStatistics from "./CallStatistics";
+import SIPMediaDialog from "./SIPMediaDialog";
+import OutboundTransportDialog from "./OutboundTransportDialog";
 import { usePanelSoftphone } from "./use-panel-softphone";
 import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
@@ -97,6 +108,8 @@ interface RawCall {
 }
 
 interface BrowserAudioDiagnostics {
+  playback_events?: AudioObservationEvent[];
+  capture_queue_events?: AudioObservationEvent[];
   received_at?: string;
   rtt_ms?: number;
   playback_queue_ms?: number;
@@ -192,6 +205,7 @@ interface RecordingSettings {
   default_mode: "off" | "always";
   channels: "mono" | "dual";
   storage_mode: "copy_to_storage" | "copy_then_delete_provider";
+  storage_format: "mp3" | "wav";
   retention_days: number;
   carrier: string;
   recording_supported: boolean;
@@ -216,11 +230,14 @@ interface Recording {
   created_at: string;
   stored_at: string;
   playback_url?: string;
-  playback_source?: "storage" | "provider";
+  playback_source?: "storage" | "provider" | "local";
+  storage_state_label?: string;
+  recorded_locally?: boolean;
+  retry_blocked?: boolean;
   playback_urls?: Partial<Record<"mix" | "caller" | "agent" | "original", string>>;
 }
 
-const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
+const LIVE_STATUSES = new Set(["initiated", "ringing", "answering", "in-progress", "answered"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "no-answer", "busy", "canceled"]);
 const CALL_COLUMNS = "8rem minmax(0,1fr) minmax(0,1fr) 8rem 7rem 6rem 7rem";
 const CONNECTED_NUMBER_COLUMNS = "minmax(12rem,1.3fr) 7rem minmax(8rem,0.8fr) minmax(10rem,1fr) minmax(11rem,1fr) minmax(9rem,0.8fr) minmax(12rem,1fr) minmax(11rem,0.9fr)";
@@ -313,11 +330,11 @@ function mediaStatusClass(status: string): string {
 
 function recordingStatusLabel(status: string): string {
   switch (status) {
-    case "stored": return "Ready";
+    case "stored": return "Stored successfully";
     case "provider_only": return "Carrier cloud";
     case "importing": return "Copying to Storage";
     case "pending": return "Processing";
-    case "failed": return "Storage copy failed";
+    case "failed": return "Storage import failed";
     case "absent": return "Unavailable";
     default: return status || "Processing";
   }
@@ -369,38 +386,6 @@ function formatDurationMS(value: number): string {
   const seconds = Math.max(0, Math.round((value || 0) / 1000));
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function RecordingPlayer({ recording }: { recording: Recording }) {
-  const variants = recording.playback_urls ?? (recording.playback_url ? { mix: recording.playback_url } : {});
-  const available = (["mix", "caller", "agent", "original"] as const).filter((variant) => Boolean(variants[variant]));
-  const [variant, setVariant] = useState<(typeof available)[number]>(available[0] ?? "mix");
-  const url = variants[variant] ?? recording.playback_url;
-  if (!url) return null;
-  const labels = { mix: "Balanced", caller: "Caller", agent: "Agent", original: "Original" };
-  return (
-    <div className="mt-3 space-y-2">
-      {available.length > 1 ? (
-        <div className="inline-flex max-w-full overflow-x-auto rounded border border-border p-0.5" role="group" aria-label="Recording track">
-          {available.map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setVariant(item)}
-              className={`h-7 whitespace-nowrap px-2 text-xs ${variant === item ? "bg-bg-muted font-medium text-text" : "text-text-muted hover:text-text"}`}
-            >
-              {labels[item]}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <div className="flex items-center gap-3">
-        <audio key={url} src={url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
-        <a href={url} download className="text-xs text-accent hover:underline">Download</a>
-        <span className="text-xs text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
-      </div>
-    </div>
-  );
 }
 
 // Icons inherit color through currentColor from the surrounding text class, so
@@ -613,6 +598,15 @@ function LevelMeter({ label, value }: { label: string; value: number }) {
   );
 }
 
+function ListenerTransportSettings({transport,fec,stereo,onTransport,onFec,onStereo}:{transport:"inherit"|"websocket"|"webrtc"|"auto";fec:"inherit"|"enabled"|"disabled";stereo:boolean;onTransport:(v:"inherit"|"websocket"|"webrtc"|"auto")=>void;onFec:(v:"inherit"|"enabled"|"disabled")=>void;onStereo:(v:boolean)=>void}) {
+ return <div className="rounded border border-border/70 p-3 text-xs mb-2"><div className="font-medium">Listening and private coaching</div><div className="grid gap-2 mt-2">
+ <label>Audio transport <select value={transport} onChange={e=>onTransport(e.target.value as typeof transport)} className="border border-border bg-bg rounded p-2"><option value="inherit">Same as softphone (default)</option><option value="websocket">WebSocket / PCM</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
+ <label>WebRTC packet recovery <select value={fec} onChange={e=>onFec(e.target.value as typeof fec)} className="border border-border bg-bg rounded p-2"><option value="inherit">Same as softphone (default)</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+ <label className="flex items-center gap-2"><input type="checkbox" checked={stereo} onChange={e=>onStereo(e.target.checked)}/>Caller left, adviser right</label>
+ <p className="text-text-muted">Uses the softphone’s devices, volume and microphone processing. Changes apply when you next join listening or coaching. The microphone opens only while you hold to talk.</p>
+ </div></div>;
+}
+
 function AudioProcessingSettings({
   value,
   disabled,
@@ -636,7 +630,9 @@ function AudioProcessingSettings({
     <div className="rounded border border-border/70 p-3">
       <div className="text-xs font-medium">Audio devices and processing</div>
       <div className="grid gap-2 mt-2 text-xs">
-        <label>Audio transport <select disabled={disabled} value={value.mediaTransport ?? "websocket"} onChange={e=>onChange({...value,mediaTransport:e.target.value as SoftphoneAudioOptions["mediaTransport"]})} className="max-w-full border border-border bg-bg rounded p-2"><option value="websocket">WebSocket (default)</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
+        <label>Audio transport <select disabled={disabled} value={value.mediaTransport ?? DEFAULT_PANEL_AUDIO_OPTIONS.mediaTransport} onChange={e=>onChange({...value,mediaTransport:e.target.value as SoftphoneAudioOptions["mediaTransport"]})} className="max-w-full border border-border bg-bg rounded p-2"><option value="websocket">WebSocket / PCM</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC / Opus preferred, default)</option></select></label>
+        {(value.mediaTransport==="webrtc"||value.mediaTransport==="auto")&&<details><summary className="cursor-pointer">Relay test override for this softphone</summary><p className="my-1 text-xs text-text-muted">Requires project permission. Omit overrides to use your adviser/project policy. Applies to new connections.</p><select aria-label="Session ICE policy" disabled={disabled} value={value.iceTransportPolicy??"inherit"} onChange={e=>onChange({...value,iceTransportPolicy:e.target.value==="inherit"?undefined:e.target.value as "all"|"relay"})} className="border border-border bg-bg p-2"><option value="inherit">Use saved ICE policy</option><option value="all">Direct or relay</option><option value="relay">Force relay</option></select><select aria-label="Session TURN transport" disabled={disabled} value={value.turnTransport??"inherit"} onChange={e=>onChange({...value,turnTransport:e.target.value==="inherit"?undefined:e.target.value as "all"|"udp"|"tcp"|"tls",turnTLSPort:undefined})} className="ml-2 border border-border bg-bg p-2"><option value="inherit">Use saved TURN transport</option>{["all","udp","tcp","tls"].map(v=><option key={v} value={v}>{v.toUpperCase()}</option>)}</select>{value.turnTransport==="tls"&&<input aria-label="Session TURN TLS port" type="number" min={1} max={65535} placeholder="Configured TLS port" value={value.turnTLSPort??""} onChange={e=>onChange({...value,turnTLSPort:e.target.value?Number(e.target.value):undefined})} className="mt-2 w-full border border-border bg-bg p-2"/>}</details>}
+        {value.mediaTransport === "webrtc" || value.mediaTransport === "auto" ? <div><label className="flex items-center gap-2"><input type="checkbox" disabled={disabled} checked={value.webrtcFec !== false} onChange={event=>onChange({...value,webrtcFec:event.target.checked})}/>WebRTC packet recovery (FEC)</label><p className="mt-1 text-text-muted">Helps recover short audio losses using extra bandwidth and processing. Applies to the next call or audio reconnect.</p></div> : null}
         <label>Microphone <select disabled={disabled} value={value.inputDeviceId || ""} onChange={e=>onChange({...value,inputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audioinput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Microphone ${i+1}`}</option>)}</select></label>
         {typeof AudioContext!=="undefined" && "setSinkId" in AudioContext.prototype ? <label>Speaker <select disabled={disabled} value={value.outputDeviceId || ""} onChange={e=>onChange({...value,outputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audiooutput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Speaker ${i+1}`}</option>)}</select></label> : <span>Speaker output follows your system settings in this browser.</span>}
         <label>Speaker volume <input type="range" min="0" max="1" step="0.05" disabled={disabled} value={value.outputVolume ?? 1} onChange={e=>onChange({...value,outputVolume:Number(e.target.value)})}/></label>
@@ -926,6 +922,20 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
           ))}
         </div>
       ) : null}
+      {[...(browser.playback_events ?? []), ...(browser.capture_queue_events ?? [])].length > 0 ? (
+        <div className="space-y-1 text-text-dim tabular-nums">
+          <div className="font-medium text-text-muted">Recent buffer observations</div>
+          {[...(browser.playback_events ?? []), ...(browser.capture_queue_events ?? [])].sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp)).slice(-5).map(event => (
+            <div key={`${event.connection_id ?? ""}:${event.id}`} title={event.timestamp}>
+              {new Date(event.timestamp).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3})}
+              {` · ${event.kind} · ${event.reason} · queue ${event.queue_ms.toFixed(1)} ms`}
+              {event.target_ms ? ` · target ${event.target_ms} ms` : ""}
+              {event.wait_ms ? ` · wait ${event.wait_ms.toFixed(1)} ms` : ""}
+              {event.frame_age_ms !== undefined ? ` · frame age estimate ${event.frame_age_ms.toFixed(1)} ms` : ""}
+            </div>
+          ))}
+        </div>
+      ) : null}
       {dropEvents.length > 0 ? (
         <div className="space-y-1 text-text-dim tabular-nums">
           <div className="font-medium text-text-muted">Recent media drops</div>
@@ -944,58 +954,44 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
   );
 }
 
-function useInboundRingtone(active: boolean) {
-  const [enabled, setEnabled] = useState(false);
-  const contextRef = useRef<AudioContext | null>(null);
-
-  const enable = useCallback(async () => {
-    const AudioContextClass = window.AudioContext
-      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const context = contextRef.current ?? new AudioContextClass();
-    contextRef.current = context;
-    await context.resume();
-    setEnabled(true);
-  }, []);
-
-  const disable = useCallback(() => setEnabled(false), []);
-
-  useEffect(() => {
-    if (!active || !enabled || !contextRef.current) return;
-    const context = contextRef.current;
-    const ring = () => {
-      const start = context.currentTime;
-      for (const offset of [0, 0.32]) {
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        oscillator.type = "sine";
-        oscillator.frequency.value = 440;
-        gain.gain.setValueAtTime(0, start + offset);
-        gain.gain.linearRampToValueAtTime(0.07, start + offset + 0.02);
-        gain.gain.setValueAtTime(0.07, start + offset + 0.18);
-        gain.gain.linearRampToValueAtTime(0, start + offset + 0.25);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(start + offset);
-        oscillator.stop(start + offset + 0.26);
-      }
-    };
-    ring();
-    const timer = window.setInterval(ring, 1800);
-    return () => window.clearInterval(timer);
-  }, [active, enabled]);
-
-  useEffect(() => () => {
-    void contextRef.current?.close();
-    contextRef.current = null;
-  }, []);
-
-  return { ringtoneEnabled: enabled, enableRingtone: enable, disableRingtone: disable };
+type NativeRingtoneStage="ringtone_attempted"|"ringtone_started"|"ringtone_failed"|"ringtone_stopped"|"ringtone_suppressed";
+function useInboundRingtone(active:boolean,reportAttempt:()=>((stage:NativeRingtoneStage,code?:string)=>void)){
+ const [enabled,setEnabled]=useState(false);const contextRef=useRef<AudioContext|null>(null);const reportRef=useRef(reportAttempt);reportRef.current=reportAttempt;
+ const enable=useCallback(async()=>{
+  try{const Context=window.AudioContext??(window as typeof window & {webkitAudioContext?:typeof AudioContext}).webkitAudioContext;if(!Context)throw Error("audio_context_unavailable");const context=contextRef.current??new Context();contextRef.current=context;await context.resume();if(context.state!=="running")throw Error("audio_context_suspended");setEnabled(true);}
+  catch{reportRef.current()("ringtone_failed","audio_context_unavailable");setEnabled(false);}
+ },[]);
+ const disable=useCallback(()=>setEnabled(false),[]);
+ useEffect(()=>{
+  if(!active)return;
+  if(!enabled||!contextRef.current){reportRef.current()("ringtone_suppressed","sounds_disabled");return;}
+  const context=contextRef.current,nodes=new Set<OscillatorNode>();let lastReport:((stage:NativeRingtoneStage,code?:string)=>void)|undefined;
+  const ring=()=>{
+   const report=reportRef.current();lastReport=report;report("ringtone_attempted");
+   try{
+    if(context.state!=="running"){report("ringtone_failed","audio_context_suspended");return;}
+    const start=context.currentTime;
+    for(const offset of [0,0.32]){
+     const oscillator=context.createOscillator(),gain=context.createGain();nodes.add(oscillator);oscillator.type="sine";oscillator.frequency.value=440;
+     gain.gain.setValueAtTime(0,start+offset);gain.gain.linearRampToValueAtTime(0.07,start+offset+0.02);gain.gain.setValueAtTime(0.07,start+offset+0.18);gain.gain.linearRampToValueAtTime(0,start+offset+0.25);oscillator.connect(gain).connect(context.destination);
+     oscillator.onended=()=>{nodes.delete(oscillator);oscillator.disconnect();gain.disconnect();if(offset===0&&context.state==="running"&&context.currentTime>=start+0.25)report("ringtone_started","webaudio_render_progress");};
+     oscillator.start(start+offset);oscillator.stop(start+offset+0.26);
+    }
+   }catch{report("ringtone_failed","audio_schedule_failed");}
+  };
+  ring();const timer=window.setInterval(ring,1800);return()=>{window.clearInterval(timer);for(const node of nodes){try{node.stop()}catch{}}lastReport?.("ringtone_stopped");};
+ },[active,enabled]);
+ useEffect(()=>()=>{void contextRef.current?.close();contextRef.current=null},[]);
+ return {ringtoneEnabled:enabled,enableRingtone:enable,disableRingtone:disable};
 }
 
 function CallsView({ projectId, installId, visible = true, showCalls }: NativePanelProps & {visible?:boolean; showCalls?:()=>void}) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
+  const [callsLoaded, setCallsLoaded] = useState(false);
+  const [callsError, setCallsError] = useState("");
   const [selectedId, setSelectedId] = useState("");
+  const selectedPane = useRef<HTMLElement | null>(null);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [ending, setEnding] = useState("");
@@ -1022,15 +1018,22 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     onDiagnostics: setDiagnostics,
     onNotice: setStatus,
   });
+  const [listenerTransport,setListenerTransport]=useState<"inherit"|"websocket"|"webrtc"|"auto">(()=>{try{const saved=localStorage.getItem("apteva.telephony.listener.transport.v1");return saved==="websocket"||saved==="webrtc"||saved==="auto"?saved:"inherit";}catch{return "inherit";}});
+  const [listenerFec,setListenerFec]=useState<"inherit"|"enabled"|"disabled">(()=>{try{const saved=localStorage.getItem("apteva.telephony.listener.fec.v1");return saved==="enabled"||saved==="disabled"?saved:"inherit";}catch{return "inherit";}});
+  const [listenerStereo,setListenerStereo]=useState(()=>{try{return localStorage.getItem("apteva.telephony.listener.stereo.v1")==="true";}catch{return false;}});
   const [callListener, setCallListener] = useState<HeadlessCallListener>();
   const [listenerState, setListenerState] = useState<ListenerSnapshot>({ state: "idle" });
   useEffect(() => {
-    const listener = telephony.createCallListener({inputDeviceId:audioOptions.inputDeviceId});
+    const listener = telephony.createCallListener();
     setCallListener(listener);
     setListenerState(listener.getSnapshot());
     const unsubscribe = listener.subscribe(setListenerState);
     return () => { unsubscribe(); void listener.dispose(); };
-  }, [telephony,audioOptions.inputDeviceId]);
+  }, [telephony]);
+  useEffect(()=>{
+    callListener?.setAudioOptions({...audioOptions,stereo:listenerStereo,...(listenerTransport==="inherit"?{}:{mediaTransport:listenerTransport}),...(listenerFec==="inherit"?{}:{webrtcFec:listenerFec==="enabled"})});
+    try{localStorage.setItem("apteva.telephony.listener.transport.v1",listenerTransport);localStorage.setItem("apteva.telephony.listener.fec.v1",listenerFec);localStorage.setItem("apteva.telephony.listener.stereo.v1",String(listenerStereo));}catch{/* Preferences are optional. */}
+  },[callListener,audioOptions,listenerTransport,listenerFec,listenerStereo]);
   useEffect(() => { if (!visible) callListener?.stopTalking(); },[visible,callListener]);
   useEffect(() => { callListener?.stopTalking(); },[selectedId,callListener]);
   const softphoneCallId = phoneState.callId ?? "";
@@ -1059,16 +1062,20 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     return `${API}${path}${sep}project_id=${encodeURIComponent(projectId)}`;
   }, [projectId]);
 
+ const selfAutoAnswerRequest=useCallback((body:import("../frontend/src/auto-answer").AutoAnswerPolicyRequest)=>telephony.autoAnswerPolicy(body),[telephony]);
+ const selfTURNRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(withProject("/softphone/turn-policy"),body),[withProject]);
+ const selfNetworkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(withProject("/softphone/network-policy"),body).then(view=>{phone?.applyNetworkPolicy(view.configured===false?undefined:view.effective);return view}),[withProject,phone]);
+
   const chooseFromNumber = useCallback((value: string) => {
     setFromNumber(value);
     if (value) localStorage.setItem(`apteva.telephony.softphone.from.v1:${projectId}`, value);
   }, [projectId]);
 
-  const loadOutboundNumbers = useCallback(async () => {
+  const loadOutboundNumbers = useCallback(async (fresh = false) => {
     setFromLoading(true);
     setFromError("");
     try {
-      const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), {});
+      const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), { fresh });
       const seen = new Set<string>();
       const available = (data.numbers ?? []).filter((number) => {
         if (number.outbound_enabled === false || !E164_RE.test(number.phone_number) || number.carrier_status === "not_found" || seen.has(number.phone_number)) return false;
@@ -1119,7 +1126,9 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const receiveCalls = useCallback((raw: TelephonyCall[]) => {
     const list = raw.map(call => normalizeCall(call as RawCall));
     setCalls(list);
-    setSelectedId(current => current && list.some(c => c.id === current) ? current : list[0]?.id ?? "");
+    setCallsLoaded(true);
+    setCallsError("");
+    setSelectedId(current => current && list.some(c => c.id === current) ? current : "");
     setLoading(false);
   }, []);
 
@@ -1131,7 +1140,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       const list = await telephony.listCalls(request.signal);
       if (!request.signal.aborted) receiveCalls(list);
     } catch (e) {
-      if (!request.signal.aborted) setStatus((e as Error).message || "Load failed");
+      if (!request.signal.aborted) setCallsError((e as Error).message || "Load failed");
     } finally {
       if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
@@ -1183,17 +1192,20 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     const watcher = telephony.watchCalls(receiveCalls, {
       onFailure: sample => {
         setLoading(false);
-        const response = sample.status === undefined ? "network" : `HTTP ${sample.status}`;
-        setStatus(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
+        if(sample.operation==="callback"){setStatus("Call UI callback failed; server read succeeded.");return;}
+        const response = sample.category==="http" ? `HTTP ${sample.status}` : sample.category.replaceAll("_"," ");
+        setCallsError(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
       },
     });
     return () => watcher.close();
   }, [telephony, receiveCalls]);
 
   const selected = useMemo(
-    () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
+    () => calls.find((call) => call.id === selectedId) ?? null,
     [calls, selectedId],
   );
+
+  useEffect(() => { selectedPane.current?.scrollTo({ top: 0 }); }, [selected?.id]);
 
   const [detailCall,setDetailCall]=useState<Call|null>(null);
   useEffect(()=>{
@@ -1224,7 +1236,25 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     })),
     [calls],
   );
-  const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length > 0);
+  const incomingEvidence=useRef<Array<{call_id:string;offer_id:string}>>([]);
+  incomingEvidence.current=ringing.flatMap(call=>call.ringOffers.filter(o=>o.kind==="browser").map(o=>({call_id:call.id,offer_id:o.id})));
+  const reportedDelivery=useRef(new Set<string>());
+  const reportDelivery=useCallback((offer:{call_id:string;offer_id:string},stage:import("../frontend/src/telemetry").OfferBrowserStage,code?:string)=>{
+    const key=`${offer.offer_id}:${stage}`;if(reportedDelivery.current.has(key))return;reportedDelivery.current.add(key);
+    void telephony.reportOfferEvent({...offer,stage,code,visibility:document.visibilityState==="hidden"?"hidden":"visible",focused:document.hasFocus()}).catch(()=>{});
+  },[telephony]);
+  const ringtoneReport=useCallback(()=>{const offers=[...incomingEvidence.current];return(stage:NativeRingtoneStage,code?:string)=>{for(const offer of offers)reportDelivery(offer,stage,code)}},[reportDelivery]);
+  const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length>0,ringtoneReport);
+  useEffect(()=>{
+    const active=new Set(incomingEvidence.current.map(o=>o.offer_id));for(const key of reportedDelivery.current)if(!active.has(key.slice(0,key.lastIndexOf(":"))))reportedDelivery.current.delete(key);
+    if(!visible)return;
+    const observe=()=>{
+      if(document.visibilityState!=="visible")return;
+      for(const offer of incomingEvidence.current){const element=document.getElementById(`telephony-call-offer-${offer.call_id}`);if(!element)continue;const r=element.getBoundingClientRect();if(r.width>0&&r.height>0&&r.top<window.innerHeight&&r.bottom>0)reportDelivery(offer,"ui_displayed");}
+    };
+    const frame=requestAnimationFrame(observe);document.addEventListener("visibilitychange",observe);window.addEventListener("scroll",observe,true);
+    return()=>{cancelAnimationFrame(frame);document.removeEventListener("visibilitychange",observe);window.removeEventListener("scroll",observe,true)};
+  },[ringing,visible,reportDelivery]);
 
   // Redial shortcuts: the most recent distinct outbound destinations.
   const recentNumbers = useMemo(() => {
@@ -1242,7 +1272,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const terminalCount = calls.length - activeCount;
 
   // The same controller consumes authoritative call state in both hosts.
-  useEffect(() => { for (const call of calls) phone?.observeCall(call); }, [calls, phone]);
+  useEffect(() => { phone?.observeCalls(calls.map(call=>({...call,peer_kind:call.peerKind,from_number:call.fromNumber,to_number:call.toNumber,ring_offers:call.ringOffers,routing_waiting:call.routingWaiting})) as TelephonyCall[]); }, [calls, phone]);
 
   const hangup = async (call: Pick<Call, "id" | "status">) => {
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
@@ -1273,6 +1303,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const answerSoftphoneCall = async (call: Call) => {
     if (!phone) return;
     setStatus("");
+
     try {
       await phone.answer(call.id, {
         destination_id: answerDestinations[call.id] || call.ringOffers.find(o => o.kind === "browser")?.destination_id,
@@ -1316,6 +1347,21 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     }
   };
 
+  const setRecordingFormat = async (storage_format: "mp3" | "wav") => {
+    setRecordingBusy("settings");
+    try {
+      const res = await fetch(withProject("/recording-settings"), {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storage_format }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setRecordingSettings(await res.json() as RecordingSettings);
+      setStatus("Recording format updated for pending and future Storage uploads");
+    } catch (e) { setStatus((e as Error).message || "Could not update recording format"); }
+    finally { setRecordingBusy(""); }
+  };
+
   const recordingAction = async (recording: Recording, action: "retry" | "delete") => {
     if (action === "delete") {
       const location = recording.storage_file_id > 0 ? "Storage and the carrier" : "the carrier";
@@ -1339,6 +1385,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   return (
     <div ref={layout.ref} className={`${visible ? "h-full flex-1" : "shrink-0"} min-h-0 min-w-0 flex flex-col bg-bg text-text`}>
+      <AutoAnswerAvailability phone={phone} state={phoneState.autoAnswer}/>
+
       {softphoneCallId ? <div aria-label="Active call controls" className="shrink-0 sticky top-0 z-10 border-b border-border bg-bg p-3">
         <div className="flex flex-wrap items-center gap-2">
           <button className="min-h-11 min-w-0 flex-1 text-left" onClick={() => {showCalls?.(); setSelectedId(softphoneCallId); setDialerOpen(false);}}>
@@ -1358,10 +1406,10 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
         <div className="flex-1" style={{ minWidth: "9rem" }}>
           <h1 className="text-sm font-semibold leading-5">Calls</h1>
           <p className="text-xs text-text-muted">
-            {activeCount} active / {terminalCount} recent
+            {callsLoaded ? `${activeCount} active / ${terminalCount} recent${callsError ? " · stale" : ""}` : callsError ? "Call list unavailable" : "Loading calls…"}
           </p>
         </div>
-        <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
+        <div role={callsError ? "alert" : undefined} className="text-xs text-text-muted" style={{ maxWidth: "28rem" }}>{callsError || status}</div>
         <button
           type="button"
           onClick={() => { if (ringtoneEnabled) disableRingtone(); else void enableRingtone(); }}
@@ -1399,6 +1447,16 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
             Record future calls
           </label>
         ) : null}
+        {recordingSettings ? (
+          <select aria-label="Recording storage format" title="Format for pending and future Storage uploads. Local capture remains WAV; existing stored recordings are unchanged."
+            className="h-8 px-2 border border-border rounded text-xs bg-bg"
+            value={recordingSettings.storage_format ?? "mp3"} disabled={recordingBusy === "settings"}
+            onChange={e => void setRecordingFormat(e.target.value as "mp3" | "wav")}>
+            <option value="mp3">Store MP3 · 128 kbps</option>
+            <option value="wav">Store WAV · lossless</option>
+          </select>
+        ) : null}
+        <NetworkCheckControl phone={phone} state={phoneState}/>
         <button
           type="button"
           onClick={loadCalls}
@@ -1412,7 +1470,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       {ringing.length > 0 ? (
         <div className="shrink-0 border-b border-border px-4 py-2 space-y-2">
           {ringing.map((call) => (
-            <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2">
+            <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2" id={`telephony-call-offer-${call.id}`}>
               <span className="text-success flex items-center gap-2 text-sm font-medium">
                 <PhoneIcon size={15} />
                 Incoming call
@@ -1452,7 +1510,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
         >
           {calls.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>
-              No calls yet.
+              {callsLoaded ? "No calls yet." : callsError ? "Call history could not be loaded. Refresh to retry." : "Loading call history…"}
             </div>
           ) : (
             <div style={{ minWidth: "54rem" }}>
@@ -1472,8 +1530,13 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     key={call.id}
                     type="button"
                     onClick={() => setSelectedId(call.id)}
-                    className={`w-full grid gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
-                    style={{ gridTemplateColumns: CALL_COLUMNS }}
+                    aria-pressed={picked}
+                    className="w-full grid gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70"
+                    style={{
+                      gridTemplateColumns: CALL_COLUMNS,
+                      backgroundColor: picked ? "color-mix(in srgb, var(--accent, #f97316) 8%, transparent)" : undefined,
+                      boxShadow: picked ? "inset 2px 0 color-mix(in srgb, var(--accent, #f97316) 50%, transparent)" : undefined,
+                    }}
                   >
                     <div>
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>
@@ -1508,7 +1571,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
           )}
         </section>
 
-        <aside className="min-h-0 overflow-auto">
+        <aside ref={selectedPane} className="min-h-0 overflow-auto">
           {dialerOpen ? (
             <div>
               <Dialer
@@ -1523,7 +1586,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 onTimeoutChange={setDialTimeoutSec}
                 onCall={() => void placeSoftphoneCall()}
                 onApplyProfile={(profileId) => void configureOutboundProfile(profileId)}
-                onRefreshNumbers={() => void loadOutboundNumbers()}
+                onRefreshNumbers={() => void loadOutboundNumbers(true)}
                 profileBusy={profileBusy}
                 busy={softphoneBusy}
                 disabled={Boolean(softphoneCallId)}
@@ -1531,6 +1594,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
               />
               <div className="border-t border-border p-4 space-y-4">
+                <AutoAnswerSettings request={selfAutoAnswerRequest}/><NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                   value={audioOptions}
                   disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -1570,7 +1634,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   </div>
                 ) : null}
                 {listenerState.callId ? (
-                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
+                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}{listenerState.mediaTransport ? ` · ${listenerState.mediaTransport === "webrtc" ? "WebRTC / Opus" : "WebSocket / PCM"}` : ""}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue={audioOptions.outputVolume ?? 1} onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
                 ) : null}
                 {selected.peerKind === "human"
                   && !selected.routingWaiting
@@ -1595,6 +1659,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </button>
               </div>
 
+              {visible ? <CallDiagnostics host={{appName:"telephony",projectId,installId}} callId={selected.id} /> : null}
+
               {softphoneCallId === selected.id ? (
                 <div className="rounded border border-border bg-bg-muted/50 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
@@ -1604,7 +1670,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-medium truncate">
-                          {softphoneState !== "live" ? (softphoneState === "error" ? "Audio error" : "Audio reconnecting") : selected.status === "answered" || selected.status === "in-progress"
+                          {softphoneState !== "live" ? (softphoneState === "error" ? "Audio error" : softphoneState === "connecting" ? "Connecting audio" : "Audio reconnecting") : selected.status === "answered" || selected.status === "in-progress"
                             ? "Connected"
                             : selected.status === "ringing"
                               ? "Destination ringing"
@@ -1640,7 +1706,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <LiveLevels sink={levelsSink} />
                   {diagnostics ? (
                     <div className="text-xs text-text-dim tabular-nums">
-                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.protocol ?? "negotiating"} · ` : "WebSocket / PCM · "}
+                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.candidateType ?? "negotiating"} ${diagnostics.webrtc?.protocol ?? ""}${diagnostics.webrtc?.relayProtocol ? ` (TURN ${diagnostics.webrtc.relayProtocol.toUpperCase()})` : ""} · ` : "WebSocket / PCM · "}
                       Browser ↔ app RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
                       {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
                       {` · underruns ${diagnostics.underruns}`}
@@ -1659,7 +1725,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
               ) : null}
 
-              <AudioProcessingSettings
+              <AutoAnswerSettings request={selfAutoAnswerRequest}/><NetworkSettings request={selfNetworkRequest}/><TurnSettings request={selfTURNRequest}/><ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+                <AudioProcessingSettings
                 value={audioOptions}
                 disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
                 onChange={setAudioOptions}
@@ -1715,7 +1782,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <div>
                     <h3 className="text-sm font-semibold">Recordings</h3>
                     <p className="text-xs text-text-muted">
-                      {selected.recordingMode === "always" ? "Captured by the carrier. Storage persistence is optional." : "Recording was not enabled for this call."}
+                      {selected.recordingMode === "always" ? "Captured locally for SIP, or by the carrier for media streams. Storage persistence is optional." : "Recording was not enabled for this call."}
                     </p>
                   </div>
                   <button type="button" onClick={() => void loadRecordings(selected.id)} className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted">Refresh</button>
@@ -1735,7 +1802,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     <div className="flex items-start gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{recordingStatusLabel(recording.storage_status)}</span>
+                          <span className="text-sm font-medium">{recording.storage_state_label || recordingStatusLabel(recording.storage_status)}</span>
+                          {recording.recorded_locally && recording.storage_status === "failed" ? <span className="text-xs text-text-muted">Recorded locally; original retained</span> : null}
                           <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)}{recording.size_bytes > 0 ? ` / ${formatBytes(recording.size_bytes)}` : ""} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
                         </div>
                         <div className="mt-1 truncate font-mono text-xs text-text-dim">{recording.provider_recording_id}</div>
@@ -1747,6 +1815,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     </div>
                     <RecordingPlayer recording={recording} />
                     {recording.last_error ? <div className="mt-2 text-xs text-error whitespace-pre-wrap">{recording.last_error}</div> : null}
+                    {recording.retry_blocked ? <p className="mt-1 text-xs text-warn">Automatic retries paused. Change the file limit or use Retry after correcting the Storage limit.</p> : null}
                   </div>
                 ))}
               </section>
@@ -1846,6 +1915,7 @@ interface ProjectAgent {
 }
 
 interface ConnectedNumber {
+ outbound_transport?:import("../frontend/src/client").OutboundTransport;
  carrier_connection_id: number;
  outbound_enabled: boolean;
  outbound_number_enabled: boolean;
@@ -1862,6 +1932,7 @@ interface ConnectedNumber {
   status_callback_status: string;
   routing_health: string;
   health_message?: string;
+  verified_at?: string;
   outbound: OutboundReadiness;
 }
 
@@ -1983,6 +2054,7 @@ function healthClass(value: string): string {
 }
 
 function NumbersView({ projectId }: NativePanelProps) {
+ const [sipSettings,setSipSettings]=useState<{route:string;label:string}|null>(null);
   const connectedRequestRef = useRef(0);
   const [connectedNumbers, setConnectedNumbers] = useState<ConnectedNumber[]>([]);
   const [connectedProvider, setConnectedProvider] = useState("");
@@ -2020,12 +2092,21 @@ function NumbersView({ projectId }: NativePanelProps) {
     return `${API}${path}${query}`;
   }, [projectId]);
 
-  const loadConnected = useCallback(async () => {
+ const [outboundTransportDialog,setOutboundTransportDialog]=useState<{provider:string;connection:number;number?:string}>();
+ const outboundTransportRequest=useCallback((body:Record<string,unknown>)=>postJSON<import("../frontend/src/client").OutboundTransportResult>(endpoint("/numbers/outbound-transport"),body),[endpoint]);
+ const carrierMediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/carrier-media"),body),[endpoint]);
+ const sipAudioProfileRequest=useCallback((body:Record<string,unknown>)=>postJSON<any>(endpoint("/numbers/sip-audio-profile"),body),[endpoint]);
+ const turnRequest=useCallback((body:Record<string,unknown>)=>postJSON<TURNPolicyView>(endpoint("/numbers/turn-policy"),body),[endpoint]);
+ const autoAnswerRequest=useCallback((body:import("../frontend/src/auto-answer").AutoAnswerPolicyRequest)=>postJSON<import("../frontend/src/auto-answer").AutoAnswerPolicyView>(endpoint("/softphone/auto-answer-policy"),{...body}),[endpoint]);
+ const networkRequest=useCallback((body:Record<string,unknown>)=>postJSON<NetworkPolicyView>(endpoint("/numbers/network-policy"),body),[endpoint]);
+ const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
+
+  const loadConnected = useCallback(async (fresh = false) => {
     const requestId = ++connectedRequestRef.current;
     setConnectedLoading(true);
     setConnectedError("");
     try {
-      const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), {});
+      const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), { fresh });
       if (requestId !== connectedRequestRef.current) return;
       setInventoryWarnings(data.warnings ?? []);
       setProviderStatuses(data.provider_statuses ?? []);
@@ -2164,7 +2245,7 @@ function NumbersView({ projectId }: NativePanelProps) {
         inbound_transport: transport,
         configure: true,
       });
-      setTransportStatus(`${number.phone_number} routing updated`);
+      setTransportStatus(`${number.phone_number} routing updated for new calls · active calls retained`);
     } catch (e) {
       setTransportStatus((e as Error).message || "Could not update inbound transport");
     } finally {
@@ -2218,6 +2299,8 @@ function NumbersView({ projectId }: NativePanelProps) {
     try {
       const result = await postJSON<{ warning?: string }>(endpoint("/numbers/routes/create"), {
         phone_number: number.phone_number,
+        carrier_connection_id: number.carrier_connection_id,
+        inbound_transport: number.provider === "didww" ? "sip_direct" : "programmable_websocket",
         phone_number_id: number.provider_number_id || "",
         agent_id: agentId,
         answer_mode: draft.answer_mode,
@@ -2287,7 +2370,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </div>
             <button
               type="button"
-              onClick={loadConnected}
+              onClick={() => void loadConnected(true)}
               disabled={connectedLoading}
               className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-50"
             >
@@ -2295,7 +2378,9 @@ function NumbersView({ projectId }: NativePanelProps) {
             </button>
           </header>
 
+          <div className="px-4 py-2 space-y-2"><AutoAnswerSettings request={autoAnswerRequest} admin/><NetworkSettings request={networkRequest} admin/><TurnSettings request={turnRequest} admin/></div>
           <div className="px-4 py-2 flex flex-wrap gap-2">
+            <button type="button" onClick={() => setSipSettings({route:"",label:"Project defaults"})} className="rounded border border-border px-2 py-1 text-xs">SIP media defaults</button>
             {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"
               disabled={connectedLoading || outboundSaving !== ""}
               onClick={() => void setOutboundEnabled("provider",p.provider,!p.provider_outbound_enabled)}
@@ -2310,6 +2395,7 @@ function NumbersView({ projectId }: NativePanelProps) {
               {p.provider} · connection {p.carrier_connection_id} · outbound {p.binding_state !== "active" ? p.binding_state : p.connection_outbound_enabled ? "enabled — disable" : "disabled — enable"}
             </button>)}
           </div>
+          <div className="px-4 pb-2 flex flex-wrap gap-2">{providerStatuses.filter(p=>p.provider==="telnyx"||p.provider==="twilio").map(p=><button key={p.carrier_connection_id} type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={()=>setOutboundTransportDialog({provider:p.provider,connection:p.carrier_connection_id})}>Outbound transport · {p.provider} account {p.carrier_connection_id}</button>)}</div>
           <p className="px-4 pb-2 text-xs text-text-muted">Inbound and outbound controls are independent. Existing calls continue. Provider and account rules also apply to individual numbers.</p>
           {inventoryWarnings.map(w => <div key={w.carrier_connection_id} role="status" className="px-4 py-2 text-xs text-warning">{w.provider}: {w.message}</div>)}
 
@@ -2321,7 +2407,7 @@ function NumbersView({ projectId }: NativePanelProps) {
           ) : connectedError ? (
             <div className="flex items-center justify-between gap-4 px-4 py-6">
               <div className="min-w-0 text-sm text-error whitespace-pre-wrap">{connectedError}</div>
-              <button type="button" onClick={loadConnected} className="h-8 shrink-0 px-3 rounded border border-border text-xs hover:bg-bg-muted">Retry</button>
+              <button type="button" onClick={() => void loadConnected(true)} className="h-8 shrink-0 px-3 rounded border border-border text-xs hover:bg-bg-muted">Retry</button>
             </div>
           ) : connectedNumbers.length === 0 ? (
             <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "10rem" }}>
@@ -2354,6 +2440,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                         className="mt-1 rounded border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-40">
                         {number.outbound_number_enabled ? "Disable outbound" : "Enable outbound"}
                       </button>
+                      {(number.provider==="telnyx"||number.provider==="twilio")?<button type="button" className="mt-1 rounded border border-border px-2 py-1 text-xs" onClick={()=>setOutboundTransportDialog({provider:number.provider,connection:number.carrier_connection_id,number:number.phone_number})}>Outbound · {number.outbound_transport?.transport==="sip_direct"?"SIP":"Voice API"}</button>:null}
                       {number.outbound_disabled_reason ? <div className="text-xs text-warning">Outbound disabled by policy</div> : null}
 
                       <div className="truncate font-mono text-xs text-text-dim" title={number.provider_number_id}>{compactId(number.provider_number_id || "")}</div>
@@ -2450,8 +2537,8 @@ function NumbersView({ projectId }: NativePanelProps) {
                             disabled={transportSaving === number.route.id}
                             className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs"
                           >
-                            <option value="programmable_websocket">Voice API</option>
-                            {(number.provider === "twilio" || number.provider === "telnyx") ? (
+                            <option value="programmable_websocket" disabled={number.provider === "didww"}>Voice API</option>
+                            {(number.provider === "twilio" || number.provider === "telnyx" || number.provider === "didww") ? (
                               <option value="sip_direct" disabled={!directSIP?.available && !directSIP?.ready}>Direct SIP</option>
                             ) : null}
                           </select>
@@ -2465,6 +2552,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                           >
                             Apply
                           </button>
+                          {(number.provider === "twilio" || number.provider === "telnyx" || number.provider === "didww") ? <button type="button" aria-label={`SIP media settings for ${number.phone_number}`} onClick={() => setSipSettings({route:number.route!.id,label:number.phone_number})} className="h-8 rounded border border-border px-2 text-xs">Media</button> : null}
                         </div>
                       ) : <span className="text-xs text-text-muted">-</span>}
                     </div>
@@ -2493,6 +2581,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                         <span className="text-text-dim">Events</span>
                         <span className={`rounded border px-1.5 py-0.5 ${healthClass(number.status_callback_status)}`}>{healthLabel(number.status_callback_status)}</span>
                       </div>
+                      {number.verified_at ? <div className="mt-1 text-xs text-text-dim" title={number.verified_at}>Checked {new Date(number.verified_at).toLocaleTimeString()}</div> : null}
                       {number.health_message ? (
                         <div className="mt-1 truncate text-xs text-text-muted" title={number.health_message}>{number.health_message}</div>
                       ) : null}
@@ -2681,6 +2770,8 @@ function NumbersView({ projectId }: NativePanelProps) {
           </button>
         </section>
       ) : null}
+      {outboundTransportDialog?<OutboundTransportDialog {...outboundTransportDialog} request={outboundTransportRequest} carrierRequest={carrierMediaRequest} profileRequest={sipAudioProfileRequest} onClose={()=>{setOutboundTransportDialog(undefined);void loadConnected(true)}}/>:null}
+      {sipSettings ? <SIPMediaDialog routeId={sipSettings.route} label={sipSettings.label} request={mediaRequest} carrierRequest={carrierMediaRequest} profileRequest={sipAudioProfileRequest} onClose={() => setSipSettings(null)}/> : null}
     </div>
   );
 }
@@ -3680,7 +3771,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
 }
 
 export default function CallsPanel(props: NativePanelProps) {
-  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles" | "audio-health">(() => new URLSearchParams(window.location.search).get("tab")==="audio-health"?"audio-health":"calls");
+  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles" | "audio-health" | "statistics">(() => new URLSearchParams(window.location.search).get("tab")==="statistics"?"statistics":new URLSearchParams(window.location.search).get("tab")==="audio-health"?"audio-health":"calls");
   return (
     <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
       <nav className="shrink-0 min-h-11 max-w-full overflow-x-auto border-b border-border px-2 flex items-center gap-1" aria-label="Telephony views">
@@ -3720,9 +3811,11 @@ export default function CallsPanel(props: NativePanelProps) {
         >
           Compliance
         </button>
+        <button type="button" onClick={()=>setView("statistics")} className={`h-8 px-3 rounded text-sm ${view==="statistics"?"bg-bg-subtle font-medium":"text-text-muted hover:bg-bg-subtle"}`}>Statistics</button>
       </nav>
       <div className="min-h-0 min-w-0 flex-1 flex flex-col">
         <CallsView key={`${props.projectId}:${props.installId}`} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
+        {view === "statistics" ? <CallStatistics key={`${props.projectId}:${props.installId}`} {...props}/> : null}
         {view === "audio-health" ? <AudioHealthView key={`${props.projectId}:${props.installId}`} {...props} /> : null}
         {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}

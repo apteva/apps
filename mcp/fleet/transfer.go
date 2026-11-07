@@ -135,7 +135,7 @@ func (a *App) startTenantOnHostMode(ctx *sdk.AppCtx, h fleetHost, tenant *Tenant
 	}
 	newStatus = statusAfterRestart(prevStatus)
 	if h.IsLocal() {
-		spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		spawnCtx, cancel := context.WithTimeout(context.Background(), tenantLifecycleTimeout)
 		defer cancel()
 		_, proc, err := a.spawnTenantWithMode(spawnCtx, tenant.ID, tenant.Slug, dir, tenantAptevaBin(version), port, false, quarantine)
 		if err != nil {

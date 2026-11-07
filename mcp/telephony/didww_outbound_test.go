@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +20,11 @@ import (
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
+	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
+	"github.com/pion/srtp/v3"
+	"sync/atomic"
 )
 
 func didwwTestCredentials() map[string]string {
@@ -61,8 +66,8 @@ func TestDIDWWOutboundPlaceDoesNotPretendRESTPlacesCalls(t *testing.T) {
 		t.Fatalf("DIDWW placement preparation: %+v, %v", placed, err)
 	}
 	request.RecordingMode = recordingModeAlways
-	if _, err := carrier.Place(nil, request); err == nil || !strings.Contains(err.Error(), "recording") {
-		t.Fatalf("provider-cloud recording should fail: %v", err)
+	if _, err := carrier.Place(nil, request); err != nil {
+		t.Fatalf("local SIP recording should be supported: %v", err)
 	}
 	request.RecordingMode = recordingModeOff
 	request.MachineDetection = "detect"
@@ -125,16 +130,73 @@ func TestDIDWWOutboundCancelsBeforeAnswer(t *testing.T) {
 }
 
 func runDIDWWOutboundSIPPeer(t *testing.T, secureAnswer, leaveRinging bool) {
+	runOutboundSIPPeer(t, "didww", secureAnswer, leaveRinging)
+}
+func TestGenericOutboundSIPTelnyxAndTwilio(t *testing.T) {
+	for _, provider := range []string{"telnyx", "twilio"} {
+		t.Run(provider+"/answer", func(t *testing.T) { runOutboundSIPPeer(t, provider, true, false) })
+		t.Run(provider+"/cancel", func(t *testing.T) { runOutboundSIPPeer(t, provider, true, true) })
+		t.Run(provider+"/downgrade", func(t *testing.T) { runOutboundSIPPeer(t, provider, false, false) })
+	}
+}
+func runOutboundSIPPeer(t *testing.T, provider string, secureAnswer, leaveRinging bool) {
+	runOutboundSIPPeerCodec(t, provider, "PCMU", secureAnswer, leaveRinging)
+}
+func TestGenericOutboundSIPAlternateCodecsAndAudio(t *testing.T) {
+	for _, tc := range []struct{ provider, codec string }{{"telnyx", "G722"}, {"telnyx", "PCMA"}, {"twilio", "PCMA"}} {
+		t.Run(tc.provider+"/"+tc.codec, func(t *testing.T) { runOutboundSIPPeerCodec(t, tc.provider, tc.codec, true, false) })
+	}
+}
+func runOutboundSIPPeerCodec(t *testing.T, provider, codec string, secureAnswer, leaveRinging bool, humanModes ...bool) {
+	t.Helper()
+	runOutboundSIPPeerScenario(t, provider, codec, secureAnswer, leaveRinging, len(humanModes) > 0 && humanModes[0], false, false, false)
+}
+func TestGenericOutboundSIPProvisionalKeysAndFinalCodec(t *testing.T) {
+	for _, provider := range []string{"telnyx", "twilio"} {
+		t.Run(provider, func(t *testing.T) {
+			runOutboundSIPPeerScenario(t, provider, "G722", true, false, false, true, false, false)
+		})
+	}
+}
+
+// BYEs the carrier fixture ignores before it answers, and how many it received.
+var outboundFixtureSilentBYEs, outboundFixtureBYEs atomic.Int32
+
+// Real sipgo and a real dialog: the retry has to put a second BYE on the wire, and
+// the hangup has to wait for it and report the confirmation.
+func TestGenericOutboundSIPHangupRetriesALostBYE(t *testing.T) {
+	outboundFixtureSilentBYEs.Store(1)
+	outboundFixtureBYEs.Store(0)
+	t.Cleanup(func() { outboundFixtureSilentBYEs.Store(0) })
+	started := time.Now()
+	runOutboundSIPPeerScenario(t, "telnyx", "PCMU", true, false, false, false, false, false)
+	if n := outboundFixtureBYEs.Load(); n != 2 {
+		t.Fatal("the carrier must see the BYE again after silence", n)
+	}
+	if took := time.Since(started); took < sipByeAttemptTimeout {
+		t.Fatal("the first BYE was not left unanswered", took)
+	}
+}
+func TestGenericOutboundSIPHangupReportsCarrierFailure(t *testing.T) {
+	runOutboundSIPPeerScenario(t, "telnyx", "PCMU", true, false, false, false, true, false)
+}
+func runOutboundSIPPeerScenario(t *testing.T, provider, codec string, secureAnswer, leaveRinging, human, earlyMedia, failBYE, shutdown bool) {
 	t.Helper()
 	app, appCtx := withTelephonyTestContext(t, &answerPlatform{})
+	coreConnected := make(chan net.Conn, 1)
 	audio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, _, _, err := ws.UpgradeHTTP(r, w)
 		if err == nil {
-			defer conn.Close()
-			<-r.Context().Done()
+			coreConnected <- conn
 		}
 	}))
 	defer audio.Close()
+	if human {
+		audio.Close()
+		audio = softphoneTestServer(t, app)
+		_, p, _ := net.SplitHostPort(strings.TrimPrefix(audio.URL, "http://"))
+		t.Setenv("APTEVA_APP_PORT", p)
+	}
 
 	directory := t.TempDir()
 	writeSIPTestCertificate(t, directory, "127.0.0.1")
@@ -195,17 +257,65 @@ func runDIDWWOutboundSIPPeer(t *testing.T, secureAnswer, leaveRinging bool) {
 			return
 		}
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusRinging, "Ringing", nil))
-		sdpBody, buildErr := buildSIPMediaAnswer(cfg, sipMediaOffer{Secure: secureAnswer, PayloadType: 0,
-			Codec: "PCMU", CryptoTag: "1"}, udpMedia.LocalAddr().(*net.UDPAddr).Port,
+		if earlyMedia && !req.To().Params.Has("tag") {
+			offer, e := parseSIPMediaOfferCodecs(req.Body(), cfg, []string{"G722", "PCMU", "PCMA"})
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			key := bytes.Repeat([]byte{7}, 30)
+			provisional, e := buildSIPMediaAnswer(cfg, sipMediaOffer{Secure: true, PayloadType: 8, Codec: "PCMA", CryptoTag: "1"}, udpMedia.LocalAddr().(*net.UDPAddr).Port, &sipMediaSecurity{LocalKey: key})
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			progress := sip.NewResponseFromRequest(req, 183, "Session Progress", provisional)
+			progress.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+			_ = tx.Respond(progress)
+			encrypt, e := srtp.CreateContext(key[:16], key[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			destination := net.UDPAddrFromAddrPort(netip.AddrPortFrom(offer.RemoteAddress, uint16(offer.RemotePort)))
+			for i := 0; i < 30; i++ {
+				packet := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 8, SequenceNumber: uint16(30000 + i), Timestamp: uint32(i * 160), SSRC: 42}, Payload: bytes.Repeat([]byte{0xd5}, 160)}
+				raw, _ := packet.Marshal()
+				raw, e = encrypt.EncryptRTP(nil, raw, nil)
+				if e != nil {
+					t.Error(e)
+					return
+				}
+				if _, e = udpMedia.WriteToUDP(raw, destination); e != nil {
+					t.Error(e)
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		sdpBody, buildErr := buildSIPMediaAnswer(cfg, sipMediaOffer{Secure: secureAnswer, PayloadType: map[string]uint8{"PCMU": 0, "PCMA": 8, "G722": 9}[codec],
+			Codec: codec, CryptoTag: "1"}, udpMedia.LocalAddr().(*net.UDPAddr).Port,
 			&sipMediaSecurity{LocalKey: remoteKey})
 		if buildErr != nil {
 			_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusInternalServerError, "SDP Error", nil))
 			return
 		}
-		_ = tx.Respond(sip.NewSDPResponseFromRequest(req, sdpBody))
+		response := sip.NewSDPResponseFromRequest(req, sdpBody)
+		response.AppendHeader(&sip.ContactHeader{Address: req.Recipient})
+		response.AppendHeader(sip.NewHeader("Session-Expires", "1800;refresher=uac"))
+		_ = tx.Respond(response)
 	})
 	server.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
-		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
+		outboundFixtureBYEs.Add(1)
+		if outboundFixtureSilentBYEs.Add(-1) >= 0 {
+			return
+		}
+		status := sip.StatusOK
+		if failBYE {
+			status = 503
+		}
+		_ = tx.Respond(sip.NewResponseFromRequest(req, status, "Fixture BYE result", nil))
 		select {
 		case byeSeen <- struct{}{}:
 		default:
@@ -266,21 +376,47 @@ func runDIDWWOutboundSIPPeer(t *testing.T, secureAnswer, leaveRinging bool) {
 	app.sip.mu.Unlock()
 	defer g.Stop()
 	row := callRow{ID: "didww-outbound-loopback", ThreadID: "human-didww-outbound-loopback",
-		Direction: "outbound", CarrierSlug: "didww", CarrierSID: "didww-outbound-loopback",
+		Direction: "outbound", CarrierSlug: provider, CarrierSID: "didww-outbound-loopback", IngressPath: inboundTransportSIPDirect,
 		ToNumber: "+33123456789", FromNumber: "+33123456780", Status: "initiated", ProjectID: "project-a",
-		PeerKind: peerKindRealtime, AudioBridgeURL: "ws" + strings.TrimPrefix(audio.URL, "http"),
+		PeerKind: peerKindRealtime, RecordingMode: recordingModeAlways, AudioBridgeURL: "ws" + strings.TrimPrefix(audio.URL, "http"),
 		PlacedAt: time.Now().UTC().Format(time.RFC3339)}
+	if human {
+		row.PeerKind = peerKindHuman
+		row.PeerToken = "browser-secret"
+		row.CallbackSecret = "carrier-secret"
+	}
 	if err := app.db().insertCall(row); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.startDIDWWOutbound(&row, didwwSIPSettings{host: "127.0.0.1", port: port,
-		username: "test-user", password: "test-password", secure: true}, 5, 60); err != nil {
+	var browser net.Conn
+	if human {
+		browser = dialWS(t, audio.URL+"/softphone/media/"+row.ID+"/"+row.PeerToken)
+		defer browser.Close()
+		readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	}
+	settings := didwwSIPSettings{host: "127.0.0.1", port: port, username: "test-user", password: "test-password", secure: true, e164: provider != "didww", scheme: "sip", codecs: []string{codec}}
+	if provider == "telnyx" {
+		settings.anchorUsername = "test-user"
+	}
+	if err := g.startSIPOutbound(&row, settings, 5, 60); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case invite := <-inviteSeen:
-		if invite.From() == nil || invite.From().Address.User != "33123456780" ||
-			invite.Recipient.User != "33123456789" || !bytes.Contains(invite.Body(), []byte("RTP/SAVP")) {
+		header := invite.GetHeader("X-Telnyx-Username")
+		if provider == "telnyx" {
+			if header == nil || header.Value() != "test-user" {
+				t.Fatal("first Telnyx INVITE omitted AnchorSite credential identity")
+			}
+		} else if header != nil {
+			t.Fatal("Telnyx identity header leaked to another provider")
+		}
+		from, to := "33123456780", "33123456789"
+		if provider != "didww" {
+			from, to = "+"+from, "+"+to
+		}
+		if invite.From() == nil || invite.From().Address.User != from ||
+			invite.Recipient.User != to || !bytes.Contains(invite.Body(), []byte("RTP/SAVP")) {
 			t.Fatalf("DIDWW INVITE did not carry caller ID, destination and secure media: %s", invite)
 		}
 	case <-time.After(5 * time.Second):
@@ -296,7 +432,7 @@ func runDIDWWOutboundSIPPeer(t *testing.T, secureAnswer, leaveRinging bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := (&didwwCarrier{app: app}).Hangup(appCtx, stored); err != nil {
+		if err := hangupOutboundSIP(app, stored); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -339,15 +475,172 @@ func runDIDWWOutboundSIPPeer(t *testing.T, secureAnswer, leaveRinging bool) {
 	if stored.CarrierSID == "" || stored.CarrierSID == row.ID {
 		t.Fatalf("SIP Call-ID was not persisted as provider identity: %q", stored.CarrierSID)
 	}
-	if err := (&didwwCarrier{app: app}).Hangup(appCtx, stored); err != nil {
+	// Exercise both media directions through the actual outbound bridge, not
+	// just signaling: carrier SRTP -> PCM bridge and PCM bridge -> carrier SRTP.
+	var core net.Conn
+	if human {
+		core = browser
+		readSoftphoneEventWithin(t, browser, "peer.connected", 3*time.Second)
+	} else {
+		select {
+		case core = <-coreConnected:
+		case <-time.After(3 * time.Second):
+			t.Fatal("outbound Core bridge did not attach")
+		}
+	}
+	defer core.Close()
+	session := g.outboundSessionByCall(row.ID)
+	encrypt, err := srtp.CreateContext(remoteKey[:16], remoteKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+	if err != nil {
 		t.Fatal(err)
 	}
+	decrypt, err := srtp.CreateContext(session.localKey[:16], session.localKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := &sipRTPMedia{offer: sipMediaOffer{Codec: codec}}
+	pcm := make([]int16, encoder.sampleRate()/50)
+	for i := range pcm {
+		pcm[i] = int16((i%40 - 20) * 200)
+	}
+	for i := 1; i <= 6; i++ {
+		packet := rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: session.media.offer.PayloadType, SequenceNumber: uint16(i), Timestamp: uint32(i * 160), SSRC: 42}, Payload: encoder.encodeAudio(pcm)}
+		raw, e := packet.Marshal()
+		if e != nil {
+			t.Fatal(e)
+		}
+		raw, e = encrypt.EncryptRTP(nil, raw, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = udpMedia.WriteToUDP(raw, session.media.conn.LocalAddr().(*net.UDPAddr)); e != nil {
+			t.Fatal(e)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = core.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var incoming []byte
+	if human {
+		incoming = readBinaryWithin(t, browser, 3*time.Second)
+	} else {
+		var op ws.OpCode
+		incoming, op, err = wsutil.ReadClientData(core)
+		if err != nil || op != ws.OpBinary {
+			t.Fatalf("carrier-to-Core audio failed: %v", err)
+		}
+	}
+	if len(incoming) < 800 || bytes.Equal(incoming, make([]byte, len(incoming))) {
+		t.Fatalf("received silent/incomplete audio: %d", len(incoming))
+	}
+	if human {
+		err = wsutil.WriteClientBinary(browser, bytes.Repeat([]byte{0x10, 0x03}, 480))
+	} else {
+		err = wsutil.WriteServerBinary(core, bytes.Repeat([]byte{0x10, 0x03}, 480))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = udpMedia.SetReadDeadline(time.Now().Add(3 * time.Second))
+	raw := make([]byte, 4096)
+	n, _, err := udpMedia.ReadFromUDP(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear, err := decrypt.DecryptRTP(nil, raw[:n], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packet rtp.Packet
+	if err = packet.Unmarshal(clear); err != nil || packet.PayloadType != session.media.offer.PayloadType || len(packet.Payload) != 160 {
+		t.Fatalf("Core-to-carrier RTP failed: %+v %v", packet, err)
+	}
+	decoded := encoder.decodeAudio(packet.Payload)
+	if bytes.Equal(pcm16ToBytes(decoded), make([]byte, len(decoded)*2)) {
+		t.Fatal("outbound audio became silence")
+	}
+	// The mock challenges every new re-INVITE, exercising the bounded
+	// authentication retry with the established dialog and fresh CSeq.
+	session.signalMu.Lock()
+	err = session.sendSessionRefresh(sipSessionTimer{interval: 1800 * time.Second, local: true})
+	session.signalMu.Unlock()
+	if err != nil {
+		t.Fatalf("authenticated outbound session refresh: %v", err)
+	}
+	session.timerMu.Lock()
+	refreshed := session.timer.local && session.timer.interval == 1800*time.Second && time.Since(session.timerUpdated) < time.Second
+	session.timerMu.Unlock()
+	if !refreshed {
+		t.Fatal("outbound session refresh did not update timer")
+	}
+	recorder := session.media.recorder.Load()
+	if recorder == nil {
+		t.Fatal("outbound SIP recording did not start")
+	}
+	control := &localSIPController{app: app}
+	if err = control.PauseRecording(appCtx, stored, ""); err != nil || !recorder.paused.Load() {
+		t.Fatalf("pause recording: %v", err)
+	}
+	if err = control.ResumeRecording(appCtx, stored, ""); err != nil || recorder.paused.Load() {
+		t.Fatalf("resume recording: %v", err)
+	}
+	if err = g.Answer(stored); err == nil || session.ended.Load() {
+		t.Fatal("answer operation ended an outbound dialog")
+	}
+
+	if earlyMedia {
+		snapshot := session.media.observations.snapshot(time.Now())
+		if snapshot.EarlyPackets != 30 || snapshot.AuthErrors != 0 || snapshot.SequenceLoss != 0 {
+			t.Fatalf("provisional media contaminated final stream: %+v", snapshot)
+		}
+	}
+	if shutdown {
+		g.Stop()
+	} else if err := g.Hangup(stored); (err != nil) != failBYE {
+		t.Fatalf("hangup confirmation mismatch: %v failBYE=%v", err, failBYE)
+	}
+	if failBYE {
+		session.diagnostics.mu.Lock()
+		signal := session.diagnostics.signal
+		session.diagnostics.mu.Unlock()
+		if signal.BYEStatus != "unconfirmed" || signal.BYEFailures != 1 {
+			t.Fatalf("missing BYE failure: %+v", signal)
+		}
+	}
+
 	select {
 	case <-byeSeen:
 	case <-time.After(5 * time.Second):
 		t.Fatal("local hangup did not send SIP BYE")
 	}
-	if current, err := app.db().findCall(row.ID); err != nil || current.Status != "completed" {
+	expectedStatus := "completed"
+	if shutdown {
+		expectedStatus = "failed"
+	}
+	if current, err := app.db().findCall(row.ID); err != nil || current.Status != expectedStatus {
 		t.Fatalf("DIDWW hangup status: %+v %v", current, err)
 	}
+	select {
+	case <-recorder.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("outbound recorder not drained")
+	}
+	var path string
+	if err = app.db().db.QueryRow(`SELECT path FROM local_recording_files WHERE recording_id=?`, recorder.row.ID).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	rawWAV, err := os.ReadFile(path)
+	if err != nil || len(rawWAV) <= 44 || string(rawWAV[:4]) != "RIFF" {
+		t.Fatalf("local recorded WAV unavailable: %v", err)
+	}
+
+}
+
+func TestGenericOutboundSIPHumanBrowserMedia(t *testing.T) {
+	for _, provider := range []string{"telnyx", "twilio"} {
+		t.Run(provider, func(t *testing.T) { runOutboundSIPPeerCodec(t, provider, "PCMU", true, false, true) })
+	}
+}
+
+func TestGenericOutboundSIPShutdownSendsBYEBeforeClosingTransport(t *testing.T) {
+	runOutboundSIPPeerScenario(t, "telnyx", "PCMU", true, false, false, false, false, true)
 }

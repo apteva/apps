@@ -1,3 +1,8 @@
+import AudienceProvenance, { type Provenance } from "./AudienceProvenance";
+import { audienceTypeLabel } from "./audiencePresentation";
+import AudienceFields, { freshAudienceDraft, audienceDefinition, audienceDefinitionValid, audienceDraftFromMetadata } from "./AudienceFields";
+import CampaignSettings from "./CampaignSettings";
+import CampaignBuilder from "./CampaignBuilder";
 import ConversionsWorkspace from "./ConversionsWorkspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -171,6 +176,8 @@ interface AdsEventData {
 }
 
 interface Audience {
+  provenance?: Provenance;
+  source_label?: string;
   id: number;
   ad_account_id: number;
   platform: string;
@@ -185,6 +192,8 @@ interface Audience {
 }
 
 interface AudienceCapabilities {
+  create_kinds?: string[];
+  engagement?: { create: boolean; reason: string; setup_url: string };
   platform: string;
   kinds: string[];
   operations: string[];
@@ -790,8 +799,18 @@ function CampaignWorkspace({
     refresh,
   }), [account.id, dateFrom, dateTo]);
 
+  // Passive loads read the local copy; only an explicit refresh, or a list
+  // that was never filled, reaches the provider.
+  const listEntities = useCallback(async (tool: "adset_list" | "ad_list", args: Record<string, unknown>, refresh: boolean) => {
+    if (!refresh) {
+      const cached = await callTool(tool, { ...args, cached: true });
+      if (!cached.cache_empty) return cached;
+    }
+    return callTool(tool, args);
+  }, [callTool]);
+
   const loadAds = useCallback(async (adSetID: string, refresh: boolean, requestID: number) => {
-    const list = await callTool("ad_list", { ad_account_id: account.id, adset_id: adSetID, limit: 100 });
+    const list = await listEntities("ad_list", { ad_account_id: account.id, adset_id: adSetID, limit: 100 }, refresh);
     if (request.current !== requestID) return;
     const nextAds = (list.data || []) as Ad[];
     setAds(nextAds);
@@ -802,7 +821,7 @@ function CampaignWorkspace({
     }
     const metrics = await callTool("performance_get", performanceArgs("ad", nextAds.map((ad) => ad.id), refresh));
     if (request.current === requestID) setAdMetrics(metrics as PerformanceResponse);
-  }, [account.id, callTool, performanceArgs]);
+  }, [account.id, callTool, listEntities, performanceArgs]);
 
   const loadWorkspace = useCallback(async (refresh: boolean) => {
     const requestID = ++request.current;
@@ -812,7 +831,7 @@ function CampaignWorkspace({
     try {
       const [campaignResult, adSetList] = await Promise.all([
         callTool("performance_get", performanceArgs("campaign", [campaign.id], refresh)),
-        callTool("adset_list", { ad_account_id: account.id, campaign_id: campaign.id, limit: 100 }),
+        listEntities("adset_list", { ad_account_id: account.id, campaign_id: campaign.id, limit: 100 }, refresh),
       ]);
       if (request.current !== requestID) return;
       setCampaignMetrics(campaignResult as PerformanceResponse);
@@ -840,7 +859,7 @@ function CampaignWorkspace({
         setLoadingMetrics(false);
       }
     }
-  }, [account.id, callTool, campaign.id, loadAds, performanceArgs, selectedAdSetID]);
+  }, [account.id, callTool, campaign.id, listEntities, loadAds, performanceArgs, selectedAdSetID]);
 
   useEffect(() => {
     loadWorkspace(false);
@@ -986,6 +1005,7 @@ function CampaignWorkspace({
           </header>
 
           <KpiStrip summary={performance} currency={account.currency} />
+          {account.platform === "google" && <CampaignSettings currency={account.currency} key={campaign.id} accountId={account.id} campaignId={campaign.id} groupId={selectedAdSetID} callTool={callTool} dateFrom={dateFrom} dateTo={dateTo} />}
 
           <div className="ads-performance-layout border-b border-border">
             <div className="min-w-0 border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
@@ -1039,16 +1059,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   return <div className="flex items-start justify-between gap-3 px-4 py-2.5"><span className="text-xs text-text-dim">{label}</span><span className="min-w-0 truncate text-right text-xs font-medium text-text" style={{ maxWidth: "65%" }} title={value}>{value}</span></div>;
 }
 
-function audienceTypeLabel(type: string): string {
-  return ({
-    customer_list: "Customer list",
-    website: "Website visitors",
-    app_activity: "App activity",
-    engagement: "Engagement",
-    lookalike: "Lookalike",
-    saved_targeting: "Saved targeting",
-  } as Record<string, string>)[type] || type.replaceAll("_", " ");
-}
 
 function audienceSize(audience: Audience): string {
   const lower = Number(audience.metadata?.approximate_count_lower_bound || 0);
@@ -1081,6 +1091,7 @@ function AudienceWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Audience | null>(null);
+  const [provenanceTarget, setProvenanceTarget] = useState<Audience | null>(null);
   const [syncTarget, setSyncTarget] = useState<Audience | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Audience | null>(null);
   const [usageTarget, setUsageTarget] = useState<Audience | null>(null);
@@ -1090,6 +1101,8 @@ function AudienceWorkspace({
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("customer_list");
   const [sourceAudienceID, setSourceAudienceID] = useState("");
+  const [definition, setDefinition] = useState(freshAudienceDraft);
+  const [createKey, setCreateKey] = useState("");
   const [sourceResourceID, setSourceResourceID] = useState("");
   const [sourceResources, setSourceResources] = useState<AdResource[]>([]);
   const [retentionDays, setRetentionDays] = useState("365");
@@ -1116,6 +1129,8 @@ function AudienceWorkspace({
           : Promise.resolve({ data: [] }),
       ]);
       setAudiences(list.data || []);
+      const refreshErrors = Object.values(list.refresh_errors || {});
+      if (refreshErrors.length) setError(`Audience refresh: ${refreshErrors.join("; ")}`);
       setCapabilities(supported);
       setSourceResources((resources.data || []).filter((resource: AdResource) => resource.provider_type === "facebook_page" && resource.status === "active"));
     } catch (err) {
@@ -1150,6 +1165,7 @@ function AudienceWorkspace({
 
   const openCreate = () => {
     setName(""); setDescription(""); setKind("customer_list"); setSourceAudienceID(""); setSourceResourceID(""); setRetentionDays("365"); setCountry("US"); setRatio("0.01");
+    setDefinition(freshAudienceDraft()); setCreateKey(crypto.randomUUID());
     setError(null); setCreateOpen(true);
   };
 
@@ -1163,17 +1179,24 @@ function AudienceWorkspace({
         source_resource_id: kind === "engagement" ? Number(sourceResourceID) : undefined,
         retention_days: kind === "engagement" ? Number(retentionDays) : undefined,
         country: kind === "lookalike" ? country.trim().toUpperCase() : undefined,
-        ratio: kind === "lookalike" ? Number(ratio) : undefined,
+        ratio: kind === "lookalike" && account.platform !== "google" ? Number(ratio) : undefined,
+        ...(account.platform === "google" ? audienceDefinition(kind, definition) : {}),
+        idempotency_key: createKey,
       });
       setCreateOpen(false); await load(true);
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const startEditAudience = (audience: Audience) => {
+    setEditTarget(audience); setName(audience.name); setDescription(String(audience.metadata?.description || ""));
+    setDefinition(audienceDraftFromMetadata(audience.metadata || {}, audiences));
   };
 
   const saveAudience = async () => {
     if (!editTarget || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      await callTool("audience_update", { ad_account_id: account.id, audience_id: editTarget.id, name: name.trim(), description: description.trim() });
+      await callTool("audience_update", { ad_account_id: account.id, audience_id: editTarget.id, name: name.trim(), description: description.trim(), ...(account.platform === "google" && editTarget.type === "custom_segment" ? audienceDefinition(editTarget.type, definition) : {}) });
       setEditTarget(null); await load(true);
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
@@ -1210,7 +1233,7 @@ function AudienceWorkspace({
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
 
-  const createKinds = (capabilities?.kinds || []).filter((value) => value === "customer_list" || (account.platform === "meta" && ["engagement", "lookalike"].includes(value)));
+  const createKinds = (capabilities?.create_kinds || capabilities?.kinds || []).filter(value => ["customer_list", "engagement", "lookalike", "custom_segment", "grouped"].includes(value));
 
   return (
     <div className="min-h-full">
@@ -1222,6 +1245,7 @@ function AudienceWorkspace({
         <button type="button" onClick={openCreate} disabled={!capabilities?.operations.includes("create")} className="h-8 shrink-0 whitespace-nowrap rounded bg-accent px-3 text-xs font-medium text-black hover:opacity-90 disabled:opacity-50">Create audience</button>
       </div>
       {error && <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{error}</div>}
+      {capabilities?.engagement?.create === false && <p className="border-b border-border px-4 py-3 text-xs text-text-muted">{capabilities.engagement.reason}. Create viewer/subscriber seeds in <a href={capabilities.engagement.setup_url} target="_blank" rel="noreferrer" className="underline">Google Ads Audience Manager</a>, then refresh. Existing remarketing lists remain available as seeds.</p>}
       {loading ? (
         <p className="px-4 py-10 text-center text-sm text-text-muted">Loading audiences...</p>
       ) : audiences.length === 0 ? (
@@ -1234,16 +1258,17 @@ function AudienceWorkspace({
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div>
-                  <div className="mt-0.5 truncate text-xs text-text-dim">{audienceTypeLabel(audience.type)} · {audience.native_id}</div>
+                  <div className="mt-0.5 truncate text-xs text-text-dim">{audienceTypeLabel(audience.type)} · {audience.native_id}</div><div className="mt-1 break-all text-xs text-text-muted">{audience.source_label || "Source unverified"}{audience.provenance?.status === "verified" && " · Verified manually"}</div>
                 </div>
                 <span className={`shrink-0 rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span>
               </div>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <div className="text-xs text-text-muted"><span className="text-text-dim">Size </span>{audienceSize(audience)}</div>
                 <div className="flex flex-wrap justify-end gap-1.5">
+                  <button type="button" onClick={() => setProvenanceTarget(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Verify source</button>
                   {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
                   {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
-                  {audience.capabilities.includes("update") && <button type="button" onClick={() => { setEditTarget(audience); setName(audience.name); setDescription(String(audience.metadata?.description || "")); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
+                  {audience.capabilities.includes("update") && <button type="button" onClick={() => startEditAudience(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
                   {audience.capabilities.includes("delete") && <button type="button" onClick={() => setDeleteTarget(audience)} aria-label={`Delete ${audience.name}`} title="Delete audience" className="grid h-8 w-8 place-items-center rounded border border-border text-text-muted hover:border-red/50 hover:text-red">×</button>}
                 </div>
               </div>
@@ -1252,19 +1277,20 @@ function AudienceWorkspace({
         </div>
         <div className="hidden overflow-auto md:block">
           <table className="w-full table-fixed text-sm" style={{ minWidth: "58rem" }}>
-            <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim"><tr><th className="w-72 px-4 py-2 text-left font-medium">Audience</th><th className="w-36 px-3 py-2 text-left font-medium">Type</th><th className="w-28 px-3 py-2 text-left font-medium">Status</th><th className="w-28 px-3 py-2 text-right font-medium">Size</th><th className="w-44 px-3 py-2 text-left font-medium">Updated</th><th className="px-4 py-2 text-right font-medium">Actions</th></tr></thead>
+            <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim"><tr><th className="w-72 px-4 py-2 text-left font-medium">Audience</th><th className="w-36 px-3 py-2 text-left font-medium">Type</th><th className="w-52 px-3 py-2 text-left font-medium">Source</th><th className="w-28 px-3 py-2 text-left font-medium">Status</th><th className="w-28 px-3 py-2 text-right font-medium">Size</th><th className="w-44 px-3 py-2 text-left font-medium">Updated</th><th className="px-4 py-2 text-right font-medium">Actions</th></tr></thead>
             <tbody className="divide-y divide-border">
               {audiences.map((audience) => (
                 <tr key={audience.id} className="hover:bg-bg-input/40">
                   <td className="px-4 py-3"><div className="truncate font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div><div className="truncate text-xs text-text-dim">{audience.native_id}</div></td>
-                  <td className="px-3 py-3 text-text-muted">{audienceTypeLabel(audience.type)}</td>
+                  <td className="px-3 py-3 text-text-muted">{audienceTypeLabel(audience.type)}</td><td className="max-w-52 break-words px-3 py-3 text-xs text-text-muted">{audience.source_label || "Source unverified"}{audience.provenance?.status === "verified" && <div className="mt-1 text-text-dim">Verified manually</div>}</td>
                   <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span></td>
                   <td className="px-3 py-3 text-right tabular-nums text-text-muted">{audienceSize(audience)}</td>
                   <td className="px-3 py-3 text-xs text-text-muted">{audience.refreshed_at ? new Date(audience.refreshed_at).toLocaleString() : "-"}</td>
                   <td className="px-4 py-3"><div className="flex justify-end gap-1.5">
-                    {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
+                    <button type="button" onClick={() => setProvenanceTarget(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Verify source</button>
+                  {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
                     {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
-                    {audience.capabilities.includes("update") && <button type="button" onClick={() => { setEditTarget(audience); setName(audience.name); setDescription(String(audience.metadata?.description || "")); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
+                    {audience.capabilities.includes("update") && <button type="button" onClick={() => startEditAudience(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
                     {audience.capabilities.includes("delete") && <button type="button" onClick={() => setDeleteTarget(audience)} aria-label={`Delete ${audience.name}`} title="Delete audience" className="grid h-8 w-8 place-items-center rounded border border-border text-text-muted hover:border-red/50 hover:text-red">×</button>}
                   </div></td>
                 </tr>
@@ -1281,14 +1307,17 @@ function AudienceWorkspace({
             <label className="grid gap-1.5 text-xs font-medium text-text-muted">Type<select value={kind} onChange={(event) => { setKind(event.target.value); setSourceAudienceID(""); setSourceResourceID(""); }} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{createKinds.map((value) => <option key={value} value={value}>{audienceTypeLabel(value)}</option>)}</select></label>
             <label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label>
             <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label>
-            {kind === "lookalike" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source audience<select required value={sourceAudienceID} onChange={(event) => setSourceAudienceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select audience</option>{audiences.filter((item) => item.type === "customer_list").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Country<input required maxLength={2} value={country} onChange={(event) => setCountry(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm uppercase text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Similarity<select value={ratio} onChange={(event) => setRatio(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="0.01">1%</option><option value="0.02">2%</option><option value="0.05">5%</option><option value="0.1">10%</option></select></label></div></>}
+            {kind === "lookalike" && account.platform !== "google" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source audience<select required value={sourceAudienceID} onChange={(event) => setSourceAudienceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select audience</option>{audiences.filter((item) => item.type === "customer_list").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Country<input required maxLength={2} value={country} onChange={(event) => setCountry(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm uppercase text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Similarity<select value={ratio} onChange={(event) => setRatio(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="0.01">1%</option><option value="0.02">2%</option><option value="0.05">5%</option><option value="0.1">10%</option></select></label></div></>}
             {kind === "engagement" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Facebook Page<select required value={sourceResourceID} onChange={(event) => setSourceResourceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select Page</option>{sourceResources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}</select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Retention<select value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="30">30 days</option><option value="90">90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></label></>}
+            {account.platform === "google" && <AudienceFields key={kind} kind={kind} draft={definition} onChange={setDefinition} audiences={audiences} adAccountId={account.id} callTool={callTool} />}
           </div>
-          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && !sourceAudienceID) || (kind === "engagement" && !sourceResourceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
+          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && account.platform !== "google" && !sourceAudienceID) || (account.platform === "google" && !audienceDefinitionValid(kind, definition)) || (kind === "engagement" && !sourceResourceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
         </form>
       </Modal>}
 
-      {editTarget && <Modal title="Edit audience" description={editTarget.name} onClose={() => !busy && setEditTarget(null)} labelledBy="ads-audience-edit-title"><form onSubmit={(event) => { event.preventDefault(); saveAudience(); }}><div className="grid gap-4 px-4 py-4"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label></div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setEditTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim()} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Saving..." : "Save"}</button></footer></form></Modal>}
+      {provenanceTarget && <Modal title="Verify audience source" description={provenanceTarget.name} size="large" onClose={() => setProvenanceTarget(null)} labelledBy="ads-audience-provenance-title"><AudienceProvenance audienceId={provenanceTarget.id} adAccountId={account.id} provenance={provenanceTarget.provenance} callTool={callTool} onClose={() => setProvenanceTarget(null)} onSaved={() => { setProvenanceTarget(null); load(false); }} /></Modal>}
+
+      {editTarget && <Modal title="Edit audience" description={editTarget.name} onClose={() => !busy && setEditTarget(null)} labelledBy="ads-audience-edit-title"><form onSubmit={(event) => { event.preventDefault(); saveAudience(); }}><div className="grid gap-4 px-4 py-4"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label>{account.platform === "google" && editTarget.type === "custom_segment" && <AudienceFields kind={editTarget.type} draft={definition} onChange={setDefinition} audiences={audiences} adAccountId={account.id} callTool={callTool} />}</div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setEditTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim()} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Saving..." : "Save"}</button></footer></form></Modal>}
 
       {syncTarget && <Modal title="Sync audience members" description={syncTarget.name} size="large" onClose={() => !busy && setSyncTarget(null)} labelledBy="ads-audience-sync-title">
         {syncJob ? <div><div className="px-4 py-5"><div className="flex items-center justify-between gap-3"><span className={`rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(syncJob.status)}`}>{syncJob.status.replaceAll("_", " ")}</span><span className="text-xs tabular-nums text-text-muted">{formatNumber(syncJob.processed_rows)} / {formatNumber(syncJob.total_rows)}</span></div><div className="mt-3 h-2 overflow-hidden rounded bg-bg-input"><div className="h-full bg-accent transition-all" style={{ width: `${syncJob.total_rows ? Math.min(100, (syncJob.processed_rows / syncJob.total_rows) * 100) : 5}%` }} /></div>{syncJob.rejected_rows > 0 && <p className="mt-2 text-xs text-yellow">{formatNumber(syncJob.rejected_rows)} rows had no usable identifiers.</p>}{syncJob.error && <p className="mt-2 text-xs text-red">{syncJob.error}</p>}</div><footer className="flex justify-end border-t border-border px-4 py-3"><button type="button" onClick={() => setSyncTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Close</button></footer></div> : <form onSubmit={(event) => { event.preventDefault(); queueSync(); }}><div className="grid gap-4 px-4 py-4 md:grid-cols-2"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Operation<select value={operation} onChange={(event) => setOperation(event.target.value as "add" | "remove")} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="add">Add members</option><option value="remove">Remove members</option></select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source<select value={sourceKind} onChange={(event) => setSourceKind(event.target.value as "storage" | "crm_segment")} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{capabilities?.sources.includes("storage") && <option value="storage">Storage CSV</option>}{capabilities?.sources.includes("crm_segment") && <option value="crm_segment">CRM segment</option>}</select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">{sourceKind === "storage" ? "CSV file" : "CRM segment"}<select required value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select source</option>{sources.map((source) => <option key={source.id} value={source.id}>{source.name || `Source ${source.id}`}</option>)}</select></label>{sourceKind === "storage" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Email column <span className="font-normal text-text-dim">optional</span><input value={emailColumn} onChange={(event) => setEmailColumn(event.target.value)} placeholder="email" className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Phone column <span className="font-normal text-text-dim">optional</span><input value={phoneColumn} onChange={(event) => setPhoneColumn(event.target.value)} placeholder="phone" className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label></>}{account.platform === "google" && <label className="flex items-start gap-2 rounded border border-border bg-bg-input px-3 py-3 text-sm text-text md:col-span-2"><input type="checkbox" checked={googleConsent} onChange={(event) => setGoogleConsent(event.target.checked)} className="mt-0.5 h-4 w-4 accent-accent" /><span>I confirm the selected records have the required consent for ad user data and personalization, and the Google Customer Match terms are accepted.</span></label>}</div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setSyncTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !sourceRef || (account.platform === "google" && !googleConsent)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Queuing..." : "Start sync"}</button></footer></form>}
@@ -1308,6 +1337,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignBuilderOpen, setCampaignBuilderOpen] = useState(false);
   const [activeView, setActiveView] = useState<"overview" | "campaigns" | "audiences" | "conversions">("overview");
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
@@ -2322,6 +2352,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     </button>
                   ))}
                 </div>
+                {activeView === "campaigns" && selected.platform === "google" && <button type="button" onClick={() => setCampaignBuilderOpen(true)} className="h-8 rounded border border-border px-3 text-xs hover:bg-bg-input">Create campaign</button>}
                 {activeView !== "audiences" && <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
                   <div className="col-span-3 inline-flex h-8 justify-self-end rounded border border-border p-0.5 sm:col-auto sm:justify-self-auto">
                     {[7, 30, 90].map((days) => (
@@ -2472,6 +2503,8 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
           )}
         </main>
       </div>
+
+      {campaignBuilderOpen && selected && <Modal title="Create campaign" size="large" onClose={() => setCampaignBuilderOpen(false)} labelledBy="ads-create-campaign"><CampaignBuilder key={`${installId}:${scopedProject}:${selected.id}`} account={selected} callTool={callTool} scopeKey={`${installId}:${scopedProject}`} dateFrom={dateFrom} dateTo={dateTo} onChanged={() => { refreshCampaigns(selected); setWorkspaceRefreshKey(current => current + 1); }} /></Modal>}
 
       {addOpen && (
         <Modal

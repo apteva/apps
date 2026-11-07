@@ -43,6 +43,7 @@ type procedureTimeline struct {
 
 type procedureRunResult struct {
 	LocalPath       string
+	StorageID       int64 // set when the runner already uploaded the artifact (renderer component)
 	Kind            string
 	DurationSeconds float64
 	Logs            string
@@ -174,6 +175,9 @@ func (a *App) materializeProceduralAssets(ctx context.Context, appCtx *sdk.AppCt
 			runner := a.procedureRunner
 			if runner == nil {
 				runner = runProcedureLocal
+				if revision.Runtime == webCanvasRuntime && useRenderer(ctx, appCtx) {
+					runner = runProcedureComponent
+				}
 			}
 			timeline := procedureTimeline{
 				JobID:            fmt.Sprintf("composition-%d:%s", compositionID, clip.UID),
@@ -191,8 +195,11 @@ func (a *App) materializeProceduralAssets(ctx context.Context, appCtx *sdk.AppCt
 				_, _ = appCtx.AppDB().Exec(`UPDATE procedure_materializations SET status='failed',logs=?,error=?,runtime_job_id=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND cache_key=?`, result.Logs, runErr.Error(), result.RuntimeJobID, projectID, cacheKey)
 				return changed, fmt.Errorf("clip %s procedure execution failed: %w", clip.UID, runErr)
 			}
-			format := strings.TrimPrefix(strings.ToLower(filepath.Ext(result.LocalPath)), ".")
-			storageID := saveRenderOutputContext(ctx, appCtx, result.LocalPath, format, projectID, compositionID)
+			storageID := result.StorageID
+			if storageID <= 0 {
+				format := strings.TrimPrefix(strings.ToLower(filepath.Ext(result.LocalPath)), ".")
+				storageID = saveRenderOutputContext(ctx, appCtx, result.LocalPath, format, projectID, compositionID)
+			}
 			if storageID <= 0 {
 				err = errors.New("procedure artifact could not be saved to Storage")
 				binding.Status, binding.Error = "failed", err.Error()
@@ -351,40 +358,20 @@ func runProcedureLocal(parent context.Context, appCtx *sdk.AppCtx, revision *Pro
 	if err := os.WriteFile(jobPath, jobJSON, 0o400); err != nil {
 		return result, err
 	}
-	executable := procedureExecutable(appCtx, revision.Runtime)
-	if executable == "" || revision.Runtime == "web-canvas-1" {
-		return result, fmt.Errorf("runtime %q is declared but local execution is not implemented", revision.Runtime)
-	}
-	args := []string{revision.Entrypoint}
-	if revision.Runtime == "go-1.25-media" {
-		args = []string{"run", revision.Entrypoint}
-	}
 	timeoutCtx, cancel := context.WithTimeout(parent, proceduralTimeout(appCtx))
 	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, executable, args...)
-	cmd.Dir = sourceDir
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=" + tmpDir, "TMPDIR=" + tmpDir,
-		"COMPOSER_JOB=" + jobPath, "COMPOSER_OUTPUT=" + outputDir, "COMPOSER_TMP=" + tmpDir,
-		"FFMPEG_PATH=" + ffmpegPath(), "FFPROBE_PATH=" + ffprobePath(),
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 5 * time.Second
 	logs := &boundedProcedureLog{limit: procedureLogLimit}
-	cmd.Stdout, cmd.Stderr = logs, logs
-	err = cmd.Run()
+	if revision.Runtime == webCanvasRuntime {
+		err = runWebCanvasProcedure(timeoutCtx, appCtx, revision, job, outputDir, tmpDir, logs)
+	} else {
+		err = runProcedureProcess(timeoutCtx, appCtx, revision, sourceDir, tmpDir, outputDir, jobPath, logs)
+	}
 	result.Logs = logs.String()
 	if timeoutCtx.Err() != nil {
 		return result, fmt.Errorf("procedure stopped: %w", timeoutCtx.Err())
 	}
 	if err != nil {
-		return result, fmt.Errorf("procedure process: %w", err)
+		return result, err
 	}
 	artifact, duration, err := readProcedureResult(outputDir, binding.OutputName, revision.OutputKind, proceduralMaxOutputBytes(appCtx))
 	if err != nil {
@@ -408,6 +395,37 @@ func runProcedureLocal(parent context.Context, appCtx *sdk.AppCtx, revision *Pro
 		result.DurationSeconds = probedDuration
 	}
 	return result, nil
+}
+
+func runProcedureProcess(ctx context.Context, appCtx *sdk.AppCtx, revision *ProcedureRevisionRecord, sourceDir, tmpDir, outputDir, jobPath string, logs *boundedProcedureLog) error {
+	executable := procedureExecutable(appCtx, revision.Runtime)
+	if executable == "" {
+		return fmt.Errorf("runtime %q has no local executable", revision.Runtime)
+	}
+	args := []string{revision.Entrypoint}
+	if revision.Runtime == "go-1.25-media" {
+		args = []string{"run", revision.Entrypoint}
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.Dir = sourceDir
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=" + tmpDir, "TMPDIR=" + tmpDir,
+		"COMPOSER_JOB=" + jobPath, "COMPOSER_OUTPUT=" + outputDir, "COMPOSER_TMP=" + tmpDir,
+		"FFMPEG_PATH=" + ffmpegPath(), "FFPROBE_PATH=" + ffprobePath(),
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Stdout, cmd.Stderr = logs, logs
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("procedure process: %w", err)
+	}
+	return nil
 }
 
 func validateProcedureInputName(name string) error {

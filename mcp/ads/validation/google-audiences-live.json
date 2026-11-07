@@ -1,0 +1,68 @@
+{
+  "validated_on": "2026-10-27",
+  "provider": "Google Ads API v23",
+  "test": "TestGoogleAudiencesLive",
+  "result": "PASS",
+  "final_run_provider_requests": 28,
+  "all_final_run_requests_succeeded": true,
+  "integration_validation": {
+    "existing_tools": "Production connection executor",
+    "custom_segments": "New integration catalog and HTTP executor, existing credentials held only in process memory",
+    "deployed": false
+  },
+  "validated": [
+    "all audience collections discovered into normalized registry",
+    "Google interest catalog search",
+    "custom segment keyword/URL/app creation",
+    "custom member update merges fresh provider state and accepts canonical domain URLs",
+    "custom segment usage and deletion",
+    "grouped composition from local scoped segment IDs and interest IDs",
+    "grouped metadata and explicit segment replacement",
+    "paused Demand Gen group targeting via local audience_resource_ids",
+    "native group configuration readback and usage",
+    "lookalike creation using first-party seed, country and expansion",
+    "identical lookalike definition reuse"
+  ],
+  "restrictions": {
+    "youtube_seed_creation": "Google Ads UI only; existing remarketing user lists can be discovered and used as seeds. Channel/action classification remains unknown.",
+    "lookalike_mutations": {
+      "readOnly": false,
+      "update": "USER_LIST_MUTATE_NOT_SUPPORTED",
+      "delete": "USER_LIST_MUTATE_NOT_SUPPORTED",
+      "app_capabilities": "immutable; update and delete blocked locally"
+    },
+    "group_deletion": "AudienceService has no remove operation",
+    "lookalike_readiness": "Unknown; creation is not proof of immediate matched membership or delivery"
+  },
+  "cleanup": {
+    "paid_delivery_enabled": false,
+    "all_campaigns_verified_removed": [
+      "24401884298",
+      "24396594693",
+      "24401939489",
+      "24407640862"
+    ],
+    "active_temporary_custom_segments_remaining": 0,
+    "active_test_budgets_remaining": 0,
+    "retained_group_id": "363565393",
+    "retained_lookalike_id": "9495570477",
+    "retained_reason": "Google API lifecycle restrictions; named reusable test fixtures"
+  },
+  "local_validation": {
+    "go_race": "PASS",
+    "go_vet": "PASS",
+    "go_build": "PASS",
+    "ui_tests": 15,
+    "ui_assertions": 58,
+    "targeted_typescript": "PASS",
+    "panel_build": "PASS",
+    "integration_transport_contract": "PASS",
+    "integration_typescript_build": "PASS",
+    "responsive_widths_px": [
+      390,
+      768,
+      1200
+    ],
+    "browser_errors": 0
+  }
+}

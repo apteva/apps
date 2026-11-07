@@ -198,7 +198,7 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	// Resolve any catalog price_id references first — this lookup
 	// fills in description / unit_price_cents on those lines and
 	// surfaces the catalog's currency if the caller didn't pin one.
-	catalogCurrency, err := resolveCatalogRefs(ctx, rawItems)
+	catalogCurrency, err := resolveCatalogRefs(ctx, pid, rawItems)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ func (a *App) toolInvoicesAddLineItem(ctx *sdk.AppCtx, args map[string]any) (any
 	// catalog (caller-provided values still win). resolveCatalogRefs
 	// mutates the map in place — maps are reference types, so args
 	// reflects the snapshot after this returns.
-	if _, err := resolveCatalogRefs(ctx, []any{args}); err != nil {
+	if _, err := resolveCatalogRefs(ctx, pid, []any{args}); err != nil {
 		return nil, err
 	}
 	items, err := normaliseLineItems([]any{args}, configIntBps(ctx, "tax_default_rate_bps"))
@@ -350,7 +350,7 @@ func (a *App) toolInvoicesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	// If patch.line_items references catalog prices, resolve before the
 	// DB call so dbInvoiceUpdate stays catalog-agnostic.
 	if rawItems, ok := patch["line_items"].([]any); ok {
-		if _, err := resolveCatalogRefs(ctx, rawItems); err != nil {
+		if _, err := resolveCatalogRefs(ctx, pid, rawItems); err != nil {
 			return nil, err
 		}
 	}

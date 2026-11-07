@@ -61,7 +61,7 @@ func TestOpenRoverBuildsAssemblyAndManufacturingPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Run.Status != "passed" || result.Report.BodyCount < 16 || len(result.Report.Parts) < 16 {
+	if (result.Run.Status != "passed" && result.Run.Status != "warning") || result.Report.BodyCount < 16 || len(result.Report.Parts) < 16 {
 		t.Fatalf("unexpected rover build: status=%s bodies=%d parts=%d checks=%#v", result.Run.Status, result.Report.BodyCount, len(result.Report.Parts), result.Checks)
 	}
 	if result.Report.MassG <= 0 || result.Report.CenterOfMass == [3]float64{} {

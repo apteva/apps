@@ -73,9 +73,15 @@ func (a *App) sharedRealtimeWork(row *callRow, phase string, bounded bool, run f
 	}
 	flight := p.active[key]
 	if flight == nil {
+		runtimeDone, err := a.runtimeBegin(false)
+		if err != nil {
+			p.mu.Unlock()
+			return "", err
+		}
 		flight = &realtimePreparation{done: make(chan struct{}), row: *row}
 		p.active[key] = flight
 		go func() {
+			defer runtimeDone()
 			flight.err = run(&flight.row)
 			p.mu.Lock()
 			delete(p.active, key)
@@ -125,6 +131,9 @@ func realtimePreparationReady(row *callRow) bool {
 }
 
 func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string) error {
+	if _, err := a.pinAgentAudioProfile(row); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(a.preparations.timeout())
 	for {
 		current, err := a.db().findCall(row.ID)
@@ -214,10 +223,46 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 			return fail(errors.New("AI agent and directive are required"))
 		}
 		ctx.Logger().Info("realtime answer preparation started", "call", row.ID, "thread", threadID, "agent", row.AgentID)
+		turnDetection, err := a.turnDetectionForNewSession(row)
+		if err != nil {
+			return fail(fmt.Errorf("invalid turn detection configuration: %w", err))
+		}
+		aiPolicy, err := a.aiPolicyForNewSession(ctx, row)
+		if err != nil {
+			return fail(fmt.Errorf("invalid AI call policy: %w", err))
+		}
+		if err = a.registerAIPolicy(ctx, row, threadID, aiPolicy, time.Now().UTC()); err != nil {
+			return fail(fmt.Errorf("persist AI call policy: %w", err))
+		}
+		mediaProfile, err := a.pinAgentAudioProfile(row)
+		if err != nil {
+			return fail(err)
+		}
+		effectiveDirective := aiPolicyDirective(directive, aiPolicy)
+		// Business facts for the selected AI destination load while the call
+		// rings; a failed lookup continues or takes the destination's fallback.
+		contextOutcome, err := a.resolveAIContext(ctx, row)
+		if err != nil {
+			return fail(fmt.Errorf("AI context lookup: %w", err))
+		}
+		if contextOutcome.Fallback {
+			// No thread exists yet, so there is nothing to clean up in Core.
+			if err := a.failAIHandoff(row, token, "context_unavailable", false); err != nil {
+				return err
+			}
+			_ = a.db().releaseRealtimePreparation(row.ID, token)
+			a.wakeRouting(row.ProjectID)
+			return errAIHandoffPending
+		}
+		effectiveDirective += contextOutcome.Block
+		if contextOutcome.Greeting != "" {
+			greeting = contextOutcome.Greeting
+		}
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
-			AgentID: row.AgentID, ThreadID: threadID, Directive: strings.TrimSpace(directive), Voice: voice,
+			RealtimeMedia: mediaProfile.mediaRequest(),
+			AgentID:       row.AgentID, ThreadID: threadID, Directive: effectiveDirective, Voice: voice,
 			CapabilityMode: sdk.RealtimeCapabilitiesInheritAgent, CallContext: realtimeCallContext(*row),
-			TurnDetection: telephonyTurnDetection(), Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
+			TurnDetection: turnDetection, Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
 		})
 		if err != nil {
 			return fail(fmt.Errorf("spawn realtime thread: %w", err))
@@ -248,7 +293,12 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 }
 
 func (c *callsDB) releaseRealtimePreparation(id, token string) error {
-	res, err := c.db.Exec(`UPDATE calls SET status='pending',audio_bridge_url='pending',thread_id=CASE WHEN thread_id LIKE 'pending-%' THEN thread_id ELSE 'pending-'||thread_id END WHERE id=? AND status='answering' AND thread_id=? AND media_active=0`, id, token)
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE calls SET status='pending',audio_bridge_url='pending',thread_id=CASE WHEN thread_id LIKE 'pending-%' THEN thread_id ELSE 'pending-'||thread_id END WHERE id=? AND status='answering' AND thread_id=? AND media_active=0`, id, token)
 	if err != nil {
 		return err
 	}
@@ -256,7 +306,11 @@ func (c *callsDB) releaseRealtimePreparation(id, token string) error {
 	if err != nil || n == 0 {
 		return err
 	}
-	return c.releaseRingClaim(id)
+	// Same transaction as the status flip: see releaseRingClaimTx.
+	if err = releaseRingClaimTx(tx, id); err != nil {
+		return err
+	}
+	return c.commitCall(tx, id)
 }
 
 // Retrying XML must not speak an error or hang up a legitimate winning answer.

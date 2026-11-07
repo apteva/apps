@@ -30,8 +30,26 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 	if f.Field != "" {
 		branches++
 	}
+	if f.Fields != nil {
+		branches++
+	}
+	if f.Exists != nil {
+		branches++
+	}
+	if f.NotExists != nil {
+		branches++
+	}
 	if branches != 1 {
-		return Invalid("filter requires exactly one of field, and, or")
+		return Invalid("filter requires exactly one of field, fields, and, or, exists, not_exists")
+	}
+	if f.Exists != nil || f.NotExists != nil {
+		if f.Op != "" || f.Value != nil {
+			return Invalid("exists filter cannot have op/value")
+		}
+		return nil
+	}
+	if f.Fields != nil || f.Op == opLikeContainsASCII {
+		return validateSearch(c, f)
 	}
 	if f.And != nil || f.Or != nil {
 		if f.Op != "" || f.Value != nil {
@@ -64,14 +82,17 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 		}
 		return nil
 	}
+	if f.Op == opContainsASCII {
+		return validateContains(fld, f)
+	}
 	if f.Value == nil {
 		return Invalid("use is_null to test null")
 	}
 	fld.Nullable = false
-	if f.Op == "in" {
+	if f.Op == "in" || f.Op == "not_in" {
 		a, ok := f.Value.([]any)
 		if !ok || len(a) == 0 || len(a) > 100 {
-			return Invalid("in requires 1–100 values")
+			return Invalid("%s requires 1–100 values", f.Op)
 		}
 		for i, v := range a {
 			n, e := normalize(fld, v)
@@ -79,6 +100,11 @@ func validateFilter(c Collection, f *Filter, depth int, terms *int) error {
 				return e
 			}
 			a[i] = n
+		}
+		// A one-value list is equality: planners bind an index prefix only
+		// on equality (a caller's single scope arrives as a list).
+		if len(a) == 1 {
+			f.Op, f.Value = map[string]string{"in": "eq", "not_in": "ne"}[f.Op], a[0]
 		}
 		return nil
 	}
@@ -214,7 +240,16 @@ func matches(c Collection, r Record, f *Filter) bool {
 		}
 		return false
 	}
+	if f.Fields != nil {
+		return matchesSearch(r, f)
+	}
+	if f.Exists != nil || f.NotExists != nil {
+		return matchesExists(r, f)
+	}
 	v := r[f.Field]
+	if f.Op == opContainsASCII {
+		return matchesContains(v, f)
+	}
 	if f.Op == "is_null" {
 		return v == nil
 	}
@@ -232,6 +267,14 @@ func matches(c Collection, r Record, f *Filter) bool {
 			}
 		}
 		return false
+	}
+	if f.Op == "not_in" {
+		for _, w := range f.Value.([]any) {
+			if compare(fld, v, w) == 0 {
+				return false
+			}
+		}
+		return true
 	}
 	if f.Op == "starts_with" {
 		return strings.HasPrefix(v.(string), f.Value.(string))
@@ -291,30 +334,45 @@ func signCursor(key []byte, p cursorData) string {
 	mac.Write(b)
 	return base64.RawURLEncoding.EncodeToString(b) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
-func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
-	parts := strings.Split(q.Cursor, ".")
-	if len(parts) != 2 || len(q.Cursor) > 32768 {
-		return nil, Invalid("invalid cursor")
+func readCursor(cursor string, key []byte) (cursorData, error) {
+	var p cursorData
+	parts := strings.Split(cursor, ".")
+	if len(parts) != 2 || len(cursor) > 32768 {
+		return p, Invalid("invalid cursor")
 	}
 	b, e := base64.RawURLEncoding.DecodeString(parts[0])
 	if e != nil {
-		return nil, Invalid("invalid cursor")
+		return p, Invalid("invalid cursor")
 	}
 	sig, e := base64.RawURLEncoding.DecodeString(parts[1])
 	mac := hmac.New(sha256.New, key)
 	mac.Write(b)
 	if e != nil || !hmac.Equal(sig, mac.Sum(nil)) {
-		return nil, Invalid("invalid cursor signature")
+		return p, Invalid("invalid cursor signature")
 	}
-	var p cursorData
-	if decode(b, &p) != nil || p.Version != c.Version || p.Hash != queryHash(c, *q) || p.Expires < time.Now().Unix() {
+	if decode(b, &p) != nil {
+		return p, Invalid("invalid cursor")
+	}
+	return p, nil
+}
+func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
+	p, e := readCursor(q.Cursor, key)
+	if e != nil {
+		return nil, e
+	}
+	if p.Version != c.Version || p.Hash != queryHash(c, *q) || p.Expires < time.Now().Unix() {
 		return nil, Invalid("expired or incompatible cursor")
 	}
 	q.after = p.Values
+	return keysetFilter(c, q, p.Values), nil
+}
+
+// keysetFilter matches rows after values under q's order.
+func keysetFilter(c Collection, q *Query, values Record) *Filter {
 	branches := []Filter{}
 	prefix := []Filter{}
 	for _, o := range q.OrderBy {
-		v := p.Values[o.Field]
+		v := values[o.Field]
 		eq := Filter{Field: o.Field, Op: "eq", Value: v}
 		var next *Filter
 		if v == nil {
@@ -340,9 +398,9 @@ func afterCursor(c Collection, q *Query, key []byte) (*Filter, error) {
 		prefix = append(prefix, eq)
 	}
 	if len(branches) == 0 {
-		return &Filter{Field: c.PrimaryKey[0], Op: "is_null"}, nil
+		return &Filter{Field: c.PrimaryKey[0], Op: "is_null"}
 	}
-	return &Filter{Or: branches}, nil
+	return &Filter{Or: branches}
 }
 func and(a, b *Filter) *Filter {
 	if a == nil {
@@ -424,11 +482,25 @@ func validateAggregate(c Collection, r *Request) (Collection, error) {
 		}
 		seen[m.Name] = true
 		f := Field{Name: m.Name, Type: "integer"}
+		if hasExists(m.Where) {
+			return Collection{}, Invalid("metric where cannot use exists; put it in the aggregate's where")
+		}
+		if e := validateFilter(c, m.Where, 0, &n); e != nil {
+			return c, e
+		}
 		if m.Op == "count" {
 			if m.Field != "" {
 				if _, e := c.field(m.Field); e != nil {
 					return c, e
 				}
+			}
+		} else if m.Op == "count_distinct" {
+			src, e := c.field(m.Field)
+			if e != nil {
+				return c, e
+			}
+			if src.Type == "json" {
+				return c, Invalid("count_distinct requires a scalar field")
 			}
 		} else {
 			src, e := c.field(m.Field)

@@ -418,7 +418,10 @@ func (a *App) reconcileSaleBilling(ctx *sdk.AppCtx, pid string, sale *Sale) erro
 	}, &response); err != nil {
 		return fmt.Errorf("reconcile Billing invoice: %w", err)
 	}
-	invoice := unwrap(response, "invoice")
+	return reconcileSaleBillingInvoice(ctx, pid, sale, unwrap(response, "invoice"))
+}
+
+func reconcileSaleBillingInvoice(ctx *sdk.AppCtx, pid string, sale *Sale, invoice map[string]any) error {
 	invoiceCurrency := strings.ToUpper(firstNonEmpty(strArg(invoice, "currency"), sale.Currency))
 	if invoiceCurrency != sale.Currency {
 		return fmt.Errorf("Billing invoice currency %s does not match sale currency %s", invoiceCurrency, sale.Currency)

@@ -148,6 +148,21 @@ func (p *answerPlatform) ExecuteIntegrationTool(connID int64, tool string, input
 	}
 	if response := p.integrationResponse[tool]; response != nil {
 		data = response
+	} else if tool == "list_phone_numbers" {
+		// Default fixture inventory matches the configured account. Explicit
+		// empty/negative responses above remain authoritative in safety tests.
+		creds, _ := p.GetConnectionCredentials(connID)
+		if creds != nil && validE164(creds.Fields["phone_number"]) {
+			number := map[string]any{"phone_number": creds.Fields["phone_number"], "status": "active"}
+			if creds.Slug == "telnyx" {
+				number["features"] = []string{"voice"}
+				number["connection_id"] = creds.Fields["connection_id"]
+				data, _ = json.Marshal(map[string]any{"data": []any{number}})
+			} else {
+				number["capabilities"] = map[string]any{"voice": true}
+				data, _ = json.Marshal(map[string]any{"incoming_phone_numbers": []any{number}})
+			}
+		}
 	}
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
 }
@@ -424,7 +439,7 @@ func TestPendingCallCanOnlyBeClaimedOnce(t *testing.T) {
 	}
 }
 
-func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
+func TestPushImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -433,12 +448,13 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	a := &App{installID: 42}
 
 	route := routeRow{
-		ID: "route-immediate", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		ID: "route-immediate", ProjectID: "project-a", CarrierSlug: "bandwidth", CarrierConnectionID: 9,
 		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
 		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoVoice: "marin",
 		AutoGreeting: "Hello. How can I help?",
 	}
 	call := testCall("immediate", "pending")
+	call.CarrierSlug = "bandwidth"
 	call.Direction = "inbound"
 	call.RouteID = route.ID
 	call.ThreadID = "pending-" + call.ID
@@ -453,7 +469,7 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
 	}
 	spawn := platform.spawned[0]
-	if spawn.AgentID != route.AgentID || spawn.Directive != route.AutoDirective || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting ||
+	if spawn.AgentID != route.AgentID || spawn.Directive != aiPolicyDirective(route.AutoDirective, projectAICallPolicy(ctx)) || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting ||
 		spawn.CapabilityMode != sdk.RealtimeCapabilitiesInheritAgent || spawn.CallContext == nil || spawn.CallContext.CallID != call.ID {
 		t.Fatalf("unexpected realtime spawn: %+v", spawn)
 	}
@@ -746,7 +762,7 @@ func TestTwilioRouteConfigurationPreservesAndRestoresCallbacks(t *testing.T) {
 	}
 }
 
-func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
+func TestPushImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
 	platform := &answerPlatform{failCarrier: true}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -755,11 +771,12 @@ func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
 	a := &App{installID: 42}
 
 	route := routeRow{
-		ID: "route-failure", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		ID: "route-failure", ProjectID: "project-a", CarrierSlug: "bandwidth", CarrierConnectionID: 9,
 		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
 		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoGreeting: defaultInboundGreeting,
 	}
 	call := testCall("immediate-failure", "pending")
+	call.CarrierSlug = "bandwidth"
 	call.Direction = "inbound"
 	call.RouteID = route.ID
 	call.ThreadID = "pending-" + call.ID

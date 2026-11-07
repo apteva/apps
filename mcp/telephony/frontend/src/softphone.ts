@@ -1,9 +1,19 @@
-import { MediaLease, type MediaSessionEvent } from "./media-lease";
-import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
+import {requestDiagnostic} from "./telemetry";
+import {AutomaticAnswer,type AutoAnswerSnapshot} from "./auto-answer";
+import {validateNetworkPolicy,type NetworkPolicy} from "./network-policy";
+import {withNetworkAbort,type NetworkCheckResult,type NetworkCheckOptions} from "./network-check";
+import { AudioRecoveryLoop } from "./audio-recovery";
+import { mediaFailure, mediaDiagnosticID, boundedMediaRequest, mediaCurrentGeneration } from "./media-lease";
+import type { CallListenerOptions } from "./listener";
+import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneCallbacks, type SoftphoneMediaReadiness, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
+import { RecoveryRecorder, runRecoveryChecks, type MediaRecoveryRecord, type RecoveryEvidence } from "./media-recovery-record";
+import { rtcRecoveryLimits } from "./webrtc-audio";
+import { measureAudioSetup } from "../../ui/audio-setup";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
 
-/** Coarse call progress derived from carrier status: idle, placing, ringing, connected, ended. */
+/** Carrier progress; connected is exposed only after browser media is live. */
 export type SoftphonePhase = "idle" | "placing" | "ringing" | "connected" | "ended";
 export interface RingbackOptions { country?: string }
 
@@ -16,7 +26,10 @@ export function phaseForStatus(status?: string): SoftphonePhase {
 }
 
 export interface SoftphoneSnapshot {
+  readonly autoAnswer?:AutoAnswerSnapshot;
   readonly callId?: string;
+ readonly networkCheck?: NetworkCheckResult;
+ readonly networkChecking?:boolean;
   readonly carrierStatus?: string;
   readonly audioState: SoftphoneState | "idle";
   readonly busy: boolean;
@@ -33,6 +46,11 @@ export interface SoftphoneSnapshot {
   readonly capabilities?: Call["capabilities"];
 }
 export interface SoftphoneOptions {
+ /** Idle-only network readiness checks. Enabled by the bundled panel, opt-in for existing hosts. */
+ networkCheck?: boolean;
+ onNetworkCheck?: (result:NetworkCheckResult)=>void;
+  onAutoAnswer?: (value:AutoAnswerSnapshot)=>void;
+  onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
 	/** Applied to the shared browser runtime; defaults to websocket. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
   audio?: Partial<SoftphoneAudioOptions>;
@@ -51,6 +69,12 @@ export interface SoftphoneOptions {
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/** Which session and connection a set of audio callbacks belongs to. */
+interface AudioRef { session: CallSession; audio?: AudioConnection; state?: [SoftphoneState, string | undefined]; settled?: () => void }
+// A candidate's ready, peer and call status arrive together just after its setup
+// resolves, so this only runs out when something is wrong with the candidate.
+const HANDOVER_LIVE_WAIT_MS=1000;
+
 /** One human operator's call. UI frameworks subscribe to immutable snapshots. */
 export class HeadlessSoftphone {
   private snapshot: SoftphoneSnapshot = Object.freeze({ audioState: "idle", busy: false, muted: false, phase: "idle" });
@@ -66,19 +90,103 @@ export class HeadlessSoftphone {
   private lease?: MediaLease;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
+  private hasStatusPush=false;
+  private automaticRecovery?:AudioRecoveryLoop;
+  private recoveryRecords:{callId:string;record:MediaRecoveryRecord}[]=[];
+  private flushingRecoveryRecords=false;
+  private handover?:{abort:AbortController;candidate?:AudioConnection};
+  // Generations this tab's candidates held. A 409 naming one means a handover
+  // committed but its connection died before this tab could learn of it.
+  private ownGenerations=new Set<string>();
+  private hasLiveAudio=false;
+  private uncertainAttachment?:{diagnostics:MediaRecoveryContext&{previous_session_id?:string};expected?:string};
+  private scheduleStatusPoll?: () => void;
   private outbound = false;
   private ringing = false;
   private readonly runtime: AudioRuntime;
   private audioOptions: SoftphoneAudioOptions;
+  private preferredPlayback:Pick<SoftphoneAudioOptions,"playbackTargetMs"|"playbackMinMs"|"playbackMaxMs">={};
+  private preferredMediaTransport: SoftphoneAudioOptions["mediaTransport"];
+ private networkTimer?:ReturnType<typeof setTimeout>;
+ private networkRequest?:AbortController;
+ private readonly networkChanged=()=>{if(this.disposed)return;if(this.snapshot.networkCheck)this.update({networkCheck:{...this.snapshot.networkCheck,state:"inconclusive"}});this.scheduleNetworkCheck(1000);};
   private readonly interval: number;
+  private readonly autoAnswer:AutomaticAnswer;
+  private autoPrepared=false;
+  private automaticAnswerStartedAt?:number;
+  private observedOffers=new Map<string,Call>();
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
     this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio, ...(options.mediaTransport ? { mediaTransport: options.mediaTransport } : {}) };
+    this.preferredMediaTransport=this.audioOptions.mediaTransport;
+    this.preferredPlayback={playbackTargetMs:this.audioOptions.playbackTargetMs,playbackMinMs:this.audioOptions.playbackMinMs,playbackMaxMs:this.audioOptions.playbackMaxMs};
     playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");
+    this.autoAnswer=new AutomaticAnswer(client,{
+      busy:()=>this.disposed||this.snapshot.busy||Boolean(this.session)||Boolean(this.hangingUp),
+      prepare:async()=>{this.cancelNetworkCheck();await this.runtime.preflight(this.audioOptions);this.autoPrepared=true;},
+      releasePreparation:()=>{this.runtime.cancelPreparation?.();this.autoPrepared=false;},
+      ...(this.runtime.playAutoAnswerWarning?{warning:async(windowMs:number,signal:AbortSignal)=>{
+        signal.throwIfAborted();
+        const cancel=()=>{this.runtime.cancelPreparation?.();this.autoPrepared=false;};
+        signal.addEventListener("abort",cancel,{once:true});
+        try{
+          if(!this.autoPrepared||this.runtime.isPrepared?.()===false){await this.runtime.preflight(this.audioOptions);this.autoPrepared=true;}
+          signal.throwIfAborted();
+          await this.runtime.playAutoAnswerWarning!(this.audioOptions,windowMs,signal);
+        }finally{signal.removeEventListener("abort",cancel);if(signal.aborted)cancel();}
+      }}:{}),
+      answer:(id,dest,session,warningCompleted)=>this.answer(id,{destination_id:dest,auto_answer_session:session,auto_answer_warning_completed:warningCompleted}),
+      changed:value=>{
+        const stage=value.code==="warning_started"?"warning_attempted":value.code==="warning_completed"?"warning_completed":value.code?.startsWith("warning_")||value.code==="auto_answer_warning_unsupported"?"warning_failed":["pickup_canceled","offer_withdrawn","offer_expired","adviser_unavailable","another_call_started"].includes(value.code??"")?"auto_answer_canceled":undefined;
+        const offer=value.eventCallId?this.observedOffers.get(value.eventCallId)?.ring_offers?.find(o=>o.id===value.offerId):undefined;
+        if(stage&&offer&&value.eventCallId)void this.client.reportOfferEvent({call_id:value.eventCallId,offer_id:offer.id,stage,code:value.code,event_id:`auto-${offer.id}-${value.code}`}).catch(()=>{});
+        this.update({autoAnswer:value});try{this.options.onAutoAnswer?.(value);}catch{/* observer isolation */}},
+    },this.interval!==0);
+    if(options.networkCheck){globalThis.addEventListener?.("online",this.networkChanged);this.scheduleNetworkCheck(500+Math.random()*15000);}
   }
+
+  private scheduleNetworkCheck(delay=300000+Math.random()*60000){
+    if(!this.options.networkCheck||this.disposed)return;
+    clearTimeout(this.networkTimer);
+    this.networkTimer=setTimeout(()=>{if(!this.session&&!this.snapshot.busy&&(typeof document==="undefined"||document.visibilityState!=="hidden"))void this.checkNetwork().catch(()=>{});else this.scheduleNetworkCheck();},delay);
+  }
+  private cancelNetworkCheck(){if(this.snapshot.networkChecking)this.update({networkChecking:false});clearTimeout(this.networkTimer);this.networkRequest?.abort();this.networkRequest=undefined;this.client.cancelNetworkChecks();}
+  /** Does not alter busy/call state; dial and answer synchronously cancel it. */
+  async checkNetwork(options:NetworkCheckOptions={}):Promise<NetworkCheckResult>{
+    this.assertOpen();if(this.session||this.snapshot.busy||!this.client.networkChecksAllowed)throw Error("Network checks pause during calls or incoming offers");
+    this.cancelNetworkCheck();const controller=new AbortController();this.networkRequest=controller;const unregister=this.client.registerNetworkCheck(controller);this.update({networkChecking:true});
+    const cancel=()=>controller.abort();options.signal?.addEventListener("abort",cancel,{once:true});if(options.signal?.aborted)cancel();
+    let profileDeadline:ReturnType<typeof setTimeout>|undefined;
+    try{
+      // Policy discovery is never on the call-admission path. A slow or old
+      // server cannot stall answering, microphone preparation or cancellation.
+      const profileController=new AbortController(),cancelProfile=()=>profileController.abort();controller.signal.addEventListener("abort",cancelProfile,{once:true});
+      profileDeadline=setTimeout(cancelProfile,3000);
+      let enabled=true;
+      try {const view=await withNetworkAbort(this.client.networkPolicy({},profileController.signal),profileController.signal);const profile=validateNetworkPolicy(view.effective);enabled=profile.background_check;
+        if(!controller.signal.aborted&&!this.session&&!this.snapshot.busy)this.applyNetworkPolicy(view.configured===false?undefined:profile);
+      }catch { /* optional policy discovery never breaks existing calls */ }
+      finally {clearTimeout(profileDeadline);controller.signal.removeEventListener("abort",cancelProfile);}
+      if(!enabled && !options.paths)return {state:"unavailable",checkedAt:new Date().toISOString(),paths:[]};
+      const result=await this.client.checkNetwork({...options,signal:controller.signal});
+      if(this.networkRequest===controller&&!controller.signal.aborted){this.update({networkCheck:result});try{this.options.onNetworkCheck?.(result);}catch{/* observer isolation */}}
+      return result;
+    }finally{unregister();clearTimeout(profileDeadline);options.signal?.removeEventListener("abort",cancel);if(this.networkRequest===controller){this.networkRequest=undefined;this.update({networkChecking:false});this.scheduleNetworkCheck();}}
+  }
+
+  /** Applies to the next attachment, without restarting an existing call. */
+  applyNetworkPolicy(value?:NetworkPolicy):void {
+    this.assertOpen();
+    if(value===undefined){if(this.audioOptions.networkProfile)this.audioOptions={...this.audioOptions,...this.preferredPlayback,networkProfile:undefined,mediaTransport:this.preferredMediaTransport};return;}
+    const profile=validateNetworkPolicy(value);
+    this.audioOptions={...this.audioOptions,networkProfile:profile,playbackTargetMs:profile.playback_target_ms,playbackMinMs:Math.min(this.preferredPlayback.playbackMinMs??60,profile.playback_target_ms),playbackMaxMs:profile.playback_max_ms,mediaTransport:profile.media_transport==="inherit"?this.preferredMediaTransport:profile.media_transport};
+  }
+
+  /** New listener/coach sessions inherit this softphone's current audio profile. */
+  createCallListener(options:CallListenerOptions = {}) { this.assertOpen(); return this.client.createCallListener({...this.audioOptions,...options.audio,...options}); }
 
   getSnapshot = (): SoftphoneSnapshot => this.snapshot;
   subscribe = (listener: (state: SoftphoneSnapshot) => void): (() => void) => {
@@ -88,7 +196,9 @@ export class HeadlessSoftphone {
   };
 
   private update(patch: Partial<SoftphoneSnapshot>) {
-    this.snapshot = Object.freeze({ ...this.snapshot, ...patch });
+    const next={...this.snapshot,...patch};
+    if(next.callId && phaseForStatus(next.carrierStatus)==="connected") next.phase=next.audioState==="live"?"connected":"placing";
+    this.snapshot = Object.freeze(next);
     for (const listener of this.listeners) {
       // Host rendering must not interrupt call cleanup or start another dial.
       try { listener(this.snapshot); } catch { /* isolate observer failures */ }
@@ -98,13 +208,18 @@ export class HeadlessSoftphone {
   private assertCurrent(generation: number) {
     if (this.disposed || generation !== this.generation || this.cancellation.signal.aborted) throw new Error("Softphone operation cancelled");
   }
-  private invalidate(): number {
+  private invalidate(keepPreparation=false): number {
+    if(!keepPreparation){this.runtime.cancelPreparation?.();this.autoPrepared=false;}
+    this.automaticRecovery?.stop();this.automaticRecovery=undefined;this.uncertainAttachment=undefined;
+    this.cancelHandover();
     this.cancellation.abort();
     this.cancellation = new AbortController();
     return ++this.generation;
   }
   private current(generation: number) { return !this.disposed && generation === this.generation; }
-  private finish(generation: number) { if (this.current(generation)) this.update({ busy: false }); }
+  private finish(generation: number) {
+    if (this.current(generation)) { this.runtime.cancelPreparation?.(); this.update({ busy: false }); }
+  }
   // Device permission and audio startup may never settle. Cancellation must
   // free controls immediately; the runtime still owns cleanup of late devices.
   private cancellable<T>(pending: Promise<T>, generation: number): Promise<T> {
@@ -116,15 +231,32 @@ export class HeadlessSoftphone {
       if (!this.current(generation) || signal.aborted) cancel();
     });
   }
-  private begin(requireIdle: boolean): number {
+  private begin(requireIdle: boolean,keepPreparation=false): number {
+ this.cancelNetworkCheck();
     this.assertOpen();
     if (this.snapshot.busy || this.hangingUp || (requireIdle && this.session)) throw new Error("Softphone already has an active operation or call");
-    const generation = this.invalidate();
+    const generation = this.invalidate(keepPreparation);
     this.update({ busy: true, detail: undefined });
     return generation;
   }
 
+  private async prepareAudio(generation: number, microphone: boolean): Promise<MediaSessionEvent[]> {
+    const events: MediaSessionEvent[] = [];
+    const emit = (event: MediaSessionEvent) => { if (this.current(generation) && !this.cancellation.signal.aborted) events.push(safeMediaSessionEvent(event)); };
+    try {
+      await this.cancellable(measureAudioSetup(microphone ? "audio_preflight" : "audio_prepare", emit, () => microphone
+        ? this.runtime.preflight(this.audioOptions, emit)
+        : this.runtime.prepare?.(this.audioOptions, emit) ?? Promise.resolve()), generation);
+      this.assertCurrent(generation);
+      return events;
+    } catch (error) {
+      if (this.current(generation)) for (const event of events) this.reportSessionEvent(event);
+      throw error;
+    }
+  }
+
   async dial(input: Omit<DialRequest, "idempotency_key"> & { idempotency_key?: string }): Promise<string> {
+    this.autoAnswer.cancel(undefined,"another_call_started");
     const generation = this.begin(true);
     let placed: CallSession | undefined;
     let attached = false;
@@ -135,7 +267,7 @@ export class HeadlessSoftphone {
       if (!this.intent || this.intent.value !== value || (input.idempotency_key && input.idempotency_key !== this.intent.request.idempotency_key)) {
         this.intent = { value, request: { ...normalized, idempotency_key: input.idempotency_key || crypto.randomUUID() } };
       }
-      await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
+      const setupEvents = await this.prepareAudio(generation, true);
       this.assertCurrent(generation);
       // Do not abort a write whose carrier outcome would then be unknown.
       placed = await this.client.place(this.intent.request);
@@ -143,7 +275,7 @@ export class HeadlessSoftphone {
       this.assertCurrent(generation);
       attached = true;
       this.outbound = true;
-      await this.attachAudio(placed, generation);
+      await this.attachAudio(placed, generation, setupEvents);
       return placed.call_id;
     } catch (error) {
       if (placed && (this.current(generation) || !attached || this.disposed)) {
@@ -154,18 +286,39 @@ export class HeadlessSoftphone {
     } finally { this.finish(generation); }
   }
 
+  /** Explicit session opt-in; invoke from a user gesture to prepare browser audio. */
+  setAutoAnswerAvailable(available:boolean,options:{takeover?:boolean}={}):Promise<void>{return this.autoAnswer.setAvailable(available,options.takeover);}
+  answerAutoAnswerNow():void{this.autoAnswer.answerNow();}
+  cancelAutoAnswer(callId?:string):void{this.autoAnswer.cancel(callId);}
+  /** Hosts that disable polling feed the same complete permission-scoped call list. */
+  observeCalls(calls:Call[]):void{this.observedOffers=new Map(calls.map(c=>[c.id,c]));for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
-    const generation = this.begin(true);
+    if(!request.auto_answer_session)this.autoAnswer.cancel(id);
+    const prepared=Boolean(request.auto_answer_session&&this.autoPrepared&&this.runtime.isPrepared?.()!==false);
+    const generation = this.begin(true,prepared);
+    const offer=this.observedOffers.get(id)?.ring_offers?.find(o=>o.kind==="browser"&&(!request.destination_id||o.destination_id===request.destination_id));
+    if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_attempted"}).catch(()=>{});
+    let answerRequested=false;
     let claimed: CallSession | undefined;
     let attached = false;
     try {
       this.assertCurrent(generation);
+      const setupEvents = prepared ? [] : await this.prepareAudio(generation, true);
+      this.autoPrepared=false;
+      this.automaticAnswerStartedAt=request.auto_answer_session?Date.now():undefined;
+      if(this.automaticAnswerStartedAt){
+        const offered=this.snapshot.autoAnswer?.offerReceivedAt;
+        if(offered)setupEvents.push({timestamp:new Date(offered).toISOString(),action:"automatic_answer",outcome:"offer_received"});
+        setupEvents.push({timestamp:new Date(this.automaticAnswerStartedAt).toISOString(),action:"automatic_answer",outcome:"answer_started",code:this.snapshot.autoAnswer?.source,duration_ms:offered?this.automaticAnswerStartedAt-offered:undefined});
+      }
+      answerRequested=true;
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
       this.outbound = false;
-      await this.attachAudio(claimed, generation);
+      await this.attachAudio(claimed, generation, setupEvents);
     } catch (error) {
+      if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_failed",code:answerRequested?(requestDiagnostic(error).code??"answer_request_failed"):"audio_preflight_failed",request_id:requestDiagnostic(error).requestId}).catch(()=>{});
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
         await this.recoverStartup(claimed, generation, () => this.client.release(claimed!));
       }
@@ -191,19 +344,20 @@ export class HeadlessSoftphone {
   async join(id: string): Promise<void> { await this.answer(id, { rejoin: true }); }
 
   /** Resume a backend-assigned call without placing a new carrier leg. */
-  async attach(id: string): Promise<void> { await this.acquireSession(id, false); }
+  async attach(id: string, action: MediaInitiatingAction = "attach"): Promise<void> { await this.acquireSession(id, false, action); }
 
   /** Explicit supervisor action; normal attach/join cannot displace another user. */
   async takeover(id: string): Promise<void> { await this.acquireSession(id, true); }
 
-  private async acquireSession(id: string, takeover: boolean): Promise<void> {
+  private async acquireSession(id: string, takeover: boolean, action: MediaInitiatingAction = "takeover"): Promise<void> {
     const generation = this.begin(true);
     try {
-      await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
+      const setupEvents = await this.prepareAudio(generation, true);
       this.assertCurrent(generation);
-      const session = await (takeover ? this.client.takeover(id) : this.client.attach(id));
+      const recovery=mediaRecoveryContext(takeover ? "takeover" : action);
+      const session = await (takeover ? this.client.takeover(id,recovery) : this.client.attach(id,recovery));
       this.assertCurrent(generation);
-      await this.attachAudio(session, generation);
+      await this.attachAudio(session, generation, setupEvents);
       // The call was placed elsewhere, so its direction and current status are
       // unknown here. One read settles both instead of waiting for polling.
       await this.reconcileAttachedCall(session, generation);
@@ -213,20 +367,36 @@ export class HeadlessSoftphone {
     } finally { this.finish(generation); }
   }
 
-  async reconnect(audio?: Partial<SoftphoneAudioOptions>): Promise<void> {
+  async reconnect(audio?: Partial<SoftphoneAudioOptions>, action: MediaInitiatingAction = "manual_reconnect"): Promise<void> {
     if (!this.session) throw new Error("No call to reconnect");
     const nextOptions = { ...this.audioOptions, ...audio };
     playbackBufferOptions(nextOptions);
     const generation = this.begin(false);
-    this.audioOptions = nextOptions;
+    this.configureAudio(audio??{});
     const id = this.session.call_id;
+    const recovery=mediaRecoveryContext(action),previous_session_id=this.session.session_generation;
+    const report=(outcome:string,extra:Partial<MediaSessionEvent>={})=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome,...recovery,previous_session_id,...extra});
+    report("started");
     try {
-      const session = await this.client.attach(id);
+      // Keep the current audio running while scripts prepare. Acquire a new
+      // server generation only after preparation, preserving token ownership.
+      const setupEvents = await this.prepareAudio(generation, false);
+      let session:CallSession;
+      try{session=await this.acquireRecoverySession(this.session!,{...recovery,previous_session_id},this.cancellation.signal);}
+      catch(error){
+        const f=mediaFailure(error),current=mediaCurrentGeneration(error);
+        if(action==="automatic_retry" || f.code!=="media_session_changed" || !current)throw error;
+        // An explicit user action may conditionally replace the observed current
+        // generation. Automatic retry never displaces a newer attachment.
+        this.assertCurrent(generation);
+        session=await this.client.attach(id,{...mediaRecoveryContext(action),previous_session_id:current},{signal:this.cancellation.signal},current);
+      }
       this.assertCurrent(generation);
-      await this.attachAudio(session, generation);
+      await this.attachAudio(session, generation, setupEvents);
       await this.reconcileAttachedCall(session, generation);
+      report("connected",{session_id:session.session_generation});
     }
-    catch (error) { if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
+    catch (error) { report(this.current(generation)?"failed":"cancelled"); if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
     finally { this.finish(generation); }
   }
 
@@ -238,6 +408,7 @@ export class HeadlessSoftphone {
       // With a write in flight, retain the busy lock until its outcome is
       // known and the cancelled operation cleans up any accepted call.
       this.cancellation.abort();
+      this.runtime.cancelPreparation?.();
       return;
     }
     const generation = this.invalidate();
@@ -301,12 +472,16 @@ export class HeadlessSoftphone {
     this.assertOpen();
     const nextOptions = { ...this.audioOptions, ...options };
     playbackBufferOptions(nextOptions);
+    if(options.mediaTransport!==undefined)this.preferredMediaTransport=options.mediaTransport;
+    for(const key of ["playbackTargetMs","playbackMinMs","playbackMaxMs"] as const)if(key in options)this.preferredPlayback[key]=options[key];
     this.audioOptions = nextOptions;
+    if(nextOptions.networkProfile)this.applyNetworkPolicy(nextOptions.networkProfile);
   }
 
   setMuted(muted: boolean): void {
     this.assertOpen();
     this.audio?.setMuted(muted);
+    this.handover?.candidate?.setMuted(muted);
     this.update({ muted });
   }
   setOutputVolume(volume: number): void {
@@ -314,6 +489,7 @@ export class HeadlessSoftphone {
     if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw new Error("Volume must be between 0 and 1");
     this.audioOptions.outputVolume = volume;
     this.audio?.setOutputVolume(volume);
+    this.handover?.candidate?.setOutputVolume(volume);
   }
   sendDTMF(digits: string): void {
     this.assertOpen();
@@ -357,64 +533,40 @@ export class HeadlessSoftphone {
     }
   }
 
-  private async attachAudio(session: CallSession, generation: number) {
+  private async attachAudio(session: CallSession, generation: number, setupEvents: MediaSessionEvent[] = []) {
+    this.hasStatusPush=false;
     this.assertCurrent(generation);
     this.stopAudio();
     this.session = session;
     this.update({ callId: session.call_id, carrierStatus: undefined, audioState: "connecting", phase: "placing", termination: undefined, answeredBy: undefined, endedAt: undefined,
       holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
+    const ref:AudioRef={session};
+    const current = () => !this.disposed && ref.audio !== undefined && this.audio === ref.audio;
     let audio: AudioConnection | undefined;
-    const current = () => !this.disposed && audio !== undefined && this.audio === audio;
-    const notify = (callback: () => void) => { if (current()) { try { callback(); } catch { /* isolate host callbacks */ } } };
-    let refreshing: Promise<string> | undefined;
     try {
       this.assertCurrent(generation);
-      audio = this.runtime.create({
-        refreshMediaURL: () => {
-          if (refreshing) return refreshing;
-          if (!current() || this.snapshot.busy) return Promise.reject(new Error("Audio recovery is not currently available"));
-          const refreshGeneration = this.generation;
-          const pending = (async () => {
-            const fresh = await this.client.attach(session.call_id);
-            this.assertCurrent(refreshGeneration);
-            if (!current()) throw new Error("Audio connection no longer active");
-            session = fresh; this.session = fresh; this.startLease(fresh);
-            return this.client.mediaURL(fresh);
-          })();
-          refreshing = pending;
-          const reset = () => { if (refreshing === pending) refreshing = undefined; };
-          void pending.then(reset, reset);
-          return pending;
-        },
-        onSessionEvent: event => notify(() => this.options.onSessionEvent?.(event)),
-        onState: (audioState, detail) => {
-          if (!current()) return;
-          if (audioState === "ended" && detail === "call.ended") {
-            this.observeCall({ id: session.call_id, status: "completed" });
-            return;
-          }
-          this.update({ audioState, detail });
-          if (current() && (audioState === "error" || audioState === "ended")) {
-            this.stopAudio();
-            if (audioState === "error") void this.reconcileFailedAudio(session, this.generation);
-          }
-        },
-        onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
-        onAudioHealth: health => notify(() => this.options.onAudioHealth?.(health)),
-        onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
-        onNotice: detail => notify(() => this.options.onNotice?.(detail)),
-        onCallStatus: status => notify(() => this.observeCall({
-          id: status.call_id, status: status.status, direction: status.direction, answered_at: status.answered_at, ended_at: status.ended_at,
-          answered_by: status.answered_by, termination: status.termination, hold_state: status.hold_state,
-          recording_state: status.recording_state, control_error: status.control_error,
-        })),
-      });
+      audio = this.runtime.create(this.audioCallbacks(ref));
+      ref.audio = audio;
       this.audio = audio;
+      this.assertCurrent(generation);
+      // These stages preceded session acquisition. Queue them in the chosen
+      // runtime before startup so startup failures retain their evidence too.
+      for (const event of setupEvents) this.reportSessionEvent(event);
       this.assertCurrent(generation);
       this.startPolling();
       this.startLease(session);
       audio.setMuted(this.snapshot.muted);
-      await this.cancellable(audio.start(this.client.mediaURL(session), this.audioOptions), generation);
+      // The transport's socket timeout starts after device/worklet setup.
+      // Bound the complete operation too: those browser promises can stall.
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await this.cancellable(Promise.race([
+          audio.start(this.client.mediaURL(session, this.audioOptions.mediaTransport), this.audioOptions),
+          new Promise<never>((_, reject) => {
+            startupTimer = setTimeout(() => reject(new Error("Audio setup timed out. Check browser permissions and the network, then try again.")), this.audioOptions.mediaTransport === "auto" ? 40000 : 20000);
+          }),
+        ]), generation);
+      } finally { clearTimeout(startupTimer); }
       this.assertCurrent(generation);
       if (!current()) throw new Error(this.snapshot.detail || "Audio connection ended during setup");
       audio.setMuted(this.snapshot.muted);
@@ -425,6 +577,209 @@ export class HeadlessSoftphone {
       if (this.current(generation)) this.update({ audioState: "error", detail: message(error) });
       throw error;
     }
+  }
+
+  // Every callback is inert until this connection is the current one, so a
+  // handover candidate cannot change call state before it replaces the old one.
+  private audioCallbacks(ref:AudioRef):SoftphoneCallbacks {
+    const current = () => !this.disposed && ref.audio !== undefined && this.audio === ref.audio;
+    const notify = (callback: () => void) => { if (current()) { try { callback(); } catch { /* isolate host callbacks */ } } };
+    let refreshing: Promise<string> | undefined;
+    let refreshingContext: MediaRecoveryContext | undefined;
+    return {
+        refreshMediaURL: (requested,signal) => {
+          const recovery=requested ?? mediaRecoveryContext("automatic_retry");
+          if (refreshing) {
+            this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"coalesced",...recovery,shared_attempt_id:refreshingContext?.attempt_id});
+            return refreshing;
+          }
+          if (!current() || this.snapshot.busy) return Promise.reject(new Error("Audio recovery is not currently available"));
+          const refreshGeneration = this.generation;
+          const pending = (async () => {
+            const previous_session_id=ref.session.session_generation;
+            const fresh = await this.acquireRecoverySession(ref.session,{...recovery,previous_session_id},signal);
+            this.assertCurrent(refreshGeneration);
+            if (!current()) throw new Error("Audio connection no longer active");
+            ref.session = fresh; this.session = fresh; this.startLease(fresh);
+            this.reportSessionEvent({timestamp:new Date().toISOString(),action:"media_session",outcome:"replaced",...recovery,previous_session_id,session_id:fresh.session_generation});
+            return this.client.mediaURL(fresh, this.audioOptions.mediaTransport);
+          })();
+          refreshing = pending; refreshingContext=recovery;
+          const reset = () => { if (refreshing === pending) {refreshing = undefined;refreshingContext=undefined;} };
+          void pending.then(reset, reset);
+          return pending;
+        },
+        sessionDiagnostics: () => ({session_id:ref.session.session_generation}),
+        onSessionEvent: event => notify(() => {
+          const steps: Record<string,string> = {
+            audio_assets: "Loading audio resources…", microphone_device: "Opening microphone…",
+            audio_context: "Enabling browser playback…", audio_worklet: "Loading audio processor…",
+            audio_transport: "Connecting audio transport…",
+          };
+          if (this.snapshot.busy && event.outcome === "started" && steps[event.action]) this.update({detail:steps[event.action]});
+          this.options.onSessionEvent?.(safeMediaSessionEvent({...event,session_id:event.session_id??ref.session.session_generation}));
+        }),
+        onState: (audioState, detail,failure) => {
+          ref.state=[audioState,detail];
+          if (audioState !== "reconnecting" && audioState !== "connecting") ref.settled?.();
+          if (!current()) return;
+          if (audioState === "ended" && detail === "call.ended") {
+            this.observeCall({ id: ref.session.call_id, status: "completed" });
+            return;
+          }
+          if(audioState==="live"){
+            this.hasLiveAudio=true;
+            void this.flushRecoveryRecords();
+            if(this.automaticAnswerStartedAt){this.reportSessionEvent({timestamp:new Date().toISOString(),action:"automatic_answer",outcome:"audio_connected",duration_ms:Date.now()-this.automaticAnswerStartedAt});this.automaticAnswerStartedAt=undefined;}
+          }
+          this.update({ audioState, detail });
+          this.scheduleStatusPoll?.();
+          if (current() && (audioState === "error" || audioState === "ended")) {
+            this.stopAudio();
+            if (audioState === "error") {void this.reconcileFailedAudio(ref.session, this.generation);if(failure?.recoverable)this.scheduleAudioRecovery();}
+          }
+        },
+        onRecoveryRecord: record => this.queueRecoveryRecord(ref.session.call_id,record),
+        startHandover: (cause,evidence) => current() ? this.startHandover(ref,cause,evidence) : null,
+        onMediaReadiness: event => notify(() => this.options.onMediaReadiness?.(event)),
+        onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
+        onAudioHealth: health => notify(() => this.options.onAudioHealth?.(health)),
+        onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
+        onNotice: detail => notify(() => this.options.onNotice?.(detail)),
+        onCallStatus: status => notify(() => {this.hasStatusPush=true;this.observeCall({
+          id: status.call_id, status: status.status, direction: status.direction, answered_at: status.answered_at, ended_at: status.ended_at,
+          answered_by: status.answered_by, termination: status.termination, hold_state: status.hold_state,
+          recording_state: status.recording_state, control_error: status.control_error,
+        });this.scheduleStatusPoll?.();}),
+    };
+  }
+
+  private cancelHandover(){
+    const handover=this.handover;if(!handover)return;
+    this.handover=undefined;handover.abort.abort();
+    try{handover.candidate?.stop();}catch{/* adapters must not block cleanup */}
+  }
+  private startHandover(ref:AudioRef,cause:string,evidence:RecoveryEvidence):Promise<boolean>|null{
+    if(this.handover||this.snapshot.busy||this.hangingUp||this.automaticRecovery||this.snapshot.audioState!=="live"||this.session!==ref.session||ref.session.attachment_guard_version!==1||!ref.session.session_generation)return null;
+    const state={abort:new AbortController()} as NonNullable<HeadlessSoftphone["handover"]>;
+    this.handover=state;
+    return this.runHandover(ref,state,cause,evidence).catch(()=>false).finally(()=>{if(this.handover===state)this.handover=undefined;});
+  }
+  private async runHandover(ref:AudioRef,state:NonNullable<HeadlessSoftphone["handover"]>,cause:string,evidence:RecoveryEvidence):Promise<boolean>{
+    const generation=this.generation,id=ref.session.call_id,signal=state.abort.signal;
+    const live=()=>this.current(generation)&&!signal.aborted&&this.session===ref.session;
+    const recovery=mediaRecoveryContext("automatic_retry");
+    const recorder=new RecoveryRecorder(recovery.recovery_id,cause,evidence);
+    const event=(outcome:string,extra:Partial<MediaSessionEvent>={})=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"handover",outcome,...recovery,...extra});
+    let checks:Promise<void>|undefined;
+    if(typeof location!=="undefined"&&typeof fetch==="function")try{checks=runRecoveryChecks(recorder,this.client.mediaURL(ref.session,"webrtc"),location.origin);}catch{/* evidence only */}
+    const finish=(outcome:"handed_over"|"handover_failed"|"cancelled")=>{recorder.finish(outcome);const deliver=()=>this.queueRecoveryRecord(id,recorder.record);if(checks)void checks.then(deliver,deliver);else deliver();};
+    let expected=ref.session.session_generation!;
+    event("started",{code:cause,previous_session_id:expected});
+    for(let attempt=1;attempt<=2&&live();attempt++){
+      const context={...recovery,attempt_id:mediaDiagnosticID("attempt")};
+      recorder.attempt(context.attempt_id);
+      let candidate:AudioConnection|undefined;
+      try{
+        const fresh=await this.client.attach(id,{...context,previous_session_id:expected},{signal},expected,true);
+        if(!live())break;
+        if(fresh.handover_pending!==true)throw new Error("The server did not issue a candidate session");
+        recorder.stage("session");
+        if(fresh.session_generation)this.ownGenerations.add(fresh.session_generation);
+        const candidateRef:AudioRef={session:fresh};
+        candidate=this.runtime.create(this.audioCallbacks(candidateRef));
+        candidateRef.audio=candidate;state.candidate=candidate;
+        candidate.setMuted(this.snapshot.muted);
+        await new Promise<void>((resolve,reject)=>{
+          const aborted=()=>reject(new Error("Handover cancelled"));
+          if(signal.aborted){aborted();return;}
+          signal.addEventListener("abort",aborted,{once:true});
+          candidate!.start(this.client.mediaURL(fresh,"webrtc"),{...this.audioOptions,mediaTransport:"webrtc",setupLimits:rtcRecoveryLimits(attempt)}).then(resolve,reject).finally(()=>signal.removeEventListener("abort",aborted));
+        });
+        // Swapping before these arrive would show a reconnect for audio that never stopped.
+        if(candidateRef.state?.[0]!=="live")await new Promise<void>(resolve=>{
+          const done=()=>{clearTimeout(timer);signal.removeEventListener("abort",done);candidateRef.settled=undefined;resolve();};
+          const timer=setTimeout(done,HANDOVER_LIVE_WAIT_MS);
+          candidateRef.settled=done;signal.addEventListener("abort",done,{once:true});
+        });
+        if(!live())throw new Error("Handover cancelled");
+        if(candidateRef.state?.[0]==="error"||candidateRef.state?.[0]==="ended")throw new Error("The replacement connection ended");
+        // The server has already moved the call to the candidate. Swap with no await.
+        const previous=this.audio;
+        this.lease?.stop();this.lease=undefined;
+        this.audio=candidate;this.session=fresh;state.candidate=undefined;
+        this.startLease(fresh);
+        candidate.setMuted(this.snapshot.muted);
+        if(this.audioOptions.outputVolume!==undefined)candidate.setOutputVolume(this.audioOptions.outputVolume);
+        try{previous?.stop();}catch{/* adapters must not block the swap */}
+        if(candidateRef.state)this.update({audioState:candidateRef.state[0],detail:candidateRef.state[1]});
+        event("committed",{...context,previous_session_id:expected,session_id:fresh.session_generation});
+        finish("handed_over");
+        return true;
+      }catch(error){
+        try{candidate?.stop();}catch{/* adapters must not block cleanup */}
+        state.candidate=undefined;
+        if(signal.aborted)break;
+        const failure=mediaFailure(error),code=failure.code??(typeof (error as {code?:unknown})?.code==="string"?(error as {code:string}).code:undefined);
+        recorder.attemptFailed(code);
+        event("attempt_failed",{...context,status:failure.status,code});
+        const current=mediaCurrentGeneration(error);
+        if(failure.code==="media_session_changed"&&current&&this.ownGenerations.has(current)){expected=current;continue;}
+        if(failure.denied||["media_session_changed","handover_unavailable","call_ended","call_not_attachable"].includes(failure.code??""))break;
+      }
+    }
+    const cancelled=signal.aborted||!this.current(generation);
+    if(!cancelled)event("failed");
+    finish(cancelled?"cancelled":"handover_failed");
+    return false;
+  }
+
+  private async acquireRecoverySession(session:CallSession,diagnostics:MediaRecoveryContext&{previous_session_id?:string},signal?:AbortSignal):Promise<CallSession>{
+    // An unknown POST outcome retries the same guarded mutation. A manual action
+    // invalidates the loop and still uses a generation precondition, so a late
+    // response cannot rotate a newer session behind it.
+    const chosen=this.uncertainAttachment??{diagnostics,expected:session.attachment_guard_version===1?(session.session_generation??""):undefined};
+    if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
+    this.uncertainAttachment=chosen;
+    if(chosen.diagnostics.attempt_id!==diagnostics.attempt_id)this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"idempotent_retry",...diagnostics,shared_attempt_id:chosen.diagnostics.attempt_id});
+    try{
+      const value=await this.client.attach(session.call_id,chosen.diagnostics,{signal},chosen.expected);
+      if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
+      this.uncertainAttachment=undefined;return value;
+    }catch(error){
+      const failure=mediaFailure(error),current=mediaCurrentGeneration(error);
+      // Not another tab: this tab's own handover committed without it learning so.
+      if(failure.code==="media_session_changed"&&current&&this.ownGenerations.delete(current)){
+        this.uncertainAttachment={diagnostics:chosen.diagnostics,expected:current};
+        return this.acquireRecoverySession(session,diagnostics,signal);
+      }
+      if(failure.status!==undefined&&failure.status>=400&&failure.status<500)this.uncertainAttachment=undefined;
+      throw error;
+    }
+  }
+  private scheduleAudioRecovery(){
+    if(this.disposed||!this.session||!this.hasLiveAudio||this.automaticRecovery)return;
+    const id=this.session.call_id,generation=this.generation;
+    this.update({audioState:"reconnecting",detail:"Network unavailable; waiting to restore audio."});
+    const permanent=(error:unknown)=>{const f=mediaFailure(error);return f.denied||f.code==="media_session_changed"||f.code==="call_ended"||f.code==="call_not_attachable"||["NotAllowedError","NotFoundError"].includes((error as Error)?.name);};
+    const episode=this.uncertainAttachment?.diagnostics??mediaRecoveryContext("automatic_retry");
+    let attempt:MediaRecoveryContext=episode;
+    this.automaticRecovery=new AudioRecoveryLoop(async signal=>{
+      this.assertCurrent(generation);
+      const call=await boundedMediaRequest(s=>this.client.getCall(id,s),signal);
+      if(!call)throw Object.assign(new Error("Call unavailable"),{status:404});
+      if(isTerminalCall(call.status)){this.observeCall(call);return;}
+      this.assertCurrent(generation);
+      const events=await this.prepareAudio(generation,false);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
+      const session=await this.acquireRecoverySession(this.session!,attempt,signal);
+      this.assertCurrent(generation);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
+      const cancel=()=>{if(this.current(generation)&&this.session===session)this.stopAudio();};
+      signal.addEventListener("abort",cancel,{once:true});
+      try{await this.attachAudio(session,generation,events);if(signal.aborted)throw new DOMException("Cancelled","AbortError");}
+      finally{signal.removeEventListener("abort",cancel);}
+      this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome:"connected",...attempt});
+      this.automaticRecovery?.stop();this.automaticRecovery=undefined;
+    },permanent,error=>{if(this.current(generation)){this.automaticRecovery=undefined;this.update({audioState:"error",detail:message(error)});}},outcome=>{if(outcome==="attempt_started")attempt={...episode,attempt_id:mediaDiagnosticID("attempt")};this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome,...attempt});});
   }
 
   private async reconcileAttachedCall(session: CallSession, generation: number) {
@@ -453,15 +808,44 @@ export class HeadlessSoftphone {
     if (!session.lease_seconds) return;
     this.lease = new MediaLease(session.lease_seconds, () => this.client.renew(session), (reason, error) => {
       if (this.disposed || this.session !== session) return;
+      // During a handover the old grant ends by design once the candidate commits.
+      // If the handover then fails, ordinary recovery rechecks authorization.
+      if (this.handover) return;
       this.stopAudio();
-      this.update({ audioState: "error", detail: reason === "expired" ? "Audio session expired. Reconnect audio." : `Audio authorization ended: ${message(error ?? reason)}` });
+      this.update({ audioState: "error", detail: reason === "expired" ? "Audio session expired. Reconnecting audio." : `Audio authorization ended: ${message(error ?? reason)}` });
+      if(reason==="expired")this.scheduleAudioRecovery();else{this.automaticRecovery?.stop();this.automaticRecovery=undefined;}
     }, event => {
       if (this.audio?.recordSessionEvent) this.audio.recordSessionEvent(event);
       else { try { this.options.onSessionEvent?.(event); } catch { /* host isolation */ } }
     }, session.lease_started_ms);
   }
 
+  // A record may finish while the network is still down, so keep a few and send
+  // them when audio is back. Never blocks audio, and a rejected record is dropped.
+  private queueRecoveryRecord(callId:string,record:MediaRecoveryRecord){
+    this.recoveryRecords.push({callId,record});
+    if(this.recoveryRecords.length>3)this.recoveryRecords.shift();
+    void this.flushRecoveryRecords();
+  }
+  private async flushRecoveryRecords(){
+    if(this.flushingRecoveryRecords)return;
+    this.flushingRecoveryRecords=true;
+    try{
+      while(this.recoveryRecords.length){
+        const next=this.recoveryRecords[0];
+        try{await this.client.reportMediaRecovery(next.callId,next.record);}
+        catch(error){const status=mediaFailure(error).status;if(status===undefined||status>=500||status===429)return;}
+        if(this.recoveryRecords[0]===next)this.recoveryRecords.shift();
+      }
+    }finally{this.flushingRecoveryRecords=false;}
+  }
+  private reportSessionEvent(event:MediaSessionEvent) {
+    event=safeMediaSessionEvent(event);
+    if(this.audio?.recordSessionEvent) {try{this.audio.recordSessionEvent(event);}catch{/* observer isolation */}}
+    else {try{this.options.onSessionEvent?.(event);}catch{/* observer isolation */}}
+  }
   private stopAudio() {
+    this.cancelHandover();
     this.lease?.stop(); this.lease = undefined;
     const audio = this.audio;
     this.audio = undefined;
@@ -473,6 +857,7 @@ export class HeadlessSoftphone {
     if (audio) { try { this.options.onLevels?.(0, 0); } catch { /* host meters cannot interrupt cleanup */ } }
   }
   private stopPolling() {
+    this.scheduleStatusPoll=undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     this.polling?.abort();
@@ -483,24 +868,39 @@ export class HeadlessSoftphone {
     if (!this.interval) return;
     const controller = new AbortController();
     this.polling = controller;
+    let running=false;
+    let lastRead=performance.now();
+    const delay=()=>this.hasStatusPush && this.snapshot.audioState==="live" ? Math.max(1,Math.max(this.interval,30000)-(performance.now()-lastRead)) : this.interval;
     const poll = async () => {
+      if(running) return;
       const id = this.session?.call_id;
       if (!id || controller.signal.aborted) return;
+      running=true;
       try {
         const call = await this.client.getCall(id, controller.signal);
+        lastRead=performance.now();
         if (!controller.signal.aborted && call) this.observeCall(call);
       } catch (error) {
-        if (!controller.signal.aborted) this.update({ detail: `Call status unavailable: ${message(error)}` });
+        if (!controller.signal.aborted) {
+          this.hasStatusPush=false;
+          this.update({ detail: `Call status unavailable: ${message(error)}` });
+        }
       } finally {
-        if (!controller.signal.aborted && this.session && !this.disposed) this.timer = setTimeout(poll, this.interval);
+        running=false;
+        this.scheduleStatusPoll?.();
       }
     };
-    this.timer = setTimeout(poll, this.interval);
+    this.scheduleStatusPoll=()=>{
+      if(running||controller.signal.aborted||!this.session||this.disposed)return;
+      clearTimeout(this.timer);this.timer=setTimeout(poll,delay());
+    };
+    this.scheduleStatusPoll();
   }
   private clearCall(carrierStatus?: string) {
+    this.hasStatusPush=false;
     this.stopAudio();
     this.stopPolling();
-    this.session = undefined;
+    this.session = undefined;this.hasLiveAudio=false;this.ownGenerations.clear();this.scheduleNetworkCheck();
     this.outbound = false;
     this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined, phase: carrierStatus ? "ended" : "idle",
       holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });
@@ -508,7 +908,9 @@ export class HeadlessSoftphone {
 
   /** Releases local devices and monitoring. An established carrier call stays up. */
   dispose(): void {
+ this.cancelNetworkCheck();globalThis.removeEventListener?.("online",this.networkChanged);
     if (this.disposed) return;
+    this.autoAnswer.dispose();
     this.disposed = true;
     this.invalidate();
     this.listeners.clear();

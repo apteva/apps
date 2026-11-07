@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,6 +39,12 @@ type executeCall struct {
 	Input  map[string]any
 }
 
+func (s *stubPlatform) ExecuteIntegrationToolContext(ctx context.Context, id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.ExecuteIntegrationTool(id, tool, input)
+}
 func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, executeCall{ConnID: connID, Tool: tool, Input: input})

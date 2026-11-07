@@ -5,11 +5,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func TestAttributeEventsExactOwnershipAndAmbiguity(t *testing.T) {
 	now := time.Now().UTC()
-	scene := &Scene{Destinations: []SceneDestination{
+	scene := &Scene{Source: Source{ProjectID: "project-1"}, Destinations: []SceneDestination{
 		{ID: "app:crm", Kind: "app", Name: "CRM", Tools: []string{"crm_search", "shared_call"}},
 		{ID: "integration:mail", Kind: "integration", Name: "Mail", Tools: []string{"mail_send", "shared_call"}},
 	}, Events: []SceneEvent{
@@ -20,7 +22,7 @@ func TestAttributeEventsExactOwnershipAndAmbiguity(t *testing.T) {
 		{ID: "5", Kind: "tool", Target: "mail_send", Time: now.Add(4 * time.Second)},
 	}}
 	attributeEvents(scene)
-	want := []string{"app:crm", "app:crm", "other:tools", "other:tools", "integration:mail"}
+	want := []string{"app:crm", "app:crm", "project-1:other:tools", "project-1:other:tools", "integration:mail"}
 	for i, event := range scene.Events {
 		if event.TargetID != want[i] {
 			t.Errorf("event %d target=%q want %q", i, event.TargetID, want[i])
@@ -30,7 +32,7 @@ func TestAttributeEventsExactOwnershipAndAmbiguity(t *testing.T) {
 	for _, item := range scene.Destinations {
 		counts[item.ID] = item.CallCount
 	}
-	if counts["app:crm"] != 1 || counts["integration:mail"] != 1 || counts["other:tools"] != 2 {
+	if counts["app:crm"] != 1 || counts["integration:mail"] != 1 || counts["project-1:other:tools"] != 2 {
 		t.Fatalf("call counts: %#v", counts)
 	}
 }
@@ -38,7 +40,7 @@ func TestAttributeEventsExactOwnershipAndAmbiguity(t *testing.T) {
 func TestLongToolNameMatchesWithoutExposingArguments(t *testing.T) {
 	name := strings.Repeat("a", 70)
 	raw, _ := json.Marshal(map[string]any{"name": name, "arguments": map[string]any{"token": "private-token"}})
-	event := normalizeEvent("1", 1, "main", "tool.call", time.Now(), raw)
+	event := normalizeEvent(sdk.TelemetryStreamEvent{ID: "1", AgentID: 1, ThreadID: "main", Type: "tool.call", Time: time.Now(), Data: raw})
 	scene := &Scene{Destinations: []SceneDestination{{ID: "app:long", Tools: []string{name}}}, Events: []SceneEvent{event}}
 	attributeEvents(scene)
 	if scene.Events[0].TargetID != "app:long" {

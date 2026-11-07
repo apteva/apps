@@ -183,7 +183,7 @@ func TestScalewayDestroyDeletesTrackedLocalBootVolumeAfterServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := persistScalewayBootVolume(ctx.AppDB(), inst, &scalewayBootVolume{
+	if err := persistManagedBootVolume(ctx.AppDB(), inst, &scalewayBootVolume{
 		ID: "local-1", ProviderType: "l_ssd", StorageClass: "local", SizeGB: 80,
 	}, &BootStorageRequest{SizeGB: 80, StorageClass: "local", Tier: "local", ProviderType: "l_ssd", DeletePolicy: "with_instance"}); err != nil {
 		t.Fatal(err)

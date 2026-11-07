@@ -24,7 +24,7 @@ func TestPerformanceGetGoogle_DerivesAndCachesMetrics(t *testing.T) {
 		query := input["query"].(string)
 		for _, field := range []string{
 			"segments.date", "campaign.id", "metrics.cost_micros",
-			"metrics.conversions_value", "metrics.video_views",
+			"metrics.conversions_value", "metrics.video_trueview_views",
 			"segments.date BETWEEN '2026-07-01' AND '2026-07-31'",
 		} {
 			if !strings.Contains(query, field) {
@@ -236,7 +236,7 @@ func TestPerformanceToolAndCollectorAreDeclared(t *testing.T) {
 	if len(workers) != 2 || workers[0].Name != "performance_collector" || workers[0].Schedule != "@every 1m" || workers[1].Name != "audience_sync_processor" || workers[1].Schedule != "@every 30s" {
 		t.Fatalf("workers=%#v", workers)
 	}
-	if performanceCollectorIntervals["campaign"] != 5*time.Minute || performanceCollectorIntervals["ad_group"] != 15*time.Minute || performanceCollectorIntervals["ad"] != 15*time.Minute {
+	if performanceCollectorIntervals["campaign"] != 15*time.Minute || performanceCollectorIntervals["ad_group"] != 30*time.Minute || performanceCollectorIntervals["ad"] != 30*time.Minute {
 		t.Fatalf("collector intervals=%#v", performanceCollectorIntervals)
 	}
 }

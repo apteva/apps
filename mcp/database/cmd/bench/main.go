@@ -66,12 +66,13 @@ type report struct {
 }
 
 var (
-	adapter     = flag.String("adapter", "sqlite", "sqlite or pebble")
+	adapter     = flag.String("adapter", "sqlite", "sqlite, pebble or aptevadb")
 	n           = flag.Int("rows", 10000, "number of synthetic records (multiple of 1000)")
 	repeat      = flag.Int("run", 1, "independent run number")
 	samples     = flag.Int("samples", 200, "samples for inexpensive operations")
 	slowSamples = flag.Int("slow-samples", 7, "samples for scans and aggregates")
 	output      = flag.String("output", "", "required result JSON path, outside the temporary data directory")
+	durability  = flag.String("durability", "durable", "durable or balanced SQLite commit profile")
 	checks      int
 )
 
@@ -224,7 +225,7 @@ func requireSuccess(m metric) {
 }
 
 func run() error {
-	if *output == "" || *n < 10000 || *n%1000 != 0 || *samples < 1 || *samples > 1000 || *slowSamples < 1 || (*adapter != "sqlite" && *adapter != "pebble") {
+	if *output == "" || *n < 10000 || *n%1000 != 0 || *samples < 1 || *samples > 1000 || *slowSamples < 1 || (*adapter != "sqlite" && *adapter != "pebble" && *adapter != "aptevadb") {
 		return fmt.Errorf("output required; rows must be a positive multiple of 1000; valid adapter and sample counts required")
 	}
 	root, e := os.MkdirTemp("", "apteva-database-bench-")
@@ -232,7 +233,7 @@ func run() error {
 		return e
 	}
 	defer os.RemoveAll(root)
-	m, e := engine.Open(root)
+	m, e := engine.OpenWithOptions(root, *durability)
 	if e != nil {
 		return e
 	}

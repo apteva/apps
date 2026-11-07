@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.3.1
+version: 0.4.0
 description: |
+  Reusable opt-in order bumps with Catalog prices, server-side eligibility,
+  durable selections, per-item delivery receipts, refunds, and conversion reporting.
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
   manual-payment path (creates a draft → open invoice in billing for
@@ -12,6 +14,8 @@ description: |
   reuse and webhook-driven payment completion. v0.3.1 adds deferred
   Payment Element preparation before buyer identity is known, without
   prematurely creating customers, invoices, or PaymentIntents.
+  v0.3.2 preserves cart/session and Catalog price metadata through Billing
+  invoice line items so generic one-time products can be fulfilled safely.
 
   Storefront blocks (add-to-cart, cart-summary, checkout-page) are
   added to the content app separately — checkout exposes the REST +
@@ -36,11 +40,24 @@ requires:
     - name: billing
       optional: false            # checkout creates invoices for conversion
       version: ">=0.12.3"
+      events: [invoice.paid, invoice.refunded]
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: order_bumps_list
+      description: List configured order bumps and conversion statistics.
+    - name: order_bumps_upsert
+      description: Create or update a scoped order bump with a Catalog price and fulfillment owner.
+    - name: checkout_bumps_get
+      description: List eligible bumps for a checkout session.
+    - name: checkout_bump_set
+      description: Select or remove an eligible bump before payment begins.
+    - name: checkout_receipt
+      description: Read item-level paid and refunded delivery state.
+    - name: checkout_item_refund
+      description: Request an idempotent refund allocated to a checkout item.
     - name: cart_create
       description: Create or fetch an open cart for a session_token or customer_id. Returns cart_id and session_token.
     - name: cart_get
@@ -81,6 +98,12 @@ provides:
       icon: shopping-cart
       entry: /ui/CheckoutPanel.mjs
   publishes:
+    - name: checkout.paid
+      description: Confirmed payment; consumers retrieve checkout_receipt for per-item fulfillment.
+    - name: checkout.refunded
+      description: Item refund state changed; consumers reconcile item receipts.
+    - name: checkout.bump_changed
+      description: An opt-in order bump selection changed.
     - name: checkout.step_changed
       description: A durable checkout moved to another step.
     - name: checkout.restarted
@@ -106,7 +129,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: checkout/v0.3.1
+    ref: checkout/v0.4.0
     entry: mcp/checkout
   port: 8080
   health_check: /health

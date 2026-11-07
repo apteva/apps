@@ -1215,7 +1215,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       body: preset.body || "",
       bodyHTML: preset.bodyHTML || "",
       from: preset.from ?? (preset.mode === "reply" ? "" : defaultForChannel?.address || ""),
-      to: preset.to,
+      to: preset.to || (preset.conversationId ? undefined : addressForChannel(target, channel)),
       templateId: preset.templateId || "",
       templateVars: preset.templateVars || {},
       contentSID: preset.contentSID || "",
@@ -1228,19 +1228,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       conversationId: preset.conversationId,
       conversationChannel: preset.conversationChannel || channel,
       replyToActivityId: preset.replyToActivityId,
-      routeBusy: preset.mode === "reply" && !preset.draft,
+      routeBusy: !!preset.conversationId && !preset.draft,
       busy: false,
       error: null,
     });
   };
 
   useEffect(() => {
-    if (composer?.mode !== "reply" || !composer.conversationId || !composerContact) return;
+    if (!composer?.conversationId || !composerContact) return;
     if (composer.draft && composer.channel === composer.draft.content.channel) return;
     const controller = new AbortController();
     const channel = composer.channel;
     setComposer(current => current ? { ...current, routeBusy: true, routeError: false, to: "", error: null } : current);
-    api<{to:string;from:string}>("GET", "/messaging/reply-route", undefined, {contact_id:String(composerContact.id), conversation_id:String(composer.conversationId), activity_id:String(composer.replyToActivityId || 0), channel}, controller.signal)
+    api<{to:string;from:string}>("GET", "/messaging/reply-route", undefined, {contact_id:String(composerContact.id), conversation_id:String(composer.conversationId), activity_id:String(composer.replyToActivityId || 0), channel,mode:composer.mode === "reply" ? "reply" : "message"}, controller.signal)
       .then(route => {
         if (!controller.signal.aborted) setComposer(current => current ? { ...current, to: route.to, from: route.from || preferredSenderForChannel(verifiedSenders, channel)?.address || "", routeBusy: false } : current);
       })
@@ -1270,31 +1270,31 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setComposer((prev) => prev && !prev.templateId ? { ...prev, templateId: String(first.id), templateVars: vars } : prev);
   }, [composer?.channel, composer?.templateId, messagingTemplates]);
 
-  const openSavedDraft = async (id: number, contact: Contact, conversation: Conversation, afterSend?: () => void | Promise<void>) => {
+  const openSavedDraft = async (id: number, contact: Contact, conversation?: Conversation, afterSend?: () => void | Promise<void>) => {
     try {
       const { draft } = await api<{draft: SavedReplyDraft}>("GET", `/drafts/${id}`);
-      if (draft.contact_id !== Number(contact.id) || draft.conversation_id !== Number(conversation.id)) throw new Error("Draft belongs to another conversation.");
+      if (draft.contact_id !== Number(contact.id) || (conversation && draft.conversation_id !== Number(conversation.id))) throw new Error("Draft belongs to another conversation.");
       const content = draft.content;
-      openCompose({mode:"reply", channel:content.channel, to:content.to, from:content.from, subject:content.subject, body:content.body,
+      openCompose({mode:draft.mode === "message" ? "new" : "reply", channel:content.channel, to:content.to, from:content.from, subject:content.subject, body:content.body,
         bodyHTML:content.body_html || "", templateId:content.template_id ? String(content.template_id) : "", templateVars:content.template_vars || {}, contentSID:content.content_sid || "",
         templateMode:!!content.template_id || !!content.content_sid,
         attachments:(content.attachments || []).map((attachment,index) => ({...attachment,key:`draft:${id}:${index}`} as unknown as ComposeAttachment)),
-        conversationId:conversation.id, conversationChannel:conversation.channel, replyToActivityId:String(draft.reply_to_activity_id), draft,
+        conversationId:draft.conversation_id ? String(draft.conversation_id) : undefined, conversationChannel:conversation?.channel || content.channel, replyToActivityId:draft.reply_to_activity_id ? String(draft.reply_to_activity_id) : undefined, draft,
         savedFingerprint:replyDraftFingerprint(content)},contact,afterSend);
     } catch (cause) { setErrorToast("Open draft failed: " + (cause as Error).message); }
   };
 
   const saveReplyDraft = async (snapshot = composerRef.current): Promise<SavedReplyDraft | null> => {
-    if (!snapshot || snapshot.mode !== "reply" || !snapshot.conversationId || snapshot.routeBusy || snapshot.routeError || snapshot.attachmentBusy || draftSaveLock.current || !replyDraftEditable(snapshot.draft)) return null;
+    if (!snapshot || !composerContact || snapshot.routeBusy || snapshot.routeError || snapshot.attachmentBusy || draftSaveLock.current || !replyDraftEditable(snapshot.draft)) return null;
     const content = composerDraftContent(snapshot);
     const fingerprint = replyDraftFingerprint(content);
     if (snapshot.draft && !snapshot.saveConflict && fingerprint === snapshot.savedFingerprint) return snapshot.draft;
     draftSaveLock.current = true;
-    setComposer(current => current?.clientKey === snapshot.clientKey ? {...current, saveBusy:true, error:null} : current);
+    setComposer(current => current && current.clientKey === snapshot.clientKey ? {...current, saveBusy:true, error:null} : current);
     try {
       const existing = snapshot.saveConflict ? undefined : snapshot.draft;
       let result = await api<{draft:SavedReplyDraft}>(existing ? "PATCH" : "POST", existing ? `/drafts/${existing.id}` : "/drafts", {
-        ...content, conversation_id:snapshot.conversationId, reply_to_activity_id:snapshot.replyToActivityId ? Number(snapshot.replyToActivityId) : undefined,
+        ...content, contact_id:Number(composerContact.id), mode:snapshot.mode === "reply" ? "reply" : "message", conversation_id:snapshot.conversationId ? Number(snapshot.conversationId) : undefined, reply_to_activity_id:snapshot.replyToActivityId ? Number(snapshot.replyToActivityId) : undefined,
         source:"human", expected_revision:existing?.revision, client_key:existing ? undefined : snapshot.saveConflict ? snapshot.copyKey : snapshot.clientKey,
       });
       // A timed-out create may have succeeded. Its operation key returns the
@@ -1302,12 +1302,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       if (!existing && replyDraftFingerprint(result.draft.content) !== fingerprint) {
         result = await api<{draft:SavedReplyDraft}>("PATCH", `/drafts/${result.draft.id}`, {...content,expected_revision:result.draft.revision,source:"human"});
       }
-      setComposer(current => current?.clientKey === snapshot.clientKey ? {...current,draft:result.draft,savedFingerprint:replyDraftFingerprint(result.draft.content),saveBusy:false,saveConflict:false,error:null} : current);
+      setComposer(current => current && current.clientKey === snapshot.clientKey ? {...current,draft:result.draft,savedFingerprint:replyDraftFingerprint(result.draft.content),saveBusy:false,saveConflict:false,error:null} : current);
       setDraftRevision(value => value + 1);
       return result.draft;
     } catch (cause) {
       const conflict = (cause as Error).message.includes("409");
-      setComposer(current => current?.clientKey === snapshot.clientKey ? {...current,saveBusy:false,saveConflict:conflict || !!snapshot.saveConflict,copyKey:current.copyKey || (conflict ? crypto.randomUUID() : undefined),error:"Draft was not saved. Your local text is retained. " + (conflict ? "Save as a new draft to preserve it without overwriting another edit. " : "Retry Save draft. ") + (cause as Error).message} : current);
+      setComposer(current => current && current.clientKey === snapshot.clientKey ? {...current,saveBusy:false,saveConflict:conflict || !!snapshot.saveConflict,copyKey:current.copyKey || (conflict ? crypto.randomUUID() : undefined),error:"Draft was not saved. Your local text is retained. " + (conflict ? "Save as a new draft to preserve it without overwriting another edit. " : "Retry Save draft. ") + (cause as Error).message} : current);
       return null;
     } finally { draftSaveLock.current = false; }
   };
@@ -1321,7 +1321,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const closeReplyComposer = async () => {
     const snapshot = composerRef.current;
     if (!snapshot || draftSaveLock.current || snapshot.busy) return;
-    if (snapshot.mode === "reply" && replyDraftEditable(snapshot.draft)) {
+    if (replyDraftEditable(snapshot.draft)) {
       if (!await saveReplyDraft(snapshot)) return;
       // Do not close over keystrokes typed while the save was in flight.
       if (composerRef.current && replyDraftFingerprint(composerDraftContent(composerRef.current)) !== replyDraftFingerprint(composerDraftContent(snapshot))) return;
@@ -1368,7 +1368,6 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     if (!composer || !target || composer.busy || composer.saveBusy || composer.attachmentBusy || composer.saveConflict) return;
     setComposer({ ...composer, busy: true, error: null });
     try {
-      if (composer.mode === "reply") {
         const draft = replyDraftEditable(composer.draft) ? await saveReplyDraft(composer) : composer.draft;
         if (!draft) { setComposer(current=>current?{...current,busy:false}:current); return; }
         const result = await api<{draft:SavedReplyDraft;sent:boolean;error?:string}>("POST", `/drafts/${draft.id}/send`, {expected_revision:draft.revision});
@@ -1377,31 +1376,6 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           setComposer(current=>current?{...current,draft:result.draft,busy:false,error:result.error || "Draft was preserved but not sent."}:current);
           return;
         }
-      } else {
-      const path = composer.mode === "reply" ? `/contacts/${target.id}/reply` : `/contacts/${target.id}/messages`;
-      const useTemplate = composer.channel === "whatsapp" && whatsappSessionRequiresTemplate(composer.whatsAppSession);
-      await api(
-        "POST",
-        path,
-        {
-          channel: composer.channel,
-          subject: composer.subject || undefined,
-          body: useTemplate ? "" : composer.body,
-          body_html: composer.bodyHTML || undefined,
-          conversation_id: composer.conversationId,
- reply_to_activity_id: composer.replyToActivityId,
-          template_id: useTemplate && composer.templateId ? Number(composer.templateId) : undefined,
-          template_vars: useTemplate && composer.templateId ? composer.templateVars : undefined,
-          attachments: composer.attachments.length > 0
-            ? composer.attachments.map(({ key: _key, ...attachment }) => attachment)
-            : undefined,
-          // Only include `from` when the operator picked something
-          // specific. Empty string means "let the backend default
-          // kick in" — pass nothing so we don't override.
-          from: composer.from || undefined,
-        },
-      );
-      }
       setComposer(null);
       setComposerContact(null);
       const afterSend = composerAfterSendRef.current;
@@ -1415,7 +1389,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       // The HTTP response can be lost after delivery. Reload server state
       // before unlocking; never turn an uncertain delivery into a new draft.
       const saved = composerRef.current?.draft;
-      if (composer.mode === "reply" && saved) {
+      if (saved) {
         try {
           const result = await api<{draft:SavedReplyDraft}>("GET", `/drafts/${saved.id}`);
           setComposer(prev=>prev?{...prev,draft:result.draft,busy:false,error:(e as Error).message}:prev);
@@ -1679,6 +1653,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                   />
 
                   <section>
+                    <DraftShelf api={api} contactId={detail.id} revision={draftRevision} collapsed onOpen={id => { void openSavedDraft(id,detail); }} />
                     <div className="flex items-center justify-between mb-2">
                       <h2 className="text-xs uppercase tracking-wide text-text-dim">
                         Activity ({activities.length})
@@ -1708,12 +1683,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                             onSetStatus={setConversationStatus}
                             emailUnsubscribe={group.kind === "conversation" && group.channel === "email" && detail ? <EmailUnsubscribeControl api={api} contactId={detail.id} conversationId={group.conversationId} refreshKey={detail.updated_at} /> : undefined}
                             onReply={(act) => openCompose({
-                              mode: "reply",
+                              mode: RECEIVED_KINDS.has(act.kind) ? "reply" : "new",
                               channel: channelOfKind(act.kind) || undefined,
                               conversationId: act.conversation_id,
                               conversationChannel: group.kind === "conversation" ? group.channel : undefined,
                               subject: group.kind === "conversation" ? group.subject : undefined,
-                              replyToActivityId: act.id,
+                              replyToActivityId: RECEIVED_KINDS.has(act.kind) ? act.id : undefined,
                             })}
                             drafts={group.kind === "conversation" && detail ? <DraftShelf api={api} conversationId={group.conversationId} revision={draftRevision} collapsed onOpen={id => {
                               const conversation=conversations.find(c=>String(c.id)===group.conversationId);
@@ -1760,12 +1735,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
             initialStatus={initialRoute.status}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
             onReply={(contact, activity, conversation, afterSend, channel) => openCompose({
-              mode: "reply",
+              mode: RECEIVED_KINDS.has(activity.kind) ? "reply" : "new",
               channel: channel || channelOfKind(activity.kind) || conversation.channel || undefined,
               conversationId: conversation.id,
               conversationChannel: conversation.channel,
               subject: conversation.subject,
-              replyToActivityId: activity.id,
+              replyToActivityId: RECEIVED_KINDS.has(activity.kind) ? activity.id : undefined,
             }, contact, afterSend)}
           />
         ) : tab === "opportunities" ? (
@@ -2195,9 +2170,9 @@ function groupActivitiesByConversation(activities: Activity[], conversations: Co
   return out;
 }
 
-function DraftShelf({api,conversationId,revision,onOpen,collapsed=false}: {
+function DraftShelf({api,conversationId,contactId,revision,onOpen,collapsed=false}: {
   api:<T,>(method:string,path:string,body?:any,params?:Record<string,string>,signal?:AbortSignal)=>Promise<T>;
-  conversationId:number|string;revision:number;onOpen:(id:number)=>void;collapsed?:boolean;
+  conversationId?:number|string;contactId?:number|string;revision:number;onOpen:(id:number)=>void;collapsed?:boolean;
 }) {
   const [open,setOpen]=useState(!collapsed);
   const [drafts,setDrafts]=useState<ReplyDraftSummary[]>([]);
@@ -2207,14 +2182,14 @@ function DraftShelf({api,conversationId,revision,onOpen,collapsed=false}: {
   useEffect(()=>{
     if (!open) return;
     const controller=new AbortController();
-    api<{drafts:ReplyDraftSummary[];total:number}>("GET","/drafts",undefined,{conversation_id:String(conversationId),limit:"200"},controller.signal)
+    api<{drafts:ReplyDraftSummary[];total:number}>("GET","/drafts",undefined,{...(conversationId ? {conversation_id:String(conversationId)} : {contact_id:String(contactId)}),limit:"200"},controller.signal)
       .then(result=>{setDrafts(result.drafts);setTotal(result.total);setError("");})
       .catch(cause=>{if (!controller.signal.aborted) setError((cause as Error).message);});
     return ()=>controller.abort();
-  },[api,conversationId,revision,refresh,open]);
+  },[api,conversationId,contactId,revision,refresh,open]);
   return <section className="p-3 border-b border-border bg-bg-input/20">
-    <div className="flex gap-2 items-center"><button type="button" onClick={()=>setOpen(value=>!value)} className="text-xs text-accent">{open ? "▾" : "▸"} Saved reply drafts{open ? ` (${total})` : ""}</button>{open && <button type="button" className="text-xs text-text-dim" onClick={()=>setRefresh(value=>value+1)}>Refresh drafts</button>}</div>
-    {open && <div className="space-y-2 mt-2">{error && <p className="text-xs text-red">{error}</p>}{!error && drafts.length===0 && <p className="text-xs text-text-dim">No saved drafts. Reply → Save draft. Nothing is sent until Send.</p>}{drafts.map(draft=><button key={draft.id} type="button" onClick={()=>onOpen(draft.id)} className="block w-full text-left border border-border rounded p-2 hover:bg-bg-input">
+    <div className="flex gap-2 items-center"><button type="button" onClick={()=>setOpen(value=>!value)} className="text-xs text-accent">{open ? "▾" : "▸"} {contactId ? "Saved message drafts" : "Saved reply drafts"}{open ? ` (${total})` : ""}</button>{open && <button type="button" className="text-xs text-text-dim" onClick={()=>setRefresh(value=>value+1)}>Refresh drafts</button>}</div>
+    {open && <div className="space-y-2 mt-2">{error && <p className="text-xs text-red">{error}</p>}{!error && drafts.length===0 && <p className="text-xs text-text-dim">No saved drafts. Compose → Save draft. Nothing is sent until Send.</p>}{drafts.map(draft=><button key={draft.id} type="button" onClick={()=>onOpen(draft.id)} className="block w-full text-left border border-border rounded p-2 hover:bg-bg-input">
       <div className="flex items-center gap-2 text-xs"><ChannelBadge channel={draft.channel} /><span className="text-text font-medium">Draft — {draft.status === "draft" ? "not sent" : draft.status === "send_failed" ? "delivery uncertain" : "sending"}</span><span className="ml-auto text-accent">{draft.status === "draft" ? "Edit" : "Review"}</span></div>
       <p className="text-xs text-text-muted truncate">From: {draft.from || "Choose sender"} → To: {draft.to}</p><p className="text-xs text-text truncate">{draft.subject || draft.preview || "Empty draft"}</p><p className="text-[10px] text-text-dim">{draft.updated_by} · {new Date(draft.updated_at).toLocaleString()} · #{draft.id}</p>{draft.last_error && <p className="text-xs text-red">{draft.last_error}</p>}
     </button>)}{total>drafts.length && <p className="text-xs text-text-muted">Showing {drafts.length} of {total} drafts; use the draft list API to page older drafts.</p>}</div>}
@@ -2374,12 +2349,12 @@ export function ActivityRow({ activity, onReply, compact, participants }: { acti
         </>}
         {activity.message_status && <MessageStatusPill status={activity.message_status} />}
         <span>{formatTime(activity.occurred_at)}{activity.source ? ` · via ${activity.source}` : ""}</span>
-        {isReceived && (
+        {(isReceived || (SENT_KINDS.has(activity.kind) && activity.conversation_id)) && (
           <button
             type="button"
             onClick={() => onReply(activity)}
             className="ml-auto text-[10px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
-          >Reply</button>
+          >{isReceived ? "Reply" : "Follow up"}</button>
         )}
       </div>
       {/^(email|sms|whatsapp)_(sent|received|send_failed|test_sent)$/.test(activity.kind) && (
@@ -2549,7 +2524,7 @@ function ComposerModal({
   const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
   const [storageSearch, setStorageSearch] = useState("");
   const [storageStatus, setStorageStatus] = useState("");
-  const channels = availableChannels(contact).filter(channel => composer.mode !== "reply" || channel === composer.conversationChannel || (["sms", "whatsapp"].includes(composer.conversationChannel || composer.channel) && ["sms", "whatsapp"].includes(channel)));
+  const channels = availableChannels(contact).filter(channel => composer.mode === "new" ? (!composer.draft && !composer.conversationId) || channel === composer.channel : channel === composer.conversationChannel || (["sms", "whatsapp"].includes(composer.conversationChannel || composer.channel) && ["sms", "whatsapp"].includes(channel)));
   const isEmail = composer.channel === "email";
   const isWhatsApp = composer.channel === "whatsapp";
   const toAddr = composer.to || addressForChannel(contact, composer.channel);
@@ -2639,7 +2614,7 @@ function ComposerModal({
       <div className="bg-bg border border-border w-full max-w-3xl rounded-lg shadow-xl flex flex-col" style={{ maxHeight: "85vh" }}>
         <header className="flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="text-text">
-            {composer.mode === "reply" ? "Reply to " : "New message to "}
+            {composer.mode === "reply" ? "Reply to " : composer.conversationId ? "Follow up with " : "New message to "}
             <span className="font-medium">{displayName(contact)}</span>
             {composer.conversationId && (
               <span className="ml-2 text-text-dim text-xs">· thread #{composer.conversationId}</span>
@@ -2655,7 +2630,7 @@ function ComposerModal({
         </header>
 
         <fieldset disabled={fieldsLocked} className="px-5 py-4 space-y-3 overflow-auto min-w-0">
-          {composer.mode === "reply" && <p className="text-xs text-text-muted">Draft — not sent. {composer.saveBusy ? "Saving…" : composer.saveConflict ? "Concurrent edit: local text retained" : composer.draft ? `Saved ${new Date(composer.draft.updated_at).toLocaleString()} · ${composer.draft.updated_by} · ${composer.draft.status}` : "Not saved yet"}{composer.draft && replyDraftFingerprint(composerDraftContent(composer)) !== composer.savedFingerprint ? " · Unsaved changes" : ""}</p>}
+          <p className="text-xs text-text-muted">Draft — not sent. {composer.saveBusy ? "Saving…" : composer.saveConflict ? "Concurrent edit: local text retained" : composer.draft ? `Saved ${new Date(composer.draft.updated_at).toLocaleString()} · ${composer.draft.updated_by} · ${composer.draft.status}` : "Not saved yet"}{composer.draft && replyDraftFingerprint(composerDraftContent(composer)) !== composer.savedFingerprint ? " · Unsaved changes" : ""}</p>
           {locked && <p className="text-xs text-text-muted">Content is locked while delivery is in progress or uncertain. Retry this same draft; do not create a replacement send.</p>}
           <div className="flex items-center gap-3">
             <label className={labelW}>From</label>
@@ -2692,8 +2667,8 @@ function ComposerModal({
                     const def = preferredSenderForChannel(senders, newCh);
                     onChange({
                       channel: newCh,
-                      to: "",
-                      routeBusy: composer.mode === "reply",
+                      to: composer.conversationId ? "" : addressForChannel(contact,newCh),
+                      routeBusy: !!composer.conversationId,
                       from: def?.address || "",
                       templateId: "",
                       templateMode: false,
@@ -2729,7 +2704,7 @@ function ComposerModal({
           {composer.routeBusy && <p className="text-xs text-text-dim">Checking reply recipient…</p>}
           {isWhatsApp && <WhatsAppWindowNotice session={composer.whatsAppSession} />}
           {isWhatsApp && channels.includes("sms") && senders.some(sender => sender.channel === "sms") && (
-            <button type="button" disabled={composer.busy} className="px-3 py-1 text-xs border border-border rounded" onClick={() => onChange({channel: "sms", to: "", from: preferredSenderForChannel(senders, "sms")?.address || "", routeBusy: composer.mode === "reply", templateId: "", templateMode:false, contentSID:"", templateVars: {}, whatsAppSession: {state: "idle"}})}>Reply via SMS{composer.mode === "reply" ? " in this conversation" : ""}</button>
+            <button type="button" disabled={composer.busy} className="px-3 py-1 text-xs border border-border rounded" onClick={() => onChange({channel: "sms", to: composer.conversationId ? "" : addressForChannel(contact,"sms"), from: preferredSenderForChannel(senders, "sms")?.address || "", routeBusy: !!composer.conversationId, templateId: "", templateMode:false, contentSID:"", templateVars: {}, whatsAppSession: {state: "idle"}})}>Reply via SMS{composer.mode === "reply" ? " in this conversation" : ""}</button>
           )}
 
           {isWhatsApp && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!composer.templateMode} onChange={e=>onChange({templateMode:e.target.checked})} />Send an approved WhatsApp template{whatsappClosed ? " (required outside reply window)" : ""}</label>}
@@ -2889,13 +2864,13 @@ function ComposerModal({
             disabled={!canSend}
             className="px-4 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >{composer.busy ? "Sending…" : composer.draft?.status === "send_failed" || composer.draft?.status === "sending" ? "Retry send" : "Send"}</button>
-          {composer.mode === "reply" && !locked && <><button type="button" onClick={onSaveDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">{composer.saveBusy ? "Saving…" : composer.saveConflict ? "Save as new draft" : "Save draft"}</button><button type="button" onClick={onDiscardDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.saveConflict || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">Discard</button></>}
+          {!locked && <><button type="button" onClick={onSaveDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">{composer.saveBusy ? "Saving…" : composer.saveConflict ? "Save as new draft" : "Save draft"}</button><button type="button" onClick={onDiscardDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.saveConflict || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">Discard</button></>}
           <button
             type="button"
             onClick={onCancel}
             disabled={composer.busy || composer.saveBusy || composer.attachmentBusy}
             className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input"
-          >{composer.mode === "reply" && !locked ? "Save & close" : "Close"}</button>
+          >{!locked ? "Save & close" : "Close"}</button>
           <span className="ml-auto text-text-dim text-xs">
             {composer.from
               ? <>from <span className="font-mono">{composer.from}</span></>
@@ -4055,6 +4030,7 @@ export function InboxTab({ api, projectId, lists, senders, initialConversationId
                       className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
                     >Reply</button>
                   )}
+                  {threadContact && !lastReceived && threadActivities.some(a => SENT_KINDS.has(a.kind)) && <button type="button" onClick={() => onReply(threadContact, [...threadActivities].reverse().find(a => SENT_KINDS.has(a.kind))!, threadConversation,reloadSelectedThread)} className="px-3 py-1 text-sm border border-accent text-accent rounded">Follow up</button>}
                   {canReplySMS && threadContact && lastReceived && <button type="button" onClick={() => onReply(threadContact, lastReceived, threadConversation, reloadSelectedThread, "sms")} className="px-3 py-1 text-sm border border-border rounded" style={{color: channelPresentation.sms.color}}>Reply via SMS</button>}
                   <button
                     type="button"

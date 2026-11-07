@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/telephony
+cpu: Apple M1 Pro
+BenchmarkSIPPlayback/PCMU/loss_false-10    	  436219	       761.4 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_false-10    	  481951	       742.7 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_false-10    	  434400	       773.6 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10     	  429216	       858.6 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10     	  431892	       862.6 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10     	  407625	       882.2 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10    	  404166	       868.4 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10    	  404410	       884.1 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10    	  401402	       891.6 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10     	  371150	       966.3 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10     	  402906	       924.8 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10     	  376497	       936.3 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10    	   24024	     14500 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10    	   24492	     14832 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10    	   24248	     14724 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10     	   24532	     14649 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10     	   25063	     14315 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10     	   24110	     15153 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10         	 1846665	       194.2 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10         	 1850410	       195.7 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10         	 1827034	       196.4 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10        	  867931	       415.7 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10        	  869984	       414.5 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10        	  861303	       416.9 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_false-10     	  690277	       523.7 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_false-10     	  690343	       517.2 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_false-10     	  720126	       528.9 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_true-10      	  680984	       518.4 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_true-10      	  694142	       537.5 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMU/loss_true-10      	  678349	       515.8 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_false-10     	  569394	       618.3 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_false-10     	  559635	       617.6 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_false-10     	  570412	       626.2 ns/op	    1120 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_true-10      	  571336	       606.9 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_true-10      	  602124	       608.2 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/PCMA/loss_true-10      	  562587	       616.9 ns/op	    1115 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_false-10     	   24412	     14564 ns/op	    2080 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_false-10     	   24710	     14733 ns/op	    2080 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_false-10     	   24284	     14579 ns/op	    2080 B/op	       4 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_true-10      	   25683	     14050 ns/op	    2075 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_true-10      	   25382	     14068 ns/op	    2075 B/op	       3 allocs/op
+BenchmarkSIPPlaybackLegacyFrame/G722/loss_true-10      	   25504	     14194 ns/op	    2075 B/op	       3 allocs/op
+BenchmarkSIPPlaybackConcurrentCalls-10                 	  186846	      1966 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlaybackConcurrentCalls-10                 	  173038	      1948 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlaybackConcurrentCalls-10                 	  188005	      1869 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlaybackTelemetryHistory-10                	    6577	     51218 ns/op	   31858 B/op	     132 allocs/op
+BenchmarkSIPPlaybackTelemetryHistory-10                	    6972	     50610 ns/op	   31850 B/op	     132 allocs/op
+BenchmarkSIPPlaybackTelemetryHistory-10                	    7129	     51916 ns/op	   31844 B/op	     132 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/telephony	20.309s

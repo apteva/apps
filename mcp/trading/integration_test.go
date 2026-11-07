@@ -475,8 +475,8 @@ func TestSidecar_HealthzIncludesProviders(t *testing.T) {
 //
 // Gated on T2_LIVE=1 so CI without internet still passes. Run with:
 //
-//	T2_LIVE=1 go test -tags integration -count=1 -run TestSidecar_LiveBinanceFetchesRealBTC ./...
-func TestSidecar_LiveBinanceFetchesRealBTC(t *testing.T) {
+//	T2_LIVE=1 go test -tags integration -count=1 -run TestSidecar_LiveCoinbaseFetchesRealBTC ./...
+func TestSidecar_LiveCoinbaseFetchesRealBTC(t *testing.T) {
 	if os.Getenv("T2_LIVE") != "1" {
 		t.Skip("set T2_LIVE=1 to enable live-network smoke test")
 	}
@@ -499,12 +499,12 @@ func TestSidecar_LiveBinanceFetchesRealBTC(t *testing.T) {
 	if price < 100 {
 		t.Errorf("BTC price=%v, expected real price (>>100); is live wired up?", price)
 	}
-	// /healthz/details should report binance-public for crypto.
+	// /healthz/details should report coinbase-public for crypto.
 	var h map[string]any
 	sc.GET("/healthz/details", &h)
 	provs, _ := h["providers"].(map[string]any)
 	c, _ := provs["crypto"].(map[string]any)
-	if c == nil || c["name"] != "binance-public" {
-		t.Errorf("crypto provider=%v, want binance-public", c)
+	if c == nil || c["name"] != "coinbase-public" {
+		t.Errorf("crypto provider=%v, want coinbase-public", c)
 	}
 }

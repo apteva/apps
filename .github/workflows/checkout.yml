@@ -1,0 +1,34 @@
+name: Checkout validation
+on:
+  pull_request:
+    paths: ['mcp/checkout/**', 'scripts/build-panels.ts', '.github/workflows/checkout.yml']
+  push:
+    branches: [main]
+    tags: ['checkout/v*']
+    paths: ['mcp/checkout/**', 'scripts/build-panels.ts', '.github/workflows/checkout.yml']
+permissions:
+  contents: read
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/checkout/go.mod
+          cache-dependency-path: mcp/checkout/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+      - run: go vet ./...
+        working-directory: mcp/checkout
+      - run: go test -race ./...
+        working-directory: mcp/checkout
+      - run: go build -o /tmp/checkout .
+        working-directory: mcp/checkout
+      - run: bunx tsc --noEmit --jsx react-jsx --target es2022 --moduleResolution bundler --module preserve --skipLibCheck mcp/checkout/ui/CheckoutPanel.tsx mcp/checkout/ui/OrderBumpsAdmin.tsx mcp/checkout/ui/OrderBumps.tsx mcp/checkout/ui/CheckoutReceipt.tsx
+      - run: bun run scripts/build-panels.ts --app checkout

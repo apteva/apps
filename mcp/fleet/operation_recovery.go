@@ -104,6 +104,47 @@ func (a *App) httpRecoverOperation(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, 500, err)
 		return
 	}
+	var hostSnapshot hostOperationSnapshot
+	if err = json.Unmarshal(op.Snapshot, &hostSnapshot); err != nil {
+		writeJSONErr(w, 500, err)
+		return
+	}
+	if hostSnapshot.Host != nil || hostSnapshot.Startup {
+		// A host deployment owns its own rollback. Recovery here is read-only
+		// reconciliation, never the legacy stop-all-recorded-processes action.
+		s, present, probeErr := a.hostRequest(r.Context(), globalCtx, current, "GET", "/status", nil)
+		if probeErr == nil && !present {
+			probeErr = errors.New("stable host is unavailable")
+		}
+		if probeErr == nil && s.Job != nil && (!hostTerminal(s.Job.Phase) || s.Job.Phase == "recovery_required") {
+			probeErr = errors.New("host deployment is not terminal; retry tenant_update or resolve host recovery first")
+		}
+		if probeErr == nil {
+			probeErr = a.verifyHostServing(r.Context(), globalCtx, current, s, s.Version)
+		}
+		if probeErr != nil {
+			writeJSONErr(w, 409, probeErr)
+			return
+		}
+		if err = a.store.setCurrentVersion(id, s.Version); err == nil {
+			err = a.store.setTargetVersion(id, s.Version)
+		}
+		if err == nil {
+			err = a.markHostOperational(id)
+		}
+		if err == nil {
+			err = a.store.clearOperationLease(id)
+		}
+		if err == nil {
+			_, err = a.store.db.Exec(`DELETE FROM fleet_active_operations WHERE tenant_id=? AND id=?`, id, op.ID)
+		}
+		if err != nil {
+			writeJSONErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"tenant_id": id, "version": s.Version, "note": "Stable host and serving runtime verified; recovery fence cleared without stopping processes or restoring data."})
+		return
+	}
 	for _, tn := range []*Tenant{state.Target, state.Source, current} {
 		if tn == nil || tn.Kind == KindRemote {
 			continue

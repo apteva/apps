@@ -1,0 +1,18 @@
+{
+  "darwin-arm64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.29.0/deploy-pipeline-darwin-arm64",
+    "sha256": "4d9697bd1610c827443d9d6375a066d76feb71bfc6a529fc581b685e03ea3e8d"
+  },
+  "darwin-amd64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.29.0/deploy-pipeline-darwin-amd64",
+    "sha256": "387bd362a4dd728f61cdef005926579ae7c27571b5ed6053b787734bbf88ff89"
+  },
+  "linux-amd64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.29.0/deploy-pipeline-linux-amd64",
+    "sha256": "80e9d2b7c7cdb84490efdc9ea7315cbd86b178ef23b2011c3f1ca31f01c787af"
+  },
+  "linux-arm64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.29.0/deploy-pipeline-linux-arm64",
+    "sha256": "7769faf1dcb81a23c84f3bbe805af78c279f3bc7406baedd53a745794b59260a"
+  }
+}

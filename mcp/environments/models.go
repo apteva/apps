@@ -89,24 +89,26 @@ type WebFixtureEvent struct {
 }
 
 type VoiceFixtureSpec struct {
-	ID               string                `json:"id,omitempty"`
-	Name             string                `json:"name,omitempty"`
-	CallerName       string                `json:"caller_name,omitempty"`
-	CallerPersona    string                `json:"caller_persona,omitempty"`
-	CallerGoal       string                `json:"caller_goal"`
-	CallerBehavior   string                `json:"caller_behavior,omitempty"`
-	Provider         string                `json:"provider,omitempty"`
-	Voice            string                `json:"voice,omitempty"`
-	CallerProvider   string                `json:"caller_provider,omitempty"`
-	CallerVoice      string                `json:"caller_voice,omitempty"`
-	TimeoutSeconds   int                   `json:"timeout_seconds,omitempty"`
-	Greeting         string                `json:"greeting,omitempty"`
-	TargetAgent      string                `json:"target_agent,omitempty"`
-	TargetDirective  string                `json:"target_directive,omitempty"`
-	DisconnectOnDone bool                  `json:"disconnect_on_done,omitempty"`
-	Transport        string                `json:"transport,omitempty"`
-	ProtocolFixture  string                `json:"protocol_fixture,omitempty"`
-	AudioConditions  *VoiceAudioConditions `json:"audio_conditions,omitempty"`
+	ID                 string                `json:"id,omitempty"`
+	Name               string                `json:"name,omitempty"`
+	CallerName         string                `json:"caller_name,omitempty"`
+	CallerPersona      string                `json:"caller_persona,omitempty"`
+	CallerGoal         string                `json:"caller_goal"`
+	CallerBehavior     string                `json:"caller_behavior,omitempty"`
+	Provider           string                `json:"provider,omitempty"`
+	Voice              string                `json:"voice,omitempty"`
+	CallerProvider     string                `json:"caller_provider,omitempty"`
+	CallerVoice        string                `json:"caller_voice,omitempty"`
+	TimeoutSeconds     int                   `json:"timeout_seconds,omitempty"`
+	Greeting           string                `json:"greeting,omitempty"`
+	TargetAgent        string                `json:"target_agent,omitempty"`
+	TargetDirective    string                `json:"target_directive,omitempty"`
+	DisconnectOnDone   bool                  `json:"disconnect_on_done,omitempty"`
+	Transport          string                `json:"transport,omitempty"`
+	ProtocolFixture    string                `json:"protocol_fixture,omitempty"`
+	AudioConditions    *VoiceAudioConditions `json:"audio_conditions,omitempty"`
+	FinalReplyContains []string              `json:"final_reply_contains,omitempty"`
+	MicrophoneMode     string                `json:"microphone_mode,omitempty"`
 }
 
 type VoiceAudioConditions struct {
@@ -158,27 +160,33 @@ type ProtocolFixtureEvent struct {
 }
 
 type VoiceCall struct {
-	ID                       string                      `json:"id"`
-	RunID                    string                      `json:"run_id"`
-	Status                   string                      `json:"status"`
-	Error                    string                      `json:"error,omitempty"`
-	Validity                 VoiceCallValidity           `json:"validity"`
-	Spec                     VoiceFixtureSpec            `json:"spec"`
-	TargetThreadID           string                      `json:"target_thread_id"`
-	CallerThreadID           string                      `json:"caller_thread_id"`
-	CallerAgentAlias         string                      `json:"caller_agent_alias"`
-	Transcript               []VoiceTranscriptTurn       `json:"transcript"`
-	Metrics                  VoiceCallMetrics            `json:"metrics"`
-	TargetRecording          string                      `json:"target_recording,omitempty"`
-	CallerRecording          string                      `json:"caller_recording,omitempty"`
-	DeliveredCallerRecording string                      `json:"delivered_caller_recording,omitempty"`
-	StartedAt                time.Time                   `json:"started_at"`
-	FinishedAt               *time.Time                  `json:"finished_at,omitempty"`
-	TargetTelemetry          []sdk.RuntimeTelemetryEvent `json:"target_telemetry,omitempty"`
-	CallerTelemetry          []sdk.RuntimeTelemetryEvent `json:"caller_telemetry,omitempty"`
-	Execution                *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
-	ProtocolEvents           []ProtocolFixtureEvent      `json:"protocol_events,omitempty"`
-	BridgeExits              []VoiceBridgeExitResult     `json:"bridge_exits,omitempty"`
+	cleanupDeadline          time.Time
+	startedThreads           map[string]string
+	ID                       string                                `json:"id"`
+	RunID                    string                                `json:"run_id"`
+	Status                   string                                `json:"status"`
+	Error                    string                                `json:"error,omitempty"`
+	Validity                 VoiceCallValidity                     `json:"validity"`
+	Spec                     VoiceFixtureSpec                      `json:"spec"`
+	TargetThreadID           string                                `json:"target_thread_id"`
+	CallerThreadID           string                                `json:"caller_thread_id"`
+	CallerAgentAlias         string                                `json:"caller_agent_alias"`
+	Transcript               []VoiceTranscriptTurn                 `json:"transcript"`
+	Metrics                  VoiceCallMetrics                      `json:"metrics"`
+	TargetRecording          string                                `json:"target_recording,omitempty"`
+	CallerRecording          string                                `json:"caller_recording,omitempty"`
+	DeliveredCallerRecording string                                `json:"delivered_caller_recording,omitempty"`
+	StartedAt                time.Time                             `json:"started_at"`
+	FinishedAt               *time.Time                            `json:"finished_at,omitempty"`
+	TargetTelemetry          []sdk.RuntimeTelemetryEvent           `json:"target_telemetry,omitempty"`
+	CallerTelemetry          []sdk.RuntimeTelemetryEvent           `json:"caller_telemetry,omitempty"`
+	Execution                *sdk.RuntimeAgentExecution            `json:"execution,omitempty"`
+	ProtocolEvents           []ProtocolFixtureEvent                `json:"protocol_events,omitempty"`
+	BridgeExits              []VoiceBridgeExitResult               `json:"bridge_exits,omitempty"`
+	FinalExchange            *VoiceFinalExchangeResult             `json:"final_exchange,omitempty"`
+	InputTransport           map[string]VoiceInputTransportMetrics `json:"input_transport,omitempty"`
+	Cleanup                  *VoiceCleanup                         `json:"cleanup,omitempty"`
+	CancellationReason       string                                `json:"cancellation_reason,omitempty"`
 }
 
 type VoiceCallValidity struct {
@@ -187,34 +195,71 @@ type VoiceCallValidity struct {
 }
 
 type VoiceTranscriptTurn struct {
-	Speaker string    `json:"speaker"`
-	Text    string    `json:"text"`
-	Time    time.Time `json:"time"`
-	AtMS    int64     `json:"at_ms"`
+	Speaker            string    `json:"speaker"`
+	Text               string    `json:"text"`
+	Time               time.Time `json:"time"`
+	AtMS               int64     `json:"at_ms"`
+	Status             string    `json:"status,omitempty"`
+	TranscriptID       string    `json:"transcript_id,omitempty"`
+	FinalizationReason string    `json:"finalization_reason,omitempty"`
+}
+
+// Forwarding and paced bridge receipts describe the simulator's media path,
+// not human hearing or a speech-recognition verdict.
+type VoiceAudioDelivery struct {
+	GeneratedBytes              int64 `json:"generated_bytes"`
+	ForwardedBytes              int64 `json:"forwarded_bytes"`
+	PlaybackAcknowledgedBytes   int64 `json:"playback_acknowledged_bytes"`
+	UnforwardedBytes            int64 `json:"unforwarded_bytes"`
+	IgnoredAfterCompletionBytes int64 `json:"ignored_after_completion_bytes"`
+}
+
+type VoiceFinalExchangeResult struct {
+	Status                        string                             `json:"status"`
+	Stage                         string                             `json:"stage"`
+	ClosingReason                 string                             `json:"closing_reason,omitempty"`
+	CallerCompletionRequested     bool                               `json:"caller_completion_requested"`
+	CallerClosedPrematurely       bool                               `json:"caller_closed_prematurely"`
+	CallerTurnDelivered           bool                               `json:"caller_turn_delivered"`
+	ReplyStarted                  bool                               `json:"reply_started"`
+	ReplyCompleted                bool                               `json:"reply_completed"`
+	ReplyPlayed                   bool                               `json:"reply_played"`
+	ReplyCapturedAfterCallerClose bool                               `json:"reply_captured_after_caller_close"`
+	ExpectationsMatched           bool                               `json:"expectations_matched"`
+	TranscriptStatus              string                             `json:"transcript_status"`
+	ThreadFinalization            map[string]VoiceThreadFinalization `json:"thread_finalization,omitempty"`
+	FinalizationStatus            string                             `json:"finalization_status"`
+	AudioLossStatus               string                             `json:"audio_loss_status"`
+	CallerAudio                   VoiceAudioDelivery                 `json:"caller_audio"`
+	ReceptionistAudio             VoiceAudioDelivery                 `json:"receptionist_audio"`
 }
 
 type VoiceCallMetrics struct {
-	DurationMS                 int64                       `json:"duration_ms"`
-	FirstResponseMS            int64                       `json:"first_response_ms,omitempty"`
-	AverageResponseMS          int64                       `json:"average_response_ms,omitempty"`
-	ReceptionistAudioS         float64                     `json:"receptionist_audio_seconds"`
-	CallerAudioS               float64                     `json:"caller_audio_seconds"`
-	DeliveredCallerAudioS      float64                     `json:"delivered_caller_audio_seconds,omitempty"`
-	Interruptions              int                         `json:"interruptions"`
-	ToolCalls                  int                         `json:"tool_calls"`
-	RealtimeErrors             int                         `json:"realtime_errors"`
-	ReceptionistRealtimeErrors int                         `json:"receptionist_realtime_errors"`
-	CallerRealtimeErrors       int                         `json:"caller_realtime_errors"`
-	DroppedAudioEvents         int                         `json:"dropped_audio_events"`
-	EndedBy                    string                      `json:"ended_by"`
-	ReceptionistSourceTurns    int                         `json:"receptionist_source_turns"`
-	CallerReceivedTurns        int                         `json:"caller_received_turns"`
-	PendingReceptionistTurns   int                         `json:"pending_receptionist_turns"`
-	CallerSourceTurns          int                         `json:"caller_source_turns"`
-	ReceptionistReceivedTurns  int                         `json:"receptionist_received_turns"`
-	PendingCallerTurns         int                         `json:"pending_caller_turns"`
-	CallerResponseUndelivered  bool                        `json:"caller_response_generated_not_delivered"`
-	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
+	DurationMS                 int64   `json:"duration_ms"`
+	FirstResponseMS            int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64 `json:"caller_audio_seconds"`
+	DeliveredCallerAudioS      float64 `json:"delivered_caller_audio_seconds,omitempty"`
+	Interruptions              int     `json:"interruptions"`
+	ToolCalls                  int     `json:"tool_calls"`
+	RealtimeErrors             int     `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int     `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int     `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int     `json:"dropped_audio_events"`
+	EndedBy                    string  `json:"ended_by"`
+	// Source/received counts describe provider segmentation. Pending turns count
+	// unmatched finalized transcript content, never undelivered audio.
+	ReceptionistSourceTurns       int                         `json:"receptionist_source_turns"`
+	CallerReceivedTurns           int                         `json:"caller_received_turns"`
+	PendingReceptionistTurns      int                         `json:"pending_receptionist_turns"`
+	CallerSourceTurns             int                         `json:"caller_source_turns"`
+	ReceptionistReceivedTurns     int                         `json:"receptionist_received_turns"`
+	PendingCallerTurns            int                         `json:"pending_caller_turns"`
+	ReceptionistRecognitionStatus string                      `json:"receptionist_recognition_status,omitempty"`
+	CallerRecognitionStatus       string                      `json:"caller_recognition_status,omitempty"`
+	CallerResponseUndelivered     bool                        `json:"caller_response_generated_not_delivered"`
+	AudioConditions               *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
 }
 
 type VoiceBridgeExitResult struct {

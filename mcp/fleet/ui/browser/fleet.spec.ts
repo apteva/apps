@@ -30,6 +30,7 @@ async function setup(
   opts: {
     delayAlpha?: boolean;
     operation?: boolean;
+    hostOperation?: boolean;
     setupPending?: boolean;
     toolError?: boolean;
   } = {},
@@ -94,12 +95,13 @@ async function setup(
           },
         ],
         hosts: [],
-        ...(opts.operation
+        ...(opts.operation || opts.hostOperation
           ? {
               operation: {
                 id: "op-123",
-                operation: "migration",
-                phase: "recovery_required",
+                operation: opts.hostOperation ? "update" : "migration",
+                phase: opts.hostOperation ? "host_activating" : "recovery_required",
+                ...(opts.hostOperation ? { snapshot: { host: { job_id: "host-123", requested: "0.91.0" } } } : {}),
               },
             }
           : {}),
@@ -162,7 +164,7 @@ test("durable operation exposes recovery and blocks lifecycle buttons", async ({
 }) => {
   await setup(page, { operation: true });
   await page.getByRole("button").filter({ hasText: "alpha" }).first().click();
-  await expect(page.getByText("migration: recovery_required")).toBeVisible();
+  await expect(page.getByText("migration: recovery required")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Recover interrupted operation" }),
   ).toBeVisible();
@@ -170,6 +172,20 @@ test("durable operation exposes recovery and blocks lifecycle buttons", async ({
   await expect(
     page.getByRole("button", { name: "Apply 0.41.1", exact: true }),
   ).toBeDisabled();
+});
+test("host progress exposes reconciliation without a stop prompt", async ({ page }) => {
+  await setup(page, { hostOperation: true });
+  await page.getByRole("button").filter({ hasText: "alpha" }).first().click();
+  await expect(page.getByText("update: host activating")).toBeVisible();
+  await expect(page.getByText(/Host deployment host-123/)).toBeVisible();
+  const dialog = page.waitForEvent("dialog").then(async (prompt) => {
+    const message = prompt.message();
+    await prompt.dismiss();
+    expect(message).toContain("keeps the host running");
+    expect(message).not.toContain("Stop all runtimes");
+  });
+  await page.getByRole("button", { name: "Reconcile host operation" }).click();
+  await dialog;
 });
 test("template dialog loads a real target project selector", async ({
   page,

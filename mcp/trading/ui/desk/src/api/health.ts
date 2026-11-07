@@ -3,7 +3,7 @@ import { apiGet } from "./client.ts";
 export type ProviderClass = "crypto" | "polymarket" | "equity" | "etf";
 
 export type ProviderHealth = {
-  name: string;            // "binance-public" | "polymarket-public" | "mock"
+  name: string;            // "coinbase-public" | "polymarket-public" | "mock"
   last_ok_at?: string;
   errors_60s: number;
   stale: boolean;

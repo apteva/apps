@@ -1,3 +1,6 @@
+import AudioHealthCharts from "./AudioHealthCharts";
+import CallDiagnostics from "./CallDiagnostics";
+import AudioIncidentSection from "./AudioIncidentSection";
 import { subscribeAudioDashboardEvents, type AudioUpdatesMode } from "./audio-dashboard-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -7,7 +10,6 @@ import {
   audioStages,
   audioStateLabel,
   initialAudioFilters,
-  metricLabel,
   type AudioDashboardHost,
   type AudioDashboardResponse,
   type AudioFilters,
@@ -20,6 +22,7 @@ export function useAudioDashboard(
   cursor = "",
   limit = 50,
   interval = 15000,
+  includeCharts = false,
 ) {
   const [data, setData] = useState<AudioDashboardResponse | null>(null),
     [error, setError] = useState(""),
@@ -36,7 +39,7 @@ export function useAudioDashboard(
     setLoading(true);
     const timeout = window.setTimeout(() => ctrl.abort("timeout"), 12000);
     try {
-      const url = audioDashboardURL(host, filters, cursor, limit);
+      const url = audioDashboardURL(host, filters, cursor, limit, Date.now(), includeCharts);
       const response = await fetch(url, {
         credentials: "same-origin",
         signal: ctrl.signal,
@@ -61,7 +64,7 @@ export function useAudioDashboard(
       window.clearTimeout(timeout);
       if (generation === latest.current) setLoading(false);
     }
-  }, [host.appName, host.installId, host.projectId, filters, cursor, limit]);
+  }, [host.appName, host.installId, host.projectId, filters, cursor, limit, includeCharts]);
   useEffect(() => {
     setData(null);
     setError("");
@@ -120,62 +123,6 @@ export function AudioHealthCards({ data }: { data: AudioDashboardResponse }) {
 }
 const displayMS = (n: number | undefined) =>
   n === undefined ? "—" : `${Math.round(n)} ms`;
-function AudioDetails({
-  host,
-  callId,
-}: {
-  host: AudioDashboardHost;
-  callId: string;
-}) {
-  const [value, setValue] = useState<Record<string, unknown> | null>(null),
-    [error, setError] = useState("");
-  useEffect(() => {
-    const ctrl = new AbortController();
-    const q = new URLSearchParams({
-      call_id: callId,
-      project_id: host.projectId || "",
-      install_id: String(host.installId || ""),
-    });
-    const timer = window.setTimeout(() => ctrl.abort(), 12000);
-    void (async () => {
-      try {
-        const r = await fetch(
-          `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`,
-          { credentials: "same-origin", signal: ctrl.signal },
-        );
-        if (!r.ok) throw new Error(`Diagnostics failed (HTTP ${r.status})`);
-        setValue(await r.json());
-      } catch (e) {
-        if (!ctrl.signal.aborted) setError((e as Error).message);
-        else if (ctrl.signal.reason?.name === "AbortError")
-          setError("Diagnostics request timed out.");
-      } finally {
-        window.clearTimeout(timer);
-      }
-    })();
-    return () => {
-      window.clearTimeout(timer);
-      ctrl.abort("unmount");
-    };
-  }, [host.appName, host.projectId, host.installId, callId]);
-  if (error)
-    return (
-      <p role="alert" className="text-error">
-        {error}
-      </p>
-    );
-  return (
-    <details className="mt-3">
-      <summary className="cursor-pointer text-text-muted">
-        Full recorded diagnostics: browser networks, peer hash, session events,
-        closes, timings and drops
-      </summary>
-      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-muted p-3 text-xs">
-        {value ? JSON.stringify(value, null, 2) : "Loading diagnostics…"}
-      </pre>
-    </details>
-  );
-}
 export function AudioHealthRow({
   report,
   host,
@@ -229,40 +176,7 @@ export function AudioHealthRow({
       </div>
       {expanded ? (
         <div className="mt-3 border-t border-border pt-3">
-          <p className="break-all text-xs text-text-muted">
-            Call {report.call_id} · {report.status}
-          </p>
-          <div className="my-3 grid gap-2 md:grid-cols-3">
-            {Object.entries(report.health.stages || {}).map(([stage, h]) => (
-              <div key={stage} className="rounded bg-bg-muted p-2 text-xs">
-                <strong>
-                  {audioStages[stage as keyof typeof audioStages] || stage}
-                </strong>
-                <div>
-                  {!report.active
-                    ? "Recorded"
-                    : report.state === "stale"
-                      ? "Stale report"
-                      : h.state}{" "}
-                  {h.signal ? `· ${h.signal}` : ""}
-                </div>
-                {h.last_bad_at ? (
-                  <div className="text-text-dim">
-                    Last impairment: {new Date(h.last_bad_at).toLocaleString()}
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-          <dl className="grid grid-cols-2 gap-2 text-xs md:grid-cols-3">
-            {Object.entries(report.metrics).map(([key, n]) => (
-              <div key={key}>
-                <dt className="text-text-muted">{metricLabel[key] || key}</dt>
-                <dd className="tabular-nums">{Math.round(n * 10) / 10}</dd>
-              </div>
-            ))}
-          </dl>
-          <AudioDetails host={host} callId={report.call_id} />
+          <CallDiagnostics host={host} callId={report.call_id} />
         </div>
       ) : null}
     </article>
@@ -282,6 +196,9 @@ export default function AudioHealthView(props: AudioDashboardHost) {
     props,
     filters,
     cursor,
+    50,
+    15000,
+    true,
   );
   const update = (key: keyof AudioFilters, value: string) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -324,8 +241,7 @@ export default function AudioHealthView(props: AudioDashboardHost) {
         <div>
           <h1 className="text-lg font-semibold">Audio health</h1>
           <p className="text-xs text-text-muted">
-            Project-wide browser call observations. Auto-refresh every 15
-            seconds.
+            Project-wide call observations. Select a call for live counters, transport history and audio diagnostics.
           </p>
         </div>
         <button
@@ -337,6 +253,7 @@ export default function AudioHealthView(props: AudioDashboardHost) {
           {loading ? "Refreshing…" : "Refresh audio health"}
         </button>
       </header>
+      <AudioIncidentSection host={props} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {field("Time window", "range", [
           { value: "1h", label: "Last hour" },
@@ -428,6 +345,7 @@ export default function AudioHealthView(props: AudioDashboardHost) {
       {data ? (
         <>
           <AudioHealthCards data={data} />
+          <AudioHealthCharts buckets={data.charts} />
           {data.pending_reports > 0 ? (
             <p className="text-xs text-warn">
               {data.pending_reports} reports awaiting background indexing.

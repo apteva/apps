@@ -1,5 +1,11 @@
+import {geometryFor,rememberGeometry,inheritCache,meshFor} from "./geometry-cache.mjs";
+import { loadAsset, inspect, topology, count } from "./inspection.mjs";
 import initOpenCascade from "replicad-opencascadejs/src/replicad_single.js";
 import {
+  Transformation,
+  cast,
+  BoundingBox,
+  getOC,
   draw,
   drawCircle,
   drawRectangle,
@@ -17,6 +23,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const SCHEMA = "apteva-design/v1";
+const importedGeometry=new WeakSet();
+const ENGINE_VERSION="replicad-0.23.1-ocjs-0.23.0-ds0.5";
 
 function fail(message, details = undefined) {
   const err = new Error(message);
@@ -127,7 +135,9 @@ function vector(value, params, label, fallback = [0, 0, 0]) {
 function parameterValues(definition, supplied) {
   const output = {};
   for (const [name, spec] of Object.entries(definition.parameters || {})) {
-    const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : spec.default;
+    const profile=(definition.print_profiles||[]).find(p=>p.id===definition.fit_profile_id);
+    const fitValue=spec.fit?profile?.fits_mm?.[spec.fit]:undefined;
+    const candidate = Object.hasOwn(supplied || {}, name) ? supplied[name] : fitValue??spec.default;
     const value = finite(candidate, `parameter ${name}`);
     if (spec.min !== undefined && value < finite(spec.min, `${name}.min`)) {
       fail(`parameter ${name} is below its minimum`);
@@ -160,13 +170,26 @@ function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) 
   return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
 }
 
-function buildOperation(operation, shapes, params) {
+function buildOperation(operation, shapes, params, assets, importedVisuals) {
   if (!operation || typeof operation !== "object") fail("every operation must be an object");
   if (!operation.id || typeof operation.id !== "string") fail("every operation requires a string id");
   if (shapes.has(operation.id)) fail(`duplicate operation id ${operation.id}`);
 
   let shape;
   switch (operation.type) {
+    case "import_step": {
+      const loaded=loadAsset(assets?.[operation.asset_id],operation.component_id);
+      importedGeometry.add(loaded.shape);for(const v of loaded.visuals)importedGeometry.add(v.shape);
+      shape=applyAssemblyTransform(loaded.shape,operation.transform||{},params);
+      importedVisuals.set(operation.id,loaded.visuals.map(v=>({...v,shape:applyAssemblyTransform(v.shape,operation.transform||{},params)})));
+      break;
+    }
+    case "swept_box": {
+      const origin=vector(operation.origin,params,"swept_box.origin"),size=vector(operation.size,params,"swept_box.size"),travel=vector(operation.travel,params,"swept_box.travel");
+      if(size.some(x=>x<=0))fail("swept_box size must be positive");
+      const min=origin.map((x,k)=>Math.min(x,x+travel[k])),max=origin.map((x,k)=>Math.max(x+size[k],x+size[k]+travel[k]));
+      shape=makeBox(min,max);break;
+    }
     case "box": {
       const [width, depth, height] = vector(operation.size, params, `${operation.id}.size`);
       if (width <= 0 || depth <= 0 || height <= 0) fail(`${operation.id}.size must be positive`);
@@ -338,19 +361,25 @@ function buildOperation(operation, shapes, params) {
   shapes.set(operation.id, shape);
 }
 
+function exactAssemblyTransform(shape,transform,params){
+ let output=shape.clone();
+ if(transform?.scale!==undefined)output=output.scale(resolve(transform.scale,params,"assembly scale"),[0,0,0]);
+ for(const r of transform?.rotate||[])output=output.rotate(resolve(r.angle,params,"assembly angle"),vector(r.center,params,"rotation center"),vector(r.direction,params,"rotation axis",[0,0,1]));
+ if(transform?.translate)output=output.translate(vector(transform.translate,params,"assembly translation"));
+ return output;
+}
 function applyAssemblyTransform(shape, transform, params) {
-  let output = shape.clone();
-  if (transform?.scale !== undefined) {
-    output = output.scale(resolve(transform.scale, params, "assembly scale"), [0, 0, 0]);
-  }
-  for (const rotation of transform?.rotate || []) {
-    output = output.rotate(
-      resolve(rotation.angle, params, "assembly rotation angle"),
-      vector(rotation.center, params, "assembly rotation center"),
-      vector(rotation.direction, params, "assembly rotation direction", [0, 0, 1]),
-    );
-  }
-  if (transform?.translate) output = output.translate(vector(transform.translate, params, "assembly translation"));
+  if(!importedGeometry.has(shape)||(transform?.scale!==undefined&&resolve(transform.scale,params)!==1))return exactAssemblyTransform(shape,transform,params);
+  let output=shape.clone();
+  if(transform?.scale!==undefined)output=output.scale(resolve(transform.scale,params,"assembly scale"),[0,0,0]);
+  // Rigid placement uses OCCT locations instead of copying all B-rep geometry.
+  // This matters for manufacturer assemblies containing tens of thousands of faces.
+  function placed(t){const oc=getOC(),location=new oc.TopLoc_Location_2(t.wrapped);try{const next=cast(output.wrapped.Moved(location,true));output.delete();output=next;}finally{location.delete();t.delete();}}
+  for(const r of transform?.rotate||[])placed(new Transformation().rotate(resolve(r.angle,params,"assembly rotation angle"),vector(r.center,params,"rotation center"),vector(r.direction,params,"rotation axis",[0,0,1])));
+  if(transform?.translate)placed(new Transformation().translate(vector(transform.translate,params,"assembly translation")));
+  importedGeometry.add(output);inheritCache(shape,output,transform||{},params);
+  const cached=geometryFor(shape);
+  if(cached){const physical=transformPhysical({mass:0,center:cached.center_of_mass||[0,0,0]},transform||{},params);rememberGeometry(output,{...cached,center_of_mass:physical.center});}
   return output;
 }
 
@@ -396,41 +425,64 @@ function hexColor(value, fallback = "#64748b") {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
 }
 
-function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params) {
+function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params, importedVisuals) {
   const parts = new Map((definition.parts || []).map((part) => [part.id, part]));
   const materials = new Map((definition.materials || []).map((material) => [material.id, material]));
   if (!definition.assembly?.instances?.length) {
     const shape = shapeFor(definition.output, shapes);
     const outputPart = (definition.parts || []).find((part) => part.output === definition.output);
-    const visuals = outputPart ? partVisuals.get(outputPart.id) : [{ id: definition.output, part_id: definition.output, name: definition.output, color: "#64748b", shape }];
+    const visuals = outputPart ? partVisuals.get(outputPart.id) : importedVisuals.get(definition.output) || [{ id: definition.output, part_id: definition.output, name: definition.output, color: "#64748b", shape }];
     return { shape, instances: [], visuals, parts, materials };
   }
   const instances = [];
-  for (const instance of definition.assembly.instances) {
-    if (instance.visible === false) continue;
+  const pending=[...definition.assembly.instances];
+  let attempts=0;
+  while(pending.length) {
+    if(++attempts>definition.assembly.instances.length**2+1)fail("Datum alignment dependency cycle");
+    const instance=pending.shift();
+    if(instance.alignment && !instances.some(i=>i.id===instance.alignment.target_instance)){pending.push(instance);continue;}
+
     const part = parts.get(instance.part_id);
     if (!part) fail(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
     const sourceShape = partShapes.get(part.id);
     if (!sourceShape) fail(`assembly part ${part.id} has no resolved geometry`);
-    const shape = applyAssemblyTransform(sourceShape, instance.transform, params);
+    let resolvedTransform=instance.transform||{};
+    if(instance.alignment) {
+      const a=instance.alignment,target=instances.find(i=>i.id===a.target_instance);
+      const point=(p,t)=>transformPhysical({mass:0,center:vector(p,params,"datum")},t,params).center;
+      const local=point(a.local_point,resolvedTransform),world=point(a.target_point,target.resolvedTransform),offset=vector(a.offset,params,"datum offset");
+      const delta=world.map((v,k)=>v+offset[k]-local[k]);
+      const old=vector(resolvedTransform.translate,params,"translation");resolvedTransform={...resolvedTransform,translate:old.map((v,k)=>v+delta[k])};
+    }
+    if(part.manufacturing?.classification==='purchased' && resolvedTransform.scale!==undefined && resolve(resolvedTransform.scale,params)!==1)fail('Purchased components require rigid placement; normalize import units separately');
+    const shape = applyAssemblyTransform(sourceShape, resolvedTransform, params);
     const material = materials.get(part.material_id);
     const visuals = (partVisuals.get(part.id) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || material?.color), shape: sourceShape }]).map((visual) => ({
       ...visual,
       id: visual.id === part.id ? instance.id : `${instance.id}/${visual.id}`,
-      shape: visual.shape === sourceShape ? shape : applyAssemblyTransform(visual.shape, instance.transform, params),
+      shape: visual.shape === sourceShape ? shape : applyAssemblyTransform(visual.shape, resolvedTransform, params),
+      sourceShape:visual.shape,resolvedTransform,
     }));
     instances.push({
       id: instance.id,
+      visible: instance.visible !== false, resolvedTransform, sourceShape,
       part,
       material,
       shape,
       color: hexColor(part.color || material?.color),
-      physical: transformPhysical(partPhysical.get(part.id), instance.transform, params),
+      physical: transformPhysical(partPhysical.get(part.id), resolvedTransform, params),
       visuals,
     });
   }
   if (!instances.length) fail("assembly has no visible instances");
-  return { shape: makeCompound(instances.map((item) => item.shape.clone())), instances, visuals: instances.flatMap((item) => item.visuals), parts, materials };
+  const assemblyShape=makeCompound(instances.map((item)=>item.shape.clone()));if(instances.every(i=>importedGeometry.has(i.shape)))importedGeometry.add(assemblyShape);
+  if(instances.every(i=>geometryFor(i.shape))){
+    const gs=instances.map(i=>geometryFor(i.shape)),volume=gs.reduce((s,g)=>s+g.volume_mm3,0);
+    const solids=gs.reduce((s,g)=>s+(g.topology?.[0]?.solid_count||0),0),valid=gs.every(g=>g.topology?.[0]?.status==='pass');
+    rememberGeometry(assemblyShape,{volume_mm3:volume,surface_area_mm2:gs.reduce((s,g)=>s+g.surface_area_mm2,0),center_of_mass:[0,1,2].map(k=>gs.reduce((s,g)=>s+g.volume_mm3*g.center_of_mass[k],0)/volume),face_count:gs.reduce((s,g)=>s+g.face_count,0),edge_count:gs.reduce((s,g)=>s+g.edge_count,0),topology:[{valid,solid_count:solids,shell_count:gs.reduce((s,g)=>s+(g.topology?.[0]?.shell_count||0),0),status:valid?'pass':'indeterminate'}]});
+  }
+
+  return { shape: assemblyShape, instances, visuals: instances.flatMap((item) => item.visuals), parts, materials };
 }
 
 function validateDefinition(definition) {
@@ -448,8 +500,8 @@ function validateDefinition(definition) {
 function buildDefinitionGeometry(definition, supplied) {
   validateDefinition(definition);
   const params = parameterValues(definition, supplied || {});
-  const shapes = new Map();
-  for (const operation of definition.operations) buildOperation(operation, shapes, params);
+  const shapes = new Map(), importedVisuals=new Map();
+  for (const operation of definition.operations) buildOperation(operation, shapes, params, definition._assets, importedVisuals);
   const resolved = new Map((definition._resolved_components || []).map((component) => [component.part_id, component]));
   const partShapes = new Map();
   const partPhysical = new Map();
@@ -460,9 +512,15 @@ function buildDefinitionGeometry(definition, supplied) {
       const component = resolved.get(part.id);
       if (!component) fail(`linked part ${part.id} was not resolved by Design Studio`);
       const child = buildDefinitionGeometry(component.definition, component.parameters || {});
+      const sourcePart=component.source_part_id?(component.definition.parts||[]).find(p=>p.id===component.source_part_id):null;
+      if(sourcePart && !part.manufacturing) part.manufacturing=sourcePart.manufacturing;
+      if(!component.source_part_id && (component.definition.parts||[]).some(p=>['purchased','reference'].includes(p.manufacturing?.classification)||p._exclude_print))part._exclude_print=true;
+
       const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
       if (!selected) fail(`linked part ${part.id} source part ${component.source_part_id} has no geometry`);
-      partShapes.set(part.id, selected.clone());
+      const selectedShape=selected.clone();if(importedGeometry.has(selected))importedGeometry.add(selectedShape);
+      inheritCache(selected,selectedShape);
+      partShapes.set(part.id, selectedShape);
       const physical = component.source_part_id ? child.partPhysical.get(component.source_part_id) : child.physical;
       if (physical) partPhysical.set(part.id, physical);
       const visuals = component.source_part_id ? child.partVisuals.get(component.source_part_id) : child.assembly.visuals;
@@ -471,11 +529,11 @@ function buildDefinitionGeometry(definition, supplied) {
       const partShape = shapeFor(part.output, shapes);
       partShapes.set(part.id, partShape);
       const density = Number(materials.get(part.material_id)?.density_g_cm3 || 0);
-      partPhysical.set(part.id, { mass: density > 0 ? measureVolume(partShape) * density / 1000 : 0, center: exactCenterOfMass(partShape) });
-      partVisuals.set(part.id, [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || materials.get(part.material_id)?.color), shape: partShape }]);
+      partPhysical.set(part.id, { mass: density > 0 ? cachedVolume(partShape) * density / 1000 : 0, center: exactCenterOfMass(partShape) });
+      partVisuals.set(part.id, importedVisuals.get(part.output)?.map(v=>({...v,part_id:part.id,color:hexColor(part.color)})) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || materials.get(part.material_id)?.color), shape: partShape }]);
     }
   }
-  const assembly = assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params);
+  const assembly = assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params, importedVisuals);
   let physical;
   if (assembly.instances.length) {
     const mass = assembly.instances.reduce((sum, item) => sum + (item.physical?.mass || 0), 0);
@@ -494,24 +552,26 @@ async function writeBlob(path, blob) {
 }
 
 function shapeBounds(shape) {
-  const box = shape.boundingBox;
-  const [min, max] = box.bounds;
-  return { min, max, size: [box.width, box.height, box.depth], center: box.center };
+  const box=new BoundingBox();
+  try{getOC().BRepBndLib.AddOptimal(shape.wrapped,box.wrapped,false,false);
+    const [min,max]=box.bounds;return {min,max,size:max.map((v,k)=>v-min[k]),center:max.map((v,k)=>(v+min[k])/2)};
+  }finally{box.delete();}
 }
 
+function cachedVolume(shape){return geometryFor(shape)?.volume_mm3??measureVolume(shape)}
 function exactCenterOfMass(shape) {
+  if(geometryFor(shape))return geometryFor(shape).center_of_mass;
   const properties = measureShapeVolumeProperties(shape);
   try { return properties.centerOfMass; }
   finally { properties.delete(); }
 }
 
 function geometryReport(shape, mesh, instances = []) {
-  const box = shape.boundingBox;
-  const [min, max] = box.bounds;
-  const volume = measureVolume(shape);
-  const area = measureArea(shape);
+  const bounds=shapeBounds(shape);
+  const volume = cachedVolume(shape);
+  const area = geometryFor(shape)?.surface_area_mm2??measureArea(shape);
   const partReports = instances.map((item) => {
-    const partVolume = measureVolume(item.shape);
+    const partVolume = cachedVolume(item.shape);
     const bounds = shapeBounds(item.shape);
     const center = item.physical?.center || exactCenterOfMass(item.shape);
     return {
@@ -531,12 +591,12 @@ function geometryReport(shape, mesh, instances = []) {
     valid: Number.isFinite(volume) && volume > 0 && mesh.triangles.length >= 3,
     representation: "brep",
     units: "mm",
-    bounds: { min, max, size: [box.width, box.height, box.depth], center: box.center },
+    bounds,
     volume_mm3: volume,
     surface_area_mm2: area,
     body_count: instances.length || 1,
-    face_count: shape.faces.length,
-    edge_count: shape.edges.length,
+    face_count: geometryFor(shape)?.face_count??count(shape,"TopAbs_FACE"),
+    edge_count: geometryFor(shape)?.edge_count??count(shape,"TopAbs_EDGE"),
     vertex_count: mesh.vertices.length / 3,
     triangle_count: mesh.triangles.length / 3,
     mass_g: mass,
@@ -545,14 +605,38 @@ function geometryReport(shape, mesh, instances = []) {
   };
 }
 
+function printOrientation(shape,part,params){
+  const angles=part.manufacturing?.orientation;
+  if(!angles)return shape;
+  if(angles.length!==3)fail('manufacturing.orientation must be Euler X/Y/Z degrees');
+  let out=shape.clone();for(let axis=0;axis<3;axis++){const direction=[0,0,0];direction[axis]=1;out=out.rotate(resolve(angles[axis],params),[0,0,0],direction);}
+  const min=out.boundingBox.bounds[0];return out.translate(min.map(v=>-v));
+}
 async function run(request) {
+  if(request.expected_engine_version&&request.expected_engine_version!==ENGINE_VERSION)fail(`Package needs engine ${request.expected_engine_version}; this is ${ENGINE_VERSION}`);
   const built = buildDefinitionGeometry(request.definition, request.parameters || {});
   const { params, partShapes, assembly } = built;
   const shape = assembly.shape;
   const tolerance = finite(request.tolerance ?? 0.1, "tolerance");
   const angularTolerance = finite(request.angular_tolerance ?? 0.1, "angular_tolerance");
-  const mesh = shape.mesh({ tolerance, angularTolerance });
-  const report = geometryReport(shape, mesh, assembly.instances);
+  // Mesh leaf components independently. Large manufacturer compounds can exceed
+  // OCCT's compound tessellator limits even when every leaf meshes successfully.
+  const partMeshes=assembly.visuals.map(item=>{
+    let visualMesh=meshFor(item.shape,vector,resolve,rotatePoint);
+    if(!visualMesh){try{visualMesh=item.shape.mesh({tolerance,angularTolerance});}catch(e){fail(`Preview failed for ${item.name}: ${String(e)}`);}
+      const faces=item.shape.faces,faceIndices=new Map(faces.map((f,index)=>[f.hashCode,index]));
+      visualMesh.faceGroups=visualMesh.faceGroups.map(g=>({...g,faceId:faceIndices.get(g.faceId)}));for(const f of faces)f.delete();
+    }
+    return {id:item.id,part_id:item.part_id,name:item.name,color:item.color,visible:!assembly.instances.some(i=>i.visible===false&&(item.id===i.id||item.id.startsWith(i.id+'/'))),instance_id:assembly.instances.find(i=>item.id===i.id||item.id.startsWith(i.id+'/'))?.id||(!request.definition.assembly?(request.definition.parts?.find(p=>p.output===request.definition.output)?.id||'output'):undefined),...visualMesh};
+  });
+  const mesh={vertices:[],triangles:[],normals:[]};
+  for(const part of partMeshes){const offset=mesh.vertices.length/3;for(const v of part.vertices)mesh.vertices.push(v);for(const n of part.normals||[])mesh.normals.push(n);for(const i of part.triangles)mesh.triangles.push(i+offset);}
+
+  let report;try{report=geometryReport(shape, mesh, assembly.instances);}catch(e){fail(`Geometry measurements failed: ${String(e)}`);}
+  const inspection=inspect(request.definition,built,applyAssemblyTransform,exactAssemblyTransform);
+  report.topology=inspection.topology; report.exact_checks=inspection.exact_checks;
+  report.body_count=inspection.topology.reduce((s,t)=>s+t.solid_count,0);
+
   if (!report.valid) fail("output geometry is empty or invalid", report);
 
   const outputDir = request.output_dir;
@@ -563,23 +647,16 @@ async function run(request) {
 
   if (formats.has("mesh-json")) {
     const path = join(outputDir, "model.mesh.json");
-    const partMeshes = assembly.visuals.map((item) => ({
-      id: item.id,
-      part_id: item.part_id,
-      name: item.name,
-      color: item.color,
-      ...item.shape.mesh({ tolerance, angularTolerance }),
-      edges: item.shape.meshEdges({ tolerance, angularTolerance }),
-    }));
-    await Bun.write(path, JSON.stringify({ ...mesh, edges: shape.meshEdges({ tolerance, angularTolerance }), parts: partMeshes }));
+    await Bun.write(path, JSON.stringify({ ...mesh, parts: partMeshes, keepouts: inspection.keepouts.map(k=>({id:k.id,name:k.name,kind:k.kind,color:k.color,owner_instance:k.owner_instance,...k.shape.mesh({tolerance,angularTolerance})})) }));
     artifacts.push({ format: "mesh-json", path, content_type: "application/json" });
     for (const part of request.definition.parts || []) {
-      if (["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
+      if (part._exclude_print || ["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
       const partPath = join(outputDir, `${part.id}.mesh.json`);
-      const partShape = partShapes.get(part.id);
+      const rawPartShape = partShapes.get(part.id);
+      const partShape = rawPartShape && printOrientation(rawPartShape,part,params);
 	  if (!partShape) fail(`part ${part.id} has no export geometry`);
       const partMesh = partShape.mesh({ tolerance, angularTolerance });
-      await Bun.write(partPath, JSON.stringify({ ...partMesh, edges: partShape.meshEdges({ tolerance, angularTolerance }) }));
+      await Bun.write(partPath, JSON.stringify({ ...partMesh }));
       artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
     }
   }
@@ -589,22 +666,26 @@ async function run(request) {
     await writeBlob(path, exportSTEP(stepShapes, { unit: "MM", modelUnit: "MM" }));
     artifacts.push({ format: "step", path, content_type: "model/step" });
     for (const part of request.definition.parts || []) {
-      if (["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
+      if (part._exclude_print || ["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
       const partPath = join(outputDir, `${part.id}.step`);
-      const partShape = partShapes.get(part.id);
+      const rawPartShape = partShapes.get(part.id);
+      const partShape = rawPartShape && printOrientation(rawPartShape,part,params);
       if (!partShape) fail(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, exportSTEP([{ shape: partShape, name: part.name }], { unit: "MM", modelUnit: "MM" }));
       artifacts.push({ format: "step", path: partPath, content_type: "model/step", part_id: part.id, part_name: part.name });
     }
   }
   if (formats.has("stl")) {
+    const printable=assembly.instances.filter(i=>!['purchased','reference'].includes(i.part.manufacturing?.classification));
+    const printShape=assembly.instances.length?(printable.length?makeCompound(printable.map(i=>i.shape.clone())):null):((request.definition.parts||[]).some(p=>['purchased','reference'].includes(p.manufacturing?.classification))?null:shape);
     const path = join(outputDir, "model.stl");
-    await writeBlob(path, shape.blobSTL({ tolerance, angularTolerance, binary: true }));
-    artifacts.push({ format: "stl", path, content_type: "model/stl" });
+    if(printShape && !request.definition.assembly) await writeBlob(path, printShape.blobSTL({ tolerance, angularTolerance, binary: true }));
+    if(printShape && !request.definition.assembly) artifacts.push({ format: "stl", path, content_type: "model/stl" });
     for (const part of request.definition.parts || []) {
-      if (["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
+      if (part._exclude_print || ["purchased", "reference"].includes(part.manufacturing?.classification)) continue;
       const partPath = join(outputDir, `${part.id}.stl`);
-      const partShape = partShapes.get(part.id);
+      const rawPartShape = partShapes.get(part.id);
+      const partShape = rawPartShape && printOrientation(rawPartShape,part,params);
       if (!partShape) fail(`part ${part.id} has no export geometry`);
       await writeBlob(partPath, partShape.blobSTL({ tolerance, angularTolerance, binary: true }));
       artifacts.push({ format: "stl", path: partPath, content_type: "model/stl", part_id: part.id, part_name: part.name });

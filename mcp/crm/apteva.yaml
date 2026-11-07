@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.22
+version: 0.9.27
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -26,7 +26,7 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
-      version: ">=0.13.59"
+      version: ">=0.15.0"
       optional: true
       reason: "Delivers messages and attachments, and supplies delivery and suppression events for per-channel messageability."
       events:
@@ -47,7 +47,7 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools, attachments, inbound media, delivery tracking, and safe outbound-only email unsubscribe. Messaging v0.13.59 or newer is required for unsubscribe. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools, attachments, inbound media, delivery tracking, and safe outbound-only email unsubscribe. Messaging v0.15.0 or newer is required for anchored email replies; unsubscribe is retained. Without it, CRM is a standalone contact store."
     - role: email_verification
       kind: app
       compatible_app_names: [email-checker]
@@ -81,7 +81,7 @@ provides:
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
-      description: Partial-patch a contact, including channel replacement.
+      description: "Partial-patch a contact with patch.attributes as an array of {key,value,source?}; native JSON types, not a key/value dictionary. Attributes merge by key; explicit value:null clears optional values and missing value is rejected. channels replaces the list. Discover definitions first and verify readback."
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone. Returns was_created.
     - name: contacts_verify_email
@@ -96,11 +96,13 @@ provides:
       description: Preview or confirm a project-scoped exact email unsubscribe; outbound only, with confirmed readback and audit, retaining inbound replies and existing stronger blocks. No send or automatic text parsing.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
+    - name: contacts_attribute_definitions_list
+      description: Read-only project attribute definitions with keys, types, required flags and allowed enum_values, including built-in defaults without writes. Use before updating or promoting researched contacts.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
-      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. Existing email conversations inherit Re: <original subject> when subject is omitted/blank, before idempotency calculation; explicit nonblank subjects are preserved and unresolved blanks rejected. New standalone emails require a subject unless supplied by a template. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading and inherit Re: <original subject> if omitted/blank; preserve explicit nonblank subjects and reject unresolved blanks before dispatch and idempotency. Deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
     - name: contacts_send_test
       description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
@@ -126,17 +128,17 @@ provides:
     - name: conversations_inbox
       description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters and paging.
     - name: conversation_drafts_create
-      description: Save a reply draft without sending; pins recipient and conversation, supports incomplete content, HTML, attachments and templates.
+      description: Save replies, first outreach to an existing contact, or outbound follow-ups without an inbound message. Never sends or creates inbox conversations; pins recipient, supports incomplete content, HTML, attachments and templates.
     - name: conversation_drafts_get
       description: Read full saved draft content and current revision. Never sends.
     - name: conversation_drafts_list
-      description: Read paged draft summaries for one conversation. Never sends.
+      description: Read paged draft summaries by conversation_id or contact_id, including standalone outreach drafts. Never sends.
     - name: conversation_drafts_update
       description: Save changes with expected_revision; concurrent edits return conflicts. Never sends.
     - name: conversation_drafts_discard
       description: Soft-discard an editable draft with expected_revision, retaining its content for audit. Never sends.
     - name: conversation_drafts_send
-      description: Explicit real external send of a saved reply draft with expected_revision; revalidates eligibility and uses durable idempotent retries.
+      description: Explicit real external send of a saved draft with expected_revision; revalidates pinned recipient and eligibility, preserves existing threads or creates one at send, and uses durable idempotent retries.
     - name: pipelines_list
       description: List CRM sales pipelines and allowed stages.
     - name: pipeline_create
@@ -237,7 +239,7 @@ provides:
             maximum: 20
   publishes:
     - name: conversation.draft.changed
-      description: A reply draft was saved, updated, discarded or its send outcome recorded. Not a sent-message event; inspect status. Contains no draft body or attachments.
+      description: A reply or message draft was saved, updated, discarded or its send outcome recorded. Not a sent-message event; inspect status. Contains no draft body or attachments. conversation_id is zero for unsent first outreach.
       payload:
         event_id: string
         draft_id: integer
@@ -507,7 +509,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.22
+    ref: crm/v0.9.27
     entry: mcp/crm
   port: 8080
   health_check: /health

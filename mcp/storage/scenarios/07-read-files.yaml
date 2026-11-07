@@ -1,0 +1,79 @@
+name: read-files-with-vision
+description: A real model reads private images, a selected PDF page, DOCX and text through files_read. Fixture answers are absent from its prompt.
+timeout: 150s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: storage-reader
+    tools: [search_tools, send, done, pace]
+    mcp: [storage]
+  app:
+    path: ./
+  fixtures:
+    - app: storage
+      tool: files_upload
+      file: fixtures/picture.png
+      args: {name: picture.png, content_type: image/png, visibility: private}
+    - app: storage
+      tool: files_upload
+      file: fixtures/report.pdf
+      args: {name: report.pdf, content_type: application/pdf, visibility: private}
+    - app: storage
+      tool: files_upload
+      file: fixtures/note.docx
+      args: {name: note.docx, content_type: application/vnd.openxmlformats-officedocument.wordprocessingml.document, visibility: private}
+    - app: storage
+      tool: files_upload
+      file: fixtures/note.txt
+      args: {name: note.txt, content_type: text/plain, visibility: private}
+
+directive: |
+  The storage-reader thread has the complete file-reading assignment. Await
+  its report without asking the user for files or doing duplicate work. Once
+  it reports, relay its exact findings to the user. Do not start other work.
+
+prompt: |
+  Find picture.png, report.pdf, note.docx and note.txt in Storage, then use
+  files_read to read each one. These files are private; read them without
+  creating URLs, changing visibility, or fetching raw base64 bytes.
+
+  Inspect the pixels of picture.png and identify each quadrant's color.
+  Read only page 2 of report.pdf using pages="2" and report its invoice
+  number and total. Also report the project code in note.docx and the
+  warehouse code in note.txt.
+
+  Send one final report to main with these exact field names:
+  top_left=<color>; top_right=<color>; bottom_left=<color>;
+  bottom_right=<color>; invoice=<number>; total=<amount>;
+  project_code=<code>; warehouse_code=<code>.
+  Use send to main, then finish with done. Do not guess unread contents.
+
+assert:
+  - tool_called: files_read
+  - tool_called_with:
+      tool: files_read
+      min_count: 4
+      success: true
+  - tool_called_with:
+      tool: files_read
+      args: {pages: "2"}
+      success: true
+  - tool_not_called: files_get_content
+  - tool_not_called: files_get_url
+  - tool_not_called: files_set_visibility
+  - agent_response_contains: top_left=red
+  - agent_response_contains: top_right=green
+  - agent_response_contains: bottom_left=blue
+  - agent_response_contains: bottom_right=yellow
+  - agent_response_contains: RV-4827
+  - agent_response_contains: "183.40"
+  - agent_response_contains: ORCHID-726
+  - agent_response_contains: LANTERN-593
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 100000
+  cost_usd: 0.80

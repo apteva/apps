@@ -3,6 +3,83 @@
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
 
+## OVH catalog transfer (0.12.1)
+
+OVH's current dedicated catalog exceeds the gateway's regular 10 MB JSON cap.
+The integration's `*_catalog_download` tools carry JSON in a binary envelope;
+Instances enforces a 32 MiB decoded cap and caches a compact projection shared
+by concurrent catalog requests. Repeated per-option price arrays are omitted
+from the fleet catalog; the final provider quote still includes all charges.
+Refresh the OVH integration catalog to obtain the three download tools.
+
+## OVH compute products (0.12.0)
+
+OVH now includes Public Cloud VMs, standalone VPS, standard dedicated servers and
+Eco bare metal. Catalogs come from the account's current billing subsidiary;
+locations, hardware options and available Linux images stay provider-driven.
+Product metadata supplies hardware facts. Catalog availability is indicative:
+OVH validates the selected plan, options and stock during quoting/checkout.
+
+Refresh the `ovhcloud` integration catalog before updating/using this release.
+The catalog preserves existing Public Cloud tool names and adds order carts,
+service delivery, VPS/dedicated installation and cancellation operations. Select
+EU, CA or US in the connection's public `api_endpoint` field (EU default).
+`service_name` remains the Public Cloud project ID and is optional for standalone
+VPS/dedicated-only accounts. Tokens must allow the chosen product APIs and, for
+contract orders, `/me` and the relevant order/billing routes. Project-only tokens
+can still use Public Cloud when contract/catalog permissions are unavailable.
+An unavailable product family does not hide the others on that endpoint.
+
+Provisioning in the panel first displays **Review order**, including OVH's
+itemized total, taxes, hardware/license choices, commitment and contract terms.
+**Place order** checks that the quote is unchanged, then charges the configured
+OVH payment method. It does not waive the cooling-off period. Delivery can take
+hours or await payment/account verification. Linux installation and generated
+SSH-key access happen only on the service identified by that exact paid order.
+Normal setup, monitoring, commands, file transfer, tunnels and native deployment
+then use the existing host paths. Physical/VPS disks use their offer options;
+Public Cloud block volumes cannot attach to standalone VPS/dedicated hosts.
+
+API/MCP callers use `instance_quote` with a unique `ovh.request_key`, then send the
+same input and returned `ovh.quote_id` to `instance_create`. Contract size IDs are
+`ovh/vps/<plan>`, `ovh/baremetalServers/<plan>` or `ovh/eco/<plan>`, and locations
+use `ovh/<product>/<datacenter>`. `ovh.addons` maps family names to arrays of option
+plan codes (one entry for an exclusive family). Optional per-addon configuration
+is under `ovh.addon_configurations[optionCode]`. All fields and human descriptions
+are discovered in `server_types[].ovh_offer`; no plan codes are hardcoded.
+
+The durable order journal handles duplicate requests and restart recovery.
+Uncertain checkout or reinstall responses are never replayed automatically.
+Recovery inspects the recorded cart/order/task and generated SSH identity; if OVH
+cannot expose an unambiguous result, the row stays pending for operator
+reconciliation. Cancellation can require the token OVH emails its account
+administrator: the panel and `instance_order_status action=confirm_termination`
+consume it without storing it. Inventory remains until provider absence is
+verified; cancelling an undelivered order never installs the eventual server.
+Unused local quote records expire after seven days and are capped per account;
+paid/unresolved orders are retained. Provider carts expire independently.
+
+This release does not add a common app API for provider VM snapshots, S3 buckets
+or paid hardware upgrades; the integration exposes their provider primitives,
+while existing native app-data snapshots and Public Cloud data volumes continue
+to work. Dedicated OSes requiring custom images or Windows credentials are not
+advertised as eligible Linux installations.
+
+Validation uses official API schemas/public catalogs and local provider fixtures,
+including UI review, duplicate purchase prevention, interrupted checkout/install,
+exact service ownership, regional permissions, cancellation/token redaction and
+provider comparison. No paid OVH resources were ordered and production was not
+updated during release validation.
+
+## Native large-state transfer (0.10.0)
+
+The native backend implements Server's negotiated `state_transfer` contract with
+independent 8 GiB archive/expanded defaults, 16 GiB hard ceilings, streamed
+validation, state filesystem metadata, disk preflight and bounded progress.
+Existing restore ownership, stopped-writer, SHA-256, SQLite WAL and crash-recovery
+protections remain in force. Headerless clients keep the 512 MiB legacy policy.
+See [configuration, Server compatibility and progress](runtime/snapshot-limits.md).
+
 ## Why
 
 Several apps need to "run a workload somewhere": Live Link's self-vps
@@ -69,7 +146,7 @@ with a 30s default timeout. `instance_upload_file` writes under
 
 An install can bind multiple cloud providers at once and choose one per
 catalog or provisioning request; the configured default is used when no
-provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
+provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Clouding.io, UpCloud, Contabo, Vultr,
 AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
 provisioning, SSH readiness, recovery, and deletion are normalized into the
 same instance contract.
@@ -364,6 +441,33 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.7.6 runs routine database retention once per minute across all hosts, with
+bounded indexed deletion batches. Covering incident indexes keep cleanup and
+detail-budget checks away from recording payload pages. Incident count/detail
+limits still apply when incidents are imported, and SQLite enforces the same
+hard storage cap between maintenance passes. Sampling, peak aggregation and
+collector 0.6.5 are unchanged. Existing databases gain the indexes automatically.
+
+
+v0.6.5 adds plot-wide hover tooltips to the CPU/memory and I/O wait charts,
+including detailed spike recordings. Tooltips show the bucket timestamp,
+observed averages, and recorded peaks with their original timestamps. Arrow
+keys navigate samples, Home/End jump to the edges, Escape closes the tooltip,
+and touch users can tap a bucket. Missing observations remain gaps. This adds
+no monitoring samples and keeps the same storage limits.
+
+v0.6.4 fixes the native panel failing to load with a missing `jsxDEV` export.
+The panel build explicitly uses production JSX and validates the shipped bundle
+against the dashboard's shared React runtime contract. I/O wait charts and all
+existing monitoring data remain available with the same sampling and limits.
+
+v0.6.3 adds a separate **I/O wait history** chart below the CPU/memory chart,
+using the selected history range. It shows observed-time weighted averages,
+recorded peaks with their original timestamps, and a labeled percentage scale
+that adjusts to make small spikes visible. Detailed spike recordings also show
+I/O wait at the original 250ms sampling interval. Missing observations stay gaps.
+This uses existing stored measurements without adding samples or changing retention.
+
 v0.6.2 reduces checkpoint CPU and allocation cost by caching compressed completed
 seconds and closed incident records. The cache is capped at 8 MiB and expires with
 its source data. Checkpoints keep the same JSON/gzip format, including compatibility
@@ -385,7 +489,7 @@ Monitoring is enabled by default for every instance. On app mount, and every
 five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
 AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
 new and temporarily unreachable hosts are retried without recreating them.
-Collectors are downloaded by the app from the `instances/v0.6.2` GitHub release,
+Collectors are downloaded by the app from the `instances/v0.6.5` GitHub release,
 verified against the SHA-256 values embedded in this source, and uploaded over
 SSH. No compiler, public listening port, or platform credential is installed
 on the host. Linux requires systemd; macOS uses a launch daemon. Service
@@ -501,3 +605,164 @@ go test ./...
 
 Real provider provisioning is opt-in and requires separately scoped test
 credentials; unit tests never create billable resources.
+
+## Native deployment backend
+
+Instances can implement Server-managed native Linux app deployments through
+`apteva.runtime-backend/v1`. See [the native backend contract and trial guide](runtime/README.md)
+for artifact staging, placement, ownership, private connectivity and supported scope.
+
+### Automatic managed package deployment (0.7.1)
+
+The native backend advertises the generic files-v1 package delivery extension
+and artifact-independent target inspection. Server selects the target platform
+and supplies its configured reachable gateway automatically. `inspect-target`
+checks host identity, architecture, ABI, libraries and gateway reachability
+without creating a deployment or requiring a package. Package references are
+verified against sealed metadata and executable hashes. Dynamic requirements
+are verified from the sealed descriptor against the actual host before prepare
+and again before a new start. Existing manually staged artifacts remain supported.
+No cloud host, firewall, DNS or public media configuration is changed by these
+operations. Stop/delete still preserve installation data and unrelated services.
+
+
+## Native backend target discovery and stopped state transfer (0.8.0)
+
+The native backend exposes protected, paginated target discovery and read-only
+preflight without execution IDs. Linux/macOS controllers also support bounded,
+verified tar.gz snapshots/restores of stopped persistent data, including SQLite
+WAL state, durable restore receipts and interrupted-swap recovery. Server retains
+migration and routing decisions. Monitoring and collector 0.6.5 are unchanged.
+See [the protocol and limits](runtime/README.md#stopped-state-transfer-080).
+
+
+## Efficient native inspection (0.8.1)
+
+Routine native deployment inspections use one isolated, reusable SSH session per
+host, combine remote process/restore checks, and query related systemd properties
+once. Verified restore completion is persisted; each controller revalidates it on
+first use and after identity changes or inconsistent observations. Partial restore
+retries and crash recovery remain supported. An explicit Ubuntu setup option,
+`suppress_dynamic_motd`, adds PAM's `noupdate` option without disabling authentication.
+It defaults to false and affects SSH login-message generation across that host.
+See [staging measurements and limits](runtime/inspection-performance.md).
+
+## Full Vultr compute catalog (0.9.0)
+
+Vultr discovery now includes all virtual/GPU plan families and the separate
+bare-metal catalog, with shared metadata for hardware, stock, regional pricing
+and boot requirements. Bare metal uses the appropriate lifecycle API. Diskless
+VX1 boot blocks are explicitly sized, verified, inventoried and cleaned up or
+retained according to policy. Unavailable and preemptible-only plans remain
+visible with a reason. The UI uses the generic catalog fields for physical
+labels, accelerators, availability and required boot choices.
+
+Existing servers must refresh their Vultr integration catalog before upgrading;
+no Server binary rebuild is required. See [setup, scope and validation](runtime/vultr-catalog.md).
+Monitoring and the collector remain unchanged. No production update is performed
+by publishing this release.
+
+
+## Clouding.io and UpCloud (0.11.0)
+
+Bind the new `clouding` or `upcloud` integration to the `provider` role. Server must refresh its integration catalog after updating; the definitions live in `apteva/integrations`. Existing instances and monitoring are unchanged.
+
+Both adapters provide Linux host catalogs, provisioning, generated SSH access, readiness/restart recovery, optional setup, monitoring, file transfer, commands, tunnels and destruction through the existing API/MCP/UI. The native deployment backend can use these hosts once SSH/systemd readiness is verified. Windows and UpCloud GPU/diskless plans are excluded. Account/provider quotas still apply.
+
+Clouding is physically in Barcelona (`barcelona`). It uses live CPU/RAM flavors, including fractional vCPU allocations, a separately selected boot disk from its volume-size catalog, and Linux images supporting public-key authentication without uploading private keys. Configure an existing `firewall_id` on the provider connection, or let Instances select an existing firewall allowing public SSH. Instances never modifies shared firewall rules. Its generated public key is tracked and removed only after server deletion and key-ownership verification. Separate data volumes are not supported by this adapter.
+
+UpCloud discovers public zones (including Madrid when returned by the account), MaxIOPS-backed non-GPU plans and eligible Linux templates. It supports configurable boot disks and managed data-volume creation/attach/detach/growth/deletion. Guest formatting is deliberately unavailable because the guest serial does not contain the complete storage UUID. Destroy confirms shutdown, retains unrelated attached disks, and removes only the boot disk identified by a durable unique ownership marker and recorded UUID. It never uses blanket attached-storage deletion. Interrupted delete responses can be retried; unknown create outcomes retain inventory for operator reconciliation rather than creating duplicates.
+
+Complete provider quotes are unavailable in this increment: catalog `price_known` is false and costs are not fabricated from CPU-only prices. Clouding compute/disk pricing is separate and UpCloud pricing is zone-specific. Raw provider cost APIs are available in their integration catalogs.
+
+### Managed provider firewalls (0.13.0)
+
+Firewall management is opt-in and provider-neutral. Clouding (IPv4), Hetzner
+Cloud, DigitalOcean, Vultr (VMs and bare metal), and Linode legacy-config hosts
+are implemented. Query `instance_firewall_capabilities` for the actual target;
+other providers/products, including Linode interface-based firewalls, return an
+explicit unsupported error. Provider API availability does not imply that every
+product has an Instances adapter.
+
+Policies are inbound allow lists with default-deny inbound and unrestricted
+outbound traffic. Rules specify `protocol` (`tcp`, `udp`, `icmp`), inclusive
+`port_start`/`port_end` for TCP/UDP, and explicit `source_cidrs`. IPv6 is checked
+against target capabilities. The effective rule count, including SSH and every
+workload owner, must fit the provider limit. Each host retains at most 64 owners
+and one managed firewall; policies are replaced in place rather than appended
+on every call.
+
+For example, callers can supply this optional field to `instance_create`:
+
+```json
+{
+  "firewall": {
+    "management_cidrs": ["203.0.113.10/32"],
+    "rules": [
+      {"protocol":"tcp", "port_start":8080, "source_cidrs":["0.0.0.0/0"]},
+      {"protocol":"udp", "port_start":10000, "port_end":10031, "source_cidrs":["0.0.0.0/0"]}
+    ]
+  }
+}
+```
+
+Use a reachable controller/admin CIDR, replacing the documentation address.
+Omitting `management_cidrs` preserves public SSH with key authentication
+(`0.0.0.0/0`, plus `::/0` where supported). The instance's actual SSH port is
+always retained. Management CIDRs are fixed at first adoption; changing them is
+an explicit host-administration task. ICMP can be allowed explicitly where
+required for network diagnostics or MTU discovery.
+
+- `instance_firewall_apply {id, owner, firewall}` sets that owner's desired rules.
+- `instance_firewall_release {id, owner}` removes only that owner's requirements.
+- `instance_firewall_get {id, refresh?}` reads intent; `refresh:true` also checks
+  provider rules and attachment without modifying anything.
+- HTTP equivalents: `GET/PUT/DELETE /api/instances/<id>/firewall` (`owner` query
+  parameter for DELETE), and `GET /api/instances-firewall-capabilities`.
+
+The instance-creation owner (`instance`) and backend-owned `native:<deployment>`
+owners are reserved. Overlapping requirements are deduplicated and retained
+until the final owner releases them. Releasing the last workload leaves the SSH
+baseline firewall attached. Destroying the host also cleans up its owned
+firewall. Existing shared profiles are never edited or deleted. Adopting an
+existing host with attached firewalls requires `replace_existing:true`; only
+that host's recorded attachments are replaced. Newly appearing attachments
+require a new explicit takeover request.
+
+The native backend advertises `firewall_policies:true` and accepts
+`options.firewall` using the same schema. `expose_declared_ports:true` explicitly
+allows manifest listeners publicly; extra `rules` can describe UDP/TCP ranges.
+The controller must supply this opt-in option—existing Server deployments do
+not silently gain public ports. Start applies and verifies the effective policy
+before starting the service; confirmed stop/delete releases that deployment's
+rules. The private control port is protected from every owner's policy. Target
+inspection and prepare do not alter provider firewall state.
+
+A desired policy and creation identity are journaled before provider mutations.
+Lost creation responses are recovered by the unique ownership name without
+replaying an uncertain create. Pending operations recover once after controller
+restart and through explicit retries. Rules are verified before replacing prior
+attachments, shared attachments prevent owned-group mutation, and pending
+provider rollout is not reported as confirmed. Applied policies are not polled
+by normal metrics or execution-health inspection.
+
+The Linux guest firewall remains externally managed: Instances does not flush
+iptables/nftables/UFW or claim that provider verification proves end-to-end
+reachability. Existing host rules must permit the requested traffic, and live
+connectivity still needs to be tested when a server is provisioned.
+
+Refresh the provider integration catalog before using these tools. Release
+0.13.0 requires the new `firewall_*` operations in the Clouding, Hetzner,
+DigitalOcean, Vultr and Linode definitions. Missing operations fail preflight
+before compute is ordered. No firewall is created for requests that omit the
+optional policy.
+
+## Ingress provider 0.15.0
+
+Public deployment ingress is coordinated by Server through one independent
+provider contract. Instances supplies the Caddy host adapter; its native compute
+backend no longer provisions or publishes public routes. Fresh preparation and
+explicit existing-proxy adoption feed the same publication operation. Use the
+matching Server controller changes before upgrading public deployments; app
+updates do not rewrite existing proxies. See the [contract, migration, safety and
+validation guide](runtime/ingress-provider.md).

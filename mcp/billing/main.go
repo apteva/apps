@@ -492,7 +492,7 @@ func normaliseLineItems(raw []any, defaultBps int) ([]LineItem, error) {
 // a clear error pointing at the install gap. Free-form line items
 // (no price_id) pass through untouched, so existing flows keep
 // working without catalog.
-func resolveCatalogRefs(ctx *sdk.AppCtx, raw []any) (string, error) {
+func resolveCatalogRefs(ctx *sdk.AppCtx, pid string, raw []any) (string, error) {
 	if ctx == nil {
 		return "", nil
 	}
@@ -512,7 +512,7 @@ func resolveCatalogRefs(ctx *sdk.AppCtx, raw []any) (string, error) {
 			return "", errors.New("price_id requires platform API (catalog app must be installed)")
 		}
 		var priceResp map[string]any
-		if err := cachedCatalogCall(api, cache, "catalog_prices_get", priceID, &priceResp); err != nil {
+		if err := cachedCatalogCall(api, cache, pid, "catalog_prices_get", priceID, &priceResp); err != nil {
 			return "", fmt.Errorf("line_items[%d]: catalog price %d lookup failed (is the catalog app installed?): %w", i, priceID, err)
 		}
 		price := mapFromAny(priceResp["price"])
@@ -526,7 +526,7 @@ func resolveCatalogRefs(ctx *sdk.AppCtx, raw []any) (string, error) {
 		product := map[string]any{}
 		if productID != 0 {
 			var productResp map[string]any
-			if err := cachedCatalogCall(api, cache, "catalog_products_get", productID, &productResp); err == nil {
+			if err := cachedCatalogCall(api, cache, pid, "catalog_products_get", productID, &productResp); err == nil {
 				product = mapFromAny(productResp["product"])
 				if len(product) == 0 {
 					product = productResp

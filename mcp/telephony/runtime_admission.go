@@ -18,6 +18,9 @@ var errInboundDisabled = errors.New("inbound_disabled: new inbound calls are dis
 // These checks apply only at admission. Access grants, media leases, callbacks,
 // and idempotent replay of existing calls remain independent.
 func (a *App) checkOutboundAdmission(project, provider string, connection int64, number string) error {
+	if _, busy := a.carrierMediaDrains.Load(connection); busy {
+		return errOutboundDisabled
+	}
 	var count int
 	err := a.db().db.QueryRow(`SELECT
  (SELECT COUNT(*) FROM outbound_admission_rules WHERE project_id=? AND
@@ -33,6 +36,9 @@ func (a *App) checkOutboundAdmission(project, provider string, connection int64,
 }
 
 func (a *App) checkInboundAdmission(route *routeRow) error {
+	if _, busy := a.carrierMediaDrains.Load(route.CarrierConnectionID); busy {
+		return errInboundDisabled
+	}
 	var enabled, draining int
 	err := a.db().db.QueryRow(`SELECT enabled,(SELECT COUNT(*) FROM carrier_binding_drains WHERE connection_id=inbound_routes.carrier_connection_id) FROM inbound_routes WHERE id=?`, route.ID).Scan(&enabled, &draining)
 	if err != nil {
@@ -50,6 +56,8 @@ func (a *App) outboundPolicy(ctx *sdk.AppCtx, body map[string]any) (map[string]a
 		return nil, errors.New("project context required")
 	}
 	if scope := strArg(body, "scope", ""); scope != "" {
+		a.inventoryReads.invalidate()
+		defer a.inventoryReads.invalidate()
 		enabled, ok := body["enabled"].(bool)
 		if !ok {
 			return nil, errors.New("enabled must be a boolean")
@@ -124,6 +132,8 @@ func (a *App) outboundPolicy(ctx *sdk.AppCtx, body map[string]any) (map[string]a
 // Runtime route toggles retain carrier resources and route snapshots. Restoring
 // or deleting external resources is a separate deconfiguration operation.
 func (a *App) setInboundRouteEnabled(route *routeRow, enabled bool) (map[string]any, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	a.admissionMu.Lock()
 	defer a.admissionMu.Unlock()
 	if enabled {
@@ -148,7 +158,7 @@ func (a *App) handleSoftphoneNumbers(w http.ResponseWriter, r *http.Request, pro
 		http.Error(w, "GET only", 405)
 		return
 	}
-	result, err := a.connectedNumbers(globalCtx.WithProject(project), r.Context())
+	result, err := a.connectedNumbers(globalCtx.WithProject(project), inventoryFreshContext(r.Context(), r.URL.Query().Get("fresh") == "true"))
 	if err != nil {
 		http.Error(w, err.Error(), 503)
 		return
@@ -164,6 +174,10 @@ func (a *App) handleSoftphoneNumbers(w http.ResponseWriter, r *http.Request, pro
 		}
 		if len(n.Capabilities) > 0 && !containsString(n.Capabilities, "voice") {
 			continue
+		}
+		if principal != nil {
+			n.OutboundTransport.Config = nil
+			n.OutboundTransport.CredentialsConfigured = false
 		}
 		filtered = append(filtered, n)
 	}

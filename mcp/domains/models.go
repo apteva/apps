@@ -69,6 +69,9 @@ type DomainRegistrationRequest struct {
 }
 
 type RegistrationIntent struct {
+	RequestJSON  json.RawMessage
+	BillingMode  string
+	OperationID  string
 	CostCents    int64
 	Result       json.RawMessage
 	AttemptedAt  string

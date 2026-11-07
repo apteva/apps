@@ -18,20 +18,22 @@ var objectSchema = map[string]any{"type": "object", "additionalProperties": true
 var voiceCallSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"run_id":           map[string]any{"type": "string"},
-		"caller_goal":      map[string]any{"type": "string"},
-		"caller_persona":   map[string]any{"type": "string"},
-		"caller_behavior":  map[string]any{"type": "string"},
-		"provider":         map[string]any{"type": "string"},
-		"voice":            map[string]any{"type": "string"},
-		"caller_provider":  map[string]any{"type": "string"},
-		"caller_voice":     map[string]any{"type": "string"},
-		"greeting":         map[string]any{"type": "string"},
-		"target_agent":     map[string]any{"type": "string"},
-		"target_directive": map[string]any{"type": "string"},
-		"timeout_seconds":  map[string]any{"type": "integer", "minimum": 15, "maximum": 300},
-		"transport":        map[string]any{"type": "string", "enum": []string{"direct", "carrier"}},
-		"protocol_fixture": map[string]any{"type": "string"},
+		"run_id":               map[string]any{"type": "string"},
+		"caller_goal":          map[string]any{"type": "string"},
+		"caller_persona":       map[string]any{"type": "string"},
+		"caller_behavior":      map[string]any{"type": "string"},
+		"provider":             map[string]any{"type": "string"},
+		"voice":                map[string]any{"type": "string"},
+		"caller_provider":      map[string]any{"type": "string"},
+		"caller_voice":         map[string]any{"type": "string"},
+		"greeting":             map[string]any{"type": "string"},
+		"target_agent":         map[string]any{"type": "string"},
+		"target_directive":     map[string]any{"type": "string"},
+		"timeout_seconds":      map[string]any{"type": "integer", "minimum": 15, "maximum": 300},
+		"transport":            map[string]any{"type": "string", "enum": []string{"direct", "carrier"}},
+		"protocol_fixture":     map[string]any{"type": "string"},
+		"microphone_mode":      map[string]any{"type": "string", "enum": []string{"auto", "continuous", "discontinuous"}, "description": "Microphone input policy; auto follows renderer capabilities and uses continuous carrier input."},
+		"final_reply_contains": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 32, "description": "Optional case-insensitive phrases required in the receptionist's final reply."},
 		"audio_conditions": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -218,8 +220,7 @@ func (a *App) toolRunGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt, rtErr := a.svc.runtime().GetRuntime(r.RuntimeID)
-	return map[string]any{"run": r, "runtime": rt}, rtErr
+	return a.svc.inspectStoredRun(r)
 }
 
 func (a *App) clockClient() (sdk.RuntimeClockClient, error) {
@@ -271,7 +272,17 @@ func (a *App) toolRunStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]bool{"ok": true}, a.svc.stopRun(r)
+	stopErr := a.svc.stopRun(r)
+	current, err := a.svc.db.getRun(r.ID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := a.svc.inspectStoredRun(current)
+	if err != nil {
+		return nil, err
+	}
+	out["ok"] = stopErr == nil
+	return out, stopErr
 }
 func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.svc.catalog()

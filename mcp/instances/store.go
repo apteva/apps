@@ -93,6 +93,8 @@ func (i *Instance) stripSecrets() *Instance {
 // ─── Inputs ────────────────────────────────────────────────────────
 
 type CreateInstanceInput struct {
+	Firewall             *FirewallPolicy
+	OVH                  *OVHOrderOptions
 	Setup                *SetupOptions
 	Name                 string
 	Provider             string
@@ -234,6 +236,16 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+	if in.Firewall != nil {
+		inst, e := dbGetInstance(db, id)
+		if e != nil {
+			return nil, e
+		}
+		if e = firewallQueue(db, inst, "instance", *in.Firewall); e != nil {
+			_, _ = db.Exec(`DELETE FROM instances WHERE id=?`, id)
+			return nil, e
+		}
 	}
 	return dbGetInstance(db, id)
 }

@@ -3,6 +3,8 @@ on:
   pull_request:
     paths: ['mcp/auth/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/panel-react-surface.json', '.github/workflows/auth.yml']
   push:
+    branches: [main]
+    tags: ['auth/v*']
     paths: ['mcp/auth/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/panel-react-surface.json', '.github/workflows/auth.yml']
 permissions:
   contents: read
@@ -15,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: mcp/auth/go.mod
+          go-version: '1.26.9'
           cache-dependency-path: mcp/auth/go.sum
       - uses: oven-sh/setup-bun@v2
         with:

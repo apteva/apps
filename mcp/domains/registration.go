@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,15 +54,18 @@ func (a *App) toolDomainRegistrationPrepare(ctx *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
+	reg, bound, err := a.registrarFor(ctx, int64(connID), pid)
+	if err != nil {
+		return nil, err
+	}
+	if bound.AppSlug == "spaceship" {
+		return a.prepareSpaceshipRegistration(ctx, args, pid, domain, bound)
+	}
 	if strArg(args, "coupon") != "" {
 		return nil, errors.New("Porkbun API registration does not support coupons")
 	}
 	if !boolArg(args, "auto_renew", true) {
 		return nil, errors.New("Porkbun registration uses automatic renewal; configure renewal separately after registration")
-	}
-	reg, bound, err := a.registrarFor(ctx, int64(connID), pid)
-	if err != nil {
-		return nil, err
 	}
 	if bound.AppSlug != "porkbun" {
 		return nil, errors.New("provider does not support paid registration")
@@ -121,14 +125,14 @@ func (a *App) toolDomainRegistrationPrepare(ctx *sdk.AppCtx, args map[string]any
 	if _, err = ctx.AppDB().Exec(`UPDATE registration_intents SET status='expired' WHERE project_id=? AND domain=? AND status='prepared'`, pid, domain); err != nil {
 		return nil, err
 	}
-	if err = dbRegistrationIntentInsert(ctx.AppDB(), intent); err != nil {
+	if err = dbRegistrationIntentInsert(ctx.AppDB(), intent, ctx); err != nil {
 		return nil, err
 	}
 	return registrationDetails(intent), nil
 }
 
 func registrationDetails(in *RegistrationIntent) map[string]any {
-	return map[string]any{"confirmation_token": in.Token, "domain": in.Domain, "years": in.Years, "auto_renew": in.AutoRenew, "whois_privacy": in.WhoisPrivacy, "provider": in.Provider, "connection_id": in.ConnectionID, "price": in.Price, "cost_cents": in.CostCents, "currency": in.Currency, "expires_at": in.ExpiresAt.Format(time.RFC3339), "status": in.Status, "error": in.Error, "attempted_at": in.AttemptedAt}
+	return map[string]any{"confirmation_token": in.Token, "domain": in.Domain, "years": in.Years, "auto_renew": in.AutoRenew, "whois_privacy": in.WhoisPrivacy, "provider": in.Provider, "connection_id": in.ConnectionID, "price": in.Price, "cost_cents": in.CostCents, "currency": in.Currency, "expires_at": in.ExpiresAt.Format(time.RFC3339), "status": in.Status, "error": in.Error, "attempted_at": in.AttemptedAt, "billing_mode": in.BillingMode, "operation_id": in.OperationID, "options": in.RequestJSON}
 }
 
 func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -147,13 +151,16 @@ func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if in == nil {
 		return nil, apiError(404, "confirmation token not found")
 	}
+	if in.Provider == "spaceship" {
+		return a.registerSpaceshipIntent(ctx, in)
+	}
 	if in.Status == "succeeded" {
 		return a.registrationResult(ctx, in, true), nil
 	}
 	now := time.Now().UTC()
 	if in.Status == "prepared" {
 		if now.After(in.ExpiresAt) {
-			_ = dbRegistrationIntentStatus(ctx.AppDB(), token, "expired", nil, "quote expired")
+			_ = registrationTransition(ctx, in, "expired", nil, "quote expired")
 			return nil, apiError(409, "quote expired; prepare a new purchase")
 		}
 	} else {
@@ -185,20 +192,13 @@ func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if attempted == "" {
 		attempted = now.Format(time.RFC3339)
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE registration_intents SET status='processing',attempted_at=?,updated_at=? WHERE project_id=? AND token=? AND status=? AND updated_at=?`, attempted, now.Format(time.RFC3339), pid, token, in.Status, in.UpdatedAt)
-	if err != nil {
+	if err = claimRegistration(ctx, in, attempted); err != nil {
 		return nil, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if n != 1 {
-		return nil, apiError(409, "purchase is already in progress")
-	}
+
 	raw, err := reg.Register(ctx, DomainRegistrationRequest{Domain: in.Domain, Years: in.Years, AutoRenew: in.AutoRenew, WhoisPrivacy: in.WhoisPrivacy, CostCents: in.CostCents, IdempotencyKey: in.Token})
 	if err != nil {
-		persistErr := dbRegistrationIntentStatus(ctx.AppDB(), token, "unknown", nil, err.Error())
+		persistErr := registrationTransition(ctx, in, "unknown", nil, err.Error())
 		if persistErr != nil {
 			return nil, fmt.Errorf("purchase outcome unknown and status could not be saved: %v; %w", persistErr, err)
 		}
@@ -231,13 +231,20 @@ func completeRegistration(ctx *sdk.AppCtx, in *RegistrationIntent) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	if err = queueDomainEvent(tx, in.ProjectID, in.Domain, "domain.registered", "registration:"+in.Token+":succeeded", map[string]any{"provider": in.Provider, "connection_id": in.ConnectionID, "status": "succeeded", "years": in.Years, "auto_renew": in.AutoRenew, "whois_privacy": in.WhoisPrivacy, "billing_mode": in.BillingMode}); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("purchase completed; result persistence failed, resume same token: %w", err)
 	}
+	deliverDomainEvents(ctx, in.ProjectID)
 	return result, nil
 }
 
 func (a *App) toolRegistrationStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.registrationStatusWithContext(context.Background(), ctx, args)
+}
+func (a *App) registrationStatusWithContext(parent context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -252,15 +259,19 @@ func (a *App) toolRegistrationStatus(ctx *sdk.AppCtx, args map[string]any) (any,
 			return nil, apiError(404, "intent not found")
 		}
 		if boolArg(args, "cancel", false) {
-			res, err := ctx.AppDB().Exec(`UPDATE registration_intents SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND token=? AND status='prepared'`, pid, token)
+			if err = registrationTransition(ctx, in, "cancelled", nil, ""); err != nil {
+				return nil, err
+			}
+			in.Status = "cancelled"
+		}
+		if in.Provider == "spaceship" && in.OperationID != "" && in.Status == "processing" && boolArg(args, "refresh", true) {
+			if _, err := a.pollSpaceshipRegistration(ctx, in, parent); err != nil {
+				return nil, err
+			}
+			in, err = dbRegistrationIntentGet(ctx.AppDB(), pid, token)
 			if err != nil {
 				return nil, err
 			}
-			n, _ := res.RowsAffected()
-			if n != 1 {
-				return nil, apiError(409, "only an unsubmitted purchase can be cancelled")
-			}
-			in.Status = "cancelled"
 		}
 		result := registrationDetails(in)
 		if boolArg(args, "inspect_ownership", false) {
@@ -268,7 +279,12 @@ func (a *App) toolRegistrationStatus(ctx *sdk.AppCtx, args map[string]any) (any,
 			if err != nil {
 				return nil, err
 			}
-			row, err := porkbunOwnedDomain(ctx, bound, in.Domain)
+			var row map[string]any
+			if bound.AppSlug == "spaceship" {
+				row, err = spaceshipOwnedDomain(ctx, bound, in.Domain, parent)
+			} else {
+				row, err = porkbunOwnedDomain(ctx, bound, in.Domain)
+			}
 			if err != nil {
 				return nil, err
 			}

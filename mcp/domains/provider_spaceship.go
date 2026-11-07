@@ -26,6 +26,12 @@ func (r *spaceshipRegistrar) CheckAvailability(ctx *sdk.AppCtx, domain string) (
 	if err != nil {
 		return nil, err
 	}
+	var identity struct {
+		Domain string `json:"domain"`
+	}
+	if json.Unmarshal(raw, &identity) != nil || (identity.Domain != "" && identity.Domain != domain) {
+		return nil, errors.New("Spaceship availability response did not match requested domain")
+	}
 	out := parseSpaceshipAvailability(domain, r.bound, raw)
 	if !out.Known {
 		return nil, errors.New("Spaceship omitted availability")
@@ -38,7 +44,7 @@ func (r *spaceshipRegistrar) Pricing(*sdk.AppCtx, string) (any, error) {
 }
 
 func (r *spaceshipRegistrar) Register(*sdk.AppCtx, DomainRegistrationRequest) (json.RawMessage, error) {
-	return nil, errors.New("Spaceship registration is intentionally not supported by domains because it would spend money; use Porkbun for domain_register")
+	return nil, errors.New("Spaceship registration requires the persisted account-rate consent and async workflow; use domain_registration_prepare and domain_register")
 }
 
 func (p *spaceshipProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error) {
@@ -220,7 +226,7 @@ func parseSpaceshipAvailability(domain string, bound *sdk.BoundIntegration, raw 
 	if v, ok := firstBool(scopes, "available", "isAvailable"); ok {
 		out.Available = v
 		out.Known = true
-	} else if s := firstString(scopes, "availability", "status"); s != "" {
+	} else if s := firstString(scopes, "availability", "status", "result"); s != "" {
 		out.Available = availabilityStringIsAvailable(s)
 		out.Known = includes([]string{"yes", "no", "true", "false", "available", "unavailable", "taken", "1", "0"}, strings.ToLower(s))
 	}
@@ -233,6 +239,11 @@ func parseSpaceshipAvailability(domain string, bound *sdk.BoundIntegration, raw 
 	if v, ok := firstBool(scopes, "premium", "isPremium"); ok {
 		out.Premium = v
 	}
+	if prices, ok := root["premiumPricing"].([]any); ok && len(prices) > 0 {
+		out.Premium = true
+	}
+	out.MinDuration = 1
+	out.Warning = "Spaceship registration is billed at account rates; its API does not provide a guaranteed standard-domain quote or price ceiling."
 	return out
 }
 

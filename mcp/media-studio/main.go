@@ -36,8 +36,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.62
+version: 0.10.63
 description: |
+  v0.10.63 aligns the Codex image catalog and default requests with
+  gpt-6.1-sol, preserving explicitly selected models.
   v0.10.62 adds project-scoped media_job_get so consumers can poll existing
   generation jobs without submitting duplicate paid requests.
   v0.10.61 adds media_asset_source: a project-scoped export of retained generation
@@ -219,7 +221,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media-studio/v0.10.61
+    ref: media-studio/v0.10.63
     entry: mcp/media-studio
   port: 8080
   health_check: /health

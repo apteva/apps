@@ -14,7 +14,7 @@ export interface HomeWidgetProps {
 export interface PublishingSummary {
   posts: SocialPost[];
   total: number;
-  attention: { failed: number; approval: number; overdue: number };
+  attention: { failed: number; approval: number; overdue: number; membership?: number };
 }
 export interface MetricPoint { date: string; value: number | null; accounts: number }
 export interface WidgetMetric {
@@ -29,7 +29,7 @@ export interface PerformanceSummary {
   start_date: string;
   end_date: string;
   updated_at: string;
-  accounts: { id: number; name: string; platform: string; updated_at: string; metrics: Record<string, WidgetMetric> }[];
+  accounts: { id: number; name: string; platform: string; updated_at: string; aggregate_exclusion_reason?: string; metrics: Record<string, WidgetMetric> }[];
   metrics: Record<string, WidgetMetric>;
 }
 

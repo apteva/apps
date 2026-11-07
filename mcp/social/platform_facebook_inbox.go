@@ -212,7 +212,7 @@ func upsertFBComment(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCr
 			parentID = c.Parent.ID
 		}
 	}
-	_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+	_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 		ProjectID:        projectID,
 		SocialAccountID:  creds.AccountID,
 		Platform:         "facebook",
@@ -320,7 +320,7 @@ func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *fac
 		}
 
 		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",
@@ -382,7 +382,7 @@ func syncFacebookMentions(ctx *sdk.AppCtx, projectID string, creds *facebookAcco
 			continue
 		}
 		mediaJSON := normalizeInboxMediaJSON(t.Attachments)
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",
@@ -443,7 +443,7 @@ func syncFacebookReviews(ctx *sdk.AppCtx, projectID string, creds *facebookAccou
 		if r.ID == "" {
 			continue
 		}
-		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		_, inserted, err := recordInboxItem(ctx, inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",

@@ -254,6 +254,9 @@ func (a *App) toolPostDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if _, err := validatePostTargets(ctx, pid, targets); err != nil {
 			return mcpError(err.Error()), nil
 		}
+		if err := freezeTargetDestinations(ctx, pid, targets, false); err != nil {
+			return mcpError(err.Error()), nil
+		}
 		a.validateTargetOptions(ctx, pid, targets)
 	}
 	tx, err := ctx.AppDB().Begin()
@@ -312,6 +315,11 @@ func (a *App) transitionDraftReview(ctx *sdk.AppCtx, args map[string]any, action
 	unlock := lockSocialPost(ctx, postID)
 	defer unlock()
 	pid := projectScope(ctx, args)
+	if action == "submit" {
+		if err := validateStoredDestinations(ctx, pid, postID); err != nil {
+			return mcpError(err.Error()), nil
+		}
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -445,6 +453,9 @@ func (a *App) toolPostDraftPublish(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	if targetCount == 0 {
 		return mcpError("at least one social target is required before publishing"), nil
+	}
+	if err := validateStoredDestinations(ctx, pid, postID); err != nil {
+		return mcpError(err.Error()), nil
 	}
 	if err := validateStoredDraftForDelivery(ctx, postID, body); err != nil {
 		return mcpError(err.Error()), nil

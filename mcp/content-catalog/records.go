@@ -19,12 +19,16 @@ type Asset struct {
 	SessionLifecycle     string           `json:"session_lifecycle"`
 	SessionRevision      int64            `json:"session_revision"`
 	Eligible             bool             `json:"eligible"`
+	Role                 string           `json:"role"`
+	OutputType           string           `json:"output_type"`
+	Ancestors            []LineageNode    `json:"ancestors"`
 	Sources              []AssetSource    `json:"sources"`
 	ID                   string           `json:"id"`
 	SessionID            string           `json:"session_id"`
 	StorageInstallID     int64            `json:"storage_install_id"`
 	StorageFileID        string           `json:"storage_file_id"`
 	Name                 string           `json:"name"`
+	Title                string           `json:"title"`
 	Kind                 string           `json:"kind"`
 	ContentType          string           `json:"content_type"`
 	SHA256               string           `json:"sha256"`
@@ -44,7 +48,7 @@ type Asset struct {
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
 	a := &Asset{}
-	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating, &a.Favorite, &a.PatreonIntent)
+	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,title,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Title, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating, &a.Favorite, &a.PatreonIntent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("asset not found")
 	}
@@ -215,7 +219,20 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, pid, str(args, "session_id"))
+	purpose, err := parsePurposeOptions(args)
+	if err != nil {
+		return nil, err
+	}
+	filter, values := "", []any{pid, str(args, "session_id")}
+	if raw, present := args["id"]; present {
+		id, ok := raw.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, errors.New("id must be a nonempty Catalog asset ID; use content_catalog_assets_get for a direct read")
+		}
+		filter = " AND a.id=?"
+		values = append(values, strings.TrimSpace(id))
+	}
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.title,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+filter+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, values...)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +240,7 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []Asset{}
 	for rows.Next() {
 		var item Asset
-		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating, &item.Favorite, &item.PatreonIntent); err != nil {
+		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Title, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating, &item.Favorite, &item.PatreonIntent); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -282,7 +299,15 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
+	history, err := purposeHistory(ctx.AppDB(), pid, asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	sourceHistory, err := sourceHistory(ctx.AppDB(), pid, asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"asset": asset, "source_history": sourceHistory, "purpose_history": history, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
@@ -304,47 +329,6 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	return out, nil
-}
-func (a *App) assetLinkSource(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := project(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err = required(args, "child_asset_id", "source_asset_id"); err != nil {
-		return nil, err
-	}
-	child, err := assetByID(ctx.AppDB(), pid, str(args, "child_asset_id"))
-	if err != nil {
-		return nil, err
-	}
-	source, err := assetByID(ctx.AppDB(), pid, str(args, "source_asset_id"))
-	if err != nil {
-		return nil, err
-	}
-	if child.ID == source.ID {
-		return nil, errors.New("asset cannot be its own source")
-	}
-	// A source can itself be derived, but the lineage graph must remain acyclic.
-	var cycle int
-	err = ctx.AppDB().QueryRow(`WITH RECURSIVE ancestors(id) AS (
-	  SELECT source_asset_id FROM asset_sources WHERE project_id=? AND child_asset_id=?
-	  UNION SELECT s.source_asset_id FROM asset_sources s JOIN ancestors a ON s.child_asset_id=a.id WHERE s.project_id=?
-	) SELECT COUNT(*) FROM ancestors WHERE id=?`, pid, source.ID, pid, child.ID).Scan(&cycle)
-	if err != nil {
-		return nil, err
-	}
-	if cycle > 0 {
-		return nil, errors.New("asset lineage cycle")
-	}
-	relation := str(args, "relation")
-	if relation == "" {
-		relation = "derived"
-	}
-	_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO asset_sources(project_id,child_asset_id,source_asset_id,relation,source_order,media_render_id) VALUES(?,?,?,?,?,?)`, pid, child.ID, source.ID, relation, number(args, "source_order"), number(args, "media_render_id"))
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"linked": true, "child_asset_id": child.ID, "source_asset_id": source.ID}, nil
 }
 func (a *App) assetReview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := project(ctx)

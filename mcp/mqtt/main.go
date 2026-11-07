@@ -28,22 +28,25 @@ import (
 var manifestYAML string
 
 type App struct {
-	ctx                 *sdk.AppCtx
-	broker              *Broker
-	messageLogCh        chan messageRecord
-	aclLogCh            chan aclRecord
-	droppedLogs         atomic.Uint64
-	droppedEvents       atomic.Uint64
-	rateLimitedMessages atomic.Uint64
-	authRejected        atomic.Uint64
-	aclRejected         atomic.Uint64
-	eventsEmitted       atomic.Uint64
-	startedAt           time.Time
-	eventLimiter        *tokenBucket
-	clientConnectedAt   sync.Map
-	clientIdentities    sync.Map
-	usersMu             sync.RWMutex
-	users               map[string]*MQTTUser
+	ctx                  *sdk.AppCtx
+	broker               *Broker
+	messageLogCh         chan messageRecord
+	aclLogCh             chan aclRecord
+	droppedLogs          atomic.Uint64
+	droppedEvents        atomic.Uint64
+	rateLimitedMessages  atomic.Uint64
+	authRejected         atomic.Uint64
+	aclRejected          atomic.Uint64
+	eventsEmitted        atomic.Uint64
+	startedAt            time.Time
+	eventLimiter         *tokenBucket
+	clientConnectedAt    sync.Map
+	clientIdentities     sync.Map
+	credentialsMu        sync.RWMutex
+	authenticatedClients sync.Map
+	scopeCounters        sync.Map
+	usersMu              sync.RWMutex
+	users                map[string]*MQTTUser
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -67,8 +70,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		clampConfigInt(ctx, "max_event_burst", 2000, 1, 10000000),
 	)
 
-	if err := a.seedDefaultUserIfNeeded(); err != nil {
-		ctx.Logger().Warn("seed default user", "err", err.Error())
+	if configFlag(ctx, "allow_anonymous", false) {
+		return errors.New("mqtt: anonymous access is incompatible with ownership isolation")
+	}
+	if err := a.initializeOwnership(); err != nil {
+		return err
 	}
 	if err := a.reloadUserCache(); err != nil {
 		return err
@@ -126,7 +132,7 @@ func (a *App) Workers() []sdk.Worker {
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		{Pattern: "/status", Handler: a.handleStatus},
 		{Pattern: "/clients", Handler: a.handleClients},
 		{Pattern: "/messages", Handler: a.handleMessages},
@@ -139,6 +145,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/devices", Handler: a.handleDevices},
 		{Pattern: "/test_publish", Handler: a.handleTestPublish},
 	}
+	for i := range routes {
+		routes[i].Handler = a.scopedHTTP(routes[i].Handler)
+	}
+	return routes
 }
 
 func (a *App) MCPTools() []sdk.Tool {

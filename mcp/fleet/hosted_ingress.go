@@ -33,12 +33,6 @@ func (a *App) prepareHostedDirectIngress(ctx *sdk.AppCtx, projectID string, t *T
 	if _, err := normaliseExactHostname(t.Domain); err != nil {
 		return nil, errors.New("attach the tenant primary domain before preparing direct ingress")
 	}
-	done, err := a.beginTenantOperation(t.ID, "prepare direct ingress")
-	if err != nil {
-		return nil, err
-	}
-	defer done()
-
 	info, err := a.getInstanceInfo(ctx, t.InstanceID)
 	if err != nil {
 		return nil, err

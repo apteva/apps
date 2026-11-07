@@ -25,12 +25,13 @@ type registerRequest struct {
 }
 
 type deliveryRequest struct {
-	DeviceID       string `json:"device_id"`
-	Type           string `json:"type"`
-	ItemID         string `json:"item_id"`
-	ProjectID      string `json:"project_id"`
-	Badge          *int   `json:"badge"`
-	IdempotencyKey string `json:"idempotency_key"`
+	Preview        *pushPreview `json:"preview,omitempty"`
+	DeviceID       string       `json:"device_id"`
+	Type           string       `json:"type"`
+	ItemID         string       `json:"item_id"`
+	ProjectID      string       `json:"project_id"`
+	Badge          *int         `json:"badge"`
+	IdempotencyKey string       `json:"idempotency_key"`
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -173,6 +174,11 @@ func (a *App) handleCreateDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "badge must be between 0 and 9999")
 		return
 	}
+	preview, err := normalizePreview(input.Preview)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid notification preview")
+		return
+	}
 	d, duplicate, err := a.store.createDelivery(
 		g,
 		input.Type,
@@ -189,6 +195,7 @@ func (a *App) handleCreateDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, d)
 		return
 	}
+	d.Preview = preview
 	a.dispatch(w, d)
 }
 
@@ -253,6 +260,10 @@ func (a *App) handleAdminTestDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) dispatch(w http.ResponseWriter, d *delivery) {
+	if err := a.store.db.QueryRow(`SELECT instance_ref FROM grants WHERE id = ?`, d.GrantID).Scan(&d.InstanceRef); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not resolve delivery origin")
+		return
+	}
 	device, err := a.store.deviceByID(d.DeviceID)
 	if err != nil || device.Status != "active" {
 		finished, _ := a.store.finishDelivery(d.ID, "failed", "", "device is not active")
@@ -351,7 +362,7 @@ func (a *App) requireGrant(w http.ResponseWriter, r *http.Request) (*grant, bool
 }
 
 func validDeliveryType(value string) bool {
-	return value == "approval" || value == "alert" || value == "report" || value == "test"
+	return value == "notification" || value == "approval" || value == "alert" || value == "report" || value == "test"
 }
 
 func validEnvironment(value string) bool {

@@ -130,7 +130,7 @@ func TestCrawlDOMRetriesWithLargerBoundedHTML(t *testing.T) {
 		doc, err := e.extractCrawlDOM()
 		wantCalls := 2
 		if alwaysTruncated {
-			wantCalls = 4
+			wantCalls = len(actorHTMLReadBudgets)
 			if err == nil || !strings.Contains(err.Error(), "still truncated") || doc != nil {
 				t.Fatalf("incomplete HTML accepted: doc=%+v err=%v", doc, err)
 			}
@@ -142,7 +142,7 @@ func TestCrawlDOMRetriesWithLargerBoundedHTML(t *testing.T) {
 		}
 		for _, call := range plat.calls {
 			formats := stringSliceFromAny(call.args["formats"])
-			if len(formats) != 1 || formats[0] != "html" || intArg(call.args, "max_chars") > 1000000 {
+			if len(formats) != 1 || formats[0] != "html" || intArg(call.args, "max_chars") > maxActorExtractChars {
 				t.Fatalf("unexpected extraction options: %+v", call.args)
 			}
 		}

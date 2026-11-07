@@ -142,10 +142,9 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		}
 	}
 
-	// 1.5 Strategy assignments. App ticks stay fast for fresh marks and
-	// fills, but deterministic strategies only rebalance when their
-	// assignment cadence says they are due.
-	strategyOrders := evaluateLiveStrategyAssignments(e, app, tickStart)
+	// Strategies schedules decisions in its own app process. Trading ticks
+	// refresh market data and execute submitted orders.
+	strategyOrders := 0 // Automated decisions are owned by the Strategies app.
 
 	// 2. Working orders — dispatch per portfolio mode.
 	//    paper → in-process tryFill against the marks we just refreshed.
@@ -395,6 +394,10 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		def, _, err := validateStrategyDefinition(strategy.Definition)
 		if err != nil {
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		if def.Engine == "rules" {
+			e.logger.Warn("rule execution adapter unavailable", "assignment_id", a.ID)
 			continue
 		}
 		var pendingTargets string

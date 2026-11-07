@@ -12,6 +12,110 @@ if (!compiled.success) throw new Error(compiled.logs.join("\n"));
 const bundle = await compiled.outputs[0].text();
 const deployment = (id: number, mobile = false) => ({id, name: id === 1 ? "Alpha" : "Bravo", target_kind:mobile?"ios":"service", framework:mobile?"ios":"blank", source_kind:"local", source_ref:"/fixture", build_backend:"local", build_backend_config_json:"{}", target_config_json:"{}", env_json:"{}", build_cmd:"", start_cmd:"", port_hint:0, domain:"", created_at:"2026-09-05", updated_at:"2026-09-05"});
 
+test("manual Apple release is offered for developer-held versions", async () => {
+  const states = ["pending_developer_release", "pending_apple_release", "approved_pending_release", "release_requested"];
+  const releases = states.map((state, index) => ({id:index+1,build_id:9,status:"starting",channel:"production",provider:"app_store_connect",external_status:state,release_meta_json:"{}"}));
+  const posts: string[] = [];
+  const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/") return new Response('<div id="root"></div><script type="module" src="/host.js"></script>',{headers:{"content-type":"text/html"}});
+    if (path === "/host.js") return new Response(bundle,{headers:{"content-type":"text/javascript"}});
+    if (req.method === "POST") {
+      posts.push(path);
+      releases[0].external_status = "release_requested";
+      return Response.json({release:releases[0],release_requested:true});
+    }
+    if (path.endsWith("/deployments")) return Response.json({deployments:[deployment(1,true)]});
+    if (path.endsWith("/deployments/1")) return Response.json({deployment:deployment(1,true),builds:[],releases,environments:[{id:1,name:"production"}]});
+    if (path.endsWith("/store-config")) return Response.json({preflight:{ready:true,errors:0}});
+    if (path.endsWith("/distribution")) return Response.json({audience:[],desired_audience:[],count:0,tester_access:"not_configured"});
+    return Response.json({});
+  }});
+  const browser = await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
+    await page.goto(server.url.href);
+    await page.locator("aside li").filter({hasText:"Alpha"}).click();
+    const row = (state: string) => page.getByRole("row").filter({has:page.getByText(state,{exact:true})});
+    await row("pending_developer_release").waitFor();
+    for (const state of states) {
+      expect(await row(state).getByRole("button",{name:"release",exact:true}).count()).toBe(
+        state === "pending_developer_release" ? 1 : 0,
+      );
+    }
+    expect(posts).toEqual([]);
+    await row("pending_developer_release").getByRole("button",{name:"release",exact:true}).click();
+    await row("pending_developer_release").waitFor({state:"detached"});
+    expect(posts).toEqual(["/api/apps/deploy/api/releases/1/release-approved"]);
+    expect(await page.getByRole("button",{name:"release",exact:true}).count()).toBe(0);
+  } finally { await browser.close(); server.stop(true); }
+});
+
+test("content rating edits independent questions and a boolean health answer", async () => {
+  const desired = {schema_version:1,version_name:"1.0",default_locale:"en-US",release_mode:"manual",localizations:{"en-US":{}},assets:[],review:{},classification:{content_rating:{violence:"FREQUENT",sexual_content:"NONE",health_wellness:false}},distribution:{},privacy:{}};
+  const preflight = {ready:false,errors:1,warnings:0,findings:[]};
+  let saved: any;
+  const server = Bun.serve({hostname:"127.0.0.1",port:0,async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/") return new Response('<div id="root"></div><script type="module" src="/host.js"></script>',{headers:{"content-type":"text/html"}});
+    if (path === "/host.js") return new Response(bundle,{headers:{"content-type":"text/javascript"}});
+    if (path.endsWith("/deployments")) return Response.json({deployments:[deployment(1,true)]});
+    if (path.endsWith("/deployments/1")) return Response.json({deployment:deployment(1,true),builds:[],releases:[],environments:[{id:1,name:"production"}]});
+    if (path.endsWith("/distribution")) return Response.json({platform:"ios",provider:"app_store_connect",channel:"internal",configured:false,audience:[],count:0,desired_configured:false,desired_audience:[],desired_count:0,synced:false,tester_access:"not_configured"});
+    if (path.endsWith("/store-config")) {
+      if (req.method === "PUT") saved = await req.json();
+      return Response.json({desired:saved || desired,preflight});
+    }
+    return Response.json({});
+  }});
+  const browser = await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
+    const errors: string[] = []; page.on("pageerror",e => errors.push(e.message));
+    await page.goto(server.url.href);
+    await page.locator("aside li").filter({hasText:"Alpha"}).click();
+    await page.getByRole("button",{name:"Store listing",exact:true}).click();
+    await page.getByRole("button",{name:"Compliance",exact:true}).click();
+    await page.getByText(/Older combined content answers need review/).waitFor();
+    const levels = [
+      ["violence_cartoon_fantasy","Cartoon or fantasy violence"],
+      ["violence_realistic","Realistic violence"],
+      ["violence_graphic_realistic","Prolonged graphic or sadistic realistic violence"],
+      ["sexual_content","Sexual content or nudity"],
+      ["sexual_content_graphic","Graphic sexual content and nudity"],
+      ["profanity","Profanity or crude humor"], ["drugs","Alcohol, tobacco, or drugs"],
+      ["gambling_simulation","Simulated gambling"], ["contests","Contests"],
+      ["weapons","Guns or other weapons"], ["horror_fear","Horror or fear"],
+      ["medical_information","Medical information"], ["mature_themes","Mature or suggestive themes"],
+    ] as const;
+    const flags = [
+      ["health_wellness","Health or wellness topics"], ["unrestricted_web_access","Unrestricted web access"],
+      ["real_money_gambling","Real-money gambling"], ["loot_boxes","Loot boxes"], ["advertising","Advertising"],
+      ["messaging_chat","Messaging and chat"], ["user_generated_content","User-generated content"],
+      ["parental_controls","Parental controls"], ["age_assurance","Age assurance"],
+      ["social_media","Social media"], ["social_media_age_gate","Social media restricted under 13"],
+    ] as const;
+    const expected: Record<string,string|boolean> = {};
+    for (const [index,[key,label]] of levels.entries()) {
+      const value = ["INFREQUENT","NONE","FREQUENT"][index%3];
+      await page.getByLabel(label,{exact:true}).selectOption(value);
+      expected[key] = value;
+    }
+    for (const [key,label] of flags) {
+      await page.getByLabel(label,{exact:true}).check();
+      expected[key] = true;
+    }
+    const savedResponse = page.waitForResponse(response => response.request().method()==="PUT" && response.url().includes("store-config"));
+    await page.getByRole("button",{name:"Save draft",exact:true}).click();
+    await savedResponse;
+    expect(Object.keys(expected)).toHaveLength(24);
+    expect(saved.classification.content_rating).toMatchObject(expected);
+    expect(errors).toEqual([]);
+  } finally { await browser.close(); server.stop(true); }
+},45000);
+
 for (const secondary of [false, true]) test(`selection is safe with delayed ${secondary ? "mobile signing" : "detail"} response`, async () => {
   let unblock!: () => void; let requested!: () => void;
   const gate = new Promise<void>(resolve => { unblock = resolve; });

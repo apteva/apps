@@ -125,7 +125,7 @@ func (a *App) handleBandwidthRecordingStatus(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "persist recording", http.StatusInternalServerError)
 		return
 	}
-	globalCtx.WithProject(call.ProjectID).Emit("recording.ready", recordingPublic(*recording))
+	a.saveCallNotification(call.ProjectID, call.ID, "recording.ready", recordingPublic(*recording))
 	w.WriteHeader(http.StatusNoContent)
 }
 

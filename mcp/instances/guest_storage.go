@@ -122,6 +122,9 @@ func flatVolumePrepareRequest(args map[string]any) (*VolumePrepareRequest, error
 }
 
 func prepareAttachedVolume(ctx *sdk.AppCtx, v *InstanceVolume, req *VolumePrepareRequest) (*InstanceVolume, *VolumePrepareResult, error) {
+	if v != nil && v.Provider == "upcloud" {
+		return nil, nil, errors.New("UpCloud guest formatting is unsupported: the complete provider UUID cannot be verified from the guest serial")
+	}
 	if v == nil || v.InstanceID == nil {
 		return nil, nil, errors.New("volume must be attached before it can be prepared")
 	}

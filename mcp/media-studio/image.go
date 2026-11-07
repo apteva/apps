@@ -243,10 +243,13 @@ func geminiImagePart(src string) map[string]any {
 	return map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": src}}
 }
 
+// Keep the catalog and request fallback aligned with the Codex connector.
+const defaultCodexImageModel = "gpt-6.1-sol"
+
 func buildOpenAICodexImageArgs(args map[string]any) map[string]any {
-	model := strArg(args, "model", "gpt-5.5")
+	model := strings.TrimSpace(strArg(args, "model", defaultCodexImageModel))
 	if model == "" || strings.HasPrefix(model, "gpt-image") || strings.HasPrefix(model, "dall-e") {
-		model = "gpt-5.5"
+		model = defaultCodexImageModel
 	}
 	prompt := strArg(args, "prompt", "")
 	instructions := strArg(args, "instructions", "")

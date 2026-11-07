@@ -9,6 +9,7 @@ func TestNormaliseAddress_Email(t *testing.T) {
 	}{
 		{"foo@bar.com", "foo@bar.com", false},
 		{"FOO@bar.COM", "foo@bar.com", false},
+		{`"Example, Alice" <ALICE@example.test>`, "alice@example.test", false},
 		{"mailto:Foo@Bar.com", "foo@bar.com", false}, // tolerates legacy URI
 		{"  hi@x.io  ", "hi@x.io", false},
 		{"support+T-1234@acme.com", "support+t-1234@acme.com", false},

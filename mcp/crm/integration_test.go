@@ -31,6 +31,77 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_AttributeDiscoveryAndTypedUpdateContract(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	listed, err := sc.MCPRaw("tools/list", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, raw := range listed["tools"].([]any) {
+		tool := raw.(map[string]any)
+		switch tool["name"] {
+		case "contacts_attribute_definitions_list":
+			found++
+			annotations := tool["annotations"].(map[string]any)
+			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
+				t.Fatalf("read-only discovery metadata: %v", tool)
+			}
+		case "contacts_update":
+			found++
+			patch := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)["patch"].(map[string]any)
+			attributes := patch["properties"].(map[string]any)["attributes"].(map[string]any)
+			if attributes["type"] != "array" || len(attributes["items"].(map[string]any)["required"].([]any)) != 2 {
+				t.Fatalf("live patch schema: %v", patch)
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatal("discovery/update tools missing")
+	}
+	defaults := sc.MCP("contacts_attribute_definitions_list", map[string]any{})
+	if defaults["count"] != float64(10) {
+		t.Fatalf("first-project defaults: %v", defaults)
+	}
+	sc.MCP("contacts_define_attribute", map[string]any{"key": "research_stage", "label": "Research stage", "type": "select", "enum_values": []string{"draft", "ready"}, "required": true})
+	discovered := sc.MCP("contacts_attribute_definitions_list", map[string]any{})
+	custom := false
+	for _, raw := range discovered["attribute_defs"].([]any) {
+		def := raw.(map[string]any)
+		if def["key"] == "research_stage" {
+			custom = true
+			if def["type"] != "select" || def["required"] != true || len(def["enum_values"].([]any)) != 2 {
+				t.Fatalf("definition contract: %v", def)
+			}
+		}
+	}
+	if !custom {
+		t.Fatal("custom definition missing")
+	}
+	created := sc.MCP("contacts_create", map[string]any{"first_name": "Research"})
+	id := created["contact"].(map[string]any)["id"]
+	sc.MCP("contacts_update", map[string]any{"id": id, "patch": map[string]any{"attributes": []any{map[string]any{"key": "lead_score", "value": 88}, map[string]any{"key": "research_stage", "value": "ready"}}}, "source": "agent:research"})
+	before := sc.MCP("contacts_get", map[string]any{"id": id})
+	values := map[string]any{}
+	for _, raw := range before["contact"].(map[string]any)["attributes"].([]any) {
+		attr := raw.(map[string]any)
+		values[attr["key"].(string)] = attr["value"]
+	}
+	if values["lead_score"] != float64(88) || values["research_stage"] != "ready" {
+		t.Fatalf("typed readback: %v", values)
+	}
+	_, err = sc.MCPRaw("tools/call", map[string]any{"name": "contacts_update", "arguments": map[string]any{"id": id, "patch": map[string]any{"first_name": "Lost", "attributes": map[string]any{"lead_score": 99}}}})
+	if err == nil {
+		t.Fatal("dictionary patch accepted")
+	}
+	after := sc.MCP("contacts_get", map[string]any{"id": id})
+	b, _ := json.Marshal(before)
+	a, _ := json.Marshal(after)
+	if string(a) != string(b) {
+		t.Fatal("invalid patch changed contact")
+	}
+}
+
 func TestSidecar_AttributeScalarCompatibilityAndReadback(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 	for key, typ := range map[string]string{"opportunity_score": "number", "custom_flag": "bool", "external_code": "text"} {
@@ -137,6 +208,10 @@ func TestSidecar_InboxReadOnlyAnnotations(t *testing.T) {
 			draftReads++
 			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
 				t.Fatalf("draft read annotation incorrect: %v", tool)
+			}
+		} else if tool["name"] == "contacts_attribute_definitions_list" {
+			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
+				t.Fatalf("attribute definition annotations incorrect: %v", tool)
 			}
 		} else if annotations["readOnlyHint"] == true {
 			t.Errorf("unexpected read-only annotation on %v", tool["name"])

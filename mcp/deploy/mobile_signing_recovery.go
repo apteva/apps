@@ -25,16 +25,19 @@ func (a *App) mobileSigningIdentityForDeployment(d *Deployment) (*MobileSigningI
 	case "android":
 		return dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, "android", "", strings.TrimSpace(target.PackageName))
 	case "ios", "macos":
-		setups, err := dbListMobileSigningSetups(globalCtx.AppDB(), d.ID, d.EnvironmentID)
+		bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 		if err != nil {
 			return nil, err
 		}
-		for i := range setups {
-			if setups[i].Platform == d.TargetKind && setups[i].IdentityID > 0 {
-				return dbGetMobileSigningIdentityByID(globalCtx.AppDB(), setups[i].IdentityID)
-			}
+		credentials, err := globalCtx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+		if err != nil {
+			return nil, err
 		}
-		return nil, nil
+		issuer := strings.TrimSpace(credentials.Fields["issuer_id"])
+		if issuer == "" {
+			return nil, errors.New("selected Apple account has no issuer_id")
+		}
+		return dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, d.TargetKind, issuer, strings.TrimSpace(target.BundleID))
 	default:
 		return nil, errors.New("mobile signing identity requires an Android, iOS, or macOS deployment")
 	}

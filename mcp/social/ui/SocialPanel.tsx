@@ -1,3 +1,6 @@
+import { PublicationFacts, type PublicationFactsData } from "./PublicationFacts";
+import { NativePostObservation, type NativePostMetadata } from "./NativePostObservation";
+import { syncAccountHistory, historySyncMessage } from "./historySync";
 // SocialPanel — accounts + compose + posts in a single panel.
 //
 // Surface:
@@ -14,7 +17,12 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRequestGate } from "./requestIdentity";
+import {DestinationPicker,type DestinationCapabilities} from "./destinations";
+import {TargetDelivery,type DeliveryDiagnostics} from "./TargetDelivery";
+import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
+import { nativeReleaseLabel, postReleaseLabel, type NativeRelease } from "./nativeRelease";
+import { SupportersCard } from "./supporters";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
@@ -25,6 +33,7 @@ import {
   accountMetricsNeedRefresh,
   metricTrendEntries,
 } from "./metricsPresentation";
+import { ReportNotice, RankedPosts, visibleMetricNames, comparableIdentity, type AnalyticsReport, type AnalyticsPostRow, type PeriodComparison } from "./analyticsReporting";
 import { platformPresentation } from "./platformPresentation";
 import {
   inboxAttachmentCapabilities,
@@ -94,6 +103,10 @@ interface NativePanelProps {
 }
 
 interface SocialAccount {
+ destination_capabilities?:DestinationCapabilities;
+ default_destination_id?:string;
+ default_destination_name?:string;
+ account_kind?:string;
   id: number;
   platform: string;
   connection_id: number;
@@ -103,6 +116,7 @@ interface SocialAccount {
   provider_profile_id?: string;
   provider_import_mode?: ProviderImportMode;
   capabilities?: Record<string, unknown> | null;
+  audience_capabilities?: AudienceCapabilities;
   display_name: string;
   avatar_url: string;
   status: string;
@@ -115,6 +129,8 @@ interface SocialAccount {
 }
 
 interface PostTarget {
+  delivery_diagnostics?: DeliveryDiagnostics;
+  publish_operation_id?:string;
   id: number;
   social_account_id: number;
   platform: string;
@@ -125,13 +141,25 @@ interface PostTarget {
   platform_url: string;
   attempts: number;
   last_error: string;
+  thumbnail_editable?: boolean;
+  thumbnail_status?: "pending" | "verifying" | "applied" | "verified" | "failed";
+  thumbnail_error?: string;
   published_at: string;
+  delivery_recorded_at?: string;
   options?: Record<string, any>;
   failure_code?: string;
   retryable?: boolean;
   upstream_status?: number;
   existing_post_id?: string;
+  native_metadata?: NativePostMetadata;
+  native_release?: NativeRelease | null;
+ publication_facts?: PublicationFactsData;
   provider_sync_status?: string;
+  audience_capabilities?: AudienceCapabilities;
+  destination_capabilities?: DestinationCapabilities;
+  audience_status?: string;
+  audience_confirmed_at?: string;
+  audience_setup_url?: string;
 }
 
 interface PostReview {
@@ -151,6 +179,7 @@ interface Post {
   status: string;
   created_at: string;
   published_at: string;
+  delivery_recorded_at?: string;
   targets: PostTarget[];
   profile_id?: number;
   revision: number;
@@ -209,11 +238,12 @@ interface PlatformInfo {
   display_name: string;
   integration_slug: string;
   requires_picker: boolean;
-  // available — true when the operator has seeded an integration
-  // connection for this platform (Settings → Integrations). Without
-  // it, OAuth start would fail with "missing client_id" — we gray
-  // out the button instead of letting the user click into an error.
+  // Existing-connection hint only; environment-configured OAuth clients
+  // can start a new login even when no connection exists yet.
   available: boolean;
+  // The project already has a login that can add another Page/IG
+  // account/board; adding reuses it instead of a new OAuth.
+  reusable_connection?: boolean;
   zernio_available?: boolean;
   provider_only?: boolean;
   // option_fields — per-platform overrides the compose dialog can
@@ -237,7 +267,7 @@ interface PlatformInfo {
 interface OptionField {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean";
+  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean" | "datetime";
   options?: string[];
   help?: string;
 }
@@ -491,7 +521,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Live updates — account adds/removals + per-target publish events
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
-    if (ev.topic === "account.added" || ev.topic === "account.removed" ||
+    if (ev.topic === "destinations.updated" || ev.topic === "account.added" || ev.topic === "account.removed" ||
         ev.topic === "account.disconnected" || ev.topic === "account.deleted") {
       loadAccounts();
     }
@@ -1165,10 +1195,8 @@ function AccountsView({
           projectId={projectId}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
-          onReuseExisting={(pendingId, connId) => {
-            // Backend returned 'reusing existing connection' — skip the
-            // OAuth popup entirely, jump straight into the page picker.
-            onSetLanding(pendingId, connId);
+          onReuseExisting={(pendingId, connectionId) => {
+            onSetLanding(pendingId, connectionId);
             setAdding(false);
           }}
           onOAuthStarted={onOAuthStarted}
@@ -1564,6 +1592,11 @@ function InboxView({
       if(current()) setLoading(false);
     }
   }, [accounts.length, accountFilter, kindFilter, statusFilter, projectId, setStatus, onCountChange, selectedAccountIDs.join(",")]);
+
+  // New comments, DMs and replies arrive on the app bus; refresh the list.
+  useAppEvents("social", projectId, (ev) => {
+    if (ev.topic.startsWith("inbox.") && ev.topic !== "inbox.coverage_changed") void loadItems();
+  });
 
   const loadThread = useCallback(async (id: number | null) => {
     const current = threadGate.current.begin();
@@ -2406,6 +2439,7 @@ function AccountCard({
   const [hardDelete, setHardDelete] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
+ const [destinationsOpen,setDestinationsOpen]=useState(false);
   const [syncingProvider, setSyncingProvider] = useState(false);
   const doRemove = async (hard = false) => {
     try {
@@ -2449,23 +2483,11 @@ function AccountCard({
   };
   const doImport = async () => {
     setImporting(true);
-    setStatus(`Importing recent posts from ${account.display_name}…`);
+    setStatus(`Syncing history from ${account.display_name}…`);
     try {
-      const res = await fetch(appURL(`/accounts/${account.id}/import?limit=25`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported: number; skipped_existing: number; error?: string; reason?: string };
-      if (data.status === "ok") {
-        setStatus(`Imported ${data.imported} new post${data.imported !== 1 ? "s" : ""}` +
-          (data.skipped_existing > 0 ? ` (${data.skipped_existing} already in)` : "") + ".");
-        onChange();
-      } else if (data.status === "unsupported") {
-        setStatus("Import unsupported: " + (data.reason || "platform not wired yet"));
-      } else {
-        setStatus("Import failed: " + (data.error || "unknown error"));
-      }
+      const data = await syncAccountHistory(account.id, projectId, receipt => setStatus(`${receipt.unique_posts || 0} native posts reconciled…`));
+      setStatus(historySyncMessage(data));
+      onChange();
     } catch (e) {
       setStatus("Import failed: " + (e as Error).message);
     } finally {
@@ -2534,6 +2556,7 @@ function AccountCard({
             <option value="full_history">Full history</option>
           </select>
         )}
+        {account.destination_capabilities?.list&&<button type="button" onClick={()=>setDestinationsOpen(value=>!value)} className="text-xs border border-border rounded px-2 py-1">{account.destination_capabilities.label||"Destinations"}s</button>}
         <button
           onClick={doCheck}
           disabled={checking}
@@ -2560,6 +2583,7 @@ function AccountCard({
           ×
         </button>
       </div>
+      {destinationsOpen&&<div className="border border-border rounded p-3"><DestinationPicker accountId={account.id} projectId={projectId} capabilities={account.destination_capabilities} defaultId={account.default_destination_id} manage onDefaultChanged={onChange}/>{account.account_kind==="destination_preset"&&<div className="text-xs text-text-dim mt-2">Saved destination preset from an earlier connection. Other destinations on the account are also available.</div>}</div>}
       {confirming && (
         <ConfirmDialog
           title={`Disconnect ${account.display_name}?`}
@@ -2608,7 +2632,7 @@ function HealthPill({ account }: { account: SocialAccount }) {
   return <span className="text-text-dim" title={account.last_check_error || when}>unsupported</span>;
 }
 
-function AddAccountDialog({
+export function AddAccountDialog({
   platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
@@ -2620,6 +2644,20 @@ function AddAccountDialog({
   onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  // Platforms whose saved login turned out to be gone; the next click signs in fresh.
+  const [freshLogin, setFreshLogin] = useState<Record<string, boolean>>({});
+  const starting = useRef(false);
+  const startRequest = useRef<{ controller: AbortController; popup: Window | null } | null>(null);
+  useEffect(() => {
+    setBusy(null);
+    return () => {
+      const request = startRequest.current;
+      startRequest.current = null;
+      starting.current = false;
+      request?.controller.abort();
+      try { request?.popup?.close(); } catch {}
+    };
+  }, [projectId, activeProfile?.id]);
   // Inline error inside the modal. The panel-header status used to
   // be the only failure surface, but the modal's fixed-inset overlay
   // sits on top of the header — so users never saw the message and
@@ -2628,57 +2666,56 @@ function AddAccountDialog({
   const zernioConnected = platforms.some((p) => !!p.zernio_available);
   const visiblePlatforms = zernioConnected ? platforms : platforms.filter((p) => !p.provider_only);
 
+  const reuses = (p: PlatformInfo) => !!p.reusable_connection && !freshLogin[p.platform];
+
   const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
-    const canStart = provider === "zernio" ? !!p.zernio_available : p.available;
-    if (!canStart) return;
+    if (starting.current || (provider === "zernio" && !p.zernio_available)) return;
     setErr("");
-    // Reuse-existing path: backend skips OAuth when a connection for
-    // this platform already exists. Detect that ahead of opening the
-    // popup so we don't pop a window only to immediately close it.
-    // We always open the popup synchronously below to dodge the
-    // popup-blocker; we close it without navigating in the reuse case.
-    // Open the popup SYNCHRONOUSLY in the click handler. Browsers
-    // block window.open() when called from an async continuation
-    // because the user-gesture context is gone by the time the fetch
-    // resolves — the popup gets silently dropped, no error surfaces,
-    // and from the user's perspective "nothing happens" when they
-    // click the platform button.
-    //
-    // Pattern: open the popup right away pointing at about:blank,
-    // then await the /accounts/start call and navigate the existing
-    // popup to the authorize URL once we have it. The popup carries
-    // the user gesture from the click; redirecting it later is fine.
-    const popup = window.open("about:blank", "social_oauth", "width=600,height=700");
-    if (!popup) {
-      setStatus("Popup blocked. Allow pop-ups for this site and try again.");
-      return;
-    }
+    const reuse = provider === "native" && reuses(p);
+    // A new login opens its popup during the click so popup blockers allow
+    // it. Reusing the project's existing login needs no popup.
+    const popup = reuse ? null : window.open("about:blank", "social_oauth", "width=600,height=700");
+    if (!reuse && !popup) {setErr("Popup blocked. Allow pop-ups for this site and try again.");return;}
+    starting.current = true;
+    const request = { controller: new AbortController(), popup };
+    startRequest.current = request;
     const busyKey = provider === "zernio" ? `${p.platform}:zernio` : p.platform;
     setBusy(busyKey);
-    setStatus("Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
+    setStatus(reuse ? `Loading ${pickerKind(p.platform).plural}…` : "Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
     (async () => {
       const fail = (msg: string) => {
+        if (startRequest.current !== request) return;
+        startRequest.current = null;
         setErr(msg);
         setStatus(msg);
         setBusy(null);
-        try { popup.close(); } catch {}
+        starting.current = false;
+        try { popup?.close(); } catch {}
       };
       try {
         const payload: Record<string, any> = provider === "zernio"
           ? { platform: p.platform, provider: "zernio" }
-          : { platform: p.platform };
+          : reuse ? { platform: p.platform } : { platform: p.platform, force_new: true };
         if (activeProfile?.id) payload.profile_id = activeProfile.id;
-        const res = await fetch(appURL("/accounts/start", projectId), {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
-          return;
+        const post = async (body: Record<string, any>) => {
+          const res = await fetch(appURL("/accounts/start", projectId), {
+            method: "POST",
+            credentials: "same-origin",
+            signal: request.controller.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+          return res.json();
+        };
+        let data = await post(payload);
+        if (startRequest.current !== request) return;
+        // Several saved logins: use the newest, which is the most recent sign-in.
+        if (reuse && data?.status === "select_connection" && Array.isArray(data.connections) && data.connections.length) {
+          const newest = Math.max(...data.connections.map((c: any) => Number(c.id)).filter(Number.isSafeInteger));
+          data = await post({ ...payload, connection_id: newest });
+          if (startRequest.current !== request) return;
         }
-        const data = await res.json();
         // The backend tool returns MCP-shaped errors as 200 with
         // {isError: true, content: [{type: "text", text: "..."}]}
         // because the same handler serves agent MCP calls. Detect
@@ -2690,25 +2727,36 @@ function AddAccountDialog({
           fail(inner || "OAuth start returned an error envelope");
           return;
         }
-        // Reuse-existing path: backend signals 'no OAuth needed' by
-        // omitting authorize_url and including reused_connection. Skip
-        // the popup, hand control back to the parent so it opens the
-        // page picker against the existing connection.
-        if (!data.authorize_url && data.pending_account_id && data.reused_connection) {
-          try { popup.close(); } catch {}
-          setBusy(null);
-          onReuseExisting(data.pending_account_id, data.reused_connection);
+        if (reuse) {
+          if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0 && Number.isSafeInteger(data.reused_connection)) {
+            startRequest.current = null;
+            starting.current = false;
+            onReuseExisting(data.pending_account_id, data.reused_connection);
+            return;
+          }
+          // The saved login is gone; the next click signs in fresh.
+          setFreshLogin((current) => ({ ...current, [p.platform]: true }));
+          fail(`The saved ${p.display_name} login is no longer available. Click Connect new account to sign in again.`);
           return;
         }
-        if (!data.authorize_url) {
-          fail("Server didn't return authorize_url");
+        if (!popup || !Number.isSafeInteger(data.pending_account_id) || data.pending_account_id <= 0 ||
+            typeof data.authorize_url !== "string") {
+          fail("The sign-in service returned an incomplete authorization request. Try connecting again.");
           return;
         }
-        // Navigate the already-open popup to the upstream authorize URL.
-        popup.location.href = data.authorize_url;
-        if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0) {
-          onOAuthStarted(data.pending_account_id, popup);
+        const authorizeURL = new URL(data.authorize_url);
+        if (authorizeURL.protocol !== "https:" || authorizeURL.username || authorizeURL.password) {
+          fail("The sign-in service returned an invalid authorization URL. Try connecting again.");
+          return;
         }
+        if (popup.closed) {
+          fail("The sign-in window was closed. Connect the account again to continue.");
+          return;
+        }
+        // Hand off ownership so closing this dialog keeps the login open.
+        popup.location.href = authorizeURL.href;
+        startRequest.current = null;
+        onOAuthStarted(data.pending_account_id, popup);
         onClose();
       } catch (e) {
         fail("Start failed: " + (e as Error).message);
@@ -2727,22 +2775,22 @@ function AddAccountDialog({
           <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="text-text-dim text-xs mb-3">
-          You'll be redirected to authorize. The access token is held by the platform; this app sees only opaque IDs.
+          Choose a platform to add an account. Facebook and Instagram reuse this project’s existing login when it has one; otherwise sign in as the account you want to add.
         </div>
         {err && (
           <div className="mb-3 border border-error rounded p-2 bg-error/10">
-            <div className="text-error text-xs font-medium mb-1">Couldn't start OAuth</div>
+            <div className="text-error text-xs font-medium mb-1">Couldn't connect account</div>
             <div className="text-text-muted text-xs whitespace-pre-wrap break-words">{err}</div>
-            {/missing client_id/i.test(err) && (
+            {/missing client_(id|secret)|missing required shared configuration/i.test(err) && (
               <div className="text-text-dim text-[11px] mt-2">
-                This integration requires a per-deployment OAuth app. Register one with the platform (e.g. developers.facebook.com) and either set <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_ID</code> + <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_SECRET</code> as environment variables on apteva-server, or connect the integration once via Settings → Integrations to seed the credentials.
+                The server could not load this platform’s saved OAuth app configuration. Existing accounts do not need to be disconnected. Check the integration’s OAuth configuration in Settings → Integrations.
               </div>
             )}
           </div>
         )}
         <div className="flex flex-col gap-1">
           {visiblePlatforms.map((p) => {
-            const directDisabled = !p.available || !!busy;
+            const directDisabled = !!busy;
             const zernioDisabled = !p.zernio_available || !!busy;
             return (
               <div
@@ -2752,7 +2800,7 @@ function AddAccountDialog({
                 <div className="min-w-0">
                   <div className="text-text truncate">{p.display_name}</div>
                   <div className="text-text-dim text-xs">
-                    {p.provider_only ? "Provider-backed" : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Single account"}
+                    {p.provider_only ? "Provider-backed" : reuses(p) ? `Uses this project’s existing login` : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Multiple accounts supported"}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -2760,14 +2808,9 @@ function AddAccountDialog({
                     <button
                       onClick={() => start(p)}
                       disabled={directDisabled}
-                      title={
-                        !p.available
-                          ? `No ${p.display_name} integration installed. Add one in Settings → Integrations to enable this.`
-                          : undefined
-                      }
                       className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
                     >
-                      Direct
+                      {reuses(p) ? `Add ${pickerKind(p.platform).singular}` : zernioConnected ? "Connect directly" : "Connect new account"}
                     </button>
                   )}
                   {zernioConnected && (
@@ -3070,6 +3113,24 @@ function OptionFieldInput({
     );
   }
 
+  if (field.type === "datetime") {
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <input
+          type="datetime-local"
+          disabled={disabled}
+          value={typeof value === "string" ? localScheduleInput(value) : ""}
+          onChange={(e) => {
+            if (!e.target.value) return onChange("");
+            try { onChange(scheduleInstant(e.target.value)); } catch { /* incomplete or nonexistent local time */ }
+          }}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        />
+      </div>
+    );
+  }
+
   if (field.type === "boolean") {
     return (
       <label className="flex items-start gap-2 border border-border rounded px-2 py-2 bg-bg-input/50">
@@ -3225,7 +3286,7 @@ function ComposeDialog({
       const next = { ...prev, [accountId]: { ...(prev[accountId] || {}), [key]: value } };
       // If the field is being cleared, remove the key entirely so the
       // submit-shape decision doesn't see a phantom empty string.
-      if (typeof value === "string" && value.trim() === "") {
+      if (value == null || (typeof value === "string" && value.trim() === "")) {
         const acct = { ...next[accountId] };
         delete acct[key];
         if (Object.keys(acct).length === 0) {
@@ -3485,7 +3546,7 @@ function ComposeDialog({
             {accounts.map((a) => {
               const isSelected = selected.has(a.id);
               const fields = (fieldsByPlatform[a.platform] || []).map(field => field.name === "privacy_level" ? {...field, options:creatorInfo[a.id]?.privacy_level_options || []} : field);
-              const hasCustomization = fields.length > 0;
+              const hasCustomization = !!a.destination_capabilities?.list || fields.length > 0 || (a.audience_capabilities?.publishing !== "unsupported" && !!a.audience_capabilities);
               const isExpanded = expanded === a.id || (isSelected && a.platform === "tiktok" && (!a.provider_slug || a.provider_slug === "native"));
               const customized = isCustomized(a.id);
               return (
@@ -3533,9 +3594,11 @@ function ComposeDialog({
                       </button>
                     )}
                   </div>
+                  {isSelected && a.destination_capabilities?.list && <div className="border-t border-border px-3 py-3"><DestinationPicker accountId={a.id} projectId={projectId} capabilities={a.destination_capabilities} value={accountOptions[a.id]?.destination_id || accountOptions[a.id]?.board_id || accountOptions[a.id]?.boardId || ""} defaultId={a.default_destination_id} onChange={value=>setAccountOptions(previous=>{const next:Record<string,any>={...previous[a.id],destination_id:value};delete next.board_id;delete next.boardId;return {...previous,[a.id]:next}})} /></div>}
                   {isSelected && hasCustomization && isExpanded && (
                     <div className="border-t border-border px-3 py-3 flex flex-col gap-3 bg-bg/40">
-                      {fields.map((f) => (
+                      <MembershipAudience accountId={a.id} projectId={projectId} capabilities={a.audience_capabilities} value={accountOptions[a.id]?.audience} onChange={value => {setAccountOption(a.id,"audience",value.type === "standard" ? undefined : value);if(value.type==="members")setAccountOption(a.id,"visibility",undefined);}} />
+                      {fields.filter(field => field.name !== "visibility" || accountOptions[a.id]?.audience?.type !== "members").map((f) => (
                         <OptionFieldInput
                           key={f.name}
                           field={f}
@@ -4306,7 +4369,7 @@ function PostsView({
     if (view !== "list" || statusFilter === "all") return;
     let alive = true;
     // Attention can include older posts outside the panel's recent list.
-    const statuses = statusFilter === "attention" ? ["failed", "partial"] : [statusFilter];
+    const statuses = statusFilter === "attention" ? ["failed", "partial", "awaiting_audience_setup"] : [statusFilter];
     Promise.all(statuses.map(async status => {
       const params = new URLSearchParams({ status, limit: "1000" });
       if (activeProfileId) params.set("profile_id", String(activeProfileId));
@@ -4331,7 +4394,7 @@ function PostsView({
 
   const sourcePosts = view === "calendar" ? calendarPosts : statusFilter !== "all" ? (filteredList?.key === listFilterKey ? filteredList.posts : []) : posts;
   const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter === "attention" ? "all" : statusFilter, accountFilter)
-    .filter(post => statusFilter !== "attention" || post.status === "failed" || post.status === "partial")
+    .filter(post => statusFilter !== "attention" || post.status === "failed" || post.status === "partial" || post.status === "awaiting_audience_setup")
     .filter(post => accountFilter !== "selected" || post.targets.some(target => navigation.accountIDs.includes(target.social_account_id)));
   const sortedListPosts = sortPostList(filteredPosts);
 
@@ -4452,7 +4515,8 @@ function PostsView({
           aria-label="Filter posts by status"
         >
           <option value="all">All statuses</option>
-          <option value="attention">Failed or partial</option>
+          <option value="attention">Needs attention</option>
+          <option value="awaiting_audience_setup">Awaiting membership setup</option>
           <option value="scheduled">Scheduled</option>
           <option value="published">Published</option>
           <option value="failed">Failed</option>
@@ -4532,6 +4596,7 @@ function PostsView({
           }}
           onPublish={() => workflow(selectedPost, "publish", { mode: "publish" })}
           onSchedule={() => setRescheduleFor(selectedPost)}
+          onAudienceConfirmed={refreshAll}
         />
       )}
       {dayDialog && (
@@ -4677,7 +4742,7 @@ function PostListRow({
           </div>
         </button>
         <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill />}
           {(post.status === "failed" || post.status === "partial") && (
             <button
@@ -4882,7 +4947,7 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill compact />}
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
@@ -4999,7 +5064,7 @@ function PostLeadMedia({ post, projectId, variant }: {
 
 function PostDetailPanel({
   post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete,
-  onSubmit, onApprove, onReject, onPublish, onSchedule,
+  onSubmit, onApprove, onReject, onPublish, onSchedule, onAudienceConfirmed,
 }: {
   post: Post;
   projectId?: string | null;
@@ -5013,6 +5078,7 @@ function PostDetailPanel({
   onReject: () => void;
   onPublish: () => void;
   onSchedule: () => void;
+  onAudienceConfirmed: () => void | Promise<void>;
 }) {
   const editable = (post.status === "published" || post.status === "partial") &&
     post.targets.some((target) => isEditablePlatform(target.platform));
@@ -5029,7 +5095,7 @@ function PostDetailPanel({
             <div className="text-text font-medium">Post #{post.id}</div>
             <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
           </div>
-          <StatusPill status={post.status} />
+          <PostStatusPill post={post} />
           {post.source === "provider" && <ProviderImportPill />}
           <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
         </div>
@@ -5049,7 +5115,8 @@ function PostDetailPanel({
           <section className="p-4 border-b border-border grid grid-cols-2 gap-3 text-xs">
             <div><div className="text-text-dim uppercase">Created</div><div className="text-text mt-1">{new Date(post.created_at).toLocaleString()}</div></div>
             <div><div className="text-text-dim uppercase">Scheduled</div><div className="text-text mt-1">{post.schedule_at ? new Date(post.schedule_at).toLocaleString() : "—"}</div></div>
-            <div><div className="text-text-dim uppercase">Published</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Native publication</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "Unknown"}</div></div>
+            <div><div className="text-text-dim uppercase">Delivery recorded</div><div className="text-text mt-1">{post.delivery_recorded_at ? new Date(post.delivery_recorded_at).toLocaleString() : "Unknown"}</div></div>
             <div><div className="text-text-dim uppercase">Targets</div><div className="text-text mt-1">{post.targets.length}</div></div>
             <div><div className="text-text-dim uppercase">Revision</div><div className="text-text mt-1">{post.revision || 1}</div></div>
             <div><div className="text-text-dim uppercase">Approval</div><div className="text-text mt-1">{post.approval_status || "not requested"}</div></div>
@@ -5082,17 +5149,28 @@ function PostDetailPanel({
                   <div className="flex items-center gap-2 text-sm">
                     <span className="text-text">{target.display_name}</span>
                     <span className="text-text-dim">{target.platform}</span>
-                    <span className="ml-auto"><StatusPill status={target.status} /></span>
+                    <span className="ml-auto"><TargetStatusPill target={target} /></span>
                   </div>
+                  {target.platform === "youtube" && target.status === "published" && target.platform_post_id && <NativeRefreshButton postId={post.id} targetId={target.id} projectId={projectId} onRefreshed={onAudienceConfirmed} />}
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
+                  {target.thumbnail_status && (
+                    <div className={`text-xs mt-1 ${target.thumbnail_status === "failed" ? "text-error" : "text-text-dim"}`}>
+                      Thumbnail {target.thumbnail_status === "pending" ? "queued" : target.thumbnail_status}
+                      {target.thumbnail_error && ` · ${target.thumbnail_error}`}
+                    </div>
+                  )}
+                  {target.platform==="tiktok"&&(target.delivery_diagnostics?.correlation_id||target.publish_operation_id)&&<TargetDelivery key={`${target.id}:${post.revision}`} postId={post.id} targetId={target.id} projectId={projectId} diagnostics={target.delivery_diagnostics} onChanged={onAudienceConfirmed}/>}
+                  <PublicationFacts facts={target.publication_facts}/><NativePostObservation metadata={target.native_metadata}/>
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
+                  {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
+                  {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
                 </div>
               ))}
             </div>
           </section>
         </div>
         <div className="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-border bg-bg-card/30">
-          {(post.status === "failed" || post.status === "partial") && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
+          {(post.status === "failed" || post.status === "partial" || post.targets.some(target => target.status==="failed" && target.retryable)) && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
           {post.status === "scheduled" && <button type="button" onClick={onReschedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Reschedule</button>}
           {(post.status === "draft" || post.status === "rejected" || post.status === "approved") && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit draft</button>}
           {(post.status === "draft" || post.status === "rejected") && <button type="button" onClick={onSubmit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Submit for review</button>}
@@ -5126,7 +5204,7 @@ function DeleteConfirmDialog({
 }) {
   const [busy, setBusy] = useState(false);
   const isScheduled = post.status === "scheduled";
-  const willTouchUpstream = post.status === "published" || post.status === "partial";
+  const willTouchUpstream = post.status === "published" || post.status === "partial" || post.status === "awaiting_audience_setup";
 
   const title =
     isScheduled ? "Cancel scheduled post?" :
@@ -5317,6 +5395,7 @@ interface TargetEditOutcome {
   social_account_id: number;
   platform: string;
   status: "ok" | "unsupported" | "skipped" | "failed";
+  thumbnail_status?: string;
   reason?: string;
   error?: string;
 }
@@ -5365,11 +5444,12 @@ function EditPostDialog({
       }));
       if (targets.length > 0) {
         payload.targets = draftLike
-          ? post.targets.map((target) => ({
-              social_account_id: target.social_account_id,
-              ...(target.options || {}),
-              ...(targetOptions[target.social_account_id] || {}),
-            }))
+          ? post.targets.map((target) => {
+              const overrides=targetOptions[target.social_account_id] || {};
+              const next:Record<string,any>={social_account_id:target.social_account_id,...(target.options || {}),...overrides};
+              if(Object.prototype.hasOwnProperty.call(overrides,"destination_id")){delete next.board_id;delete next.boardId;}
+              return next;
+            })
           : targets;
       }
       if (draftLike) payload.expected_revision = post.revision;
@@ -5401,6 +5481,8 @@ function EditPostDialog({
         setStatus(`Saved locally. Edit failed upstream on: ${names}.`);
       } else if (unsupported.length > 0) {
         setStatus(`Saved. ${unsupported.length} target${unsupported.length !== 1 ? "s" : ""} couldn't be edited upstream (platform constraint).`);
+      } else if (outcomes.some((t) => t.thumbnail_status === "pending")) {
+        setStatus("Thumbnail update queued.");
       } else {
         setStatus("Edits applied.");
       }
@@ -5436,7 +5518,8 @@ function EditPostDialog({
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <label className="text-xs uppercase tracking-wide text-text-dim">Targets</label>
+
+                      <label className="text-xs uppercase tracking-wide text-text-dim">Targets</label>
               {post.targets.map((t) => {
                 const editable = isEditablePlatform(t.platform);
                 return (
@@ -5457,12 +5540,30 @@ function EditPostDialog({
                         </span>
                       )}
                     </div>
+                    {draftLike && t.destination_capabilities?.list && <DestinationPicker accountId={t.social_account_id} projectId={projectId} capabilities={t.destination_capabilities} value={targetOptions[t.social_account_id]?.destination_id ?? t.options?.destination_id ?? t.options?.board_id ?? t.options?.boardId ?? ""} onChange={value=>setTargetOptions(previous=>({...previous,[t.social_account_id]:{...previous[t.social_account_id],destination_id:value}}))}/>}
+                    {draftLike && <MembershipAudience accountId={t.social_account_id} projectId={projectId} capabilities={t.audience_capabilities} value={targetOptions[t.social_account_id]?.audience || t.options?.audience} onChange={value => {setOpt(t.social_account_id,"audience",value);if(value.type==="members")setOpt(t.social_account_id,"visibility","unlisted");}} />}
                     {editable && t.platform === "facebook" && (
                       <FieldText
                         label="Override message"
                         placeholder="leave blank to use the post body above"
                         value={targetOptions[t.social_account_id]?.body || ""}
                         onChange={(v) => setOpt(t.social_account_id, "body", v)}
+                      />
+                    )}
+                    {!draftLike && t.thumbnail_editable && (
+                      <OptionFieldInput
+                        field={{
+                          name: "thumbnail_storage_id",
+                          label: "Video cover",
+                          type: "media",
+                          help: "Pick a Storage image for the existing Facebook video.",
+                        }}
+                        value={targetOptions[t.social_account_id]?.thumbnail_storage_id}
+                        projectId={projectId}
+                        onChange={(v) => {
+                          setOpt(t.social_account_id, "thumbnail_storage_id", v);
+                          setOpt(t.social_account_id, "thumbnail_project_id", v ? projectId || "" : "");
+                        }}
                       />
                     )}
                     {editable && t.platform === "youtube" && (
@@ -5493,6 +5594,28 @@ function EditPostDialog({
                             <option value="private">private</option>
                           </select>
                         </div>
+                        <OptionFieldInput
+                          field={{
+                            name: "release_at",
+                            label: "YouTube release time",
+                            type: "datetime",
+                            help: "Keeps the video private until YouTube releases it. Clear to remove the schedule.",
+                          }}
+                          value={targetOptions[t.social_account_id] && "release_at" in targetOptions[t.social_account_id] ? targetOptions[t.social_account_id].release_at : t.options?.release_at}
+                          projectId={projectId}
+                          onChange={(v) => setOpt(t.social_account_id, "release_at", v === "" ? null : v)}
+                        />
+                        <OptionFieldInput
+                          field={{
+                            name: "contains_synthetic_media",
+                            label: "AI-generated or altered content",
+                            type: "boolean",
+                            help: "Discloses realistic altered or synthetic content to YouTube.",
+                          }}
+                          value={targetOptions[t.social_account_id]?.contains_synthetic_media ?? t.options?.contains_synthetic_media}
+                          projectId={projectId}
+                          onChange={(v) => setOpt(t.social_account_id, "contains_synthetic_media", v)}
+                        />
                         <OptionFieldInput
                           field={{
                             name: "thumbnail_storage_id",
@@ -5709,6 +5832,8 @@ interface PostMetrics {
 }
 
 interface TargetMetrics {
+  report?: AnalyticsReport;
+  updated_at?: string;
   target_id: number;
   social_account_id: number;
   platform: string;
@@ -5718,6 +5843,7 @@ interface TargetMetrics {
   reason?: string;
   error?: string;
   metrics?: {
+    impressions?: number; video_views?: number; pin_clicks?: number; outbound_clicks?: number; engagements?: number;
     views: number;
     reach?: number;
     likes: number;
@@ -5731,6 +5857,13 @@ interface TargetMetrics {
 }
 
 interface AccountMetrics {
+  period_metrics?:Record<string,number>;
+  period_window?: {start_date?:string;end_date?:string};
+  report?: AnalyticsReport;
+  post_rows?: AnalyticsPostRow[];
+  period_comparison?: PeriodComparison;
+  available?: string[];
+  video_views?: number; pin_clicks?: number; outbound_clicks?: number;
   social_account_id: number;
   profile_id?: number;
   platform: string;
@@ -5739,6 +5872,8 @@ interface AccountMetrics {
   reason?: string;
   error?: string;
   followers?: number;
+  supporters?: number;
+  supporters_state?: string;
   following?: number;
   total_likes?: number;
   total_videos?: number;
@@ -5757,6 +5892,7 @@ interface AccountMetrics {
   insights?: Record<string, { time?: string; value: number }[]>;
   breakdowns?: AnalyticsBreakdown[];
   capabilities?: {
+    scopes?: string[]; scope_labels?: Record<string,string>; metrics?: string[]; date_ranges?: boolean; post_date_ranges?: boolean; publication_filter?:boolean;
     available?: string[];
     unavailable?: { dimension: string; reason: string }[];
   };
@@ -5810,11 +5946,19 @@ function MetricsView({
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
   const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
   const [analyticsRange, setAnalyticsRange] = useState(initialRange);
-  const [breakdownDimension, setBreakdownDimension] = useState("device");
+  const [breakdownDimension, setBreakdownDimension] = useState("");
+  const [analyticsScope, setAnalyticsScope] = useState("provider_account");
+ const [analyticsDestination,setAnalyticsDestination]=useState("");
+ useEffect(()=>setAnalyticsDestination(""),[activeAccountId]);
+  const [rankMetric, setRankMetric] = useState("impressions");
+  const [customStart,setCustomStart] = useState("");
+  const [customEnd,setCustomEnd] = useState("");
+  const [publishedInRange,setPublishedInRange] = useState(false);
+  useEffect(()=>setPublishedInRange(false),[activeAccountId,analyticsScope]);
   const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());
   const autoRefreshedAccounts = useRef<Set<string>>(new Set());
-  const queryIdentity = `${projectId}:${analyticsRange}:${breakdownDimension}`;
+  const queryIdentity = `${projectId}:${analyticsRange}:${customStart}:${customEnd}:${breakdownDimension}:${analyticsScope}:${analyticsDestination}:${rankMetric}:${publishedInRange}`;
   const queryRef = useRef(queryIdentity); queryRef.current = queryIdentity;
   const requestVersions = useRef<Record<number,number>>({});
   const accountIds = accounts.map((a) => a.id).join(",");
@@ -5840,6 +5984,7 @@ function MetricsView({
   }, [accounts, activeAccountId]);
 
   const loadAccount = async (id: number, refresh = false, background = false) => {
+    if (analyticsRange==="custom" && (!customStart || !customEnd)) return;
     const version = (requestVersions.current[id] || 0)+1; requestVersions.current[id]=version;
     const query = queryIdentity;
     const current = () => queryRef.current === query && requestVersions.current[id]===version;
@@ -5848,12 +5993,20 @@ function MetricsView({
     try {
       const params = new URLSearchParams({
         refresh: refresh ? "1" : "0",
-        range: analyticsRange,
-        breakdowns: breakdownDimension,
+        scope: analyticsScope,
+        ...(analyticsDestination&&id===activeAccountId?{destination_id:analyticsDestination}:{}),
+        sort_by: rankMetric,
+        compare: "true",
+        group_by: "post",
+        published_in_range: String(publishedInRange),
+        limit: "20",
+        ...(analyticsRange === "custom" ? { start_date: customStart, end_date: customEnd } : { range: analyticsRange }),
+        ...(breakdownDimension ? { breakdowns: breakdownDimension } : {}),
       });
       const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
+      const issue=mcpEnvelopeError(data);if(issue) throw new Error(issue);
       if (current()) setAccountFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
       if (!background && current()) {
@@ -5875,21 +6028,11 @@ function MetricsView({
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(appURL(`/accounts/${id}/import?limit=100`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { status: string; imported?: number; skipped_existing?: number; reason?: string; error?: string };
-      if (data.status === "ok") {
-        setSyncFor((prev) => ({ ...prev, [id]: "done" }));
-        if (!quiet) setStatus(`Imported ${data.imported || 0}; skipped ${data.skipped_existing || 0}`);
-        onPostsChanged();
-      } else if (data.status === "unsupported") {
-        setSyncFor((prev) => ({ ...prev, [id]: { error: data.reason || "import unsupported" } }));
-      } else {
-        throw new Error(data.error || "import failed");
-      }
+      const data = await syncAccountHistory(id, projectId, receipt => {if (!quiet) setStatus(`${receipt.unique_posts || 0} native posts reconciled…`);});
+      if (data.status === "unsupported") throw new Error(data.limitation || "History sync unsupported");
+      setSyncFor(prev => ({ ...prev, [id]: "done" }));
+      if (!quiet) setStatus(historySyncMessage(data));
+      onPostsChanged();
     } catch (e) {
       setSyncFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       if (!quiet) setStatus("Post sync failed: " + (e as Error).message);
@@ -5899,27 +6042,31 @@ function MetricsView({
   useEffect(() => {
     autoLoadedAccounts.current.clear();
     for (const account of accounts) {
-      const key = `${account.id}:${analyticsRange}:${breakdownDimension}`;
+      const key = `${account.id}:${queryIdentity}`;
       if (!autoLoadedAccounts.current.has(key)) {
         autoLoadedAccounts.current.add(key);
         loadAccount(account.id);
       }
     }
-  }, [accountIds, analyticsRange, breakdownDimension]);
+  }, [accountIds, queryIdentity]);
 
   useEffect(() => {
     setBreakdownFilter("all");
-  }, [analyticsRange, breakdownDimension]);
+  }, [queryIdentity]);
+
+  useEffect(()=> { setPostFor({}); setExpanded(null); },[queryIdentity]);
 
   const loadPost = async (id: number) => {
+    const query=queryIdentity;
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(appURL(`/posts/${id}/metrics`, projectId), { credentials: "same-origin" });
+      const params=new URLSearchParams(analyticsRange==="custom" ? {start_date:customStart,end_date:customEnd} : {range:analyticsRange});
+      const res = await fetch(appURL(`/posts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as PostMetrics;
-      setPostFor((prev) => ({ ...prev, [id]: data }));
+      if(queryRef.current===query) setPostFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
-      setPostFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      if(queryRef.current===query) setPostFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       setStatus("Metrics fetch failed: " + (e as Error).message);
     }
   };
@@ -5942,7 +6089,7 @@ function MetricsView({
     if (!activeAccount || !activeMetrics || activeMetrics === "loading" || "error" in activeMetrics) return;
     const refreshIfStale = () => {
       if (!accountMetricsNeedRefresh(activeMetrics)) return;
-      const key = `${activeAccount.id}:${activeMetrics.updated_at || "missing"}`;
+      const key = `${activeAccount.id}:${queryIdentity}:${activeMetrics.updated_at || "missing"}`;
       if (autoRefreshedAccounts.current.has(key)) return;
       autoRefreshedAccounts.current.add(key);
       loadAccount(activeAccount.id, true, true);
@@ -5958,7 +6105,7 @@ function MetricsView({
       Math.max(1000, updatedAt + ACCOUNT_METRICS_STALE_MS - Date.now()),
     );
     return () => window.clearTimeout(timer);
-  }, [activeAccount?.id, activeMetrics]);
+  }, [activeAccount?.id, activeMetrics,queryIdentity]);
 
   const activeBreakdown = activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics
     ? (activeMetrics.breakdowns || []).find((item) => item.dimension === breakdownDimension)
@@ -6010,7 +6157,7 @@ function MetricsView({
       {activeAccount && (
         <section className="flex flex-col gap-4 border-t border-border pt-4">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex-1 min-w-0">
+            <div className="flex-1 min-w-[180px]">
               <div className="text-text font-medium truncate">{activeAccount.display_name}</div>
               <div className="text-text-dim text-xs">{activeAccount.platform}</div>
               {activeMetrics && activeMetrics !== "loading" && !("error" in activeMetrics) && activeMetrics.updated_at && (
@@ -6034,7 +6181,13 @@ function MetricsView({
               {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
             </button>
           </div>
+          {analyticsScope==="destination"&&activeAccount.destination_capabilities?.list&&<DestinationPicker accountId={activeAccount.id} projectId={projectId} capabilities={activeAccount.destination_capabilities} value={analyticsDestination} defaultId={activeAccount.default_destination_id} onChange={setAnalyticsDestination}/>}
           <div className="flex flex-wrap items-end gap-2 border-y border-border py-3">
+            <label className="flex flex-col gap-1 text-xs">Scope
+              <select aria-label="Analytics scope" value={analyticsScope} onChange={e=>setAnalyticsScope(e.target.value)} className="h-9 bg-bg-input border border-border rounded px-2">
+                {["destination","provider_account"].map(scope=><option key={scope} value={scope}>{activeMetrics && typeof activeMetrics==="object" && "capabilities" in activeMetrics ? activeMetrics.capabilities?.scope_labels?.[scope] || (scope==="destination" ? "Destination" : "Account") : scope==="destination" ? "Destination" : "Account"}</option>)}
+              </select>
+            </label>
             <label className="flex flex-col gap-1">
               <span className="text-[10px] uppercase tracking-wide text-text-dim">Range</span>
               <select
@@ -6044,9 +6197,13 @@ function MetricsView({
               >
                 <option value="7d">Last 7 days</option>
                 <option value="28d">Last 28 days</option>
+                <option value="30d">Last 30 days</option>
                 <option value="90d">Last 90 days</option>
+                <option value="custom">Custom dates</option>
               </select>
             </label>
+            {analyticsRange==="custom" && <><label className="text-xs flex flex-col">From<input aria-label="Analytics start date" type="date" value={customStart} onChange={e=>setCustomStart(e.target.value)} className="bg-bg-input border border-border rounded p-1" /></label><label className="text-xs flex flex-col">Through<input aria-label="Analytics end date" type="date" value={customEnd} onChange={e=>setCustomEnd(e.target.value)} className="bg-bg-input border border-border rounded p-1" /></label></>}
+            <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={publishedInRange} disabled={analyticsScope!=="destination" || !(activeMetrics && typeof activeMetrics==="object" && "capabilities" in activeMetrics && activeMetrics.capabilities?.publication_filter)} onChange={e=>setPublishedInRange(e.target.checked)} />Published during this period</label>
             <label className="flex flex-col gap-1">
               <span className="text-[10px] uppercase tracking-wide text-text-dim">Breakdown</span>
               <select
@@ -6054,6 +6211,7 @@ function MetricsView({
                 onChange={(event) => setBreakdownDimension(event.target.value)}
                 className="h-9 min-w-[180px] bg-bg-input border border-border rounded px-2 text-sm"
               >
+                <option value="">None</option>
                 {ANALYTICS_BREAKDOWNS.map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
@@ -6081,7 +6239,11 @@ function MetricsView({
           ) : activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics ? (
             <>
               <div className="text-xs uppercase tracking-wide text-text-dim">Overview</div>
+              <ReportNotice report={activeMetrics.report} comparison={activeMetrics.period_comparison} />
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
+              {activeAccount && <SupportersCard key={activeAccount.id} accountId={activeAccount.id} projectId={projectId} />}
+              {activeMetrics.period_metrics && activeMetrics.report?.window.kind!=="range" && <PeriodMetricsSummary metrics={activeMetrics} />}
+              {activeMetrics.post_rows && <RankedPosts rows={activeMetrics.post_rows} metric={rankMetric} onMetric={setRankMetric} metrics={activeMetrics.capabilities?.metrics || activeMetrics.available || []} />}
               {(activeMetrics as AccountMetrics).status === "ok" && (
                 <>
                   <div className="text-xs uppercase tracking-wide text-text-dim mt-1">Trends</div>
@@ -6120,7 +6282,7 @@ function MetricsView({
               const m = postFor[p.id];
               const isExpanded = expanded === p.id;
               const totals = (typeof m === "object" && m && "targets" in m)
-                ? aggregateTotals((m as PostMetrics).targets)
+                ? aggregateTotals((m as PostMetrics).targets.filter(t=>!activeAccount || t.social_account_id===activeAccount.id))
                 : null;
               return (
                 <div key={p.id} className="border border-border rounded">
@@ -6133,7 +6295,7 @@ function MetricsView({
                         {p.body || <span className="text-text-dim italic">no body</span>}
                       </div>
                       <div className="text-text-dim text-xs mt-0.5">
-						{new Date(p.published_at || p.created_at).toLocaleString()}
+						{p.published_at ? "Native publication: " : p.delivery_recorded_at ? "Delivery recorded: " : "Created: "}{new Date(p.published_at || p.delivery_recorded_at || p.created_at).toLocaleString()}
                         {p.targets && p.targets.length > 0 && (
                           <span className="ml-2">
                             · {p.targets.length} target{p.targets.length !== 1 ? "s" : ""}
@@ -6157,7 +6319,7 @@ function MetricsView({
                       )}
                       {typeof m === "object" && m && "targets" in m && (
                         <div className="flex flex-col gap-2">
-                          {(m as PostMetrics).targets.map((t) => (
+                          {(m as PostMetrics).targets.filter(t=>!activeAccount || t.social_account_id===activeAccount.id).map((t) => (
                             <TargetMetricsBlock key={t.target_id} target={t} />
                           ))}
                           <button
@@ -6209,20 +6371,24 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
   }
   const stats = [
     ["followers", metrics.followers],
+    ["supporters", metrics.supporters],
     ["following", metrics.following],
-    ["videos", metrics.total_videos],
+    ["total_videos", metrics.total_videos],
     ["posts", metrics.posts],
     ["likes", metrics.likes ?? metrics.total_likes],
     ["reach", metrics.reach],
     ["impressions", metrics.impressions],
     ["engagements", metrics.engagements],
     ["views", metrics.views],
+    ["video_views",metrics.video_views],
+    ["pin_clicks",metrics.pin_clicks],
+    ["outbound_clicks",metrics.outbound_clicks],
     ["comments", metrics.comments],
     ["shares", metrics.shares],
     ["saves", metrics.saves],
     ["sends", metrics.sends],
     ["clicks", metrics.clicks],
-  ].filter(([, value]) => value != null && Number(value) > 0) as [string, number][];
+  ].filter(([name, value]) => metrics.report ? visibleMetricNames(metrics.available,metrics.report).includes(String(name)) || metrics.report.requested_metrics?.includes(String(name)) : value != null && Number(value) > 0).map(([name,value])=>[name, metrics.report && !visibleMetricNames(metrics.available,metrics.report).includes(String(name)) ? null : value == null ? null : Number(value)]) as [string, number | null][];
   if (metrics.engagement_rate != null && metrics.engagement_rate > 0) {
     stats.push(["engagement rate", metrics.engagement_rate]);
   }
@@ -6234,13 +6400,20 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
       {stats.map(([label, value]) => (
         <div key={label} className="border border-border rounded px-3 py-2 bg-bg">
           <div className="text-text font-medium">
-            {label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
+            {value == null ? "Unavailable" : label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
           </div>
-          <div className="text-text-dim text-[10px] uppercase tracking-wide">{label}</div>
+          <div className="text-text-dim text-[10px] uppercase tracking-wide">{label.replace(/_/g," ")}</div>
+          {metrics.report?.metric_info[label]?.kind && <div className="text-text-dim text-xs">{metrics.report.metric_info[label].kind==="range" ? "Selected period" : metrics.report.metric_info[label].kind==="snapshot" ? "Current total" : "Lifetime"}</div>}
+          {metrics.report?.metric_info[label]?.kind==="range" && metrics.period_comparison?.change_percent && label in metrics.period_comparison.change_percent && <div className="text-xs text-text-dim">{metrics.period_comparison.change_percent[label]==null ? "No percentage baseline" : `${metrics.period_comparison.change_percent[label]!.toFixed(1)}% vs previous period`}</div>}
         </div>
       ))}
     </div>
   );
+}
+
+function PeriodMetricsSummary({metrics}:{metrics:AccountMetrics}) {
+ return <section><h3 className="text-xs uppercase text-text-dim mb-2">Period performance · {metrics.period_window?.start_date} – {metrics.period_window?.end_date}</h3>
+ <div className="grid grid-cols-2 md:grid-cols-4 gap-2">{Object.entries(metrics.period_metrics||{}).map(([name,value])=><div key={name} className="border border-border rounded p-3"><div>{formatNumber(value)}</div><div className="text-xs text-text-dim">{name.replace(/_/g," ")}</div>{metrics.period_comparison?.change_percent?.[name]!=null && <div className="text-xs text-text-dim">{metrics.period_comparison.change_percent[name]!.toFixed(1)}% vs previous period</div>}</div>)}</div></section>;
 }
 
 function AccountBreakdownComparison({
@@ -6254,9 +6427,11 @@ function AccountBreakdownComparison({
   dimension: string;
   filter: string;
 }) {
+  const seenIdentities=new Set<string>();
   const rows = accounts.flatMap((account) => {
     const metrics = accountFor[account.id];
     if (!metrics || metrics === "loading" || !("status" in metrics)) return [];
+    const identity=comparableIdentity(metrics.report,String(account.id)); if(seenIdentities.has(identity)) return []; seenIdentities.add(identity);
     const breakdown = (metrics.breakdowns || []).find((item) => item.dimension === dimension && item.status === "ok");
     if (!breakdown) return [];
     const matching = (breakdown.rows || []).filter((row) => filter === "all" || row.dimensions[dimension] === filter);
@@ -6351,17 +6526,8 @@ function analyticsLabel(value: string): string {
 
 const InsightCharts = lazy(() => import("./SocialCharts"));
 
-function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } }) {
-  return (
-    <div className="flex items-center gap-3 text-xs text-text-dim flex-shrink-0">
-      <Stat label="views" value={totals.views} />
-      <Stat label="likes" value={totals.likes} />
-      <Stat label="comments" value={totals.comments} />
-      <Stat label="shares" value={totals.shares} />
-      {totals.saves > 0 && <Stat label="saves" value={totals.saves} />}
-      {totals.clicks > 0 && <Stat label="clicks" value={totals.clicks} />}
-    </div>
-  );
+function MetricsRow({ totals }: { totals: Record<string,number> }) {
+  return <div className="flex flex-wrap items-center gap-3 text-xs text-text-dim">{Object.entries(totals).map(([name,value])=><Stat key={name} label={name.replace(/_/g," ")} value={value} />)}</div>;
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
@@ -6391,9 +6557,10 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
           {status === "skipped" && target.reason && <span className="ml-1">— {target.reason}</span>}
         </span>
       </div>
+      <ReportNotice report={target.report} />
       {target.metrics && (
         <div className="mt-2 flex items-center gap-4 text-xs">
-          {(target.metrics.available || ["views", "likes", "comments", "shares"]).map((name) => (
+          {visibleMetricNames(target.metrics.available || ["views", "likes", "comments", "shares"],target.report).map((name) => (
             <Stat key={name} label={name} value={Number(target.metrics?.[name as keyof typeof target.metrics]) || 0} />
           ))}
         </div>
@@ -6402,21 +6569,16 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
   );
 }
 
-function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } {
-  return targets.reduce(
-    (acc, t) => {
-      if (t.metrics) {
-        acc.views += t.metrics.views;
-        acc.likes += t.metrics.likes;
-        acc.comments += t.metrics.comments;
-        acc.shares += t.metrics.shares;
-        acc.saves += t.metrics.saves || 0;
-        acc.clicks += t.metrics.clicks || 0;
-      }
-      return acc;
-    },
-    { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, clicks: 0 }
-  );
+function aggregateTotals(targets: TargetMetrics[]): Record<string,number> {
+  const totals:Record<string,number>={};
+  for(const target of targets) if(target.status==="ok" && target.metrics) {
+    for(const name of visibleMetricNames(target.metrics.available,target.report)) {
+      if(target.report && !target.report.metric_info[name]?.additive) continue;
+      const value=target.metrics[name as keyof typeof target.metrics];
+      if(typeof value==="number") totals[name]=(totals[name] || 0)+value;
+    }
+  }
+  return totals;
 }
 
 function formatNumber(n: number): string {
@@ -6540,17 +6702,57 @@ function ExternalMediaThumb({ url }: { url: string }) {
   );
 }
 
+function PostStatusPill({ post }: { post: Post }) {
+  const release = postReleaseLabel(post);
+  if (!release) return <StatusPill status={post.status} />;
+  return <span className={"text-xs " + release.tone} title={release.title}>{release.label}</span>;
+}
+
+function TargetStatusPill({ target }: { target: PostTarget }) {
+  const release = target.status === "published" ? nativeReleaseLabel(target.native_release) : null;
+  if (!release) return <StatusPill status={target.status} />;
+  return <span className={"text-xs " + release.tone} title={release.title}>{release.label}</span>;
+}
+
+function NativeRefreshButton({ postId, targetId, projectId, onRefreshed }: { postId: number; targetId: number; projectId?: string | null; onRefreshed: () => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(appURL(`/posts/${postId}/delivery/${targetId}/native-refresh`, projectId), { method: "POST", credentials: "same-origin" });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || out?.isError || (out?.status && out.status !== "ok")) {
+        setError(mcpEnvelopeError(out) || out?.error || out?.limitation || `Refresh failed (${res.status})`);
+      } else {
+        await onRefreshed();
+      }
+    } catch (e: any) {
+      setError(e?.message || "Refresh failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-1 text-xs">
+      <button type="button" onClick={refresh} disabled={busy} className="text-accent hover:underline disabled:opacity-50">{busy ? "Refreshing…" : "Refresh from YouTube"}</button>
+      {error && <span className="text-error ml-2">{error}</span>}
+    </div>
+  );
+}
+
 function StatusPill({ status }: { status: string }) {
   const tone =
     status === "published" ? "text-success" :
     status === "failed" ? "text-error" :
-    status === "partial" ? "text-warn" :
+    status === "partial" || status === "awaiting_audience_setup" ? "text-warn" :
     status === "scheduled" ? "text-info" :
     status === "approved" ? "text-success" :
     status === "in_review" ? "text-info" :
     status === "rejected" ? "text-error" :
     "text-text-dim";
-  return <span className={"text-xs uppercase " + tone}>{status}</span>;
+  return <span className={"text-xs uppercase " + tone}>{status === "awaiting_audience_setup" ? "Awaiting membership setup" : status}</span>;
 }
 
 function ProviderImportPill({ compact = false }: { compact?: boolean }) {

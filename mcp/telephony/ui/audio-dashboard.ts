@@ -9,11 +9,16 @@ export const audioStages = {
   carrier_to_telephony: "Carrier → Telephony",
   telephony_to_browser: "Telephony → browser",
   browser_to_telephony: "Browser → Telephony",
+ internal_processing:"Internal audio processing",
 };
 export const audioIssues = {
   audio_degraded: "Audio degradation",
+ carrier_error:"Carrier transport errors",
+ carrier_recovery:"Carrier media recovery",
+ processing_error:"Internal processing errors",
   dropped_audio: "Dropped audio",
   playback_underrun: "Playback buffer gaps",
+  concealed_audio: "WebRTC replacement audio",
   carrier_stall: "Carrier delivery gaps",
   sequence_gaps: "Sequence gaps",
   browser_error: "Browser / media errors",
@@ -48,6 +53,8 @@ export const defaultAudioFilters: AudioFilters = {
   search: "",
 };
 export interface AudioReport {
+ carrier_transport?: "sip" | "websocket";
+ boundaries?: Record<string, {state: string; reason?:string; signal?:string; last_bad_at?:string}>;
   call_id: string;
   provider: string;
   status: string;
@@ -79,7 +86,13 @@ export interface AudioAlert {
   call_ids: string[];
   occurred_at: string;
 }
+export interface AudioHealthBucket {
+ from:string; until:string; calls:number; observed:number; affected:number;
+ sip_discard_ms:number; browser_discard_ms:number; sip_calls:number; browser_calls:number; problem_percent:number|null;
+}
 export interface AudioDashboardResponse {
+ charts?: AudioHealthBucket[];
+ chart_basis?: string;
   calls: AudioReport[];
   totals: {
     calls: number;
@@ -102,6 +115,7 @@ export function audioDashboardURL(
   cursor = "",
   limit = 50,
   now = Date.now(),
+  includeCharts = false,
 ): string {
   const q = new URLSearchParams();
   if (host.projectId) q.set("project_id", host.projectId);
@@ -123,6 +137,7 @@ export function audioDashboardURL(
   q.set("until", new Date(until).toISOString());
   q.set("limit", String(Math.min(100, Math.max(1, limit))));
   if (cursor) q.set("cursor", cursor);
+  if (includeCharts) q.set("include_charts", "true");
   for (const k of [
     "provider",
     "adviser",
@@ -133,6 +148,59 @@ export function audioDashboardURL(
     "search",
   ] as const)
     if (filters[k]) q.set(k, filters[k]);
+  return `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`;
+}
+export interface AudioIncidentCall {
+  call_id: string;
+  adviser?: string;
+  disconnected_at: string;
+  first_failed: string;
+  audio_age_ms?: number;
+  signaling_age_ms?: number;
+  error_class?: string;
+  ice_state?: string;
+  reconnected_at?: string;
+  reconnect_ms?: number;
+  disconnects: number;
+  failed_attempts: number;
+  recovery?: {
+    outcome?: string;
+    lost_ms?: number;
+    attempts_total?: number;
+    last_packet_age_ms?: number;
+    online?: boolean;
+    checks?: { telephony?: { ok: boolean; ms: number }; page?: { ok: boolean; ms: number } };
+  };
+}
+export interface AudioIncidentReport {
+  from: string;
+  to: string;
+  reading: string;
+  summary: { affected_calls: number; reconnected: number; not_reconnected: number; healthy_calls: number; first_failed: Record<string, number>; median_reconnect_ms?: number; longest_reconnect_ms?: number };
+  calls: AudioIncidentCall[];
+  healthy_calls: { call_id: string; adviser?: string }[];
+  alerts: { stage: string; state: string; call_count: number; occurred_at: string }[];
+  network_checks: { occurred_at: string; calls: number; results: { target: string; ok: boolean; ms: number; error?: string }[] }[];
+  truncated: boolean;
+}
+export const audioFirstFailedLabels: Record<string, string> = {
+  audio: "Audio",
+  signaling: "Signaling",
+  both: "Both",
+  neither: "Neither",
+  unknown: "Not recorded",
+};
+/** Blank times mean the last 15 minutes, chosen by the server. */
+export function audioIncidentURL(host: AudioDashboardHost, from = "", to = ""): string {
+  const q = new URLSearchParams({ view: "incident" });
+  if (host.projectId) q.set("project_id", host.projectId);
+  if (host.installId) q.set("install_id", String(host.installId));
+  for (const [key, value] of [["from", from], ["to", to]] as const) {
+    if (!value) continue;
+    const at = Date.parse(value);
+    if (!Number.isFinite(at)) throw new Error("Choose a valid time.");
+    q.set(key, new Date(at).toISOString());
+  }
   return `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`;
 }
 export function audioDashboardLink(
@@ -172,6 +240,12 @@ export function audioWidgetPreferences(value: Record<string, unknown> = {}) {
   };
 }
 export const metricLabel: Record<string, string> = {
+  server_webrtc_ingress_concealed_ms: "Microphone replacement audio (ms)",
+  webrtc_concealed_ms: "WebRTC replacement audio (ms)",
+  webrtc_packets_lost: "WebRTC packets lost",
+  webrtc_packets_discarded: "WebRTC packets discarded",
+  webrtc_jitter_buffer_interval_ms: "Recent browser buffering (ms)",
+  webrtc_jitter_buffer_ms: "WebRTC average playback buffer (ms)",
   playback_dropped_ms: "Browser playback dropped (ms)",
   playback_underruns: "Playback underruns",
   playback_underrun_ms: "Missing playback audio (ms)",
@@ -194,6 +268,8 @@ export const metricLabel: Record<string, string> = {
   context_suspended_ms: "AudioContext suspended (ms)",
   carrier_max_gap_ms: "Max carrier reception gap (ms)",
   carrier_stalls: "Carrier stalls",
+  carrier_last_media_age_ms: "Last carrier audio age (ms)",
+  carrier_max_delivery_batch_ms: "Largest carrier delivery batch (ms)",
   carrier_max_batch_ms: "Max carrier batch (ms)",
   carrier_max_age_ms: "Max carrier source age (ms)",
   carrier_source_dropped_ms: "Carrier source dropped (ms)",
@@ -226,8 +302,14 @@ export function audioStateLabel(state: string) {
         stale: "Telemetry stale",
         unobserved: "No telemetry",
         unavailable: "Health unavailable",
-        inactive: "Browser audio inactive",
+        inactive: "Audio inactive",
+        disconnected: "Transport disconnected",
       } as Record<string, string>
     )[state] || state
   );
+}
+
+export function audioBoundaryIndicators(report: AudioReport) {
+ const labels:Record<string,string>={carrier:report.carrier_transport==="sip"?"Carrier SIP / RTP":"Carrier stream",browser:"Browser WebRTC / WebSocket",internal:"Internal audio processing"};
+ return Object.entries(labels).map(([key,label])=>({key,label,state:report.boundaries?.[key]?.state||"unobserved",reason:report.boundaries?.[key]?.reason||""}));
 }

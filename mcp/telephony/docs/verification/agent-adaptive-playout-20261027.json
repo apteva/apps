@@ -1,0 +1,934 @@
+{
+  "date": "2026-10-27",
+  "status": "Validation performed locally before release; fixed defaults retained; deployments unchanged",
+  "telephony_base": "d889afb804563a564bd51ab6f0023cf8fce7be44",
+  "replay": [
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 260,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 160,
+        "max_target_reserve_ms": 200,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 320
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 180,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 190390,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 160,
+        "max_target_reserve_ms": 200,
+        "adjusted_frames": 13,
+        "unmatched_frames": 97,
+        "expanded_ms": 0,
+        "compressed_ms": 99.9375,
+        "max_delivery_deficit_ms": 320
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 260,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 100,
+        "max_target_reserve_ms": 100,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 30
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 40,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 183,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 192366,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 100,
+        "max_target_reserve_ms": 100,
+        "adjusted_frames": 3,
+        "unmatched_frames": 40,
+        "expanded_ms": 23.5625,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 30
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 2,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 1,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 9,
+      "excess_timeline_ms": 180,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 180
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 3,
+      "excess_timeline_ms": 200,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 193588,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 13,
+        "unmatched_frames": 97,
+        "expanded_ms": 99.9375,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 60
+    },
+    {
+      "codec": "G722",
+      "empty_intervals": 9,
+      "excess_timeline_ms": 180,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 191989,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 191989,
+      "total_empty_ms": 180
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 260,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 160,
+        "max_target_reserve_ms": 200,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 320
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 160,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95195,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 160,
+        "max_target_reserve_ms": 200,
+        "adjusted_frames": 13,
+        "unmatched_frames": 97,
+        "expanded_ms": 0,
+        "compressed_ms": 100,
+        "max_delivery_deficit_ms": 320
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 260,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 280,
+      "max_queue_ms": 420,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "burst320",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 260
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 100,
+        "max_target_reserve_ms": 100,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 30
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 40,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 183,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 96184,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 100,
+        "max_target_reserve_ms": 100,
+        "adjusted_frames": 3,
+        "unmatched_frames": 40,
+        "expanded_ms": 23.625,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 30
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "jitter",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 2,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 1,
+      "excess_timeline_ms": 1500,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 1520,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "long_stall",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 1500
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 1,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 0,
+      "excess_timeline_ms": 0,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 20,
+      "max_queue_ms": 160,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "normal",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 0
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 9,
+      "excess_timeline_ms": 180,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "adaptive",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 180
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 3,
+      "excess_timeline_ms": 200,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "adaptive_speed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 96795,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 13,
+        "unmatched_frames": 97,
+        "expanded_ms": 100,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 60
+    },
+    {
+      "codec": "PCMA",
+      "empty_intervals": 9,
+      "excess_timeline_ms": 180,
+      "first_audio_ms": 60,
+      "max_packet_gap_ms": 40,
+      "max_queue_ms": 140,
+      "mode": "fixed",
+      "note": "Output samples exclude scheduling gaps; metrics describe packet timeline, not measured speech loss.",
+      "output_samples": 95995,
+      "pattern": "slow102",
+      "playout": {
+        "target_reserve_ms": 60,
+        "max_target_reserve_ms": 60,
+        "adjusted_frames": 0,
+        "unmatched_frames": 0,
+        "expanded_ms": 0,
+        "compressed_ms": 0,
+        "max_delivery_deficit_ms": 0
+      },
+      "source_samples": 95995,
+      "total_empty_ms": 180
+    }
+  ],
+  "intelligibility": {
+    "note": "ASR agreement on sample audio; not a perceptual quality score or measurement of pauses.",
+    "results": [
+      {
+        "codec": "G722",
+        "pattern": "slow102",
+        "baseline": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "candidate": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "word_difference": 0,
+        "accepted": true
+      },
+      {
+        "codec": "G722",
+        "pattern": "burst320",
+        "baseline": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "candidate": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "word_difference": 0,
+        "accepted": true
+      },
+      {
+        "codec": "PCMA",
+        "pattern": "slow102",
+        "baseline": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "candidate": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "word_difference": 0,
+        "accepted": true
+      },
+      {
+        "codec": "PCMA",
+        "pattern": "burst320",
+        "baseline": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "candidate": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+        "word_difference": 0,
+        "accepted": true
+      }
+    ]
+  },
+  "limitations": [
+    "Three independent live replies per transport; stochastic provider output, no PSTN or handset test.",
+    "ASR agreement is not a listening-quality score.",
+    "The first unexpected delayed-burst gap remains 280 ms.",
+    "Adaptive buffer alone does not refill a SIP reserve in mid-speech; short recovery remains immediate.",
+    "Speed correction intentionally leaves unmatched speech unchanged.",
+    "UTC timestamps across hosts are correlation anchors, not proven one-way network delay."
+  ],
+  "evidence_paths": {
+    "actual_pipeline": "/private/tmp/telephony-adaptive-pipeline-final",
+    "speech_replay": "/private/tmp/telephony-adaptive-speech",
+    "websocket": "/private/tmp/telephony-adaptive-final-live-ws",
+    "webrtc": "/private/tmp/telephony-adaptive-final-live-rtc"
+  },
+  "exploratory_live_transport_comparison": {
+    "ws": [
+      {
+        "first_reply_ms": 1380.5375,
+        "applied_transport": "websocket",
+        "trace_frames": 579,
+        "provider_to_write_max_voiced_ms": 0.19125
+      },
+      {
+        "first_reply_ms": 1499.467125,
+        "applied_transport": "websocket",
+        "trace_frames": 659,
+        "provider_to_write_max_voiced_ms": 2.42725
+      },
+      {
+        "first_reply_ms": 1565.271125,
+        "applied_transport": "websocket",
+        "trace_frames": 580,
+        "provider_to_write_max_voiced_ms": 0.14625
+      }
+    ],
+    "rtc": [
+      {
+        "first_reply_ms": 1481.331834,
+        "applied_transport": "webrtc",
+        "trace_frames": 654,
+        "provider_to_write_max_voiced_ms": 0.051042
+      },
+      {
+        "first_reply_ms": 1280.974875,
+        "applied_transport": "webrtc",
+        "trace_frames": 619,
+        "provider_to_write_max_voiced_ms": 0.102416
+      },
+      {
+        "first_reply_ms": 1300.07625,
+        "applied_transport": "webrtc",
+        "trace_frames": 600,
+        "provider_to_write_max_voiced_ms": 0.060959
+      }
+    ]
+  },
+  "final_live_transport_comparison": {
+    "ws": [
+      {
+        "first_reply_ms": 1481.655,
+        "applied_transport": "websocket",
+        "trace_frames": 598,
+        "provider_to_write_max_voiced_ms": 0.443416,
+        "playout": {
+          "target_reserve_ms": 60,
+          "max_target_reserve_ms": 60,
+          "adjusted_frames": 0,
+          "unmatched_frames": 11,
+          "expanded_ms": 0,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 0
+        }
+      },
+      {
+        "first_reply_ms": 1244.711,
+        "applied_transport": "websocket",
+        "trace_frames": 626,
+        "provider_to_write_max_voiced_ms": 0.126625,
+        "playout": {
+          "target_reserve_ms": 60,
+          "max_target_reserve_ms": 60,
+          "adjusted_frames": 0,
+          "unmatched_frames": 8,
+          "expanded_ms": 0,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 0
+        }
+      },
+      {
+        "first_reply_ms": 1301.235,
+        "applied_transport": "websocket",
+        "trace_frames": 620,
+        "provider_to_write_max_voiced_ms": 0.328167,
+        "playout": {
+          "target_reserve_ms": 60,
+          "max_target_reserve_ms": 60,
+          "adjusted_frames": 0,
+          "unmatched_frames": 8,
+          "expanded_ms": 0,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 0
+        }
+      }
+    ],
+    "rtc": [
+      {
+        "first_reply_ms": 1464.655,
+        "applied_transport": "webrtc",
+        "trace_frames": 612,
+        "provider_to_write_max_voiced_ms": 0.090416,
+        "playout": {
+          "target_reserve_ms": 80,
+          "max_target_reserve_ms": 80,
+          "adjusted_frames": 0,
+          "unmatched_frames": 0,
+          "expanded_ms": 0,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 7.904833
+        }
+      },
+      {
+        "first_reply_ms": 1359.426,
+        "applied_transport": "webrtc",
+        "trace_frames": 636,
+        "provider_to_write_max_voiced_ms": 0.064917,
+        "playout": {
+          "target_reserve_ms": 100,
+          "max_target_reserve_ms": 100,
+          "adjusted_frames": 0,
+          "unmatched_frames": 11,
+          "expanded_ms": 0,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 38.688667
+        }
+      },
+      {
+        "first_reply_ms": 1400.759,
+        "applied_transport": "webrtc",
+        "trace_frames": 635,
+        "provider_to_write_max_voiced_ms": 0.041667,
+        "playout": {
+          "target_reserve_ms": 160,
+          "max_target_reserve_ms": 160,
+          "adjusted_frames": 1,
+          "unmatched_frames": 15,
+          "expanded_ms": 5.25,
+          "compressed_ms": 0,
+          "max_delivery_deficit_ms": 99.946542
+        }
+      }
+    ]
+  },
+  "checks": {
+    "telephony_full_go": "PASS 449.141s",
+    "core_full_short": "PASS 120.552s",
+    "telephony_focused_race": "PASS 19.229s",
+    "core_trace_flow_race": "PASS 1.690s",
+    "frontend_ui": "PASS 437 tests",
+    "typescript": "PASS",
+    "go_vet": "PASS",
+    "actual_core_server_carrier_pipeline": "PASS 12 inbound/outbound paths, adaptive + 3% + trace enabled; 125.001s",
+    "live_final": "PASS 3 WS and 3 WebRTC real model/G722 outbound loopback paths",
+    "asr_proxy": "PASS four comparisons, zero normalized word differences",
+    "final_focused": "PASS 1.466s"
+  },
+  "benchmarks": {
+    "host": "Apple M1 Pro Darwin arm64",
+    "20ms_pcm_ns_per_op": 12123,
+    "100ms_pcm_ns_per_op": 285846,
+    "scope": "synthetic periodic PCM controller only; excludes encoding/network; not a VPS guarantee"
+  },
+  "core_companion_files": [
+    "provider_realtime.go",
+    "realtime_audio_lane.go",
+    "realtime_audio_bridge.go",
+    "realtime_playback_window.go",
+    "realtime_frame_trace_test.go"
+  ],
+  "telephony_changed_source_sha256": {
+    "agent_playout.go": "6c4763ceb13b4e7e9045e2c45a69068985c1b55d751135826375a08dfda307fe",
+    "agent_audio_trace.go": "ba6d8a998f4350ceebe5244e418ce1af66575dde76a47bc32b5442d94be55f47",
+    "agent_audio.go": "e0469cb6eaf1d157b69d1a1b5c7be03a4eec7ea49b8199830d8b07f21f060ab9",
+    "agent_audio_profiles.go": "67bb2a8e5419f8c38843f544e2c640a2fd578ddfda687920a9d21ad26136d8c8",
+    "sip_agent_playout.go": "ac232c778371d1a5e751585074cb4a898595e89ae0bafecfc3c8da37c49a57c0",
+    "sip_rtp.go": "c5d2dde119a3006b08263a1ce5ccde9ff36836dd910841a76309611244223edb",
+    "carrier_pacer.go": "73d2f302b9440680898840d3fce0bed526932d7fed0afe4558dbd22c811851cc",
+    "twilio_pacer.go": "52ee03acd8470fb141eb7131cea341f2909668694b6e8a82dff32c2d46859b2d",
+    "bridge_twilio.go": "ecf3b8e0e086b93ca3484150d46e18bde3025765fdef27514bf8d7a45f61520b",
+    "bridge_carriers.go": "23391a560e6637b16ac19d85e9db3b3d5fbf484725e2fdae09ae85007217a58d",
+    "agent_audio_binary.go": "601b101f0c327c10508b76e3879506c10663c06708ecf23a5f66885c7e0c167e"
+  },
+  "release_version": "0.12.59",
+  "release_checks": {
+    "linux_amd64_build": "PASS, CGO_ENABLED=0, GOWORK=off",
+    "version_frontend_manifest_hash": "PASS",
+    "focused_release_tests": "PASS 1.566s",
+    "rebuilt_frontend_ui_tests": "PASS 437 tests",
+    "prior_ci_failure": "0.12.58 browser outage fixtures rejected X-Request-ID in CORS preflight before answer; fixture allowlist corrected",
+    "browser_long_outages": "PASS WebRTC/TURN 90s and PCM 120s; 235.313s total"
+  }
+}

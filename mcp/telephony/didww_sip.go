@@ -90,41 +90,55 @@ func restoreDIDWWDIDTrunk(ctx *sdk.AppCtx, connectionID int64, didID string, sta
 	return setDIDWWDIDTrunk(ctx, connectionID, didID, state.PreviousTrunkID, state.PreviousTrunkGroupID)
 }
 
-func (a *App) configureDIDWWDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sipGatewayConfig) error {
-	if route == nil || route.PhoneNumber == "" || route.CarrierConnectionID == 0 {
-		return errors.New("DIDWW route has no number or carrier connection")
-	}
+// didwwInboundSIPConfiguration is the trunk target. DIDWW sends the username
+// verbatim as the Request-URI user, so it carries the route secret.
+func didwwInboundSIPConfiguration(route *routeRow, cfg sipGatewayConfig, token string) (map[string]any, error) {
 	if cfg.SRTPMode == sipSRTPRequired && cfg.Transport != "tls" {
-		return errors.New("DIDWW direct SIP with required SRTP needs TLS signaling")
+		return nil, errors.New("DIDWW direct SIP with required SRTP needs TLS signaling")
 	}
 	transportID := map[string]int{"udp": 1, "tcp": 2, "tls": 3}[strings.ToLower(cfg.Transport)]
 	if transportID == 0 {
-		return errors.New("unsupported DIDWW SIP transport")
+		return nil, errors.New("unsupported DIDWW SIP transport")
 	}
 	_, portText, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
-		return fmt.Errorf("DIDWW SIP gateway listen address: %w", err)
+		return nil, fmt.Errorf("DIDWW SIP gateway listen address: %w", err)
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
-		return errors.New("DIDWW SIP gateway port is invalid")
-	}
-	did, err := findDIDWWDID(ctx, route.CarrierConnectionID, route.PhoneNumber)
-	if err != nil {
-		return err
+		return nil, errors.New("DIDWW SIP gateway port is invalid")
 	}
 	mediaEncryption := "disabled"
 	if cfg.SRTPMode != sipSRTPDisabled {
 		mediaEncryption = "srtp_sdes"
 	}
+	return map[string]any{"type": "sip_configurations", "attributes": map[string]any{
+		"username": sipRouteTokenUser(route.PhoneNumber, token), "host": cfg.PublicHost, "port": port,
+		"codec_ids": []int{9, 10}, "transport_protocol_id": transportID,
+		"media_encryption_mode": mediaEncryption,
+	}}, nil
+}
+
+func (a *App) configureDIDWWDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sipGatewayConfig) error {
+	if route == nil || route.PhoneNumber == "" || route.CarrierConnectionID == 0 {
+		return errors.New("DIDWW route has no number or carrier connection")
+	}
+	token, err := newSIPRouteToken()
+	if err != nil {
+		return err
+	}
+	configuration, err := didwwInboundSIPConfiguration(route, cfg, token)
+	if err != nil {
+		return err
+	}
+	did, err := findDIDWWDID(ctx, route.CarrierConnectionID, route.PhoneNumber)
+	if err != nil {
+		return err
+	}
 	raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_inbound_trunk", map[string]any{
 		"name":     "Apteva " + route.PhoneNumber,
 		"priority": 1, "weight": 100,
-		"configuration": map[string]any{"type": "sip_configurations", "attributes": map[string]any{
-			"username": route.PhoneNumber, "host": cfg.PublicHost, "port": port,
-			"codec_ids": []int{9, 10}, "transport_protocol_id": transportID,
-			"media_encryption_mode": mediaEncryption,
-		}},
+		"configuration": configuration,
 	})
 	if err != nil {
 		return fmt.Errorf("create DIDWW inbound trunk: %w", err)
@@ -141,7 +155,7 @@ func (a *App) configureDIDWWDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sipG
 		return fmt.Errorf("assign DIDWW DID to SIP trunk: %w", err)
 	}
 	state := directSIPProviderConfig{Provider: "didww", TrunkID: trunkID,
-		PreviousTrunkID: did.TrunkID, PreviousTrunkGroupID: did.TrunkGroupID}
+		PreviousTrunkID: did.TrunkID, PreviousTrunkGroupID: did.TrunkGroupID, InboundToken: token}
 	encoded, _ := json.Marshal(state)
 	if err := a.db().updateRoutePhoneSID(route.ID, did.ID); err != nil {
 		_ = restoreDIDWWDIDTrunk(ctx, route.CarrierConnectionID, did.ID, state)

@@ -26,6 +26,8 @@ const (
 	buildBackendRunner                   = "runner"
 	buildBackendCodemagic                = "codemagic"
 	buildBackendGitHubActions            = "github_actions"
+	buildBackendBitrise                  = "bitrise"
+	buildBackendAppcircle                = "appcircle"
 	defaultCloudArtifactName             = "apteva-build"
 	maxCloudArtifactBytes                = int64(2 << 30)
 	cloudBuildPollLease                  = 2 * time.Minute
@@ -45,6 +47,12 @@ func (e *externalJobUnavailableError) Error() string {
 }
 
 type cloudBuildConfig struct {
+	ConnectionID        int64             `json:"connection_id,omitempty"`
+	ProfileID           string            `json:"profile_id,omitempty"`
+	ConfigurationID     string            `json:"configuration_id,omitempty"`
+	CommitID            string            `json:"commit_id,omitempty"`
+	BranchID            string            `json:"branch_id,omitempty"`
+	Stack               string            `json:"stack,omitempty"`
 	Owner               string            `json:"owner,omitempty"`
 	Repo                string            `json:"repo,omitempty"`
 	WorkflowID          string            `json:"workflow_id"`
@@ -61,6 +69,7 @@ type cloudBuildConfig struct {
 	ArtifactFile        string            `json:"artifact_file,omitempty"`
 	StoreChannel        string            `json:"store_channel,omitempty"`
 	Preflight           string            `json:"preflight,omitempty"`
+	ContractInput       string            `json:"contract_input,omitempty"`
 	ContractInputs      bool              `json:"contract_inputs,omitempty"`
 	Inputs              map[string]any    `json:"inputs,omitempty"`
 	Variables           map[string]string `json:"variables,omitempty"`
@@ -88,6 +97,7 @@ type externalBuildStatus struct {
 }
 
 type cloudArtifact struct {
+	ArchiveEntry    string
 	Name            string
 	URL             string
 	NeedsGitHubAuth bool
@@ -148,6 +158,14 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return cfg, fmt.Errorf("build_backend_config_json: %w", err)
 	}
+	if cfg.ConnectionID < 0 {
+		return cfg, errors.New("connection_id must be positive")
+	}
+	for name := range cfg.Variables {
+		if managedSigningVariable(name) {
+			return cfg, fmt.Errorf("%s is managed signing material; use deploy_mobile_signing_setup instead of variables", name)
+		}
+	}
 	cfg.WorkflowID = strings.TrimSpace(cfg.WorkflowID)
 	cfg.ArtifactName = strings.TrimSpace(cfg.ArtifactName)
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(cfg.ArtifactMode))
@@ -175,6 +193,9 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	if cfg.ArtifactName == "" {
 		cfg.ArtifactName = defaultCloudArtifactName
 	}
+	if strings.ContainsAny(cfg.ArtifactName, "/\\\r\n") || cfg.ArtifactName == "." || cfg.ArtifactName == ".." {
+		return cfg, errors.New("artifact_name must be a filename without directory components")
+	}
 	if cfg.SourceMode != "repository" && cfg.SourceMode != "bundle" {
 		return cfg, errors.New("source_mode must be repository or bundle")
 	}
@@ -191,6 +212,17 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 		return cfg, fmt.Errorf("source_url_ttl_seconds must be 0 (default) or between 1 and %d", maxTTLSeconds)
 	}
 	switch normalizeBuildBackend(backend) {
+	case buildBackendBitrise:
+		if cfg.AppID == "" || cfg.WorkflowID == "" || (cfg.Branch == "" && cfg.Tag == "") {
+			return cfg, errors.New("bitrise backend requires app_id (app slug), workflow_id, and branch or tag")
+		}
+		if cfg.Branch != "" && cfg.Tag != "" {
+			return cfg, errors.New("bitrise backend accepts branch or tag, not both")
+		}
+	case buildBackendAppcircle:
+		if cfg.ProfileID == "" || cfg.ConfigurationID == "" || cfg.WorkflowID == "" || (cfg.CommitID == "" && cfg.BranchID == "") {
+			return cfg, errors.New("appcircle backend requires profile_id, configuration_id, workflow_id, and commit_id or branch_id")
+		}
 	case buildBackendRunner:
 		if cfg.SourceMode != "bundle" {
 			return cfg, errors.New("runner backend requires source_mode=bundle")
@@ -214,8 +246,8 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 			return cfg, errors.New("codemagic backend accepts branch or tag, not both")
 		}
 	case buildBackendGitHubActions:
-		if cfg.SourceMode == "bundle" && !cfg.ContractInputs {
-			return cfg, errors.New("github_actions source_mode=bundle requires contract_inputs=true and matching workflow_dispatch inputs")
+		if cfg.SourceMode == "bundle" && !cfg.ContractInputs && cfg.ContractInput == "" {
+			return cfg, errors.New("github_actions source_mode=bundle requires contract_input or contract_inputs=true and matching workflow_dispatch inputs")
 		}
 		if strings.TrimSpace(cfg.Owner) == "" || strings.TrimSpace(cfg.Repo) == "" || cfg.WorkflowID == "" || strings.TrimSpace(cfg.Ref) == "" {
 			return cfg, errors.New("github_actions backend requires owner, repo, workflow_id, and ref")
@@ -250,12 +282,20 @@ func cloudBackendFor(name string) (cloudBuildBackend, error) {
 		return codemagicBuildBackend{}, nil
 	case buildBackendGitHubActions:
 		return githubActionsBuildBackend{}, nil
+	case buildBackendBitrise:
+		return bitriseBuildBackend{}, nil
+	case buildBackendAppcircle:
+		return appcircleBuildBackend{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported build_backend %q", name)
 	}
 }
 
 func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
+	return cloudIntegrationForConfig(backend, cloudBuildConfig{})
+}
+
+func cloudIntegrationForConfig(backend string, cfg cloudBuildConfig) (*sdk.BoundIntegration, error) {
 	if normalizeBuildBackend(backend) == buildBackendRunner {
 		return nil, nil
 	}
@@ -265,11 +305,29 @@ func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
 	wantSlug := map[string]string{
 		buildBackendCodemagic:     "codemagic",
 		buildBackendGitHubActions: "github",
+		buildBackendBitrise:       "bitrise",
+		buildBackendAppcircle:     "appcircle",
 	}[normalizeBuildBackend(backend)]
+	var selected *sdk.BoundIntegration
 	for _, bound := range globalCtx.IntegrationsFor("cloud_build") {
 		if bound != nil && bound.Kind == "integration" && bound.ConnectionID > 0 && bound.AppSlug == wantSlug {
-			return bound, nil
+			if cfg.ConnectionID > 0 {
+				if bound.ConnectionID == cfg.ConnectionID {
+					return bound, nil
+				}
+				continue
+			}
+			if selected != nil {
+				return nil, fmt.Errorf("multiple %s connections are bound; select connection_id in build_backend_config_json", wantSlug)
+			}
+			selected = bound
 		}
+	}
+	if selected != nil {
+		return selected, nil
+	}
+	if cfg.ConnectionID > 0 {
+		return nil, fmt.Errorf("connection_id %d is not a bound %s cloud_build connection", cfg.ConnectionID, wantSlug)
 	}
 	return nil, fmt.Errorf("no %s connection is bound to Deploy's cloud_build role", wantSlug)
 }
@@ -308,9 +366,14 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 	if err != nil {
 		return nil, err
 	}
-	bound, err := cloudIntegrationFor(backendName)
+	bound, err := cloudIntegrationForConfig(backendName, cfg)
 	if err != nil {
 		return nil, err
+	}
+	// Freeze the chosen connection so later binding changes cannot redirect a running job.
+	if bound != nil {
+		cfg.ConnectionID = bound.ConnectionID
+		buildBackendJSON = mustJSON(cfg)
 	}
 	build, err := dbCreateBuildForEnvBackend(
 		globalCtx.AppDB(), d.ID, d.EnvironmentID, d.Framework, d.BuildCmd,
@@ -451,7 +514,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		a.failBuild(build, err.Error())
 		return nil
 	}
-	bound, err := cloudIntegrationFor(build.BuildBackend)
+	bound, err := cloudIntegrationForConfig(build.BuildBackend, cfg)
 	if err != nil {
 		a.scheduleCloudBuildPoll(build, err)
 		return nil
@@ -624,6 +687,10 @@ func providerDisplayName(provider string) string {
 		return "Codemagic"
 	case buildBackendGitHubActions:
 		return "GitHub Actions"
+	case buildBackendBitrise:
+		return "Bitrise"
+	case buildBackendAppcircle:
+		return "Appcircle"
 	default:
 		return provider
 	}
@@ -650,10 +717,37 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	var manifestJSON string
 	switch mode {
 	case "store_upload":
+		pipeline, err := pipelineConfig(build.TargetConfigJSON)
+		if err != nil {
+			a.failBuild(build, err.Error())
+			return nil
+		}
 		manifest, err := externalStoreArtifactManifest(d, build)
 		if err != nil {
 			a.failBuild(build, err.Error())
 			return nil
+		}
+		if pipeline != nil {
+			artifact, err := backend.Artifact(ctx, bound, cfg, build, status)
+			if err != nil {
+				a.failBuild(build, "collect uploaded artifact evidence: "+err.Error())
+				return nil
+			}
+			if err = a.downloadAndStageCloudArtifact(bound, d, build, artifact, "file", distDir); err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			if err = a.verifyStagedCloudMobileArtifact(d, build, distDir); err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			returned, err := readArtifactManifestFile(filepath.Join(distDir, artifactManifestFilename))
+			if err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			returned.Channel, returned.ExternalProvider, returned.ExternalID, returned.ExternalStatus = manifest.Channel, manifest.ExternalProvider, manifest.ExternalID, manifest.ExternalStatus
+			manifest = returned
 		}
 		if err := writeArtifactManifest(distDir, manifest); err != nil {
 			a.failBuild(build, err.Error())
@@ -796,7 +890,7 @@ func (a *App) finishCloudCancellation(ctx context.Context, build *Build) error {
 	if err != nil {
 		return err
 	}
-	bound, err := cloudIntegrationFor(build.BuildBackend)
+	bound, err := cloudIntegrationForConfig(build.BuildBackend, cfg)
 	if err != nil {
 		return err
 	}
@@ -852,8 +946,14 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	if len(cfg.Groups) > 0 {
 		environment["groups"] = cfg.Groups
 	}
-	if len(cfg.SoftwareVersions) > 0 {
-		environment["softwareVersions"] = cfg.SoftwareVersions
+	// Bun/Rust are provisioned by the generic recipe adapter rather than
+	// Codemagic's limited softwareVersions API.
+	providerVersions := cloneStringMap(cfg.SoftwareVersions)
+	for _, key := range []string{"bun", "rust", "rust_targets", "python"} {
+		delete(providerVersions, key)
+	}
+	if len(providerVersions) > 0 {
+		environment["softwareVersions"] = providerVersions
 	}
 	input["environment"] = environment
 	data, err := executeIntegration(bound, "start_build", input)
@@ -875,6 +975,18 @@ func (codemagicBuildBackend) Inspect(_ context.Context, bound *sdk.BoundIntegrat
 			return nil, &externalJobUnavailableError{
 				Provider: buildBackendCodemagic, JobID: build.ExternalJobID,
 				Reason: "provider returned HTTP 404 not_found", NotFound: true,
+			}
+		}
+		if errors.As(err, &toolErr) && toolErr.Status >= 200 && toolErr.Status < 300 {
+			var contract struct {
+				Error  string `json:"error"`
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(toolErr.Data, &contract) == nil && contract.Error == "response contract violation" {
+				return nil, &externalJobUnavailableError{
+					Provider: buildBackendCodemagic, JobID: build.ExternalJobID,
+					Reason: "get_build response contract violation: " + contract.Detail,
+				}
 			}
 		}
 		return nil, err
@@ -1051,15 +1163,38 @@ func (githubActionsBuildBackend) Name() string { return buildBackendGitHubAction
 
 func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, d *Deployment, build *Build, capsule *sourceCapsule) (*externalBuildJob, error) {
 	inputs := cloneAnyMap(cfg.Inputs)
-	if cfg.ContractInputs {
+	if cfg.ContractInputs || cfg.ContractInput != "" {
 		contract, err := cloudBuildContractVariables(cfg, d, build, capsule)
 		if err != nil {
 			return nil, err
 		}
-		for key, value := range contract {
-			inputs[strings.ToLower(key)] = value
+		if cfg.ContractInput != "" {
+			body, err := json.Marshal(contract)
+			if err != nil {
+				return nil, err
+			}
+			inputs[cfg.ContractInput] = string(body)
+		} else {
+			for key, value := range contract {
+				inputs[strings.ToLower(key)] = value
+			}
 		}
 	}
+	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	if isAppPlatform(d.TargetKind) && !target.SmokeOnly {
+		setup, err := dbGetMobileSigningSetup(globalCtx.AppDB(), d.ID, d.EnvironmentID, buildBackendGitHubActions)
+		if err != nil {
+			return nil, err
+		}
+		if setup == nil || setup.Status != mobileSigningStatusReady || setup.ProviderSecretRef == "" {
+			return nil, errors.New("configure managed signing for the selected GitHub Actions repository before building")
+		}
+		inputs["apteva_signing_prefix"] = setup.ProviderSecretRef
+	}
+
 	correlation := fmt.Sprintf("apteva-deploy-%d-%d", build.ID, time.Now().UnixNano())
 	inputs["apteva_deploy_run_id"] = correlation
 	data, err := executeIntegration(bound, "trigger_workflow", map[string]any{
@@ -1163,12 +1298,19 @@ func (githubActionsBuildBackend) Artifact(_ context.Context, bound *sdk.BoundInt
 		if item.Expired || (cfg.ArtifactName != "" && item.Name != cfg.ArtifactName) {
 			continue
 		}
+		archiveEntry := ""
+		if cfg.ContractInput != "" {
+			// The shared capsule workflow uploads its sealed ZIP as one file;
+			// GitHub's artifact API adds an outer container around that file.
+			archiveEntry = item.Name + ".zip"
+		}
 		return &cloudArtifact{
 			Name: item.Name + ".zip",
 			URL: fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/artifacts/%d/zip",
 				url.PathEscape(cfg.Owner), url.PathEscape(cfg.Repo), item.ID),
 			NeedsGitHubAuth: true,
 			Archive:         true,
+			ArchiveEntry:    archiveEntry,
 			FileName:        cfg.ArtifactFile,
 		}, nil
 	}
@@ -1334,6 +1476,25 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 	defer os.Remove(tmpPath)
 	if err := downloadCloudArtifact(bound, artifact, tmpPath); err != nil {
 		return err
+	}
+	if artifact.ArchiveEntry != "" {
+		inner, err := extractProviderArtifactArchive(tmpPath, artifact.ArchiveEntry)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(inner)
+		tmpPath = inner
+	}
+	targetJSON := defaultStr(build.TargetConfigJSON, d.TargetConfigJSON)
+	pipeline, err := pipelineConfig(targetJSON)
+	if err != nil {
+		return err
+	}
+	if pipeline != nil {
+		if mode != "bundle" && !artifact.Archive {
+			return errors.New("pipeline artifact must include its tree and evidence in a zip archive")
+		}
+		return importPipelineArchive(tmpPath, distDir, pipeline, artifact.FileName)
 	}
 	if mode == "bundle" {
 		zr, err := zip.OpenReader(tmpPath)

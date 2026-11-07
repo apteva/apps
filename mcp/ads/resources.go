@@ -40,6 +40,7 @@ type discoveredResource struct {
 }
 
 type adResource struct {
+	Provenance       map[string]any
 	ID               int64
 	AdAccountID      int64
 	Kind             string
@@ -55,7 +56,7 @@ type adResource struct {
 }
 
 func (r adResource) response() map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id":                 r.ID,
 		"ad_account_id":      r.AdAccountID,
 		"kind":               r.Kind,
@@ -68,6 +69,13 @@ func (r adResource) response() map[string]any {
 		"managed_by_app":     r.ManagedByApp,
 		"refreshed_at":       r.RefreshedAt,
 	}
+	if r.Kind == resourceAudience {
+		out["metadata"] = audienceMetadata(r)
+		out["provenance"] = verifiedAudienceProvenance(r)
+		out["source_label"] = audienceSourceLabel(r)
+		out["audience_type"] = audienceKind("", r)
+	}
+	return out
 }
 
 func (a *App) toolAccountContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -137,6 +145,13 @@ func accountResourceCapabilities(platform string) map[string]any {
 	}
 	return map[string]any{
 		"mobile_app": mobileCapabilities(platform),
+		"audiences":  audienceCapabilityResponse(platform, audienceCapabilities[platform]),
+		"demand_gen": func() map[string]any {
+			if platform == "google" {
+				return demandGenCapabilities()
+			}
+			return map[string]any{"supported": false}
+		}(),
 		"tracking_source": map[string]any{
 			"supported":                  supported,
 			"create":                     create,
@@ -576,7 +591,13 @@ func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind strin
 				Kind: resourceTrackingSource, ProviderType: "meta_pixel", NativeID: id,
 				DisplayName: firstString(row, "name"), Status: status,
 				Capabilities: []string{"conversion_tracking", "server_events"},
-				Metadata:     map[string]any{"last_fired_time": row["last_fired_time"]},
+				// Provider availability only: a domain can still be blocked,
+				// so readiness comes from tracking_source_readiness_get.
+				Metadata: map[string]any{
+					"last_fired_time":    row["last_fired_time"],
+					"provider_available": status == "active",
+					"tracking_verified":  false,
+				},
 			})
 		}
 		return out, nil
@@ -675,11 +696,11 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	var query string
 	switch kind {
 	case resourceConversionAction:
-		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer, conversion_action.app_id, conversion_action.primary_for_goal FROM conversion_action ORDER BY conversion_action.id"
+		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer, conversion_action.app_id, conversion_action.primary_for_goal, conversion_action.origin FROM conversion_action ORDER BY conversion_action.id"
 	case resourceLeadForm:
 		query = "SELECT asset.id, asset.name, asset.resource_name, asset.type, asset.lead_form_asset.business_name, asset.lead_form_asset.headline, asset.lead_form_asset.description, asset.lead_form_asset.privacy_policy_url, asset.lead_form_asset.fields, asset.lead_form_asset.call_to_action_type, asset.lead_form_asset.call_to_action_description, asset.lead_form_asset.desired_intent, asset.lead_form_asset.post_submit_headline, asset.lead_form_asset.post_submit_description, asset.lead_form_asset.post_submit_call_to_action_type FROM asset WHERE asset.type = LEAD_FORM ORDER BY asset.id"
 	case resourceAudience:
-		query = "SELECT user_list.id, user_list.name, user_list.type, user_list.description, user_list.membership_status, user_list.size_for_display, user_list.size_for_search FROM user_list ORDER BY user_list.id"
+		return a.discoverGoogleAudiences(ctx, acct)
 	default:
 		return nil, mcpError("unsupported Google resource kind: " + kind)
 	}
@@ -937,7 +958,7 @@ func (a *App) listResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]ad
 	query := `SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 	                 COALESCE(parent_resource_id,0), display_name, status,
 	                 capabilities_json, metadata_json, managed_by_app,
-	                 COALESCE(refreshed_at,'')
+	                 COALESCE(refreshed_at,''), audience_provenance_json
 	          FROM ad_resources
 	          WHERE project_id=? AND ad_account_id=? AND status!='stale'`
 	args := []any{pid, acct.ID}
@@ -968,12 +989,12 @@ type rowScanner interface {
 
 func scanResource(row rowScanner) (adResource, error) {
 	var resource adResource
-	var capabilitiesJSON, metadataJSON string
+	var capabilitiesJSON, metadataJSON, provenanceJSON string
 	var managed int
 	err := row.Scan(
 		&resource.ID, &resource.AdAccountID, &resource.Kind, &resource.ProviderType,
 		&resource.NativeID, &resource.ParentResourceID, &resource.DisplayName, &resource.Status,
-		&capabilitiesJSON, &metadataJSON, &managed, &resource.RefreshedAt,
+		&capabilitiesJSON, &metadataJSON, &managed, &resource.RefreshedAt, &provenanceJSON,
 	)
 	if err != nil {
 		return resource, err
@@ -986,6 +1007,7 @@ func scanResource(row rowScanner) (adResource, error) {
 	if resource.Metadata == nil {
 		resource.Metadata = map[string]any{}
 	}
+	_ = json.Unmarshal([]byte(provenanceJSON), &resource.Provenance)
 	resource.ManagedByApp = managed != 0
 	return resource, nil
 }
@@ -1002,7 +1024,7 @@ func (a *App) getResource(ctx *sdk.AppCtx, acct *adAccount, resourceID int64) (*
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
 		        capabilities_json, metadata_json, managed_by_app,
-		        COALESCE(refreshed_at,'')
+		        COALESCE(refreshed_at,''), audience_provenance_json
 		 FROM ad_resources WHERE id=? AND project_id=? AND ad_account_id=?`,
 		resourceID, pid, acct.ID,
 	))
@@ -1021,7 +1043,7 @@ func (a *App) linkedInstagramIdentity(ctx *sdk.AppCtx, acct *adAccount, pageReso
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
 		        capabilities_json, metadata_json, managed_by_app,
-		        COALESCE(refreshed_at,'')
+		        COALESCE(refreshed_at,''), audience_provenance_json
 		 FROM ad_resources
 		 WHERE project_id=? AND ad_account_id=? AND parent_resource_id=?
 		   AND kind=? AND provider_type='instagram_business' AND status='active'

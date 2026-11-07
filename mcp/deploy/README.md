@@ -79,6 +79,48 @@ runner and Deploy tracks the `MAC_OS` build in App Store Connect. An explicit
 `artifact_mode: file` requires a macOS Deploy host to inspect the downloaded
 package with `pkgutil` before it can be used for a local upload.
 
+Google Play release, listing and tester observations are cached in SQLite for
+five minutes, scoped by connection, package and observation configuration.
+Concurrent refreshes share the same observation. Cached responses preserve
+their original check time; they do not manufacture new publication evidence.
+The API and panel expose observation age, stale status and the next retry time.
+
+Completed Google Play releases and available TestFlight builds are excluded
+from background polling, even when an older workflow still says `publishing`.
+The worker reconciles those workflows to `completed` using persisted provider
+results, preserving their configuration and evidence without opening an edit.
+Failed and stopped mobile workflows are reconciled locally as well. Pending
+uploads, staged rollouts and reviews continue to sync. Explicit release sync
+remains available and still honors the observation cache and account cooldown.
+For older Play releases whose `external_status` was overwritten by `sync_error`,
+saved `availability.publication: completed` can close the workflow locally.
+The release must remain live, the saved audience must match its channel when
+present, and no partial rollout may be configured. The sync error, stale-check
+warning, observation timestamps and cooldown remain unchanged; this is not a
+new provider verification. Missing, malformed or mismatched evidence leaves
+the release pending.
+
+Google Play quota failures (HTTP 429 and quota-specific 403 responses) and HTTP
+503 responses persist an account-level retry deadline. `Retry-After` seconds
+and HTTP dates, plus Google `RetryInfo.retryDelay`, are honored. Exponential
+backoff uses a one-minute base, a one-hour base for daily-limit failures, a
+six-hour exponential cap and connection jitter. Provider-requested deadlines
+can exceed that cap. Authentication and ordinary permission errors do not
+activate quota backoff. Deadlines and observations survive sidecar restarts.
+The specific `Daily edit creation quota exceeded` message is recognized even
+when Google labels the response HTTP 403 `PERMISSION_DENIED` or `forbidden`.
+This receives the daily-limit cooldown; unrelated permission errors do not.
+
+All Deploy-managed Play edits are serialized per connection/package across
+processes sharing the install's data directory, from creation through upload
+and commit/cleanup. Read observations defer while cloud-managed store uploads
+are active. Successful commits and adopted cloud uploads invalidate cached
+observations; observations cannot repopulate an older snapshot after a commit.
+Mutations and ambiguous commits are never automatically replayed. While a
+refresh is paused, last-known data is explicitly stale and does not count as
+new provider verification. Changes made externally through Play Console remain
+subject to Google's edit invalidation rules and the observation cache window.
+
 Android `target_config_json` supports:
 
 ```json
@@ -159,7 +201,8 @@ Test audiences are managed through Deploy rather than by calling store
 integrations directly:
 
 - `deploy_distribution_status` reads the current provider-backed audience.
-- `deploy_distribution_update` stores the desired audience and reconciles it.
+- `deploy_distribution_update` reconciles the desired audience and saves it once
+  the provider accepts it. A refused update saves nothing.
 - iOS channels accept individual tester emails and safely add them to managed
   TestFlight groups. Existing tester access is not removed automatically.
 - Android test tracks accept Google Group addresses and use exact replacement,
@@ -297,9 +340,9 @@ be automated:
 1. Register or reuse the Apple Bundle ID.
 2. Wait with `action_required` until the operator creates the App Store
    Connect app record for that Bundle ID.
-3. Generate a new RSA key and CSR in memory.
-4. Create an Apple Distribution certificate and App Store provisioning
-   profile.
+3. Reuse an active certificate and private key from the same project and Apple
+   account, or generate a new key and CSR when no compatible identity exists.
+4. Create an App Store provisioning profile for this app.
 5. Deliver the App Store Connect API key and certificate private key directly
    to the selected build provider's secure secret store.
 6. Add the provider secret group to this environment's build configuration.
@@ -309,12 +352,14 @@ app database. The encryption key is a separate `0600` file in Deploy's DataDir;
 backups require both. Provider setup records contain resource IDs, the provider
 secret reference, the public-key fingerprint, and status. Calling setup again
 is idempotent; pass `rotate: true` to create and activate a replacement before
-removing the old Apple profile and certificate.
+removing the old Apple profile. Existing Apple certificates are retained because
+other apps may use them.
 
 Codemagic is the first `mobileSigningProvider` adapter. Additional build
 providers implement the same secret-delivery interface while reusing the
-provider-independent Apple lifecycle. A provider must expose secure secret
-CRUD through its integration before Deploy can automate signing for it.
+provider-independent Apple lifecycle. The provider adapter delivers managed signing material through secure stored
+secrets or masked per-build credentials. Local and capsule runners receive
+the same managed identity.
 
 Apple still requires an operator to accept agreements, create/download the
 initial App Store Connect API key, and create the App Store app record. App
@@ -400,6 +445,29 @@ validated against Apple display targets or Google icon, feature-graphic, and
 screenshot constraints. iPad screenshot requirements are inferred from the
 Xcode project, explicit Info.plist, or built IPA.
 
+Content ratings use independent `violence_cartoon_fantasy`, `violence_realistic`,
+`violence_graphic_realistic`, `sexual_content` and `sexual_content_graphic`
+levels. `health_wellness` is a boolean. Apple receives each answer separately;
+fantasy violence never implies realistic or graphic violence. Exact Apple
+answers in `classification.age_declaration` take precedence over the generic
+questionnaire. Legacy `violence: NONE` and non-graphic `sexual_content: NONE`
+can safely fill absent categories with `NONE`. Other combined legacy answers
+require explicit category answers or exact Apple declarations before apply.
+Legacy health/wellness levels are accepted on read and converted to booleans.
+
+Apple age-rating validation is pinned to the published OpenAPI 4.5.1 schema
+in `schemas/apple-age-rating-4.5.1.json`, with its upstream JSON digest recorded.
+All 13 frequency questions and 11 boolean questions have independent mapping
+tests. The six optional advanced fields are `kidsAgeBand`, `ageRatingOverride`
+(deprecated), `ageRatingOverrideV2`, `koreaAgeRatingOverride`,
+`gracRatingClassificationNumber` and `developerAgeRatingInfoUrl`. Advanced
+answers are checked for field names, types, enum values and URI syntax before
+provider calls. Documented nullable values remain supported. Invalid answers
+block classification apply while remaining editable in a draft. Classification
+is verified only when every requested answer matches Apple's readback;
+legacy frequency spellings are compared semantically. No rating is inferred
+from another question, and calculated age ratings remain Apple's decision.
+
 The workflow is:
 
 1. `deploy_store_update` saves metadata, media references, review details,
@@ -412,7 +480,13 @@ The workflow is:
 5. `deploy_release` attaches the exact build and optionally submits it.
 6. `deploy_store_sync` refreshes observed provider state.
 7. `deploy_store_release_approved` releases an Apple-approved version waiting
-   for manual developer release.
+   for manual developer release (`pending_developer_release`). Apple-held
+   versions (`pending_apple_release`) are not eligible for this action.
+   Sync older releases showing `approved_pending_release` to refresh Apple's
+   actual state before requesting release.
+   An accepted release request is recorded as `release_requested`, not `live`.
+   A later sync must confirm distribution; acceptance alone does not confirm
+   public availability.
 
 Store media can be reconciled independently with `media_kinds` (for example,
 `["icon"]`). With `allow_partial`, each valid media kind is committed in its
@@ -483,11 +557,52 @@ TestFlight is reported available only after Apple reports `IN_BETA_TESTING`;
 assignment to a beta group alone is insufficient. Failed processing and modern
 App Store states are visible, and interrupted review preparation is retried.
 
+A build Apple is still processing is checked after 1, 2, 5, 5 and 10 minutes and
+then every 15 minutes, and fails after 48 hours as `processing_timeout`. An
+assigned build or a version in App Store review stays in progress. Deploy checks
+it after 1, 5, 15 and 30 minutes and then hourly, returning to the start of that
+schedule when Apple's answer changes or a manual release is requested.
+`deploy_release_sync` checks immediately. Waiting on TestFlight ends when Apple
+reports the build available or expired, or a newer release supersedes it. Only a
+processed build that no group accepted within 48 hours fails, as
+`testflight_assignment_timeout`.
+
+When Apple holds an internal build at `READY_FOR_BETA_TESTING` and its group has
+no testers, the release records `tester_access: no_testers` and a
+`tester_warning`, and `deploy_release_sync` returns the warning. The panel shows
+this as `0 · no testers`. An empty group is the likely cause, not a confirmed one.
+Deploy keeps only the tester count on the release.
+
 Artifact reads and release starts hold a retention lock. Retention also pins
 requested releases and recovery artifacts; newly discovered orphan directories
 receive a grace period. ZIP extraction is limited to 100,000 entries and 2 GiB
 expanded data (1 GiB for runner source capsules), rejects duplicate/special files
 and escaping links, and preserves confined relative runtime symlinks.
+
+Static builds and automatically detected Bun/Node static exports generate
+deterministic Brotli and gzip sidecars before pipeline tests and artifact
+sealing. The static server negotiates `Accept-Encoding` quality values, preserves
+the original MIME type, sets `Content-Encoding` and `Vary: Accept-Encoding`, and
+uses a separate strong ETag for each representation. GET, HEAD, conditional
+requests and byte ranges operate on the selected representation.
+
+Common content-hashed JS/CSS/font/image/wasm filenames receive
+`public, max-age=31536000, immutable`; HTML, `version.json` and other mutable
+filenames use `no-cache` so clients revalidate. Missing asset URLs return a real
+404, while navigation still supports directory indexes, custom `404.html` and
+the SPA index fallback. Existing external servers selected by `start_cmd` keep
+their own delivery behavior.
+
+Hashed assets and their compressed sidecars are copied into a separate
+`/data/static-assets/<deployment_id>/<environment_id>/<release_id>/` cache.
+The current snapshot plus five previous snapshots are retained, with snapshots
+older than 30 days pruned when a static release starts. Restarts and rollbacks
+refresh their snapshot. Old tabs can load previous chunks during this retention
+window even after build-artifact pruning. Only hashed assets are eligible for
+fallback; old HTML and mutable files are never served. The first release after
+upgrading also seeds the previously active build's assets. Artifact trees and
+their attestations remain unchanged during serving and retention.
+
 Node, Bun, and blank artifact staging remaps absolute links into the temporary
 source tree to relative links within the staged artifact. Links outside the
 source tree fail with their path; artifact attestation still checks every link.
@@ -575,3 +690,83 @@ historical failed builds. A 15-second cache avoids repeated provider requests
 from dashboard polling. If the provider is unavailable, the local summary is
 returned with an explicit provider-log warning. Provider tokens and signed log
 URLs are not included in returned logs.
+
+## Switching mobile build providers
+
+Deploy supports Codemagic, Bitrise and Appcircle through the same native source
+capsule contract. `requires.integrations.cloud_build` declares `mode: multiple`
+and compatible slugs `codemagic`, `github`, `bitrise`, `appcircle`. Bind as many
+accounts as needed, then set `build_backend` and `build_backend_config_json` per
+deployment environment. `connection_id` selects an exact bound account; it is
+required when multiple accounts for the selected provider are bound. Builds
+freeze that selection, so rebinding cannot redirect polling or cancellation.
+
+Bitrise configuration:
+
+```json
+{"connection_id":123,"app_id":"APP_SLUG","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file","artifact_file":"Moonhorde.ipa"}
+```
+
+Appcircle configuration:
+
+```json
+{"connection_id":456,"profile_id":"PROFILE_UUID","configuration_id":"CONFIG_UUID","workflow_id":"WORKFLOW_UUID","branch_id":"ADAPTER_BRANCH_UUID","source_mode":"bundle","artifact_mode":"file","artifact_file":"Moonhorde.ipa"}
+```
+
+Both use the maintained [adapter repository](https://github.com/apteva/deploy-build-adapter).
+Bitrise loads `bitrise.yml`; Appcircle uses the documented Git Clone → Custom
+Script → Export Build Artifacts workflow in `runners/appcircle/README.md`.
+Create/authorize the provider's adapter app or profile first, then
+`deploy_cloud_backend_setup` validates and saves its configuration. Supply
+`provider`, `connection_id`, and `build_backend_config_json`. Appcircle's updated
+connector catalog must include `update_build_configuration` and `get_last_commit`.
+
+Run `deploy_mobile_signing_setup` after changing providers. Existing managed
+Apple/Android identities are reused. Bitrise receives masked per-build signing
+secrets; Appcircle receives a versioned secret group attached to a dedicated
+configuration, preserving unrelated settings and previous groups. Provider
+metadata and public build variables never store private signing values. Apple
+workers install the exact certificate and matching profile; they do not create
+new identities. `artifact_mode: file` returns the signed IPA/AAB; Deploy's store
+release flow uses the bound App Store Connect or Google Play account afterward.
+
+The recipe remains in `target_config_json.pipeline`: preparation, toolchain
+versions, build directory, outputs and tests are identical across providers.
+Bun/Rust and pinned XcodeGen are prepared before recipe commands. XcodeGen is
+also available to export commands that generate Xcode projects themselves.
+Apple builds need macOS; Android supports macOS/Linux. Configure requested
+Xcode/Java/etc. versions on the provider runner; mismatches fail preparation.
+Declared native filenames, final-artifact tests, immutable evidence, and Deploy
+attestation retain the same validation on every backend. `deploy_logs`, build
+logs and deployment build-log HTTP routes include provider step output.
+
+A real signed build and store upload still require connected provider accounts
+and the platform toolchains; hermetic adapter tests do not certify those services.
+
+### Portable Apple signing
+
+Deploy's `app_store` integration owns Apple provisioning and publishing; build
+providers receive the certificate/private key and the app-specific profile.
+Setup reuses a compatible active certificate within the same project, Apple
+issuer, and platform before requesting another Apple certificate. Private keys
+are retained in the encrypted Deploy vault and never retrieved from Apple.
+Import an existing `.p12`/`.pfx` or Deploy signing-recovery `.zip` in the signing
+panel. The import endpoint accepts multipart `keystore` and optional
+`store_password`, with `inspect_only=true` for a public preview. Replacing a
+key requires `confirm_replace=true`. Imports verify key/certificate matching,
+validity, and membership in the selected Apple account; profiles in recovery
+archives are ignored and regenerated for the selected app.
+
+Managed signing works with local, capsule runner, Codemagic, Bitrise, Appcircle,
+and GitHub Actions backends. GitHub uses sealed, revision-scoped repository
+secrets and requires repository Actions secrets write permission. Its adapter
+workflow accepts a JSON contract rather than a long list of dispatch inputs:
+
+```json
+{"owner":"YOUR_OWNER","repo":"deploy-build-adapter","workflow_id":"apteva-mobile-capsule.yml","ref":"main","source_mode":"bundle","contract_input":"apteva_contract","artifact_mode":"file","artifact_file":"app.ipa"}
+```
+
+Use `runners/github-actions/apteva-mobile-capsule.yml` or the corresponding
+workflow in the shared adapter repository. Changing `build_backend` and its
+account/config does not change the Apple identity; run signing setup to prepare
+it for the newly selected provider. Already-ready Bundle IDs remain immutable.

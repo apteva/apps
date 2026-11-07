@@ -70,6 +70,13 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		return nil, err
 	}
 	defer trackInstanceCreation(ctx, inst.ID)()
+	if in.Firewall != nil {
+		if _, e := firewallReconcile(ctx, inst, true); e != nil {
+			finishInstanceCreation(ctx, inst.ID)
+			failInstanceStage(ctx, inst.ID, "Firewall", e)
+			return nil, e
+		}
+	}
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
@@ -86,6 +93,9 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		"image":       in.Image,
 		"location":    in.Region,
 		"user_data":   cloudInit,
+	}
+	if s, e := firewallLoad(ctx.AppDB(), inst.ID); e == nil && s.ResourceID != "" {
+		args["firewalls"] = []map[string]any{{"firewall": mustFirewallInt(s.ResourceID)}}
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_create", args)
 	if err != nil {

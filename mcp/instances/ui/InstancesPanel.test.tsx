@@ -1,7 +1,8 @@
 import {afterEach, beforeAll, expect, test} from "bun:test";
 import {Window} from "happy-dom";
 import React, {act} from "react";
-import {createRoot, type Root} from "react-dom/client";
+import type {Root} from "react-dom/client";
+let createRoot:typeof import("react-dom/client").createRoot;
 import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
@@ -9,8 +10,9 @@ const win = new Window({url:"http://localhost"});
 let root: Root | undefined;
 let container: HTMLDivElement;
 const originalFetch = globalThis.fetch;
-beforeAll(() => {
+beforeAll(async () => {
   Object.assign(globalThis, {window:win, document:win.document, navigator:win.navigator, HTMLElement:win.HTMLElement, IS_REACT_ACT_ENVIRONMENT:true});
+  createRoot = (await import("react-dom/client")).createRoot;
 });
 afterEach(async () => {if(root) await act(async()=>root!.unmount()); root=undefined;container?.remove();globalThis.fetch=originalFetch;});
 async function render(element: React.ReactNode) {container=document.createElement("div");document.body.append(container);root=createRoot(container);await act(async()=>root!.render(element));}
@@ -118,4 +120,167 @@ test("history paths do not bridge outages and averages use observed coverage",as
  const path=chartPath([point(0),point(1000),point(5000)],"cpu",true,0,6000);
  expect(path.match(/M/g)?.length).toBe(2);expect(path.match(/L/g)?.length).toBe(1);
  const p=point(0);p.observed_ms=500;p.values.cpu.observed_ms=100;p.values.cpu.sum=1000;expect(metricAverage(p,"cpu")).toBe(10);
+});
+
+test("I/O wait history shows weighted averages, original peaks and incident samples",async()=>{
+ const {MonitoringHistory}=await import("./MonitoringHistory");const now=Date.now();
+ const event={id:"io-spike",start:now-60000,end:now-1000,peak:10,core_peak:20,reason:"Memory pressure or I/O wait for 1s"};
+ const peakAt=now-59250;
+ globalThis.fetch=(async(input:any)=>{const path=String(input);
+  if(path.includes("incident_id="))return response({incident:{...event,recordings:[{time:now-60000,cpu:10,core:20,iowait:0,interval_ms:250},{time:peakAt,cpu:10,core:20,iowait:35,interval_ms:250}]}});
+  if(path.includes("/metrics/incidents"))return response({incidents:[event]});
+  return response({points:[
+   {time:now-60000,step_ms:60000,observed_ms:10000,values:{iowait:{sum:100000,observed_ms:10000,min:0,max:30,peak_at:peakAt}}},
+   {time:now-30000,step_ms:1000,observed_ms:1000,values:{iowait:{sum:0,observed_ms:1000,min:0,max:0,peak_at:now-30000}}},
+  ],resolution:"1m",from:now-3600000,to:now,monitoring:{enabled:true,state:"running",version:"0.6.3"}});
+ }) as unknown as typeof fetch;
+ await render(<MonitoringHistory id={6} withParams={params}/>);
+ const chart=container.querySelector('svg[aria-label="I/O wait average and recorded peaks over time"]')!;
+ expect(chart).not.toBeNull();expect(chart.querySelectorAll("path").length).toBe(2);
+ expect(chart.querySelector("title")?.textContent).toContain(`30.00% I/O wait peak at ${new Date(peakAt).toLocaleString()}`);
+ expect(chart.querySelectorAll("title")[1].textContent).toContain("0.00% I/O wait peak");
+ expect(container.textContent).toContain("Average 9.09% · Peak 30.00%");
+ const incident=Array.from(container.querySelectorAll("button")).find(b=>b.textContent?.includes(event.reason))!;
+ await act(async()=>incident.click());
+ expect(container.querySelectorAll('svg[aria-label="I/O wait average and recorded peaks over time"]').length).toBe(2);
+ expect(container.textContent).toContain("Average 17.50% · Peak 35.00%");
+});
+
+test("missing I/O wait observations are not shown as zero",async()=>{
+ const {MonitoringHistory}=await import("./MonitoringHistory");const now=Date.now();
+ globalThis.fetch=(async(input:any)=>String(input).includes("/metrics/incidents")?response({incidents:[]}):response({points:[{time:now-1000,step_ms:1000,observed_ms:1000,values:{}}],from:now-3600000,to:now,resolution:"1s",monitoring:{enabled:true,state:"running"}})) as unknown as typeof fetch;
+ await render(<MonitoringHistory id={6} withParams={params}/>);
+ expect(container.textContent).toContain("No I/O wait observations in this range.");
+ expect(container.querySelector('svg[aria-label="I/O wait average and recorded peaks over time"]')).toBeNull();
+});
+
+test("chart hover shows weighted values and original peak times across the plot",async()=>{
+ const {MetricHistoryChart}=await import("./MonitoringHistory");
+ const time=Date.now()-60000,peakAt=time+3750;
+ const aggregate=(sum:number,max:number)=>({sum,observed_ms:1000,min:0,max,peak_at:peakAt});
+ const points=[{time,step_ms:60000,observed_ms:1000,values:{cpu:aggregate(12345,87.6),core:aggregate(0,99.9),memory:aggregate(23456,30)}}];
+ await render(<MetricHistoryChart kind="cpu" points={points} from={time} to={time+60000}/>);
+ const svg=container.querySelector("svg")!;
+ svg.getBoundingClientRect=()=>({left:100,width:1600,height:135} as DOMRect);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointermove",{clientX:530,clientY:10,bubbles:true,pointerType:"mouse"}) as any);});
+ const tooltip=container.querySelector('[role="tooltip"]')!;
+ expect(tooltip.textContent).toContain("CPU average: 12.3%");
+ expect(tooltip.textContent).toContain(`CPU peak: 87.6% at ${new Date(peakAt).toLocaleString()}`);
+ expect(tooltip.textContent).toContain("Busiest core peak: 99.9%");expect(tooltip.textContent).toContain("Memory average: 23.5%");
+ expect(tooltip.textContent).toContain("Partial observations: 2% coverage");
+ expect(svg.getAttribute("aria-describedby")).toBe(tooltip.id);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointerout",{bubbles:true,pointerType:"mouse"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+});
+
+test("hover leaves outages empty while keyboard and touch expose zero I/O wait",async()=>{
+ const {MetricHistoryChart}=await import("./MonitoringHistory");
+ const aggregate=(value:number,time:number)=>({sum:value*1000,observed_ms:1000,min:value,max:value,peak_at:time+250});
+ const points=[{time:0,step_ms:1000,observed_ms:1000,values:{iowait:aggregate(0,0)}},{time:5000,step_ms:1000,observed_ms:1000,values:{iowait:aggregate(10,5000)}}];
+ await render(<MetricHistoryChart kind="iowait" points={points} from={0} to={6000} max={10}/>);
+ const svg=container.querySelector("svg")!;svg.getBoundingClientRect=()=>({left:0,width:800,height:135} as DOMRect);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointermove",{clientX:20+760*2/6,bubbles:true,pointerType:"mouse"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Home",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait average: 0.00%");
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait peak: 10.00%");
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Escape",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointerdown",{clientX:20,bubbles:true,pointerType:"touch"}) as any);svg.dispatchEvent(new win.PointerEvent("pointerout",{bubbles:true,pointerType:"touch"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait peak: 0.00%");
+});
+
+test("chart pointer mapping handles letterboxing and missing series stay missing",async()=>{
+ const {MetricHistoryChart,pointerChartTime}=await import("./MonitoringHistory");
+ expect(pointerChartTime(520,{left:100,width:1600,height:135},0,6000)).toBe(0);
+ expect(pointerChartTime(1280,{left:100,width:1600,height:135},0,6000)).toBe(6000);
+ expect(pointerChartTime(100,{left:100,width:1600,height:135},0,6000)).toBeUndefined();
+ expect(pointerChartTime(20,{left:0,width:0,height:0},0,6000)).toBeUndefined();
+ await render(<MetricHistoryChart kind="cpu" from={0} to={1000} points={[{time:0,step_ms:1000,observed_ms:1000,values:{cpu:{sum:0,observed_ms:1000,min:0,max:0,peak_at:0}}}]}/>);
+ const svg=container.querySelector("svg")!;
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Home",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("CPU average: 0.0%");
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Memory average: No observation");
+});
+
+test("generic catalog shows bare metal and unavailable offers, and requires diskless boot storage",async()=>{
+ globalThis.fetch=(async(input:any)=>{
+  const path=String(input);
+  if(path.includes("instances-providers"))return response({providers:[{provider:"vultr",connection_id:7,default:true}]});
+  if(path.includes("server-types"))return response({server_types:[
+   {name:"diskless",cores:4,memory_gb:16,disk_gb:0,monthly_price_usd:10,resource_class:"virtual",available:true,configurable_boot:true,requires_boot_storage:true,boot_storage:[{storage_class:"block",provider_type:"high_perf",allowed_tiers:["performance"]}]},
+   {name:"physical",cores:8,memory_gb:32,disk_gb:480,monthly_price_usd:100,resource_class:"bare_metal",platform:"linux",available:true,configurable_boot:false},
+   {name:"gpu-unavailable",available:false,unavailable_reason:"No available regions reported by Vultr"},
+  ]});
+  if(path.includes("locations"))return response({locations:[{name:"cdg"}]});
+  if(path.includes("images"))return response({images:[{name:"2284",description:"Ubuntu",architecture:"x86"}]});
+  return response({capabilities:{boot_size_configurable:true,storage_classes:["local","block"],tiers:[{name:"local",storage_class:"local",provider_type:"local"},{name:"balanced",storage_class:"block",provider_type:"storage_opt"},{name:"performance",storage_class:"block",provider_type:"high_perf"}]}});
+ }) as unknown as typeof fetch;
+ await render(<CreateDialog withParams={params} setError={()=>{}} onCreated={()=>{}} onClose={()=>{}}/>);
+ expect(container.textContent).toContain("required for this diskless plan; billed separately");
+ const custom=Array.from(container.querySelectorAll('input[type="checkbox"]')).find(e=>e.parentElement?.textContent?.includes("Custom boot volume")) as HTMLInputElement;
+ expect(custom.checked).toBe(true);expect(custom.disabled).toBe(true);
+ const storage=container.querySelector('select[aria-label="Boot storage class"]') as HTMLSelectElement;
+ expect(storage.value).toBe("block");
+ expect(container.textContent).toContain("physical cores");
+ expect(container.textContent).not.toContain("Mac mini bare metal");
+ const unavailable=container.querySelector('option[value="gpu-unavailable"]') as HTMLOptionElement;expect(unavailable.disabled).toBe(true);
+ const sizes=container.querySelector('option[value="physical"]')!.parentElement as HTMLSelectElement;
+ await act(async()=>{sizes.value="physical";sizes.dispatchEvent(new win.Event("change",{bubbles:true}) as any);});
+ expect(container.querySelector('select[aria-label="Boot storage class"]')).toBeNull();
+});
+
+test("Clouding creation shows fractional vCPU allocation and Barcelona",async()=>{
+ globalThis.fetch=(async(input:any)=>{
+  const path=new URL(String(input),"http://localhost").pathname;
+  if(path.endsWith("instances-providers"))return response({providers:[{provider:"clouding",connection_id:7,default:true}]});
+  if(path.endsWith("server-types"))return response({server_types:[{name:"0.5x1",cores:0,vcpus:0.5,memory_gb:1,disk_gb:0,price_known:false,configurable_boot:true,requires_boot_storage:true,available_in:["barcelona"]}]});
+  if(path.endsWith("locations"))return response({locations:[{name:"barcelona",city:"Barcelona",country:"ES"}]});
+  if(path.endsWith("images"))return response({images:[{name:"ubuntu",description:"Ubuntu 24.04",architecture:"x86",platform:"linux"}]});
+  return response({capabilities:{boot_size_configurable:true,storage_classes:["block"],tiers:[{name:"balanced",provider_type:"ssd"}]}});
+ }) as unknown as typeof fetch;
+ await render(<CreateDialog withParams={params} setError={()=>{}} onCreated={()=>{}} onClose={()=>{}}/>);
+ expect(container.textContent).toContain("0.5 vCPU");
+ expect(container.textContent).toContain("Barcelona");
+ expect(container.textContent).not.toContain("$0.00/mo");
+});
+
+test("OVH contracts require review and reuse the reviewed payload for purchase",async()=>{
+ const posts:Array<{path:string;body:any}>=[];let created=0;
+ const size='ovh/vps/plan-1';
+ globalThis.fetch=(async(input:any,init:any)=>{
+  const path=String(input);
+  if(init?.method==='POST'){
+   posts.push({path,body:JSON.parse(init.body)});
+   if(path.includes('instances-quote'))return response({quote_id:'quote-1',status:'quoted',expires_at:new Date(Date.now()+60000).toISOString(),quote:{prices:{withTax:{value:14.52,currencyCode:'EUR'},withoutTax:{value:12,currencyCode:'EUR'},tax:{value:2.52,currencyCode:'EUR'}},details:[{description:'VPS setup and first month',totalPrice:{value:14.52,currencyCode:'EUR'}}],contracts:[{name:'OVH VPS terms',content:'Contract terms',url:'https://www.ovhcloud.com/terms'}]}});
+   return response({instance:{id:9}});
+  }
+  if(path.includes('instances-providers'))return response({providers:[{provider:'ovhcloud',connection_id:7,default:true}]});
+  if(path.includes('server-types'))return response({server_types:[{name:size,cores:2,memory_gb:4,disk_gb:80,resource_class:'virtual',available_in:['ovh/vps/MAD'],configurable_boot:false,ovh_offer:{product:'vps',plan_code:'plan-1',configurations:[],addon_families:[{name:'os',required:true,exclusive:true,default:'linux',options:['linux']}],prices:[{mode:'default',duration:'P1M',amount:12,currency:'EUR'}],options:{linux:{description:'Linux operating system'}}}}]});
+  if(path.includes('locations'))return response({locations:[{name:'ovh/vps/MAD'}]});
+  if(path.includes('images'))return response({images:[{name:'ovh-vps/Ubuntu 24.04',resource_class:'virtual',compatible_types:[size]}]});
+  return response({capabilities:{storage_classes:[],tiers:[]}});
+ }) as typeof fetch;
+ await render(<CreateDialog withParams={params} onCreated={()=>created++} onClose={()=>{}} setError={()=>{}}/>);
+ const name=container.querySelector('input[type="text"]') as HTMLInputElement;
+ await act(async()=>{const setter=Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value')!.set!;setter.call(name,'Madrid VPS');name.dispatchEvent(new win.Event('input',{bubbles:true}) as any);});
+ if(!(container.querySelector('button[type="submit"]') as HTMLButtonElement).disabled){
+  await act(async()=>container.querySelector('form')!.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}) as any));
+  expect(posts).toHaveLength(1);expect(posts[0].path).toContain('instances-quote');expect(created).toBe(0);
+  expect(container.textContent).toContain('14.52 EUR');expect(container.textContent).toContain('OVH VPS terms');expect(container.textContent).toContain('Place order');
+  await act(async()=>container.querySelector('form')!.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}) as any));
+  expect(posts).toHaveLength(2);expect(posts[1].body.ovh.quote_id).toBe('quote-1');expect(posts[1].body.ovh.request_key).toBe(posts[0].body.ovh.request_key);expect(created).toBe(1);
+ } else { throw new Error('Name change did not enable the order review form'); }
+});
+
+test("OVH cancellation sends its email token only in a POST and clears it",async()=>{
+ let sent:any;let url='';
+ globalThis.fetch=(async(input:any,init:any)=>{url=String(input);sent=init?.body?JSON.parse(init.body):undefined;return response({order:{status:'termination_pending'},message:'OVH service still exists'});}) as typeof fetch;
+ await render(<InstanceCard inst={{id:9,name:'OVH host',provider:'ovhcloud',size:'ovh/vps/p',status:'destroying',monthly_cost_cents:0} as any} withParams={params} busy={false} onUpgrade={()=>{}} onVolumes={()=>{}} onDestroy={()=>{}}/>);
+ const field=container.querySelector('input[type="password"]') as HTMLInputElement;
+ await act(async()=>{const setter=Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,'value')!.set!;setter.call(field,'email-secret');field.dispatchEvent(new win.Event('input',{bubbles:true}) as any);});
+ const button=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Confirm OVH cancellation')!;
+ await act(async()=>button.click());
+ expect(sent).toEqual({id:9,action:'confirm_termination',token:'email-secret'});expect(url).not.toContain('email-secret');expect(field.value).toBe('');expect(container.textContent).toContain('OVH service still exists');
 });

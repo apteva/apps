@@ -127,3 +127,126 @@ func queryInt(r *http.Request, key string, fallback int) int {
 	}
 	return n
 }
+
+func (a *App) handleSeal(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	out, err := a.toolSealCertificateGet(ctx, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleSealCertificate serves the seal certificate as DER, the format
+// Acrobat's "Import" in Trusted Certificates expects.
+func (a *App) handleSealCertificate(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/pkix-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="signatures-seal.cer"`)
+	_, _ = w.Write(seal.Certificate.Raw)
+}
+
+func (a *App) handleSealVerify(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	args, err := requestArgs(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := a.toolSealVerify(ctx, args)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *App) handleLayouts(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	var out any
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		out, err = a.toolLayoutsList(ctx, nil)
+	case http.MethodPost:
+		var args map[string]any
+		if args, err = requestArgs(r); err == nil {
+			if args["envelope_id"] != nil {
+				out, err = a.toolLayoutSaveFromEnvelope(ctx, args)
+			} else {
+				out, err = a.toolLayoutSave(ctx, args)
+			}
+		}
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *App) handleLayoutItem(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
+	if ctx == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("app is not mounted"))
+		return
+	}
+	id, _ := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, "/layouts/"), "/"), 10, 64)
+	if id == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("layout id required"))
+		return
+	}
+	var out any
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		out, err = a.toolLayoutGet(ctx, map[string]any{"layout_id": id})
+	case http.MethodDelete:
+		out, err = a.toolLayoutDelete(ctx, map[string]any{"layout_id": id})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}

@@ -30,17 +30,25 @@ func (q analyticsQuery) cacheKey() string {
 	sort.Strings(dims)
 	groups := canonicalDimensions(q.GroupBy)
 	sort.Strings(groups)
+	version := 4
+	if containsFold(groups, "post") {
+		version = 5
+	}
 	raw, _ := json.Marshal(struct {
-		Start, End         string
-		Filters            map[string][]string
-		Dimensions, Groups []string
-	}{start, end, filters, dims, groups})
+		Version                   int
+		Scope, DestinationID      string
+		MaxPosts                  int
+		Compare, PublishedInRange bool
+		Start, End                string
+		Filters                   map[string][]string
+		Dimensions, Groups        []string
+	}{version, q.Scope, q.DestinationID, queryMaxPosts(q), q.Compare, q.PublishedInRange, start, end, filters, dims, groups})
 	return string(raw)
 }
 func (q analyticsQuery) snapshotPeriod(metric string) string {
 	if len(q.Filters) == 0 {
 		switch metric {
-		case "followers", "following", "total_likes", "total_videos", "posts":
+		case "followers", "supporters", "following", "total_likes", "total_videos", "posts":
 			return "snapshot"
 		}
 	}
@@ -65,6 +73,10 @@ func loadAccountMetricHistoryForQuery(ctx *sdk.AppCtx, pid string, accountID int
 }
 
 func accountMetricKnown(res accountMetricsResult, name string) bool {
+	if name == "supporters" {
+		// Known only from a complete count; any other state stays unavailable.
+		return res.SupportersState == "available" && res.supporters != nil && res.supporters.Complete
+	}
 	for _, available := range res.Available {
 		if available == name {
 			return true

@@ -1,0 +1,42 @@
+name: Deploy checks
+on:
+  pull_request:
+    paths: ["mcp/deploy/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["mcp/deploy/**", ".github/workflows/deploy.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp/deploy
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.1"
+          cache-dependency-path: mcp/deploy/go.sum
+      - run: go test ./... -count=1
+      - run: go test -race -run 'TestGoogle|TestFinishedMobile|TestMobileWorker|TestPendingMobileSelection|TestTestFlightCompletion|TestAppleAgeRating|TestAppleManualRelease|TestApplePendingRelease|TestGenericContentRating|TestAppStore|TestStuckReleases|TestFailingReleases|TestProcessedBuild|TestSuperseded' -count=1 .
+      - run: go vet ./...
+  age-rating-panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp/deploy/ui/tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bunx --no-install playwright install --with-deps chromium
+      - run: bun test -t 'content rating|manual Apple release' browser.test.ts

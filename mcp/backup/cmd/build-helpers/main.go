@@ -14,7 +14,7 @@ import (
 
 func main() {
 	out := flag.String("out", "/tmp/backup-helper-assets", "asset output directory")
-	version := flag.String("version", "0.3.6", "Backup release version")
+	version := flag.String("version", "0.3.7", "Backup release version")
 	flag.Parse()
 	if e := build(*out, *version); e != nil {
 		fmt.Fprintln(os.Stderr, e)

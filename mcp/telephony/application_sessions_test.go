@@ -25,6 +25,9 @@ func TestApplicationSessionOnlineAuthAndRevocation(t *testing.T) {
 		writeJSON(w, map[string]any{"user": map[string]any{"id": "alice", "organization_id": "org-1", "project_id": "project-a"}})
 	}))
 	defer provider.Close()
+	// Provider URLs must be public HTTPS or the gateway origin; the test provider
+	// stands in for the gateway-proxied Auth app.
+	t.Setenv("APTEVA_GATEWAY_URL", provider.URL)
 	policy.Providers = []phoneAuthProvider{{ID: "login", IssuerApp: "auth", IssuerInstallID: "11", URL: provider.URL, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach"}}}
 	if w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy); w.Code != 200 {
 		t.Fatal(w.Body)
@@ -75,6 +78,9 @@ func TestApplicationSessionProviderRedirectAndProjectDenied(t *testing.T) {
 		writeJSON(w, map[string]any{"user": map[string]any{"id": "alice", "organization_id": "org-1", "project_id": "other"}})
 	}))
 	defer provider.Close()
+	// Provider URLs must be public HTTPS or the gateway origin; the test provider
+	// stands in for the gateway-proxied Auth app.
+	t.Setenv("APTEVA_GATEWAY_URL", provider.URL)
 	policy.Providers = []phoneAuthProvider{{ID: "login", IssuerApp: "auth", IssuerInstallID: "11", URL: provider.URL, Format: "apteva-auth", Actions: []string{"call.read"}}}
 	if w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy); w.Code != 200 {
 		t.Fatal(w.Body)
@@ -114,6 +120,9 @@ func TestApplicationSessionPolicyEditDuringOnlineAuthentication(t *testing.T) {
 		writeJSON(w, map[string]any{"user": map[string]any{"id": "alice", "organization_id": "org-1", "project_id": "project-a"}})
 	}))
 	defer provider.Close()
+	// Provider URLs must be public HTTPS or the gateway origin; the test provider
+	// stands in for the gateway-proxied Auth app.
+	t.Setenv("APTEVA_GATEWAY_URL", provider.URL)
 	policy.Providers = []phoneAuthProvider{{ID: "login", IssuerApp: "auth", IssuerInstallID: "11", URL: provider.URL,
 		Format: "apteva-auth", Actions: []string{"call.read"}}}
 	w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy)

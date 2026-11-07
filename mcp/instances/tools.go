@@ -11,6 +11,13 @@ import (
 
 func (a *App) MCPTools() []sdk.Tool {
 	return append(monitoringTools(), []sdk.Tool{
+		{Name: "instance_network_evidence", Description: "Read-only bounded TCP probes from one registered instance to another. Reports timestamps, failures, host-wide TCP counters and a route observation. Requires Python 3 on source. Repeat from an independent instance for comparison; does not identify provider fault.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "target_id": map[string]any{"type": "integer"}, "port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535}, "samples": map[string]any{"type": "integer", "minimum": 1, "maximum": 5}}, []string{"id", "target_id"}), Handler: a.toolNetworkEvidence},
+		{Name: "instance_firewall_capabilities", Description: "Discover opt-in provider/product firewall support, IPv6 and limits. Does not modify hosts.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolFirewallCapabilities},
+		{Name: "instance_firewall_get", Description: "Read owned policies and effective rules. refresh=true verifies provider rules/attachments without changing them. Host OS firewall is externally managed.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "refresh": map[string]any{"type": "boolean"}}, []string{"id"}), Handler: a.toolFirewallGet},
+		{Name: "instance_firewall_apply", Description: "Set an owner's inbound allow rules and reconcile the union of all owners. Always retain SSH. Requires explicit replace_existing for initial takeover of existing firewall attachments. Does not modify shared rules or the guest firewall.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "owner": map[string]any{"type": "string"}, "firewall": firewallPolicySchema()}, []string{"id", "owner", "firewall"}), Handler: a.toolFirewallApply},
+		{Name: "instance_firewall_release", Description: "Remove only one owner's rules and reconcile the remaining owners plus SSH. Keeps a dedicated baseline firewall even when no workloads remain.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "owner": map[string]any{"type": "string"}}, []string{"id", "owner"}), Handler: a.toolFirewallRelease},
+		{Name: "instance_quote", Description: "Prepare and review a priced OVH VPS/dedicated/Eco order without purchasing. Use a unique ovh.request_key; pass the returned quote_id to instance_create only after reviewing prices and contracts.", InputSchema: ovhQuoteSchema(), Handler: a.toolInstanceQuote},
+		{Name: "instance_order_status", Description: "Inspect or resume an owned OVH order. confirm_termination consumes the provider email token without storing it. Never repeats checkout or an unknown installation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "action": map[string]any{"type": "string", "enum": []string{"inspect", "resume", "confirm_termination"}}, "token": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolOrderStatus},
 		{
 			Name:        "instance_list_providers",
 			Description: "List all VPS provider connections bound to this Instances install and identify the configured default. Read-only and does not call a provider API.",
@@ -19,7 +26,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "instance_create",
-			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
+			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
 				"Args: name (req), provider? (defaults to the configured default binding), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
@@ -31,7 +38,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"image":                  map[string]any{"type": "string"},
 				"tags_json":              map[string]any{"type": "string"},
 				"retain_for_diagnosis":   map[string]any{"type": "boolean", "description": "Keep a failed provider resource for diagnostics instead of automatic rollback; defaults to true"},
+				"firewall":               firewallPolicySchema(),
 				"setup":                  setupSchema(),
+				"ovh":                    ovhOrderOptionsSchema(),
 				"elastic_metal": map[string]any{"type": "object", "description": "Optional Scaleway Elastic Metal install settings", "properties": map[string]any{
 					"raid_level":          map[string]any{"type": "string", "enum": []string{"raid0", "raid1", "raid5", "raid6", "raid10"}},
 					"partitioning_schema": map[string]any{"type": "object", "description": "Explicit Scaleway partitioning schema; validated before server creation"},
@@ -308,16 +317,20 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("name required")
 	}
 	provider := strArg(args, "provider")
+	firewall, err := firewallPolicyArg(args)
+	if err != nil {
+		return nil, err
+	}
 	setup, err := parseSetup(args)
 	if err != nil {
 		return nil, err
 	}
 	in := CreateInstanceInput{
-		Setup: setup,
-		Name:  name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
+		Firewall: firewall, Setup: setup,
+		Name: name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
 		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
 		Storage:      storageRequestArg(args),
-		ElasticMetal: elasticMetalConfigArg(args),
+		ElasticMetal: elasticMetalConfigArg(args), OVH: ovhOrderArg(args),
 	}
 	if value, present := args["retain_for_diagnosis"]; present {
 		in.RetainOnFailureSet = true

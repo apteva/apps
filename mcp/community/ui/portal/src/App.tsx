@@ -1,3 +1,5 @@
+import { OrderBumps } from "../../../../checkout/ui/OrderBumps";
+import { formatPublicOffer, formatCheckoutOffer } from "./offerPricing";
 import {
   ArrowRight,
   BadgeCheck,
@@ -185,19 +187,6 @@ function formatMembershipPrice(plan: MembershipPlan): string {
   return `${amount} / ${count}${plan.interval}${plan.interval_count > 1 ? "s" : ""}`;
 }
 
-function formatPublicOffer(offer: PublicOffer): string {
-  const amount = (() => {
-    try {
-      return new Intl.NumberFormat(undefined, { style: "currency", currency: offer.currency })
-        .format(offer.unit_amount_cents / 100);
-    } catch {
-      return `${offer.currency} ${(offer.unit_amount_cents / 100).toFixed(2)}`;
-    }
-  })();
-  if (!offer.interval) return amount;
-  const count = (offer.interval_count || 1) > 1 ? `${offer.interval_count} ` : "";
-  return `${amount} / ${count}${offer.interval}${(offer.interval_count || 1) > 1 ? "s" : ""}`;
-}
 
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
@@ -277,6 +266,7 @@ export default function App() {
   const selectedCourse = courses.find((item) => item.id === courseId);
   const selectedLesson = lessons.find((item) => item.id === lessonId);
   const selectedStorefrontOffer = publicProduct?.offers.find((offer) => offer.catalog_price_id === storefrontPriceId);
+  const storefrontCheckoutRequested = wantsCourseCheckout();
   const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
   const brandName = portal?.brand.name || "your community";
 
@@ -702,7 +692,7 @@ export default function App() {
   }, [auth, communityId, portal, selectedStorefrontOffer, storefrontCheckout?.recovery_token]);
 
   useEffect(() => {
-    if (!portal || !selectedStorefrontOffer || !wantsCourseCheckout()) return;
+    if (!portal || !selectedStorefrontOffer || !storefrontCheckoutRequested) return;
     const storageKey = `community-checkout:${portal.community.id}:${selectedStorefrontOffer.catalog_price_id}`;
     let cancelled = false;
     setStorefrontPreparing(true);
@@ -715,6 +705,8 @@ export default function App() {
     const storedRecoveryToken = window.sessionStorage.getItem(storageKey) || undefined;
     const prepare = (recovery_token?: string) => api.portal.prepareCheckout(portal.community.slug, {
       catalog_price_id: selectedStorefrontOffer.catalog_price_id,
+      promotion_code: new URLSearchParams(window.location.search).get("promotion") || undefined,
+      attribution: Object.fromEntries(["utm_source","utm_medium","utm_campaign","utm_content","utm_term","campaign_id","adset_id","ad_id","fbclid","captured_at"].map(k=>[k,new URLSearchParams(window.location.search).get(k)||""])),
       recovery_token,
       return_url: success.toString(),
       success_url: success.toString(),
@@ -740,7 +732,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [portal, selectedStorefrontOffer]);
+  }, [portal, selectedStorefrontOffer, storefrontCheckoutRequested]);
 
   useEffect(() => {
     if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
@@ -1019,7 +1011,7 @@ export default function App() {
       return true;
     }
     if (claimingPreparedCheckout) {
-      if (!result.client_secret) {
+      if (!result.claimed && !result.client_secret) {
         setError("Secure payment confirmation is unavailable. Please try again.");
         return false;
       }
@@ -1036,6 +1028,24 @@ export default function App() {
     }
     window.location.assign(result.checkout_url);
     return true;
+  }
+
+  async function toggleOrderBump(id: number, selected: boolean) {
+    if (!portal || !selectedStorefrontOffer || !storefrontCheckout?.recovery_token) return;
+    setStorefrontPreparing(true);
+    try {
+      const next = await api.portal.setBump(portal.community.slug, {catalog_price_id: selectedStorefrontOffer.catalog_price_id, recovery_token: storefrontCheckout.recovery_token, bump_id: id, selected});
+      setStorefrontCheckout(next);
+      setError("");
+    } catch (e) { setError(friendlyError(e)); }
+    finally { setStorefrontPreparing(false); }
+  }
+  async function prepareStorefrontPayment() {
+    if (!portal || !selectedStorefrontOffer || !storefrontCheckout?.recovery_token) throw new Error("Checkout is unavailable.");
+    const result = await api.storefront.claim(portal.community.id, selectedStorefrontOffer.catalog_price_id, storefrontCheckout.recovery_token, false);
+    if (!result.client_secret) throw new Error("Secure payment confirmation is unavailable.");
+    setStorefrontCheckout((current) => current ? {...current, ...result, selections_locked: true} : result);
+    return result.client_secret;
   }
 
   function selectStorefrontOffer(offer: PublicOffer) {
@@ -1184,6 +1194,8 @@ export default function App() {
       ) : undefined;
     const paymentPanel = wantsCourseCheckout() && selectedStorefrontOffer ? (
       storefrontCheckout?.publishable_key && storefrontCheckout.amount_cents && storefrontCheckout.currency ? (
+        <>
+        <OrderBumps offers={storefrontCheckout.order_bumps || []} disabled={busy || storefrontPreparing || Boolean(storefrontCheckout.selections_locked)} onSelect={(id, selected) => void toggleOrderBump(id, selected)} />
         <StripePaymentForm
           session={storefrontCheckout}
           themeColor={portal.brand.primary_color}
@@ -1194,11 +1206,12 @@ export default function App() {
             url.searchParams.delete("auth");
             return url.toString();
           })()}
-          busy={busy}
+          busy={busy || storefrontPreparing}
+          onPreparePayment={prepareStorefrontPayment}
           error={error}
           enabled={Boolean(auth && storefrontClaimed)}
           onError={setError}
-        />
+        /></>
       ) : storefrontPreparing ? <CheckoutPreparing /> : <CheckoutPaymentUnavailable />
     ) : undefined;
     if (!auth || wantsCourseCheckout()) {
@@ -1206,6 +1219,9 @@ export default function App() {
         product={publicProduct}
         portal={portal}
         checkout={wantsCourseCheckout()}
+        checkoutAmount={storefrontCheckout?.amount_cents}
+        checkoutBumpAmount={(storefrontCheckout?.order_bumps || []).filter(b=>b.selected).reduce((sum,b)=>sum+b.amount_cents,0)}
+        checkoutCurrency={storefrontCheckout?.currency}
         signedIn={Boolean(auth)}
         selectedOffer={selectedStorefrontOffer}
         accountPanel={accountPanel}
@@ -1605,10 +1621,13 @@ function storefrontBenefits(product: PublicProduct): Array<{ title: string; desc
   ];
 }
 
-function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, accountPanel, paymentPanel, onSelect, onChoose, onSignIn }: {
+function PublicStorefront({ product, portal, checkout, checkoutAmount, checkoutCurrency, checkoutBumpAmount = 0, signedIn, selectedOffer, accountPanel, paymentPanel, onSelect, onChoose, onSignIn }: {
   product: PublicProduct;
   portal: PortalBootstrap;
   checkout: boolean;
+  checkoutAmount?: number;
+  checkoutBumpAmount?: number;
+  checkoutCurrency?: string;
   signedIn: boolean;
   selectedOffer?: PublicOffer;
   accountPanel?: ReactNode;
@@ -1737,8 +1756,8 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
         </div>
         <aside className="storefront-checkout" aria-label="Checkout">
           <div className="checkout-heading">
-            <p>{checkout ? "Complete your enrollment" : "Choose your access"}</p>
-            {activeOffer && <strong>{formatPublicOffer(activeOffer)}</strong>}
+            <p>{checkout ? "Due today" : "Choose your access"}</p>
+            {activeOffer && <strong>{checkout && checkoutAmount && checkoutCurrency ? formatPublicOffer({...activeOffer, unit_amount_cents:checkoutAmount, currency:checkoutCurrency, interval:undefined}) : formatPublicOffer(activeOffer)}</strong>}
           </div>
           <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
             {offers.map((offer) => {
@@ -1747,7 +1766,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
               return <button type="button" role={offers.length > 1 ? "radio" : undefined} aria-checked={offers.length > 1 ? selected : undefined} className={`offer-option ${selected ? "selected" : ""}`} key={offer.catalog_price_id} onClick={() => onSelect(offer)}>
                 {offers.length > 1 && <span className="offer-radio" aria-hidden="true" />}
                 <span className="offer-copy"><strong>{offerLabel(offer)}</strong><small>{offerNote(offer)}</small></span>
-                <span className="offer-price"><strong>{formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
+                <span className="offer-price"><strong>{checkout && selected && checkoutAmount && checkoutCurrency ? formatCheckoutOffer(offer, checkoutAmount-checkoutBumpAmount, checkoutCurrency) : formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
               </button>;
             })}
             {offers.length === 0 && <div className="checkout-unavailable">This product is not currently available for purchase.</div>}
@@ -1756,7 +1775,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
           {accountPanel}
           {paymentPanel}
           <div className="checkout-trust"><LockKeyhole size={15} /><span><strong>Secure checkout</strong><small>Payments are encrypted and processed by Stripe.</small></span></div>
-          {activeOffer?.kind === "recurring" && <p className="checkout-terms">Your subscription renews automatically. You can cancel future renewals from your account.</p>}
+          {activeOffer?.kind === "recurring" && <p className="checkout-terms">Renews at {formatPublicOffer(activeOffer)}. Optional extras are charged once. You can cancel future renewals from your account.</p>}
         </aside>
       </section>
       <footer className="storefront-footer"><span>© {new Date().getFullYear()} {portal.brand.name}</span>{portal.brand.support_email && <a href={`mailto:${portal.brand.support_email}`}>Need help?</a>}</footer>
@@ -1876,7 +1895,8 @@ function CheckoutPaymentUnavailable() {
   </section>;
 }
 
-function StripePaymentForm({ session, themeColor, returnURL, busy, error, enabled, onError }: {
+function StripePaymentForm({ session, themeColor, returnURL, busy, error, enabled, onError, onPreparePayment }: {
+  onPreparePayment: () => Promise<string>;
   session: StorefrontCheckoutSession;
   themeColor: string;
   returnURL: string;
@@ -1888,6 +1908,8 @@ function StripePaymentForm({ session, themeColor, returnURL, busy, error, enable
   const mountRef = useRef<HTMLDivElement>(null);
   const stripeRef = useRef<Stripe | null>(null);
   const elementsRef = useRef<StripeElements | null>(null);
+  const currentAmount = useRef(session.amount_cents);
+  currentAmount.current = session.amount_cents;
   const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -1901,7 +1923,7 @@ function StripePaymentForm({ session, themeColor, returnURL, busy, error, enable
       if (cancelled || !stripe || !mountRef.current || !session.amount_cents || !session.currency) return;
       const elements = stripe.elements({
         mode: "payment",
-        amount: session.amount_cents,
+        amount: currentAmount.current,
         currency: session.currency.toLowerCase(),
         setupFutureUsage: session.offer_kind === "recurring" ? "off_session" : undefined,
         appearance: { theme: "stripe", variables: { colorPrimary: themeColor, borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
@@ -1919,11 +1941,15 @@ function StripePaymentForm({ session, themeColor, returnURL, busy, error, enable
       elementsRef.current = null;
       paymentElement?.destroy();
     };
-  }, [onError, session.amount_cents, session.currency, session.offer_kind, session.publishable_key, themeColor]);
+  }, [onError, session.currency, session.offer_kind, session.publishable_key, themeColor]);
+
+  useEffect(() => {
+    if (session.amount_cents) elementsRef.current?.update({ amount: session.amount_cents });
+  }, [session.amount_cents]);
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();
-    if (!stripeRef.current || !elementsRef.current || !enabled || !session.client_secret) return;
+    if (!stripeRef.current || !elementsRef.current || !enabled || submitting || busy) return;
     setSubmitting(true);
     onError("");
     const submitted = await elementsRef.current.submit();
@@ -1932,9 +1958,12 @@ function StripePaymentForm({ session, themeColor, returnURL, busy, error, enable
       setSubmitting(false);
       return;
     }
+    let clientSecret: string;
+    try { clientSecret = session.client_secret || await onPreparePayment(); }
+    catch (e) { onError(friendlyError(e)); setSubmitting(false); return; }
     const result = await stripeRef.current.confirmPayment({
       elements: elementsRef.current,
-      clientSecret: session.client_secret,
+      clientSecret,
       confirmParams: { return_url: returnURL },
       redirect: "if_required",
     });

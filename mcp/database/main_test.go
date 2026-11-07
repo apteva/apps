@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -126,6 +128,98 @@ func TestScopeAndPermissions(t *testing.T) {
 		t.Fatal("schema operation accepted in batch")
 	}
 }
+
+// GraphQL-style sibling calls arrive with bound-caller identity. They keep a
+// private namespace by default and reach a project database only by explicit
+// scope plus an operator grant, never managing it themselves.
+func TestAppProjectDatabaseAccess(t *testing.T) {
+	a := testApp(t)
+	operator := &sdk.Caller{ProjectID: "p", AgentID: 1, DefaultEffect: "allow"}
+	graphql := &sdk.Caller{ProjectID: "p", AppInstallID: 7, AppName: "graphql", DefaultEffect: "allow"}
+	other := &sdk.Caller{ProjectID: "p", AppInstallID: 8, AppName: "crm", DefaultEffect: "allow"}
+	elsewhere := &sdk.Caller{ProjectID: "q", AppInstallID: 7, AppName: "graphql", DefaultEffect: "allow"}
+	must := func(v any, e error) any {
+		t.Helper()
+		if e != nil {
+			t.Fatal(e)
+		}
+		return v
+	}
+	denied := func(c *sdk.Caller, op string, args map[string]any) {
+		t.Helper()
+		var known *engine.Error
+		if _, e := invoke(a, c, op, args); !errors.As(e, &known) || known.Code != "permission_denied" {
+			t.Fatalf("%s by %s accepted or wrong error: %v", op, c.AppName, e)
+		}
+	}
+	must(invoke(a, operator, "database_create", map[string]any{"database": "prod"}))
+	must(invoke(a, operator, "collection_create", map[string]any{"database": "prod", "collection": "orders", "fields": []any{map[string]any{"name": "total", "type": "number"}}}))
+	must(invoke(a, operator, "insert", map[string]any{"database": "prod", "collection": "orders", "records": []any{map[string]any{"id": "o1", "total": 5}}}))
+	find := map[string]any{"scope": "project", "database": "prod", "collection": "orders"}
+	insert := map[string]any{"scope": "project", "database": "prod", "collection": "orders", "records": []any{map[string]any{"id": "o2", "total": 7}}}
+
+	// The default remains the private namespace: prod does not exist there.
+	if _, e := invoke(a, graphql, "find", map[string]any{"database": "prod", "collection": "orders"}); e == nil {
+		t.Fatal("private namespace resolved the project database")
+	}
+	denied(graphql, "find", find)
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 0 {
+		t.Fatal("ungranted project database listed", v)
+	}
+	denied(graphql, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "write"})
+	if _, e := invoke(a, operator, "find", map[string]any{"scope": "app", "database": "prod", "collection": "orders"}); e == nil {
+		t.Fatal("agent selected an app namespace")
+	}
+	if _, e := invoke(a, operator, "access_grant", map[string]any{"database": "missing", "app": "graphql", "access": "read"}); e == nil {
+		t.Fatal("grant created or named a missing database")
+	}
+
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "read"}))
+	got := must(invoke(a, graphql, "find", find)).(map[string]any)
+	if records := got["records"].([]engine.Record); len(records) != 1 || records[0]["id"] != "o1" {
+		t.Fatal("granted read did not reach project data", got)
+	}
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 1 {
+		t.Fatal("granted database not listed", v)
+	}
+	denied(graphql, "insert", insert)
+	// A batch of only reads needs read access and accepts a query deadline;
+	// a write batch still needs write access.
+	reads := must(invoke(a, graphql, "batch", map[string]any{"scope": "project", "database": "prod", "timeoutMs": 45000, "operations": []any{
+		map[string]any{"op": "count", "args": map[string]any{"collection": "orders"}},
+		map[string]any{"op": "aggregate", "args": map[string]any{"collection": "orders", "metrics": []any{map[string]any{"name": "big", "op": "count", "where": map[string]any{"field": "total", "op": "gt", "value": 1}}}}},
+	}})).(map[string]any)["results"].([]any)
+	if len(reads) != 2 || reads[0].(map[string]any)["count"] != "1" || reads[1].(map[string]any)["rows"].([]engine.Record)[0]["big"] != "1" {
+		t.Fatal("read batch", reads)
+	}
+	denied(graphql, "batch", map[string]any{"scope": "project", "database": "prod", "operations": []any{map[string]any{"op": "insert", "args": map[string]any{"collection": "orders", "records": insert["records"]}}}})
+	denied(graphql, "collection_drop", map[string]any{"scope": "project", "database": "prod", "collection": "orders", "confirm": true})
+	denied(graphql, "realtime_configure", map[string]any{"scope": "project", "database": "prod", "enabled": true})
+	denied(other, "find", find)
+	denied(elsewhere, "find", find)
+
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "write"}))
+	must(invoke(a, graphql, "insert", insert))
+	if c := must(invoke(a, operator, "count", map[string]any{"database": "prod", "collection": "orders"})).(map[string]any); c["count"] != "2" {
+		t.Fatal("app write did not land in project database", c)
+	}
+	denied(graphql, "index_create", map[string]any{"scope": "project", "database": "prod", "collection": "orders", "index": map[string]any{"name": "by_total", "fields": []any{map[string]any{"field": "total"}}}})
+	list := must(invoke(a, operator, "access_list", map[string]any{"database": "prod"})).([]engine.AppAccess)
+	if len(list) != 1 || list[0].App != "graphql" || list[0].Access != "write" {
+		t.Fatal("access list", list)
+	}
+
+	must(invoke(a, operator, "access_revoke", map[string]any{"database": "prod", "app": "graphql"}))
+	denied(graphql, "find", find)
+	// Dropping and recreating a database must not revive earlier grants.
+	must(invoke(a, operator, "access_grant", map[string]any{"database": "prod", "app": "graphql", "access": "read"}))
+	must(invoke(a, operator, "database_drop", map[string]any{"database": "prod", "confirm": true}))
+	must(invoke(a, operator, "database_create", map[string]any{"database": "prod"}))
+	if v := must(invoke(a, graphql, "databases_list", map[string]any{"scope": "project"})); len(v.([]engine.DatabaseInfo)) != 0 {
+		t.Fatal("dropped database grant revived", v)
+	}
+	denied(graphql, "database_describe", map[string]any{"scope": "project", "database": "prod"})
+}
 func TestHTTPGuardrails(t *testing.T) {
 	a := testApp(t)
 	for _, tc := range []struct {
@@ -175,7 +269,7 @@ func TestSidecar(t *testing.T) {
 	cmd := exec.Command(binary)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "APTEVA_APP_PORT="+fmt.Sprint(port), "APTEVA_APP_TOKEN=local-database-test", "APTEVA_PROJECT_ID=", "APTEVA_DATA_DIR="+dir, "DB_PATH="+filepath.Join(dir, "sdk.db"), "APTEVA_GATEWAY_URL=http://127.0.0.1:1")
+	cmd.Env = append(os.Environ(), "APTEVA_APP_PORT="+fmt.Sprint(port), "APTEVA_APP_TOKEN=local-database-test", "APTEVA_PROJECT_ID=", "APTEVA_DATA_DIR="+dir, "DB_PATH="+filepath.Join(dir, "sdk.db"), "APTEVA_GATEWAY_URL=http://127.0.0.1:1", "DATABASE_APTEVADB_SYNC_MODE=full", `APTEVA_APP_CONFIG={"aptevadb_sync_mode":"os"}`)
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
@@ -222,7 +316,7 @@ func TestSidecar(t *testing.T) {
 	if code, _ := request("/operations/databases_list", map[string]any{}, false, nil); code != 401 {
 		t.Fatalf("unauthenticated request returned %d", code)
 	}
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		for _, step := range []struct {
 			op   string
 			args map[string]any
@@ -231,18 +325,89 @@ func TestSidecar(t *testing.T) {
 			{"collection_create", map[string]any{"database": adapter, "collection": "sales", "fields": []any{map[string]any{"name": "amount", "type": "number"}}}},
 			{"insert", map[string]any{"database": adapter, "collection": "sales", "records": []any{map[string]any{"amount": 7}, map[string]any{"amount": 11}}}},
 			{"aggregate", map[string]any{"database": adapter, "collection": "sales", "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "amount"}}}},
+			{"query", map[string]any{"database": adapter, "version": 1, "nodes": []any{map[string]any{"name": "source", "op": "scan", "collection": "sales"}, map[string]any{"name": "total", "op": "aggregate", "from": "source", "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "amount"}}}}, "result": map[string]any{"from": "total"}}},
+			{"aggregate", map[string]any{"database": adapter, "pipeline": map[string]any{"version": 1, "nodes": []any{map[string]any{"name": "source", "op": "scan", "collection": "sales"}}, "from": "source"}, "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "amount"}}}},
+			{"find", map[string]any{"database": adapter, "collection": "sales", "joins": []any{map[string]any{"as": "same", "collection": "sales", "on": []any{map[string]any{"local": "root.id", "foreign": "id"}}}}, "select": []any{"root.amount", "same.amount"}, "limit": 1}},
+			{"find", map[string]any{"database": adapter, "pipeline": map[string]any{"version": 1, "nodes": []any{map[string]any{"name": "source", "op": "scan", "collection": "sales"}}, "from": "source"}, "limit": 1, "count": true}},
+			{"joined_page", map[string]any{"database": adapter, "collection": "sales", "select": []any{"root.amount"}, "orderBy": []any{map[string]any{"field": "root.amount"}}, "limit": 1}},
+			{"joined_aggregate", map[string]any{"database": adapter, "collection": "sales", "metrics": []any{map[string]any{"name": "revenue", "op": "sum", "field": "root.amount"}}}},
+			{"related_read", map[string]any{"database": adapter, "collection": "sales", "count": true, "relation": map[string]any{"as": "context", "limit": 1, "sources": []any{map[string]any{"name": "self", "joins": []any{}, "select": []any{"root.amount"}}}}}},
 		} {
 			code, v := request("/operations/"+step.op, step.args, true, nil)
 			if code != 200 {
 				t.Fatalf("%s/%s: %d %v", adapter, step.op, code, v)
 			}
-			if step.op == "aggregate" {
+			if step.op == "aggregate" || step.op == "joined_aggregate" || step.op == "query" {
 				row := v.(map[string]any)["rows"].([]any)[0].(map[string]any)
 				if row["revenue"] != float64(18) {
 					t.Fatal(row)
 				}
 			}
+			if step.op == "joined_page" || step.op == "related_read" {
+				if total := v.(map[string]any)["total"]; total != "2" {
+					t.Fatalf("%s total: %v", step.op, v)
+				}
+			}
 		}
+		if adapter == "aptevadb" {
+			code, value := request("/operations/explain", map[string]any{"database": adapter, "collection": "sales"}, true, nil)
+			if code != 200 || value.(map[string]any)["syncMode"] != "os" || value.(map[string]any)["synchronousWrites"] != true {
+				t.Fatal("mounted app config must override environment and keep writes synchronous", code, value)
+			}
+		}
+	}
+
+	// Exercise SSE through the actual SDK server and token gate, not just a handler.
+	if code, _ := request("/realtime/watch", map[string]any{"database": "aptevadb", "collections": []string{"sales"}}, false, nil); code != 401 {
+		t.Fatal("watch token gate", code)
+	}
+	if code, v := request("/operations/realtime_configure", map[string]any{"database": "aptevadb", "enabled": true}, true, nil); code != 200 {
+		t.Fatal("enable capture", code, v)
+	}
+	streamCtx, stopStream := context.WithTimeout(context.Background(), 5*time.Second)
+	streamReq, _ := http.NewRequestWithContext(streamCtx, "POST", base+"/realtime/watch", strings.NewReader(`{"database":"aptevadb","collections":["sales"],"initial":{"op":"find","args":{"collection":"sales"}}}`))
+	streamReq.Header.Set("Authorization", "Bearer local-database-test")
+	streamReq.Header.Set("X-Apteva-Project-ID", "integration-project")
+	stream, e := http.DefaultClient.Do(streamReq)
+	if e != nil {
+		stopStream()
+		t.Fatal(e)
+	}
+	if stream.StatusCode != 200 || stream.Header.Get("Content-Type") != "text/event-stream" {
+		stream.Body.Close()
+		stopStream()
+		t.Fatal("SDK streaming", stream.Status)
+	}
+	scanner := bufio.NewScanner(stream.Body)
+	readEvent := func(want string) {
+		t.Helper()
+		for scanner.Scan() {
+			if scanner.Text() == "event: "+want {
+				return
+			}
+		}
+		t.Fatal("SDK event missing", want, scanner.Err())
+	}
+	readEvent("snapshot")
+	readEvent("ready")
+	if code, v := request("/operations/insert", map[string]any{"database": "aptevadb", "collection": "sales", "records": []any{map[string]any{"amount": 1}}}, true, nil); code != 200 {
+		t.Fatal(code, v)
+	}
+	readEvent("invalidate")
+	stream.Body.Close()
+	stopStream()
+	for attempt := 0; attempt < 100; attempt++ {
+		code, v := request("/operations/realtime_describe", map[string]any{"database": "aptevadb"}, true, nil)
+		if code != 200 {
+			t.Fatal(code, v)
+		}
+		if v.(map[string]any)["stats"].(map[string]any)["Watchers"] == float64(0) {
+			break
+		}
+		if attempt == 99 {
+			t.Fatal("SDK disconnect leaked watcher", v)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	code, v := request("/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "db_database_create", "arguments": map[string]any{"database": "private"}}}, true, map[string]string{sdk.HeaderBoundCallerInstallID: "42", sdk.HeaderBoundCallerAppName: "crm"})
 	if code != 200 {
@@ -253,7 +418,34 @@ func TestSidecar(t *testing.T) {
 		t.Fatalf("MCP failed: %s", b)
 	}
 	_, v = request("/operations/databases_list", map[string]any{}, true, nil)
-	if len(v.([]any)) != 2 {
+	if len(v.([]any)) != 3 {
 		t.Fatal("app-private database leaked into project list", v)
+	}
+	// Through the real bridge headers, a granted app reaches the project
+	// database the dashboard owns; an ungranted app gets a tool error.
+	projectCount := func(app string) string {
+		_, v := request("/mcp", map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "db_count", "arguments": map[string]any{"scope": "project", "database": "sqlite", "collection": "sales"}}}, true, map[string]string{sdk.HeaderBoundCallerInstallID: "42", sdk.HeaderBoundCallerAppName: app})
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	if out := projectCount("crm"); !strings.Contains(out, "no access to project database sqlite") {
+		t.Fatal("ungranted app reached project database", out)
+	}
+	if code, v := request("/operations/access_grant", map[string]any{"database": "sqlite", "app": "crm", "access": "read"}, true, nil); code != 200 {
+		t.Fatal(code, v)
+	}
+	if out := projectCount("crm"); strings.Contains(out, `"isError":true`) || !strings.Contains(out, `\"count\":\"2\"`) {
+		t.Fatal("granted app could not read project database", out)
+	}
+	if out := projectCount("tables"); !strings.Contains(out, "no access to project database sqlite") {
+		t.Fatal("grant leaked to another app", out)
+	}
+}
+
+func TestRelationalReadsNeedOnlyReadAccess(t *testing.T) {
+	for _, op := range []string{"related_read", "joined_page", "joined_aggregate"} {
+		if got := requestPermission(op, engine.Request{}); got != "database.read" {
+			t.Errorf("%s needs %s", op, got)
+		}
 	}
 }

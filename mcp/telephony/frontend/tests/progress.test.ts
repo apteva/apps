@@ -134,3 +134,12 @@ describe("softphone call progress", () => {
     expect(f.phone.getSnapshot().phase).toBe("ringing");
   });
 });
+
+test('headless connected phase waits for audio readiness and falls back during repair',async()=>{
+ const f=fixture();await f.phone.dial({to:'+12025550100'});
+ f.callbacks.onState?.('connecting');f.phone.observeCall({id:'call-1',status:'answered'});
+ expect(f.phone.getSnapshot().phase).toBe('placing');expect(f.phone.getSnapshot().carrierStatus).toBe('answered');
+ f.callbacks.onState?.('live');expect(f.phone.getSnapshot().phase).toBe('connected');
+ f.callbacks.onState?.('reconnecting');expect(f.phone.getSnapshot().phase).toBe('placing');
+ await f.phone.dispose();
+});

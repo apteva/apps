@@ -1179,7 +1179,7 @@ func TestBuildOpenAICodexImageArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if args["model"] != "gpt-5.5" || args["prompt"] != "draw a door" || args["size"] != "1024x1536" {
+	if args["model"] != "gpt-6.1-sol" || args["prompt"] != "draw a door" || args["size"] != "1024x1536" {
 		t.Fatalf("base args wrong: %+v", args)
 	}
 	if strings.TrimSpace(fmt.Sprint(args["instructions"])) == "" {

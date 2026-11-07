@@ -825,9 +825,33 @@ func dbCreateReleaseForEnv(db *sql.DB, deploymentID, environmentID, buildID int6
 }
 
 func dbUpdateRelease(db *sql.DB, id int64, fields map[string]any) error {
-	if len(fields) == 0 {
+	cols, args := releaseUpdateColumns(fields)
+	if len(cols) == 0 {
 		return nil
 	}
+	args = append(args, id)
+	_, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
+	return err
+}
+
+// dbUpdateReleaseIfStatus applies fields only while the release still has the
+// status the caller read, so the result of a slow provider call cannot undo a
+// change made in the meantime. It reports whether the release was updated.
+func dbUpdateReleaseIfStatus(db *sql.DB, id int64, status string, fields map[string]any) (bool, error) {
+	cols, args := releaseUpdateColumns(fields)
+	if len(cols) == 0 {
+		return false, nil
+	}
+	args = append(args, id, status)
+	res, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ? AND status = ?`, args...)
+	if err != nil {
+		return false, err
+	}
+	updated, err := res.RowsAffected()
+	return updated > 0, err
+}
+
+func releaseUpdateColumns(fields map[string]any) ([]string, []any) {
 	cols := []string{}
 	args := []any{}
 	for _, k := range []string{"status", "port", "pid", "started_at", "stopped_at", "restart_count", "last_health_at", "log_path", "error", "channel", "provider", "external_id", "external_status", "release_meta_json"} {
@@ -836,12 +860,7 @@ func dbUpdateRelease(db *sql.DB, id int64, fields map[string]any) error {
 			args = append(args, v)
 		}
 	}
-	if len(cols) == 0 {
-		return nil
-	}
-	args = append(args, id)
-	_, err := db.Exec(`UPDATE releases SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
-	return err
+	return cols, args
 }
 
 func dbGetRelease(db *sql.DB, id int64) (*Release, error) {
@@ -926,11 +945,53 @@ func dbListLiveReleases(db *sql.DB) ([]Release, error) {
 	return out, nil
 }
 
+// Completion is based on a successful provider result, not the presence of a
+// workflow row. A failed check may have overwritten external_status; retain
+// saved completion without erasing that warning or claiming a fresh check.
+// Older completion must not hide an active partial rollout or another channel.
+const finishedMobileReleaseSQL = `(status='live' AND (
+	(provider='google_play' AND (lower(external_status)='completed' OR (
+		lower(external_status)='sync_error' AND CASE WHEN json_valid(release_meta_json) THEN
+			lower(COALESCE(json_extract(release_meta_json,'$.availability.publication'),''))='completed'
+			AND COALESCE(json_extract(release_meta_json,'$.rollout_fraction'),0) IN (0,1)
+			AND COALESCE(NULLIF(json_extract(release_meta_json,'$.availability.audience'),''),channel)=channel
+		ELSE 0 END
+	))) OR
+	(provider='app_store_connect' AND lower(external_status) IN (
+		'testflight_available','in_beta_testing','available','ready_for_sale',
+		'ready_for_distribution','pre_order_ready_for_sale','preorder_ready_for_distribution'))
+))`
+
+// Repair workflows left in publishing by older versions using only persisted
+// release evidence. Never contact a provider or rewrite its observed status.
+func dbReconcileFinishedMobileWorkflows(db *sql.DB, releaseID int64) error {
+	scope := ""
+	args := []any{nowUTC()}
+	if releaseID > 0 {
+		scope = " AND release_id=?"
+		args = append(args, releaseID)
+	}
+	_, err := db.Exec(`UPDATE release_workflows
+		SET state_json=json_set(state_json,'$.phase',
+			(SELECT CASE WHEN status='live' THEN 'completed' ELSE status END FROM releases WHERE id=release_id)),
+			updated_at=?
+		WHERE json_valid(state_json) AND release_id IN (
+			SELECT id FROM releases WHERE provider IN ('google_play','app_store_connect')
+			AND (`+finishedMobileReleaseSQL+` OR status IN ('failed','stopped'))
+		) AND COALESCE(json_extract(state_json,'$.phase'),'') !=
+			(SELECT CASE WHEN status='live' THEN 'completed' ELSE status END FROM releases WHERE id=release_id)`+scope, args...)
+	return err
+}
+
 func dbListPendingMobileReleases(db *sql.DB, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider NOT IN ('','pending_mobile','pending_external') AND (status = 'starting' OR (status='live' AND (external_status IN ('inProgress','in_progress','waiting_for_review','in_review') OR id IN (SELECT release_id FROM release_workflows)))) ORDER BY id LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases
+		WHERE provider NOT IN ('','pending_mobile','pending_external')
+		AND NOT `+finishedMobileReleaseSQL+`
+		AND (status = 'starting' OR (status='live' AND (external_status IN ('inProgress','in_progress','waiting_for_review','in_review') OR id IN (SELECT release_id FROM release_workflows))))
+		ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

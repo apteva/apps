@@ -103,3 +103,26 @@ bun run test:editorial-ui
 ```
 
 Go 1.25.1+, app-sdk v0.85.0 (latest tag by ancestry when implemented). The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.
+
+### Compact worker reads and safe result updates (0.4.4)
+
+`editorial_items_get` keeps its existing full-detail default. Execution workers
+can set `include_history:false, include_results:false` and optionally
+`field_keys:["source_id","constraints"]` to read only current requirements.
+Projected item reads list `available_field_keys` so omitted constraints can be
+requested explicitly. No historical data is removed.
+
+`editorial_releases_get(id, results_keys:["execution"])` reads one release
+without item history. Results are omitted by default; `include_results:true`
+explicitly opts into the whole results object.
+
+`editorial_releases_merge_results(id, revision, merge:{execution:{...}})`
+recursively merges supplied keys on the server, preserving all unspecified
+result keys and histories. Arrays replace; null is a literal value. Record
+accepted operations under a map keyed by their immutable ID when an append-only
+ledger is wanted. The result is a compact receipt with the new revision,
+applied merge and complete-results SHA256. Re-read selected keys to verify.
+Stale revisions fail without changing data; re-read and retry the intended
+small merge. Merge never changes publisher links, release state or external
+posts. Legacy `releases_update.patch.results` still replaces the full results
+object and should not be used for worker ledger updates.

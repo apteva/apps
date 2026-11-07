@@ -6,6 +6,7 @@ import (
 	"math"
 	"runtime/metrics"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,45 @@ import (
 var mediaClockOrigin = time.Now()
 
 func mediaClockMS() float64 { return float64(time.Since(mediaClockOrigin)) / float64(time.Millisecond) }
+
+// captureTransitClockMS is replaceable so tests can simulate hours of skew.
+var captureTransitClockMS = mediaClockMS
+
+const (
+	transitFloorBucketMS = 5000
+	transitFloorBuckets  = 12
+)
+
+// transitFloor is the minimum transit delta over the last minute, kept in 5s
+// buckets. Browser send times and mediaClockMS are different clocks, so a
+// lifetime minimum turns ~100ppm skew into ever-growing "excess" and, after
+// tens of minutes, drops every microphone frame. A windowed floor follows the
+// skew (6ms per window at 100ppm) while a sudden sustained delay still
+// registers for a full window.
+type transitFloor struct {
+	buckets [transitFloorBuckets]struct {
+		index int64
+		min   float64
+		set   bool
+	}
+}
+
+func (f *transitFloor) observe(delta, now float64) float64 {
+	index := int64(math.Floor(now / transitFloorBucketMS))
+	b := &f.buckets[((index%transitFloorBuckets)+transitFloorBuckets)%transitFloorBuckets]
+	if !b.set || b.index != index {
+		b.index, b.min, b.set = index, delta, true
+	} else if delta < b.min {
+		b.min = delta
+	}
+	floor := delta
+	for _, other := range f.buckets {
+		if other.set && other.index > index-transitFloorBuckets && other.index <= index && other.min < floor {
+			floor = other.min
+		}
+	}
+	return floor
+}
 
 const softphoneAudioFrameV2 uint32 = 0x32545041
 
@@ -36,6 +76,7 @@ type mediaStageSnapshot struct {
 	ConnectionID    string          `json:"connection_id,omitempty"`
 	Frames          int64           `json:"frames"`
 	Bytes           int64           `json:"bytes"`
+	FirstAt         string          `json:"first_at,omitempty"`
 	LastAt          string          `json:"last_at,omitempty"`
 	LastClockMS     float64         `json:"last_clock_ms"`
 	MaxGapMS        float64         `json:"max_gap_ms"`
@@ -74,6 +115,9 @@ func (d *liveAudioTimeline) observe(stage string, bytes int, started time.Time, 
 			}
 		}
 	}
+	if s.FirstAt == "" {
+		s.FirstAt = now.UTC().Format(time.RFC3339Nano)
+	}
 	s.ConnectionID = connectionID
 	s.Frames++
 	s.Bytes += int64(bytes)
@@ -102,6 +146,7 @@ func (d *liveAudioTimeline) snapshot() (string, map[string]mediaStageSnapshot) {
 }
 
 type serverAudioDiagnostics struct {
+	Startup                microphoneStartup             `json:"startup"`
 	WebRTC                 rtcMediaSnapshot              `json:"webrtc"`
 	Socket                 audioSocketSnapshot           `json:"browser_socket"`
 	Health                 audioHealthSnapshot           `json:"audio_health"`
@@ -126,6 +171,9 @@ type serverAudioDiagnostics struct {
 }
 
 func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
+	// Process sampling can wait for another call's sampler or the Go runtime.
+	// Never hold this call's audio-routing lock while collecting those metrics.
+	process := sampleMediaProcess()
 	epoch, stages := h.timeline.snapshot()
 	socket, health := h.telemetry.snapshots()
 	h.mu.Lock()
@@ -136,7 +184,11 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 			rtc = mergeRTCSnapshots(rtc, c.stats.snapshot())
 		}
 	}
-	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+	startup := h.startup
+	startup.PhaseSchema = 1
+	startup.Readiness = append([]mediaReadinessEvent(nil), startup.Readiness...)
+	startup.Events = append([]startupDrop(nil), startup.Events...)
+	return serverAudioDiagnostics{Startup: startup, Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: process, CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		WebRTC:         rtc,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
@@ -157,25 +209,55 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	a.FlushedBytes += b.FlushedBytes
 	a.FailedBytes += b.FailedBytes
 	a.WriteErrors += b.WriteErrors
+	a.WriteTimeoutDrops += b.WriteTimeoutDrops
+	a.WriteTimeoutBytes += b.WriteTimeoutBytes
+	a.DropEvents = append(append([]websocketWriteEvent(nil), a.DropEvents...), b.DropEvents...)
+	if len(a.DropEvents) > maxWriteDiagnosticEvents {
+		a.DropEvents = a.DropEvents[len(a.DropEvents)-maxWriteDiagnosticEvents:]
+	}
+	a.Transport = mergeWebsocketTransport(a.Transport, b.Transport)
 	if b.LastWriteAt > a.LastWriteAt {
 		a.LastWriteAt = b.LastWriteAt
 	}
 	return a
 }
 func (c *callsDB) updateServerAudioDiagnostics(id string, s serverAudioDiagnostics, underruns ...[]playbackUnderrunEvent) error {
+	var events []playbackUnderrunEvent
+	if len(underruns) > 0 {
+		events = underruns[0]
+	}
+	return c.updateServerAudioDiagnosticEvents(id, s, events, nil)
+}
+
+// Preserve sparse events received before the first cumulative browser report,
+// without inventing zero browser measurements or adding another database write.
+func (c *callsDB) updateServerAudioDiagnosticEvents(id string, s serverAudioDiagnostics, underruns []playbackUnderrunEvent, sessions []mediaSessionEvent) error {
 	encoded, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	if len(underruns) > 0 && len(underruns[0]) > 0 {
-		events, encodeErr := json.Marshal(normalizePlaybackUnderruns(underruns[0]))
-		if encodeErr != nil {
-			return encodeErr
+	query := `UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?)`
+	args := []any{string(encoded)}
+	if len(underruns) > 0 {
+		encoded, err = json.Marshal(normalizePlaybackUnderruns(underruns))
+		if err != nil {
+			return err
 		}
-		_, err = c.db.Exec(`UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?), '$.playback_underrun_events', json(?)) WHERE id=? AND peer_kind='human'`, string(encoded), string(events), id)
-		return err
+		query += `, '$.playback_underrun_events', json(?)`
+		args = append(args, string(encoded))
 	}
-	_, err = c.db.Exec(`UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?)) WHERE id=? AND peer_kind='human'`, string(encoded), id)
+	if len(sessions) > 0 {
+		normalized := normalizeBrowserAudioDiagnostics(browserAudioDiagnostics{SessionEvents: sessions})
+		encoded, err = json.Marshal(normalized.SessionEvents)
+		if err != nil {
+			return err
+		}
+		query += `, '$.session_events', json(?)`
+		args = append(args, string(encoded))
+	}
+	query += `) WHERE id=? AND peer_kind='human'`
+	args = append(args, id)
+	_, err = c.db.Exec(query, args...)
 	return err
 }
 func (h *softphoneHub) observeCaptureTiming(data []byte, connectionIDs ...string) (stale bool) {
@@ -199,19 +281,21 @@ func (h *softphoneHub) observeCaptureTiming(data []byte, connectionIDs ...string
 	if magic == softphoneAudioFrameV2 && len(data) >= 32 {
 		sent := math.Float64frombits(binary.LittleEndian.Uint64(data[16:]))
 		if !math.IsNaN(sent) && !math.IsInf(sent, 0) && sent > 0 {
-			delta := mediaClockMS() - sent
-			if !h.captureTransitSet || delta < h.captureTransitBase {
-				h.captureTransitBase = delta
+			now := captureTransitClockMS()
+			delta := now - sent
+			if !h.captureTransitSet {
+				h.captureTransitFloor = transitFloor{}
 				h.captureTransitSet = true
 			}
-			h.captureTransitExcessMS = max(h.captureTransitExcessMS, delta-h.captureTransitBase)
-			// This is EXCESS over the fastest observed transit, not absolute
-			// one-way latency. No wall-clock synchronization is assumed.
-			if delta-h.captureTransitBase > float64(liveAudioMaxAge/time.Millisecond) {
+			excess := delta - h.captureTransitFloor.observe(delta, now)
+			h.captureTransitExcessMS = max(h.captureTransitExcessMS, excess)
+			// This is EXCESS over the fastest recently observed transit, not
+			// absolute one-way latency. No wall-clock synchronization is assumed.
+			if excess > float64(liveAudioMaxAge/time.Millisecond) {
 				h.captureStaleBytes += int64(len(data) - 32)
 				h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
 					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "capture_transit_age", ConnectionID: connectionID,
-					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, delta-h.captureTransitBase)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
+					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, excess)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
 				})
 				if len(h.captureDropEvents) > 100 {
 					h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
@@ -243,7 +327,7 @@ func (h *softphoneHub) finishCarrierForward(w *websocketWriterPump) {
 }
 func carrierMediaWriteTimeout(row *callRow) time.Duration {
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
-		return liveAudioMaxAge
+		return liveAudioWriteTimeout
 	}
 	return websocketWriteTimeout
 }
@@ -311,17 +395,25 @@ func sampleMediaProcess() mediaProcessSnapshot {
 
 // Pacer counters survive eviction of the bounded diagnostic event sample.
 type livePacerSnapshot struct {
-	SentMS       int64            `json:"sent_ms"`
-	DroppedMS    int64            `json:"dropped_ms"`
-	DropTotalsMS map[string]int64 `json:"drop_totals_ms"`
-	MaxQueueMS   int              `json:"max_queue_ms"`
-	MaxWriteMS   int64            `json:"max_write_ms"`
+	MaxSourceAgeMS int64            `json:"max_source_age_ms,omitempty"`
+	MaxResidenceMS int64            `json:"max_residence_ms,omitempty"`
+	SentMS         int64            `json:"sent_ms"`
+	DroppedMS      int64            `json:"dropped_ms"`
+	DropTotalsMS   map[string]int64 `json:"drop_totals_ms"`
+	MaxQueueMS     int              `json:"max_queue_ms"`
+	MaxWriteMS     int64            `json:"max_write_ms"`
 }
 type livePacerStats struct {
-	mu    sync.Mutex
-	value livePacerSnapshot
+	maxSourceAge atomic.Int64
+	maxResidence atomic.Int64
+	mu           sync.Mutex
+	value        livePacerSnapshot
 }
 
+func (p *livePacerStats) observeAge(source, residence time.Duration) {
+	atomicMax(&p.maxSourceAge, source.Milliseconds())
+	atomicMax(&p.maxResidence, residence.Milliseconds())
+}
 func (p *livePacerStats) dropped(reason string, ms int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -349,6 +441,8 @@ func (p *livePacerStats) snapshot() livePacerSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s := p.value
+	s.MaxSourceAgeMS = p.maxSourceAge.Load()
+	s.MaxResidenceMS = p.maxResidence.Load()
 	s.DropTotalsMS = map[string]int64{}
 	for k, v := range p.value.DropTotalsMS {
 		s.DropTotalsMS[k] = v
@@ -359,4 +453,24 @@ func (h *softphoneHub) setPacerStats(p *livePacerStats) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pacerStats = p
+}
+
+func mergeWebsocketTransport(a, b websocketTransportSnapshot) websocketTransportSnapshot {
+	a.Writes += b.Writes
+	a.WriteErrors += b.WriteErrors
+	a.WriteTimeouts += b.WriteTimeouts
+	a.CleanupWriteErrors += b.CleanupWriteErrors
+	a.CleanupWriteTimeouts += b.CleanupWriteTimeouts
+	a.ForcedCloses += b.ForcedCloses
+	a.MaxWriteMS = max(a.MaxWriteMS, b.MaxWriteMS)
+	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)
+	if b.LastCloseAt > a.LastCloseAt {
+		a.LastCloseAt = b.LastCloseAt
+		a.CloseMS = b.CloseMS
+	}
+	a.Events = append(append([]websocketWriteEvent(nil), a.Events...), b.Events...)
+	if len(a.Events) > maxWriteDiagnosticEvents {
+		a.Events = a.Events[len(a.Events)-maxWriteDiagnosticEvents:]
+	}
+	return a
 }

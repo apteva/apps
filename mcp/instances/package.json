@@ -4,7 +4,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test ui",
-    "build": "bun run typecheck && bun build ui/InstancesPanel.tsx --target browser --format esm --external react --external react/jsx-runtime --outfile ui/InstancesPanel.mjs"
+    "build": "bun run typecheck && bun build ui/InstancesPanel.tsx --target browser --format esm --production --external react --external react/jsx-runtime --outfile ui/InstancesPanel.mjs && bun run ui/verify-bundle.ts"
   },
   "devDependencies": { "typescript": "^5.9.3", "@types/react": "^19.2.0", "@types/bun": "^1.3.0", "react": "^19.2.0", "react-dom": "^19.2.0", "@types/react-dom": "^19.2.0", "happy-dom": "^20.0.0" }
 }

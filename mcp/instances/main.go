@@ -42,19 +42,20 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.6.2
+version: 0.15.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
   Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
-  Linode, OVHcloud, and RunPod. Foundation layer
+  Clouding.io, UpCloud, Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [global]
+min_apteva_version: "0.87.4"
 requires:
   permissions:
     - db.write.app
@@ -72,7 +73,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, clouding, upcloud, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS providers
       hint: |
         Optional — local instance always available. Bind one or more VPS integrations
@@ -82,10 +83,41 @@ requires:
         whose API only schedules contract cancellation. Scaleway Dedibox orders
         physical hardware and installs Linux after delivery; macOS hosts have a
         mandatory 24-hour minimum allocation before Destroy is enabled.
+config_schema:
+  - name: native_snapshot_max_archive_bytes
+    label: Native snapshot archive limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum compressed archive size. Default 8 GiB; hard maximum 16 GiB (17179869184 bytes). Applies after app restart."
+  - name: native_snapshot_max_state_bytes
+    label: Native snapshot expanded-state limit (bytes)
+    type: text
+    default: "8589934592"
+    description: "Maximum cumulative file content and individual file size. Default 8 GiB; hard maximum 16 GiB. Tar metadata has a separate bounded allowance."
+  - name: native_snapshot_timeout_seconds
+    label: Native snapshot operation timeout (seconds)
+    type: text
+    default: "7200"
+    description: "Complete snapshot or restore deadline, from 60 to 21600 seconds. Default 2 hours. Server must use a compatible deadline."
+
 provides:
   http_routes:
     - prefix: /
+    - prefix: /_apteva/runtime/backends/native
+    - prefix: /_apteva/ingress/providers/caddy
   mcp_tools:
+    - name: instance_firewall_capabilities
+      description: Discover managed firewall capabilities for a provider or instance.
+    - name: instance_firewall_get
+      description: Read owned policies and optionally verify provider rules and attachments.
+    - name: instance_firewall_apply
+      description: Apply an owner-scoped inbound policy while retaining SSH and other owners.
+    - name: instance_firewall_release
+      description: Release one owner's rules while retaining other owners and SSH.
+    - name: instance_quote
+      description: Review an OVH contract-product order and its prices before purchase.
+    - name: instance_order_status
+      description: Inspect or resume OVH delivery and confirm service cancellation with a provider email token.
     - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
     - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
     - { name: instance_storage_capabilities, description: "Describe boot and data-volume capabilities for a bound provider." }
@@ -122,6 +154,7 @@ provides:
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
     - { name: instance_metrics_history, description: "Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage. Args: id, from?, to?, resolution?, max_points?." }
     - { name: instance_metrics_incidents, description: "List spike incidents or retrieve a bounded recording and best-effort process attribution. Args: id, incident_id?, limit?." }
+    - { name: instance_network_evidence, description: "Bounded timestamped TCP probes, host counters and route evidence between registered instances. Args: id, target_id, port?, samples?." }
     - { name: instance_monitoring, description: "Read collector health/version or enable/disable automatic background monitoring. Args: id, enabled?." }
     - { name: instance_metrics,      description: "Latest continuous CPU/memory/I/O snapshot and collector freshness for local and remote Linux/macOS hosts. Args: id." }
     - { name: instance_list_server_types, description: "Live list of active, non-deprecated compute types from the bound provider — name, cores, memory_gb, disk_gb, platform, resource_class, price, available_in. Includes virtual and bare-metal types where supported. Args: provider? (default: bound provider)." }
@@ -196,7 +229,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.6.2
+    ref: instances/v0.15.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -247,7 +280,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// because destroy must only target an upstream id recorded from
 	// the original create response.
 	startInstanceWorker(ctx, -1, func(work context.Context) {
-		for _, reconcile := range []func(*sdk.AppCtx){reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState, reconcileExternalHosts} {
+		for _, reconcile := range []func(*sdk.AppCtx){reconcilePendingFirewalls, reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState, reconcileExternalHosts} {
 			if work.Err() != nil {
 				return
 			}
@@ -271,10 +304,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	})
 
+	if os.Getenv("APTEVA_INSTALL_ID") != "" {
+		if err := startNativeRuntime(ctx); err != nil {
+			return err
+		}
+	}
 	return startMonitoring(ctx)
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	stopNativeRuntime(ctx)
 	stopMonitoring(ctx)
 	stopInstanceWorkers(ctx)
 	globalTunnelRegistry.closeAll()
@@ -291,9 +330,13 @@ func main() { sdk.Run(&App{}) }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: nativePrefix + "/", Handler: a.handleNativeRuntime},
+		{Pattern: proxyPrefix + "/", Handler: a.handleProxyAdapter},
 		{Pattern: "/api/instances-register", Handler: a.httpRegister},
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
+		{Pattern: "/api/instances-quote", Handler: a.handleInstanceQuote},
+		{Pattern: "/api/instances-order", Handler: a.handleOrderStatus},
 		{Pattern: "/api/instances-providers", Handler: a.handleListProviders},
 		// Live provider catalog. Sister surface to the MCP tools so the
 		// panel doesn't need an MCP client; ?provider= defaults to
@@ -301,6 +344,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
 		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
 		{Pattern: "/api/instances-images", Handler: a.handleListImages},
+		{Pattern: "/api/instances-firewall-capabilities", Handler: a.handleFirewallCapabilities},
 		{Pattern: "/api/instances-storage-capabilities", Handler: a.handleStorageCapabilities},
 		{Pattern: "/api/instance-volumes", Handler: a.handleVolumesCollection},
 		{Pattern: "/api/instance-volumes/", Handler: a.handleVolumeItem},

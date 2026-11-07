@@ -20,15 +20,62 @@ import (
 func renderV2Browser(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string) (Result, []string, error) {
 	return renderV2BrowserWindow(ctx, app, spec, projectID, 0, 0)
 }
-func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string, excerptStart, excerptEnd float64) (Result, []string, error) {
-	start := time.Now()
+
+// browserFrames is the capture geometry shared by local and component renders.
+type browserFrames struct {
+	Output                     Output
+	Width, Height, FPS, Frames int
+	Duration                   float64
+}
+
+func browserFrameGeometry(spec *V2Composition, excerptStart, excerptEnd float64) (browserFrames, error) {
+	var g browserFrames
 	if err := validateV2Composition(spec); err != nil {
+		return g, err
+	}
+	g.Output = v2OutputToOutput(spec.Output)
+	if g.Output.Format != "mp4" {
+		return g, fmt.Errorf("browser composer/v2 renderer supports mp4 output, got %q", g.Output.Format)
+	}
+	g.Width, g.Height = spec.Output.Width, spec.Output.Height
+	if g.Width <= 0 || g.Height <= 0 {
+		g.Width, g.Height = resolutionWH(g.Output.Resolution, g.Output.Aspect)
+	}
+	g.FPS = spec.Output.FPS
+	if g.FPS <= 0 {
+		g.FPS = g.Output.FPS
+	}
+	if g.FPS <= 0 {
+		g.FPS = 24
+	}
+	g.Duration = v2DurationSeconds(spec)
+	if excerptEnd > 0 {
+		g.Duration = excerptEnd
+	}
+	g.Duration -= excerptStart
+	if g.Duration <= 0 {
+		return g, fmt.Errorf("composer/v2 duration must be > 0")
+	}
+	g.Frames = int(g.Duration * float64(g.FPS))
+	if float64(g.Frames)/float64(g.FPS) < g.Duration {
+		g.Frames++
+	}
+	if g.Frames < 1 {
+		g.Frames = 1
+	}
+	return g, nil
+}
+
+func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string, excerptStart, excerptEnd float64) (Result, []string, error) {
+	if useRenderer(ctx, app) {
+		return renderV2BrowserComponent(ctx, app, spec, projectID, excerptStart, excerptEnd)
+	}
+	start := time.Now()
+	g, err := browserFrameGeometry(spec, excerptStart, excerptEnd)
+	if err != nil {
 		return Result{}, nil, err
 	}
-	out := v2OutputToOutput(spec.Output)
-	if out.Format != "mp4" {
-		return Result{}, nil, fmt.Errorf("browser composer/v2 renderer supports mp4 output, got %q", out.Format)
-	}
+	out, w, h, fps, duration, frameCount := g.Output, g.Width, g.Height, g.FPS, g.Duration, g.Frames
 	chromePath, err := chromeExecutable()
 	if err != nil {
 		return Result{}, nil, err
@@ -36,25 +83,6 @@ func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composi
 	nodePath, err := exec.LookPath(browserNodePath())
 	if err != nil {
 		return Result{}, nil, fmt.Errorf("node is required for browser composer/v2 rendering: %w", err)
-	}
-	w, h := spec.Output.Width, spec.Output.Height
-	if w <= 0 || h <= 0 {
-		w, h = resolutionWH(out.Resolution, out.Aspect)
-	}
-	fps := spec.Output.FPS
-	if fps <= 0 {
-		fps = out.FPS
-	}
-	if fps <= 0 {
-		fps = 24
-	}
-	duration := v2DurationSeconds(spec)
-	if excerptEnd > 0 {
-		duration = excerptEnd
-	}
-	duration -= excerptStart
-	if duration <= 0 {
-		return Result{}, nil, fmt.Errorf("composer/v2 duration must be > 0")
 	}
 	scratch, err := os.MkdirTemp("", "composer-v2-browser-")
 	if err != nil {
@@ -85,13 +113,6 @@ func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composi
 	if err != nil {
 		cleanup()
 		return Result{}, nil, err
-	}
-	frameCount := int(duration * float64(fps))
-	if float64(frameCount)/float64(fps) < duration {
-		frameCount++
-	}
-	if frameCount < 1 {
-		frameCount = 1
 	}
 	args := []string{
 		scriptPath,
@@ -146,6 +167,18 @@ func renderV2BrowserWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composi
 }
 
 func browserResolvedSpec(app *sdk.AppCtx, spec *V2Composition) (*V2Composition, error) {
+	return browserSpecWith(spec, func(src string) (string, error) {
+		resolved, err := resolveAssetLocal(app, src)
+		if err != nil {
+			return "", err
+		}
+		return fileURL(resolved), nil
+	})
+}
+
+// browserSpecWith copies spec with every image/video source replaced by what
+// resolve returns: local file URLs here, worker-local files for components.
+func browserSpecWith(spec *V2Composition, resolve func(string) (string, error)) (*V2Composition, error) {
 	b, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err
@@ -156,22 +189,22 @@ func browserResolvedSpec(app *sdk.AppCtx, spec *V2Composition) (*V2Composition, 
 	}
 	for i := range out.Assets {
 		if out.Assets[i].Type == "image" || out.Assets[i].Type == "video" {
-			resolved, err := resolveAssetLocal(app, out.Assets[i].Src)
+			resolved, err := resolve(out.Assets[i].Src)
 			if err != nil {
 				return nil, err
 			}
-			out.Assets[i].Src = fileURL(resolved)
+			out.Assets[i].Src = resolved
 		}
 	}
 	for i := range out.Scenes {
 		for j := range out.Scenes[i].Elements {
 			el := &out.Scenes[i].Elements[j]
 			if el.Type == "image" && el.Asset == "" && el.Src != "" {
-				resolved, err := resolveAssetLocal(app, el.Src)
+				resolved, err := resolve(el.Src)
 				if err != nil {
 					return nil, err
 				}
-				el.Src = fileURL(resolved)
+				el.Src = resolved
 			}
 		}
 	}
@@ -320,7 +353,9 @@ const {spawn} = require('child_process');
 const [chromePath, url, framesDir, wRaw, hRaw, fpsRaw, countRaw, portRaw, profile] = process.argv.slice(2);
 const width=Number(wRaw), height=Number(hRaw), fps=Number(fpsRaw), frames=Number(countRaw), port=Number(portRaw);
 fs.mkdirSync(framesDir,{recursive:true});
-const chrome = spawn(chromePath, ['--headless=new','--disable-gpu','--hide-scrollbars','--mute-audio','--allow-file-access-from-files','--remote-debugging-port='+port,'--user-data-dir='+profile,'about:blank'], {stdio:['ignore','pipe','pipe']});
+const extraArgs = (process.env.CHROME_EXTRA_ARGS||'').split(/\s+/).filter(Boolean);
+const progressFrom = Number(process.env.COMPOSER_PROGRESS_FROM||0), progressTo = Number(process.env.COMPOSER_PROGRESS_TO||0);
+const chrome = spawn(chromePath, ['--headless=new','--disable-gpu','--hide-scrollbars','--mute-audio','--allow-file-access-from-files','--remote-debugging-port='+port,'--user-data-dir='+profile,...extraArgs,'about:blank'], {stdio:['ignore','pipe','pipe']});
 process.once('SIGINT',()=>{chrome.kill('SIGTERM');process.exit(130)});
 process.once('SIGTERM',()=>{chrome.kill('SIGTERM');process.exit(143)});
 chrome.stderr.on('data', d => process.stderr.write(d));
@@ -329,6 +364,6 @@ async function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 async function getJSON(path){const res=await fetch('http://127.0.0.1:'+port+path); if(!res.ok) throw new Error('HTTP '+res.status+' '+path); return res.json();}
 async function waitChrome(){for(let i=0;i<80;i++){try{return await getJSON('/json/list')}catch(e){await sleep(100)}} throw new Error('Chrome did not start');}
 function cdp(wsUrl){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl); let id=0; const pending=new Map(); ws.onopen=()=>resolve({send(method,params={}){return new Promise((res,rej)=>{const mid=++id; pending.set(mid,{res,rej}); ws.send(JSON.stringify({id:mid,method,params}));});}, close(){ws.close();}}); ws.onerror=reject; ws.onmessage=e=>{const msg=JSON.parse(e.data); if(msg.id&&pending.has(msg.id)){const p=pending.get(msg.id); pending.delete(msg.id); msg.error?p.rej(new Error(JSON.stringify(msg.error))):p.res(msg.result)}};});}
-(async()=>{try{let pages=await waitChrome(); let page=pages.find(p=>p.type==='page')||pages[0]; let dev=await cdp(page.webSocketDebuggerUrl); await dev.send('Page.enable'); await dev.send('Runtime.enable'); await dev.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false}); await dev.send('Page.navigate',{url}); for(let attempt=0;attempt<100;attempt++){const ready=await dev.send('Runtime.evaluate',{expression:'typeof window.__composerReady !== \"undefined\"',returnByValue:true}); if(ready.result?.value)break; if(attempt===99)throw new Error('Composer page did not load'); await sleep(100);} const ready=await dev.send('Runtime.evaluate',{expression:'window.__composerReady',awaitPromise:true}); if(ready.exceptionDetails)throw new Error('Composer assets failed to load: '+JSON.stringify(ready.exceptionDetails)); for(let i=0;i<frames;i++){let t=i/fps+Number(process.env.COMPOSER_EXCERPT_START||0); const evaluated=await dev.send('Runtime.evaluate',{expression:'window.__setComposerTime('+t+')',awaitPromise:true}); if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails)); const cap=await dev.send('Page.captureScreenshot',{format:'jpeg',quality:92,clip:{x:0,y:0,width,height,scale:1},captureBeyondViewport:false}); fs.writeFileSync(framesDir+'/frame_'+String(i+1).padStart(6,'0')+'.jpg', Buffer.from(cap.data,'base64')); if(i%120===0) process.stderr.write('frame '+i+'/'+frames+'\\n');} dev.close(); chrome.kill('SIGTERM');}catch(e){chrome.kill('SIGTERM'); console.error(e.stack||e); process.exit(1);}})();
+(async()=>{try{let pages=await waitChrome(); let page=pages.find(p=>p.type==='page')||pages[0]; let dev=await cdp(page.webSocketDebuggerUrl); await dev.send('Page.enable'); await dev.send('Runtime.enable'); await dev.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false}); await dev.send('Page.navigate',{url}); for(let attempt=0;attempt<100;attempt++){const ready=await dev.send('Runtime.evaluate',{expression:'typeof window.__composerReady !== \"undefined\"',returnByValue:true}); if(ready.result?.value)break; if(attempt===99)throw new Error('Composer page did not load'); await sleep(100);} const ready=await dev.send('Runtime.evaluate',{expression:'window.__composerReady',awaitPromise:true}); if(ready.exceptionDetails)throw new Error('Composer assets failed to load: '+JSON.stringify(ready.exceptionDetails)); for(let i=0;i<frames;i++){let t=i/fps+Number(process.env.COMPOSER_EXCERPT_START||0); const evaluated=await dev.send('Runtime.evaluate',{expression:'window.__setComposerTime('+t+')',awaitPromise:true}); if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails)); const cap=await dev.send('Page.captureScreenshot',{format:'jpeg',quality:92,clip:{x:0,y:0,width,height,scale:1},captureBeyondViewport:false}); fs.writeFileSync(framesDir+'/frame_'+String(i+1).padStart(6,'0')+'.jpg', Buffer.from(cap.data,'base64')); if(i%120===0) process.stderr.write('frame '+i+'/'+frames+'\\n'); if(progressTo>progressFrom&&(i+1)%12===0) process.stdout.write('APTEVA_PROGRESS:'+(progressFrom+(progressTo-progressFrom)*(i+1)/frames).toFixed(3)+'\n');} dev.close(); chrome.kill('SIGTERM');}catch(e){chrome.kill('SIGTERM'); console.error(e.stack||e); process.exit(1);}})();
 `
 }

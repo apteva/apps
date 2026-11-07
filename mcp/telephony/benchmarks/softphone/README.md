@@ -19,6 +19,9 @@ profiles require at least 17 seconds, including four seconds for recovery.
 
 Each run writes `REPORT.md`, machine-readable `results.json`, and browser
 measurements under the ignored `benchmarks/softphone/results/<timestamp>/`.
+It also writes `host-load.json`: timestamped aggregate CPU activity, load average
+and physical free memory during the entire run, including compilation. Physical
+free memory is not a measurement of memory pressure or reclaimable memory.
 Use `--output /absolute/path` to select a different directory. Keep reports
 with release evidence; they are not bundled into the frontend. A failing usable
 profile, infrastructure error, or failure to recover makes the command fail.
@@ -58,6 +61,18 @@ healthy and playback recovers. UI blocking must be observed by runtime
 telemetry without violating the usable audio gates. The runtime observer
 measures scheduling delay beyond its one-second interval, rather than the
 full duration of a busy interval.
+
+The benchmark also observes the synthetic microphone and playback render clocks
+through direct Worklet ports in a separate Worker. `independent_render_clocks`
+contains bounded timestamped progress samples, probe RTT/uncertainty and the
+observer's own timer gaps. It keeps measuring while the UI is blocked and starts
+a separate baseline for replacement playback contexts. Clock replies taking more
+than 50 ms are excluded as uncertain; observations do not subtract delays from
+the scored audio timings or convert failures into passes. Correlate these clocks,
+server stage/drop timestamps and host CPU samples before attributing a failure to
+the softphone or to a busy computer. A host can delay the browser, local carrier
+fixture, proxy or Telephony server; simultaneous CPU saturation establishes
+contention, not which process caused every gap.
 
 For a separate processing-cost microbenchmark in a real Chromium Worker:
 

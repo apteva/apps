@@ -50,7 +50,7 @@ func resourceByProviderType(t *testing.T, ctx *sdk.AppCtx, accountID int64, prov
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
 		        capabilities_json, metadata_json, managed_by_app,
-		        COALESCE(refreshed_at,'')
+		        COALESCE(refreshed_at,''), audience_provenance_json
 		 FROM ad_resources
 		 WHERE project_id='test-proj' AND ad_account_id=? AND provider_type=?`,
 		accountID, providerType,
@@ -184,6 +184,9 @@ func TestGoogleResourceDiscoveryPaginatesAndKeepsQueriesScoped(t *testing.T) {
 		}
 		if strings.Contains(query, "FROM asset") {
 			return executeJSON(`{"results":[{"asset":{"id":"31","resourceName":"customers/1234567890/assets/31","name":"Quote form","type":"LEAD_FORM","leadFormAsset":{"businessName":"Example","headline":"Get a quote","privacyPolicyUrl":"https://example.com/privacy"}}}]}`), nil
+		}
+		if strings.Contains(query, "FROM custom_audience") || strings.Contains(query, "FROM audience") {
+			return executeJSON(`{"results":[]}`), nil
 		}
 		if !strings.Contains(query, "user_list") {
 			t.Fatalf("unexpected GAQL query: %s", query)

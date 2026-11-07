@@ -26,19 +26,21 @@ type listenerAudioFrame struct {
 	at   time.Time
 }
 type callListener struct {
-	coaching   coachingState
-	coachStops chan coachingStop
-	hash       string
-	audio      chan listenerAudioFrame
-	done       chan struct{}
-	once       sync.Once
-	dropped    [2]atomic.Int64
-	sent       [2]atomic.Int64
-	stale      [2]atomic.Int64
-	trimmed    [2]atomic.Int64
-	maxWriteMS atomic.Int64
-	mu         sync.Mutex
-	reason     string
+	rtcCaptureSequence atomic.Uint32
+	rtc                *listenerRTCConn
+	coaching           coachingState
+	coachStops         chan coachingStop
+	hash               string
+	audio              chan listenerAudioFrame
+	done               chan struct{}
+	once               sync.Once
+	dropped            [2]atomic.Int64
+	sent               [2]atomic.Int64
+	stale              [2]atomic.Int64
+	trimmed            [2]atomic.Int64
+	maxWriteMS         atomic.Int64
+	mu                 sync.Mutex
+	reason             string
 }
 
 func (l *callListener) close(reason string) {
@@ -46,7 +48,18 @@ func (l *callListener) close(reason string) {
 }
 func (l *callListener) closeReason() string { l.mu.Lock(); defer l.mu.Unlock(); return l.reason }
 func (l *callListener) diagnostics() map[string]any {
-	return map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load(), "coaching": l.coaching.grant.Enabled, "coach_starts": l.coaching.starts.Load(), "coach_received_frames": l.coaching.received.Load(), "coach_dropped_frames": l.coaching.dropped.Load()}
+	result := map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load(), "coaching": l.coaching.grant.Enabled, "coach_starts": l.coaching.starts.Load(), "coach_received_frames": l.coaching.received.Load(), "coach_dropped_frames": l.coaching.dropped.Load()}
+	if l.rtc != nil {
+		result["media_transport"] = "webrtc"
+		result["rtp"] = map[string]rtcMediaSnapshot{"caller": l.rtc.stats[0].snapshot(), "adviser": l.rtc.stats[1].snapshot()}
+		result["coach_rtp"] = l.rtc.coachStats.snapshot()
+		if l.rtc.ice != nil {
+			result["ice_events"] = l.rtc.ice.snapshot()
+		}
+	} else {
+		result["media_transport"] = "websocket"
+	}
+	return result
 }
 
 type callAudioTap struct {
@@ -426,10 +439,13 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			return
 		}
 		grant.PeerHash, grant.OwnerHash = phoneHash(row.PeerToken), phoneHash(owner)
-		h := a.softphones.lookup(id)
-		h.mu.Lock()
-		grant.BrowserEpoch = h.browserEpoch
-		h.mu.Unlock()
+		epoch, ok := a.coachingBrowserEpoch(id)
+		if !ok {
+			// The adviser hub can be released between the capability check and here.
+			writeJSONStatus(w, 409, map[string]any{"code": "adviser_not_connected"})
+			return
+		}
+		grant.BrowserEpoch = epoch
 	}
 	principal, providerJSON := "", ""
 	if p != nil {
@@ -492,6 +508,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
+	authenticatedCarrierHeaders(w, r, row)
 	tap := a.listeners.lookup(id)
 	if tap == nil {
 		http.Error(w, "media disconnected", 409)
@@ -515,9 +532,89 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
+	transport := r.URL.Query().Get("transport")
+	if transport != "" && transport != "websocket" && transport != "webrtc" {
+		writeJSONStatus(w, 400, map[string]any{"code": "unsupported_media_transport"})
+		return
+	}
+	if transport != "webrtc" {
+		var principal string
+		if err = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal); err != nil {
+			http.Error(w, "listener policy unavailable", 503)
+			return
+		}
+		var identity phoneIdentity
+		if principal != "" && (json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid()) {
+			http.Error(w, "listener identity invalid", 403)
+			return
+		}
+		policy, e := a.resolvedTURNPolicy(row.ProjectID, identity, r.URL.Query())
+		if e != nil {
+			http.Error(w, "relay policy unavailable", 503)
+			return
+		}
+		if policy.ICEPolicy == "relay" {
+			writeJSONStatus(w, 426, map[string]any{"code": "turn_relay_required", "message": "Select WebRTC for the required relay policy"})
+			return
+		}
+	}
+	var rtcConfig softphoneRTCConfig
+	if transport == "webrtc" {
+		config := map[string]string{}
+		if globalCtx != nil {
+			config = globalCtx.WithProject(row.ProjectID).Config()
+		}
+		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		attachRTCResourcePolicy(&rtcConfig, globalCtx)
+		if err != nil || !rtcConfig.Enabled {
+			writeJSONStatus(w, 503, map[string]any{"code": "webrtc_unavailable"})
+			return
+		}
+		rtcConfig.FEC, err = parseRTCFECPreference(r.URL.Query())
+		if err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_webrtc_fec"})
+			return
+		}
+	}
+	if transport == "webrtc" {
+		var principal string
+		if err = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal); err != nil {
+			http.Error(w, "listener unavailable", 503)
+			return
+		}
+		var identity phoneIdentity
+		if principal != "" && (json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid()) {
+			http.Error(w, "listener identity invalid", 403)
+			return
+		}
+		if err = a.configureManagedTURN(&rtcConfig, row, token, identity, true, r.URL.Query()); err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_turn_policy", "message": err.Error()})
+			return
+		}
+	}
+
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		return
+	}
+	if transport == "webrtc" {
+		rtc, stop, e := connectListenerRTC(conn, readConn, rtcConfig, l)
+		if e != nil {
+			return
+		}
+		defer stop()
+		l.rtc = rtc
+		conn = rtc
+		readConn = rtc
+		// Setup can overlap expiry/revocation. Verify again before admitting media.
+		current, e := a.db().findCall(id)
+		if e != nil || current == nil {
+			return
+		}
+		reason, verifiedExpiry = a.listenerSessionCheck(current, token)
+		if reason != "" {
+			return
+		}
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
@@ -535,7 +632,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db().db.Exec(`UPDATE telephony_listener_audit SET left_at=?,reason=?,diagnostics_json=? WHERE id=?`, ringTime(time.Now()), l.closeReason(), string(b), auditID)
 		_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, l.hash)
 	}()
-	ready, _ := json.Marshal(map[string]any{"type": "listener.ready", "sample_rate": 24000, "channels": 2, "coaching": l.coaching.grant.Enabled})
+	ready, _ := json.Marshal(map[string]any{"type": "listener.ready", "sample_rate": 24000, "channels": 2, "coaching": l.coaching.grant.Enabled, "media_transport": map[bool]string{true: "webrtc", false: "websocket"}[l.rtc != nil]})
 	_ = writer.Write(ws.OpText, ready)
 	var auditMu sync.Mutex
 	spurt := ""
@@ -550,6 +647,26 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	finishSpurt := func(reason string) { finishSpurtFor(0, reason) }
 	defer func() { finishSpurt(l.closeReason()) }()
+	// Coaching target checks are serialized with answer/attach/takeover and
+	// refresh the cached authorization the coach media path relies on.
+	targetCheck := func() (*callRow, string, int64, error) {
+		if l.coaching.grant.Enabled {
+			unlock := a.softphones.lockClaim(id)
+			defer unlock()
+		}
+		current, e := a.db().findCall(id)
+		if e != nil || current == nil || isTerminalStatus(current.Status) {
+			l.coaching.clearTargetVerified()
+			return current, "", 0, e
+		}
+		reason, expiry := a.listenerSessionCheck(current, token)
+		if reason == "" {
+			l.coaching.markTargetVerified()
+		} else {
+			l.coaching.clearTargetVerified()
+		}
+		return current, reason, expiry, e
+	}
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() { close(done); <-watcherDone }()
@@ -580,7 +697,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				event, _ := json.Marshal(map[string]any{"type": "coach.stopped", "generation": stopped.generation, "reason": stopped.reason})
 				writer.queueControl(event)
 			case <-ticker.C:
-				current, e := a.db().findCall(id)
+				current, reason, expiry, e := targetCheck()
 				if e != nil && verifiedExpiry > time.Now().Unix() {
 					if h := a.softphones.lookup(id); h != nil {
 						h.stopCoach(l, "policy_unavailable")
@@ -602,7 +719,6 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 					finishSpurt("talk_timeout")
 
 				}
-				reason, expiry := a.listenerSessionCheck(current, token)
 				if reason == "" {
 					verifiedExpiry = expiry
 					continue
@@ -682,6 +798,11 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 							reason = "media_session_lookup_failed"
 						} else if current != nil {
 							reason, _ = a.listenerSessionCheck(current, token)
+						}
+						if reason == "" {
+							l.coaching.markTargetVerified()
+						} else {
+							l.coaching.clearTargetVerified()
 						}
 						if temporaryMediaFailure(reason) {
 							if h := a.softphones.lookup(id); h != nil {

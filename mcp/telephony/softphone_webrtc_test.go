@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"math"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -311,8 +312,9 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 		t.Fatal(e)
 	}
 	var config struct {
-		Type    string             `json:"type"`
-		Servers []webrtc.ICEServer `json:"ice_servers"`
+		Type    string                    `json:"type"`
+		Servers []webrtc.ICEServer        `json:"ice_servers"`
+		Policy  webrtc.ICETransportPolicy `json:"ice_transport_policy"`
 	}
 	if json.Unmarshal(data, &config) != nil || config.Type != "webrtc.config" {
 		t.Fatal(string(data))
@@ -321,7 +323,7 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 	if e != nil {
 		t.Fatal(e)
 	}
-	pc, e := api.NewPeerConnection(webrtc.Configuration{ICEServers: config.Servers})
+	pc, e := api.NewPeerConnection(webrtc.Configuration{ICEServers: config.Servers, ICETransportPolicy: config.Policy})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -374,7 +376,7 @@ func rtcTestConnect(t *testing.T, url string, beforeConnect ...func()) *rtcTestB
 	case <-time.After(5 * time.Second):
 		t.Fatal("test ICE timeout")
 	}
-	text, _ := json.Marshal(map[string]string{"type": "webrtc.offer", "sdp": pc.LocalDescription().SDP})
+	text, _ := json.Marshal(map[string]any{"type": "webrtc.offer", "sdp": pc.LocalDescription().SDP, "ice_version": 1})
 	if e := wsutil.WriteClientText(socket, text); e != nil {
 		t.Fatal(e)
 	}
@@ -423,8 +425,13 @@ func TestRTCCallerCancellationCannotReviveCall(t *testing.T) {
 	}
 }
 
-func TestRTCPrivateCoachingUsesAdviserControlOnly(t *testing.T) {
-	rtcTestCtx(t)
+func TestRTCPrivateCoachingUsesAdviserRTPOnly(t *testing.T) {
+	for _, rate := range []string{"48000", "24000"} {
+		t.Run(rate, func(t *testing.T) { testRTCPrivateCoachingAtRate(t, rate) })
+	}
+}
+func testRTCPrivateCoachingAtRate(t *testing.T, rate string) {
+	rtcTestCtxAtRate(t, rate)
 	app := &App{installID: 42}
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
@@ -455,9 +462,39 @@ func TestRTCPrivateCoachingUsesAdviserControlOnly(t *testing.T) {
 	if !h.startCoach(l, 1) || !h.forwardCoach(l, 1, make([]byte, 160), mediaClockMS()) {
 		t.Fatal("RTC coach rejected")
 	}
-	got := readBinaryWithin(t, b.socket, 2*time.Second)
-	if len(got) != 176 || binary.LittleEndian.Uint32(got) != coachPlaybackMagic {
-		t.Fatal("whisper wire", len(got))
+	decoder, err := newRTCOpusDecoderWithFEC(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoder.Close()
+	pcm := make([]int16, 2880)
+	deadline = time.Now().Add(2 * time.Second)
+	heard := false
+	for !heard && time.Now().Before(deadline) {
+		if !h.forwardCoach(l, 1, make([]byte, 160), mediaClockMS()) {
+			t.Fatal("private overlay rejected")
+		}
+		select {
+		case packet := <-b.caller:
+			n, e := decoder.decode(packet, pcm)
+			if e == nil && rmsPCM(pcm[:n]) > 500 {
+				heard = true
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if !heard {
+		t.Fatal("coaching was not heard on adviser RTP")
+	}
+	b.socket.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
+	for {
+		data, op, e := wsutil.ReadServerData(b.socket)
+		if e != nil {
+			break
+		}
+		if op == ws.OpBinary {
+			t.Fatalf("PCM coaching on RTC signaling: %d", len(data))
+		}
 	}
 	peer.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 	if data, op, e := wsutil.ReadServerData(peer); e == nil && op == ws.OpBinary && len(data) > 0 {
@@ -469,20 +506,30 @@ func TestRTCPrivateCoachingUsesAdviserControlOnly(t *testing.T) {
 	}
 }
 
-func rtcTestCtx(t *testing.T) {
+func rtcTestCtx(t *testing.T) { rtcTestCtxAtRate(t, "48000") }
+func rtcTestCtxAtRate(t *testing.T, rate string) {
 	t.Helper()
 	previous := globalCtx
-	globalCtx = tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true"}))
+	globalCtx = tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true", "softphone_webrtc_encoder_input_rate": rate}))
 	t.Cleanup(func() { globalCtx = previous })
 }
 
 func TestRTCExistingHubMediaHoldAndReplacement(t *testing.T) {
+	for _, query := range []string{"", "&webrtc_fec=false"} {
+		t.Run("fec"+query, func(t *testing.T) { testRTCExistingHubMediaHoldAndReplacement(t, query) })
+	}
+}
+
+func testRTCExistingHubMediaHoldAndReplacement(t *testing.T, query string) {
 	rtcTestCtx(t)
 	app := &App{installID: 42}
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
-	b := rtcTestConnect(t, server.URL+"/softphone/media/call-soft-1/peer-secret?transport=webrtc")
+	b := rtcTestConnect(t, server.URL+"/softphone/media/call-soft-1/peer-secret?transport=webrtc"+query)
+	if query != "" && !strings.Contains(b.pc.RemoteDescription().SDP, "useinbandfec=0") {
+		t.Fatal("browser was still asked to send FEC", b.pc.RemoteDescription().SDP)
+	}
 	encoder, _ := opus.NewEncoder(opus.WithChannels(1), opus.WithBitrate(32000))
 	pcm := make([]float32, 960)
 	packet := make([]byte, 1275)
@@ -500,6 +547,11 @@ func TestRTCExistingHubMediaHoldAndReplacement(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	got := readBinaryWithin(t, peer, 3*time.Second)
+	pcmGot, sourceAt, sourced := decodeMicrophoneSource(got)
+	if !sourced || sourceAt.IsZero() || time.Since(sourceAt) > 2*time.Second {
+		t.Fatal("missing capture provenance", sourceAt)
+	}
+	got = pcmGot
 	if len(got) != 960 {
 		t.Fatal("hub PCM", len(got))
 	}
@@ -535,6 +587,16 @@ func TestRTCExistingHubMediaHoldAndReplacement(t *testing.T) {
 	}
 	hub := app.softphones.lookup("call-soft-1")
 	old := hub.browserWriter()
+	if query != "" {
+		state := old.conn.(*rtcHubConn).stats.snapshot().Encoder
+		expected := "go_opus_plc"
+		if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
+			expected = "libopus_plc"
+		}
+		if state == nil || state.FEC || state.FECRequested || state.Capability != expected {
+			t.Fatal("FEC opt-out selected the wrong codec", state)
+		}
+	}
 	hub.setHeld(true)
 	hub.forwardMicrophone(old, []byte{1, 0})
 	if !hub.held {
@@ -606,7 +668,7 @@ func TestRTCDiagnosticsPersistenceAndLossAccounting(t *testing.T) {
 	a := &App{installID: 42}
 	insertSoftphoneCall(t, a, "in-progress")
 	b := browserAudioDiagnostics{MediaTransport: "webrtc", Codec: "opus", MicrophoneMuted: true,
-		WebRTC: &browserWebRTCStats{Protocol: "udp", CandidateType: "relay", PacketsLost: 3, PacketsDiscarded: 2, ConcealedMS: 20, JitterMS: math.NaN(), SendBitrateBPS: math.Inf(1)},
+		WebRTC: &browserWebRTCStats{Protocol: "udp", CandidateType: "relay", PacketsLost: 3, PacketsDiscarded: 2, ConcealedMS: func() *float64 { v := 20.; return &v }(), JitterMS: math.NaN(), SendBitrateBPS: math.Inf(1)},
 		Server: &serverAudioDiagnostics{WebRTC: rtcMediaSnapshot{OutboundDroppedMS: 40, IngressRejectedPackets: 1}}}
 	if e := a.db().updateBrowserAudioDiagnostics("call-soft-1", b); e != nil {
 		t.Fatal(e)
@@ -698,26 +760,40 @@ func TestRTPLiveClockCannotAccumulateEncoderSchedulingDelay(t *testing.T) {
 	steady := rtcRTPClock{base: start}
 	for i := 1; i <= 100; i++ {
 		tick := start.Add(time.Duration(i) * 20 * time.Millisecond)
-		if steady.sent && steady.slot(tick) <= steady.lastSlot {
-			t.Fatal("encoder phase suppressed a normal tick")
+		if slots, fill, skipped := steady.plan(tick, 0); slots != 1 || !fill || skipped != 0 {
+			t.Fatal("encoder phase suppressed a normal tick", i, slots, fill, skipped)
 		}
-		ts, skipped := steady.next(tick.Add(4 * time.Millisecond))
-		if ts != uint32(i*960) || skipped != 0 {
-			t.Fatal("steady RTP clock drift", ts, skipped)
+		// Encoding finishing later in the slot cannot move the media time.
+		if ts := steady.take(tick.Add(4 * time.Millisecond)); ts != uint32(i*960) {
+			t.Fatal("steady RTP clock drift", ts)
 		}
 	}
 	clock := rtcRTPClock{baseTS: 0xfffffe00}
-	first, _ := clock.next(start)
+	first := clock.take(start)
+	last := first
 	for i := 1; i <= 200; i++ {
 		now := start.Add(time.Duration(i) * 30 * time.Millisecond) // slower than 20ms encoder cadence
-		ts, _ := clock.next(now)
-		elapsed := time.Duration(uint32(ts-first)) * time.Second / 48000
+		slots, _, skipped := clock.plan(now, 6)
+		if skipped != 0 {
+			t.Fatal("slow cadence opened a hole", skipped)
+		}
+		for range slots {
+			ts := clock.take(now)
+			if uint32(ts-last) != 960 {
+				t.Fatal("media time not continuous", ts, last)
+			}
+			last = ts
+		}
+		elapsed := time.Duration(uint32(last-first)) * time.Second / 48000
 		if gap := now.Sub(start) - elapsed; gap < 0 || gap >= 20*time.Millisecond {
 			t.Fatal("RTP clock accumulated delay", gap)
 		}
 	}
-	before, _ := clock.next(start.Add(7 * time.Second))
-	after, skipped := clock.next(start.Add(12 * time.Second))
+	// Pauses past the catch-up limit jump the timeline instead.
+	clock.plan(start.Add(7*time.Second), 0)
+	before := clock.take(start.Add(7 * time.Second))
+	_, _, skipped := clock.plan(start.Add(12*time.Second), 0)
+	after := clock.take(start.Add(12 * time.Second))
 	if uint32(after-before) != 48000*5 || skipped != 4980 {
 		t.Fatal("process pause did not advance live RTP timeline", before, after, skipped)
 	}
@@ -774,5 +850,21 @@ func TestRTCTransportPaddingIsNotAudioLoss(t *testing.T) {
 	v := stats.snapshot()
 	if v.IngressPaddingPackets != 100 || v.IngressRejectedPackets != 0 || v.IngressQueueDrops != 0 || len(v.Events) != 0 {
 		t.Fatal("padding reported as audio fault", v)
+	}
+}
+
+func TestRTCRelayConfigurationEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		json  string
+		relay bool
+	}{
+		{`[]`, false}, {`[{"urls":["stun:example.org:3478"]}]`, false},
+		{`[{"urls":["turn:example.org:3478"],"username":"restricted","credential":"secret"}]`, true},
+		{`[{"urls":["turns:example.org:5349?transport=tcp"],"username":"restricted","credential":"secret"}]`, true},
+	} {
+		config, err := parseSoftphoneRTCConfig(map[string]string{"softphone_webrtc_enabled": "true", "softphone_webrtc_ice_servers": tc.json})
+		if err != nil || config.relayConfigured() != tc.relay {
+			t.Fatalf("relay %v error %v", config.relayConfigured(), err)
+		}
 	}
 }

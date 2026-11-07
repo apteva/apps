@@ -46,7 +46,7 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 	if err != nil {
 		return nil, err
 	}
-	providerBound, err := mobileSigningProviderBinding(providerName)
+	providerBound, err := cloudIntegrationForSigning(providerName, cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,36 @@
+name: Design Studio checks
+on:
+  push:
+    branches: [main]
+    tags: ['design/v*']
+    paths: ['mcp/design/**', '.github/workflows/design.yml']
+  pull_request:
+    paths: ['mcp/design/**', '.github/workflows/design.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: mcp/design
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/design/go.mod
+          cache-dependency-path: mcp/design/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: mcp/design/runner
+      - run: go test -short ./...
+      - run: go vet ./...
+      - run: go mod verify
+      - run: bun run ../../scripts/build-panels.ts --app design
+      - run: go build -o /tmp/apteva-design .

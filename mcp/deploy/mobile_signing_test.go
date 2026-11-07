@@ -123,17 +123,18 @@ func TestAndroidMobileSigningSetupProvisionsCodemagic(t *testing.T) {
 
 type mobileSigningPlatform struct {
 	tk.BasePlatformClient
-	calls          []integrationCall
-	appExists      bool
-	bundleID       string
-	groupID        string
-	groupName      string
-	variables      map[string]string
-	certificateSeq int
-	profileSeq     int
-	failTool       string
-	capabilities   map[string]string
-	certificates   map[string]bool
+	calls              []integrationCall
+	appExists          bool
+	bundleID           string
+	groupID            string
+	groupName          string
+	variables          map[string]string
+	certificateSeq     int
+	profileSeq         int
+	failTool           string
+	capabilities       map[string]string
+	certificates       map[string]bool
+	certificateContent map[string]string
 }
 
 func (p *mobileSigningPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -177,7 +178,7 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		if p.bundleID == "" {
 			data = json.RawMessage(`{"data":[]}`)
 		} else {
-			data = json.RawMessage(fmt.Sprintf(`{"data":[{"id":%q}]}`, p.bundleID))
+			data = json.RawMessage(fmt.Sprintf(`{"data":[{"id":%q,"attributes":{"identifier":%q}}]}`, p.bundleID, input["identifier"]))
 		}
 	case "register_bundle_id":
 		p.bundleID = "bundle-resource-1"
@@ -226,13 +227,16 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 			NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0), IsCA: true,
 			KeyUsage: x509.KeyUsageCertSign, PublicKey: &caKey.PublicKey,
 		}, csr.PublicKey, caKey)
-		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"attributes":{"certificateContent":%q}}}`,
-			id, base64.StdEncoding.EncodeToString(certificateDER)))
+		if p.certificateContent == nil {
+			p.certificateContent = map[string]string{}
+		}
+		p.certificateContent[id] = base64.StdEncoding.EncodeToString(certificateDER)
+		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"attributes":{"certificateContent":%q}}}`, id, p.certificateContent[id]))
 	case "list_certificates":
 		items := make([]map[string]any, 0, len(p.certificates))
 		for id, available := range p.certificates {
 			if available {
-				items = append(items, map[string]any{"id": id, "attributes": map[string]any{}})
+				items = append(items, map[string]any{"id": id, "attributes": map[string]any{"certificateContent": p.certificateContent[id]}})
 			}
 		}
 		data, _ = json.Marshal(map[string]any{"data": items})
@@ -652,7 +656,7 @@ func TestMobileSigningSetupPausesForManualAppRecordThenResumes(t *testing.T) {
 	}
 }
 
-func TestMobileSigningRotationReplacesThenCleansOldAppleResources(t *testing.T) {
+func TestMobileSigningRotationPreservesSharedAppleCertificate(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, d := newIOSSigningDeployment(t, platform)
 	app := &App{}
@@ -674,7 +678,7 @@ func TestMobileSigningRotationReplacesThenCleansOldAppleResources(t *testing.T) 
 	if deleteProfile == nil || deleteProfile.Input["profile_id"] != first.Setup.AppleProfileID {
 		t.Fatalf("delete profile=%#v", deleteProfile)
 	}
-	if revokeCertificate == nil || revokeCertificate.Input["certificate_id"] != first.Setup.AppleCertificateID {
+	if revokeCertificate != nil {
 		t.Fatalf("revoke certificate=%#v", revokeCertificate)
 	}
 	if signingCallCount(platform.calls, "update_group_variable") < 6 {
@@ -790,4 +794,53 @@ func lastSigningCallIndex(calls []integrationCall, tool string) int {
 		}
 	}
 	return -1
+}
+
+func TestIncompleteAppleSigningBundleCorrection(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: false}
+	_, d := newIOSSigningDeployment(t, platform)
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Ready {
+		t.Fatal("expected incomplete signing")
+	}
+	// Simulate stale identity-dependent state from an interrupted setup.
+	first.Setup.AppleProfileID = "old-profile"
+	first.Setup.AppleCertificateID = "unrelated-certificate"
+	first.Setup.ProviderSecretRef = "old-secrets"
+	if _, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), first.Setup); err != nil {
+		t.Fatal(err)
+	}
+	d.TargetConfigJSON = `{"bundle_id":"com.example.corrected","scheme":"Example"}`
+	platform.bundleID = "corrected-bundle-resource"
+	platform.appExists = true
+	corrected, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !corrected.Ready || corrected.Setup.AppleBundleResourceID != "corrected-bundle-resource" || corrected.Setup.BundleID != "com.example.corrected" || corrected.Setup.AppleProfileID == "old-profile" {
+		t.Fatalf("corrected=%+v", corrected)
+	}
+	profile := lastSigningCall(platform.calls, "create_profile")
+	if profile == nil || profile.Input["bundle_id"] != "corrected-bundle-resource" {
+		t.Fatalf("profile=%+v", profile)
+	}
+	if signingCallCount(platform.calls, "revoke_certificate") != 0 || signingCallCount(platform.calls, "delete_profile") != 0 {
+		t.Fatal("correction revoked unrelated resources")
+	}
+	d.TargetConfigJSON = `{"bundle_id":"com.example.another","scheme":"Example"}`
+	if _, err = app.setupMobileSigning(t.Context(), d, "", false); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("ready identity changed: %v", err)
+	}
+}
+
+func TestAppleBundleResourceRequiresMatchingIdentifier(t *testing.T) {
+	for _, raw := range []string{`{"data":[{"id":"wrong","attributes":{"identifier":"com.other"}}]}`, `{"data":[{"id":"unknown"}]}`} {
+		if _, err := matchingAppleBundleResource(json.RawMessage(raw), "com.expected"); err == nil {
+			t.Fatal("accepted mismatched Apple resource")
+		}
+	}
 }

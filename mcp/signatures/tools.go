@@ -28,15 +28,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		"required":     sBool(),
 	}, "recipient_id", "field_type", "page", "x", "y", "width", "height")
 	return []sdk.Tool{
-		{Name: "signatures_envelopes_create", Description: "Create a draft envelope from a PDF in Storage.", InputSchema: schemaObject(map[string]any{
+		{Name: "signatures_envelopes_create", Description: "Create a draft envelope from a PDF in Storage. Pass layout (slug) to place a saved layout's recipients and fields automatically, with recipients[i] naming layout role i.", InputSchema: schemaObject(map[string]any{
 			"source_file_id": sInteger(), "title": sString(), "sender_name": sString(), "message": sString(), "expires_at": sString(),
+			"layout": sString(), "recipients": map[string]any{"type": "array", "items": schemaObject(map[string]any{"name": sString(), "email": sString()})},
 		}, "source_file_id", "title"), Handler: a.toolEnvelopeCreate},
 		{Name: "signatures_envelopes_update", Description: "Update a draft envelope.", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "title": sString(), "sender_name": sString(), "message": sString(), "expires_at": sString(),
 		}, "envelope_id"), Handler: a.toolEnvelopeUpdate},
 		{Name: "signatures_envelopes_get", Description: "Get an envelope with recipients and fields.", InputSchema: schemaObject(map[string]any{"envelope_id": sInteger()}, "envelope_id"), Handler: a.toolEnvelopeGet},
 		{Name: "signatures_envelopes_list", Description: "List envelopes.", InputSchema: schemaObject(map[string]any{"status": sString(), "limit": sInteger()}), Handler: a.toolEnvelopeList},
-		{Name: "signatures_recipients_set", Description: "Replace a draft envelope's ordered recipients.", InputSchema: schemaObject(map[string]any{
+		{Name: "signatures_recipients_set", Description: "Replace a draft envelope's recipients. Recipients sharing a signing_order sign at the same time; distinct orders run in sequence.", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "recipients": map[string]any{"type": "array", "items": recipientItem},
 		}, "envelope_id", "recipients"), Handler: a.toolRecipientsSet},
 		{Name: "signatures_fields_set", Description: "Replace a draft envelope's fields.", InputSchema: schemaObject(map[string]any{
@@ -48,7 +49,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "signatures_envelopes_send", Description: "Freeze and activate a draft envelope.", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "delivery_mode": map[string]any{"type": "string", "enum": []string{"manual", "messaging"}}, "idempotency_key": sString(),
 		}, "envelope_id", "delivery_mode"), Handler: a.toolEnvelopeSend},
-		{Name: "signatures_recipient_link_create", Description: "Generate or rotate the current recipient's signing link.", InputSchema: schemaObject(map[string]any{
+		{Name: "signatures_recipient_link_create", Description: "Generate or rotate an active recipient's signing link (every recipient in the current signing_order group is active).", InputSchema: schemaObject(map[string]any{
 			"envelope_id": sInteger(), "recipient_id": sInteger(),
 		}, "envelope_id", "recipient_id"), Handler: a.toolRecipientLinkCreate},
 		{Name: "signatures_envelopes_remind", Description: "Send a reminder through optional Messaging.", InputSchema: schemaObject(map[string]any{
@@ -61,6 +62,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			"envelope_id": sInteger(),
 		}, "envelope_id"), Handler: a.toolEnvelopeFinalize},
 		{Name: "signatures_audit_get", Description: "Return an envelope's append-only audit timeline.", InputSchema: schemaObject(map[string]any{"envelope_id": sInteger()}, "envelope_id"), Handler: a.toolAuditGet},
+		{Name: "signatures_layouts_list", Description: "List saved layouts (reusable signer roles and field positions).", InputSchema: schemaObject(map[string]any{}), Handler: a.toolLayoutsList},
+		{Name: "signatures_layouts_get", Description: "Get one saved layout by layout_id or slug.", InputSchema: schemaObject(map[string]any{"layout_id": sInteger(), "slug": sString()}), Handler: a.toolLayoutGet},
+		{Name: "signatures_layouts_save", Description: "Create or replace a layout by slug. recipients[] are roles (label, role, signing_order; equal orders sign together); fields[] use recipient = role index and normalized page coordinates.", InputSchema: schemaObject(map[string]any{
+			"slug": sString(), "name": sString(), "description": sString(),
+			"recipients": map[string]any{"type": "array", "items": schemaObject(map[string]any{"label": sString(), "role": map[string]any{"type": "string", "enum": []string{"signer", "approver"}}, "signing_order": sInteger()}, "label")},
+			"fields": map[string]any{"type": "array", "items": schemaObject(map[string]any{
+				"recipient": sInteger(), "field_type": map[string]any{"type": "string", "enum": []string{"signature", "initials", "date_signed", "text", "checkbox"}},
+				"page": sInteger(), "x": sNumber(), "y": sNumber(), "width": sNumber(), "height": sNumber(), "label": sString(), "required": sBool(),
+			}, "recipient", "field_type", "page", "x", "y", "width", "height")},
+		}, "name", "recipients", "fields"), Handler: a.toolLayoutSave},
+		{Name: "signatures_layouts_save_from_envelope", Description: "Save an envelope's recipients (names become role labels) and field positions as a layout.", InputSchema: schemaObject(map[string]any{
+			"envelope_id": sInteger(), "slug": sString(), "name": sString(), "description": sString(),
+		}, "envelope_id", "name"), Handler: a.toolLayoutSaveFromEnvelope},
+		{Name: "signatures_layouts_delete", Description: "Delete a saved layout.", InputSchema: schemaObject(map[string]any{"layout_id": sInteger()}, "layout_id"), Handler: a.toolLayoutDelete},
+		{Name: "signatures_seal_certificate_get", Description: "Describe the certificate that digitally seals completed PDFs: source (configured or self_signed), subject, issuer, SHA-256 fingerprint, validity, PEM, and how Acrobat will treat it.", InputSchema: schemaObject(map[string]any{}), Handler: a.toolSealCertificateGet},
+		{Name: "signatures_seal_verify", Description: "Check the digital seal of a PDF in Storage: whether it is sealed, whether every byte is still covered by an intact signature, and whether it was sealed by this install.", InputSchema: schemaObject(map[string]any{"file_id": sInteger()}, "file_id"), Handler: a.toolSealVerify},
 	}
 }
 
@@ -80,11 +97,36 @@ func (a *App) toolEnvelopeCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if expiresAt.Before(time.Now().UTC().Add(15 * time.Minute)) {
 		return nil, errors.New("expires_at must be at least 15 minutes in the future")
 	}
+	var layout *Layout
+	var people []map[string]any
+	if slug := stringArg(args, "layout"); slug != "" {
+		if layout, err = getLayout(ctx.AppDB(), ctx.CurrentProject(), 0, slug); err != nil {
+			return nil, err
+		}
+		if _, ok := args["recipients"]; ok {
+			if people, err = mapSliceArg(args, "recipients"); err != nil {
+				return nil, err
+			}
+		}
+		if len(people) > len(layout.Recipients) {
+			return nil, fmt.Errorf("layout %q has %d roles but %d recipients were given", layout.Slug, len(layout.Recipients), len(people))
+		}
+	}
 	env, err := createEnvelope(ctx.AppDB(), ctx.CurrentProject(), file, bytesHash(body), stringArg(args, "title"), stringArg(args, "sender_name"), stringArg(args, "message"), expiresAt)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"envelope": env}, nil
+	if layout == nil {
+		return map[string]any{"envelope": env}, nil
+	}
+	if _, _, err := applyLayout(ctx.AppDB(), ctx.CurrentProject(), env.ID, layout, people); err != nil {
+		return nil, fmt.Errorf("draft envelope %d created but layout %q could not be applied: %w", env.ID, layout.Slug, err)
+	}
+	detail, err := getEnvelopeDetail(ctx.AppDB(), ctx.CurrentProject(), env.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"envelope": detail, "layout": layout.Slug}, nil
 }
 
 func (a *App) toolEnvelopeUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -186,18 +228,20 @@ func (a *App) toolEnvelopeSend(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if valid, _ := result["valid"].(bool); !valid {
 		return nil, fmt.Errorf("envelope is not ready: %v", result["errors"])
 	}
-	env, recipient, err := activateEnvelope(ctx.AppDB(), ctx.CurrentProject(), envelopeID, deliveryMode, idempotencyKey)
+	env, active, err := activateEnvelope(ctx.AppDB(), ctx.CurrentProject(), envelopeID, deliveryMode, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}
 	emit(ctx, "envelope.sent", env, 0)
-	if deliveryMode == "messaging" && recipient != nil {
-		_, _, token, err := createRecipientToken(ctx.AppDB(), env.ProjectID, env.ID, recipient.ID)
-		if err != nil {
-			return nil, fmt.Errorf("envelope activated but signing link creation failed: %w", err)
-		}
-		if err := sendInvitation(ctx, env, recipient, token, false); err != nil {
-			return nil, fmt.Errorf("envelope activated but invitation delivery failed: %w", err)
+	if deliveryMode == "messaging" {
+		for i := range active {
+			_, _, token, err := createRecipientToken(ctx.AppDB(), env.ProjectID, env.ID, active[i].ID)
+			if err != nil {
+				return nil, fmt.Errorf("envelope activated but signing link creation failed: %w", err)
+			}
+			if err := sendInvitation(ctx, env, &active[i], token, false); err != nil {
+				return nil, fmt.Errorf("envelope activated but invitation delivery failed: %w", err)
+			}
 		}
 	}
 	detail, err := getEnvelopeDetail(ctx.AppDB(), ctx.CurrentProject(), envelopeID, false)
@@ -275,4 +319,92 @@ func (a *App) toolAuditGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"events": events}, nil
+}
+
+func (a *App) toolSealCertificateGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"seal": seal.info(ctx)}, nil
+}
+
+func (a *App) toolSealVerify(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	fileID := int64Arg(args, "file_id")
+	if fileID == 0 {
+		return nil, errors.New("file_id required")
+	}
+	file, body, err := storageDownload(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := verifySealedPDF(body, seal)
+	return map[string]any{"file_id": file.ID, "file_name": file.Name, "sha256": bytesHash(body), "verification": result}, nil
+}
+
+func (a *App) toolLayoutsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	layouts, err := listLayouts(ctx.AppDB(), ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"layouts": layouts}, nil
+}
+
+func (a *App) toolLayoutGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	layout, err := getLayout(ctx.AppDB(), ctx.CurrentProject(), int64Arg(args, "layout_id"), stringArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"layout": layout}, nil
+}
+
+func (a *App) toolLayoutSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	recipientSpecs, err := mapSliceArg(args, "recipients")
+	if err != nil {
+		return nil, err
+	}
+	recipients, err := parseLayoutRecipients(recipientSpecs)
+	if err != nil {
+		return nil, err
+	}
+	fieldSpecs, err := mapSliceArg(args, "fields")
+	if err != nil {
+		return nil, err
+	}
+	fields, err := parseLayoutFields(fieldSpecs, recipients)
+	if err != nil {
+		return nil, err
+	}
+	layout, err := saveLayout(ctx.AppDB(), ctx.CurrentProject(), stringArg(args, "slug"), stringArg(args, "name"), stringArg(args, "description"), recipients, fields)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"layout": layout}, nil
+}
+
+func (a *App) toolLayoutSaveFromEnvelope(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	envelopeID := int64Arg(args, "envelope_id")
+	if _, err := getEnvelopeRequired(ctx.AppDB(), ctx.CurrentProject(), envelopeID); err != nil {
+		return nil, err
+	}
+	recipients, fields, err := layoutFromEnvelope(ctx.AppDB(), ctx.CurrentProject(), envelopeID)
+	if err != nil {
+		return nil, err
+	}
+	layout, err := saveLayout(ctx.AppDB(), ctx.CurrentProject(), stringArg(args, "slug"), stringArg(args, "name"), stringArg(args, "description"), recipients, fields)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"layout": layout}, nil
+}
+
+func (a *App) toolLayoutDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := deleteLayout(ctx.AppDB(), ctx.CurrentProject(), int64Arg(args, "layout_id")); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true}, nil
 }

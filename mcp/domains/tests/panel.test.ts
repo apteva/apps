@@ -14,6 +14,11 @@ const calls: any[] = [];
 const waiting = new Map<string, () => void>();
 let delayAlpha = false;
 let needsMailMode = false;
+let spaceshipMode = false;
+let spaceshipSubmitted = false;
+let storedValuation = false;
+let activeListing = false;
+let soldListing = false;
 const caps = {
   write_types: ["A", "TXT", "MX", "SRV"],
   delete_types: ["A", "TXT", "MX", "SRV"],
@@ -27,7 +32,7 @@ beforeAll(async () => {
   await Bun.write(
     entry,
     `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import Panel from ${JSON.stringify(source)};
- function Test(){const [scope,setScope]=useState({projectId:'project-a',installId:1});React.useEffect(()=>{const f=e=>setScope(e.detail);window.addEventListener('test-scope',f);return()=>window.removeEventListener('test-scope',f)},[]);return <Panel {...scope} appName="domains"/>}createRoot(document.getElementById('root')).render(<Test/>);`,
+ window.__aptevaAppEvents={subscribe:(app,project,fn)=>{const handler=e=>fn(e.detail);window.addEventListener('test-domain-event',handler);return()=>window.removeEventListener('test-domain-event',handler)}};function Test(){const [scope,setScope]=useState({projectId:'project-a',installId:1});React.useEffect(()=>{const f=e=>setScope(e.detail);window.addEventListener('test-scope',f);return()=>window.removeEventListener('test-scope',f)},[]);return <Panel {...scope} appName="domains"/>}createRoot(document.getElementById('root')).render(<Test/>);`,
   );
   const build = await Bun.build({
     entrypoints: [entry],
@@ -58,7 +63,7 @@ beforeAll(async () => {
           connections: [
             {
               id: 1,
-              app_slug: "porkbun",
+              app_slug: spaceshipMode ? "spaceship" : "porkbun",
               name: "Account one",
               status: "active",
               dns_default: true,
@@ -112,6 +117,17 @@ beforeAll(async () => {
               },
             ],
           });
+        }
+        if(body.tool==="domain_sale_get") return Response.json(activeListing?{provider:"spaceship",state:soldListing?"sold":"on_sale",status:soldListing?"sold":"onSale",listed:!soldListing,snapshot:{state:soldListing?"sold":"on_sale",checked_at:"2026-10-14T10:00:00Z"},raw:{name:body.args.domain,status:soldListing?"sold":"onSale",binPriceEnabled:true,binPrice:{amount:"145",currency:"USD"}}}:{});
+        if(body.tool==="domain_sale_history")return Response.json({history:activeListing?[{id:1,state:"on_sale",source:"worker",observed_at:"2026-10-14T10:00:00Z"}]:[],sales:soldListing?[{id:1,sold_at:"2026-10-14T10:10:00Z",sale_price:"145.00",payout:"130.50",currency:"USD"}]:[]});
+        if (body.tool === "domain_estimate_start") return Response.json({cached:storedValuation&&!body.args.force_new});
+        if (body.tool === "domain_estimate_list") return Response.json({valuations:storedValuation?[{id:1,domain:body.args.domain,status:"succeeded",auction:0,marketplace:145,brokerage:457,created_at:"2026-10-14T09:15:37Z"}]:[]});
+        if (spaceshipMode) {
+          const purchase = {confirmation_token: "spaceship-token", status: spaceshipSubmitted ? "processing" : "prepared", domain: "fresh.example", provider:"spaceship", connection_id:1, years:2, auto_renew:true, whois_privacy:true, billing_mode:"account_rate", options:{contacts:{registrant:"1ZdMXpapqp9sle5dl8BlppTJXAzf5"}}, expires_at:"2030-01-01T00:00:00Z"};
+          if (body.tool === "domain_availability_check") return Response.json({availability:{domain:body.args.domain,available:true,known:true,provider:"spaceship",min_duration:1}});
+          if (body.tool === "domain_registration_prepare") return Response.json(purchase);
+          if (body.tool === "domain_register") {spaceshipSubmitted=true; return Response.json({registered:false,status:"processing",operation_id:"operation123"})}
+          if (body.tool === "domain_registration_status") return Response.json(body.args.confirmation_token ? {...purchase,operation_id:"operation123"} : {intents:[]});
         }
         if (body.tool === "domain_registration_status")
           return Response.json({ intents: [] });
@@ -361,4 +377,82 @@ test("Namecheap requires an explicit mail mode when provider metadata is absent"
     needsMailMode = false;
     await page.close();
   }
+});
+
+test("Spaceship purchase shows account-rate consent and keeps accepted operations pending", async () => {
+  spaceshipMode=true;spaceshipSubmitted=false;calls.length=0;
+  const page=await loadPage();
+  try {
+    await page.getByRole("button",{name:"Register",exact:true}).click();
+    await page.getByLabel("Domain",{exact:true}).fill("fresh.example");
+    await page.getByRole("button",{name:"Check availability",exact:true}).click();
+    const review=page.getByRole("button",{name:"Review purchase",exact:true});
+    expect(await review.isDisabled()).toBe(true);
+    await page.getByLabel("Spaceship contact ID",{exact:true}).fill("1ZdMXpapqp9sle5dl8BlppTJXAzf5");
+    await page.getByLabel("Registration years",{exact:true}).fill("2");
+    await page.getByText("I reviewed Spaceship pricing",{exact:false}).click();
+    await review.click();
+    const dialog=page.getByRole("dialog");await dialog.waitFor();
+    expect(await dialog.textContent()).toContain("No guaranteed quote");
+    const preparation=calls.find(c=>c.tool==="domain_registration_prepare");expect(preparation.args.accept_account_rate).toBe(true);expect(preparation.args.years).toBe(2);
+    await dialog.getByRole("button",{name:"Register and pay",exact:true}).click();
+    await dialog.getByRole("button",{name:"Check purchase status",exact:true}).waitFor();
+    expect(await dialog.textContent()).toContain("processing");
+    expect(await dialog.textContent()).toContain("Checking status does not submit another purchase.");
+  } finally {spaceshipMode=false;await page.close()}
+});
+
+ test("stored estimates are shown for an available domain before purchase", async()=>{
+  storedValuation=true;calls.length=0;const page=await loadPage();
+  try{
+   await page.getByRole("button",{name:"Register",exact:true}).click();
+   await page.getByLabel("Domain",{exact:true}).fill("vectorlantern.com");
+   await page.getByRole("button",{name:"Check availability",exact:true}).click();
+   await page.getByText(/marketplace \$145/).waitFor();
+   expect(await page.getByText(/auction \$0/).count()).toBe(1);
+   expect(calls.some(c=>c.tool==="domain_estimate_list"&&c.args.domain==="vectorlantern.com"&&c.args.refresh===false)).toBe(true);
+   expect(calls.some(c=>c.tool==="domain_estimate_start"||c.tool==="domain_register")).toBe(false);
+  }finally{storedValuation=false;await page.close()}
+ });
+
+test("listing status and price survive a panel reload without publishing",async()=>{
+ activeListing=true;calls.length=0;const page=await loadPage();
+ try{
+  await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByText("Listing status: For sale · Buy now $145 USD",{exact:true}).waitFor();
+  expect(await page.getByLabel("Listing price",{exact:true}).inputValue()).toBe("145");
+  await page.reload();await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByText("Listing status: For sale · Buy now $145 USD",{exact:true}).waitFor();
+  expect(calls.some(c=>c.tool==="domain_sale_publish")).toBe(false);
+ }finally{activeListing=false;await page.close()}
+});
+
+test("a scoped bus sale event updates saved state and payout without a paid action",async()=>{
+ activeListing=true;soldListing=false;calls.length=0;const page=await loadPage();
+ try{
+  await page.getByText("alpha.example",{exact:true}).click();await page.getByText("Listing status: For sale · Buy now $145 USD",{exact:true}).waitFor();
+  soldListing=true;const before=calls.length;
+  await page.evaluate(()=>window.dispatchEvent(new CustomEvent('test-domain-event',{detail:{topic:'domain.sold',project_id:'other-project',install_id:1,seq:1,data:{event_id:'other',domain:'alpha.example'}}})));
+  expect(calls.length).toBe(before);
+  await page.evaluate(()=>window.dispatchEvent(new CustomEvent('test-domain-event',{detail:{topic:'domain.sold',project_id:'project-a',install_id:1,seq:2,data:{event_id:'sale-1',domain:'alpha.example'}}})));
+  await page.getByText(/Sold — provider confirmed/).waitFor();await page.getByText(/payout 130.50 USD/).waitFor();
+  expect(await page.getByRole('button',{name:'Publish listing',exact:true}).isDisabled()).toBe(true);
+  expect(calls.some(c=>['domain_sale_publish','domain_register','domain_estimate_start'].includes(c.tool))).toBe(false);
+ }finally{activeListing=false;soldListing=false;await page.close()}
+});
+
+
+test("saved estimate reuse and explicit paid refresh remain separate actions",async()=>{
+ storedValuation=true;calls.length=0;const page=await loadPage();
+ try{
+  await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByRole("button",{name:"New paid estimate",exact:true}).waitFor();
+  expect(calls.some(c=>c.tool==="domain_estimate_start")).toBe(false);
+  await page.getByRole("button",{name:"Estimate with HumbleWorth",exact:true}).click();
+  await page.getByText("Reused a stored estimate; no new paid prediction.",{exact:true}).waitFor();
+  const first=calls.find(c=>c.tool==="domain_estimate_start");expect(first.args.force_new).toBeUndefined();
+  await page.getByRole("button",{name:"New paid estimate",exact:true}).click();
+  await page.getByText("Estimate submitted and stored.",{exact:true}).waitFor();
+  expect(calls.filter(c=>c.tool==="domain_estimate_start").at(-1).args.force_new).toBe(true);
+ }finally{storedValuation=false;await page.close()}
 });

@@ -14,14 +14,17 @@ func (a *App) softphoneOfferResponse(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	var request struct {
-		OfferID string `json:"offer_id"`
+		OfferID          string              `json:"offer_id"`
+		BrowserTabID     string              `json:"browser_tab_id,omitempty"`
+		BrowserSessionID string              `json:"browser_session_id,omitempty"`
+		Watch            *browserWatchHealth `json:"watch,omitempty"`
 	}
 	if decodeJSONBody(r, &request) != nil || request.OfferID == "" {
 		http.Error(w, "offer_id required", 400)
 		return
 	}
 	p := phoneUserFrom(r)
-	if p == nil {
+	if p == nil && decline {
 		http.Error(w, "application user required", 403)
 		return
 	}
@@ -47,7 +50,7 @@ func (a *App) softphoneOfferResponse(w http.ResponseWriter, r *http.Request, pro
 	}
 	var selected *ringOffer
 	for i := range offers {
-		if offers[i].ID == request.OfferID && offers[i].Kind == "browser" && p.Destinations[offers[i].DestinationID] && a.destinationAllowsIdentity(project, offers[i].DestinationID, p.Identity) {
+		if offers[i].ID == request.OfferID && offers[i].Kind == "browser" && (p == nil || p.Destinations[offers[i].DestinationID] && a.destinationAllowsIdentity(project, offers[i].DestinationID, p.Identity)) {
 			selected = &offers[i]
 			break
 		}
@@ -55,6 +58,12 @@ func (a *App) softphoneOfferResponse(w http.ResponseWriter, r *http.Request, pro
 	if selected == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if !decline && (request.BrowserTabID != "" || request.BrowserSessionID != "") {
+		if !safeBrowserTelemetryID(request.BrowserTabID) || !safeBrowserTelemetryID(request.BrowserSessionID) {
+			http.Error(w, "invalid browser correlation", 400)
+			return
+		}
 	}
 	now := ringTime(time.Now())
 	if !decline {
@@ -68,6 +77,13 @@ func (a *App) softphoneOfferResponse(w http.ResponseWriter, r *http.Request, pro
 		if n == 0 {
 			http.Error(w, "offer expired", 409)
 			return
+		}
+		if request.BrowserSessionID != "" {
+			event := browserOfferEvent{CallID: callID, OfferID: selected.ID, Stage: "browser_acknowledged", EventID: "ack-" + phoneHash(selected.ID)[:24], RequestID: r.Header.Get("X-Request-ID")}
+			if err := a.storeBrowserTelemetry(r, project, request.BrowserTabID, request.BrowserSessionID, []browserOfferEvent{event}, request.Watch, true); err != nil {
+				http.Error(w, "receipt telemetry unavailable", 503)
+				return
+			}
 		}
 		writeJSON(w, map[string]any{"offer_id": selected.ID, "acknowledged": true})
 		return

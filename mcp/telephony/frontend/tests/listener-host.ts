@@ -10,7 +10,7 @@ w.loadListener = async () => {
     w.client = w.loaded.client;
   }
   w.calls = await w.client.listCalls();
-  w.callListener = w.client.createCallListener({ stereo: true, onDiagnostics: (value: unknown) => { w.listenerDiagnostics = value; } });
+  w.callListener = w.client.createCallListener({ stereo: true,mediaTransport:(new URLSearchParams(location.search).get("transport")??"websocket") as "websocket"|"webrtc"|"auto", onDiagnostics: (value: unknown) => { w.listenerDiagnostics = value; } });
   document.querySelector("#listen")!.addEventListener("click", () => { w.listenPromise = w.callListener.listen(w.calls[0].id); });
 };
 

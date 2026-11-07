@@ -1,0 +1,415 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type yahooPublic struct {
+	base   string
+	client *http.Client
+	// Concurrency cap on parallel symbol fetches. Yahoo's unofficial
+	// rate limit is ~2k/hour observed; capping at 4 in-flight keeps
+	// us well under that even on tick-heavy UI sessions.
+	sem chan struct{}
+}
+
+// Quote returns a Mark for the given symbol. Hits the chart endpoint
+// with 1d/5m and pulls meta.regularMarketPrice — using the chart
+// endpoint instead of the (more obviously-named) /v7/finance/quote
+// endpoint because the latter has had cookie / crumb requirements
+// added over the years that broke unauthenticated callers. /chart
+// has been stable for the same period.
+func (y *yahooPublic) Quote(symbol string) (*Mark, error) {
+	bars, meta, err := y.fetchChart(symbol, "1d", "5m")
+	if err != nil {
+		return nil, err
+	}
+	_ = bars
+	if meta == nil || meta.RegularMarketPrice <= 0 {
+		return nil, fmt.Errorf("yahoo: no regularMarketPrice for %s", symbol)
+	}
+	mk := &Mark{
+		Symbol:        strings.ToUpper(symbol),
+		AssetClass:    yahooAssetClass(meta, symbol),
+		Price:         meta.RegularMarketPrice,
+		MarkedAt:      yahooRegularMarketTimestamp(meta),
+		TimestampKind: "exchange",
+		Source:        "yahoo-finance",
+		VolumeUnit:    "shares",
+	}
+	mk.Instrument = yahooInstrument(meta, mk.Symbol, mk.AssetClass, time.Now().UTC())
+	if meta.PreviousClose > 0 {
+		pc := meta.PreviousClose
+		mk.PrevClose = &pc
+	}
+	if meta.RegularMarketVolume > 0 {
+		v := meta.RegularMarketVolume
+		mk.Volume24h = &v
+	}
+	return mk, nil
+}
+
+// Bars returns OHLCV history for the given symbol + range. Maps our
+// range chips to Yahoo's (range, interval) tuple. The chart endpoint
+// returns both meta + bars; we ignore meta here and let Quote() own
+// that responsibility.
+func (y *yahooPublic) Bars(symbol, rng string) ([]Bar, error) {
+	yRange, yInterval := yahooRangeFor(rng)
+	bars, _, err := y.fetchChart(symbol, yRange, yInterval)
+	return bars, err
+}
+
+// BacktestBars returns real, date-bounded Yahoo OHLCV for equity and ETF
+// strategy replays. period2 is exclusive in Yahoo's API, while the trading
+// app treats end as inclusive, so the request and local filter use an
+// expanded effective end for daily/weekly bars.
+func (y *yahooPublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	return y.BacktestBarsContext(context.Background(), symbol, interval, start, end, limit)
+}
+
+func (y *yahooPublic) BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	yahooInterval, aggregateFourHour, err := yahooBacktestInterval(interval)
+	if err != nil {
+		return nil, err
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil, fmt.Errorf("yahoo: valid backtest start and end required")
+	}
+	if limit <= 0 {
+		return nil, errors.New("yahoo: positive backtest bar limit required")
+	}
+	effectiveEnd := end.UTC()
+	if yahooInterval == "1d" || yahooInterval == "1wk" {
+		effectiveEnd = time.Date(effectiveEnd.Year(), effectiveEnd.Month(), effectiveEnd.Day(), 23, 59, 59, 0, time.UTC)
+	}
+
+	byTime := make(map[int64]Bar)
+	cursor := start.UTC()
+	exclusiveEnd := effectiveEnd.Add(time.Second)
+	pageSpan := yahooBacktestPageSpan(yahooInterval)
+	for cursor.Before(exclusiveEnd) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pageEnd := cursor.Add(pageSpan)
+		if pageEnd.After(exclusiveEnd) {
+			pageEnd = exclusiveEnd
+		}
+		q := url.Values{}
+		q.Set("period1", fmt.Sprint(cursor.Unix()))
+		q.Set("period2", fmt.Sprint(pageEnd.Unix()))
+		q.Set("interval", yahooInterval)
+		bars, _, err := y.fetchChartQueryContext(ctx, symbol, q)
+		if err != nil {
+			return nil, fmt.Errorf("yahoo history %s to %s: %w",
+				cursor.Format("2006-01-02"), pageEnd.Add(-time.Second).Format("2006-01-02"), err)
+		}
+		for _, bar := range bars {
+			at := time.Unix(bar.T, 0).UTC()
+			if at.Before(start.UTC()) || at.After(effectiveEnd) || bar.C <= 0 {
+				continue
+			}
+			byTime[bar.T] = bar
+		}
+		if !pageEnd.After(cursor) {
+			return nil, errors.New("yahoo: history pagination made no progress")
+		}
+		cursor = pageEnd
+	}
+
+	filtered := make([]Bar, 0, len(byTime))
+	for _, bar := range byTime {
+		filtered = append(filtered, bar)
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].T < filtered[j].T })
+	if aggregateFourHour {
+		filtered = aggregateYahooFourHourBars(filtered)
+	}
+	return filtered, nil
+}
+
+func yahooBacktestPageSpan(interval string) time.Duration {
+	switch interval {
+	case "1m":
+		return 7 * 24 * time.Hour
+	case "5m":
+		return 7 * 24 * time.Hour
+	case "15m":
+		return 28 * 24 * time.Hour
+	case "1h":
+		return 90 * 24 * time.Hour
+	case "1d":
+		return 2 * 365 * 24 * time.Hour
+	case "1wk":
+		return 10 * 365 * 24 * time.Hour
+	default:
+		return 90 * 24 * time.Hour
+	}
+}
+
+func yahooBacktestInterval(interval string) (string, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return "1m", false, nil
+	case "5m":
+		return "5m", false, nil
+	case "15m":
+		return "15m", false, nil
+	case "1h":
+		return "1h", false, nil
+	case "4h":
+		return "1h", true, nil
+	case "1d":
+		return "1d", false, nil
+	case "1w":
+		return "1wk", false, nil
+	default:
+		return "", false, fmt.Errorf("yahoo: unsupported backtest interval %q", interval)
+	}
+}
+
+func aggregateYahooFourHourBars(bars []Bar) []Bar {
+	out := make([]Bar, 0, (len(bars)+3)/4)
+	for i := 0; i < len(bars); {
+		day := time.Unix(bars[i].T, 0).UTC().Format("2006-01-02")
+		dayEnd := i
+		for dayEnd < len(bars) && time.Unix(bars[dayEnd].T, 0).UTC().Format("2006-01-02") == day {
+			dayEnd++
+		}
+		for chunkStart := i; chunkStart < dayEnd; chunkStart += 4 {
+			chunkEnd := chunkStart + 4
+			if chunkEnd > dayEnd {
+				chunkEnd = dayEnd
+			}
+			first := bars[chunkStart]
+			aggregated := Bar{T: first.T, O: first.O, H: first.H, L: first.L}
+			for j := chunkStart; j < chunkEnd; j++ {
+				bar := bars[j]
+				if aggregated.H == 0 || bar.H > aggregated.H {
+					aggregated.H = bar.H
+				}
+				if aggregated.L == 0 || (bar.L > 0 && bar.L < aggregated.L) {
+					aggregated.L = bar.L
+				}
+				aggregated.C = bar.C
+				aggregated.V += bar.V
+			}
+			out = append(out, aggregated)
+		}
+		i = dayEnd
+	}
+	return out
+}
+
+// UniverseBatch fetches multiple symbols in parallel (semaphore-limited).
+// Yahoo doesn't expose a true batched quote in the chart API, so this
+// is N concurrent calls — but with our sem=4 cap, even 50 symbols
+// finishes in ~3-5 seconds and the typical equity universe is 7-10
+// tickers (sub-second batch).
+func (y *yahooPublic) UniverseBatch(symbols []string) ([]*Mark, error) {
+	if len(symbols) == 0 {
+		return nil, nil
+	}
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		out = make([]*Mark, 0, len(symbols))
+	)
+	for _, sym := range symbols {
+		wg.Add(1)
+		go func(s string) {
+			defer wg.Done()
+			y.sem <- struct{}{}
+			defer func() { <-y.sem }()
+			m, err := y.Quote(s)
+			if err != nil || m == nil {
+				return
+			}
+			mu.Lock()
+			out = append(out, m)
+			mu.Unlock()
+		}(sym)
+	}
+	wg.Wait()
+	return out, nil
+}
+
+// yahooMeta — the bits of `chart.result[0].meta` we read. Yahoo packs
+// many more fields in there (52-week range, exchange timezone, market
+// state, etc.); we only pull what feeds Mark.
+type yahooMeta struct {
+	Symbol              string  `json:"symbol"`
+	ShortName           string  `json:"shortName"`
+	LongName            string  `json:"longName"`
+	Currency            string  `json:"currency"`
+	QuoteType           string  `json:"instrumentType"`
+	ExchangeName        string  `json:"exchangeName"`
+	FullExchangeName    string  `json:"fullExchangeName"`
+	ExchangeTimezone    string  `json:"exchangeTimezoneName"`
+	RegularMarketPrice  float64 `json:"regularMarketPrice"`
+	RegularMarketTime   int64   `json:"regularMarketTime"`
+	PreviousClose       float64 `json:"previousClose"`
+	ChartPreviousClose  float64 `json:"chartPreviousClose"`
+	RegularMarketVolume float64 `json:"regularMarketVolume"`
+}
+
+func yahooAssetClass(meta *yahooMeta, symbol string) string {
+	if meta != nil && strings.EqualFold(strings.TrimSpace(meta.QuoteType), "ETF") {
+		return "etf"
+	}
+	return inferAssetClass(symbol)
+}
+
+func yahooInstrument(meta *yahooMeta, symbol, assetClass string, now time.Time) *Instrument {
+	i := defaultInstrument(symbol, assetClass, "yahoo-finance", now)
+	if meta == nil {
+		return i
+	}
+	if strings.TrimSpace(meta.Symbol) != "" {
+		i.ProviderSymbol = strings.ToUpper(strings.TrimSpace(meta.Symbol))
+	}
+	if strings.TrimSpace(meta.LongName) != "" {
+		i.Name = strings.TrimSpace(meta.LongName)
+	} else if strings.TrimSpace(meta.ShortName) != "" {
+		i.Name = strings.TrimSpace(meta.ShortName)
+	}
+	if strings.TrimSpace(meta.FullExchangeName) != "" {
+		i.Exchange = strings.ToUpper(strings.TrimSpace(meta.FullExchangeName))
+	} else if strings.TrimSpace(meta.ExchangeName) != "" {
+		i.Exchange = strings.ToUpper(strings.TrimSpace(meta.ExchangeName))
+	}
+	if strings.TrimSpace(meta.ExchangeTimezone) != "" {
+		i.ExchangeTimezone = strings.TrimSpace(meta.ExchangeTimezone)
+	}
+	if strings.TrimSpace(meta.Currency) != "" {
+		i.QuoteCurrency = strings.ToUpper(strings.TrimSpace(meta.Currency))
+	}
+	return i
+}
+
+func yahooRegularMarketTimestamp(meta *yahooMeta) string {
+	if meta != nil && meta.RegularMarketTime > 0 {
+		return time.Unix(meta.RegularMarketTime, 0).UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
+// fetchChart — single HTTP call, returns (bars, meta) split. The chart
+// endpoint is the workhorse: one request gets everything for a symbol
+// + range. Errors are mapped to nil pointers so callers can decide
+// whether the partial data is usable.
+func (y *yahooPublic) fetchChart(symbol, rng, interval string) ([]Bar, *yahooMeta, error) {
+	q := url.Values{}
+	q.Set("range", rng)
+	q.Set("interval", interval)
+	return y.fetchChartQuery(symbol, q)
+}
+
+func (y *yahooPublic) fetchChartQuery(symbol string, q url.Values) ([]Bar, *yahooMeta, error) {
+	return y.fetchChartQueryContext(context.Background(), symbol, q)
+}
+
+func (y *yahooPublic) fetchChartQueryContext(parent context.Context, symbol string, q url.Values) ([]Bar, *yahooMeta, error) {
+
+	u := y.base + "/v8/finance/chart/" + url.PathEscape(strings.ToUpper(symbol)) + "?" + q.Encode()
+
+	raw, err := publicGET(parent, y.client, "yahoo", u, 4<<20, map[string]string{
+		"User-Agent": "Mozilla/5.0 (compatible; Apteva-Trading/0.4)", "Accept": "application/json",
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Response shape:
+	//   { "chart": { "result": [{ "meta": {...}, "timestamp": [...],
+	//     "indicators": { "quote": [{ "open": [...], "close": [...], ... }] } }],
+	//     "error": null }
+	//   }
+	var resp1 struct {
+		Chart struct {
+			Result []struct {
+				Meta       yahooMeta `json:"meta"`
+				Timestamp  []int64   `json:"timestamp"`
+				Indicators struct {
+					Quote []struct {
+						Open   []float64 `json:"open"`
+						High   []float64 `json:"high"`
+						Low    []float64 `json:"low"`
+						Close  []float64 `json:"close"`
+						Volume []float64 `json:"volume"`
+					} `json:"quote"`
+				} `json:"indicators"`
+			} `json:"result"`
+			Error any `json:"error"`
+		} `json:"chart"`
+	}
+	if err := json.Unmarshal(raw, &resp1); err != nil {
+		return nil, nil, fmt.Errorf("yahoo decode: %w", err)
+	}
+	if resp1.Chart.Error != nil {
+		return nil, nil, fmt.Errorf("yahoo error envelope: %v", resp1.Chart.Error)
+	}
+	if len(resp1.Chart.Result) == 0 {
+		return nil, nil, fmt.Errorf("yahoo: empty result for %s", symbol)
+	}
+	r := resp1.Chart.Result[0]
+	meta := r.Meta
+
+	bars := make([]Bar, 0, len(r.Timestamp))
+	if len(r.Indicators.Quote) > 0 {
+		q := r.Indicators.Quote[0]
+
+		for i, t := range r.Timestamp {
+			if i >= len(q.Close) || q.Close[i] == 0 {
+				continue
+			}
+			bar := Bar{T: t, C: q.Close[i]}
+			if i < len(q.Open) {
+				bar.O = q.Open[i]
+			}
+			if i < len(q.High) {
+				bar.H = q.High[i]
+			}
+			if i < len(q.Low) {
+				bar.L = q.Low[i]
+			}
+			if i < len(q.Volume) {
+				bar.V = q.Volume[i]
+			}
+			bars = append(bars, bar)
+		}
+	}
+	return bars, &meta, nil
+}
+
+// yahooRangeFor — maps our local ChartRange to Yahoo's (range, interval)
+// tuple. Yahoo's range is a separate enum from ours — keep the bar
+// count roughly aligned with bucketsForRange so the chart resolution
+// matches whether you're on Yahoo, Alpaca, or mock.
+func yahooRangeFor(rng string) (string, string) {
+	switch strings.ToUpper(rng) {
+	case "1D":
+		return "1d", "5m"
+	case "5D":
+		return "5d", "30m"
+	case "1M":
+		return "1mo", "1h"
+	case "3M":
+		return "3mo", "1d"
+	case "1Y":
+		return "1y", "1d"
+	case "ALL":
+		return "5y", "1wk"
+	default:
+		return "1d", "5m"
+	}
+}

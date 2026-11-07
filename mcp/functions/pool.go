@@ -90,7 +90,10 @@ type pool struct {
 	life                                                     context.Context
 	closed                                                   bool
 	deleted                                                  map[string]bool
-	lastRetention                                            time.Time
+	storageNextPhase                                         int
+	lastStorageReport                                        time.Time
+	storageLastError                                         string
+	storageLastWork                                          storageWork
 }
 type fnPool struct {
 	sem                 chan struct{}
@@ -152,10 +155,11 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 			return nil, err
 		}
 	}
-	p.maintenanceWG.Add(2)
+	p.maintenanceWG.Add(3)
 	go p.legacyRecoveryLoop()
 	p.startPreparation()
 	go p.reapLoop()
+	go p.storageLoop()
 	return p, nil
 }
 func (p *pool) poolFor(id int64) *fnPool {
@@ -568,7 +572,6 @@ func (p *pool) reapLoop() {
 		case <-ticker.C:
 			p.recoverAbandonedWork()
 			p.reapIdle()
-			p.retainInvocations()
 			p.retainArtifacts()
 		}
 	}
@@ -629,30 +632,6 @@ func (p *pool) shutdown() {
 	p.maintenanceWG.Wait()
 	p.owner.close()
 	_ = removeTree(p.stageDir)
-}
-func (p *pool) retainInvocations() {
-	days := envInt("APTEVA_FUNCTIONS_INVOCATION_RETENTION_DAYS", 30, 1, 3650)
-	p.mu.Lock()
-	if time.Since(p.lastRetention) < time.Hour {
-		p.mu.Unlock()
-		return
-	}
-	p.lastRetention = time.Now()
-	p.mu.Unlock()
-	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
-	// One bounded batch per reaper tick; allow the next tick to continue a backlog.
-	result, err := p.ctx.AppDB().ExecContext(p.life, `DELETE FROM function_invocations WHERE id IN (SELECT id FROM function_invocations WHERE started_at < ? ORDER BY started_at LIMIT 128)`, cutoff)
-	if err != nil {
-		p.ctx.Logger().Warn("prune function invocations", "err", err)
-		return
-	}
-	n, _ := result.RowsAffected()
-	if n == 128 {
-		p.mu.Lock()
-		p.lastRetention = time.Time{}
-		p.mu.Unlock()
-	}
-
 }
 
 func (p *pool) leaseVersion(dir string) (func(), error) {

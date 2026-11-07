@@ -75,28 +75,29 @@ type FunctionVersion struct {
 }
 
 type Invocation struct {
-	Identity     StoredResources `json:"identity,omitempty"`
-	Resources    StoredResources `json:"resources,omitempty"`
-	BuildMS      int64           `json:"build_ms"`
-	QueueMS      int64           `json:"queue_ms"`
-	ColdStartMS  int64           `json:"cold_start_ms"`
-	ExecutionMS  int64           `json:"execution_ms"`
-	VersionID    *int64          `json:"version_id,omitempty"`
-	ConfigHash   string          `json:"config_hash,omitempty"`
-	Truncated    bool            `json:"truncated,omitempty"`
-	ID           int64           `json:"id"`
-	FunctionID   int64           `json:"function_id"`
-	FunctionName string          `json:"function_name,omitempty"`
-	StartedAt    string          `json:"started_at"`
-	FinishedAt   string          `json:"finished_at,omitempty"`
-	DurationMS   int64           `json:"duration_ms"`
-	Status       string          `json:"status"`
-	ExitCode     int             `json:"exit_code"`
-	TriggerKind  string          `json:"trigger_kind"`
-	EventJSON    string          `json:"event_json,omitempty"`
-	ResponseBody string          `json:"response_body,omitempty"`
-	Stderr       string          `json:"stderr,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	DetailsExpired bool            `json:"details_expired,omitempty"`
+	Identity       StoredResources `json:"identity,omitempty"`
+	Resources      StoredResources `json:"resources,omitempty"`
+	BuildMS        int64           `json:"build_ms"`
+	QueueMS        int64           `json:"queue_ms"`
+	ColdStartMS    int64           `json:"cold_start_ms"`
+	ExecutionMS    int64           `json:"execution_ms"`
+	VersionID      *int64          `json:"version_id,omitempty"`
+	ConfigHash     string          `json:"config_hash,omitempty"`
+	Truncated      bool            `json:"truncated,omitempty"`
+	ID             int64           `json:"id"`
+	FunctionID     int64           `json:"function_id"`
+	FunctionName   string          `json:"function_name,omitempty"`
+	StartedAt      string          `json:"started_at"`
+	FinishedAt     string          `json:"finished_at,omitempty"`
+	DurationMS     int64           `json:"duration_ms"`
+	Status         string          `json:"status"`
+	ExitCode       int             `json:"exit_code"`
+	TriggerKind    string          `json:"trigger_kind"`
+	EventJSON      string          `json:"event_json,omitempty"`
+	ResponseBody   string          `json:"response_body,omitempty"`
+	Stderr         string          `json:"stderr,omitempty"`
+	Error          string          `json:"error,omitempty"`
 }
 
 type FunctionFilter struct {
@@ -665,7 +666,7 @@ func scanInvocation(row scanRow, inv *Invocation) error {
 		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
 		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated,
 		&inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS,
-		&inv.Resources, &inv.Identity)
+		&inv.Resources, &inv.Identity, &inv.DetailsExpired)
 }
 
 func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...int64) ([]*Invocation, error) {
@@ -676,7 +677,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.function_id = ? AND (?=0 OR i.id<?)
 		 ORDER BY i.id DESC LIMIT ?`,
@@ -702,7 +703,7 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
-			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
 		 WHERE i.project_id = ? AND i.id = ?`,
 		pid, id)
@@ -734,9 +735,9 @@ func dbRecentInvocationsQuery(db *sql.DB, pid string, query InvocationQuery) ([]
 	return dbRecentInvocationsContext(context.Background(), db, pid, query)
 }
 
-func dbRecentInvocationsContext(parent context.Context, db *sql.DB, pid string, query InvocationQuery) ([]*Invocation, error) {
-	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
-	defer cancel()
+// invocationHistoryPageQuery selects IDs only. Keep payload/telemetry lookup
+// outside this query so it cannot be evaluated for discarded history rows.
+func invocationHistoryPageQuery(pid string, query InvocationQuery) (string, []any, error) {
 	if query.Limit <= 0 || query.Limit > 200 {
 		query.Limit = 50
 	}
@@ -754,7 +755,7 @@ func dbRecentInvocationsContext(parent context.Context, db *sql.DB, pid string, 
 			where = append(where, "i.status = ?")
 			args = append(args, query.Status)
 		default:
-			return nil, fmt.Errorf("invalid invocation status %q", query.Status)
+			return "", nil, fmt.Errorf("invalid invocation status %q", query.Status)
 		}
 	}
 	if query.Cursor > 0 {
@@ -762,30 +763,88 @@ func dbRecentInvocationsContext(parent context.Context, db *sql.DB, pid string, 
 		args = append(args, query.Cursor)
 	}
 	args = append(args, query.Limit)
-	rows, err := db.QueryContext(ctx,
-		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
+	return `SELECT i.id
+		FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
+		WHERE ` + strings.Join(where, " AND ") + ` ORDER BY i.id DESC LIMIT ?`, args, nil
+}
+
+func invocationHistoryDetailsQuery(pid string, ids []int64) (string, []any) {
+	args := []any{pid}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	return `SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
 			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
 			i.trigger_kind, '', '', '', COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,
 			i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,
 			COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),
-			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null'),i.details_expired
 		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
-		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY i.id DESC LIMIT ?`, args...)
+		 WHERE i.project_id = ? AND i.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`, args
+}
+
+func dbRecentInvocationsContext(parent context.Context, db *sql.DB, pid string, query InvocationQuery) ([]*Invocation, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	pageSQL, args, err := invocationHistoryPageQuery(pid, query)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*Invocation{}
+	// A single read snapshot prevents retention/deletion or status changes
+	// between ID selection and detail lookup from changing the selected page.
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, pageSQL, args...)
+	if err != nil {
+		return nil, err
+	}
+	ids := []int64{}
 	for rows.Next() {
-		inv := &Invocation{}
-		if err := scanInvocation(rows, inv); err == nil {
-			out = append(out, inv)
-		} else {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
 	}
-	return out, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Invocation, 0, len(ids))
+	if len(ids) > 0 {
+		detailsSQL, args := invocationHistoryDetailsQuery(pid, ids)
+		rows, err := tx.QueryContext(ctx, detailsSQL, args...)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[int64]*Invocation, len(ids))
+		for rows.Next() {
+			inv := &Invocation{}
+			if err := scanInvocation(rows, inv); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			byID[inv.ID] = inv
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		// Preserve the indexed ID order without sorting telemetry-bearing rows.
+		for _, id := range ids {
+			out = append(out, byID[id])
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ─── Encoders ──────────────────────────────────────────────────────

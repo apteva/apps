@@ -28,39 +28,98 @@ type transaction interface {
 	createIndex(Collection, Index) error
 	dropIndex(Collection, string) error
 	get(Collection, string) (Record, error)
+	insert(Collection, string, Record) error
 	put(Collection, string, Record) error
 	remove(Collection, string) error
 	find(Collection, Query, int) ([]Record, error)
 	aggregate(Collection, Request, Collection) ([]Record, error)
 	explain(Collection, Query) (any, error)
 }
+
 type DatabaseInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Adapter string `json:"adapter"`
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Adapter string            `json:"adapter"`
+	Memory  *NativeMemoryInfo `json:"memory,omitempty"`
 }
 type database struct {
-	mu      sync.RWMutex
-	writes  writeQueue
-	backend backend
-	info    DatabaseInfo
-	key     []byte
-	closed  bool
+	watchesMu sync.Mutex
+	watches   map[*Watch]struct{}
+	realtime  *RealtimeOptions
+	mu        sync.RWMutex
+	writes    writeQueue
+	backend   backend
+	info      DatabaseInfo
+	key       []byte
+	closed    bool
+	schemas   schemaCache
+	users     int    // protected by Manager.mu
+	lastUse   uint64 // protected by Manager.mu
 }
 type Manager struct {
-	mu        sync.Mutex
-	registry  *sql.DB
-	root      string
-	databases map[string]*database
-	secret    string
-	closed    bool
+	watchMu               sync.Mutex
+	watchCount            int
+	watchCallers          map[string]int
+	mu                    sync.Mutex
+	registry              *sql.DB
+	root                  string
+	databases             map[string]*database
+	names                 map[databaseName]*database
+	secret                string
+	durability            string
+	apteva                AptevaOptions
+	closed                bool
+	nativeCacheBudget     int64
+	nativeQueries         chan struct{}
+	nativeQueryAdmissions chan struct{}
+	cacheClock            uint64
 }
 
 func Open(root string) (*Manager, error) {
+	return OpenWithOptions(root, "durable")
+}
+
+// OpenWithOptions opens the manager with an explicit SQLite durability profile.
+// durable is the default and uses synchronous=FULL; balanced uses NORMAL and
+// is intended only when the operator accepts the weaker crash-commit window.
+func OpenWithOptions(root, durability string) (*Manager, error) {
+	return OpenWithConfig(root, ManagerOptions{SQLiteDurability: durability})
+}
+
+func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
+	durability := options.SQLiteDurability
+	if durability == "" {
+		durability = "durable"
+	}
+	if durability != "durable" && durability != "balanced" {
+		return nil, Invalid("durability must be durable or balanced")
+	}
+	apteva := DefaultAptevaOptions()
+	if options.Apteva != nil {
+		apteva = *options.Apteva
+	}
+	apteva, e := apteva.normalized()
+	if e != nil {
+		return nil, e
+	}
+	cacheBudget := options.AptevaCacheBudgetBytes
+	if cacheBudget == 0 {
+		cacheBudget = max(256<<20, apteva.CacheBytes)
+	}
+	if cacheBudget < 1<<20 || cacheBudget > 8<<30 || cacheBudget < apteva.CacheBytes {
+		return nil, Invalid("native total cache target must be 1–8192 MiB and cover one database cache")
+	}
+	concurrency := options.MaxConcurrentAptevaQueries
+	if concurrency == 0 {
+		concurrency = 2
+	}
+	if concurrency < 1 || concurrency > 64 {
+		return nil, Invalid("native query concurrency must be 1–64")
+	}
 	if e := os.MkdirAll(root, 0700); e != nil {
 		return nil, e
 	}
-	root, e := filepath.Abs(root)
+	root, e = filepath.Abs(root)
 	if e != nil {
 		return nil, e
 	}
@@ -68,7 +127,7 @@ func Open(root string) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
-	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL)`)
+	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS realtime (id TEXT PRIMARY KEY, policy TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_access (scope TEXT NOT NULL, database TEXT NOT NULL, app TEXT NOT NULL, access TEXT NOT NULL, PRIMARY KEY(scope,database,app))`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -78,7 +137,7 @@ func Open(root string) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
-	m := &Manager{registry: db, root: root, databases: map[string]*database{}}
+	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva, nativeCacheBudget: cacheBudget, nativeQueries: make(chan struct{}, concurrency), nativeQueryAdmissions: make(chan struct{}, concurrency+maxQueuedNativeQueries)}
 	if e = db.QueryRow(`SELECT value FROM settings WHERE name='secret'`).Scan(&m.secret); e != nil {
 		db.Close()
 		return nil, e
@@ -95,6 +154,7 @@ func (m *Manager) Close() error {
 	var errs []error
 	for _, d := range m.databases {
 		d.mu.Lock()
+		d.closeWatches()
 		d.closed = true
 		errs = append(errs, d.backend.close())
 		d.mu.Unlock()
@@ -121,11 +181,24 @@ func (m *Manager) list(ctx context.Context, scope string) ([]DatabaseInfo, error
 func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, create bool) (*database, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.resolveLocked(ctx, scope, name, adapter, create)
+}
+func (m *Manager) resolveLocked(ctx context.Context, scope, name, adapter string, create bool) (*database, error) {
 	if m.closed {
 		return nil, fail("storage_error", "database app is closed")
 	}
 	if e := nameOK(name); e != nil {
 		return nil, e
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lookup := databaseName{scope: scope, name: name}
+	if d := m.names[lookup]; d != nil {
+		if create && adapter != "" && adapter != d.info.Adapter {
+			return nil, fail("schema_conflict", "database already uses %s", d.info.Adapter)
+		}
+		return d, nil
 	}
 	var info DatabaseInfo
 	e := m.registry.QueryRowContext(ctx, `SELECT id,name,adapter FROM databases WHERE scope=? AND name=?`, scope, name).Scan(&info.ID, &info.Name, &info.Adapter)
@@ -140,8 +213,8 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		if adapter == "" {
 			adapter = "sqlite"
 		}
-		if adapter != "sqlite" && adapter != "pebble" {
-			return nil, Invalid("adapter must be sqlite or pebble")
+		if adapter != "sqlite" && adapter != "pebble" && adapter != "aptevadb" {
+			return nil, Invalid("adapter must be sqlite, pebble or aptevadb")
 		}
 		var n int
 		if e := m.registry.QueryRowContext(ctx, `SELECT count(*) FROM databases WHERE scope=?`, scope).Scan(&n); e != nil {
@@ -150,7 +223,7 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		if n >= 128 {
 			return nil, fail("resource_limit", "at most 128 databases per scope")
 		}
-		info = DatabaseInfo{uuid.NewString(), name, adapter}
+		info = DatabaseInfo{ID: uuid.NewString(), Name: name, Adapter: adapter}
 	} else if create && adapter != "" && adapter != info.Adapter {
 		return nil, fail("schema_conflict", "database already uses %s", info.Adapter)
 	}
@@ -160,15 +233,39 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 	if len(m.databases) >= 128 {
 		return nil, fail("resource_limit", "at most 128 open databases per app")
 	}
+	if info.Adapter == "aptevadb" {
+		if e = m.makeNativeCacheRoom(); e != nil {
+			return nil, e
+		}
+	}
 	dir := filepath.Join(m.root, "databases", info.ID)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return nil, e
 	}
 	var b backend
+	var rt *RealtimeOptions
+	var policy string
+	policyErr := m.registry.QueryRowContext(ctx, `SELECT policy FROM realtime WHERE id=?`, info.ID).Scan(&policy)
+	if policyErr == nil {
+		rt = &RealtimeOptions{}
+		if e = decode([]byte(policy), rt); e != nil {
+			return nil, e
+		}
+	} else if !errors.Is(policyErr, sql.ErrNoRows) {
+		return nil, policyErr
+	}
 	if info.Adapter == "sqlite" {
-		b, e = openSQLite(filepath.Join(dir, "data.sqlite"))
-	} else {
+		b, e = openSQLiteWithDurability(filepath.Join(dir, "data.sqlite"), m.durability)
+	} else if info.Adapter == "pebble" {
 		b, e = openPebble(filepath.Join(dir, "pebble"))
+	} else if info.Adapter == "aptevadb" {
+		options := m.apteva
+		if rt != nil {
+			options.Realtime = rt
+		}
+		b, e = openAptevaDBWithOptions(filepath.Join(dir, "aptevadb"), options)
+	} else {
+		return nil, fail("storage_error", "unknown stored database adapter %s", info.Adapter)
 	}
 	if e != nil {
 		return nil, e
@@ -182,16 +279,27 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		}
 	}
 	key := sha256.Sum256([]byte(m.secret + "/" + info.ID))
-	d := &database{backend: b, info: info, key: key[:]}
+	d := &database{backend: b, info: info, key: key[:], realtime: rt, watches: map[*Watch]struct{}{}}
 	m.databases[info.ID] = d
+	m.names[lookup] = d
 	return d, nil
 }
 func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any, error) {
-	timeout, err := OperationTimeout(op, r.TimeoutMS)
+	if op == "realtime_configure" || op == "realtime_describe" {
+		return m.realtimeOperation(ctx, scope, op, r)
+	}
+	if op == "changes" {
+		return m.pollChanges(ctx, scope, r)
+	}
+	if op == "count" && r.Diagnostics {
+		r.diag = &countDiagnostics{started: time.Now()}
+	}
+	kind := QueryKind(op, r)
+	timeout, err := OperationTimeout(kind, r.TimeoutMS)
 	if err != nil {
 		return nil, err
 	}
-	if op == "find" || op == "count" || op == "aggregate" {
+	if kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch" {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -208,12 +316,37 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "databases_list" {
 		return m.list(ctx, scope)
 	}
-	d, e := m.resolve(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default")
+	if isAccessOp(op) {
+		return m.accessOperation(ctx, scope, op, r)
+	}
+	d, release, e := m.acquireDatabase(ctx, scope, r.Database, r.Adapter, op == "database_create" || r.Database == "default" && op != "query" && r.Pipeline == nil)
 	if e != nil {
 		return nil, e
 	}
+	defer release()
+	if d.info.Adapter == "aptevadb" && (kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch") {
+		done, err := m.acquireNativeQuery(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+	}
+	r.diag.queued()
 	if op == "database_create" || op == "database_describe" {
-		return d.info, nil
+		info := d.info
+		if op == "database_describe" && info.Adapter == "aptevadb" {
+			d.mu.RLock()
+			defer d.mu.RUnlock()
+			if d.closed {
+				return nil, fail("not_found", "database is closed")
+			}
+			stats, err := d.backend.(*aptevaBackend).db.MemoryStats(ctx)
+			if err != nil {
+				return nil, nativeError(err)
+			}
+			info.Memory = nativeMemoryInfo(stats)
+		}
+		return info, nil
 	}
 	if op == "database_drop" {
 		if !r.Confirm {
@@ -230,18 +363,23 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 			return nil, e
 		}
 		d.closed = true
+		d.closeWatches()
+		_, _ = m.registry.ExecContext(ctx, `DELETE FROM realtime WHERE id=?`, d.info.ID)
+		// A later database with the same name must not inherit app access.
+		_, _ = m.registry.ExecContext(ctx, `DELETE FROM app_access WHERE scope=? AND database=?`, scope, r.Database)
 		delete(m.databases, d.info.ID)
+		delete(m.names, databaseName{scope: scope, name: r.Database})
 		if e = d.backend.close(); e != nil {
 			return nil, e
 		}
 		e = os.RemoveAll(filepath.Join(m.root, "databases", d.info.ID))
 		return map[string]any{"deleted": e == nil}, e
 	}
-	write := isWrite(op)
-	if isRecordWrite(op) {
+	write := isWrite(op) && kind != "read_batch"
+	if isRecordWrite(op) && write {
 		if grouped, ok := d.backend.(groupedBackend); ok {
 			return d.enqueueWrite(ctx, grouped, func(tx transaction) (any, error) {
-				return execute(tx, op, r, d.key)
+				return execute(d.cachedTransaction(tx, false), op, r, d.key)
 			})
 		}
 	}
@@ -255,9 +393,61 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if d.closed {
 		return nil, fail("not_found", "database is closed")
 	}
+	if isSchemaWrite(op) {
+		d.schemas.clear()
+		if b, ok := d.backend.(schemaInvalidator); ok {
+			b.invalidateSchema()
+		}
+	}
+	if op == "get" {
+		if b, ok := d.backend.(pointReader); ok {
+			return d.pointRead(ctx, b, r)
+		}
+	}
 	var out any
-	e = d.backend.transaction(ctx, write, func(tx transaction) error { var err error; out, err = execute(tx, op, r, d.key); return err })
+	e = d.backend.transaction(ctx, write, func(tx transaction) error {
+		var err error
+		out, err = execute(d.cachedTransaction(tx, !write), op, r, d.key)
+		return err
+	})
 	return out, e
+}
+
+// batchReads reports whether a batch holds only reads. Reads and writes never
+// mix: a write batch is atomic, a read batch shares one snapshot.
+func batchReads(r Request) (bool, error) {
+	if len(r.Operations) == 0 || len(r.Operations) > 100 {
+		return false, Invalid("batch requires 1–100 operations")
+	}
+	reads, writes := 0, 0
+	for _, o := range r.Operations {
+		switch o.Op {
+		case "query", "get", "find", "count", "aggregate", opRelatedRead, opJoinedPage, opJoinedAggregate:
+			reads++
+		case "insert", "update", "delete", "upsert":
+			writes++
+		default:
+			return false, Invalid("batch accepts record writes (insert, update, delete, upsert) or reads (get, find, count, aggregate)")
+		}
+	}
+	if reads > 0 && writes > 0 {
+		return false, Invalid("batch cannot mix reads and writes")
+	}
+	return reads > 0, nil
+}
+
+// QueryKind names the work an operation does: a batch of only reads is a
+// "read_batch", with read permissions and query deadlines.
+func QueryKind(op string, r Request) string {
+	if op == "query" || isRelationalRead(op) || (op == "find" || op == "aggregate") && (r.Pipeline != nil || hasRelationalInput(r) || r.Relation != nil) {
+		return "read_batch"
+	}
+	if op == "batch" {
+		if reads, _ := batchReads(r); reads {
+			return "read_batch"
+		}
+	}
+	return op
 }
 func isRecordWrite(op string) bool {
 	switch op {
@@ -268,29 +458,32 @@ func isRecordWrite(op string) bool {
 }
 func isWrite(op string) bool {
 	switch op {
-	case "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain":
+	case "query", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain", opRelatedRead, opJoinedPage, opJoinedAggregate:
 		return false
 	}
 	return true
 }
 func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error) {
+	if r.Diagnostics && op != "count" {
+		return nil, Invalid("diagnostics is supported by count")
+	}
+	r.diag.snapshotted()
 	if op == "collections_list" {
 		return tx.collections()
 	}
 	if op == "batch" {
-		if len(r.Operations) == 0 || len(r.Operations) > 100 {
-			return nil, Invalid("batch requires 1–100 operations")
+		reads, e := batchReads(r)
+		if e != nil {
+			return nil, e
+		}
+		if reads {
+			return executeReads(tx, r, cursorKey)
 		}
 		out := []any{}
 		total := 0
 		for _, o := range r.Operations {
 			if o.Request.TimeoutMS != 0 {
-				return nil, Invalid("batch record operations do not accept timeoutMs")
-			}
-			switch o.Op {
-			case "insert", "update", "delete", "upsert":
-			default:
-				return nil, Invalid("batch only accepts record writes")
+				return nil, Invalid("batch operations do not accept timeoutMs; set it on the batch")
 			}
 			if o.Request.Database != "" && o.Request.Database != r.Database {
 				return nil, Invalid("batch cannot span databases")
@@ -307,6 +500,19 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			out = append(out, v)
 		}
 		return map[string]any{"results": out, "affected": total}, nil
+	}
+	if op == "find" || op == "aggregate" {
+		planned, e := planCoreRead(op, r)
+		if e != nil {
+			return nil, e
+		}
+		if r.Pipeline != nil {
+			return executePipelineRead(tx, op, r, cursorKey)
+		}
+		op = planned
+	}
+	if op == "query" {
+		return executeQuery(tx, r)
 	}
 	if op == "collection_create" {
 		c, e := newCollection(r)
@@ -328,6 +534,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		}
 		return c, tx.createCollection(c)
 	}
+	if op == opJoinedAggregate && len(r.Branches) > 0 {
+		return executeJoinedAggregate(tx, Collection{}, r)
+	}
 	if e := nameOK(r.Collection); e != nil {
 		return nil, e
 	}
@@ -337,14 +546,14 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 	}
 	switch op {
 	case "collection_describe":
-		return c, nil
+		return cloneCollection(c), nil
 	case "collection_drop":
 		if !r.Confirm {
 			return nil, Invalid("confirm=true is required")
 		}
 		return map[string]any{"deleted": true}, tx.dropCollection(c)
 	case "indexes_list":
-		return c.Indexes, nil
+		return cloneCollection(c).Indexes, nil
 	case "index_create":
 		if e := validateIndex(c, r.Index); e != nil {
 			return nil, e
@@ -386,8 +595,30 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		if e := validateQuery(c, &r.Query); e != nil {
 			return nil, e
 		}
+		exists, e := prepareExists(tx, c, r.Where)
+		if e != nil {
+			return nil, e
+		}
 		if op == "explain" {
-			return tx.explain(c, r.Query)
+			out, e := tx.explain(c, r.Query)
+			if plan, ok := out.(map[string]any); ok {
+				plan["executed"] = false
+				plan["note"] = "Planned find access; nothing ran. Use count with diagnostics:true for what a count actually did."
+			}
+			return out, e
+		}
+		if len(r.Buckets) > 0 {
+			return nil, Invalid("find does not accept buckets")
+		}
+		if len(r.Lookups) > 0 {
+			for _, l := range r.Lookups {
+				if !lookupLocalIsStored(l) || len(r.Select) > 0 && !contains(r.Select, l.LocalField) {
+					return nil, Invalid("lookup %s needs localField %s as a stored, selected field", l.As, l.LocalField)
+				}
+			}
+			if e := prepareAnalytics(tx, c, &r); e != nil {
+				return nil, e
+			}
 		}
 		q := r.Query
 		if q.Cursor != "" {
@@ -397,39 +628,95 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 			q.Where = and(q.Where, after)
 		}
-		rows, e := tx.find(c, q, q.Limit+1)
+		rows, e := tx.find(c, q, r.Offset+q.Limit+1)
+		if e == nil {
+			e = exists.failure()
+		}
 		if e != nil {
 			return nil, e
 		}
-		return page(c, r.Query, rows, cursorKey)
+		if r.Offset > 0 {
+			rows = rows[min(r.Offset, len(rows)):]
+		}
+		out, e := page(c, r.Query, rows, cursorKey)
+		if e != nil {
+			return nil, e
+		}
+		if r.Count {
+			v, e := execute(tx, "count", Request{Collection: r.Collection, Query: Query{Where: r.Where, RequireIndex: r.RequireIndex}}, cursorKey)
+			if e != nil {
+				return nil, e
+			}
+			out.(map[string]any)["total"] = v.(map[string]any)["count"]
+		}
+		if r.analytics == nil {
+			return out, nil
+		}
+		records := out.(map[string]any)["records"].([]Record)
+		if e := r.analytics.attach(records); e != nil {
+			return nil, e
+		}
+		if len(marshal(records)) > MaxBytes {
+			return nil, fail("resource_limit", "records with lookups exceed 4 MiB; select fewer lookup fields or lower limit")
+		}
+		return out, nil
 	case "count":
+		if r.Diagnostics && r.diag == nil {
+			r.diag = &countDiagnostics{} // inside a read batch, which shares one queue and snapshot
+		}
 		r.Metrics = []Metric{{Name: "count", Op: "count"}}
 		r.GroupBy = nil
 		r.OrderBy = nil
 		r.Limit = 1
 		fallthrough
 	case "aggregate":
-		outSchema, e := validateAggregate(c, &r)
+		view := c
+		if needsAnalytics(r) {
+			if e := prepareAnalytics(tx, c, &r); e != nil {
+				return nil, e
+			}
+			view = r.analytics.view
+		}
+		outSchema, e := validateAggregate(view, &r)
 		if e != nil {
 			return nil, e
 		}
+		if e := validateDerived(outSchema, r.Derived); e != nil {
+			return nil, e
+		}
+		if r.analytics != nil {
+			r.analytics.finish(c, r)
+		}
+		exists, e := prepareExists(tx, c, r.Where)
+		if e != nil {
+			return nil, e
+		}
+		r.diag.begin()
 		rows, e := tx.aggregate(c, r, outSchema)
+		r.diag.end()
+		if e == nil {
+			e = exists.failure()
+		}
 		if e != nil {
 			return nil, e
 		}
 		if op == "count" {
-			return map[string]any{"count": rows[0]["count"]}, nil
+			out := map[string]any{"count": rows[0]["count"]}
+			if r.diag != nil {
+				out["diagnostics"] = r.diag.report(tx, c, r.Query, exists)
+			}
+			return out, nil
 		}
-		if len(marshal(rows)) > MaxBytes {
-			return nil, fail("resource_limit", "aggregate response exceeds 4 MiB")
-		}
-		more := len(rows) > r.Limit
-		if more {
-			rows = rows[:r.Limit]
-		}
-		return map[string]any{"rows": rows, "truncated": more}, nil
+		return finishAggregate(rows, r.Limit, r.Derived)
+
 	case "insert", "upsert", "update", "delete":
 		return mutate(tx, c, op, r)
+	case opRelatedRead:
+		return executeRelatedRead(tx, c, r, cursorKey)
+	case opJoinedPage:
+		return executeJoinedPage(tx, c, r, cursorKey)
+	case opJoinedAggregate:
+		return executeJoinedAggregate(tx, c, r)
 	default:
 		return nil, Invalid("unknown operation %s", op)
 	}
@@ -438,17 +725,14 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 	if r.IfVersion < 0 {
 		return nil, Invalid("ifVersion must be positive")
 	}
-	keys := []Record{}
+	keys := make([]Record, 0, len(r.Records))
 	now := time.Now().UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
 	if op == "insert" || op == "upsert" {
 		if len(r.Records) == 0 || len(r.Records) > MaxRecords {
 			return nil, Invalid("records requires 1–1000 records")
 		}
 		for _, input := range r.Records {
-			row := Record{}
-			for k, v := range input {
-				row[k] = v
-			}
+			row := input
 			var old Record
 			if op == "upsert" && r.ConflictIndex != "" {
 				var ix *Index
@@ -478,15 +762,14 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				if len(found) > 0 {
 					old = found[0]
 				}
-			} else if _, e := primary(c, row); e == nil {
-				pk, _ := primary(c, row)
-				old, e = tx.get(c, pk)
-				if e != nil {
-					return nil, e
+			} else if op == "upsert" {
+				if _, e := primary(c, row); e == nil {
+					pk, _ := primary(c, row)
+					old, e = tx.get(c, pk)
+					if e != nil {
+						return nil, e
+					}
 				}
-			}
-			if old != nil && op == "insert" {
-				return nil, fail("unique_conflict", "primary key already exists")
 			}
 			if old != nil {
 				merged := Record{}
@@ -503,6 +786,11 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			} else if _, supplied := row["id"]; len(c.PrimaryKey) == 1 && c.PrimaryKey[0] == "id" && !supplied {
 				f, _ := c.field("id")
 				if f.Type == "text" {
+					copy := make(Record, len(row)+1)
+					for k, v := range row {
+						copy[k] = v
+					}
+					row = copy
 					row["id"] = uuid.NewString()
 				}
 			}
@@ -510,11 +798,11 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			if e != nil {
 				return nil, e
 			}
-			pk, e := primary(c, row)
+			pk, e := primaryNormalized(c, row)
 			if e != nil {
 				return nil, e
 			}
-			if old == nil {
+			if op == "upsert" && old == nil {
 				existing, e := tx.get(c, pk)
 				if e != nil {
 					return nil, e
@@ -524,7 +812,12 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				}
 			}
 			stamp(row, old, now)
-			if e = tx.put(c, pk, row); e != nil {
+			if op == "insert" {
+				e = tx.insert(c, pk, row)
+			} else {
+				e = tx.put(c, pk, row)
+			}
+			if e != nil {
 				return nil, e
 			}
 			keys = append(keys, keyOf(c, row))
@@ -534,12 +827,21 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			return nil, Invalid("mutations do not accept pagination, ordering or projection")
 		}
 		if len(r.Key) > 0 {
-			if r.Where != nil || r.All || len(r.Key) != len(c.PrimaryKey) {
-				return nil, Invalid("use an exact key or a filter")
+			if r.All || len(r.Key) != len(c.PrimaryKey) {
+				return nil, Invalid("key must contain exactly the primary key fields and cannot be combined with all")
 			}
 			filters := []Filter{}
 			for _, p := range c.PrimaryKey {
+				if _, ok := r.Key[p]; !ok {
+					return nil, Invalid("key must contain exactly the primary key fields and cannot be combined with all")
+				}
 				filters = append(filters, Filter{Field: p, Op: "eq", Value: r.Key[p]})
+			}
+			// A where with a key is a guard: the record must also match it. A
+			// failed guard reads like an absent record (affected 0, or
+			// version_conflict with ifVersion), in the same write transaction.
+			if r.Where != nil {
+				filters = append(filters, *r.Where)
 			}
 			r.Where = &Filter{And: filters}
 		}
@@ -548,6 +850,9 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 		}
 		if r.Where != nil && r.All {
 			return nil, Invalid("all and where cannot be combined")
+		}
+		if hasExists(r.Where) {
+			return nil, Invalid("update and delete cannot use exists")
 		}
 		n := 0
 		if e := validateFilter(c, r.Where, 0, &n); e != nil {
@@ -648,6 +953,16 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 	}
 	return map[string]any{"affected": len(keys), "keys": keys}, nil
 }
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func stamp(r, old Record, now string) {
 	r["_created_at"] = now
 	r["_updated_at"] = now

@@ -4,27 +4,33 @@ go 1.26.1
 
 require (
 	github.com/apteva/app-sdk v0.53.0
+	github.com/digitorus/pdf v0.1.2
+	github.com/digitorus/pdfsign v0.9.0
 	github.com/pdfcpu/pdfcpu v0.11.1
 	github.com/phpdave11/gofpdf v1.4.3
 	modernc.org/sqlite v1.50.0
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
 require (
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
+	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hhrutter/lzw v1.0.0 // indirect
 	github.com/hhrutter/pkcs7 v0.2.0 // indirect
 	github.com/hhrutter/tiff v1.0.2 // indirect
+	github.com/mattetti/filebuffer v1.0.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/crypto v0.43.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/image v0.32.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.0 // indirect

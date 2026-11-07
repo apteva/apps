@@ -1,4 +1,51 @@
-# CRM v0.9.22
+# CRM v0.9.27
+
+Release `crm/v0.9.27`: email replies pin the selected inbound activity (or the
+latest by occurrence time and ID) and use Messaging's `send_message` with
+`reply_to_message_id`. Requires Messaging v0.15.0+. Messaging derives addressing,
+subject, RFC references, Gmail thread/account and supported ticket identifiers.
+CRM validates the source installation and message before dispatch, records the
+anchor in its activity log, and includes it in automatic deduplication. A selected
+activity can identify its conversation without a separate `conversation_id`.
+Saved reply drafts retain their selected anchor. Explicit sender/subject overrides
+keep the regular send contract with the selected message's RFC ID and top-level
+references; legacy activities with unknown source provenance use local RFC data
+without looking up potentially unrelated Messaging IDs. Phone-channel switches
+are preserved. No migrations or historical-message repair. Pins app-sdk v0.115.0.
+
+Release `crm/v0.9.26`: normalize display-name email recipients and retain each
+Messaging event's soft-bounce contribution. Confirmed automatic-response
+corrections remove only the disproved contribution, preserve genuine delivery
+failures and suppressions, and tolerate reversed notification order. Migration
+024 is additive and updates the pending suppression-removal index. Install this
+version before Messaging v0.13.61. Pins app-sdk v0.108.0 by commit topology.
+All previous subject inheritance, drafts, snapshots and unsubscribe behavior is
+preserved. See `../messaging/DELIVERY_RECONCILIATION.md` for rollout and recovery.
+
+Release `crm/v0.9.25`: shared email subject inheritance for `contacts_send_message` and
+`contacts_reply`. Subject resolution precedes dispatch and automatic idempotency;
+explicit nonblank subjects are unchanged and unresolved blanks are rejected.
+SDK pin updated to v0.102.0 by commit topology. No migrations or Messaging
+changes; previously delivered emails are not rewritten or resent.
+
+Release `crm/v0.9.24`: adds the explicitly read-only MCP tool
+`contacts_attribute_definitions_list` to discover project attribute keys, types,
+required flags and allowed values before research-to-CRM promotion. Discovery
+uses SELECT only, the read pool and request cancellation; built-in defaults are
+returned without lazy database writes. `contacts_update` now documents and
+schemas its nested attribute array, native types, merge/clear semantics and
+provenance. Missing attribute values are rejected rather than clearing data.
+CRM pins app-sdk v0.100.0. No migrations, Messaging changes or production repair.
+
+Release `crm/v0.9.23`: save first-outreach drafts for existing contacts and
+outbound follow-ups without requiring an inbound conversation. New messages
+have Save draft / Save & close and reopen from the contact's Saved message
+drafts; outbound-only inbox threads offer Follow up. Saving creates no inbox
+conversation or message. All composer sends use the same durable saved-draft
+workflow. Recipients stay pinned, send eligibility is rechecked, and uncertain
+delivery retries keep the original operation key. Migration 023 preserves every
+existing draft field; no message or conversation history is rewritten.
+Messaging is unchanged. CRM pins app-sdk v0.99.0.
 
 Release `crm/v0.9.22`: background refreshes preserve the loaded thread,
 scroll position and draft shelf instead of replacing them with a loading screen.
@@ -164,6 +211,31 @@ their declared number, boolean, date, string or multi-select types. Missing and
 unset attributes match `is_null`. Multi-select equality compares sets;
 `contains` tests membership.
 
+Agents can discover definitions with `contacts_attribute_definitions_list({})`.
+This explicitly read-only tool returns `attribute_defs` and `count`; each
+definition includes `key`, `label`, `type`, `enum_values` (always an array),
+`required`, `sort_order`, and `is_system`. Project definitions override built-in
+defaults. Discover definitions before promoting researched contacts; do not
+create definitions merely to inspect them.
+
+`contacts_update` attributes are an array inside `patch`, not a dictionary:
+
+```json
+{"id":123,"patch":{"attributes":[{"key":"lead_score","value":88},{"key":"do_not_contact","value":false,"source":"human"}]},"source":"agent:Research"}
+```
+
+Each entry requires `key` and `value`; per-entry `source` overrides the outer
+provenance. Values must match existing definitions: finite JSON numbers, JSON
+booleans, strings for text/url/date/select, arrays of allowed strings for
+multi_select. Update patches do **not** support the legacy scalar-string
+conversion available through `contacts_set_attribute`.
+Attributes merge by key: omitted keys and an empty array leave values unchanged;
+explicit `value:null` clears an optional attribute. Missing values are rejected,
+not treated as clears. Invalid batches do not partially apply scalar, channel
+or attribute updates. `channels` replaces the channel list; primary email/phone
+are read-only mirrors. Include `patch.expected_updated_at` for optimistic
+concurrency, then read back with `contacts_get` before advancing readiness.
+
 Static segments populate a snapshot on creation, conversion to static, and
 explicit definition updates. Materialization replaces the snapshot atomically.
 Static evaluation returns frozen membership IDs; resolve an audience to filter
@@ -231,6 +303,26 @@ saves before closing; existing drafts autosave after edits. Reopen them from
 are supported, with source labels, last-editor timestamps and pinned From/To.
 These are CRM-local drafts, not drafts synchronized to Gmail or another mailbox.
 
+Since v0.9.23, **Send message → Save draft** also saves first outreach without
+any incoming message. Reopen from the contact's **Saved message drafts** shelf.
+For outbound-only conversations, **Follow up** opens a draft in the same thread,
+using the historical recipient/sender instead of today's primary contact route.
+
+MCP examples (all save only):
+
+```json
+{"mode":"message","contact_id":42,"channel":"email","subject":"Introduction","body":"Hello"}
+{"mode":"message","conversation_id":123,"body":"Following up"}
+{"mode":"reply","conversation_id":123,"body":"Proposed reply"}
+```
+
+With no conversation, `contact_id` and `channel` are required; mode defaults to
+`message`. An optional `to` must be an existing contact channel, otherwise the
+primary channel is pinned. With a conversation, mode defaults to `reply` and
+requires inbound; explicitly use `message` for an outbound follow-up. Message
+drafts cannot change recipient/channel/conversation/mode after creation. Use a
+new draft for a different destination. Only explicit send creates a new thread.
+
 `conversation_drafts_create/get/list/update/discard` never send. The separate
 `conversation_drafts_send` is a real external send and requires explicit approval.
 For example, save with `{"conversation_id":123,"body":"Proposed reply"}`;
@@ -248,7 +340,7 @@ those notes. Sending rechecks recipient, ownership, Messaging binding, verified
 sender, contact eligibility, suppression and WhatsApp window.
 
 REST: `GET/POST /drafts`, `GET/PATCH/DELETE /drafts/<id>`, and
-`POST /drafts/<id>/send`. List accepts `conversation_id`, `limit`, `offset` and
+`POST /drafts/<id>/send`. List accepts `conversation_id` OR `contact_id`, `limit`, `offset` and
 `include_finished`; it returns summaries, not attachment payloads. Discard is
 soft: content is retained for audit. Draft changes publish
 `conversation.draft.changed` separately from message/activity events; saves do
@@ -261,9 +353,25 @@ replacement send. In-progress sends use a five-minute lease; reopen after lease
 expiry to retry a crashed send. A committed message is recovered without another
 dispatch, and repeated successful sends return the original result. Contact
 merges preserve drafts/anchors and reject in-progress or uncertain sends.
-The additive migration does not rewrite existing messages or conversations.
+The atomic draft-table upgrade preserves all legacy drafts, including their
+anchors, status, revision, authorship, attachments and durable retry state;
+it does not rewrite existing messages or conversations.
 
 ### Delivery and routing
+
+Normal email replies use the selected/latest inbound message's subject and
+Messaging-owned threading. Explicit sender/subject overrides retain the regular
+send path with that selected RFC ID and reference chain. For legacy activities
+without a usable Messaging anchor, both `contacts_send_message` with an existing
+email `conversation_id` and `contacts_reply` inherit `Re: <original subject>` when subject is omitted, empty
+or whitespace-only. An existing `Re:` prefix is recognized case-insensitively
+and is not duplicated. Nonblank explicit subjects remain unchanged. If the
+conversation has no nonblank subject, supply one explicitly, including when
+using a template in that existing conversation. Reply headers are retained.
+Resolution occurs before automatic idempotency calculation, so equivalent
+inherited and explicit subjects deduplicate across both tools. Standalone email
+templates still supply their subject through Messaging; SMS/WhatsApp behavior is
+unchanged. This does not rewrite or resend previously delivered messages.
 
 Bind Messaging in the platform's integration settings. Reading CRM Settings is
 read-only. Explicit routing repair uses CRM's `/messaging/routes` backend to set

@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "name": "facts",
+      "op": "scan",
+      "collection": "facts",
+      "where": {
+        "field": "centre",
+        "op": "eq",
+        "value": "a"
+      }
+    },
+    {
+      "name": "periods",
+      "op": "aggregate",
+      "from": "facts",
+      "groupBy": [
+        "centre",
+        "period"
+      ],
+      "metrics": [
+        {
+          "name": "callers",
+          "op": "count_distinct",
+          "field": "caller",
+          "where": {
+            "field": "kind",
+            "op": "eq",
+            "value": "call"
+          }
+        },
+        {
+          "name": "contracts",
+          "op": "count",
+          "where": {
+            "field": "kind",
+            "op": "eq",
+            "value": "sale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rates",
+      "op": "compute",
+      "from": "periods",
+      "computed": [
+        {
+          "name": "rate_cents",
+          "type": "integer",
+          "expr": {
+            "op": "if",
+            "args": [
+              {
+                "op": "gte",
+                "args": [
+                  {
+                    "op": "safe_divide",
+                    "args": [
+                      {
+                        "field": "contracts"
+                      },
+                      {
+                        "field": "callers"
+                      }
+                    ]
+                  },
+                  {
+                    "const": 0.5
+                  }
+                ]
+              },
+              {
+                "const": "4000"
+              },
+              {
+                "const": "2000"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "sales",
+      "op": "compute",
+      "from": "facts",
+      "where": {
+        "field": "kind",
+        "op": "eq",
+        "value": "sale"
+      }
+    },
+    {
+      "name": "valued",
+      "op": "join",
+      "from": "sales",
+      "as": "sale",
+      "joins": [
+        {
+          "relation": "rates",
+          "as": "rate",
+          "kind": "inner",
+          "cardinality": "many_to_one",
+          "on": [
+            {
+              "local": "sale.centre",
+              "foreign": "centre"
+            },
+            {
+              "local": "sale.period",
+              "foreign": "period"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "amounts",
+      "op": "compute",
+      "from": "valued",
+      "computed": [
+        {
+          "name": "amount_cents",
+          "type": "integer",
+          "expr": {
+            "op": "multiply",
+            "args": [
+              {
+                "field": "sale.contracts"
+              },
+              {
+                "field": "rate.rate_cents"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "total",
+      "op": "aggregate",
+      "from": "amounts",
+      "metrics": [
+        {
+          "name": "revenue_cents",
+          "op": "sum",
+          "field": "amount_cents"
+        },
+        {
+          "name": "contracts",
+          "op": "sum",
+          "field": "sale.contracts"
+        }
+      ]
+    }
+  ],
+  "result": {
+    "from": "total"
+  }
+}

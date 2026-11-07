@@ -914,8 +914,11 @@ func TestHTTPRoutes_LocalLifecycle(t *testing.T) {
 	}
 
 	runResponse := request(http.MethodPost, "/run", fmt.Sprintf(`{"destination_id":%d}`, destinationID), app.handleRunNow)
-	if runResponse.Code != http.StatusInternalServerError || !strings.Contains(runResponse.Body.String(), "server does not support app-authorized platform backups") {
+	if runResponse.Code != http.StatusAccepted || !strings.Contains(runResponse.Body.String(), `"queued"`) {
 		t.Fatalf("run now: status=%d body=%s", runResponse.Code, runResponse.Body.String())
+	}
+	if err := processQueuedBackup(context.Background(), ctx); err == nil || !strings.Contains(err.Error(), "server does not support app-authorized platform backups") {
+		t.Fatalf("queued error=%v", err)
 	}
 	allRuns, _ := dbListRuns(db, destinationID, 10)
 	if len(allRuns) != 1 || allRuns[0].Status != "failed" {

@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gobwas/ws"
+	"github.com/gotranspile/g722"
 	"github.com/pion/rtp"
 )
 
@@ -24,6 +24,12 @@ const (
 	sipRTPPrimeSamples  = 480
 	sipRTPQueuePackets  = 100
 	sipRTPInactivity    = 30 * time.Second
+	// While nothing is queued, encoded silence keeps the RTP stream alive.
+	// The far end's inactivity timer, NAT/firewall pinholes and carrier media
+	// relays all need packets even when our side has nothing to say; two
+	// Telephony legs bridged to each other would otherwise wait in silence
+	// until both time out. Shorter gaps between chunks keep their behavior.
+	sipRTPIdleSilenceAfter = 200 * time.Millisecond
 )
 
 var sipRTPPorts = struct {
@@ -32,14 +38,33 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
-	liveTimeline atomic.Pointer[liveAudioTimeline]
-	conn         *net.UDPConn
-	offer        sipMediaOffer
-	security     *sipMediaSecurity
-	remote       *net.UDPAddr
-	localPort    int
-	closeOnce    sync.Once
-	lastPacket   atomic.Int64
+	kernelClock          sipKernelClock
+	rtcp                 sipRTCPState
+	rtcpConn             *net.UDPConn
+	readAt               time.Time // single receive owner only
+	readCompletedAt      time.Time // socket dequeue, distinct from kernel arrival
+	socketOOB            [128]byte
+	early                *sipEarlyReceiver
+	observations         sipRTPObservations
+	diagnostics          atomic.Pointer[sipLiveDiagnostics]
+	jitterTelemetry      atomic.Pointer[rtpJitterBuffer]
+	coreForwardTelemetry atomic.Pointer[websocketWriterPump]
+	remoteMode           atomic.Int32
+	pacer                atomic.Pointer[sipRTPPacer]
+	recorder             atomic.Pointer[localCallRecorder]
+	hold                 atomic.Pointer[localSIPHold]
+	liveTimeline         atomic.Pointer[liveAudioTimeline]
+	conn                 *net.UDPConn
+	offer                sipMediaOffer
+	security             *sipMediaSecurity
+	remote               *net.UDPAddr
+	localPort            int
+	closeOnce            sync.Once
+	codecOnce            sync.Once
+	g722Encoder          *g722.Encoder
+	g722Decoder          *g722.Decoder
+	g722SentDecoder      *g722.Decoder
+	lastPacket           atomic.Int64
 }
 
 func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, error) {
@@ -55,19 +80,52 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 	if start < cfg.RTPPortMin || start > cfg.RTPPortMax {
 		start = cfg.RTPPortMin
 	}
-	count := (cfg.RTPPortMax-cfg.RTPPortMin)/2 + 1
+	count := (cfg.RTPPortMax - cfg.RTPPortMin + 1) / 2
+	// Internal local harnesses can request ephemeral sockets. Runtime validation
+	// requires an explicit nonzero range; both paths still reserve an even pair.
+	ephemeral := cfg.RTPPortMin == 0 && cfg.RTPPortMax == 0
+	if ephemeral {
+		count = 128
+	}
 	for offset := 0; offset < count; offset++ {
-		port := cfg.RTPPortMin + ((start-cfg.RTPPortMin)/2+offset)%count*2
+		port := 0
+		if !ephemeral {
+			port = cfg.RTPPortMin + ((start-cfg.RTPPortMin)/2+offset)%count*2
+		}
 		local := net.UDPAddrFromAddrPort(netip.AddrPortFrom(cfg.RTPBindIP, uint16(port)))
 		conn, err := net.ListenUDP("udp4", local)
 		if err != nil {
 			continue
 		}
-		media := &sipRTPMedia{
-			conn: conn, offer: offer, security: security, remote: remote, localPort: port,
+		if ephemeral {
+			port = conn.LocalAddr().(*net.UDPAddr).Port
+			if port%2 != 0 || port == 65535 {
+				conn.Close()
+				continue
+			}
 		}
-		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
+		rtcpLocal := net.UDPAddrFromAddrPort(netip.AddrPortFrom(cfg.RTPBindIP, uint16(port+1)))
+		rtcpConn, err := net.ListenUDP("udp4", rtcpLocal)
+		if err != nil {
+			_ = conn.Close()
+			continue
+		}
+		if cfg.socketPolicy != nil {
+			cfg.socketPolicy(conn)
+			cfg.socketPolicy(rtcpConn)
+		}
+		media := &sipRTPMedia{
+			rtcpConn: rtcpConn,
+			conn:     conn, offer: offer, security: security, remote: remote, localPort: port,
+		}
+		if !ephemeral {
+			sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
+		}
 
+		media.observations.kernelDropsAvailable.Store(enableSIPSocketDropCounter(conn))
+		media.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(conn))
+		now := time.Now()
+		media.kernelClock.sample(now, now.UnixNano())
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -79,6 +137,9 @@ func (m *sipRTPMedia) Close() {
 		return
 	}
 	m.closeOnce.Do(func() {
+		if m.rtcpConn != nil {
+			_ = m.rtcpConn.Close()
+		}
 		if m.conn != nil {
 			_ = m.conn.Close()
 		}
@@ -86,27 +147,53 @@ func (m *sipRTPMedia) Close() {
 }
 
 func (m *sipRTPMedia) decodePacket(raw []byte) (*rtp.Packet, error) {
+	return m.decodePacketAt(raw, time.Now())
+}
+func (m *sipRTPMedia) decodePacketAt(raw []byte, at time.Time) (*rtp.Packet, error) {
 	if m.security != nil {
 		decrypted, err := m.security.RemoteContext.DecryptRTP(nil, raw, nil)
 		if err != nil {
+			m.observedDecodeError(err, true)
 			return nil, err
 		}
 		raw = decrypted
 	}
 	var packet rtp.Packet
 	if err := packet.Unmarshal(raw); err != nil {
+		m.observedDecodeError(err, false)
 		return nil, err
 	}
-	if packet.PayloadType != m.offer.PayloadType {
+	if packet.PayloadType != m.offer.PayloadType && (m.offer.DTMFPayloadType <= 0 || int(packet.PayloadType) != m.offer.DTMFPayloadType) {
+		m.observations.decodeErrors.Add(1)
 		return nil, fmt.Errorf("unexpected RTP payload type %d", packet.PayloadType)
 	}
 	if len(packet.Payload) == 0 || len(packet.Payload) > 2048 {
+		m.observations.decodeErrors.Add(1)
 		return nil, errors.New("invalid RTP payload size")
+	}
+	m.startRTCP()
+	m.observations.received(&packet, len(raw), at, packet.PayloadType == m.offer.PayloadType)
+	if !m.readCompletedAt.IsZero() {
+		m.observations.receiveEvidence.observe(packet.SequenceNumber, packet.Timestamp, packet.SSRC, at, m.readCompletedAt, time.Now())
 	}
 	return &packet, nil
 }
 
-func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
+func (m *sipRTPMedia) writePacket(packet *rtp.Packet) (result error) {
+	m.startRTCP()
+	startedAt := time.Now()
+	defer func() {
+		atomicMax(&m.observations.maxSend, int64(time.Since(startedAt)))
+		if result != nil {
+			if !errors.Is(result, net.ErrClosed) && (m.diagnostics.Load() == nil || !m.diagnostics.Load().ended.Load()) {
+				m.observations.sendErrors.Add(1)
+				m.observations.lastError.Store(time.Now().UnixNano())
+			}
+			if d := m.diagnostics.Load(); d != nil {
+				d.event("transport_write_error", "carrier", transportEvidenceError(result), 0)
+			}
+		}
+	}()
 	raw, err := packet.Marshal()
 	if err != nil {
 		return err
@@ -122,6 +209,13 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 	}
 	started := time.Now()
 	_, err = m.conn.WriteToUDP(raw, m.remote)
+	if err == nil {
+		m.observations.sentPacket(len(raw), time.Now())
+		m.rtcp.localSSRC.Store(packet.SSRC)
+		m.rtcp.lastRTP.Store(packet.Timestamp)
+		m.rtcp.lastSentNS.Store(time.Now().UnixNano())
+		m.rtcp.payloadOctets.Add(uint32(len(packet.Payload)))
+	}
 	if timeline := m.liveTimeline.Load(); timeline != nil {
 		stage := "carrier_send"
 		if err != nil {
@@ -132,220 +226,66 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 	return err
 }
 
-type rtpJitterBuffer struct {
-	mu             sync.Mutex
-	packets        map[uint16][]byte
-	expected       uint16
-	started        bool
-	primed         bool
-	buffered       int
-	missing        int
-	primeTicks     int
-	arrivals       map[uint16]time.Time
-	lost           int
-	droppedSamples int
-	maxAgeMS       int
-	jitterMS       float64
-	lastArrival    time.Time
-	lastTimestamp  uint32
-}
-
-func newRTPJitterBuffer() *rtpJitterBuffer {
-	return &rtpJitterBuffer{packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time)}
-}
-
-func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
-	b.pushRTP(sequence, payload, 0, time.Now())
-}
-
-func (b *rtpJitterBuffer) pushRTP(sequence uint16, payload []byte, timestamp uint32, now time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.started {
-		b.started = true
-		b.expected = sequence
-	}
-	if b.primed && rtpSequenceBefore(sequence, b.expected) {
-		if len(b.packets) != 0 || timestamp == 0 || int32(timestamp-b.lastTimestamp) <= 0 || now.Sub(b.lastArrival) < 60*time.Millisecond {
-			return
-		}
-		b.expected = sequence
-		b.primed = false
-		b.primeTicks = 0
-		b.missing = 0
-	}
-	if !b.primed && rtpSequenceBefore(sequence, b.expected) {
-		b.expected = sequence
-	}
-	if _, exists := b.packets[sequence]; exists {
-		return
-	}
-	if !b.lastArrival.IsZero() && timestamp != 0 {
-		variation := now.Sub(b.lastArrival).Seconds()*1000 - float64(int32(timestamp-b.lastTimestamp))/8
-		if variation < 0 {
-			variation = -variation
-		}
-		b.jitterMS += (variation - b.jitterMS) / 16
-	}
-	b.lastArrival, b.lastTimestamp = now, timestamp
-	if len(payload) > 960 {
-		b.droppedSamples += len(payload)
-		return
-	}
-	// Keep recent speech, not an old backlog, under overload or a clock jump.
-	for len(b.packets) > 0 && (b.buffered+len(payload) > 960 || len(b.packets) >= 12) {
-		oldest := b.oldest()
-		b.droppedSamples += len(b.packets[oldest])
-		b.buffered -= len(b.packets[oldest])
-		delete(b.packets, oldest)
-		delete(b.arrivals, oldest)
-		b.expected = oldest + 1
-	}
-	b.packets[sequence] = append([]byte(nil), payload...)
-	b.arrivals[sequence] = now
-	b.buffered += len(payload)
-	if b.buffered >= sipRTPPrimeSamples {
-		b.primed = true
-	}
-}
-
-// Caller holds b.mu.
-func (b *rtpJitterBuffer) oldest() uint16 {
-	var oldest uint16
-	first := true
-	for seq := range b.packets {
-		if first || rtpSequenceBefore(seq, oldest) {
-			oldest = seq
-			first = false
-		}
-	}
-	return oldest
-}
-func rtpSequenceBefore(left, right uint16) bool {
-	return int16(left-right) < 0
-}
-
-func (b *rtpJitterBuffer) pop() ([]byte, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.primed {
-		if len(b.packets) == 0 {
-			return nil, false
-		}
-		b.primeTicks++
-		if b.primeTicks < 3 {
-			return nil, false
-		}
-		b.primed = true
-	}
-	now := time.Now()
-	for len(b.packets) > 0 {
-		oldest := b.oldest()
-		age := now.Sub(b.arrivals[oldest])
-		if int(age/time.Millisecond) > b.maxAgeMS {
-			b.maxAgeMS = int(age / time.Millisecond)
-		}
-		if age <= 120*time.Millisecond {
-			break
-		}
-		b.droppedSamples += len(b.packets[oldest])
-		b.buffered -= len(b.packets[oldest])
-		delete(b.packets, oldest)
-		delete(b.arrivals, oldest)
-		b.expected = oldest + 1
-	}
-	payload, ok := b.packets[b.expected]
-	delete(b.packets, b.expected)
-	delete(b.arrivals, b.expected)
-	b.buffered -= len(payload)
-	b.expected++
-	if ok {
-		b.missing = 0
-	} else {
-		b.missing++
-		b.lost++
-	}
-	// After sustained silence, re-prime from the next packet instead of
-	// inventing sequence numbers indefinitely (RTP DTX advances timestamps only).
-	if b.missing >= 10 && len(b.packets) == 0 {
-		b.started = false
-		b.primed = false
-		b.missing = 0
-		b.primeTicks = 0
-	}
-	if ok {
-		return payload, true
-	}
-	return nil, true
-}
-
-type rtpAudioFramer struct {
-	jitter         *rtpJitterBuffer
-	codec          string
-	missingSamples int
-	pending        []byte
-}
-
-func newRTPAudioFramer(jitter *rtpJitterBuffer, offer sipMediaOffer) *rtpAudioFramer {
-	missingSamples := offer.PacketSamples
-	if missingSamples <= 0 {
-		missingSamples = sipRTPPacketSamples
-	}
-	return &rtpAudioFramer{jitter: jitter, codec: offer.Codec, missingSamples: missingSamples}
-}
-
-func (f *rtpAudioFramer) pop() ([]byte, bool) {
-	for len(f.pending) < sipRTPPacketSamples {
-		payload, ready := f.jitter.pop()
-		if !ready {
-			return nil, false
-		}
-		if payload == nil {
-			payload = sipEncodedSilence(f.codec, f.missingSamples)
-		}
-		f.pending = append(f.pending, payload...)
-	}
-	out := append([]byte(nil), f.pending[:sipRTPPacketSamples]...)
-	f.pending = f.pending[sipRTPPacketSamples:]
-	return out, true
-}
-
 type sipPlaybackState struct {
-	pending atomic.Int64
+	pending       atomic.Int64
+	pendingSpeech atomic.Int64
 }
 
 func (s *sipPlaybackState) hasPending() bool {
 	return s.pending.Load() > 0
 }
+func (s *sipPlaybackState) hasPendingSpeech() bool { return s.pendingSpeech.Load() > 0 }
+func (s *sipPlaybackState) adjust(packet sipRTPOutboundPacket, delta int64) {
+	s.pending.Add(delta)
+	if !packet.silence {
+		s.pendingSpeech.Add(delta)
+	}
+}
 
 type sipRTPOutboundPacket struct {
-	enqueuedAt time.Time
+	silence    bool
+	generation int64
+	enqueuedAt time.Time // Original microphone source time; never refreshed on handoff.
+	queuedAt   time.Time // Local SIP queue entry, independent of source age.
 	payload    []byte
+	pcm        []int16
 	itemID     string
 	audioEndMS int
 }
 
 type sipRTPPacer struct {
-	observeSent    func([]byte)
-	diagnostics    livePacerStats
-	ctx            context.Context
-	media          *sipRTPMedia
-	playback       *sipPlaybackState
-	onProgress     func(twilioPlaybackProgress) error
-	queue          chan sipRTPOutboundPacket
-	clearCh        chan chan int
-	errCh          chan error
-	done           chan struct{}
-	sequence       uint16
-	timestamp      uint32
-	ssrc           uint32
-	dropStale      bool
-	trimToPackets  int
-	droppedPackets atomic.Int64
-	needsCrossfade atomic.Bool
-	lastSentPCM    []int16
-	dropMu         sync.Mutex
-	drops          []audioDropEvent
+	idleSilencePackets atomic.Int64 // keepalive silence sent while nothing was queued
+	keepaliveObserver  atomic.Pointer[func(sequence uint16)]
+	queueMu            sync.Mutex
+	packetizer         *carrierAudioPacketizer
+	agentPlayout       sipAgentPlayout
+	observeActivity    func(bool)
+	agentSession       *agentAudioSession
+	cancelCh           chan sipAgentCancel
+	dtmfCh             chan string
+	dtmf               sipDTMFState
+	observeSent        func([]byte)
+	diagnostics        livePacerStats
+	ctx                context.Context
+	media              *sipRTPMedia
+	playback           *sipPlaybackState
+	receipts           *sipReceiptPump
+	queue              chan sipRTPOutboundPacket
+	clearCh            chan chan int
+	errCh              chan error
+	done               chan struct{}
+	progress           chan struct{}
+	sequence           uint16
+	timestamp          uint32
+	ssrc               uint32
+	dropStale          bool
+	trimToPackets      int
+	droppedPackets     atomic.Int64
+	needsCrossfade     atomic.Bool
+	fadeAfterClear     atomic.Bool
+	lastSentPCM        []int16
+	dropMu             sync.Mutex
+	drops              []audioDropEvent
 }
 
 func newSIPRTPPacer(
@@ -366,7 +306,7 @@ func newSIPRTPPacerWithPolicy(
 	observers ...func([]byte),
 ) *sipRTPPacer {
 	queuePackets := sipRTPQueuePackets
-	if policy.dropStale {
+	if policy.dropStale || policy.agentSession.continuous() {
 		queuePackets = max(1, policy.maxQueueMS/int(sipRTPPacketTime/time.Millisecond))
 	}
 	var seed [10]byte
@@ -374,19 +314,36 @@ func newSIPRTPPacerWithPolicy(
 		panic("SIP RTP random source unavailable: " + err.Error())
 	}
 	pacer := &sipRTPPacer{
-		ctx: ctx, media: media, playback: playback, onProgress: onProgress,
+		observeActivity: policy.onSent, agentSession: policy.agentSession, cancelCh: make(chan sipAgentCancel), ctx: ctx, media: media, playback: playback, receipts: newSIPReceiptPump(onProgress), dtmfCh: make(chan string, 4),
 		queue:   make(chan sipRTPOutboundPacket, queuePackets),
-		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}),
+		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}), progress: make(chan struct{}, 1),
 		sequence: binary.BigEndian.Uint16(seed[:2]), timestamp: binary.BigEndian.Uint32(seed[2:6]),
 		ssrc:          binary.BigEndian.Uint32(seed[6:]),
 		dropStale:     policy.dropStale,
 		trimToPackets: max(1, policy.trimToMS/int(sipRTPPacketTime/time.Millisecond)),
 	}
+	if policy.agentSession.continuous() {
+		pacer.packetizer = newCarrierAudioPacketizer(media.sampleRate())
+		pacer.agentPlayout.tuning = newAgentPlayoutTuning(policy.agentSession, policy.bufferMS)
+		// Drift compensation is measured and enabled for direct SIP only.
+		pacer.agentPlayout.tuning.driftAllowed = true
+		pacer.agentPlayout.reserve = time.Duration(min(max(20, policy.bufferMS), min(200, policy.maxQueueMS))) * time.Millisecond
+	}
 	if len(observers) > 0 {
 		pacer.observeSent = observers[0]
 	}
+	go pacer.receipts.run(ctx)
 	go pacer.run()
 	return pacer
+}
+
+func firstNonZeroTime(times ...time.Time) time.Time {
+	for _, t := range times {
+		if !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func (p *sipRTPPacer) run() {
@@ -394,13 +351,57 @@ func (p *sipRTPPacer) run() {
 	clockStart := time.Now()
 	baseTimestamp := p.timestamp
 	var lastSent time.Time
+	var lastAudio time.Time // last DTMF, agent or hold packet; silence does not count
 	var lastFrame time.Duration
+	lastTickFrame := time.Duration(-1)
 	ticker := time.NewTicker(sipRTPPacketTime)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
+		case command := <-p.cancelCh:
+			p.queueMu.Lock()
+			p.agentPlayout.tuning.resetStream()
+			partialCleared := 0
+			if p.packetizer != nil {
+				before := p.packetizer.queuedSamples
+				p.packetizer.cancelPlayback(command.control)
+				partialCleared = carrierSamplesToMS(before-p.packetizer.queuedSamples, p.media.sampleRate())
+			}
+			count := len(p.queue)
+			kept := make([]sipRTPOutboundPacket, 0, count)
+			cleared := partialCleared
+			for i := 0; i < count; i++ {
+				select {
+				case packet := <-p.queue:
+					if matchesAgentPlayback(packet.itemID, packet.generation, command.control) {
+						p.playback.adjust(packet, -1)
+						cleared += 20
+					} else {
+						kept = append(kept, packet)
+					}
+				default:
+				}
+			}
+			for _, packet := range kept {
+				p.queue <- packet
+			}
+			if len(p.queue) == 0 && p.packetizer != nil && p.packetizer.queuedSamples == 0 {
+				p.agentPlayout.readyAt = time.Time{}
+				p.agentPlayout.exhaustedAt = time.Time{}
+				p.agentPlayout.tuning.resetStream()
+			}
+			p.queueMu.Unlock()
+			// Arm the restart fade only when audible output was actually cut.
+			if cleared > 0 && p.agentSession.continuous() {
+				p.fadeAfterClear.Store(true)
+			}
+			command.reply <- agentClearReceipt{Scope: "local", LocalMS: cleared}
+		case digits := <-p.dtmfCh:
+			if len(p.dtmf.digits)+len(digits) <= 128 {
+				p.dtmf.digits += digits
+			}
 		case reply := <-p.clearCh:
 			cleared := p.drain()
 			reply <- cleared * int(sipRTPPacketTime/time.Millisecond)
@@ -410,70 +411,231 @@ func (p *sipRTPPacer) run() {
 			if !lastSent.IsZero() && frame <= lastFrame {
 				continue
 			}
-			select {
-			case packet := <-p.queue:
-				p.playback.pending.Add(-1)
-				if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
-					p.droppedPackets.Add(1)
-					p.diagnostics.dropped("live_audio_age_limit", 20)
-					p.needsCrossfade.Store(true)
-					p.dropMu.Lock()
-					p.drops = append(p.drops, audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: 20})
-					if len(p.drops) > 100 {
-						p.drops = p.drops[len(p.drops)-100:]
-					}
-					p.dropMu.Unlock()
-					continue
-				}
-				if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
-					pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
-					applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
-					packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
-				}
-				p.lastSentPCM = decodeSIPG711(packet.payload, p.media.offer.Codec)
-				p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
-				wire := &rtp.Packet{Header: rtp.Header{
-					Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
-					SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
-				}, Payload: packet.payload}
-				p.sequence++
-				lastSent = now
-				lastFrame = frame
-				writeStarted := time.Now()
-				if err := p.media.writePacket(wire); err != nil {
+			if sent, err := p.dtmfTick(now, baseTimestamp+uint32(frame)*sipRTPPacketSamples); sent {
+				if err != nil {
 					select {
 					case p.errCh <- err:
 					default:
 					}
 					return
 				}
-				if p.observeSent != nil {
-					p.observeSent(packet.payload)
+				lastSent = now
+				lastAudio = now
+				lastFrame = frame
+				continue
+			}
+			// A late ticker drops ticks. Audio already queued for the missed
+			// slots goes out now with contiguous timestamps; the receiver must
+			// not conceal a hole the queue never had. Empty slots stay gaps.
+			slots := []time.Duration{frame}
+			if p.packetizer != nil && lastTickFrame >= 0 && frame > lastTickFrame+1 {
+				slots = slots[:0]
+				for f := max(lastTickFrame+1, frame-sipRTPCatchUpFrames); f <= frame; f++ {
+					slots = append(slots, f)
 				}
-				p.diagnostics.sent(20, writeStarted)
-				if p.onProgress != nil && packet.itemID != "" && packet.audioEndMS > 0 {
-					if err := p.onProgress(twilioPlaybackProgress{
-						ItemID: packet.itemID, AudioEndMS: packet.audioEndMS,
-					}); err != nil {
-						select {
-						case p.errCh <- err:
-						default:
+			}
+			lastTickFrame = frame
+			for slot, frame := range slots {
+				catchUp := slot < len(slots)-1
+				if catchUp && !p.hasQueuedAgentAudio() {
+					continue
+				}
+				if !p.prepareAgentTick(now) {
+					break
+				}
+				if packet, ok := p.dequeueLivePacket(now); ok {
+					failed := func() bool {
+						defer p.playback.adjust(packet, -1)
+						if p.agentSession.rejects(packet.itemID, packet.generation) {
+							return false
 						}
+						durationMS := 20
+						if len(packet.pcm) > 0 {
+							durationMS = carrierSamplesToMS(len(packet.pcm), p.media.sampleRate())
+						}
+						if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
+							if !packet.silence {
+								p.receipts.discard(packet.itemID, packet.generation, durationMS)
+							}
+							return false
+						}
+						if len(packet.pcm) > 0 {
+							packet.pcm = p.shapeAgentPCM(packet, now)
+							packet.payload = p.media.encodeAudio(packet.pcm)
+							p.lastSentPCM = append(p.lastSentPCM[:0], packet.pcm...)
+						} else if p.media.offer.Codec != "G722" {
+							pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
+							if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+								applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
+								packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+							}
+							p.lastSentPCM = pcm
+						}
+						p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
+						wire := &rtp.Packet{Header: rtp.Header{
+							Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
+							SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
+						}, Payload: packet.payload}
+						p.sequence++
+						lastSent = now
+						lastAudio = now
+						lastFrame = frame
+						writeStarted := time.Now()
+						if err := p.media.writePacket(wire); err != nil {
+							select {
+							case p.errCh <- err:
+							default:
+							}
+							return true
+						}
+						p.agentSession.observeSent(packet.itemID, packet.generation, packet.silence, time.Time{})
+						p.agentSession.traceSent(packet.itemID, packet.generation, packet.silence, packet.audioEndMS, durationMS, "rtp_transmitted", time.Now(), time.Since(writeStarted))
+						if p.observeActivity != nil {
+							p.observeActivity(packet.silence)
+						}
+						if p.observeSent != nil {
+							p.observeSent(packet.payload)
+						}
+						p.diagnostics.sent(20, writeStarted)
+						if packet.itemID != "" && packet.audioEndMS > 0 {
+							p.receipts.progress(twilioPlaybackProgress{
+								Generation: packet.generation, ItemID: packet.itemID, AudioEndMS: packet.audioEndMS,
+							})
+						}
+						return false
+					}()
+					if failed {
 						return
 					}
+				} else if catchUp {
+					break
+				} else {
+					var pcm []int16
+					keepalive := false
+					if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
+						// Remote sendonly/inactive: our side must stay silent.
+					} else if hold := p.media.hold.Load(); hold != nil {
+						pcm = hold.frame(p.media.sampleRate() / 50)
+						lastAudio = now
+					} else if idleSince := firstNonZeroTime(lastAudio, clockStart); now.Sub(idleSince) >= sipRTPIdleSilenceAfter {
+						pcm = make([]int16, p.media.sampleRate()/50)
+						keepalive = true
+					}
+					if pcm != nil {
+						wire := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: p.media.offer.PayloadType, SequenceNumber: p.sequence, Timestamp: baseTimestamp + uint32(frame)*sipRTPPacketSamples, SSRC: p.ssrc}, Payload: p.media.encodeAudio(pcm)}
+						p.sequence++
+						lastSent = now
+						lastFrame = frame
+						if observe := p.keepaliveObserver.Load(); keepalive && observe != nil {
+							(*observe)(wire.SequenceNumber)
+						}
+						writeStarted := time.Now()
+						if err := p.media.writePacket(wire); err != nil {
+							select {
+							case p.errCh <- err:
+							default:
+							}
+							return
+						}
+						if p.observeSent != nil {
+							p.observeSent(wire.Payload)
+						}
+						if keepalive {
+							p.idleSilencePackets.Add(1)
+						} else {
+							p.diagnostics.sent(20, writeStarted)
+						}
+					}
 				}
-			default:
 			}
+		}
+		select {
+		case p.progress <- struct{}{}:
+		default:
 		}
 	}
 }
 
+// Expired frames do not consume media time. Drain only the bounded queue
+// present at this tick, then send at most one usable frame. Consuming one stale
+// frame per tick would preserve a backlog forever while new audio arrives.
+func (p *sipRTPPacer) dequeueLivePacket(now time.Time) (sipRTPOutboundPacket, bool) {
+	for remaining := len(p.queue); remaining > 0; remaining-- {
+		select {
+		case packet := <-p.queue:
+			if hold := p.media.hold.Load(); hold != nil {
+				if !packet.silence && !p.agentSession.rejects(packet.itemID, packet.generation) {
+					ms := 20
+					if len(packet.pcm) > 0 {
+						ms = carrierSamplesToMS(len(packet.pcm), p.media.sampleRate())
+					}
+					p.receipts.discard(packet.itemID, packet.generation, ms)
+				}
+				packet.pcm = hold.frame(p.media.sampleRate() / 50)
+				packet.payload = nil
+				packet.itemID = ""
+				packet.enqueuedAt = now
+			}
+			sourceAge, residence := time.Duration(0), time.Duration(0)
+			if !packet.enqueuedAt.IsZero() {
+				sourceAge = max(0, now.Sub(packet.enqueuedAt))
+			}
+			if !packet.queuedAt.IsZero() {
+				residence = max(0, now.Sub(packet.queuedAt))
+			}
+			p.diagnostics.observeAge(sourceAge, residence)
+			if !p.dropStale || sourceAge < liveAudioMaxAge {
+				return packet, true
+			}
+			p.playback.adjust(packet, -1)
+			p.droppedPackets.Add(1)
+			p.diagnostics.dropped("live_audio_age_limit", 20)
+			p.needsCrossfade.Store(true)
+			p.dropMu.Lock()
+			p.drops = append(p.drops, audioDropEvent{
+				Timestamp: now.UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+				Reason: "live_audio_age_limit", DurationMS: 20,
+				FrameAgeMS: float64(sourceAge) / float64(time.Millisecond), QueueResidenceMS: float64(residence) / float64(time.Millisecond),
+			})
+			if len(p.drops) > 100 {
+				p.drops = p.drops[len(p.drops)-100:]
+			}
+			p.dropMu.Unlock()
+		default:
+			return sipRTPOutboundPacket{}, false
+		}
+	}
+	return sipRTPOutboundPacket{}, false
+}
+
+// Everything drained was never transmitted; each playback gets a local clear
+// receipt (hold music start is the production caller) rather than silence.
 func (p *sipRTPPacer) drain() int {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+	if p.packetizer != nil {
+		for _, segment := range p.packetizer.segments {
+			if !segment.silence && !p.agentSession.rejects(segment.itemID, segment.generation) {
+				p.receipts.discard(segment.itemID, segment.generation, carrierSamplesToMS(len(segment.pcm)-segment.offset, p.media.sampleRate()))
+			}
+		}
+		p.packetizer.clear()
+		p.agentPlayout.readyAt = time.Time{}
+		p.agentPlayout.exhaustedAt = time.Time{}
+		p.agentPlayout.tuning.resetStream()
+	}
 	count := 0
 	for {
 		select {
-		case <-p.queue:
-			p.playback.pending.Add(-1)
+		case packet := <-p.queue:
+			p.playback.adjust(packet, -1)
+			if !packet.silence && !p.agentSession.rejects(packet.itemID, packet.generation) {
+				ms := 20
+				if len(packet.pcm) > 0 {
+					ms = carrierSamplesToMS(len(packet.pcm), p.media.sampleRate())
+				}
+				p.receipts.discard(packet.itemID, packet.generation, ms)
+			}
 			count++
 		default:
 			return count
@@ -482,6 +644,90 @@ func (p *sipRTPPacer) drain() int {
 }
 
 func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
+	return p.enqueueAt(packets, time.Now())
+}
+
+func (p *sipRTPPacer) enqueueAt(packets []sipRTPOutboundPacket, receivedAt time.Time) (int, error) {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+	if p.packetizer != nil {
+		rawSamples := p.packetizer.queuedSamples
+		for _, packet := range packets {
+			if !p.agentSession.rejects(packet.itemID, packet.generation) {
+				rawSamples += len(packet.pcm)
+			}
+		}
+		// A bounded rate correction cannot rescue a grossly oversized batch.
+		// Reject before scanning PCM; preserve the transactional retry path.
+		if rawSamples > (cap(p.queue)-len(p.queue))*p.packetizer.packetSamples*104/100+p.media.sampleRate()/100 {
+			return len(p.queue) * 20, errCarrierPacerOverflow
+		}
+		// Stage both packetization and adaptation. Queue-full retries are pure:
+		// no samples, source offsets, priming or rate debt advance on rejection.
+		state := p.agentPlayout
+		if state.tuning.cfg.Mode == "" {
+			state.tuning = newAgentPlayoutTuning(p.agentSession, int(state.reserve/time.Millisecond))
+			state.tuning.driftAllowed = true
+		}
+		packetizer := *p.packetizer
+		packetizer.segments = append([]carrierAudioSegment(nil), p.packetizer.segments...)
+		var ready []sipRTPOutboundPacket
+		for _, packet := range packets {
+			if p.agentSession.rejects(packet.itemID, packet.generation) {
+				continue
+			}
+			if len(packet.pcm) == 0 {
+				continue
+			}
+			now := receivedAt
+			initial := state.readyAt.IsZero() || (!state.exhaustedAt.IsZero() && now.Sub(state.exhaustedAt) >= time.Duration(state.recoveryIdleMS())*time.Millisecond)
+			if initial {
+				state.tuning.resetStream()
+			}
+			sourceSamples := len(packet.pcm) * 24000 / p.media.sampleRate()
+			frame := realtimeBridgeControl{ItemID: packet.itemID, Generation: packet.generation, AudioEndMS: packet.audioEndMS, Silence: packet.silence}
+			pcm := state.tuning.process(packet.pcm, p.media.sampleRate(), (len(p.queue)+len(ready))*20+carrierSamplesToMS(packetizer.queuedSamples, p.media.sampleRate()), frame, now)
+			state.reserve = time.Duration(state.tuning.stats.TargetMS) * time.Millisecond
+			if initial {
+				state.readyAt = now.Add(state.reserve)
+				state.resumeFade = false
+				state.starts++
+			} else if !state.exhaustedAt.IsZero() {
+				state.readyAt = now.Add(state.recoveryCushion(now.Sub(state.exhaustedAt)))
+				state.recoveries++
+			}
+			state.exhaustedAt = time.Time{}
+			state.lastInputAt = now
+			if frame.Silence && state.tuning.drifting() {
+				// Speech never ends or resumes in a padded packet: the pause's
+				// first zeros complete a pending speech packet, and the pause
+				// itself lasts whole packets.
+				var head []int16
+				head, pcm = alignAgentSilence(&packetizer, pcm)
+				if len(head) > 0 {
+					last := packetizer.segments[len(packetizer.segments)-1]
+					speech := realtimeBridgeControl{ItemID: last.itemID, Generation: last.generation, AudioEndMS: last.endMS}
+					for _, f := range packetizer.addAt(head, 0, speech, packet.enqueuedAt) {
+						ready = append(ready, sipRTPOutboundPacket{pcm: f.PCM, itemID: f.ItemID, generation: f.Generation, audioEndMS: f.AudioEndMS, silence: f.Silence, enqueuedAt: f.EnqueuedAt})
+					}
+				}
+			}
+			for _, f := range packetizer.addAt(pcm, sourceSamples, frame, packet.enqueuedAt) {
+				ready = append(ready, sipRTPOutboundPacket{pcm: f.PCM, itemID: f.ItemID, generation: f.Generation, audioEndMS: f.AudioEndMS, silence: f.Silence, enqueuedAt: f.EnqueuedAt})
+			}
+		}
+		slots := len(ready)
+		if packetizer.queuedSamples > 0 {
+			slots++
+		}
+		if slots > cap(p.queue)-len(p.queue) {
+			return len(p.queue) * 20, errCarrierPacerOverflow
+		}
+		*p.packetizer = packetizer
+		p.agentPlayout = state
+		p.agentSession.publishPlayout(state.tuning)
+		packets = ready
+	}
 	before := len(p.queue) + len(packets)
 	droppedBefore := p.droppedPackets.Load()
 	if p.dropStale && len(packets) > cap(p.queue) {
@@ -493,8 +739,8 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 	trimQueue:
 		for len(p.queue) > targetPackets {
 			select {
-			case <-p.queue:
-				p.playback.pending.Add(-1)
+			case packet := <-p.queue:
+				p.playback.adjust(packet, -1)
 				p.droppedPackets.Add(1)
 			default:
 				break trimQueue
@@ -519,13 +765,17 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue overflow")
 	}
 	for _, packet := range packets {
+		packet.queuedAt = time.Now()
 		if packet.enqueuedAt.IsZero() {
 			packet.enqueuedAt = time.Now()
 		}
+		// Count before publishing so a concurrently scheduled sender cannot
+		// consume a frame before it is counted. Keep it pending through writing.
+		p.playback.adjust(packet, 1)
 		select {
 		case p.queue <- packet:
-			p.playback.pending.Add(1)
 		default:
+			p.playback.adjust(packet, -1)
 			return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue changed concurrently")
 		}
 	}
@@ -565,19 +815,29 @@ func (p *sipRTPPacer) clear(ctx context.Context) (int, error) {
 func (p *sipRTPPacer) Err() <-chan error { return p.errCh }
 
 type sipBridgeSession struct {
-	callID string
-	ctx    context.Context
-	media  *sipRTPMedia
-	finish func(string, error)
-	hangup func() error
+	playbackPolicy sipPlaybackPolicy
+	callID         string
+	ctx            context.Context
+	media          *sipRTPMedia
+	finish         func(string, error)
+	hangup         func() error
+	takePrepared   func() net.Conn
 }
 
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	session.answerMu.Lock()
 	media := session.media
 	session.answerMu.Unlock()
+	policy := sipPlaybackPolicy{}
+	session.local.mu.Lock()
+	if session.local.config.RTPPlayback != nil {
+		policy = *session.local.config.RTPPlayback
+	}
+	session.local.mu.Unlock()
 	a.bridgeSIPMedia(sipBridgeSession{
-		callID: session.call.ID, ctx: session.ctx, media: media,
+		playbackPolicy: policy,
+		takePrepared:   session.takePreparedBridge,
+		callID:         session.call.ID, ctx: session.ctx, media: media,
 		finish: session.finish, hangup: session.hangup,
 	})
 }
@@ -598,27 +858,31 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		return
 	}
 	defer a.db().releaseMedia(row.ID)
-	bridgeURL, err := a.mediaBridgeURL(row)
-	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
-		session.finish("local_error", err)
-		return
+	var core net.Conn
+	if session.takePrepared != nil {
+		core = session.takePrepared()
 	}
-	coreURL, err := url.Parse(bridgeURL)
-	if err != nil {
-		session.finish("local_error", err)
-		return
+	if core == nil {
+		core, err = a.dialSIPBridge(session.ctx, row)
+		if err != nil {
+			_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "audio bridge rejected", string(mediaCloseLegCore))
+			session.finish("core", err)
+			return
+		}
 	}
-	core, buffered, _, err := (ws.Dialer{}).Dial(session.ctx, coreURL.String())
+	agentSession, err := a.newAgentAudioSession(row, agentBridgeResponse(core))
 	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
+		_ = core.Close()
 		session.finish("core", err)
 		return
 	}
-	if buffered != nil {
-		core = hijackedConn{Conn: core, reader: buffered}
-	}
+	core = a.resilientAgentBridge(session.ctx, row, core, agentBridgeResponse(core), agentSession)
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	agentSession.configureWriter(coreWriter)
+	coreWriter.audioRate.Store(int64(agentSession.byteRate()))
+	coreWriter.sipResidenceBudget.Store(int64(time.Duration(session.playbackPolicy.resolved().MaxAgeMS) * time.Millisecond))
+	media.coreForwardTelemetry.Store(coreWriter)
+	defer media.coreForwardTelemetry.CompareAndSwap(coreWriter, nil)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer coreCloser.Close(ws.StatusNormalClosure, "direct SIP media ended")
 
@@ -629,38 +893,68 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	closeState := &websocketCloseState{}
 	tap := a.listeners.openBridge(row.ID)
 	defer a.listeners.closeBridge(row.ID, tap)
-	listenResampler := newPCMResampler(8000, 24000)
-	audioFrontend := newCarrierAudioFrontend(8000)
+	audioFrontend := newCarrierAudioFrontend(media.sampleRate())
+	defer a.trackAgentAudio(row.ID, agentSession)()
+	agentSession.configureFrontend(audioFrontend)
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
 		humanHub = a.softphones.hubFor(row.ID)
+		humanHub.sipMedia.Store(media)
+		defer humanHub.sipMedia.CompareAndSwap(media, nil)
 		media.liveTimeline.Store(&humanHub.timeline)
 		humanHub.setCarrierForward(coreWriter)
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
-	inputResampler := newPCMResampler(8000, 24000)
-	outputResampler := newPCMResampler(24000, 8000)
+	inputResampler := newPCMResampler(media.sampleRate(), 24000)
+	agentInput := newAgentMediaConverter(agentSession, media.sampleRate(), true)
+	agentOutput := newAgentMediaConverter(agentSession, media.sampleRate(), false)
 	playback := &sipPlaybackState{}
-	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerPolicy := agentSession.policy()
 	pacerMode := "buffered"
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
+	recorder, recordErr := a.newLocalRecording(row, false)
+	if recordErr != nil {
+		globalCtx.Logger().Warn("local SIP recording unavailable", "call", row.ID, "err", recordErr)
+	}
+	media.recorder.Store(recorder)
+	defer func() { media.recorder.CompareAndSwap(recorder, nil); recorder.Close() }()
+	recordOutput := newPCMResampler(media.sampleRate(), 24000)
+	policyGeneration := newSecret()
+	pacerPolicy.onSent = func(silent bool) {
+		if !silent {
+			a.observeAIOutput(row, time.Now().UTC(), policyGeneration)
+		}
+	}
 	pacer := newSIPRTPPacerWithPolicy(ctx, media, playback, pacerPolicy, func(progress twilioPlaybackProgress) error {
-		control, _ := json.Marshal(realtimeBridgeControl{
-			Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
-		})
-		return coreWriter.Write(ws.OpText, control)
+		return agentSession.progress(coreWriter, progress, "rtp_transmitted")
 	}, func(payload []byte) {
-		if tap.hasListeners() {
-			tap.publish(1, pcm16ToBytes(listenResampler.Process(decodeSIPG711(payload, media.offer.Codec))))
+		var sentPCM []int16
+		listeners := tap.hasListeners()
+		if recorder != nil || listeners || media.offer.Codec == "G722" {
+			sentPCM = recordOutput.Process(media.decodeSentAudio(payload))
+			recorder.Record(1, sentPCM)
+		}
+		if listeners {
+			tap.publish(1, pcm16ToBytes(sentPCM))
 		}
 	})
+	pacer.setDiscardReceipt(func(item string, generation int64, ms int) error {
+		return agentSession.cleared(coreWriter, realtimeBridgeControl{ItemID: item, Generation: generation}, agentClearReceipt{Scope: "local", LocalMS: ms})
+	})
+	legacyFramer := &sipLegacyFramer{rate: media.sampleRate(), commit: func(packets []sipRTPOutboundPacket) { _, _ = pacer.enqueue(packets) }}
+	defer legacyFramer.stop()
+	media.pacer.Store(pacer)
+	defer media.pacer.CompareAndSwap(pacer, nil)
+	a.bindAIPlayback(row, policyGeneration, playback.hasPendingSpeech)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
 	var workers sync.WaitGroup
+	jitter := newRTPJitterBufferWithPolicy(session.playbackPolicy)
+	defer jitter.releaseTrace()
 	defer func() {
 		cancel()
 		media.Close()
@@ -668,7 +962,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		workers.Wait()
 		<-pacer.done
 	}()
-	jitter := newRTPJitterBuffer()
+	media.jitterTelemetry.Store(jitter)
 	framer := newRTPAudioFramer(jitter, media.offer)
 	maxQueuedMS := 0
 	workers.Add(1)
@@ -692,16 +986,24 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	go func() {
 		defer workers.Done()
 		defer cancel()
+		media.finishEarlyReceiver()
 		buffer := make([]byte, 4096)
 		for {
 			_ = media.conn.SetReadDeadline(time.Now().Add(time.Second))
-			n, source, err := media.conn.ReadFromUDP(buffer)
+			n, source, err := media.readPacket(buffer)
+			media.observedReadError(err)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 					return
 				}
 				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+					if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
+						continue
+					}
 					if time.Since(time.Unix(0, media.lastPacket.Load())) > sipRTPInactivity {
+						if d := media.diagnostics.Load(); d != nil {
+							d.event("sip_media_timeout", "carrier", "direct SIP RTP timed out", 0)
+						}
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusGoingAway, "direct SIP RTP timed out")
 						return
 					}
@@ -711,9 +1013,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				return
 			}
 			if source.IP.String() != media.remote.IP.String() || source.Port != media.remote.Port {
+				media.observations.rejectedSource.Add(1)
 				continue
 			}
-			packet, err := media.decodePacket(buffer[:n])
+			packet, err := media.decodePacketAt(buffer[:n], media.readAt)
 			if err != nil {
 				continue
 			}
@@ -721,7 +1024,17 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			if humanHub != nil {
 				humanHub.timeline.observe("carrier_media_read", n, time.Time{}, fmt.Sprint(packet.Timestamp), fmt.Sprint(packet.SequenceNumber))
 			}
-			jitter.pushRTP(packet.SequenceNumber, packet.Payload, packet.Timestamp, time.Now())
+			if int(packet.PayloadType) == media.offer.DTMFPayloadType {
+				if !jitter.sourceKnown.Load() || jitter.sourceSSRC.Load() == packet.SSRC {
+					jitter.control(packet.SequenceNumber)
+				}
+				a.observeAICaller(row, true, time.Now().UTC(), policyGeneration)
+				continue
+			}
+			if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
+				continue
+			}
+			jitter.pushSourceRTPAt(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt, time.Now(), time.Now)
 		}
 	}()
 
@@ -735,14 +1048,18 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				payload, ready := framer.pop()
+			case now := <-ticker.C:
+				mode := media.remoteMode.Load()
+				jitter.setPaused(mode == 2 || mode == 3, now)
+				pcm, ready := framer.popPCM(media)
 				if !ready {
 					continue
 				}
-				pcm := decodeSIPG711(payload, media.offer.Codec)
 				processed := processCarrierInput(row, audioFrontend, pcm)
-				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				observedAt := time.Now()
+				agentSession.observeCaller(processed.SpeechActive, observedAt)
+				a.observeAICaller(row, processed.SpeechActive, observedAt.UTC(), policyGeneration)
+				localSpeechStarted := processed.SpeechStarted && playback.hasPendingSpeech()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
 				}
@@ -753,8 +1070,13 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, time.Time{}, "", "")
 				}
+				recorder.Record(0, pcm24)
 				tap.publishPCM(0, pcm24)
-				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+				if humanHub != nil {
+					queueSIPHumanAudio(coreWriter, pcm24, framer.frameArrival, uint32(jitter.generation.Load()))
+				} else {
+					coreWriter.queueAudioAt(agentInput.inputWithPCM24(processed.PCM, pcm24, nil, ""), 0, framer.frameArrival)
+				}
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					if err := coreWriter.Write(ws.OpText, control); err != nil {
@@ -773,20 +1095,20 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		droppedStaleMS := pacer.droppedMS()
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "sip_direct", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
 		jitter.mu.Lock()
-		lost, inboundDroppedMS, maxAge, jitterMS := jitter.lost, jitter.droppedSamples/8, jitter.maxAgeMS, jitter.jitterMS
+		lost, inboundDroppedMS, maxAge, jitterMS := int(media.observations.loss.Load()), (jitter.droppedSamples+jitter.lateDroppedSamples)/8, jitter.maxAgeMS, jitter.jitterMS
 		jitter.mu.Unlock()
 		var preAnswerDroppedMS int64
 		if hub := a.softphones.lookup(row.ID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(row.ID, carrierAudioDiagnostics{
-			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
+			SIPAgentPlayout: pacer.agentPlayoutSnapshot(), AgentAudio: agentSession.snapshot(), OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
-			Provider:   "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
+			Provider:   "sip_direct", Codec: media.offer.Codec, SampleRate: media.sampleRate(),
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
-			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/48000), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
+			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/int64(coreWriter.mediaRate())), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
 		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()
@@ -794,7 +1116,11 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		session.finish(string(leg), errors.New(reason))
 	}()
 
+	if err := agentSession.ready(coreWriter, "rtp_transmitted"); err != nil {
+		return
+	}
 	var nextFrame realtimeBridgeControl
+	var outputKey agentPlaybackKey
 	for {
 		select {
 		case <-ctx.Done():
@@ -803,6 +1129,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			if a.handleAgentCompletionClose(row, err) {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
+				return
+			}
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
@@ -816,9 +1146,19 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			case "audio.frame":
 				nextFrame = control
 			case "interrupt":
-				nextFrame = realtimeBridgeControl{}
+				a.observeAICaller(row, true, time.Now().UTC(), policyGeneration)
+				if matchesAgentPlayback(nextFrame.ItemID, nextFrame.Generation, control) {
+					nextFrame = realtimeBridgeControl{}
+				}
 				audioFrontend.markInterrupt(control.Source)
-				if _, err := pacer.clear(ctx); err != nil {
+				agentSession.cancel(control.ItemID, control.Generation)
+				agentOutput.reset()
+				legacyFramer.drop(control)
+				receipt, err := pacer.cancelPlayback(ctx, control)
+				if err == nil {
+					err = agentSession.cleared(coreWriter, control, receipt)
+				}
+				if err != nil {
 					closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear direct SIP playback")
 					return
 				}
@@ -828,31 +1168,55 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		pcm8 := outputResampler.Process(bytesToPCM16(data))
+		if media.hold.Load() != nil {
+			// Never played: free Core's playback credit with an honest clear.
+			if !nextFrame.Silence && !agentSession.rejects(nextFrame.ItemID, nextFrame.Generation) {
+				pacer.discardAgentAudio(nextFrame.ItemID, nextFrame.Generation, (len(data)*1000+agentSession.byteRate()-1)/agentSession.byteRate())
+			}
+			agentOutput.reset()
+			nextFrame = realtimeBridgeControl{}
+			continue
+		}
+		if !agentSession.accept(nextFrame) {
+			nextFrame = realtimeBridgeControl{}
+			continue
+		}
+		if key := (agentPlaybackKey{nextFrame.Generation, nextFrame.ItemID}); key.Item != "" && key != outputKey {
+			agentOutput.reset()
+			outputKey = key
+		}
+		data, sourceAt := carrierMicrophoneSource(row, data)
+		pcm8 := agentOutput.output(data)
 		if len(pcm8) == 0 {
 			continue
 		}
-		chunks := twilioAudioPackets(pcm8, len(data)/2, nextFrame)
-		packets := make([]sipRTPOutboundPacket, 0, len(chunks))
-		for _, chunk := range chunks {
-			pcm := chunk.PCM
-			if len(pcm) < sipRTPPacketSamples {
-				padded := make([]int16, sipRTPPacketSamples)
-				copy(padded, pcm)
-				pcm = padded
-			}
-			packets = append(packets, sipRTPOutboundPacket{
-				payload: encodeSIPG711(pcm, media.offer.Codec),
-				itemID:  nextFrame.ItemID, audioEndMS: chunk.AudioEndMS,
-			})
+		meta := sipRTPOutboundPacket{enqueuedAt: sourceAt, pcm: pcm8, silence: nextFrame.Silence, generation: nextFrame.Generation, itemID: nextFrame.ItemID, audioEndMS: nextFrame.AudioEndMS}
+		packets := []sipRTPOutboundPacket{meta}
+		if !agentSession.continuous() {
+			packets = legacyFramer.frames(pcm8, meta)
 		}
+		frameMeta := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queued, err := pacer.enqueue(packets)
+		var queued int
+		receivedAt := time.Now()
+		err = agentSession.withPlaybackPressure(ctx, frameMeta, func() error { var e error; queued, e = pacer.enqueueAt(packets, receivedAt); return e })
 		if err != nil {
-			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow"})
-			_ = coreWriter.Write(ws.OpText, control)
+			if writeErr := agentSession.overflow(coreWriter, frameMeta.ItemID, frameMeta.Generation, "carrier_queue_overflow"); writeErr != nil {
+				return
+			}
+			// The overflowed playback is cancelled; its already queued packets
+			// must go now, not be rejected one tick at a time as dead air.
+			if frameMeta.ItemID != "" {
+				control := realtimeBridgeControl{ItemID: frameMeta.ItemID, Generation: frameMeta.Generation}
+				agentOutput.reset()
+				legacyFramer.drop(control)
+				if _, err := pacer.cancelPlayback(ctx, control); err != nil {
+					return
+				}
+			}
 			continue
 		}
+		legacyFramer.arm()
 		if queued > maxQueuedMS {
 			maxQueuedMS = queued
 		}
@@ -930,4 +1294,321 @@ func pcm16ToAlaw(pcm []int16) []byte {
 		out[i] = (encoded | sign) ^ 0x55
 	}
 	return out
+}
+
+func (m *sipRTPMedia) sampleRate() int {
+	if m.offer.Codec == "G722" {
+		return 16000
+	}
+	return 8000
+}
+func (m *sipRTPMedia) initCodec() {
+	m.codecOnce.Do(func() {
+		if m.offer.Codec == "G722" {
+			m.g722Encoder = g722.NewEncoder(g722.Rate64000, 0)
+			m.g722Decoder = g722.NewDecoder(g722.Rate64000, 0)
+			m.g722SentDecoder = g722.NewDecoder(g722.Rate64000, 0)
+		}
+	})
+}
+func (m *sipRTPMedia) encodeAudio(pcm []int16) []byte {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return encodeSIPG711(pcm, m.offer.Codec)
+	}
+	out := make([]byte, (len(pcm)+1)/2)
+	n := m.g722Encoder.Encode(out, pcm)
+	return out[:n]
+}
+func (m *sipRTPMedia) decodeAudio(p []byte) []int16 {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return decodeSIPG711(p, m.offer.Codec)
+	}
+	out := make([]int16, len(p)*2)
+	n := m.g722Decoder.Decode(out, p)
+	return out[:n]
+}
+
+func (m *sipRTPMedia) resetReceiveDecoder() {
+	m.initCodec()
+	if m.offer.Codec == "G722" {
+		m.g722Decoder = g722.NewDecoder(g722.Rate64000, 0)
+	}
+}
+func (m *sipRTPMedia) decodeSentAudio(p []byte) []int16 {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return decodeSIPG711(p, m.offer.Codec)
+	}
+	out := make([]int16, len(p)*2)
+	n := m.g722SentDecoder.Decode(out, p)
+	return out[:n]
+}
+
+type sipAgentCancel struct {
+	control realtimeBridgeControl
+	reply   chan agentClearReceipt
+}
+
+func (p *sipRTPPacer) cancelPlayback(ctx context.Context, c realtimeBridgeControl) (agentClearReceipt, error) {
+	p.agentSession.cancel(c.ItemID, c.Generation)
+	reply := make(chan agentClearReceipt, 1)
+	select {
+	case p.cancelCh <- sipAgentCancel{c, reply}:
+	case <-ctx.Done():
+		return agentClearReceipt{}, ctx.Err()
+	case <-p.done:
+		return agentClearReceipt{}, errCarrierPacerClosed
+	}
+	select {
+	case r := <-reply:
+		// Progress queued before the cancel lands before the caller's clear.
+		p.receipts.flush()
+		return r, nil
+	case <-ctx.Done():
+		return agentClearReceipt{}, ctx.Err()
+	case <-p.done:
+		return agentClearReceipt{}, errCarrierPacerClosed
+	}
+}
+
+// setDiscardReceipt routes local discards (hold, remote hold, overflow-free
+// drains) to Core as playback.cleared. Safe to call while the pacer runs.
+func (p *sipRTPPacer) setDiscardReceipt(fn func(item string, generation int64, ms int) error) {
+	p.receipts.setDiscard(fn)
+}
+
+// discardAgentAudio reports Core audio dropped before it reached the pacer.
+func (p *sipRTPPacer) discardAgentAudio(item string, generation int64, ms int) {
+	p.receipts.discard(item, generation, ms)
+}
+
+// Playback receipts leave the 20 ms RTP tick through this pump: a slow Core
+// socket cannot skip ticks, and a failed receipt write cannot stop outgoing
+// audio (the Core reader owns that failure). Progress is coalesced to the latest
+// per playback; a discard is ordered after any progress queued before it.
+type sipReceiptEntry struct {
+	key      agentPlaybackKey
+	progress twilioPlaybackProgress
+	discard  bool
+	ms       int
+}
+
+type sipReceiptPump struct {
+	writeMu    sync.Mutex // held for the duration of each Core write
+	mu         sync.Mutex
+	pending    []*sipReceiptEntry
+	latest     map[agentPlaybackKey]*sipReceiptEntry
+	onProgress func(twilioPlaybackProgress) error
+	onDiscard  func(item string, generation int64, ms int) error
+	wake       chan struct{}
+	failures   atomic.Int64
+}
+
+func newSIPReceiptPump(onProgress func(twilioPlaybackProgress) error) *sipReceiptPump {
+	return &sipReceiptPump{onProgress: onProgress, latest: make(map[agentPlaybackKey]*sipReceiptEntry), wake: make(chan struct{}, 1)}
+}
+
+func (r *sipReceiptPump) setDiscard(fn func(item string, generation int64, ms int) error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.onDiscard = fn
+	r.mu.Unlock()
+}
+
+func (r *sipReceiptPump) progress(v twilioPlaybackProgress) {
+	if r == nil {
+		return
+	}
+	k := agentPlaybackKey{v.Generation, v.ItemID}
+	r.mu.Lock()
+	if r.onProgress == nil {
+		r.mu.Unlock()
+		return
+	}
+	if e := r.latest[k]; e != nil {
+		e.progress.AudioEndMS = max(e.progress.AudioEndMS, v.AudioEndMS)
+	} else {
+		e = &sipReceiptEntry{key: k, progress: v}
+		r.latest[k] = e
+		r.pending = append(r.pending, e)
+	}
+	r.mu.Unlock()
+	r.notify()
+}
+
+// Discarded (never transmitted) audio: an honest local clear frees Core's
+// playback credit, including on Core versions that predate flow control.
+func (r *sipReceiptPump) discard(item string, generation int64, ms int) {
+	if r == nil {
+		return
+	}
+	if item == "" || ms <= 0 {
+		return
+	}
+	k := agentPlaybackKey{generation, item}
+	r.mu.Lock()
+	if r.onDiscard == nil {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.latest, k)
+	if n := len(r.pending); n > 0 && r.pending[n-1].discard && r.pending[n-1].key == k {
+		r.pending[n-1].ms += ms
+	} else {
+		r.pending = append(r.pending, &sipReceiptEntry{key: k, discard: true, ms: ms})
+	}
+	r.mu.Unlock()
+	r.notify()
+}
+
+func (r *sipReceiptPump) notify() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *sipReceiptPump) run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.wake:
+		}
+		for r.writeNext() {
+		}
+	}
+}
+
+// flush writes everything queued so far on the caller, after any in-flight
+// write. A cancel flushes before its playback.cleared so progress for the
+// cancelled playback can never land after the clear.
+func (r *sipReceiptPump) flush() {
+	if r == nil {
+		return
+	}
+	for r.writeNext() {
+	}
+}
+
+func (r *sipReceiptPump) writeNext() bool {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	r.mu.Lock()
+	if len(r.pending) == 0 {
+		r.mu.Unlock()
+		return false
+	}
+	e := r.pending[0]
+	r.pending[0] = nil
+	r.pending = r.pending[1:]
+	if r.latest[e.key] == e {
+		delete(r.latest, e.key)
+	}
+	onProgress, onDiscard := r.onProgress, r.onDiscard
+	r.mu.Unlock()
+	var err error
+	if e.discard {
+		err = onDiscard(e.key.Item, e.key.Generation, e.ms)
+	} else {
+		err = onProgress(e.progress)
+	}
+	if err != nil {
+		r.failures.Add(1)
+	}
+	return true
+}
+
+// Legacy (non-continuous) Core chunks are not 20 ms aligned. Carry a partial
+// packet into the next chunk of the same playback instead of zero-padding every
+// chunk; a remainder with no continuation is committed (padded only by the send
+// loop) one packet interval after its chunk was queued.
+type sipLegacyFramer struct {
+	mu      sync.Mutex
+	rate    int
+	pending []int16
+	meta    sipRTPOutboundPacket
+	seq     uint64
+	timer   *time.Timer
+	commit  func([]sipRTPOutboundPacket)
+}
+
+func (f *sipLegacyFramer) frames(pcm []int16, meta sipRTPOutboundPacket) []sipRTPOutboundPacket {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	samples := f.rate / 50
+	var out []sipRTPOutboundPacket
+	if len(f.pending) > 0 && (f.meta.itemID != meta.itemID || f.meta.generation != meta.generation || f.meta.silence != meta.silence) {
+		out = append(out, f.takeLocked())
+	}
+	carried := len(f.pending)
+	buf := append(f.pending, pcm...)
+	f.pending = nil
+	full := len(buf) / samples * samples
+	for off := 0; off < full; off += samples {
+		packet := meta
+		packet.pcm = append([]int16(nil), buf[off:off+samples]...)
+		packet.audioEndMS = meta.audioEndMS - (len(buf)-off-samples)*1000/f.rate
+		if !meta.enqueuedAt.IsZero() {
+			packet.enqueuedAt = meta.enqueuedAt.Add(time.Duration(off-carried) * time.Second / time.Duration(f.rate))
+		}
+		out = append(out, packet)
+	}
+	if full < len(buf) {
+		f.pending = append([]int16(nil), buf[full:]...)
+		f.meta = meta
+	}
+	return out
+}
+
+// arm starts the remainder deadline only after the chunk's full packets were
+// queued, so a committed tail can never overtake them.
+func (f *sipLegacyFramer) arm() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pending) == 0 || f.commit == nil {
+		return
+	}
+	seq := f.seq
+	if f.timer != nil {
+		f.timer.Stop()
+	}
+	f.timer = time.AfterFunc(sipRTPPacketTime, func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.seq != seq || len(f.pending) == 0 {
+			return
+		}
+		f.commit([]sipRTPOutboundPacket{f.takeLocked()})
+	})
+}
+
+func (f *sipLegacyFramer) takeLocked() sipRTPOutboundPacket {
+	packet := f.meta
+	packet.pcm = f.pending
+	f.pending = nil
+	return packet
+}
+
+func (f *sipLegacyFramer) drop(c realtimeBridgeControl) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pending) > 0 && matchesAgentPlayback(f.meta.itemID, f.meta.generation, c) {
+		f.pending = nil
+		f.seq++
+	}
+}
+
+func (f *sipLegacyFramer) stop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	if f.timer != nil {
+		f.timer.Stop()
+	}
 }

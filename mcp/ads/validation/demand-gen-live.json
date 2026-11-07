@@ -1,0 +1,59 @@
+{
+  "validation_date": "2026-10-26",
+  "app_version_prepared": "0.1.51",
+  "google_ads_api_version": "v23",
+  "path": "Structured app handlers -> existing Apteva integration connection -> real Google Ads account",
+  "result": "passed",
+  "delivery_enabled": false,
+  "campaigns": [
+    {
+      "id": "24391785096",
+      "status_after_test": "REMOVED"
+    },
+    {
+      "id": "24391786743",
+      "status_after_test": "REMOVED"
+    },
+    {
+      "id": "24397194866",
+      "status_after_test": "REMOVED"
+    },
+    {
+      "id": "24402869476",
+      "status_after_test": "REMOVED"
+    }
+  ],
+  "validated": [
+    "Atomic daily/total campaign budgets",
+    "Exclusive campaign-specific custom conversion goals; standard campaign goals disabled",
+    "YouTube in-feed/Shorts placements; ad-group geography and language inheritance",
+    "Grouped audience creation and targeting",
+    "Paused responsive video, responsive image, and carousel ad creation",
+    "Campaign/ad-group configuration readback and updates",
+    "Paused creative replacement with old ad paused",
+    "YouTube subscriptions to follow-on views goal switch",
+    "Restoring account conversion goals and switching to click optimization",
+    "Conversion event reporting",
+    "Placement and creative-asset report queries",
+    "Campaign and budget cleanup",
+    "Conversion-count and native target-CPA campaign creation",
+    "Value/ROAS eligibility rejection is classified as provider_bidding_ineligible"
+  ],
+  "local_checks": [
+    "Go suite and race suite",
+    "Go build and vet",
+    "14 UI tests",
+    "Targeted TypeScript checking",
+    "Panel build",
+    "23 catalog tests with 471 assertions in synchronized isolated embed layout",
+    "Browser preview at 1200, 768 and 390 pixels without overflow"
+  ],
+  "limits": [
+    "Paused validation does not demonstrate policy approval, serving or paid attribution",
+    "API v23 does not expose channel-specific linking verification; activation requires explicit external verification when readiness is unknown",
+    "Reusable creative assets and the test grouped Audience remain where API v23 offers no deletion",
+    "Current account returns NOT_ENOUGH_CONVERSIONS for value/ROAS bidding; positive value-bidding creation remains unverified, as accepted by the user."
+  ],
+  "raw_evidence_local": "/private/tmp/ads-demand-gen-live/evidence.json",
+  "real_provider_requests": 68
+}

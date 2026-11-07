@@ -13,6 +13,8 @@ import (
 var compatibleProviderSlugs = []string{
 	"hetzner",
 	"digitalocean",
+	"clouding",
+	"upcloud",
 	"contabo",
 	"vultr",
 	"aws-ec2",
@@ -192,6 +194,35 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.ProviderConnectionID = bound.ConnectionID
+	if in.Firewall != nil {
+		target := &Instance{ID: 1, Provider: provider, ResourceClass: in.ResourceClass, Size: in.Size}
+		if provider == "vultr" && strings.HasPrefix(in.Size, "vbm-") {
+			target.ResourceClass = "bare_metal"
+		}
+		if in.Firewall.ExposeDeclaredPorts {
+			return nil, errors.New("expose_declared_ports is only supported by native deployments")
+		}
+		if _, e := normalizeFirewallRules(in.Firewall.Rules, firewallCapabilities(target)); e != nil {
+			return nil, e
+		}
+		if _, e := firewallInitial(target, *in.Firewall); e != nil {
+			return nil, e
+		}
+		if _, e := (firewallDriver{ctx: ctx, inst: &Instance{ID: 1, Provider: provider, ProviderConnectionID: bound.ConnectionID}}).list(); e != nil {
+			return nil, fmt.Errorf("firewall integration preflight: %w", e)
+		}
+	}
+	if provider == "ovhcloud" {
+		if in.Size == "" {
+			return nil, errors.New("OVH requires an explicit Public Cloud flavor or a reviewed VPS/dedicated offer")
+		}
+		if product, _ := ovhSizeParts(in.Size); product != "" {
+			return ovhContractProvision(ctx, in)
+		}
+		if strings.HasPrefix(in.Image, "ovh-") || strings.HasPrefix(in.Region, "ovh/") {
+			return nil, errors.New("OVH Public Cloud flavor requires a Public Cloud image and region")
+		}
+	}
 	ctx, releaseScope := scopedCatalog(ctx, catalogOptions{ConnectionID: bound.ConnectionID, Zone: in.Region})
 	defer releaseScope()
 	if err := validateStorageRequest(provider, in.Storage); err != nil {
@@ -244,6 +275,9 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 	if inst == nil {
 		return ErrInstanceNotFound
 	}
+	if err := nativeHostRetained(ctx.AppDB(), inst.ID); err != nil {
+		return err
+	}
 	if !instanceCapabilities(inst).Destroy {
 		return providerAdapterUnavailable(inst.Provider, "destroy")
 	}
@@ -280,6 +314,10 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 		return err
 	}
 	if fresh.CreatePending {
+		if isOVHContract(fresh) {
+			kickOVHContract(ctx, fresh.ID)
+			return errors.New("OVH order outcome/delivery must be reconciled before cancellation; inventory retained")
+		}
 		if !instanceCreateActive(ctx, fresh.ID) {
 			_ = dbUpdateInstance(ctx.AppDB(), fresh.ID, map[string]any{"cleanup_error": "Provider create outcome is unknown; reconcile the recorded account before deletion"})
 			return fmt.Errorf("provider create outcome is unknown; inventory retained for reconciliation")
@@ -311,6 +349,9 @@ func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
 			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"cleanup_error": err.Error()})
 		}
 	}()
+	if err = reconcileVultrBootStorage(ctx, inst); err != nil {
+		return err
+	}
 	if err = reconcileAWSBootStorage(ctx, inst); err != nil {
 		return err
 	}
@@ -335,6 +376,12 @@ func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
 		err = destroyProviderInstance(ctx, inst)
 	}
 	if err != nil {
+		return err
+	}
+	if err = firewallDestroy(ctx, inst); err != nil {
+		return err
+	}
+	if err = finalizeVultrBootStorage(ctx, inst); err != nil {
 		return err
 	}
 	if err = finalizeAWSBootVolumes(ctx, inst); err != nil {

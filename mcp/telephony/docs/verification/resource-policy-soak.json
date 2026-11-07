@@ -1,0 +1,213 @@
+{
+  "app_version": "0.12.40",
+  "completed_seconds": 60,
+  "concurrent_calls": 8,
+  "process_cpu_one_core_pct": 66.62951155324316,
+  "requested_seconds": 60,
+  "scope": "real Chromium production WebRTC/capture DSP, actual outbound INVITE/180/ACK/BYE and local TLS/SRTP carrier; synthetic microphone with natural speech/markers; local platform identity; excludes Telnyx network and Apteva remote proxy",
+  "wall_seconds": 60.000414333,
+  "results": [
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "failures": [],
+      "healthy_delay_p50_ms": 107.1962890625,
+      "healthy_delay_p95_ms": 107.374755859375,
+      "id": "outbound-soak-0",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 20,
+      "median_delay_growth_ms": -0.1435546875,
+      "profile": "healthy",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "failures": [],
+      "healthy_delay_p50_ms": 106.287841796875,
+      "healthy_delay_p95_ms": 106.7587890625,
+      "id": "outbound-soak-1",
+      "longest_healthy_speech_delivery_interruption_ms": 3.142291,
+      "longest_speech_delivery_interruption_ms": 3.142291,
+      "median_delay_growth_ms": -0.15087890625,
+      "profile": "healthy",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "failures": [],
+      "healthy_delay_p50_ms": 106.121826171875,
+      "healthy_delay_p95_ms": 116.15087890625,
+      "id": "outbound-soak-2",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 20,
+      "median_delay_growth_ms": -0.2041015625,
+      "profile": "jitter",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "failures": [],
+      "healthy_delay_p50_ms": 85.858154296875,
+      "healthy_delay_p95_ms": 86.126953125,
+      "id": "outbound-soak-3",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 20,
+      "median_delay_growth_ms": -0.09423828125,
+      "profile": "jitter",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "failures": [],
+      "healthy_delay_p50_ms": 83.874755859375,
+      "healthy_delay_p95_ms": 93.91455078125,
+      "id": "outbound-soak-4",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 120.36349999999999,
+      "median_delay_growth_ms": -0.005615234375,
+      "profile": "shift180",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "failures": [],
+      "healthy_delay_p50_ms": 84.538330078125,
+      "healthy_delay_p95_ms": 84.9892578125,
+      "id": "outbound-soak-5",
+      "longest_healthy_speech_delivery_interruption_ms": 9.428332999999999,
+      "longest_speech_delivery_interruption_ms": 120.33166700000001,
+      "median_delay_growth_ms": -0.08349609375,
+      "profile": "shift180",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "PCMA",
+      "failures": [],
+      "healthy_delay_p50_ms": 74.37939453125,
+      "healthy_delay_p95_ms": 74.6953125,
+      "id": "outbound-soak-6",
+      "longest_healthy_speech_delivery_interruption_ms": 20,
+      "longest_speech_delivery_interruption_ms": 360.8275,
+      "median_delay_growth_ms": -0.068115234375,
+      "profile": "pause420",
+      "recording_dropped_ms": 0
+    },
+    {
+      "accepted": true,
+      "codec": "G722",
+      "failures": [],
+      "healthy_delay_p50_ms": 85.198974609375,
+      "healthy_delay_p95_ms": 85.448974609375,
+      "id": "outbound-soak-7",
+      "longest_healthy_speech_delivery_interruption_ms": 9.930875,
+      "longest_speech_delivery_interruption_ms": 340.877125,
+      "median_delay_growth_ms": -0.037109375,
+      "profile": "pause420",
+      "recording_dropped_ms": 0
+    }
+  ],
+  "resources": {
+    "diagnostic_reads": 5712,
+    "errors": 0,
+    "resources": {
+      "contract": "apteva.resources/v1",
+      "network_apply": "new_sockets",
+      "policy": {
+        "process": {},
+        "total_concurrency": 4,
+        "workloads": {
+          "diagnostics": {
+            "concurrency": 4,
+            "queue": 16,
+            "weight": 4
+          },
+          "maintenance": {
+            "concurrency": 1,
+            "queue": 8,
+            "weight": 1
+          },
+          "recording_import": {
+            "concurrency": 1,
+            "queue": 8,
+            "weight": 2
+          },
+          "recording_playback": {
+            "concurrency": 1,
+            "queue": 8,
+            "weight": 2
+          }
+        },
+        "network": {
+          "sip_media": {
+            "receive_bytes": 262144
+          },
+          "webrtc_media": {
+            "receive_bytes": 262144
+          }
+        }
+      },
+      "process_apply": "backend_owned",
+      "revision": 1,
+      "sockets": {
+        "sip_media": {
+          "failures": 0,
+          "last_revision": 1,
+          "sockets": 16,
+          "last": {
+            "requested": {
+              "receive_bytes": 262144
+            },
+            "receive_bytes": 262144,
+            "send_bytes": 9216,
+            "kernel_receive_bytes": 262144,
+            "kernel_send_bytes": 9216,
+            "dscp": 0,
+            "buffer_accounting": "kernel"
+          }
+        },
+        "webrtc_media": {
+          "failures": 0,
+          "last_revision": 1,
+          "sockets": 96,
+          "last": {
+            "requested": {
+              "receive_bytes": 262144
+            },
+            "receive_bytes": 262144,
+            "send_bytes": 9216,
+            "kernel_receive_bytes": 262144,
+            "kernel_send_bytes": 9216,
+            "dscp": 0,
+            "buffer_accounting": "kernel"
+          }
+        }
+      },
+      "workloads": {
+        "diagnostics": {
+          "Active": 0,
+          "Queued": 0,
+          "Completed": 5712,
+          "Rejected": 0,
+          "WaitNanoseconds": 5139312326
+        }
+      }
+    }
+  },
+  "source_verification": {
+    "unchanged": true,
+    "changed_files": [],
+    "test_exit_code": 0
+  },
+  "limitations": [
+    "Local macOS loopback simulation; no Linux scheduler enforcement measurement",
+    "Synthetic audio-marker continuity, not a natural-speech listening assessment",
+    "60-second measured run is not a long-duration production guarantee",
+    "Earlier browser-resilience harsh-marker gate failure remains separate"
+  ]
+}

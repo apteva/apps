@@ -1,0 +1,175 @@
+{
+  "id": "session_range_breakout",
+  "name": "Session range breakout",
+  "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
+  "definition": {
+    "engine": "rules",
+    "universe": [
+      "DE40"
+    ],
+    "cadence": "1m",
+    "program": {
+      "version": "trading-rules/1",
+      "symbol": "DE40",
+      "timeframe": "1m",
+      "timezone": "Europe/Helsinki",
+      "windows": {
+        "morning": {
+          "start": "08:00",
+          "end": "11:00"
+        }
+      },
+      "rules": [
+        {
+          "id": "daily_flatten",
+          "on": "any",
+          "repeat": "always",
+          "when": {
+            "op": ">=",
+            "args": [
+              {
+                "metric": "minute"
+              },
+              {
+                "value": 1080
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "flatten"
+            }
+          ]
+        },
+        {
+          "id": "range_entries",
+          "on": "bar.close",
+          "repeat": "once_per_day",
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "metric": "window_complete",
+                "window": "morning"
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "==",
+                    "args": [
+                      {
+                        "metric": "position_qty"
+                      },
+                      {
+                        "value": 0
+                      }
+                    ]
+                  },
+                  {
+                    "op": "and",
+                    "args": [
+                      {
+                        "op": "==",
+                        "args": [
+                          {
+                            "metric": "entry_count"
+                          },
+                          {
+                            "value": 0
+                          }
+                        ]
+                      },
+                      {
+                        "op": "and",
+                        "args": [
+                          {
+                            "op": ">=",
+                            "args": [
+                              {
+                                "metric": "minute"
+                              },
+                              {
+                                "value": 660
+                              }
+                            ]
+                          },
+                          {
+                            "op": "<",
+                            "args": [
+                              {
+                                "metric": "minute"
+                              },
+                              {
+                                "value": 1080
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "enter",
+              "side": "buy",
+              "order_type": "stop",
+              "price": {
+                "metric": "window_high",
+                "window": "morning"
+              },
+              "stop": {
+                "metric": "window_low",
+                "window": "morning"
+              },
+              "group": "daily_range",
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            },
+            {
+              "kind": "enter",
+              "side": "sell",
+              "order_type": "stop",
+              "price": {
+                "metric": "window_low",
+                "window": "morning"
+              },
+              "stop": {
+                "metric": "window_high",
+                "window": "morning"
+              },
+              "group": "daily_range",
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            }
+          ]
+        }
+      ],
+      "schedules": {
+        "daily_close": "18:00"
+      }
+    }
+  },
+  "simulation": {
+    "seed": 1,
+    "starting_cash": 100000,
+    "contracts": {
+      "DE40": {
+        "multiplier": 1,
+        "currency_rate": 1,
+        "margin_fraction": 0.1
+      }
+    },
+    "costs": {
+      "qty_step": 0.001
+    }
+  }
+}

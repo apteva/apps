@@ -74,6 +74,11 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 		return "", nil, err
 	}
 	expectedVersion := ""
+	startupTenant := &Tenant{ID: tenantID, Slug: slug, Kind: KindLocal, ConfigDir: configDir, BaseURL: fmt.Sprintf("http://127.0.0.1:%d", port), Status: StatusStarting}
+	if original, _, lookupErr := a.store.get(tenantID); lookupErr == nil {
+		startupTenant.CurrentVersion = original.CurrentVersion
+		startupTenant.TargetVersion = original.TargetVersion
+	}
 	spawnEnv := tenantSpawnEnvForMode(configDir, port, tenantID, quarantine)
 	dnsEnv, err := a.tenantDNSEnv(tenantID, false)
 	if err != nil {
@@ -94,8 +99,27 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 		}
 		spawnEnv = applyVersionedRuntimeEnv(spawnEnv, runtime)
 	}
-	cmd := buildSpawnCmd(slug, bin,
-		[]string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"})
+	args := []string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"}
+	journal, hosted, err := a.hostRequest(ctx, globalCtx, startupTenant, "JOURNAL", "", nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("read stable host journal: %w", err)
+	}
+	if hosted {
+		// The host owns recovery; the CLI's shorter startup timer must not
+		// terminate a valid activation or choose a different recovery binary.
+		bin = journal.HostBinary
+		if info, err := os.Stat(bin); err != nil || info.Mode()&0111 == 0 {
+			return "", nil, errors.New("recorded host binary is unavailable; recovery required")
+		}
+		args = []string{"-c", stableHostLaunchScript, "fleet-host", configDir, bin}
+		bin = "sh"
+		spawnEnv = stableHostLaunchEnv(spawnEnv, journal)
+	} else if server, ok := versionedRuntimeFromCLI(bin); ok {
+		// Preserve the legacy lifecycle; host conversion is an explicit
+		// maintenance action, never an incidental consequence of npm install.
+		args = append(args, "--server-bin", server.Server)
+	}
+	cmd := buildSpawnCmd(slug, bin, args)
 	cmd.Env = spawnEnv
 	// New process group: child survives if fleet itself restarts.
 	// (Setpgid is also set redundantly inside buildSpawnCmd; harmless.)
@@ -125,31 +149,27 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 	a.procMu.Unlock()
 
 	// Reap on exit so a crashed child doesn't become a zombie.
-	go func() {
+	go func(ownedProc *tenantProc) {
 		_ = cmd.Wait()
-		close(proc.done)
+		close(ownedProc.done)
 		_ = logFile.Close()
 		a.procMu.Lock()
 		// Only forget the proc if it's still the same one (avoid racing
 		// a concurrent restart).
-		if a.procs[slug] == proc {
+		if a.procs[slug] == ownedProc {
 			delete(a.procs, slug)
 		}
 		a.procMu.Unlock()
-	}()
+	}(proc)
 
 	// Wait for /api/health to come up. The CLI takes a few seconds
 	// to boot server + core; the health endpoint is public so we
 	// don't need an api_key to probe it.
-	if err := waitForReady(ctx, port, 30*time.Second); err != nil {
-		_ = stopProcess(proc, 2*time.Second)
-		return "", nil, fmt.Errorf("tenant did not become ready: %w", err)
-	}
-	if expectedVersion != "" {
-		if _, err := requireRuntimeHealthVersion(ctx, fmt.Sprintf("http://127.0.0.1:%d", port), expectedVersion); err != nil {
+	if err := a.waitTenantStartup(ctx, globalCtx, startupTenant, expectedVersion, 30*time.Second, proc.done); err != nil {
+		if !errors.Is(err, errStableHostPending) {
 			_ = stopProcess(proc, 2*time.Second)
-			return "", nil, err
 		}
+		return "", nil, err
 	}
 
 	if freshSetup {

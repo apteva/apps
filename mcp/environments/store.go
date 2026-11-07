@@ -11,6 +11,56 @@ import (
 
 type store struct{ db *sql.DB }
 
+// Reconciliation needs lifecycle state, not potentially megabytes of fixture
+// JSON. Keep this projection separate from Definition so the worker cannot
+// accidentally depend on an unpopulated specification.
+type definitionLifecycle struct {
+	ID                string
+	DesiredState      string
+	ReconcileStatus   string
+	ReconcileFailures int
+	ReconcileNextAt   *time.Time
+	HasActiveRun      bool
+}
+
+const definitionLifecycleColumns = `d.id,d.desired_state,d.reconcile_status,d.reconcile_failures,d.reconcile_next_at,
+	EXISTS(SELECT 1 FROM environment_runs r WHERE r.environment_id=d.id AND r.status IN ('starting','running','stopping'))`
+
+func scanDefinitionLifecycle(row rowScanner) (*definitionLifecycle, error) {
+	var d definitionLifecycle
+	var next sql.NullString
+	err := row.Scan(&d.ID, &d.DesiredState, &d.ReconcileStatus, &d.ReconcileFailures, &next, &d.HasActiveRun)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	d.ReconcileNextAt = parseOptionalTime(next)
+	return &d, nil
+}
+
+func (s store) listDefinitionLifecycles() ([]definitionLifecycle, error) {
+	rows, err := s.db.Query(`SELECT ` + definitionLifecycleColumns + ` FROM environment_definitions d ORDER BY d.updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []definitionLifecycle
+	for rows.Next() {
+		d, err := scanDefinitionLifecycle(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *d)
+	}
+	return out, rows.Err()
+}
+
+func (s store) getDefinitionLifecycle(id string) (*definitionLifecycle, error) {
+	return scanDefinitionLifecycle(s.db.QueryRow(`SELECT `+definitionLifecycleColumns+` FROM environment_definitions d WHERE d.id=?`, id))
+}
+
 func (s store) listDefinitions() ([]Definition, error) {
 	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions ORDER BY updated_at DESC`)
 	if err != nil {
@@ -133,7 +183,7 @@ func (s store) updateRun(id, status, msg string) error {
 	if status == "stopped" || status == "failed" || status == "expired" {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=?`, status, msg, stopped, id)
+	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=CASE WHEN ? IN ('starting','running') THEN NULL ELSE COALESCE(stopped_at,?) END WHERE id=?`, status, msg, status, stopped, id)
 	return err
 }
 
@@ -142,7 +192,7 @@ func (s store) transitionRun(id, from, status, msg string) (bool, error) {
 	if status == "stopped" || status == "failed" || status == "expired" {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	result, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=? AND status=?`, status, msg, stopped, id, from)
+	result, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=CASE WHEN ? IN ('starting','running') THEN NULL ELSE COALESCE(stopped_at,?) END WHERE id=? AND status=?`, status, msg, status, stopped, id, from)
 	if err != nil {
 		return false, err
 	}
@@ -266,7 +316,7 @@ func (s store) saveVoiceCall(call *VoiceCall) error {
 	}
 	_, err = s.db.Exec(`INSERT INTO environment_voice_calls(id,run_id,status,spec_json,result_json,error,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at`,
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at WHERE environment_voice_calls.status != 'cancelled'`,
 		call.ID, call.RunID, call.Status, string(spec), string(result), call.Error, created.Format(time.RFC3339Nano), now)
 	return err
 }

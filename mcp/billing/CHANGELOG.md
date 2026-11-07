@@ -1,5 +1,20 @@
 # Billing release notes
 
+## 0.14.0
+
+- Mark the 11 tools that never write with the MCP `readOnlyHint`, so the
+  platform can run them across every project an agent's grant allows
+  (`project_id: "*"`). `invoices_render_pdf`, provider session tools and every
+  create, update, void, refund, send or collect tool stay unmarked.
+- Pass `_project_id` on catalog price and product lookups. A global Billing
+  install previously sent none, so `price_id` line items failed with catalog's
+  "project_id required".
+- Point `runtime.source.ref` at `billing/v0.14.0`. It had stayed on
+  `billing/v0.13.0`, so source installs of 0.13.1 and 0.13.2 built 0.13.0
+  code; this release ships their changes too.
+- Read `payment_methods_list` from the read pool. No new tools, arguments or
+  database migrations.
+
 ## 0.13.2
 
 - Return Storage’s signed invoice PDF URL and expiry instead of constructing an

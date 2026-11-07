@@ -1,0 +1,35 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/telephony
+cpu: Apple M1 Pro
+BenchmarkSIPAdaptiveIngress/adaptive-10         	 2170518	       558.0 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPAdaptiveIngress/adaptive-10         	 2108514	       667.7 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPAdaptiveIngress/adaptive-10         	 2095726	       554.1 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPAdaptiveIngress/reference-10        	 1836520	       632.7 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPAdaptiveIngress/reference-10        	 1731177	       641.6 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPAdaptiveIngress/reference-10        	 1674736	       808.0 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_false-10         	 1000000	      1120 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_false-10         	 1000000	      1091 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_false-10         	 1000000	      1348 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10          	 1000000	      1213 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10          	 1000000	      1201 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMU/loss_true-10          	 1000000	      1216 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10         	 1000000	      1181 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10         	 1000000	      1196 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_false-10         	 1000000	      1176 ns/op	     800 B/op	       3 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10          	 1000000	      1832 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10          	 1000000	      1280 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/PCMA/loss_true-10          	 1000000	      1272 ns/op	     795 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10         	   75169	     20161 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10         	   74761	     15447 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_false-10         	   78327	     15623 ns/op	    1440 B/op	       3 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10          	   79912	     15893 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10          	   71048	     15528 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/G722/loss_true-10          	   77324	     19670 ns/op	    1435 B/op	       2 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10  	 5116807	       202.3 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10  	 5254854	       216.6 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_true-10  	 5959723	       202.3 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10 	 1838122	       649.9 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10 	 1836499	       663.5 ns/op	     160 B/op	       1 allocs/op
+BenchmarkSIPPlayback/queue_only/legacy_false-10 	 1840696	       651.6 ns/op	     160 B/op	       1 allocs/op
+PASS

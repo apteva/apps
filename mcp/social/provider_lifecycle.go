@@ -103,6 +103,11 @@ func (z zernioLifecycleAdapter) UpsertWorkflowPost(ctx *sdk.AppCtx, request prov
 }
 
 func (a *App) zernioWorkflowInput(ctx *sdk.AppCtx, j publishJob, intent, scheduleAt string) (map[string]any, error) {
+	if j.platform == "pinterest" && intent != postModeDraft {
+		if _, err := resolvePinterestBoard(publishJob{options: j.options}); err != nil {
+			return nil, err
+		}
+	}
 	input := map[string]any{
 		"content": j.body,
 		"platforms": []any{map[string]any{
@@ -146,6 +151,11 @@ func (a *App) zernioWorkflowInput(ctx *sdk.AppCtx, j publishJob, intent, schedul
 		input["mediaItems"] = items
 	}
 	if platformData := zernioPlatformSpecificData(j.options); len(platformData) > 0 {
+		if j.platform == "pinterest" {
+			if title := strOption(j.options, "title"); title != "" {
+				platformData["title"] = title
+			}
+		}
 		input["platforms"].([]any)[0].(map[string]any)["platformSpecificData"] = platformData
 	}
 	return input, nil
@@ -267,6 +277,15 @@ func (a *App) reconcileImportedProviderPost(
 	if providerPostID == "" {
 		return false, errors.New("provider post id required")
 	}
+	var platform string
+	if err := ctx.AppDB().QueryRow(`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid).Scan(&platform); err != nil {
+		return false, err
+	}
+	platformURL = safePublicationURL(platform, platformURL)
+	// Provider-indexed timestamps remain in provider_data; they are not native inspection.
+	providerPublishedAt := nativeTimestamp(publishedAt)
+	publishedAt = ""
+
 	var suppressed int
 	tombstoneErr := ctx.AppDB().QueryRow(
 		`SELECT 1 FROM provider_import_tombstones
@@ -305,12 +324,12 @@ func (a *App) reconcileImportedProviderPost(
 			targetStatus = "draft"
 		}
 		if source == "provider" && !reviewing {
-			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),published_at=CASE WHEN ?='published' THEN NULLIF(?,'') ELSE NULL END,body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, status, publishedAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
+			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
 			if err != nil {
 				return false, err
 			}
 		}
-		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,published_at=CASE WHEN ?='published' THEN ? ELSE NULL END WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID)
+		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,provider_reported_published_at=? WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, providerPublishedAt, targetID)
 		if err != nil {
 			return false, err
 		}
@@ -356,14 +375,33 @@ func (a *App) reconcileImportedProviderPost(
 		return false, err
 	}
 	postID, _ = postResult.LastInsertId()
+	// Imported provider drafts retain the selected destination in their initial
+	// revision. Existing reviewed targets are never silently rewritten.
+	options := map[string]any{}
+	var providerAccountID string
+	if err := tx.QueryRow(`SELECT platform,COALESCE(provider_account_id,'') FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid).Scan(&platform, &providerAccountID); err != nil {
+		return false, err
+	}
+	if platform == "pinterest" {
+		entry := zernioPlatformPost(raw, providerAccountID, platform)
+		if data, ok := entry["platformSpecificData"].(map[string]any); ok {
+			if board := firstString(data, "boardId", "board_id"); board != "" {
+				options["destination_id"] = board
+			}
+			if section := firstString(data, "boardSectionId", "board_section_id"); section != "" {
+				options["board_section_id"] = section
+			}
+		}
+	}
+	optionsJSON, _ := json.Marshal(options)
 	_, err = tx.Exec(
 		`INSERT INTO post_targets
 		 (post_id, social_account_id, status, platform_post_id, platform_url, provider_post_id,
-		  provider_data, provider_sync_status, provider_updated_at, published_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
-		         CASE WHEN ?='published' THEN ? ELSE NULL END)`,
+		  provider_data, provider_sync_status, provider_updated_at, options, published_at,provider_reported_published_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?,
+		         CASE WHEN ?='published' THEN ? ELSE NULL END,?)`,
 		postID, accountID, status, nullable(platformPostID), nullable(platformURL), providerPostID,
-		string(rawJSON), status, status, nullable(publishedAt),
+		string(rawJSON), status, string(optionsJSON), status, nullable(publishedAt), providerPublishedAt,
 	)
 	if err != nil {
 		return false, err

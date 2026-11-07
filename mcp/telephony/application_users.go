@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -55,17 +56,18 @@ type phonePolicy struct {
 	Groups    []phoneGroup        `json:"groups"`
 }
 type phonePrincipal struct {
-	Identity     phoneIdentity
-	Project      string
-	Revision     int64
-	Listen       bool
-	ListenScope  bool
-	Coach        bool
-	CoachScope   bool
-	AuthProvider *phoneAuthProvider
-	Supervisor   bool
-	Destinations map[string]bool
-	Numbers      map[string]bool
+	readPermissions *phoneReadPermissions // only attached to read requests; never answer/control requests
+	Identity        phoneIdentity
+	Project         string
+	Revision        int64
+	Listen          bool
+	ListenScope     bool
+	Coach           bool
+	CoachScope      bool
+	AuthProvider    *phoneAuthProvider
+	Supervisor      bool
+	Destinations    map[string]bool
+	Numbers         map[string]bool
 }
 type phonePrincipalKey struct{}
 
@@ -92,11 +94,11 @@ func (a *App) phonePolicy(project string) (phonePolicy, error) {
 	return p, err
 }
 func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrincipal, error) {
-	policy, err := a.phonePolicy(project)
+	policy, err := a.cachedPhonePolicy(project)
 	if err != nil {
 		return nil, err
 	}
-	return phonePrincipalFromPolicy(project, identity, policy)
+	return phonePrincipalFromPolicy(project, identity, *policy)
 }
 func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy phonePolicy) (*phonePrincipal, error) {
 	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
@@ -131,7 +133,16 @@ func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 	return p, p != (phoneIdentity{}) || r.Header.Get("X-Apteva-Scopes") != ""
 }
 func phoneAction(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/softphone/auto-answer-") && (r.Method == "GET" || r.Method == "POST") {
+		return "call.answer"
+	}
 	path := r.URL.Path
+	if (path == "/softphone/telemetry" && r.Method == "POST") || (strings.HasPrefix(path, "/softphone/offer-telemetry/") && r.Method == "GET") {
+		return "call.read"
+	}
+	if (path == "/softphone/turn-policy" || path == "/softphone/network-policy" || path == "/softphone/network-check") && (r.Method == "GET" || r.Method == "POST") {
+		return "call.read"
+	}
 	if r.Method == "GET" && (path == "/calls" || path == "/calls/events") {
 		return "call.read"
 	}
@@ -156,7 +167,7 @@ func phoneAction(r *http.Request) string {
 		return "call.dial"
 	case strings.HasPrefix(path, "/softphone/answer/"):
 		return "call.answer"
-	case strings.HasPrefix(path, "/softphone/offer/ack/"):
+	case strings.HasPrefix(path, "/softphone/offer/ack/"), strings.HasPrefix(path, "/softphone/recovery/"):
 		return "call.read"
 	case strings.HasPrefix(path, "/softphone/offer/decline/"):
 		return "call.answer"
@@ -311,7 +322,7 @@ func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) boo
 	if row.ProjectID != p.Project {
 		return false
 	}
-	owner, dest, err := a.phoneOwner(row.ID)
+	owner, dest, err := a.phoneReadOwner(p, row)
 	if err != nil {
 		return false
 	}
@@ -333,22 +344,18 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 	if row.Status != "pending" || row.Direction != "inbound" || isSuppressedHandlingReason(row.HandlingReason) {
 		return ""
 	}
-	offers, err := a.db().activeRingOffers(row.ID, row.ProjectID)
+	offers, ringRuns, err := a.phoneReadOffers(p, row)
 	if err != nil {
 		return ""
 	}
 	for _, offer := range offers {
-		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.destinationAllowsIdentity(row.ProjectID, offer.DestinationID, p.Identity) && (requested == "" || requested == offer.DestinationID) {
+		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.phoneReadDestination(p, row.ProjectID, offer.DestinationID) && (requested == "" || requested == offer.DestinationID) {
 			return offer.DestinationID
 		}
 	}
 	// A ring-group offer can expire while the call remains pending. Only a
 	// direct destination may use the fallback when no offer is active.
-	var ringRuns int
-	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&ringRuns); err != nil {
-		return ""
-	}
-	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
+	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.phoneReadDestination(p, row.ProjectID, row.RoutingDestinationID) && (requested == "" || requested == row.RoutingDestinationID) {
 		return row.RoutingDestinationID
 	}
 	return ""
@@ -459,7 +466,10 @@ func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 // grant per call prevents stale tabs and explicit takeovers replaying old URLs.
 const phoneLeaseSeconds = 60
 
-func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSession, error) {
+func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal, diagnostic ...audioSessionCorrelation) (*softphoneSession, error) {
+	return a.issuePhoneSessionConditional(row, p, nil, diagnostic...)
+}
+func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guard *phoneAttachmentGuard, diagnostic ...audioSessionCorrelation) (*softphoneSession, error) {
 	principal := ""
 	revision := int64(0)
 	if p != nil {
@@ -476,15 +486,51 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 		principal = p.Identity.key()
 		revision = fresh.Revision
 	}
+	s := audioSessionCorrelation{}
+	if len(diagnostic) > 0 {
+		s = diagnostic[0]
+	}
+	s = normalizeAudioSessionCorrelation(s)
+	s.SessionID = newAudioSessionID()
+	s.PreviousSessionID = ""
+	s.IssuedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, _ := json.Marshal(s)
 	token := newSecret()
-	_, err := a.db().db.Exec(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at) VALUES(?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds)
+	var saved string
+	query := `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,pending_token_hash='',pending_expires_at=0,pending_diagnostic_json='{}',diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
+	args := []any{row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix() + phoneLeaseSeconds, string(raw)}
+	if guard != nil {
+		query = strings.Replace(query, `VALUES(?,?,?,?,?,?,?)`, `SELECT ?,?,?,?,?,?,? WHERE ?='' OR EXISTS(SELECT 1 FROM telephony_media_sessions WHERE call_id=? AND project_id=?)`, 1)
+		args = append(args, guard.Expected, row.ID, row.ProjectID)
+		query += ` WHERE COALESCE(json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id'),'')=?`
+		args = append(args, guard.Expected)
+	}
+	query += ` RETURNING diagnostic_json`
+	err := a.db().db.QueryRow(query, args...).Scan(&saved)
+	if guard != nil && errors.Is(err, sql.ErrNoRows) {
+		return nil, errPhoneSessionChanged
+	}
+	_ = json.Unmarshal([]byte(saved), &s)
 	if err != nil {
 		return nil, err
 	}
 	if h := a.softphones.lookup(row.ID); h != nil {
 		h.invalidateCoaching()
+		identity := phoneIdentity{}
+		if p != nil {
+			identity = p.Identity
+		}
+		h.telemetry.sessionIssued(row, s, identity, a.audioNetworks.enqueue)
+	} else {
+		network := audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, Retention: 7 * 24 * time.Hour}
+		if p != nil {
+			network.AdviserIdentity = p.Identity
+			network.SessionIssuerIdentity = &p.Identity
+			network.IdentitySource = "authorized_http_session"
+		}
+		enqueueAudioSessionIssued(network, s, a.audioNetworks.enqueue)
 	}
-	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
+	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds, AttachmentGuardVersion: 1}, nil
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
 	return a.phoneMediaDenialReason(row, token) == ""
@@ -498,6 +544,14 @@ func (a *App) validPhoneMedia(row *callRow, token string) bool {
 func temporaryMediaFailure(reason string) bool {
 	return reason == "media_session_lookup_failed" || reason == "policy_lookup_failed" || reason == "owner_lookup_failed"
 }
+
+// Applies only to an established socket. An outage cannot create or extend a lease.
+func establishedMediaLeaseReason(reason string, verifiedExpiry, now int64) string {
+	if temporaryMediaFailure(reason) && verifiedExpiry <= now {
+		return "media_lease_expired"
+	}
+	return reason
+}
 func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
 	reason, _ := a.phoneMediaCheck(row, token)
 	return reason
@@ -507,55 +561,88 @@ func (a *App) phoneMediaCheck(row *callRow, token string) (string, int64) {
 	return reason, expiry
 }
 func (a *App) phoneMediaCheckDetails(row *callRow, token string) (string, int64, phoneIdentity) {
-	var hash, principal string
+	reason, expiry, identity, _ := a.phoneMediaCheckState(row, token)
+	return reason, expiry, identity
+}
+func (a *App) phoneMediaCheckState(row *callRow, token string, includeCorrelation ...bool) (string, int64, phoneIdentity, audioSessionCorrelation) {
+	var hash, principal, raw string
+	var session audioSessionCorrelation
 	var revision, expires int64
-	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
+	var err error
+	if len(includeCorrelation) > 0 && includeCorrelation[0] {
+		err = a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at,diagnostic_json FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires, &raw)
+		_ = json.Unmarshal([]byte(raw), &session)
+	} else {
+		// Lease watchdogs retain their existing compact query; generation decoding
+		// is needed only at an attachment boundary, never on each media tick.
+		err = a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
+	}
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
 		if e != nil {
-			return "owner_lookup_failed", expires, phoneIdentity{}
+			return "owner_lookup_failed", expires, phoneIdentity{}, session
 		}
 		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
-			return "", expires, phoneIdentity{}
+			return "", expires, phoneIdentity{}, session
 		}
-		return "media_session_missing", expires, phoneIdentity{}
+		return "media_session_missing", expires, phoneIdentity{}, session
 	}
 	if err != nil {
-		return "media_session_lookup_failed", expires, phoneIdentity{}
+		return "media_session_lookup_failed", expires, phoneIdentity{}, session
 	}
 	if expires <= time.Now().Unix() {
-		return "media_lease_expired", expires, phoneIdentity{}
+		return "media_lease_expired", expires, phoneIdentity{}, session
 	}
 	if !secureEqual(phoneHash(token), hash) {
-		return "media_token_replaced", expires, phoneIdentity{}
+		return "media_token_replaced", expires, phoneIdentity{}, session
 	}
+	reason, identity := a.phoneMediaPrincipalReason(row, principal)
+	return reason, expires, identity, session
+}
+func (a *App) phoneMediaPrincipalReason(row *callRow, principal string) (string, phoneIdentity) {
 	if principal == "" {
-		return "", expires, phoneIdentity{}
+		return "", phoneIdentity{}
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return "media_principal_invalid", expires, phoneIdentity{}
+		return "media_principal_invalid", phoneIdentity{}
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
 	if err != nil {
 		if errors.Is(err, errPhoneAccessDenied) {
-			return "user_access_revoked", expires, phoneIdentity{}
+			return "user_access_revoked", phoneIdentity{}
 		}
-		return "policy_lookup_failed", expires, phoneIdentity{}
+		return "policy_lookup_failed", phoneIdentity{}
 	}
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
-			return "owner_lookup_failed", expires, phoneIdentity{}
+			return "owner_lookup_failed", phoneIdentity{}
 		}
 		if owner != identity.key() {
-			return "call_ownership_changed", expires, phoneIdentity{}
+			return "call_ownership_changed", phoneIdentity{}
 		}
-		return "call_permission_revoked", expires, phoneIdentity{}
+		return "call_permission_revoked", phoneIdentity{}
 	}
-	return "", expires, identity
+	return "", identity
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
+	// Optional HTTP metadata may await request bytes. Never hold the media claim
+	// while reading it; authorization and issuance remain authoritative below.
+	var diagnostic audioSessionCorrelation
+	var guard *phoneAttachmentGuard
+	if action != "renew" {
+		var err error
+		diagnostic, guard, err = audioAttachmentRequest(r, action)
+		if err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_attachment_guard"})
+			return
+		}
+		if action != "attach" && guard != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_attachment_guard"})
+			return
+		}
+	}
 	unlock := a.softphones.lockClaim(id)
 	defer unlock()
 	row, err := a.db().findCall(id)
@@ -568,7 +655,11 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 	if isTerminalStatus(row.Status) || row.PeerKind != peerKindHuman || row.PeerToken == "" || row.Status == "pending" {
-		http.Error(w, "call has no attachable human session", 409)
+		code := "call_not_attachable"
+		if isTerminalStatus(row.Status) {
+			code = "call_ended"
+		}
+		writeJSONStatus(w, 409, map[string]any{"code": code})
 		return
 	}
 	p := phoneUserFrom(r)
@@ -635,8 +726,39 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
 		return
 	}
-	session, err := a.issuePhoneSession(row, p)
+	var session *softphoneSession
+	if guard != nil && guard.Handover {
+		if !softphoneHandoverEnabled(row.ProjectID) {
+			writeJSONStatus(w, 409, map[string]any{"code": "handover_unavailable"})
+			return
+		}
+		session, err = a.issuePendingPhoneSession(r.Context(), row, p, diagnostic, guard)
+	} else {
+		session, err = a.issueGuardedPhoneSession(r.Context(), row, p, diagnostic, guard)
+	}
 	if err != nil {
+		if errors.Is(err, errPhoneSessionChanged) {
+			result := map[string]any{"code": "media_session_changed"}
+			var raw string
+			if a.db().db.QueryRow(`SELECT diagnostic_json FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&raw) == nil {
+				var state audioSessionCorrelation
+				if json.Unmarshal([]byte(raw), &state) == nil {
+					result["current_generation"] = safeAudioDiagnosticID(state.SessionID)
+				}
+			}
+			writeJSONStatus(w, 409, result)
+			return
+		}
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errPhoneAccessDenied) {
+			status = http.StatusForbidden
+		}
+		identity := phoneIdentity{}
+		if p != nil {
+			identity = p.Identity
+		}
+		network := audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, AdviserIdentity: identity, IdentitySource: "authorized_http_session", Session: diagnostic, Retention: 7 * 24 * time.Hour}
+		enqueueAudioAttachmentFailure(network, "softphone.media.session_issue_failed", status, "media_session_unavailable", nil, a.audioNetworks.enqueue)
 		writePhoneSessionFailure(w, err)
 		return
 	}
@@ -664,12 +786,19 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 		}
 		return nil
 	}
+	// Provider IDs are unique. Several IDs may share one issuer only as aliases
+	// of the exact same identity endpoint (same URL and format), each with its
+	// own actions; a second endpoint for an issuer is a conflicting authority.
 	providers := map[string]bool{}
+	issuers := map[string]string{}
 	for _, provider := range p.Providers {
-		if !validPhoneProvider(provider) || providers[provider.ID] {
+		issuer := provider.IssuerApp + "\x00" + provider.IssuerInstallID
+		authority := provider.URL + "\x00" + provider.Format
+		if existing, seen := issuers[issuer]; !validPhoneProvider(provider) || providers[provider.ID] || seen && existing != authority {
 			return errors.New("invalid or duplicate online identity provider")
 		}
 		providers[provider.ID] = true
+		issuers[issuer] = authority
 	}
 	groups := map[string]bool{}
 	users := map[string]bool{}
@@ -883,27 +1012,8 @@ func phoneCallCandidates(p *phonePrincipal, project string) (string, []any) {
 // Apply visibility before the result limit. Paging here traverses only calls
 // with an indexed ownership, offer, or destination candidate for this user.
 func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]callRow, error) {
-	p := phoneUserFrom(r)
-	if p == nil {
-		return a.db().recent(project, limit)
-	}
-	candidates, args := phoneCallCandidates(p, project)
-	out := []callRow{}
-	for offset := 0; len(out) < limit; offset += 200 {
-		queryArgs := append(append([]any{}, args...), project)
-		rows, err := a.db().listWhere(`id IN (`+candidates+`) AND project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), queryArgs...)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a.filterPhoneCalls(r, rows)...)
-		if len(rows) < 200 {
-			break
-		}
-	}
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	model, _, err := a.phoneCallRead(r, project, limit, false)
+	return model.rows, err
 }
 
 func writePhoneSessionFailure(w http.ResponseWriter, err error) {
@@ -912,4 +1022,39 @@ func writePhoneSessionFailure(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "media_session_unavailable"})
+}
+
+type phonePolicyCache struct {
+	mu       sync.Mutex
+	projects map[string]cachedPhonePolicy
+}
+
+type cachedPhonePolicy struct {
+	epoch  int64
+	policy *phonePolicy
+}
+
+func (a *App) cachedPhonePolicy(project string) (*phonePolicy, error) {
+	var revision, epoch int64
+	err := a.db().db.QueryRow(`SELECT p.revision,v.revision FROM telephony_access_policies p JOIN telephony_policy_versions v ON v.project_id=p.project_id WHERE p.project_id=?`, project).Scan(&revision, &epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &phonePolicy{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.policyReads.mu.Lock()
+	defer a.policyReads.mu.Unlock()
+	if saved := a.policyReads.projects[project]; saved.policy != nil && saved.policy.Revision == revision && saved.epoch == epoch {
+		return saved.policy, nil
+	}
+	fresh, err := a.phonePolicy(project)
+	if err != nil {
+		return nil, err
+	}
+	if a.policyReads.projects == nil || len(a.policyReads.projects) >= 256 {
+		a.policyReads.projects = make(map[string]cachedPhonePolicy)
+	}
+	a.policyReads.projects[project] = cachedPhonePolicy{epoch, &fresh}
+	return &fresh, nil
 }

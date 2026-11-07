@@ -27,11 +27,7 @@ workflows:
             test "$(shasum -a 256 "$capsule" | awk '{print $1}')" = "$APTEVA_SOURCE_SHA256"
             unzip -q "$capsule" -d "$APTEVA_SOURCE_DIR"
           fi
-          if [[ -n "${APTEVA_SOURCE_BUILD_SUBDIR:-}" ]]; then
-            test "$APTEVA_SOURCE_BUILD_SUBDIR" = "app" || { echo "unsupported source build subdirectory" >&2; exit 1; }
-            export APTEVA_SOURCE_DIR="$APTEVA_SOURCE_DIR/$APTEVA_SOURCE_BUILD_SUBDIR"
-            test -d "$APTEVA_SOURCE_DIR"
-          fi
+          echo "APTEVA_CAPSULE_DIR=$APTEVA_SOURCE_DIR" >> "$CM_ENV"
           echo "APTEVA_SOURCE_DIR=$APTEVA_SOURCE_DIR" >> "$CM_ENV"
 
       - name: Decode mobile target
@@ -42,7 +38,8 @@ workflows:
           import json
           import os
 
-          target = json.loads(base64.b64decode(os.environ.get("APTEVA_TARGET_CONFIG_B64", "e30=")))
+          spec = json.loads(base64.b64decode(os.environ["APTEVA_BUILD_SPEC_B64"], validate=True))
+          target = json.loads(spec.get("target_config_json") or "{}")
           values = {
               "APTEVA_MODULE": target.get("module", "app").strip(":"),
               "APTEVA_VARIANT": target.get("variant", "release"),
@@ -63,12 +60,24 @@ workflows:
               print(f"{key}={value}")
           PY
 
+      - name: Prepare source pipeline and verify toolchains
+        script: |
+          set -euo pipefail
+          python3 "$CM_BUILD_DIR/scripts/prepare_pipeline.py"
+
       - name: Build mobile artifact
         script: |
           set -euo pipefail
           output="$CM_BUILD_DIR/apteva-output"
           mkdir -p "$output"
-          cd "$APTEVA_SOURCE_DIR"
+          cd "${APTEVA_NATIVE_BUILD_DIR:-$APTEVA_SOURCE_DIR}"
+          extension="ipa"
+          if [[ "$APTEVA_TARGET_KIND" = "macos" ]]; then extension="pkg"; fi
+          if [[ "$APTEVA_TARGET_KIND" = "android" ]]; then extension="aab"; fi
+          primary="${APTEVA_OUTPUT_PRIMARY:-app.$extension}"
+          mkdir -p "$output/$(dirname "$primary")"
+          export DEPLOY_SOURCE_DIR="$APTEVA_SOURCE_DIR"
+          export DEPLOY_ARTIFACT_DIR="$output"
 
           if [[ -n "${APTEVA_BUILD_CMD:-}" ]]; then
             sh -c "$APTEVA_BUILD_CMD"
@@ -163,7 +172,7 @@ workflows:
               -exportOptionsPlist "$HOME/export_options.plist"
             artifact="$(find "$ipa_dir" -name "*.$extension" -print -quit)"
             test -n "$artifact" || { echo "Xcode export produced no .$extension" >&2; exit 1; }
-            cp "$artifact" "$output/app.$extension"
+            cp "$artifact" "$output/$primary"
           elif [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
             test -n "${APTEVA_PACKAGE_NAME:-}"
             chmod +x ./gradlew
@@ -187,7 +196,7 @@ workflows:
               args+=(--init-script "$CM_BUILD_DIR/apteva-mobile-version.gradle")
             fi
             ./gradlew "${args[@]}"
-            cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/app.aab"
+            cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/$primary"
           else
             echo "unsupported APTEVA_TARGET_KIND=$APTEVA_TARGET_KIND" >&2
             exit 1
@@ -215,7 +224,7 @@ workflows:
               f.write(base64.b64decode(os.environ["ANDROID_UPLOAD_KEYSTORE_BASE64"], validate=True))
           PY
             chmod 600 "$keystore"
-            if ! unzip -Z1 "$output/app.aab" | grep -Eiq '^META-INF/.*\.SF$'; then
+            if ! unzip -Z1 "$output/$primary" | grep -Eiq '^META-INF/.*\.SF$'; then
               jarsigner \
                 -keystore "$keystore" \
                 -storetype PKCS12 \
@@ -223,10 +232,10 @@ workflows:
                 -keypass:env ANDROID_UPLOAD_KEY_PASSWORD \
                 -sigalg SHA256withRSA \
                 -digestalg SHA-256 \
-                "$output/app.aab" "$ANDROID_UPLOAD_KEY_ALIAS"
+                "$output/$primary" "$ANDROID_UPLOAD_KEY_ALIAS"
             fi
-            jarsigner -verify -certs "$output/app.aab"
-            actual_fingerprint="$(keytool -printcert -jarfile "$output/app.aab" -rfc | openssl x509 -noout -fingerprint -sha256 | sed 's/^[^=]*=//; s/://g' | tr '[:lower:]' '[:upper:]')"
+            jarsigner -verify -certs "$output/$primary"
+            actual_fingerprint="$(keytool -printcert -jarfile "$output/$primary" -rfc | openssl x509 -noout -fingerprint -sha256 | sed 's/^[^=]*=//; s/://g' | tr '[:lower:]' '[:upper:]')"
             expected_fingerprint="$(printf '%s' "$ANDROID_UPLOAD_CERT_SHA256" | sed 's/://g; s/ //g; s/-//g' | tr '[:lower:]' '[:upper:]')"
             if [[ -z "$actual_fingerprint" || "$actual_fingerprint" != "$expected_fingerprint" ]]; then
               echo "Android bundle signer does not match Deploy's managed upload certificate" >&2
@@ -244,38 +253,13 @@ workflows:
           mode="${APTEVA_ARTIFACT_MODE:-file}"
           channel="${APTEVA_STORE_CHANNEL:-internal}"
 
-          if [[ "$mode" = "store_upload" && ( "$APTEVA_TARGET_KIND" = "ios" || "$APTEVA_TARGET_KIND" = "macos" ) ]]; then
-            required=(APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_IDENTIFIER APP_STORE_CONNECT_PRIVATE_KEY)
-            for name in "${required[@]}"; do
-              test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
-            done
-            key="$CM_BUILD_DIR/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
-            printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key"
-            apple_extension="ipa"
-            if [[ "$APTEVA_TARGET_KIND" = "macos" ]]; then apple_extension="pkg"; fi
-            xcrun altool --upload-package "$output/app.$apple_extension" \
-              --api-key "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --api-issuer "$APP_STORE_CONNECT_ISSUER_ID" \
-              --p8-file-path "$key" \
-              --output-format json
-            rm -f "$key"
-          elif [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "android" ]]; then
-            test -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS:-}"
-            test -n "${APTEVA_VERSION_CODE:-}"
-            fastlane supply \
-              --json_key_data "$GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS" \
-              --aab "$output/app.aab" \
-              --package_name "$APTEVA_PACKAGE_NAME" \
-              --track "$channel"
-          fi
-
           python3 - <<'PY'
           import json
           import os
 
           platform = os.environ["APTEVA_TARGET_KIND"]
           mode = os.environ.get("APTEVA_ARTIFACT_MODE", "file")
-          primary = {"ios": "app.ipa", "macos": "app.pkg", "android": "app.aab"}[platform]
+          primary = os.environ["APTEVA_OUTPUT_PRIMARY"]
           manifest = {
               "platform": platform,
               "primary": primary,
@@ -289,17 +273,59 @@ workflows:
               "signing_contract": os.environ.get("APTEVA_SIGNING_CONTRACT", ""),
               "device_families": json.loads(os.environ.get("APTEVA_DEVICE_FAMILIES_JSON", "[]")),
           }
-          if mode == "store_upload":
-              manifest.update({
-                  "channel": os.environ.get("APTEVA_STORE_CHANNEL", ""),
-                  "external_provider": "app_store_connect" if platform in ("ios", "macos") else "google_play",
-                  "external_status": "uploaded_processing" if platform in ("ios", "macos") else "completed",
-              })
           with open(os.path.join(os.environ["CM_BUILD_DIR"], "apteva-output", ".apteva-artifact.json"), "w") as f:
               json.dump(manifest, f, separators=(",", ":"))
           PY
+          if [[ -n "${APTEVA_PIPELINE_RUNNER:-}" ]]; then
+            "$APTEVA_PIPELINE_RUNNER" --cloud-pipeline finalize \
+              --source "$APTEVA_CAPSULE_DIR" --artifact "$output"
+          fi
+          primary="$APTEVA_OUTPUT_PRIMARY"
+          if [[ "$mode" = "store_upload" && ( "$APTEVA_TARGET_KIND" = "ios" || "$APTEVA_TARGET_KIND" = "macos" ) ]]; then
+            required=(APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_IDENTIFIER APP_STORE_CONNECT_PRIVATE_KEY)
+            for name in "${required[@]}"; do
+              test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
+            done
+            key="$CM_BUILD_DIR/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
+            printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key"
+            apple_extension="ipa"
+            if [[ "$APTEVA_TARGET_KIND" = "macos" ]]; then apple_extension="pkg"; fi
+            xcrun altool --upload-package "$output/$primary" \
+              --api-key "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+              --api-issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+              --p8-file-path "$key" \
+              --output-format json
+            rm -f "$key"
+          elif [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "android" ]]; then
+            test -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS:-}"
+            test -n "${APTEVA_VERSION_CODE:-}"
+            fastlane supply \
+              --json_key_data "$GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS" \
+              --aab "$output/$primary" \
+              --package_name "$APTEVA_PACKAGE_NAME" \
+              --track "$channel"
+          fi
+
+          if [[ -n "${APTEVA_PIPELINE_RUNNER:-}" ]]; then
+            "$APTEVA_PIPELINE_RUNNER" --cloud-pipeline verify \
+              --source "$APTEVA_CAPSULE_DIR" --artifact "$output"
+          fi
+          if [[ "$mode" = "store_upload" ]]; then
+            python3 - <<'PY'
+          import json, os
+          path = os.path.join(os.environ["CM_BUILD_DIR"], "apteva-output", ".apteva-artifact.json")
+          with open(path) as f:
+              manifest = json.load(f)
+          apple = os.environ["APTEVA_TARGET_KIND"] in ("ios", "macos")
+          manifest.update(channel=os.environ.get("APTEVA_STORE_CHANNEL", ""),
+                          external_provider="app_store_connect" if apple else "google_play",
+                          external_status="uploaded_processing" if apple else "completed")
+          with open(path, "w") as f:
+              json.dump(manifest, f, separators=(",", ":"))
+          PY
+          fi
           cd "$output"
-          zip -q "$CM_BUILD_DIR/apteva-build.zip" .apteva-artifact.json app.*
+          zip -qry "$CM_BUILD_DIR/apteva-build.zip" .
     artifacts:
       - apteva-build.zip
       - /tmp/xcodebuild_logs/*.log

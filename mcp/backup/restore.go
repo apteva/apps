@@ -56,6 +56,9 @@ func restoreFromRunWithOptions(ctx *sdk.AppCtx, runID int64, options InstanceRes
 		return nil, fmt.Errorf("download %s: %w", run.RemoteKey, err)
 	}
 	defer body.Close()
+	if err := requireDiskSpace(os.TempDir(), 0); err != nil {
+		return nil, err
+	}
 	stored, err := os.CreateTemp("", "apteva-restore-object-*")
 	if err != nil {
 		return nil, err
@@ -63,7 +66,7 @@ func restoreFromRunWithOptions(ctx *sdk.AppCtx, runID int64, options InstanceRes
 	storedPath := stored.Name()
 	defer os.Remove(storedPath)
 	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(stored, hash), contextReader{ctx: opCtx, r: body}); err != nil {
+	if _, err := io.Copy(&archiveDiskWriter{ctx: opCtx, out: io.MultiWriter(stored, hash), path: os.TempDir(), remaining: 1 << 40}, contextReader{ctx: opCtx, r: body}); err != nil {
 		_ = stored.Close()
 		return nil, fmt.Errorf("download %s: %w", run.RemoteKey, err)
 	}
@@ -124,7 +127,7 @@ func restoreProviderRunStream(opCtx context.Context, ctx *sdk.AppCtx, run *Run, 
 	var prepared struct {
 		UploadURL string `json:"upload_url"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult(run.Scope.SourceApp, tool, args, &prepared); err != nil {
+	if err := sdk.CallAppResultContext(opCtx, ctx.PlatformAPI(), run.Scope.SourceApp, tool, args, &prepared); err != nil {
 		return nil, fmt.Errorf("%s.%s prepare stream: %w", run.Scope.SourceApp, tool, err)
 	}
 	if prepared.UploadURL == "" {

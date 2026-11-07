@@ -23,7 +23,7 @@ func pdfPageCount(body []byte) (int, error) {
 	return api.PageCount(bytes.NewReader(body), model.NewDefaultConfiguration())
 }
 
-func renderCompletedPDF(source []byte, env *Envelope, recipients []Recipient, values []completionValue) ([]byte, error) {
+func renderCompletedPDF(source []byte, env *Envelope, recipients []Recipient, values []completionValue, seal *sealIdentity) ([]byte, error) {
 	dims, err := api.PageDims(bytes.NewReader(source), model.NewDefaultConfiguration())
 	if err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func renderCompletedPDF(source []byte, env *Envelope, recipients []Recipient, va
 		stamped = buf.Bytes()
 	}
 
-	certificate, err := completionCertificate(env, recipients)
+	certificate, err := completionCertificate(env, recipients, seal)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func imageFieldWatermark(img []byte, boxW, boxH, x, y float64) (*model.Watermark
 	return api.ImageWatermarkForReader(bytes.NewReader(img), desc, true, false, types.POINTS)
 }
 
-func completionCertificate(env *Envelope, recipients []Recipient) ([]byte, error) {
+func completionCertificate(env *Envelope, recipients []Recipient, seal *sealIdentity) ([]byte, error) {
 	pdf := gofpdf.New("P", "mm", "A4", "")
 	pdf.SetTitle("Completion certificate - "+env.Title, true)
 	pdf.SetAuthor("Apteva Signatures", true)
@@ -194,10 +194,22 @@ func completionCertificate(env *Envelope, recipients []Recipient) ([]byte, error
 		}
 		pdf.MultiCell(0, 7, line, "", "L", false)
 	}
+	if seal != nil {
+		pdf.Ln(5)
+		pdf.SetFont("Helvetica", "B", 13)
+		pdf.CellFormat(0, 9, "Document seal", "", 1, "L", false, 0, "")
+		certificateRow(pdf, "Sealed by", seal.Certificate.Subject.CommonName)
+		certificateRow(pdf, "Issuer", seal.Certificate.Issuer.CommonName)
+		certificateRow(pdf, "Fingerprint", certFingerprint(seal.Certificate))
+		pdf.SetFont("Helvetica", "", 9)
+		pdf.SetTextColor(55, 65, 81)
+		pdf.MultiCell(0, 6, "This PDF, including this page, carries a digital certification signature applied after the last recipient finished. Any later change to the file invalidates the signature in PDF readers such as Adobe Acrobat.", "", "L", false)
+		pdf.SetTextColor(17, 24, 39)
+	}
 	pdf.Ln(7)
 	pdf.SetFont("Helvetica", "I", 9)
 	pdf.SetTextColor(75, 85, 99)
-	pdf.MultiCell(0, 6, "This certificate documents a simple electronic-signature process. It is not a qualified electronic signature, notarization, or legal opinion.", "", "L", false)
+	pdf.MultiCell(0, 6, "This certificate documents an electronic-signature process. It is not a qualified electronic signature, notarization, or legal opinion.", "", "L", false)
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
 		return nil, err
@@ -237,7 +249,21 @@ func finalizeEnvelope(ctx *sdk.AppCtx, env *Envelope) (*Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	completedPDF, err := renderCompletedPDF(source, env, recipients, values)
+	seal, err := loadSealIdentity(ctx)
+	if err != nil {
+		_ = addAudit(ctx.AppDB(), env.ID, env.ProjectID, 0, "finalization.failed", map[string]any{"error": err.Error()})
+		return nil, err
+	}
+	stampedPDF, err := renderCompletedPDF(source, env, recipients, values, seal)
+	if err != nil {
+		_ = addAudit(ctx.AppDB(), env.ID, env.ProjectID, 0, "finalization.failed", map[string]any{"error": err.Error()})
+		return nil, err
+	}
+	completedPDF, err := sealPDF(stampedPDF, seal, sealDetails{
+		SignerName: seal.Certificate.Subject.CommonName,
+		Reason:     "All recipients completed envelope " + env.PublicID,
+		TSAURL:     timestampURL(ctx),
+	})
 	if err != nil {
 		_ = addAudit(ctx.AppDB(), env.ID, env.ProjectID, 0, "finalization.failed", map[string]any{"error": err.Error()})
 		return nil, err
@@ -262,14 +288,25 @@ func finalizeEnvelope(ctx *sdk.AppCtx, env *Envelope) (*Envelope, error) {
 		}
 	}
 	auditBody, err := json.MarshalIndent(map[string]any{
-		"schema":                   "apteva-signatures-evidence/v1",
-		"envelope":                 &evidenceEnvelope,
-		"recipients":               recipients,
-		"field_values":             auditValues,
-		"events":                   audit,
-		"completed_sha256":         completedHash,
-		"generated_at":             nowUTC(),
-		"signature_assurance":      "simple_electronic_signature",
+		"schema":              "apteva-signatures-evidence/v1",
+		"envelope":            &evidenceEnvelope,
+		"recipients":          recipients,
+		"field_values":        auditValues,
+		"events":              audit,
+		"completed_sha256":    completedHash,
+		"generated_at":        nowUTC(),
+		"signature_assurance": "simple_electronic_signature",
+		"document_seal": map[string]any{
+			"type":               "pdf_certification_signature",
+			"sub_filter":         "adbe.pkcs7.detached",
+			"doc_mdp":            "no_changes_allowed",
+			"digest":             "sha256",
+			"certificate_source": seal.Source,
+			"subject":            seal.Certificate.Subject.String(),
+			"issuer":             seal.Certificate.Issuer.String(),
+			"sha256_fingerprint": certFingerprint(seal.Certificate),
+			"timestamp_url":      timestampURL(ctx),
+		},
 		"independent_verification": false,
 	}, "", "  ")
 	if err != nil {

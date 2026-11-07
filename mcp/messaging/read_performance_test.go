@@ -65,3 +65,30 @@ func TestSummaryReadPayloadAndSearchPlan(t *testing.T) {
 	}
 	t.Logf("100 messages with ~50KB body+HTML each: 50-row JSON full=%d bytes summary=%d bytes (%.1f%% smaller); indexed unique-text query=%s", len(fullJSON), len(smallJSON), 100*(1-float64(len(smallJSON))/float64(len(fullJSON))), elapsed)
 }
+
+// Unfiltered lists must walk an index in order; a temp B-tree sort over a
+// large project took 5-16s per page in production.
+func TestUnfilteredMessageListAvoidsProjectSort(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	for _, q := range []string{
+		`SELECT id FROM messages WHERE project_id=? ORDER BY created_at DESC, id DESC LIMIT 20`,
+		`SELECT id FROM messages WHERE project_id=? AND status=? ORDER BY created_at DESC, id DESC LIMIT 20`,
+	} {
+		args := []any{"test-proj", "sent"}[:strings.Count(q, "?")]
+		rows, err := ctx.AppDB().Query(`EXPLAIN QUERY PLAN `+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var id, parent, aux int
+			var detail string
+			if err := rows.Scan(&id, &parent, &aux, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(detail, "TEMP B-TREE") {
+				t.Errorf("%s: %s", q, detail)
+			}
+		}
+		rows.Close()
+	}
+}

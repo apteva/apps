@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -16,14 +19,24 @@ import (
 //go:embed apteva.yaml
 var manifestYAML []byte
 
+const requestTimeout = 8 * time.Second
+
 type App struct {
-	ctx              *sdk.AppCtx
-	cancel           context.CancelFunc
-	mu               sync.RWMutex
-	events           []sdk.TelemetryStreamEvent
-	destinationMu    sync.Mutex
-	destinationCache map[string]cachedDestinations
+	ctx       *sdk.AppCtx
+	catalogMu sync.Mutex
+	catalog   map[string]topologyCache
+	swept     time.Time
 }
+
+// selfName lets enrichment skip this app's own attachment without repeating
+// the slug in code.
+var selfName = func() string {
+	m, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		return ""
+	}
+	return m.Name
+}()
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest(manifestYAML)
@@ -34,53 +47,18 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if ctx.TelemetryAPI() == nil {
+		return errors.New("telemetry observation API unavailable")
+	}
 	a.ctx = ctx
-	if _, err := sdk.ListAgentsVia(ctx.PlatformAPI(), ctx.CurrentProject()); err != nil {
-		return err
-	}
-	if ctx.RuntimeAPI() == nil {
-		return errors.New("runtime API unavailable")
-	}
-	if tc, ok := ctx.PlatformAPI().(sdk.TelemetryClient); ok {
-		streamCtx, cancel := context.WithCancel(context.Background())
-		a.cancel = cancel
-		go a.collect(streamCtx, tc)
-	}
 	ctx.Logger().Info("Agent Worlds mounted", "project_id", ctx.CurrentProject())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
-	if a.cancel != nil {
-		a.cancel()
-	}
-	return nil
-}
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
-
-func (a *App) collect(ctx context.Context, tc sdk.TelemetryClient) {
-	sub := sdk.TelemetrySubscription{Events: []string{
-		"thread.spawn", "thread.done", "thread.message", "thread.renamed",
-		"tool.call", "tool.result", "tool.before", "tool.after",
-		"llm.start", "llm.done", "llm.error", "iteration.done", "event.received",
-		"execution.waiting", "execution.released", "execution.cancelled",
-	}}
-	ch, err := tc.SubscribeTelemetry(ctx, sub)
-	if err != nil {
-		a.ctx.Logger().Warn("Agent Worlds telemetry unavailable", "error", err)
-		return
-	}
-	for ev := range ch {
-		a.mu.Lock()
-		a.events = append(a.events, ev)
-		if len(a.events) > 600 {
-			a.events = append([]sdk.TelemetryStreamEvent(nil), a.events[len(a.events)-600:]...)
-		}
-		a.mu.Unlock()
-	}
-}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
@@ -91,10 +69,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "worlds_sources", Description: "List live agent visualisation sources.", InputSchema: objectSchema(nil), Handler: func(_ *sdk.AppCtx, _ map[string]any) (any, error) { return a.sources() }},
-		{Name: "worlds_scene", Description: "Read a sanitized agent scene for one source.", InputSchema: objectSchema(map[string]any{"source": map[string]any{"type": "string"}}), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+		{Name: "worlds_sources", Description: "List live agent visualisation sources.", InputSchema: objectSchema(nil), Handler: func(app *sdk.AppCtx, _ map[string]any) (any, error) {
+			return a.sources(context.Background(), app)
+		}},
+		{Name: "worlds_scene", Description: "Read a sanitized agent scene for one source.", InputSchema: objectSchema(map[string]any{"source": map[string]any{"type": "string"}}), Handler: func(app *sdk.AppCtx, args map[string]any) (any, error) {
 			source, _ := args["source"].(string)
-			return a.scene(source)
+			return a.scene(context.Background(), app, source)
 		}},
 	}
 }
@@ -111,8 +91,8 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	sources, err := a.sources()
-	respond(w, sources, err)
+	sources, err := a.sources(r.Context(), a.ctx.WithUserSession(r))
+	a.respond(w, sources, err)
 }
 
 func (a *App) handleScene(w http.ResponseWriter, r *http.Request) {
@@ -120,20 +100,46 @@ func (a *App) handleScene(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	scene, err := a.scene(r.URL.Query().Get("source"))
-	respond(w, scene, err)
+	scene, err := a.scene(viewerContext(r), a.ctx.WithUserSession(r), r.URL.Query().Get("source"))
+	a.respond(w, scene, err)
 }
 
-func respond(w http.ResponseWriter, value any, err error) {
+// publicError marks messages that are safe to show in the panel. Other errors
+// can carry upstream URLs or transport details, so they stay in the log.
+type publicError struct{ message string }
+
+func (e publicError) Error() string { return e.message }
+
+func (a *App) respond(w http.ResponseWriter, value any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
+		message := "The scene source is unavailable."
+		var public publicError
+		if errors.As(err, &public) {
+			message = public.message
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			message = "The scene source did not respond in time."
+		}
+		if a.ctx != nil {
+			a.ctx.Logger().Warn("scene request failed", "error", err)
+		}
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func main() {
-	sdk.Run(&App{})
+func main() { sdk.Run(&App{}) }
+
+// Cache topology by the viewer as well as project/agent. A browser session must
+// never reuse metadata obtained on behalf of a different signed-in user.
+type viewerKey struct{}
+
+func viewerContext(r *http.Request) context.Context {
+	identity := "install"
+	if c, err := r.Cookie("session"); err == nil {
+		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(c.Value)))
+	}
+	return context.WithValue(r.Context(), viewerKey{}, identity)
 }

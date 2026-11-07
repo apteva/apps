@@ -74,7 +74,7 @@ func (a *App) handlePlivoRecordingStatus(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "persist recording", http.StatusInternalServerError)
 		return
 	}
-	globalCtx.WithProject(call.ProjectID).Emit("recording.ready", recordingPublic(*recording))
+	a.saveCallNotification(call.ProjectID, call.ID, "recording.ready", recordingPublic(*recording))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -131,11 +131,14 @@ func (a *App) handleTelnyxRecordingEvent(call *callRow, body []byte) (bool, erro
 	if err != nil {
 		return true, err
 	}
-	globalCtx.WithProject(call.ProjectID).Emit("recording.ready", recordingPublic(*recording))
+	a.saveCallNotification(call.ProjectID, call.ID, "recording.ready", recordingPublic(*recording))
 	return true, nil
 }
 
 func (a *App) reconcileCallRecordings(ctx *sdk.AppCtx, call *callRow) error {
+	if a.callUsesDirectSIP(call) {
+		return nil
+	} // Native recordings are owned by the local recorder, not Voice API IDs.
 	input := map[string]any{}
 	switch call.CarrierSlug {
 	case "twilio":
@@ -230,6 +233,9 @@ func parseProviderRecordingMetadata(provider string, item map[string]any, call *
 }
 
 func (a *App) downloadProviderRecording(downloadCtx context.Context, ctx *sdk.AppCtx, recording *recordingRow, creds map[string]string) (string, int64, error) {
+	if recording.Provider == localRecordingProvider {
+		return a.downloadLocalRecording(downloadCtx, recording)
+	}
 	if recording.Provider == "twilio" {
 		return downloadTwilioRecordingChannels(downloadCtx, creds, recording.ProviderRecordingID, recording.Format, recording.Channels)
 	}
@@ -322,9 +328,9 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 		return "", 0, fmt.Errorf("provider recording download returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if resp.ContentLength > limit {
-		return "", 0, errors.New("provider recording exceeds the download size limit")
+		return "", 0, &recordingSizeLimitError{limit}
 	}
-	tmp, err := os.CreateTemp("", "apteva-telephony-provider-recording-*."+recordingExtension(format))
+	tmp, err := newRecordingTemporaryFile("apteva-telephony-provider-recording-*." + recordingExtension(format))
 	if err != nil {
 		return "", 0, err
 	}
@@ -340,8 +346,11 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 	if err != nil {
 		return "", 0, err
 	}
-	if written <= 0 || written > limit {
-		return "", 0, errors.New("provider recording is empty or exceeds the download size limit")
+	if written > limit {
+		return "", 0, &recordingSizeLimitError{limit}
+	}
+	if written <= 0 {
+		return "", 0, errors.New("provider recording is empty")
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err

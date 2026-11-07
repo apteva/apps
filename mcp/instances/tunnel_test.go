@@ -91,3 +91,33 @@ func TestTunnelRegistrySeparatesPortsAndClosesByInstance(t *testing.T) {
 		t.Fatal("second listener still accepts after closeInstance")
 	}
 }
+
+func TestTunnelRecreatesClosedListenerAtAssignedPort(t *testing.T) {
+	r := newTunnelRegistry(func(*Instance, string) (net.Conn, error) { return nil, io.EOF })
+	defer r.closeAll()
+	inst := &Instance{ID: 17, Provider: "test"}
+	first, err := r.open(inst, 7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := first.localPort
+	first.close()
+	second, err := r.openAt(inst, 7200, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || second.localPort != port {
+		t.Fatal("durable port not restored")
+	}
+	conn, err := net.DialTimeout("tcp", second.listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	conn.Read(make([]byte, 1))
+	conn.Close()
+	evidence := second.diagnostics()
+	if evidence["channel_failures"] != uint64(1) || evidence["channel_attempts"] != uint64(1) {
+		t.Fatal(evidence)
+	}
+}

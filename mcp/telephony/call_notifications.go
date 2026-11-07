@@ -66,32 +66,37 @@ func (h *callChangeHub) notify(project string) {
 // Fingerprint only the visible call/offer state. Unrelated users' changes never
 // produce events, and hints carry no call data or global sequence counters.
 func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byte, error) {
-	rows, err := a.recentPhoneCalls(r, project, 100)
+	model, _, err := a.phoneCallRead(r, project, 100, true)
 	if err != nil {
 		return [32]byte{}, err
 	}
+	return model.fingerprint, nil
+}
+func (a *App) callReadFingerprint(checked *http.Request, model callReadModel) ([32]byte, error) {
 	type offer struct{ ID, Destination, Kind, Expires string }
 	type entry struct {
 		ID, Status, Peer, Destination, Media, Hold, Recording string
 		Offers                                                []offer
 	}
-	entries := make([]entry, 0, len(rows))
-	for _, row := range rows {
+	entries := make([]entry, 0, len(model.rows))
+	for _, row := range model.rows {
 		e := entry{ID: row.ID, Status: row.Status, Peer: row.PeerKind, Destination: row.RoutingDestinationID, Media: row.MediaStatus, Hold: row.HoldState, Recording: effectiveRecordingControlState(row)}
-		offers, err := a.db().activeRingOffers(row.ID, project)
-		if err != nil {
-			return [32]byte{}, err
-		}
-		p := phoneUserFrom(r)
+		offers := model.permissions.offers[row.ID]
+		p := phoneUserFrom(checked)
 		for _, o := range offers {
-			if p != nil && (!p.Destinations[o.DestinationID] || !a.destinationAllowsIdentity(project, o.DestinationID, p.Identity)) {
+			if p != nil && (!p.Destinations[o.DestinationID] || !a.phoneReadDestination(p, row.ProjectID, o.DestinationID)) {
 				continue
 			}
 			e.Offers = append(e.Offers, offer{o.ID, o.DestinationID, o.Kind, o.ExpiresAt})
 		}
 		entries = append(entries, e)
 	}
-	raw, err := json.Marshal(entries)
+	// Grants affect visible controls even if the call rows did not change.
+	// Include the authenticated scope so permission changes invalidate hints.
+	raw, err := json.Marshal(struct {
+		Scope   string
+		Entries []entry
+	}{callReadScope(checked, model.project, 0, false), entries})
 	return sha256.Sum256(raw), err
 }
 func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +134,7 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	if send(`{"type":"calls.changed"}`) != nil {
+	if send(fmt.Sprintf(`{"type":"calls.changed","state":"%x"}`, current)) != nil {
 		return
 	}
 	heartbeat := time.NewTicker(callStreamHeartbeat)
@@ -144,6 +149,23 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 		case <-lease.C:
 			return // reconnect through the gateway with current credentials
 		case <-changes:
+			// Fixed, bounded coalescing window. Continuous writes cannot keep
+			// postponing an offer notification or its authorization check.
+			timer := time.NewTimer(20 * time.Millisecond)
+		drain:
+			for {
+				select {
+				case <-r.Context().Done():
+					timer.Stop()
+					return
+				case <-lease.C:
+					timer.Stop()
+					return
+				case <-changes:
+				case <-timer.C:
+					break drain
+				}
+			}
 		case <-heartbeat.C:
 			heartbeatDue = true
 		}
@@ -170,11 +192,11 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 		}
 		if snapshot != current {
 			current = snapshot
-			if send(`{"type":"calls.changed"}`) != nil {
+			if send(fmt.Sprintf(`{"type":"calls.changed","state":"%x"}`, current)) != nil {
 				return
 			}
 		} else if heartbeatDue {
-			if write(": keepalive\n\n") != nil {
+			if send(`{"type":"heartbeat"}`) != nil {
 				return
 			}
 		}

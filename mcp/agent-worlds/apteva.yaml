@@ -1,22 +1,20 @@
 schema: apteva-app/v1
 name: agent-worlds
 display_name: Agent Worlds
-version: 0.1.6
-description: Live agent scenes with real app and integration destinations on the main server, isolated environments, and a configured remote server.
+version: 0.8.0
+description: "Live, themeable maps of Apteva agents and the apps they use: system graph, operations board, isometric pixel village, and space station, across the main server, isolated environments, and a remote server."
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
 icon: /ui/icon.svg
 icon_style: monochrome
 tags: [agents, visualization, observability, environments]
-scopes: [project]
+scopes: [project, global]
 min_apteva_version: "0.26.1"
 requires:
   permissions:
     - platform.instances.read
-    - platform.telemetry.read
-    - platform.runtimes.read
-    - platform.runtime_catalog.read
-    - platform.connections.read
+    - platform.telemetry.observe
+    - platform.runtimes.observe
     - net.egress
 provides:
   http_routes:
@@ -29,22 +27,61 @@ provides:
       label: Agent Worlds
       icon: network
       entry: /ui/AgentWorldsPanel.mjs
+  ui_components:
+    - name: world-view
+      label: Agent world
+      description: A live view of the project's agents at work, drawn in any Agent Worlds view. Opens the full page on the same view.
+      entry: /ui/AgentWorldsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      settings_schema:
+        type: object
+        properties:
+          view:
+            type: string
+            title: View
+            enum: [village, station, graph, operations]
+            enum_names: [Pixel village, Space station, System graph, Operations]
+            default: village
+          source:
+            type: string
+            title: Source
+            description: Which agents to show. Main is this installation; remote sources come from the app's settings.
+            default: main
+          height:
+            type: string
+            title: Height
+            enum: [compact, standard, tall]
+            enum_names: [Compact, Standard, Tall]
+            default: standard
+      settings_ui:
+        order: [view, source, height]
+        advanced: [source]
+        fields:
+          source:
+            discovery:
+              route: /api/sources
+              value_field: id
+              label_field: label
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.6, entry: mcp/agent-worlds }
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.8.0, entry: mcp/agent-worlds }
   artifacts:
     darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-darwin-arm64.tar.gz
-      sha256: 340781c6c3508ddaf0cd5c10148624bb51ff9b64d1ed9a4ecbdb71ac4e985df9
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.8.0/agent-worlds-v0.8.0-darwin-arm64.tar.gz
+      sha256: e19113315464c9863e6df27967e0a20a910b5e29a335e42c24087cc40d03e480
     darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-darwin-amd64.tar.gz
-      sha256: b221d4a0aceb4c4ec1443f65682dc9871053ea89945c1ff7fb4d657eb4dc5aa7
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.8.0/agent-worlds-v0.8.0-darwin-amd64.tar.gz
+      sha256: 6c15b487b15108eb69f944e34dc8b94e7f84ac2a0388055fd7852c5ec2f8d891
     linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-linux-amd64.tar.gz
-      sha256: 84afef4d97878d565e16c26b9d527b4467a15e301a70d48f57db2cf58f11b873
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.8.0/agent-worlds-v0.8.0-linux-amd64.tar.gz
+      sha256: 33309dc6ae201c7a566280ea8756dbc24f0241cd777a965da6f5fac32c066bc2
     linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-linux-arm64.tar.gz
-      sha256: d39678e2e65a025b0be90e4f8b6438f754b19f4b197a1e786c1a399d514271b6
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.8.0/agent-worlds-v0.8.0-linux-arm64.tar.gz
+      sha256: 83ab791ed428eb6f09cd465a26db1420a04a5d02992285664d1b6c40862369dc
   port: 8080
   health_check: /health
 config_schema:
@@ -66,10 +103,5 @@ config_schema:
     type: text
     default: ""
     label: Remote project ID
-    description: Optional remote project filter, also used to find that project's Environments installation.
-  - name: remote_environments_install_id
-    type: text
-    default: ""
-    label: Remote Environments install ID
-    description: Optional install ID when the remote server has several Environments installations.
+    description: Optional project filter for remote agent, runtime, and activity discovery.
 upgrade_policy: auto-patch

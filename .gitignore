@@ -16,6 +16,7 @@ mcp/certs/certs
 mcp/checkout/checkout
 mcp/code/code
 mcp/composer/composer
+mcp/composer/renderer/renderer
 mcp/computer/computer
 mcp/content/content
 mcp/crm/crm

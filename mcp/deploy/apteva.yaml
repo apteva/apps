@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.27.2
+version: 0.30.11
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,45 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.11 accepts pending developer releases for Apple's manual release action,
+  preserves Apple-held release states, and shows the release button only for
+  eligible versions. Sync older approved_pending_release aliases before release.
+  v0.30.10 saves tester audiences only after the provider accepts them, warns
+  when an internal TestFlight group is empty, keeps status changes made during
+  availability checks and slows checks during processing and App Store review.
+  v0.30.9 slows checks for assigned TestFlight builds waiting on Apple, fails
+  only builds no group accepted within 48 hours and clears stale sync errors.
+  v0.30.8 pauses App Store Connect calls per connection on rate limits and
+  timeouts, retries failing releases on a growing schedule, fails releases on
+  final provider errors or 48 hours after processing, and stops superseded ones.
+  v0.30.7 omits an empty Apple marketing URL and uploads 6.9-inch iPhone
+  screenshots as APP_IPHONE_67, the type App Store Connect accepts.
+  v0.30.6 validates every Apple age-rating attribute against the audited
+  schema and verifies each requested answer against provider readback.
+  v0.30.5 keeps Apple violence and graphic-content answers independent,
+  sends health/wellness as a boolean and preserves exact Apple overrides.
+  v0.30.4 recovers saved Play completion hidden by sync errors while retaining
+  stale-check warnings and leaving uncertain or partial rollouts pending.
+  v0.30.3 reconciles finished mobile workflows locally and stops background
+  polling of completed Play releases and available TestFlight builds.
+  v0.30.2 recognizes Google's daily edit quota when returned as 403
+  PERMISSION_DENIED, preserving the daily cooldown across restarts.
+  v0.30.1 caches Google Play observations, persists quota backoff and
+  coordinates polling with publishing without replaying store mutations.
+  v0.30.0 adds precompressed static delivery, immutable hashed-asset caching,
+  HTML revalidation, previous-chunk retention and delivery regression tests.
+  v0.29.2 fixes shared macOS key import with compatible, password-protected
+  PKCS#12 archives and installs app-specific profiles in Xcode caches.
+  v0.29.1 imports and reuses Apple signing identities across build providers,
+  protects shared certificates, and adds managed GitHub Actions signing.
+  v0.29.0 adds Bitrise and Appcircle with multiple bound build accounts,
+  generic source recipes, managed signing, provider logs and verified artifacts.
+  v0.28.2 pins the installed source to the matching release tag.
+  v0.28.1 provisions iOS Rust device and simulator targets and bounds
+  missing cloud jobs when a provider returns an invalid HTTP 200 response.
+  v0.28.0 executes generic source and artifact pipelines on native cloud
+  runners, preserves cloud artifact evidence, and repairs incomplete Apple
+  signing identity changes without revoking unrelated certificates.
   v0.27.2 installs pinned, checksum-verified XcodeGen 2.46.0 when Apple
   source bundles require project generation. Existing Xcode projects and
   workspaces remain supported. Deploy logs include Codemagic step output
@@ -79,10 +118,10 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [codemagic, github]
+      compatible_slugs: [codemagic, github, bitrise, appcircle]
       capabilities: [build.submit, build.status, build.cancel, build.artifacts]
       label: Cloud build providers
-      hint: Optional Codemagic or GitHub connections. Git-independent capsule runners do not require an integration.
+      hint: Bind build provider accounts and select a provider and connection per environment. Git-independent capsule runners do not require an integration.
 
 provides:
   http_routes:
@@ -186,7 +225,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.27.2
+    ref: deploy/v0.30.11
     entry: mcp/deploy
   port: 8080
   health_check: /health

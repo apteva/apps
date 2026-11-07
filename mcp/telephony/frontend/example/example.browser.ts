@@ -12,6 +12,9 @@ test("example loads SDK client and supports outgoing/incoming calls on desktop a
   await page.getByRole("button", { name: "Mute", exact: true }).click();
   await expect(page.getByRole("button", { name: "Unmute" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  // The previous connection can still read "Audio connected" while attach is
+  // in flight. Wait for completion before testing the replacement audio.
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
   await expect(page.locator("#connection")).toHaveText("Audio connected");
   await expect(page.getByRole("button", { name: "Unmute" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Key 1", exact: true }).click();

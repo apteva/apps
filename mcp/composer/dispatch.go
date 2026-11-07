@@ -608,6 +608,7 @@ func (a *App) renderComposition(parent context.Context, ctx *sdk.AppCtx, args ma
 		}
 	}
 	rctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	rctx = withRenderPlacement(withComponentOwner(rctx, fmt.Sprintf("render:%d", renderID)), executorOverride)
 	unregister := registerRenderCancel(renderID, cancel)
 	defer func() { cancel(); unregister() }()
 	var currentStatus string
@@ -655,10 +656,17 @@ func (a *App) renderComposition(parent context.Context, ctx *sdk.AppCtx, args ma
 						}
 					}()
 				}
-				qa := analyzeRenderContext(rctx, result.LocalPath, nil)
+				var qa RenderQA
+				var storageID int64
+				if sid, ok := componentStorageResult(result.LocalPath); ok {
+					// The renderer component already uploaded the output.
+					storageID = sid
+				} else {
+					qa = analyzeRenderContext(rctx, result.LocalPath, nil)
+					setRenderProgress(ctx, renderID, id, pid, "rendering", "uploading", 90, map[string]any{"message": "Uploading render output"})
+					storageID = saveRenderOutputContext(rctx, ctx, result.LocalPath, output.Format, pid, id)
+				}
 				qa.Warnings = append(qa.Warnings, nativeWarnings...)
-				setRenderProgress(ctx, renderID, id, pid, "rendering", "uploading", 90, map[string]any{"message": "Uploading render output"})
-				storageID := saveRenderOutputContext(rctx, ctx, result.LocalPath, output.Format, pid, id)
 				if storageID == 0 {
 					if cacheErr := writeLocalCacheFromPath(renderID, result.LocalPath, output.Format); cacheErr != nil {
 						result.Cleanup = nil // Retain the encoded file for recovery.
@@ -1422,9 +1430,8 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 	pid := projectScopeFromArgs(requestAppCtx(r), map[string]any{"project_id": r.URL.Query().Get("project_id")})
 	out := map[string]any{
 		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": pid}),
-		"instances_bound":   appToolAvailable(globalCtx, "instances", "instance_get", map[string]any{"id": 0, "_project_id": pid}),
 		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": pid}),
-		"render_host_id":    renderHostID(globalCtx),
+		"renderer":          rendererStatus(r.Context(), globalCtx.WithProject(pid)),
 		"ffmpeg_path":       ffmpegPath(),
 	}
 	if bound := globalCtx.IntegrationFor("render_executor"); bound != nil {

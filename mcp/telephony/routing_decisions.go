@@ -542,8 +542,14 @@ func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 		<-decisionSlots
 		return nil
 	}
+	runtimeDone, runtimeErr := a.runtimeBegin(false)
+	if runtimeErr != nil {
+		<-decisionSlots
+		return runtimeErr
+	}
 	a.decisionWG.Add(1)
 	go func(d decisionRecord) {
+		defer runtimeDone()
 		defer a.decisionWG.Done()
 		defer func() { <-decisionSlots; a.wakeRouting(d.ProjectID); a.routingCapacityReleased() }()
 		response, reason := a.invokeDecision(ctx, d)
@@ -826,14 +832,16 @@ func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	if e = ctx.AppDB().QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=?`, d.CallID).Scan(&node); e != nil {
 		return e
 	}
-	if row != nil && !isTerminalStatus(row.Status) && row.CarrierSlug == "telnyx" && node == p.NodeID && p.AnswerMode == answerModeRealtimeImmediate && (p.TerminalType == "destination" || p.TerminalType == "ring_group") {
+	if row != nil && !isTerminalStatus(row.Status) && row.CarrierSlug == "telnyx" && !a.callUsesDirectSIP(row) && node == p.NodeID && p.AnswerMode == answerModeRealtimeImmediate && (p.TerminalType == "destination" || p.TerminalType == "ring_group") {
 		if _, e = a.prepareAndActivateTelnyxAI(ctx, row, p.Directive, p.Voice, p.Greeting); e != nil {
 			return e
 		}
 	} else if row != nil && row.Status == "answering" {
 		return errAnswerPreparationInProgress
 	} else if row != nil && row.Status == "pending" && node == p.NodeID {
-		if p.TerminalType == "hangup" || p.TerminalType == "reject" {
+		if a.callUsesDirectSIP(row) {
+			e = a.executeSIPRoutingPlan(ctx, row, &p)
+		} else if p.TerminalType == "hangup" || p.TerminalType == "reject" {
 			var ex routingExecutionContext
 			if e = json.Unmarshal([]byte(p.ContextJSON), &ex); e == nil {
 				e = a.finishTerminalRoutingPlan(ctx, row, &ex.Route, &p)
@@ -883,11 +891,20 @@ func (a *App) handleDecisionList(w http.ResponseWriter, r *http.Request, project
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	writeJSON(w, map[string]any{"decisions": ds})
+	lookups, e := a.listAIContextLookups(project, r.URL.Query().Get("call_id"))
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{"decisions": ds, "context_lookups": lookups})
 }
 func (a *App) toolDecisionsList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ds, e := a.listDecisions(currentProject(ctx), strArg(args, "call_id", ""))
-	return map[string]any{"decisions": ds}, e
+	if e != nil {
+		return nil, e
+	}
+	lookups, e := a.listAIContextLookups(currentProject(ctx), strArg(args, "call_id", ""))
+	return map[string]any{"decisions": ds, "context_lookups": lookups}, e
 }
 
 // Unique by milestone and offer, rather than call/topic: repeat decisions must

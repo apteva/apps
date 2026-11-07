@@ -2,9 +2,13 @@
 class TelephonyListenerProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
+    this.targetMS = options.processorOptions?.initialTargetMs ?? 60;
+    this.capacityMS = Math.min(320, Math.max(220,this.targetMS+80));
+    this.futureMS = Math.min(320, Math.max(200,this.targetMS+60));
     this.stereo = options.processorOptions?.stereo === true;
     this.queues = [[], []];
     this.dropped = [0, 0];
+    this.lastPlayAtMS=[null,null];this.rejectedLate=[0,0];this.rejectedFuture=[0,0];
     this.played = [0, 0];
     this.maxQueueMS = 0;
     this.maxLateMS = 0;
@@ -15,7 +19,9 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       const now = currentTime * 1000;
       const duration = data.frame.length * 1000 / sampleRate;
       // Bound future scheduling and stale audio independently of queue length.
-      if (data.playAtMS + duration < now || data.playAtMS > now + 200) {
+      this.lastPlayAtMS[d]=data.playAtMS;
+      if (data.playAtMS + duration < now || data.playAtMS > now + this.futureMS) {
+        if(data.playAtMS+duration<now)this.rejectedLate[d]+=data.frame.length;else this.rejectedFuture[d]+=data.frame.length;
         this.dropped[d] += data.frame.length; return;
       }
       const queue = this.queues[d];
@@ -26,14 +32,19 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       if (previous) start = Math.max(start, previous.start + previous.frame.length);
       queue.push({ frame: data.frame, start });
       let trimmed = false;
-      while (queue.length > 8) {
+      while (queue.length > Math.ceil((this.capacityMS - 60) / 20)) {
         const old = queue.shift(); this.dropped[d] += old.frame.length - (old.played || 0); trimmed = true;
       }
       const last = queue[queue.length - 1];
-      if (trimmed || (last.start + last.frame.length) * 1000 / sampleRate > now + 220) {
+      if (trimmed || (last.start + last.frame.length) * 1000 / sampleRate > now + this.capacityMS) {
         // Rebase only this listener's backlog. Keep a small cushion and a hard
         // upper bound instead of letting repeated catch-up bursts build delay.
-        let next = Math.round((now + 40) * sampleRate / 1000);
+        // Overflow must make progress immediately. Repeated arrivals must not
+        // re-prime the queue into the future before its first sample can play.
+        // Never postpone an already scheduled head, including a partially
+        // played frame when only the tail exceeded the scheduling bound.
+        const head = queue[0];
+        let next = Math.min(head.start + (head.played || 0), Math.round((now + (trimmed ? 0 : Math.max(40, this.targetMS - 20))) * sampleRate / 1000));
         for (const item of queue) {
           if (item.played) { item.frame = item.frame.subarray(item.played); item.played = 0; }
           item.start = next; next += item.frame.length;
@@ -71,7 +82,7 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
     this.reportSamples += out[0].length;
     if (this.reportSamples >= sampleRate) {
       this.reportSamples = 0;
-      this.port.postMessage({ type: "listener.diagnostics", dropped_ms: this.dropped.map(n => n * 1000 / sampleRate), played_ms: this.played.map(n => n * 1000 / sampleRate), max_queue_ms: this.maxQueueMS, max_late_ms: this.maxLateMS });
+      this.port.postMessage({ type: "listener.diagnostics", render_time_ms:currentTime*1000,last_play_at_ms:this.lastPlayAtMS.slice(),rejected_late_ms:this.rejectedLate.map(n=>n*1000/sampleRate),rejected_future_ms:this.rejectedFuture.map(n=>n*1000/sampleRate), dropped_ms: this.dropped.map(n => n * 1000 / sampleRate), played_ms: this.played.map(n => n * 1000 / sampleRate), max_queue_ms: this.maxQueueMS, max_late_ms: this.maxLateMS });
     }
     return true;
   }

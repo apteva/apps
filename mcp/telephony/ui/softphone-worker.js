@@ -9,7 +9,45 @@ const SAMPLE_RATE = 24_000;
 const MAX_RECONNECT_MS = 30_000;
 const MAX_RECONNECT_DELAY_MS = 4_000;
 const MAX_CAPTURE_BUFFERED_BYTES = SAMPLE_RATE * 2 * 0.12;
+const MAX_CLOCK_PROBE_RTT_MS = 1000;
+const AUDIO_CLOCK_FRESH_MS = 5000;
+// Past freshness, a held render-clock offset loses 2ms of certainty per second
+// (2000ppm, well beyond audio-device versus system oscillator skew).
+const AUDIO_CLOCK_STALE_DRIFT = 0.002;
+// Delivery floors compare two free-running clocks, so they are the minimum
+// over the last minute (5s buckets), not over the socket's whole life. Skew of
+// 100ppm moves a floor only 6ms per window instead of accumulating into
+// "excess", while a sudden sustained delay still registers for a full window.
+const DELIVERY_FLOOR_BUCKET_MS = 5000;
+const DELIVERY_FLOOR_BUCKETS = 12;
+function deliveryFloor(buckets, delta, now) {
+  const bucket=Math.floor(now/DELIVERY_FLOOR_BUCKET_MS), last=buckets.at(-1);
+  if(last && last.bucket===bucket) last.min=Math.min(last.min,delta); else buckets.push({bucket,min:delta});
+  while(buckets[0].bucket<=bucket-DELIVERY_FLOOR_BUCKETS) buckets.shift();
+  return buckets.reduce((floor,entry)=>Math.min(floor,entry.min),Infinity);
+}
+function audioClockUncertaintyAt(now) {
+  return audioClockSampleUncertainty+Math.max(0,now-audioClockSampleAt-AUDIO_CLOCK_FRESH_MS)*AUDIO_CLOCK_STALE_DRIFT;
+}
 
+let queueEvents = [], queueEventSerial = 0, queueBuilding = false, queueStartedMS = 0, queueLastEventMS = -Infinity;
+let lastCaptureAge = null;
+function observeCaptureQueue(message, now, age, reason) {
+  const bytes=socket?.bufferedAmount ?? 0, queueMS=bytes*1000/(SAMPLE_RATE*2);
+  let kind=reason;
+  if (!queueBuilding && queueMS>=40) {queueBuilding=true;queueStartedMS=now;kind=kind || "queue_buildup";}
+  else if (queueBuilding && queueMS<20) {queueBuilding=false;kind=kind || "queue_drained";}
+  else if (queueBuilding && now-queueLastEventMS>=250) kind=kind || "queue_sample";
+  if (!kind || (kind==="backpressure_drop" && now-queueLastEventMS<250)) return;
+  queueLastEventMS=now;
+  const duration=message?.frame?.length*1000/(message?.sample_rate||SAMPLE_RATE);
+  queueEvents.push({id:`capture-queue:${++queueEventSerial}`,timestamp:new Date().toISOString(),kind,reason:kind,
+    queue_bytes:bytes,queue_ms:queueMS,duration_ms:queueStartedMS ? Math.max(0,now-queueStartedMS) : 0,
+    frame_age_ms:Number.isFinite(age) ? age+(duration||0) : undefined,
+    worker_delay_ms:Number.isFinite(age) ? Math.max(0,age-audioClockUncertainty) : undefined,
+    clock_uncertainty_ms:audioClockUncertainty,sequence:message?.sequence});
+  if(queueEvents.length>64)queueEvents.shift();
+}
 let socket = null;
 let mediaURL = "";
 let capturePort = null;
@@ -27,35 +65,51 @@ let framedV2 = false;
 let audioClockOffset = null;
 let audioClockUncertainty = 0;
 let audioClockSampleAt = 0;
+let audioClockSampleUncertainty = 0;
+let audioClockStale = false;
 let capturePaused = false;
 let refreshCredentials = false;
 let refreshID = 0;
 let lastRTTPing = null;
 let pendingRecovery = false;
 let reconnectCause = "transport_closed";
+let recoveryContext = null;
+function recoveryID(kind) {return `${kind}-${self.crypto?.randomUUID?.() ?? Date.now().toString(16)+"-"+Math.random().toString(16).slice(2)}`; }
 let serverClockOffset = null;
 let serverClockUncertainty = null;
 let serverClockSampleAt = 0;
 let captureGateOpenedAt = 0;
 let playbackExpected = null;
-let playbackDeliveryBase = null;
+let playbackDeliveryFloor = [];
 let pendingMutedCapture = null;
 let whisperEpoch = null;
-let whisperDeliveryBase = null;
-const timing = { capture_frames:0, capture_muted_frames:0, capture_muted_ms:0, capture_sent_ms:0, capture_dropped_ms:0, capture_max_age_ms:0, playback_received_ms:0, playback_ingress_ms:0, playback_sequence_gaps:0, playback_max_transit_ms:0, playback_max_server_queue_ms:0, playback_transport_dropped_ms:0, playback_source_dropped_ms:0, playback_max_source_age_ms:0, playback_max_delivery_excess_ms:0, playback_source_timestamp_ms:0, playback_source_sequence:0, playback_source_epoch:0, worker_max_tick_gap_ms:0, worker_pause_count:0, reconnect_attempts:0, reconnect_successes:0, rtt_ms:null, rtt_max_ms:0, rtt_samples:[], websocket_max_buffered_bytes:0, drop_totals_ms:{} };
+let whisperDeliveryFloor = [];
+const timing = { capture_frames:0, capture_muted_frames:0, capture_muted_ms:0, capture_sent_ms:0, capture_dropped_ms:0, capture_clock_stale_ms:0, capture_max_age_ms:0, playback_received_ms:0, playback_ingress_ms:0, playback_sequence_gaps:0, playback_max_transit_ms:0, playback_max_server_queue_ms:0, playback_transport_dropped_ms:0, playback_source_dropped_ms:0, playback_max_source_age_ms:0, playback_max_delivery_excess_ms:0, playback_source_timestamp_ms:0, playback_source_sequence:0, playback_source_epoch:0, worker_max_tick_gap_ms:0, worker_pause_count:0, reconnect_attempts:0, reconnect_successes:0, rtt_ms:null, rtt_max_ms:0, rtt_samples:[], websocket_max_buffered_bytes:0, drop_totals_ms:{} };
 function runtimeEvent(action,outcome,duration_ms) {
-  postMessage({type:"runtime.event",event:{timestamp:new Date().toISOString(),action,outcome,duration_ms:duration_ms===undefined ? undefined : Math.round(duration_ms)}});
+  let session_id;
+  try { const value=new URL(mediaURL).searchParams.get("session_generation");if(value && /^session-[a-f0-9-]{1,64}$/.test(value))session_id=value; } catch {/* legacy URLs have no generation */}
+  postMessage({type:"runtime.event",event:{timestamp:new Date().toISOString(),action,outcome,session_id,...(action==="reconnect" ? {...recoveryContext,code:reconnectCause} : {}),duration_ms:duration_ms===undefined ? undefined : Math.round(duration_ms)}});
 }
 function monotonicEpochMS() { return performance.timeOrigin + performance.now(); }
+let sampleAt=performance.now(), captureWireBytes=0, playbackWireBytes=0, lastPlaybackReceipt=null;
+let receiveGap=null, captureAge=null, transitMax=null, deliveryExcessMax=null, queueMax=null;
 function stats() {
   flushMutedCapture();
-  timing.websocket_max_buffered_bytes=Math.max(timing.websocket_max_buffered_bytes,socket?.bufferedAmount ?? 0); postMessage({type:"transport.stats", buffered_bytes:socket?.bufferedAmount||0, timing:{...timing, clock_uncertainty_ms:serverClockUncertainty, clock_sample_age_ms:serverClockSampleAt ? monotonicEpochMS()-serverClockSampleAt : null}}); }
+  observeCaptureQueue(null,monotonicEpochMS(),null);
+  const now=performance.now(), elapsed=Math.max(1,now-sampleAt);
+  const observation=elapsed>=500 ? {window_ms:elapsed,timestamp:new Date().toISOString(),send_bitrate_bps:captureWireBytes*8000/elapsed,receive_bitrate_bps:playbackWireBytes*8000/elapsed,
+    receive_gap_ms:receiveGap,capture_age_ms:captureAge,transit_ms:transitMax,delivery_excess_ms:deliveryExcessMax,server_queue_ms:queueMax} : undefined;
+  if(observation){sampleAt=now;captureWireBytes=playbackWireBytes=0;receiveGap=captureAge=transitMax=deliveryExcessMax=queueMax=null;}
+  timing.websocket_max_buffered_bytes=Math.max(timing.websocket_max_buffered_bytes,socket?.bufferedAmount ?? 0); postMessage({type:"transport.stats", observation, buffered_bytes:socket?.bufferedAmount||0, capture_queue_events:queueEvents.slice(), timing:{...timing, clock_uncertainty_ms:serverClockUncertainty, clock_sample_age_ms:serverClockSampleAt ? monotonicEpochMS()-serverClockSampleAt : null}}); }
 function dropCapture(message,reason,age=0) {
  const duration = message.frame.length*1000/(message.sample_rate||SAMPLE_RATE);
  timing.capture_dropped_ms+=duration;
  timing.drop_totals_ms[reason]=(timing.drop_totals_ms[reason]||0)+duration;
  resamplers.delete(`${message.sample_rate || SAMPLE_RATE}:${SAMPLE_RATE}`);
- postMessage({type:"transport.drop",event:{timestamp:new Date().toISOString(),direction:"operator_to_carrier",reason,duration_ms:duration,queue_before_ms:age,sequence:message.sequence}});
+ postMessage({type:"transport.drop",event:{timestamp:new Date().toISOString(),direction:"operator_to_carrier",reason,duration_ms:duration,queue_before_ms:age,sequence:message.sequence,
+   frame_age_ms:lastCaptureAge===null ? undefined : lastCaptureAge+duration,
+   worker_delay_ms:lastCaptureAge===null ? undefined : Math.max(0,lastCaptureAge-audioClockUncertainty),
+   clock_uncertainty_ms:audioClockUncertainty,queue_bytes:socket?.bufferedAmount ?? 0}});
 }
 
 // Metadata shares the ordered media socket. The server can exclude only these
@@ -150,10 +204,15 @@ function decodePlayback(buffer) {
 function capture(message) {
   if (message?.type === "clock.reply") {
     const now = monotonicEpochMS(), rtt = now-message.nonce;
-    if (rtt>=0 && rtt<=50 && Number.isFinite(message.audio_ms)) {
+    const uncertainty = rtt/2 + 10; // Audio render quantum and timestamp sampling.
+    // A slow reply still bounds the offset by its own round trip. Prefer it
+    // only when nothing better is known, so a busy render thread cannot
+    // starve the microphone of a clock.
+    if (rtt>=0 && rtt<=MAX_CLOCK_PROBE_RTT_MS && Number.isFinite(message.audio_ms) && (rtt<=50 || audioClockOffset===null || uncertainty<=audioClockUncertaintyAt(now))) {
       audioClockOffset = (now+message.nonce)/2-message.audio_ms;
       audioClockSampleAt = now;
-      audioClockUncertainty = rtt/2 + 10; // Audio render quantum and timestamp sampling.
+      audioClockSampleUncertainty = audioClockUncertainty = uncertainty;
+      audioClockStale = false;
     }
     return;
   }
@@ -161,28 +220,42 @@ function capture(message) {
   if(muted) { observeMutedCapture(message); return; }
   if(!microphoneReady || !socket || socket.readyState !== WebSocket.OPEN) return;
   const now = monotonicEpochMS();
-  if(capturePaused || audioClockOffset===null || now-audioClockSampleAt>5000) {
+  lastCaptureAge=null;
+  if(capturePaused || audioClockOffset===null) {
     capturePort?.postMessage({type:"clock.probe",nonce:now});
     dropCapture(message,"capture_clock_unavailable"); return;
   }
+  if(now-audioClockSampleAt>AUDIO_CLOCK_FRESH_MS) {
+    // Keep the last offset with widening uncertainty instead of muting.
+    capturePort?.postMessage({type:"clock.probe",nonce:now});
+    audioClockUncertainty=audioClockUncertaintyAt(now);
+    timing.capture_clock_stale_ms+=message.frame.length*1000/(message.sample_rate||SAMPLE_RATE);
+    if(!audioClockStale) { audioClockStale=true; runtimeEvent("audio_clock","stale",now-audioClockSampleAt); }
+  }
   const mapped = Number.isFinite(message.timestamp_ms) && audioClockOffset!==null ? message.timestamp_ms+audioClockOffset : null;
   const age = mapped===null ? 0 : Math.max(0,now-mapped);
+  lastCaptureAge=age;
+  observeCaptureQueue(message,now,age);
   timing.capture_frames++;
+  captureAge=Math.max(captureAge,age);
   timing.capture_max_age_ms=Math.max(timing.capture_max_age_ms,age);
   // Use a conservative lower bound, not an assumed exact clock offset.
   if (mapped!==null && (age-audioClockUncertainty>MAX_CAPTURE_AGE_MS || mapped+audioClockUncertainty<captureGateOpenedAt)) {
     dropCapture(message,"capture_age_limit",age); return;
   }
   if (socket.bufferedAmount > MAX_CAPTURE_BUFFERED_BYTES) {
+    observeCaptureQueue(message,now,age,"backpressure_drop");
     dropCapture(message,"websocket_backpressure",socket.bufferedAmount*1000/(SAMPLE_RATE*2)); return;
   }
   flushMutedCapture();
-  socket.send(framedCapture(message.frame, message.sequence, message.timestamp_ms, message.sample_rate, age));
+  const wire=framedCapture(message.frame, message.sequence, message.timestamp_ms, message.sample_rate, age);
+  socket.send(wire);captureWireBytes+=wire.byteLength;
   timing.capture_sent_ms+=message.frame.length*1000/(message.sample_rate||SAMPLE_RATE);
 }
 
 function connect() {
   if (closed || !mediaURL) return;
+  lastPlaybackReceipt=null;sampleAt=performance.now();captureWireBytes=playbackWireBytes=0;receiveGap=captureAge=transitMax=deliveryExcessMax=queueMax=null;
   const ws = new WebSocket(mediaURL);
   ws.binaryType = "arraybuffer";
   socket = ws;
@@ -221,7 +294,8 @@ function connect() {
     pendingMutedCapture=null;
     openedAt = Date.now();
     lastReceivedAt = openedAt;
-    framedV2=false; serverClockOffset=null; serverClockUncertainty=null; serverClockSampleAt=0; playbackExpected=null; playbackDeliveryBase=null; whisperEpoch=null; whisperDeliveryBase=null; playbackPort?.postMessage({type:"whisper.clear"});
+    queueBuilding=false;queueStartedMS=0;lastCaptureAge=null;
+    framedV2=false; serverClockOffset=null; serverClockUncertainty=null; serverClockSampleAt=0; playbackExpected=null; playbackDeliveryFloor=[]; whisperEpoch=null; whisperDeliveryFloor=[]; playbackPort?.postMessage({type:"whisper.clear"});
     capturePort?.postMessage({type:"clock.probe",nonce:monotonicEpochMS()});
     ws.send(JSON.stringify({type:"media.capabilities",version:2,versions:[3,2],whisper:true}));
     ws.send(JSON.stringify({type:"media.clock",nonce:monotonicEpochMS()}));
@@ -232,7 +306,7 @@ function connect() {
     lastReceivedAt = Date.now();
     // A responsive transport is healthy even while the callee is ringing.
     // Handshakes alone must not reset the retry budget.
-    if (openedAt && lastReceivedAt - openedAt >= 10000) { reconnectStartedAt = 0; reconnectAttempt = 0; }
+    if (openedAt && lastReceivedAt - openedAt >= 10000) { reconnectStartedAt = 0; reconnectAttempt = 0; recoveryContext=null; }
     if (typeof event.data === "string") {
       try {
         const control=JSON.parse(event.data);
@@ -247,7 +321,7 @@ function connect() {
         }
         if(control.type==="coach.state") {
           whisperEpoch=control.talking && Number.isInteger(control.epoch) ? control.epoch : null;
-          whisperDeliveryBase=null;
+          whisperDeliveryFloor=[];
           resamplers.delete(`whisper:8000:${contextRate}`);
           playbackPort?.postMessage({type:"whisper.clear"});
         }
@@ -270,8 +344,8 @@ function connect() {
       if(buffer.byteLength<17 || buffer.byteLength>176 || whisperEpoch===null) return;
       const view=new DataView(buffer),epoch=view.getUint32(4,true),source=view.getFloat64(8,true);
       if(epoch!==whisperEpoch || !Number.isFinite(source)) return;
-      const delta=monotonicEpochMS()-source;
-      whisperDeliveryBase=whisperDeliveryBase===null ? delta : Math.min(whisperDeliveryBase,delta);
+      const now=monotonicEpochMS(), delta=now-source;
+      const whisperDeliveryBase=deliveryFloor(whisperDeliveryFloor,delta,now);
       const excess=Math.max(0,delta-whisperDeliveryBase);
       if(excess>200) return;
       const pcm=new Float32Array(buffer.byteLength-16);
@@ -282,6 +356,7 @@ function connect() {
       return;
     }
     if(buffer.byteLength%2!==0) return;
+    const receipt=performance.now();if(lastPlaybackReceipt!==null)receiveGap=Math.max(receiveGap,receipt-lastPlaybackReceipt);lastPlaybackReceipt=receipt;playbackWireBytes+=buffer.byteLength;
     let sequence=playbackSequence++;
     const header=magic===MAGIC_V3 ? 64 : 32;
     if(framedV2 && buffer.byteLength>=header && (magic===MAGIC_V2 || magic===MAGIC_V3)) {
@@ -297,17 +372,19 @@ function connect() {
         timing.playback_source_epoch=view.getUint32(56,true);
       }
       timing.playback_ingress_ms+=(buffer.byteLength-header)*1000/(SAMPLE_RATE*2);
-      if(Number.isFinite(queued)) timing.playback_max_server_queue_ms=Math.max(timing.playback_max_server_queue_ms,queued);
+      if(Number.isFinite(queued)){queueMax=Math.max(queueMax,queued);timing.playback_max_server_queue_ms=Math.max(timing.playback_max_server_queue_ms,queued);}
       // Relative clocks need no synchronized offset to detect GROWING delay.
       // When clock probes cannot cross an undersized link, still reject audio
       // over 320ms behind its fastest delivery in this socket epoch. This does
-      // not estimate the unknown fixed latency of its very first packet.
+      // not estimate the unknown fixed latency of its very first packet. The
+      // windowed floor keeps server/browser clock skew from accumulating.
       const ageClock=source!==null && Number.isFinite(source) ? source : sent;
       let deliveryExcess=0;
       if(Number.isFinite(ageClock) && ageClock>0) {
-        const delta=monotonicEpochMS()-ageClock;
-        playbackDeliveryBase=playbackDeliveryBase===null ? delta : Math.min(playbackDeliveryBase,delta);
+        const now=monotonicEpochMS(), delta=now-ageClock;
+        const playbackDeliveryBase=deliveryFloor(playbackDeliveryFloor,delta,now);
         deliveryExcess=Math.max(0,delta-playbackDeliveryBase);
+        deliveryExcessMax=Math.max(deliveryExcessMax,deliveryExcess);
         timing.playback_max_delivery_excess_ms=Math.max(timing.playback_max_delivery_excess_ms,deliveryExcess);
         if(audioClockOffset!==null) sourceAudioMS=monotonicEpochMS()-audioClockOffset-deliveryExcess+audioClockUncertainty;
       }
@@ -315,6 +392,7 @@ function connect() {
       let transit=null, sourceAge=null;
       if(serverClockOffset!==null && monotonicEpochMS()-serverClockSampleAt<15000 && Number.isFinite(sent)) {
         transit=Math.max(0,monotonicEpochMS()+serverClockOffset-sent);
+        transitMax=Math.max(transitMax,transit);
         timing.playback_max_transit_ms=Math.max(timing.playback_max_transit_ms,transit);
         sourceAge=source!==null && Number.isFinite(source) ? Math.max(0,monotonicEpochMS()+serverClockOffset-source) : null;
         if(sourceAge!==null) {
@@ -343,7 +421,9 @@ function connect() {
     microphoneReady = false;
     resamplers.clear();
     playbackPort?.postMessage({ type: "flush" });
+    if(recoveryContext && pendingRecovery) runtimeEvent("reconnect","attempt_failed");
     pendingRecovery=true;
+    if(!recoveryContext) recoveryContext={recovery_id:recoveryID("recovery"),initiating_action:"automatic_retry"};
     reconnectCause=event?.reason==="heartbeat_timeout" ? "heartbeat_timeout" : `websocket_close_${event?.code ?? 0}`;
     postMessage({ type: "socket.close", timestamp:new Date().toISOString(), code:event?.code ?? 0, reason:(event?.reason || "").slice(0,160), wasClean:Boolean(event?.wasClean) });
     scheduleReconnect();
@@ -356,18 +436,19 @@ function scheduleReconnect() {
   const now = Date.now();
   if (reconnectStartedAt === 0) reconnectStartedAt = now;
   if (now - reconnectStartedAt >= MAX_RECONNECT_MS) {
-    postMessage({ type: "socket.failed", detail: "audio connection lost after repeated retries" });
+    runtimeEvent("reconnect","timed_out");
+    postMessage({ type: "socket.failed", recoverable: true, detail: "audio connection lost after repeated retries" });
     return;
   }
   const delay = Math.min(250 * (2 ** reconnectAttempt), MAX_RECONNECT_DELAY_MS);
   reconnectAttempt += 1;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    timing.reconnect_attempts++; runtimeEvent("reconnect",reconnectCause);
+    timing.reconnect_attempts++; recoveryContext={...recoveryContext,attempt_id:recoveryID("attempt")}; runtimeEvent("reconnect","attempt_started");
     if(!refreshCredentials) { connect(); return; }
     const id=++refreshID;
-    postMessage({type:"socket.reconnect",id,cause:reconnectCause});
-    reconnectTimer=setTimeout(()=>{reconnectTimer=null;refreshID++;scheduleReconnect();},5000);
+    postMessage({type:"socket.reconnect",id,cause:reconnectCause,recovery:{...recoveryContext}});
+    reconnectTimer=setTimeout(()=>{runtimeEvent("reconnect","authorization_timed_out");reconnectTimer=null;refreshID++;scheduleReconnect();},5000);
   }, delay);
 }
 
@@ -379,7 +460,7 @@ self.onmessage = (event) => {
       mediaURL = message.mediaURL;
       refreshCredentials = Boolean(message.refreshCredentials);
       contextRate = message.contextRate || SAMPLE_RATE;
-      if(Number.isFinite(message.audioClockMS)&&Number.isFinite(message.monotonicEpochMS)) { audioClockOffset=message.monotonicEpochMS-message.audioClockMS; audioClockUncertainty=20; audioClockSampleAt=monotonicEpochMS(); }
+      if(Number.isFinite(message.audioClockMS)&&Number.isFinite(message.monotonicEpochMS)) { audioClockOffset=message.monotonicEpochMS-message.audioClockMS; audioClockSampleUncertainty=audioClockUncertainty=20; audioClockSampleAt=monotonicEpochMS(); }
       capturePort = message.capturePort;
       playbackPort = message.playbackPort;
       capturePort.onmessage = (captureEvent) => capture(captureEvent.data);
@@ -411,8 +492,15 @@ self.onmessage = (event) => {
       break;
     case "microphone.ready":
       if (!message.value) resamplers.clear();
+      if(microphoneReady!==Boolean(message.value)) captureGateOpenedAt=monotonicEpochMS();
       microphoneReady = Boolean(message.value);
-      captureGateOpenedAt=monotonicEpochMS();
+      break;
+    case "send.telemetry":
+      // Monitoring parts may be lost under pressure; microphone audio is
+      // authoritative and must never wait behind a diagnostic backlog.
+      if(socket?.readyState===WebSocket.OPEN && socket.bufferedAmount<=1920) {
+        try{socket.send(message.data);}catch{/* observational only */}
+      }
       break;
     case "send.text":
       if (socket?.readyState === WebSocket.OPEN) {
@@ -425,16 +513,28 @@ self.onmessage = (event) => {
       break;
     case "close":
       flushMutedCapture();
+      if(recoveryContext && pendingRecovery) runtimeEvent("reconnect","cancelled");
       closed = true;
       if (healthTimer !== null) clearInterval(healthTimer);
       healthTimer = null;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       reconnectTimer = null;
-      socket?.close();
-      socket = null;
+      const closing=socket;
+      socket=null;
+      if (closing?.readyState===WebSocket.OPEN) {
+        // This metadata only describes browser shutdown. It never hangs up the
+        // carrier, changes authorization or disables recovery on another tab.
+        try {closing.send(JSON.stringify({type:"media.shutdown",reason:message.reason || "session_cleanup"}));} catch { /* close still proceeds if metadata cannot be sent */ }
+      }
+      let finished=false;
+      const finishClose=()=>{if(finished)return;finished=true;postMessage({type:"socket.shutdown.complete"});close();};
+      if (closing) {
+        closing.onclose=finishClose;
+        try {closing.close(1000,"client_shutdown");} catch {finishClose();}
+        setTimeout(finishClose,500);
+      } else finishClose();
       capturePort?.close();
       playbackPort?.close();
-      close();
       break;
   }
 };

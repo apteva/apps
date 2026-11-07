@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -104,10 +105,16 @@ func (a *App) carrierForRow(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, row *c
 	if slug == "" && bound != nil {
 		slug = bound.AppSlug
 	}
+	if rowUsesOutboundSIP(row) && slug != "didww" {
+		return &sipOutboundCarrier{app: a, provider: slug}, nil
+	}
 	return a.carrierForSlug(slug, connID, nil)
 }
 
 func (a *App) carrierForSlug(slug string, connID int64, fields map[string]string) (carrierAdapter, error) {
+	if fields["outbound_transport"] == inboundTransportSIPDirect && (slug == "telnyx" || slug == "twilio") {
+		return &sipOutboundCarrier{app: a, provider: slug, fields: fields}, nil
+	}
 	switch slug {
 	case "twilio":
 		return &twilioCarrier{app: a, connID: connID}, nil
@@ -204,6 +211,7 @@ func (c *bandwidthCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, requests ...context.Context) (json.RawMessage, error) {
+	started := time.Now()
 	var res *sdk.ExecuteResult
 	var err error
 	if len(requests) > 0 && requests[0] != nil {
@@ -218,6 +226,13 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 	} else {
 		res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
 	}
+	observeAccountAPI(ctx, connID, tool, started, res, err)
+	if res != nil && len(requests) > 0 && requests[0] != nil {
+		if obs, ok := requests[0].Value(carrierCommandObservationKey{}).(*carrierCommandObservation); ok {
+			obs.Status = res.Status
+			obs.RequestID = boundedTransportID(firstNonEmpty(res.Headers["Request-Id"], res.Headers["X-Request-Id"], res.Headers["request-id"], res.Headers["x-request-id"]))
+		}
+	}
 	if res != nil {
 		recordCarrierCommand(ctx, connID, tool, input, res.Status, err == nil && res.Success)
 	} else {
@@ -230,7 +245,7 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 		return nil, fmt.Errorf("%s returned no response", tool)
 	}
 	if !res.Success {
-		return nil, fmt.Errorf("%s failed: status=%d body=%s", tool, res.Status, string(res.Data))
+		return nil, &carrierHTTPError{status: res.Status, message: fmt.Sprintf("%s failed: status=%d body=%s", tool, res.Status, string(res.Data))}
 	}
 	return res.Data, nil
 }
@@ -245,6 +260,21 @@ func (a *App) sendCarrierDTMF(ctx *sdk.AppCtx, row *callRow, digits string) erro
 	digits = strings.TrimSpace(digits)
 	if !validDTMFDigits(digits) {
 		return errors.New("digits must contain 1-32 DTMF characters (0-9, A-D, *, #, w or W)")
+	}
+	if a.callUsesDirectSIP(row) || row.Direction == "outbound" && row.CarrierSlug == "didww" {
+		controller := &localSIPController{app: a}
+		media, err := controller.media(row)
+		if err != nil {
+			return err
+		}
+		pacer := media.pacer.Load()
+		if pacer == nil {
+			return errors.New("SIP media not connected")
+		}
+		return pacer.queueDTMF(digits)
+	}
+	if strings.EqualFold(strings.TrimSpace(row.CarrierSlug), "twilio") {
+		return a.sendTwilioDTMF(ctx, row, digits)
 	}
 	input := map[string]any{"digits": digits}
 	tool := ""
@@ -618,6 +648,11 @@ func (a *App) handlePlivoXML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if callUUID := firstNonEmpty(r.FormValue("CallUUID"), r.URL.Query().Get("CallUUID")); callUUID != "" {
+		// A signed request for another leg must not rebind this call's identity.
+		if row.CarrierSID != "" && callUUID != row.CarrierSID {
+			http.Error(w, "carrier call ID mismatch", http.StatusForbidden)
+			return
+		}
 		if err := a.db().updateCarrierIdentity(callID, callUUID, row.CarrierRequestID); err != nil {
 			http.Error(w, "persist Plivo call id", http.StatusInternalServerError)
 			return

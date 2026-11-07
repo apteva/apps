@@ -98,6 +98,7 @@ interface Sale {
   fulfillment_status: string;
   processing_error?: string;
   total_cents: number;
+  refunded_cents: number;
   currency: string;
   customer_email: string;
   customer_name: string;
@@ -325,7 +326,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `Request failed: ${res.status}`);
+        throw Object.assign(new Error(body.error || `Request failed: ${res.status}`), { status: res.status });
       }
       return res.json();
     },
@@ -1051,7 +1052,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
         {view === "sales" && (
           <section className="grid xl:grid-cols-[minmax(0,1fr)_380px] gap-5">
             <div className="space-y-3 min-w-0"><h2 className="text-sm font-semibold">Sales</h2><DataTable headers={["Sale", "Customer", "Payment", "Fulfillment", "Total"]} empty={sales.length === 0} emptyLabel="No sales">{sales.map((sale) => <tr key={sale.id} onClick={() => void openSale(sale.id)} className="border-t border-border cursor-pointer hover:bg-bg-input/50"><td className="px-3 py-2.5"><div className="font-medium">#{sale.id}</div><div className="text-xs text-text-muted">{sale.invoice_number || fmtDate(sale.created_at)}</div></td><td className="px-3 py-2.5">{sale.customer_email || "Guest"}</td><td className="px-3 py-2.5"><Status value={sale.payment_status} /></td><td className="px-3 py-2.5"><Status value={sale.fulfillment_status} /></td><td className="px-3 py-2.5 text-right whitespace-nowrap">{fmtMoney(sale.total_cents, sale.currency)}</td></tr>)}</DataTable></div>
-            <aside className="xl:border-l xl:border-border xl:pl-5 space-y-4">{selectedSale ? <><div className="flex items-center justify-between"><h2 className="text-sm font-semibold">Sale #{selectedSale.id}</h2><button type="button" onClick={() => setSelectedSale(null)} className="text-sm text-text-muted hover:text-text">Close</button></div><dl className="grid grid-cols-[120px_1fr] gap-y-2 text-sm"><dt className="text-text-muted">Invoice</dt><dd>{selectedSale.invoice_number || "-"}</dd><dt className="text-text-muted">Order</dt><dd>{selectedSale.order_id ? `#${selectedSale.order_id}` : "Pending"}</dd><dt className="text-text-muted">Customer</dt><dd>{selectedSale.customer_name || selectedSale.customer_email || "Guest"}</dd><dt className="text-text-muted">Payment</dt><dd><Status value={selectedSale.payment_status} /></dd></dl>{selectedSale.processing_error && <div className="space-y-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-300"><p>{selectedSale.processing_error}</p><button type="button" disabled={busy} onClick={() => void run(retrySale, "Sale processing completed")} className="h-8 rounded-md border border-red-500/40 px-3 text-sm font-medium disabled:opacity-50">Retry processing</button></div>}<div>{(selectedSale.items || []).map((item) => <div key={item.id} className="flex justify-between gap-3 border-b border-border py-2 text-sm"><span className="min-w-0"><span className="block truncate">{item.title_snapshot}</span><span className="text-xs text-text-muted">{item.quantity} x {fmtMoney(item.unit_amount_cents, item.currency)}</span></span><span className="whitespace-nowrap">{fmtMoney(Math.round(item.unit_amount_cents * item.quantity), item.currency)}</span></div>)}</div><div className="flex justify-between font-semibold"><span>Total</span><span>{fmtMoney(selectedSale.total_cents, selectedSale.currency)}</span></div></> : <p className="text-sm text-text-muted">Select a sale</p>}</aside>
+            <aside className="xl:border-l xl:border-border xl:pl-5 space-y-4">{selectedSale ? <><div className="flex items-center justify-between"><h2 className="text-sm font-semibold">Sale #{selectedSale.id}</h2><button type="button" onClick={() => setSelectedSale(null)} className="text-sm text-text-muted hover:text-text">Close</button></div><dl className="grid grid-cols-[120px_1fr] gap-y-2 text-sm"><dt className="text-text-muted">Invoice</dt><dd>{selectedSale.invoice_number || "-"}</dd><dt className="text-text-muted">Order</dt><dd>{selectedSale.order_id ? `#${selectedSale.order_id}` : "Pending"}</dd><dt className="text-text-muted">Customer</dt><dd>{selectedSale.customer_name || selectedSale.customer_email || "Guest"}</dd><dt className="text-text-muted">Payment</dt><dd><Status value={selectedSale.payment_status} /></dd></dl>{selectedSale.processing_error && <div className="space-y-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-300"><p>{selectedSale.processing_error}</p><button type="button" disabled={busy} onClick={() => void run(retrySale, "Sale processing completed")} className="h-8 rounded-md border border-red-500/40 px-3 text-sm font-medium disabled:opacity-50">Retry processing</button></div>}<div>{(selectedSale.items || []).map((item) => <div key={item.id} className="flex justify-between gap-3 border-b border-border py-2 text-sm"><span className="min-w-0"><span className="block truncate">{item.title_snapshot}</span><span className="text-xs text-text-muted">{item.quantity} x {fmtMoney(item.unit_amount_cents, item.currency)}</span></span><span className="whitespace-nowrap">{fmtMoney(Math.round(item.unit_amount_cents * item.quantity), item.currency)}</span></div>)}</div><div className="flex justify-between font-semibold"><span>Total</span><span>{fmtMoney(selectedSale.total_cents, selectedSale.currency)}</span></div><SaleRefunds key={`${projectId}:${installId}:${selectedSale.id}`} sale={selectedSale} scope={`${projectId}:${installId}`} api={api} onSale={(sale) => { setSelectedSale((current) => current?.id === sale.id ? sale : current); setSales((rows) => rows.map((row) => row.id === sale.id ? sale : row)); }} /></> : <p className="text-sm text-text-muted">Select a sale</p>}</aside>
           </section>
         )}
       </main>
@@ -1127,4 +1128,115 @@ function fmtDate(value: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed";
+}
+
+interface SaleRefundRequest {
+  amount_cents: number;
+  reason: string;
+  idempotency_key: string;
+  status?: string;
+  execution_error?: string;
+}
+interface SaleRefundResult {
+  request: SaleRefundRequest;
+  sale: Sale;
+  reconciled: boolean;
+  reconciliation_error?: string;
+}
+
+export function SaleRefunds({ sale, scope, api, onSale }: {
+  sale: Sale;
+  scope: string;
+  api: <T>(path: string, init?: RequestInit) => Promise<T>;
+  onSale: (sale: Sale) => void;
+}) {
+  const [requests, setRequests] = useState<SaleRefundRequest[]>([]);
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("requested_by_customer");
+  const [message, setMessage] = useState("");
+  const [ready, setReady] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [retry, setRetry] = useState<SaleRefundRequest | null>(null);
+  const inFlight = useRef(false);
+  const path = `/admin/sales/${sale.id}/refunds`;
+  const recoveryKey = `commerce-refund:${scope}:${sale.id}`;
+  const remaining = Math.max(0, sale.total_cents - (sale.refunded_cents || 0));
+  const unresolved = requests.some((request) => !["succeeded", "failed"].includes(request.status || ""));
+
+  const refresh = useCallback(async () => {
+    const response = await api<{ requests: SaleRefundRequest[] }>(path);
+    setRequests(response.requests);
+    setReady(true);
+  }, [api, path]);
+
+  useEffect(() => {
+    let active = true;
+    try {
+      const saved = sessionStorage.getItem(recoveryKey);
+      if (saved) setRetry(JSON.parse(saved));
+    } catch { /* Recovery also remains available from the server request list. */ }
+    api<{ requests: SaleRefundRequest[] }>(path).then((response) => {
+      if (active) { setRequests(response.requests); setReady(true); }
+    }).catch((error) => { if (active) setMessage(errorMessage(error)); });
+    return () => { active = false; };
+  }, [api, path, recoveryKey]);
+
+  async function issue(request?: SaleRefundRequest) {
+    if (inFlight.current) return;
+    const cents = amount === "" ? remaining : Number(amount);
+    if (!request && (!Number.isSafeInteger(cents) || cents <= 0 || cents > remaining)) {
+      setMessage("Enter a positive whole amount in cents within the remaining balance.");
+      return;
+    }
+    const intent = request || { amount_cents: cents, reason, idempotency_key: crypto.randomUUID() };
+    try { sessionStorage.setItem(recoveryKey, JSON.stringify(intent)); } catch { /* The server persists accepted intents. */ }
+    inFlight.current = true;
+    setWorking(true);
+    setRetry(intent);
+    setMessage("");
+    try {
+      const result = await api<SaleRefundResult>(path, { method: "POST", body: JSON.stringify({
+        amount_cents: intent.amount_cents, reason: intent.reason, idempotency_key: intent.idempotency_key,
+      }) });
+      onSale(result.sale);
+      const status = result.request.status;
+      setRequests((current) => [result.request, ...current.filter((row) => row.idempotency_key !== intent.idempotency_key)]);
+      if (status === "succeeded" || status === "failed") {
+        setRetry(null);
+        try { sessionStorage.removeItem(recoveryKey); } catch { /* Storage may be disabled. */ }
+      }
+      const outcome = status === "succeeded" ? "Refund succeeded." : status === "failed" ? "Refund failed." : `Refund ${status}. Use Check status to recover this same request.`;
+      setMessage([outcome, result.request.execution_error, result.reconciliation_error && `Sale reconciliation: ${result.reconciliation_error}`].filter(Boolean).join(" "));
+      setAmount("");
+    } catch (error) {
+      if (error instanceof Error && "status" in error && error.status === 400) {
+        setRetry(null);
+        try { sessionStorage.removeItem(recoveryKey); } catch { /* Storage may be disabled. */ }
+        setMessage(errorMessage(error));
+      } else {
+        setMessage(`${errorMessage(error)}. Use Retry request to reuse this refund request.`);
+      }
+    } finally {
+      inFlight.current = false;
+      setWorking(false);
+    }
+  }
+
+  return <section className="space-y-3 border-t border-border pt-4">
+    <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">Refunds</h3><button type="button" disabled={working} onClick={() => void refresh().catch((error) => setMessage(errorMessage(error)))} className="text-xs text-text-muted">Refresh requests</button></div>
+    <p className="text-sm text-text-muted">Refunded: {fmtMoney(sale.refunded_cents || 0, sale.currency)} · Remaining: {fmtMoney(remaining, sale.currency)}</p>
+    {message && <p role="status" className="text-sm">{message}</p>}
+    {requests.map((request) => <div key={request.idempotency_key} className="space-y-1 border-b border-border pb-2 text-sm">
+      <div className="flex justify-between"><span>{fmtMoney(request.amount_cents, sale.currency)}</span><Status value={request.status || "pending"} /></div>
+      {request.execution_error && <p className="text-xs text-text-muted">{request.execution_error}</p>}
+      <button type="button" disabled={working} onClick={() => void issue(request)} className="text-xs underline">{request.status === "succeeded" || request.status === "failed" ? "Refresh sale state" : "Check status"}</button>
+    </div>)}
+    {retry && <button type="button" disabled={working} onClick={() => void issue(retry)} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Retry request</button>}
+    {remaining > 0 && ["paid", "partially_refunded"].includes(sale.payment_status) && <form onSubmit={(event) => { event.preventDefault(); void issue(); }} className="space-y-3">
+      <Field label={`Amount in cents (${sale.currency})`}><input type="number" min="1" max={remaining} step="1" value={amount} placeholder={String(remaining)} disabled={working || !!retry || unresolved || !ready} onChange={(event) => setAmount(event.target.value)} className={inputClass} /></Field>
+      <Field label="Reason"><select value={reason} disabled={working || !!retry || unresolved || !ready} onChange={(event) => setReason(event.target.value)} className={inputClass}><option value="requested_by_customer">Requested by customer</option><option value="duplicate">Duplicate payment</option><option value="fraudulent">Fraudulent payment</option></select></Field>
+      <p className="text-xs text-text-muted">Leave the amount blank to refund the remaining balance. Requires an original Stripe payment.</p>
+      <button type="submit" disabled={working || !!retry || unresolved || !ready} className="h-8 rounded-md border border-border px-3 text-sm font-medium disabled:opacity-50">{working ? "Processing…" : "Issue refund"}</button>
+    </form>}
+  </section>;
 }

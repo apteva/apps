@@ -673,6 +673,39 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 		order++
 	}
 	for _, page := range pages {
+		// Preserve occurrence context before links and flattened metadata can
+		// reintroduce addresses published only in vendor/recruitment credits.
+		text := emailExtractionText(page.Text, domain)
+		blocked, allowed := map[string]bool{}, map[string]bool{}
+		previousEnd := 0
+		for _, match := range emailPattern.FindAllStringIndex(text, -1) {
+			start := strings.LastIndex(text[:match[0]], "\n") + 1
+			for _, boundary := range []string{". ", "! ", "? "} {
+				if end := strings.LastIndex(text[:match[0]], boundary); end >= start {
+					start = end + len(boundary)
+				}
+			}
+			if previousEnd > start {
+				start = previousEnd
+			}
+			if match[0]-start > 180 {
+				start = match[0] - 180
+			}
+			raw := strings.ToLower(text[match[0]:match[1]])
+			if unrelatedEmailContext(text[start:match[0]]) {
+				blocked[raw] = true
+			} else {
+				allowed[raw] = true
+			}
+			previousEnd = match[1]
+		}
+		pageAdd := func(raw string, score int, publishedContact bool) {
+			key := strings.ToLower(raw)
+			if blocked[key] && !allowed[key] {
+				return
+			}
+			add(raw, score, publishedContact)
+		}
 		pageScore := 0
 		if containsAny(strings.ToLower(page.URL+" "+page.FinalURL+" "+page.Title), []string{"contact", "location", "appointment"}) {
 			pageScore = 20
@@ -685,22 +718,27 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 				if unrelatedEmailContext(label) {
 					continue
 				}
-				add(link.URL[len("mailto:"):strings.Index(link.URL+"?", "?")], 80+pageScore, firstParty)
+				pageAdd(link.URL[len("mailto:"):strings.Index(link.URL+"?", "?")], 80+pageScore, firstParty)
 			}
 		}
 		if firstParty {
+			// A restaurant entity tied to this page identifies its own mailbox,
+			// even when the hotel's generic reservation link is in the footer.
+			for _, raw := range restaurantEntityEmails(page.StructuredData, defaultString(page.FinalURL, page.URL)) {
+				pageAdd(raw, 180+pageScore, true)
+			}
 			for _, line := range nonEmptyLines(emailExtractionText(page.Text, domain)) {
 				if unrelatedEmailContext(qualificationLinkText(line)) {
 					continue
 				}
 				for _, raw := range emailPattern.FindAllString(line, -1) {
-					add(raw, 40+pageScore, pageScore > 0 || containsAny(qualificationLinkText(line), []string{"email", "e-mail", "courriel", "contact", "reservation"}))
+					pageAdd(raw, 40+pageScore, pageScore > 0 || containsAny(qualificationLinkText(line), []string{"email", "e-mail", "courriel", "contact", "reservation"}))
 				}
 			}
 		}
 		corpus := emailExtractionText(strings.Join([]string{page.Text, page.Description, metadataText(page.Metadata), structuredDataText(page.StructuredData)}, " "), domain)
 		for _, raw := range emailPattern.FindAllString(corpus, -1) {
-			add(raw, 40+pageScore, false)
+			pageAdd(raw, 40+pageScore, false)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -760,7 +798,7 @@ func unrelatedEmailContext(text string) bool {
 	}
 	for _, word := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) }) {
 		switch word {
-		case "candidat", "candidate", "candidature", "recrutement", "recruitment", "recruiting", "careers", "jobs", "rh", "hr", "presse", "press", "privacy", "rgpd", "dpo", "webmaster", "webdesign", "agence", "agency", "hebergeur", "hebergement", "hosting", "realisation", "developpement", "support", "event", "events", "evenement", "evenements":
+		case "candidat", "candidate", "candidature", "recrutement", "recruitment", "recruiting", "careers", "jobs", "rh", "hr", "presse", "press", "privacy", "rgpd", "dpo", "webmaster", "webdesign", "agence", "agency", "hebergeur", "hebergement", "hosting", "realisation", "developpement", "development", "developer", "photographe", "photographer", "support", "event", "events", "evenement", "evenements":
 			return true
 		}
 	}
@@ -942,6 +980,36 @@ func structuredDataText(value any) string {
 	}
 	walk(value)
 	return strings.Join(parts, " ")
+}
+
+func restaurantEntityEmails(value any, pageURL string) []string {
+	values := []string{}
+	var walk func(any)
+	walk = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			types := structuredDataText(typed["@type"])
+			entityURL, _ := typed["url"].(string)
+			isRestaurant := false
+			for _, kind := range strings.Fields(types) {
+				if kind == "Restaurant" || kind == "https://schema.org/Restaurant" || kind == "http://schema.org/Restaurant" {
+					isRestaurant = true
+				}
+			}
+			if isRestaurant && entityURL != "" && qualificationURLKey(entityURL) == qualificationURLKey(pageURL) {
+				values = append(values, emailPattern.FindAllString(structuredDataText(typed["email"]), -1)...)
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return values
 }
 
 func structuredPhoneValues(value any) []string {

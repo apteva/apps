@@ -15,8 +15,12 @@ func TestBusinessMailboxRoles(t *testing.T) {
 		name, domain, text, want string
 		links                    []webLink
 	}{
+		{name: "recruiting business description is not mailbox purpose", domain: "staffing.fr", text: "Staffing and recruiting services for businesses. Contact office@staffing.fr.", want: "office@staffing.fr"},
 		{name: "commercial before recruitment", domain: "auxpiedssouslatable.fr", text: "Service commercial : contact@auxpiedssouslatable.frPôle recrutement : candidat@auxpiedssouslatable.fr", want: "contact@auxpiedssouslatable.fr"},
 		{name: "restaurant before hotel reception", domain: "fr.mamashelter.com", want: "food.lille@mamashelter.com", links: []webLink{{URL: "mailto:reception.lille@mamashelter.com", Text: "Reception"}, {URL: "mailto:food.lille@mamashelter.com", Text: "Restaurant Email"}}},
+		{name: "vendor credits cannot return through corpus or mailto", domain: "parisbrest.bzh", text: "Développement : Mr Nicolas Tranne – Contact : nictranne@gmail.com\nCrédit photos : Photographe freelance – thomas.pellan@yahoo.fr", links: []webLink{{URL: "mailto:nictranne@gmail.com", Text: "Contact"}}, want: ""},
+		{name: "business gmail remains valid beside vendor credits", domain: "restaurant.fr", text: "Réservations : restaurant@gmail.com\nDéveloppement : Contact : developer@gmail.com", want: "restaurant@gmail.com"},
+		{name: "labeled recruitment gmail cannot return through corpus", domain: "restaurant.fr", text: "Recrutement : hiring@gmail.com", want: ""},
 		{name: "recruitment alone is not a lead", domain: "example.fr", text: "candidat@example.fr careers@example.fr", want: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,5 +166,20 @@ func TestNewOnlySkipsExistingBusinessesWithoutChangingOldProspects(t *testing.T)
 	unchanged, _ := getCandidate(ctx.AppDB(), ctx.CurrentProject(), old.ID)
 	if unchanged.Summary != old.Summary || unchanged.Email != old.Email {
 		t.Fatal("old lead changed")
+	}
+}
+
+func TestRestaurantEntityEmailOutranksHotelReservations(t *testing.T) {
+	page := webExtractPage{URL: "https://hotel.fr/restaurant", Text: "Emaillepatio@hotel.fr\nContact\nreservation@hotel.fr", Links: []webLink{{URL: "mailto:reservation@hotel.fr", Text: "Contact"}}, StructuredData: []any{
+		map[string]any{"@type": "Hotel", "url": "https://hotel.fr/", "email": "reservation@hotel.fr"},
+		map[string]any{"@type": "Restaurant", "url": "https://hotel.fr/restaurant/", "email": "lepatio@hotel.fr"},
+		map[string]any{"@type": "Restaurant", "url": "https://hotel.fr/another-venue", "email": "another@hotel.fr"},
+	}}
+	if got := extractBestEmail([]webExtractPage{page}, "hotel.fr"); got != "lepatio@hotel.fr" {
+		t.Fatalf("restaurant page got %q", got)
+	}
+	page.URL = "https://hotel.fr/"
+	if got := extractBestEmail([]webExtractPage{page}, "hotel.fr"); got != "reservation@hotel.fr" {
+		t.Fatalf("hotel page got %q", got)
 	}
 }

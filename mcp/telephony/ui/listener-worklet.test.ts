@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-function fixture(stereo = false) {
+function fixture(stereo = false, rate = 24_000) {
   let Processor: any;
-  const context = { sampleRate: 24_000, currentTime: 0, Float32Array, AudioWorkletProcessor: class { port = { onmessage: undefined as any, messages: [] as any[], postMessage(value: any) { this.messages.push(value); } }; }, registerProcessor(_name: string, ctor: any) { Processor = ctor; } };
+  const context = { sampleRate: rate, currentTime: 0, Float32Array, AudioWorkletProcessor: class { port = { onmessage: undefined as any, messages: [] as any[], postMessage(value: any) { this.messages.push(value); } }; }, registerProcessor(_name: string, ctor: any) { Processor = ctor; } };
   vm.runInNewContext(readFileSync(new URL("./listener-worklet.js", import.meta.url), "utf8"), context);
   return { context, processor: new Processor({ processorOptions: { stereo } }) };
 }
@@ -50,3 +50,34 @@ test("moderate carrier bursts with identical timestamps preserve every sample in
   expect(actual[0]).toEqual(expected); expect(actual[1]).toEqual(expected);
   expect(processor.dropped).toEqual([0, 0]);
 });
+
+for (const rate of [24_000, 44_100, 48_000]) {
+  test(`listener drains a startup overflow without repeatedly priming (${rate} Hz)`, () => {
+    const { context, processor } = fixture(true, rate);
+    const size = rate / 50;
+    const send = (playAtMS: number) => {
+      for (let direction = 0; direction < 2; direction++) {
+        processor.port.onmessage({ data: { direction, frame: new Float32Array(size).fill(direction ? -0.5 : 0.5), playAtMS } });
+      }
+    };
+    // More than the queue's eight-frame capacity, then regular 20 ms delivery.
+    // Previously every arrival trimmed and postponed the head again: no audio
+    // could play even though delivery and the rendering clock were healthy.
+    for (let i = 0; i < 9; i++) send(60);
+    let nextArrival = 0.02;
+    let nonzero = 0;
+    for (let at = 0; at < rate * 2; at += 128) {
+      context.currentTime = at / rate;
+      if (context.currentTime >= nextArrival) { send(context.currentTime * 1000 + 60); nextArrival += 0.02; }
+      const out = [new Float32Array(128), new Float32Array(128)];
+      processor.process([], [out]);
+      nonzero += out[0].filter(x => x !== 0).length;
+      expect(out[0].every(x => x === 0 || x === 0.5)).toBe(true);
+      expect(out[1].every(x => x === 0 || x === -0.5)).toBe(true);
+    }
+    expect(nonzero / rate).toBeGreaterThan(1.9);
+    expect(processor.maxQueueMS).toBeLessThanOrEqual(160.01);
+    expect(processor.dropped[0] / rate).toBeLessThan(0.05);
+    expect(processor.dropped[1]).toBe(processor.dropped[0]);
+  });
+}

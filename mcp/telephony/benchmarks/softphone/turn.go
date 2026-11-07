@@ -105,6 +105,7 @@ type shapedPacketConn struct {
 	wg                        sync.WaitGroup
 }
 type datagramSchedule struct {
+	epoch  time.Time
 	free   time.Time
 	link   Link
 	rng    *rand.Rand
@@ -112,6 +113,15 @@ type datagramSchedule struct {
 }
 
 func (s *datagramSchedule) due(now time.Time, bytes int) (time.Time, bool) {
+	if s.link.UDPLossProbability > 0 && s.rng.Float64() < s.link.UDPLossProbability {
+		return now, false
+	}
+	if !s.epoch.IsZero() && s.link.UDPBurstMS > 0 {
+		elapsed := float64(now.Sub(s.epoch)) / float64(time.Millisecond)
+		if elapsed >= s.link.UDPBurstAtMS && elapsed < s.link.UDPBurstAtMS+s.link.UDPBurstMS {
+			return now, false
+		}
+	}
 	extra := time.Duration((s.link.LatencyMS + s.rng.Float64()*s.link.JitterMS) * float64(time.Millisecond))
 	if extra >= 200*time.Millisecond {
 		return now.Add(extra), false
@@ -182,6 +192,7 @@ func (p *shapedPacketConn) readPackets() {
 		packet.measured = p.measured(now)
 		accepted := true
 		if packet.measured {
+			s.epoch = p.epoch
 			packet.due, accepted = s.due(now, n)
 		}
 		if accepted {
@@ -207,6 +218,7 @@ func (p *shapedPacketConn) WriteTo(data []byte, addr net.Addr) (int, error) {
 	packet.measured = p.measured(now)
 	accepted := true
 	if packet.measured {
+		p.downSchedule.epoch = p.epoch
 		packet.due, accepted = p.downSchedule.due(now, len(data))
 	}
 	if accepted {

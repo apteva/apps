@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  audioWidgetPreferences, defaultAudioFilters, audioIssues, audioStages, audioStateLabel, metricLabel,
+  audioBoundaryIndicators, audioWidgetPreferences, defaultAudioFilters, audioIssues, audioStages, audioStateLabel, metricLabel,
   type AudioDashboardHost, type AudioFilters,
 } from "./audio-dashboard";
 import { audioWidgetMeasurements, audioWidgetProblems } from "./audio-widget";
@@ -69,6 +69,7 @@ export default function AudioHealthWidget(props: AudioDashboardHost) {
               <span className="text-xs text-text-muted">{audioStateLabel(report.state)}</span>
             </div>
             <p className="mt-2 break-words text-xs text-text-muted">{report.adviser_label} · {report.provider}</p>
+ <div className="mt-2 grid gap-1 text-xs">{audioBoundaryIndicators(report).map((item)=><div key={item.key} className="flex justify-between gap-2"><span className="text-text-muted">{item.label}</span><span className={item.state==="audio_degraded"?"font-semibold text-error":"text-text-muted"}>{audioStateLabel(item.state)}{item.reason==="intentional_hold"?" · hold":""}</span></div>)}</div>
             {measurements.length > 0 && <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">{measurements.map((item) => <div key={item.key}><dt className="text-xs text-text-muted">{item.label}</dt><dd className="text-sm font-semibold tabular-nums text-text">{item.value}</dd></div>)}</dl>}
             <div className="mt-3 flex justify-between gap-2 text-xs text-text-muted"><time dateTime={report.observed_at}>{new Date(report.observed_at).toLocaleTimeString()}</time><button aria-expanded={open} onClick={() => setExpanded(open ? null : report.call_id)} className="underline">{open ? "Hide details" : "Show details"}</button></div>
             {open && <div className="mt-3 space-y-2 border-t border-border pt-3 text-xs text-text-muted"><p className="break-all">Call {report.call_id} · {report.status}</p><p>{report.from} → {report.to}</p><p>Observed {new Date(report.observed_at).toLocaleString()}</p>{report.stages.map((stage) => <p key={stage}>{audioStages[stage as keyof typeof audioStages] || stage}</p>)}<dl className="grid grid-cols-2 gap-2">{Object.entries(report.metrics).filter(([, value]) => value > 0).map(([key, value]) => <div key={key}><dt>{(metricLabel[key] || key.replace(/_/g, " "))}</dt><dd className="text-text">{Math.round(value)}{key.endsWith("_ms") ? " ms" : ""}</dd></div>)}</dl></div>}

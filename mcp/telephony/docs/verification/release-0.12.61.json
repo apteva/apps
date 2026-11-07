@@ -1,0 +1,35 @@
+{
+  "schema": "telephony-release-validation/v1",
+  "version": "0.12.61",
+  "validated_at": "2026-10-28T07:49:20.302033+00:00",
+  "source_base": "380ae2e8873b48a587b6abb5e911cf0d577ec540",
+  "sdk": "v0.110.0",
+  "workspace_overlay": false,
+  "go_full": {
+    "passed": true,
+    "seconds": 441.424,
+    "command": "GOWORK=off go test -count=1 -timeout 18m ./..."
+  },
+  "race": {
+    "passed": true,
+    "seconds": 7.255,
+    "scope": "release manifests, outgoing partial framing, final tails, queue age protection and Opus/RTP speech"
+  },
+  "frontend": {
+    "passed": 437,
+    "failed": 0
+  },
+  "vet": true,
+  "typescript_and_panels": true,
+  "builds": [
+    {
+      "platform": "darwin/arm64",
+      "sha256": "b0f90f1910ed75f02430bebca271c5f1278935a2ea40d1fd9dab9234c3c825da"
+    },
+    {
+      "platform": "linux/amd64",
+      "sha256": "504a051c0596a247314883317dc14bcb6b0c726ea294efdabc0c1304525dd1bc"
+    }
+  ],
+  "deployments_updated": false
+}
