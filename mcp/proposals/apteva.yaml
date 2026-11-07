@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: proposals
 display_name: Proposals
-version: 0.3.0
+version: 0.3.1
 description: Build interactive client proposals with selectable scope, live pricing, private links, and recorded decisions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/proposals
@@ -75,7 +75,7 @@ provides:
     - {slot: project.page, label: Proposals, icon: file-text, entry: /ui/ProposalsPanel.mjs}
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: proposals/v0.3.0, entry: mcp/proposals}
+  source: {repo: github.com/apteva/apps, ref: proposals/v0.3.1, entry: mcp/proposals}
   port: 8080
   health_check: /health
   storage:

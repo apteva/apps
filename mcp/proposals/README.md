@@ -4,6 +4,8 @@ A project-scoped Apteva sidecar for client proposals. Create and preview a draft
 
 Clients use visible **Include**, **For later**, and **Decline** buttons for optional items. Multi-select categories also offer group buttons to include, defer, or decline every optional item at once, with live group subtotals. Required lines always stay included, and choose-one categories still allow only one included item. Clicking an active choice clears it. Categories support any number of options, at most one, or exactly one for acceptance. Required lines are included automatically. The client can accept the selection, decline the proposal, or request changes with a note. A published revision freezes its prices and scope, and the server calculates the recorded total. Publishing a replacement closes the previous open link.
 
+Confirmation flows use styled, keyboard-accessible dialogs throughout the public page and dashboard. Client decline confirmations follow the proposal language. In-app draft navigation uses a discard-changes modal.
+
 ## Proposal language
 
 Choose **English (Default)** or **Français** in each draft’s **Proposal details**. This controls the public page, client preview, response buttons and messages, invitation emails, and date/price formatting. Write the title, overview, categories, item descriptions, and terms in that language; content is not automatically translated. The MCP content field is `language: "en" | "fr"`; omitted values and older proposals default to English. Language is frozen with the published revision.

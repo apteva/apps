@@ -12,6 +12,42 @@ function element(tag, text, className) {
   return node;
 }
 
+function confirmDecline() {
+  return new Promise((resolve) => {
+    const previous = document.activeElement;
+    const dialog = element("dialog", "", "confirmation");
+    dialog.setAttribute("aria-labelledby", "decline-title");
+    dialog.setAttribute("aria-describedby", "decline-description");
+    const title = element("h2", text.confirmDecline);
+    title.id = "decline-title";
+    const description = element("p", text.declineDescription, "muted");
+    description.id = "decline-description";
+    const footer = element("div", "", "confirmation-actions");
+    const cancel = element("button", text.cancel);
+    const accept = element("button", text.declineProposal, "danger");
+    cancel.type = accept.type = "button";
+    cancel.autofocus = true;
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      dialog.close();
+      dialog.remove();
+      if (previous?.isConnected) previous.focus();
+      resolve(confirmed);
+    };
+    cancel.addEventListener("click", () => finish(false));
+    accept.addEventListener("click", () => finish(true));
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish(false); });
+    dialog.addEventListener("close", () => finish(false));
+    footer.append(cancel, accept);
+    dialog.append(title, description, footer);
+    document.body.append(dialog);
+    dialog.showModal();
+    cancel.focus();
+  });
+}
+
 async function request(path, body) {
   const endpoint = new URL(path, location.href);
   endpoint.searchParams.set("project_id", project);
@@ -224,8 +260,10 @@ function render(view) {
       form.append(button);
       return button;
     });
+    let submitting = false;
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (submitting) return;
       const outcome = event.submitter?.value || "accepted";
       error.textContent = "";
       if (outcome === "accepted" && !name.value.trim()) {
@@ -243,12 +281,14 @@ function render(view) {
         note.focus();
         return;
       }
-      if (outcome === "declined" && !window.confirm(text.confirmDecline)) return;
+      submitting = true;
+      if (outcome === "declined" && !(await confirmDecline())) { submitting = false; return; }
       buttons.forEach((button) => { button.disabled = true; });
       try {
         render(await request("respond", {outcome, name: name.value, note: note.value, selection: choices}));
         root.focus();
       } catch (err) {
+        submitting = false;
         error.textContent = err.message;
         buttons.forEach((button) => { button.disabled = false; });
       }

@@ -18,13 +18,13 @@ export function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat(undefined, {style: "currency", currency}).format(amount / 100);
 }
 
-function Dialog({title, onClose, busy, children}: {title: string; onClose: () => void; busy?: boolean; children: ReactNode}) {
+export function Dialog({title, onClose, busy, children, description, compact}: {title: string; onClose: () => void; busy?: boolean; children: ReactNode; description?: string; compact?: boolean}) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     dialog.current?.showModal();
     return () => dialog.current?.close();
   }, []);
-  return <dialog className="pp-dialog" ref={dialog} aria-label={title}
+  return <dialog className={"pp-dialog" + (compact ? " pp-confirm-dialog" : "")} ref={dialog} aria-label={title} aria-describedby={description}
     onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
     <header><h2>{title}</h2><button type="button" disabled={busy} onClick={onClose} aria-label="Close dialog">×</button></header>
     {children}

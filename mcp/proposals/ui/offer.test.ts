@@ -117,4 +117,39 @@ describe("public scope buttons", () => {
     expect(calls.length).toBe(1);
   });
 
+  test("decline uses a localized modal, cancellation sends nothing, and confirmation sends once", async () => {
+    const {doc, window, calls} = await open(undefined, "fr");
+    window.confirm = () => { throw new Error("Native confirmation must not be used"); };
+    const form = doc.querySelector("form")!;
+    const decline = form.querySelector('button[value="declined"]')!;
+    const submit = () => form.dispatchEvent(new window.SubmitEvent("submit", {cancelable: true, submitter: decline}));
+    submit(); submit();
+    expect(doc.querySelectorAll("dialog").length).toBe(1);
+    const dialog = doc.querySelector("dialog")!;
+    expect(dialog.textContent).toContain("Refuser toute la proposition ?");
+    expect(dialog.textContent).toContain("Annuler");
+    expect(doc.activeElement!.textContent).toBe("Annuler");
+    expect(calls.length).toBe(1);
+    dialog.querySelector("button")!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(doc.querySelector("dialog")).toBeNull();
+    expect(calls.length).toBe(1);
+    submit();
+    doc.querySelector("dialog button.danger")!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls.length).toBe(2);
+    expect(calls[1].body.outcome).toBe("declined");
+  });
+  test("Escape dismisses the decline modal without changing the proposal", async () => {
+    const {doc, window, calls, total} = await open();
+    const form = doc.querySelector("form")!;
+    form.dispatchEvent(new window.SubmitEvent("submit", {cancelable: true, submitter: form.querySelector('button[value="declined"]')!}));
+    doc.querySelector("dialog")!.dispatchEvent(new window.Event("cancel", {cancelable: true}));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(doc.querySelector("dialog")).toBeNull();
+    expect(calls.length).toBe(1);
+    expect(total()).toBe("1200000");
+    expect(form.querySelector<HTMLButtonElement>('button[value="declined"]')!.disabled).toBe(false);
+  });
+
 });
