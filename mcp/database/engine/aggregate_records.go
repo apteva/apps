@@ -13,6 +13,12 @@ func aggregateRecords(ctx context.Context, c Collection, r Request, outSchema Co
 }
 
 func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, outSchema Collection, workLimit int, scan func(Query, []string, func(Record, []byte) bool) error) ([]Record, error) {
+	return aggregateRecordsSharedBudget(ctx, c, r, outSchema, workLimit, scan, nil)
+}
+
+// aggregateRecordsSharedBudget charges live accumulator state to an enclosing
+// query as it grows, so nested small aggregates do not reserve full budgets.
+func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, outSchema Collection, workLimit int, scan func(Query, []string, func(Record, []byte) bool) error, retain func(int) error) ([]Record, error) {
 	// Keep typed accumulators while scanning; format portable decimal strings
 	// once per output group, instead of allocating them for every input row.
 	type metricState struct {
@@ -47,6 +53,23 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 		groupFields[i], _ = view.field(g)
 	}
 	workBytes := 0
+	grow := func(n int) error {
+		if workBytes+n > workLimit {
+			return fail("resource_limit", "aggregate group state exceeds %d MiB", workLimit>>20)
+		}
+		if retain != nil {
+			if e := retain(n); e != nil {
+				return e
+			}
+		}
+		workBytes += n
+		return nil
+	}
+	defer func() {
+		if retain != nil {
+			retain(-workBytes)
+		}
+	}()
 	init := func(key any, row Record) error {
 		out := Record{}
 		for _, g := range r.GroupBy {
@@ -57,10 +80,9 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 		}
 		// Include maps, keys, typed accumulator storage and final scalar growth.
 		n := 256 + retainedBytes(key) + retainedBytes(out) + len(r.Metrics)*96
-		if workBytes+n > workLimit {
-			return fail("resource_limit", "aggregate group state exceeds %d MiB", workLimit>>20)
+		if e := grow(n); e != nil {
+			return e
 		}
-		workBytes += n
 		groups[key] = &groupState{row: out, metrics: make([]metricState, len(r.Metrics))}
 		return nil
 	}
@@ -131,9 +153,7 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 				if _, dup := state.seen[v]; dup {
 					continue
 				}
-				workBytes += 64 + retainedBytes(v)
-				if workBytes > workLimit {
-					aggErr = fail("resource_limit", "aggregate group state exceeds %d MiB", workLimit>>20)
+				if aggErr = grow(64 + retainedBytes(v)); aggErr != nil {
 					return false
 				}
 				state.seen[v] = struct{}{}
@@ -146,9 +166,7 @@ func aggregateRecordsWithBudget(ctx context.Context, c Collection, r Request, ou
 			switch m.Op {
 			case "min", "max":
 				if state.value == nil || (m.Op == "min" && compare(f, v, state.value) < 0) || (m.Op == "max" && compare(f, v, state.value) > 0) {
-					workBytes += retainedBytes(v) - retainedBytes(state.value)
-					if workBytes > workLimit {
-						aggErr = fail("resource_limit", "aggregate group state exceeds %d MiB", workLimit>>20)
+					if aggErr = grow(retainedBytes(v) - retainedBytes(state.value)); aggErr != nil {
 						return false
 					}
 					state.value = v

@@ -1,0 +1,85 @@
+[
+  {
+    "id": "c0",
+    "centre": "a",
+    "period": "sep",
+    "kind": "call",
+    "caller": "a"
+  },
+  {
+    "id": "c1",
+    "centre": "a",
+    "period": "sep",
+    "kind": "call",
+    "caller": "a"
+  },
+  {
+    "id": "c2",
+    "centre": "a",
+    "period": "sep",
+    "kind": "call",
+    "caller": "b"
+  },
+  {
+    "id": "c3",
+    "centre": "a",
+    "period": "oct",
+    "kind": "call",
+    "caller": "c"
+  },
+  {
+    "id": "c4",
+    "centre": "a",
+    "period": "oct",
+    "kind": "call",
+    "caller": "d"
+  },
+  {
+    "id": "c5",
+    "centre": "a",
+    "period": "oct",
+    "kind": "call",
+    "caller": "e"
+  },
+  {
+    "id": "c6",
+    "centre": "a",
+    "period": "oct",
+    "kind": "call",
+    "caller": "f"
+  },
+  {
+    "id": "s1",
+    "centre": "a",
+    "period": "sep",
+    "kind": "sale",
+    "contracts": "1",
+    "campaign": "blue",
+    "adviser": "ann",
+    "display_date": "2026-09-30"
+  },
+  {
+    "id": "s2",
+    "centre": "a",
+    "period": "oct",
+    "kind": "sale",
+    "contracts": "1",
+    "campaign": "red",
+    "adviser": "bob",
+    "display_date": "2026-10-01"
+  },
+  {
+    "id": "foreign_call",
+    "centre": "b",
+    "period": "sep",
+    "kind": "call",
+    "caller": "foreign"
+  },
+  {
+    "id": "foreign_sale",
+    "centre": "b",
+    "period": "sep",
+    "kind": "sale",
+    "contracts": "100"
+  }
+]

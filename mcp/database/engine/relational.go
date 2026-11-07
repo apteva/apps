@@ -77,6 +77,11 @@ type RelJoin struct {
 
 // RelExpr is exactly one of its forms; an empty one is null.
 type RelExpr struct {
+	resultType  string
+	Op          string    `json:"op,omitempty"`
+	Args        []RelExpr `json:"args,omitempty"`
+	Round       *int      `json:"round,omitempty"`
+	RoundMode   string    `json:"roundMode,omitempty"`
 	Field       string    `json:"field,omitempty"`
 	Const       any       `json:"const,omitempty"`
 	Coalesce    []RelExpr `json:"coalesce,omitempty"`
@@ -173,6 +178,8 @@ type relBudget struct {
 // relContext is the deadline of the transaction's request.
 func relContext(tx transaction) context.Context {
 	switch t := tx.(type) {
+	case cachedSchemaTx:
+		return relContext(t.transaction)
 	case *sqliteTx:
 		return t.ctx
 	case *pebbleTx:
@@ -648,14 +655,30 @@ func (p *relChain) step(i int, row Record, yield func(Record) (bool, error)) (bo
 	return true, nil
 }
 
-func (p *relChain) final(row Record, yield func(Record) (bool, error)) (bool, error) {
+func (p *relChain) computeValues(row Record, reserve func(int) error) error {
 	for i := range p.computed {
 		c := &p.computed[i]
-		v, e := relTyped(p.fields[i], c.Expr.eval(p.view, row))
+		value, e := c.Expr.evalChecked(p.view, row)
 		if e != nil {
-			return false, e
+			return e
+		}
+		v, e := relTyped(p.fields[i], value)
+		if e != nil {
+			return e
+		}
+		if reserve != nil {
+			if e := reserve(64 + len(c.Name) + retainedBytes(v)); e != nil {
+				return e
+			}
 		}
 		row[c.Name] = v
+	}
+	return nil
+}
+
+func (p *relChain) final(row Record, yield func(Record) (bool, error)) (bool, error) {
+	if e := p.computeValues(row, nil); e != nil {
+		return false, e
 	}
 	if !matches(p.view, row, p.filter) {
 		return true, nil
@@ -697,6 +720,25 @@ func relTyped(f Field, v any) (any, error) {
 	if v == nil {
 		return nil, nil
 	}
+	if r, ok := v.(*big.Rat); ok {
+		switch f.Type {
+		case "integer":
+			if !r.IsInt() {
+				return nil, Invalid("computed %s requires explicit rounding to integer", f.Name)
+			}
+			if !r.Num().IsInt64() {
+				return nil, fail("resource_limit", "computed %s integer overflow", f.Name)
+			}
+			v = r.Num().String()
+		case "number":
+			v, _ = r.Float64()
+			if math.IsInf(v.(float64), 0) || math.IsNaN(v.(float64)) {
+				return nil, fail("resource_limit", "computed %s numeric overflow", f.Name)
+			}
+		default:
+			return nil, Invalid("computed %s numeric expression requires integer or number type", f.Name)
+		}
+	}
 	if f.Type == "text" {
 		s, _ := relText(v)
 		return s, nil
@@ -730,7 +772,7 @@ func (p *relChain) tieFrom(row Record, first int) string {
 
 func (x *RelExpr) forms() int {
 	n := 0
-	for _, set := range []bool{x.Field != "", x.Const != nil, x.Coalesce != nil, x.NullIfEmpty != nil, x.Trim != nil, x.Strip != nil, x.Concat != nil, x.JSON != nil, x.If != nil} {
+	for _, set := range []bool{x.Op != "", x.Field != "", x.Const != nil, x.Coalesce != nil, x.NullIfEmpty != nil, x.Trim != nil, x.Strip != nil, x.Concat != nil, x.JSON != nil, x.If != nil} {
 		if set {
 			n++
 		}
@@ -744,6 +786,9 @@ func (x *RelExpr) visit(use func(string)) {
 	}
 	if x.Field != "" {
 		use(x.Field)
+	}
+	for i := range x.Args {
+		x.Args[i].visit(use)
 	}
 	for i := range x.Coalesce {
 		x.Coalesce[i].visit(use)
@@ -772,7 +817,17 @@ func (p *relChain) checkExpr(x *RelExpr, depth int) error {
 			return e
 		}
 	}
-	for _, list := range [][]RelExpr{x.Coalesce, x.Concat} {
+	if x.Op == "" && (x.Args != nil || x.Round != nil || x.RoundMode != "") {
+		return Invalid("args, round and roundMode require op")
+	}
+	if x.Op != "" {
+		typ, e := numericExprType(p.view, x, depth)
+		if e != nil {
+			return e
+		}
+		x.resultType = typ
+	}
+	for _, list := range [][]RelExpr{x.Args, x.Coalesce, x.Concat} {
 		for i := range list {
 			if e := p.checkExpr(&list[i], depth+1); e != nil {
 				return e
@@ -807,11 +862,30 @@ func (p *relChain) typeComputed(c *RelComputed) (Field, error) {
 		return Field{}, e
 	}
 	t := c.Type
+	if t == "" && c.Expr.Op != "" {
+		var e error
+		t, e = numericExprType(p.view, &c.Expr, 0)
+		if e != nil {
+			return Field{}, e
+		}
+		if t == "rational" {
+			return Field{}, Invalid("computed %s requires explicit integer or number type for fractional arithmetic", c.Name)
+		}
+	}
 	if t == "" {
 		t = "text"
 		if c.Expr.Field != "" {
 			f, _ := p.view.field(c.Expr.Field)
 			t = f.Type
+		}
+	}
+	if c.Expr.Op != "" {
+		inferred, e := numericExprType(p.view, &c.Expr, 0)
+		if e != nil {
+			return Field{}, e
+		}
+		if numericType(inferred) && t != "integer" && t != "number" || !numericType(inferred) && t != inferred {
+			return Field{}, Invalid("computed %s has incompatible type %s", c.Name, t)
 		}
 	}
 	switch t {
@@ -834,64 +908,86 @@ func relText(v any) (string, bool) {
 
 // eval returns null for a null input, except coalesce, concat (null reads as "")
 // and if.
-func (x *RelExpr) eval(view Collection, row Record) any {
+func (x *RelExpr) evalChecked(view Collection, row Record) (any, error) {
+	if x == nil {
+		return nil, nil
+	}
+	if x.Op != "" {
+		return x.evalNumeric(view, row)
+	}
 	switch {
 	case x.Field != "":
-		return row[x.Field]
+		return row[x.Field], nil
 	case x.Const != nil:
-		return x.Const
+		return x.Const, nil
 	case x.Coalesce != nil:
 		for i := range x.Coalesce {
-			if v := x.Coalesce[i].eval(view, row); v != nil {
-				return v
+			v, e := x.Coalesce[i].evalChecked(view, row)
+			if e != nil || v != nil {
+				return v, e
 			}
 		}
-		return nil
-	case x.NullIfEmpty != nil:
-		v := x.NullIfEmpty.eval(view, row)
-		if v == "" {
-			return nil
-		}
-		return v
-	case x.Trim != nil:
-		s, ok := relText(x.Trim.eval(view, row))
-		if !ok {
-			return nil
-		}
-		return strings.Trim(s, " ")
-	case x.Strip != nil:
-		s, ok := relText(x.Strip.eval(view, row))
-		if !ok {
-			return nil
-		}
-		return strings.Map(func(c rune) rune {
-			if strings.ContainsRune(x.Chars, c) {
-				return -1
-			}
-			return c
-		}, s)
-	case x.Concat != nil:
-		parts := make([]string, len(x.Concat))
-		for i := range x.Concat {
-			parts[i], _ = relText(x.Concat[i].eval(view, row))
-		}
-		return strings.Join(parts, x.Separator)
-	case x.JSON != nil:
-		return relJSON(x.JSON.eval(view, row), x.Path)
+		return nil, nil
 	case x.If != nil:
 		if matches(view, row, x.If) {
-			return x.Then.evalOrNull(view, row)
+			return x.Then.evalChecked(view, row)
 		}
-		return x.Else.evalOrNull(view, row)
+		return x.Else.evalChecked(view, row)
+	case x.Concat != nil:
+		parts := make([]string, len(x.Concat))
+		size := max(0, len(parts)-1) * len(x.Separator)
+		for i := range x.Concat {
+			v, e := x.Concat[i].evalChecked(view, row)
+			if e != nil {
+				return nil, e
+			}
+			parts[i], _ = relText(v)
+			size += len(parts[i])
+			if size > MaxBytes {
+				return nil, fail("resource_limit", "computed text exceeds 4 MiB")
+			}
+		}
+		return strings.Join(parts, x.Separator), nil
 	}
-	return nil
-}
-
-func (x *RelExpr) evalOrNull(view Collection, row Record) any {
-	if x == nil {
-		return nil
+	var child *RelExpr
+	switch {
+	case x.NullIfEmpty != nil:
+		child = x.NullIfEmpty
+	case x.Trim != nil:
+		child = x.Trim
+	case x.Strip != nil:
+		child = x.Strip
+	case x.JSON != nil:
+		child = x.JSON
+	default:
+		return nil, nil
 	}
-	return x.eval(view, row)
+	v, e := child.evalChecked(view, row)
+	if e != nil {
+		return nil, e
+	}
+	switch {
+	case x.NullIfEmpty != nil:
+		if v == "" {
+			return nil, nil
+		}
+		return v, nil
+	case x.JSON != nil:
+		return relJSON(v, x.Path), nil
+	}
+	text, ok := relText(v)
+	if !ok {
+		return nil, nil
+	}
+	if x.Trim != nil {
+		return strings.Trim(text, " "), nil
+	}
+	return strings.Map(func(c rune) rune {
+		if strings.ContainsRune(x.Chars, c) {
+			return -1
+		}
+		return c
+	}, text), nil
 }
 
 // relJSON reads a dotted path. Text that is not valid JSON has no fields.
