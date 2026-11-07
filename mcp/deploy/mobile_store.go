@@ -2770,7 +2770,9 @@ func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
 	if meta.AppStoreVersionID == "" {
 		return nil, errors.New("release has no App Store version id")
 	}
-	if rel.ExternalStatus != "pending_apple_release" && rel.ExternalStatus != "approved_pending_release" {
+	// Pending Apple Release is an Apple-held release, not a manual developer release.
+	// Legacy aliases must be synced to refresh Apple's actual state first.
+	if rel.ExternalStatus != "pending_developer_release" {
 		return nil, fmt.Errorf("App Store version is not waiting for manual release (state=%s)", rel.ExternalStatus)
 	}
 	bound, err := selectedIntegration("app_store", releaseBindingConfig(&meta))

@@ -687,15 +687,37 @@ func TestAppStoreReviewChecksSpaceOutUntilStateChanges(t *testing.T) {
 func TestAppStoreReleaseRequestChecksOnNextRun(t *testing.T) {
 	p, release, now, version := setupAppStoreReview(t)
 	db := globalCtx.AppDB()
-	p.replies["get_app_version"] = version("IN_REVIEW")
+	p.replies["get_app_version"] = version("PENDING_DEVELOPER_RELEASE")
+	p.replies["request_version_release"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"data":{"id":"request-1"}}`)}
 	runMobileWorker(t)
-	if err := dbUpdateRelease(db, release.ID, map[string]any{"external_status": "pending_apple_release"}); err != nil {
-		t.Fatal(err)
+	fresh, _ := releaseWithMeta(t, release.ID)
+	if fresh.Status != "starting" || fresh.ExternalStatus != "pending_developer_release" {
+		t.Fatalf("release=%+v", fresh)
+	}
+	for _, call := range p.calls {
+		if call.Tool == "request_version_release" {
+			t.Fatal("sync must not request a manual release")
+		}
 	}
 	deferReleaseSync(db, release.ID, now.Add(time.Hour))
-	fresh, _ := releaseWithMeta(t, release.ID)
-	if _, err := (&App{}).releaseApprovedMobileVersion(fresh); err != nil {
+	updated, err := (&App{}).releaseApprovedMobileVersion(fresh)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if updated.Status == "live" || updated.ExternalStatus != "release_requested" {
+		t.Fatalf("accepted request must await availability: %+v", updated)
+	}
+	var requests int
+	for _, call := range p.calls {
+		if call.Tool == "request_version_release" {
+			requests++
+			if call.Input["version_id"] != "version-1" {
+				t.Fatalf("release request=%+v", call)
+			}
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("release requests=%d, want 1", requests)
 	}
 	if !releaseSyncDue(db, release.ID) {
 		t.Fatal("requested release still waits out the long interval")

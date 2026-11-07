@@ -480,7 +480,13 @@ The workflow is:
 5. `deploy_release` attaches the exact build and optionally submits it.
 6. `deploy_store_sync` refreshes observed provider state.
 7. `deploy_store_release_approved` releases an Apple-approved version waiting
-   for manual developer release.
+   for manual developer release (`pending_developer_release`). Apple-held
+   versions (`pending_apple_release`) are not eligible for this action.
+   Sync older releases showing `approved_pending_release` to refresh Apple's
+   actual state before requesting release.
+   An accepted release request is recorded as `release_requested`, not `live`.
+   A later sync must confirm distribution; acceptance alone does not confirm
+   public availability.
 
 Store media can be reconciled independently with `media_kinds` (for example,
 `["icon"]`). With `allow_partial`, each valid media kind is committed in its

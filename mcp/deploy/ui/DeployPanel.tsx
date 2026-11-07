@@ -1933,7 +1933,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                               {promotionValidations[rel.id].valid ? "ready" : "blocked"}
                             </span>
                           )}
-                          {(rel.external_status === "approved_pending_release" || rel.external_status === "pending_apple_release") && (
+                          {rel.external_status === "pending_developer_release" && (
                             <button
                               type="button"
                               disabled={busy}
