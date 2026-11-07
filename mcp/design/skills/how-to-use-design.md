@@ -51,3 +51,15 @@ Add checks to make requirements executable: `bounding_box`, `volume`, `surface_a
 ## Direct meshes and generative geometry
 
 V1 produces direct meshes from exact parametric source. Future text-to-geometry or image-to-3D providers should enter as explicit mesh-source revisions, retain provider/model/provenance metadata, and never masquerade as editable B-rep CAD. Validate and repair those meshes before manufacturing. A manufacturing provider integration should consume the validated package, return quotes, and require human approval before placing a paid order.
+
+## Purchased assemblies (v0.5)
+
+Use `design_step_import` for manufacturer STEP (large files: HTTP multipart `/api/sources`). Record exact model/revision, source, uncertainty, omissions and measurements needed; do not mark incomplete CAD as verified fit. Its returned design is purchased, not printable. Build assembly links with `assembly_create`; author measured proxy solids for missing features. Pins include original source and normalized geometry hashes. Normalize component orientation with an explicit `import_step.transform`; never resize a purchased component to make it fit.
+
+Use exact `part_clearance` and `assembly_collision` checks with named instance IDs and stable check IDs. Explicitly list intended contact/ignored pairs. `indeterminate` and `not_checked` are not passes. Keepouts are named operation solids attached to `assembly.keepouts` with owner, purpose, source, required clearance and optional targets. Use conservative `swept_box` volumes for plug insertion, connector levers and service travel. Hiding a component does not exclude it physically.
+
+`design_measure` evaluates exact instance/face distances in the selected revision; mesh point picks are approximate. `design_enclosure_from_assembly` creates the front-shell/rear-cover template without PCB Studio. Position display opening/retention, screw bosses, supports, cradle, brackets and service openings from measured datums. Use `fit_profile_id`, parameter `fit` keys and printer/material `fits_mm` allowances, then calibrate with physical coupons.
+
+Treat `manufacturing_rules` as declared rules. `print_geometry` samples thickness/feature spans/overhangs and reports its limits; absence of sampled defects is not certification. Export unique oriented parts for printing. Assembly STEP/GLB include reference components; assemblies no longer produce a combined print mesh.
+
+Create prototype manufacturing packages while assumptions remain. A verified package requires named passing checks, complete component evidence, resolved assumptions and assembly/service/fastening instructions plus actual physical-fit and enclosed-thermal evidence pinned to the exact revision/hash through `design_verification_record`. Never fabricate physical test records. The ZIP contains replayable resolved source/assets and evidence. The Pocket 15 mm appearance study is not a dimensional requirement; size around the complete measured assembly and the current BOM.

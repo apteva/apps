@@ -18,7 +18,7 @@ var (
 )
 
 var allowedOperations = map[string]bool{
-	"box": true, "cylinder": true, "sphere": true,
+	"import_step": true, "swept_box": true, "box": true, "cylinder": true, "sphere": true,
 	"extrude_rectangle": true, "extrude_circle": true, "extrude_polygon": true,
 	"revolve_profile": true, "sweep_circle": true,
 	"fuse": true, "cut": true, "intersect": true, "compound": true,
@@ -101,6 +101,9 @@ func normalizeDefinition(raw []byte, maxOperations int) ([]byte, *DesignDefiniti
 	}
 	if definition.Output != "" && !ids[definition.Output] {
 		return nil, nil, fmt.Errorf("definition.output references unknown operation %q", definition.Output)
+	}
+	if err := validateInspectionDefinition(&definition, ids); err != nil {
+		return nil, nil, err
 	}
 	if err := validateProductDefinition(&definition, ids); err != nil {
 		return nil, nil, err
@@ -200,6 +203,9 @@ func validateProductDefinition(definition *DesignDefinition, operations map[stri
 	if definition.Assembly != nil {
 		if len(definition.Parts) == 0 {
 			return errors.New("assembly requires named parts")
+		}
+		if len(definition.Assembly.Instances) > 512 {
+			return errors.New("assembly exceeds 512 instances")
 		}
 		instances := map[string]bool{}
 		for _, instance := range definition.Assembly.Instances {

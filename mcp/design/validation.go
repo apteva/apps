@@ -13,9 +13,24 @@ func evaluateChecks(definition *DesignDefinition, report GeometryReport) []Check
 		Type: "geometry_valid", Status: status(report.Valid), Message: ternary(report.Valid, "Geometry is a valid non-empty solid", "Geometry is empty or invalid"),
 		Expected: true, Actual: report.Valid,
 	}}
-	for _, check := range definition.Checks {
+	for index, check := range definition.Checks {
+		id, _ := check["id"].(string)
+		if id == "" {
+			id = fmt.Sprintf("check_%d", index)
+		}
+		found := false
+		for _, exact := range report.ExactChecks {
+			if exact.ID == id {
+				results = append(results, exact)
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
 		kind, _ := check["type"].(string)
-		result := CheckResult{Type: kind, Status: "warning", Message: "Unsupported check type"}
+		result := CheckResult{Type: kind, Status: "indeterminate", Message: "Unsupported check type", ID: id}
 		switch kind {
 		case "bounding_box":
 			result = checkBounds(check, report.Bounds.Size)
@@ -42,7 +57,20 @@ func evaluateChecks(definition *DesignDefinition, report GeometryReport) []Check
 		case "open_hardware_complete":
 			result = checkOpenHardwareComplete(definition)
 		}
+		result.ID = id
 		results = append(results, result)
+	}
+	for _, exact := range report.ExactChecks {
+		if strings.HasPrefix(exact.ID, "keepout_") || (exact.Type == "component_evidence" || exact.Type == "export_scope") {
+			results = append(results, exact)
+		}
+	}
+	if len(report.Topology) > 0 {
+		for _, top := range report.Topology {
+			if top.Status != "pass" {
+				results = append(results, CheckResult{Type: "solid_topology", Status: "indeterminate", Message: "Component is not a validated closed solid: " + top.InstanceID, Instances: []string{top.InstanceID}, Details: top})
+			}
+		}
 	}
 	return results
 }

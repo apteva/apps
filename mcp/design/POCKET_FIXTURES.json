@@ -1,0 +1,16 @@
+{
+  "schema": "apteva-design-fixtures/v1",
+  "bom_date": "2026-11-07",
+  "selected_models": [
+    {"model":"CM5104016 / SC1594", "file":"cm5-official-cad/CM5R5-3dsteps.step", "status":"manufacturer reference; confirm delivered revision", "size_mm":[55,40,4.621]},
+    {"model":"CM5-NANO-A / 29307", "file":"cm5-nano-a-cad/CM5-NANO-A.step", "status":"incomplete; measure missing connectors", "size_mm":[56.235,40.018,11.8]},
+    {"model":"PiSugar 3 Plus / PISUGAR3P1001", "file":"pisugar3plus.STEP", "status":"board reference; delivered battery/module combination unmeasured", "size_mm":[65,9.22,57]},
+    {"model":"4-DSI-TOUCH-A / 34354", "file":null, "status":"complete STEP unconfirmed; measured proxy required"},
+    {"model":"BentoIO CMX0/CMX2 Heatsink V3", "file":null, "status":"V3 geometry/fastening unconfirmed; measured proxy required"}
+  ],
+  "excluded_references": [
+    {"file":"waveshare-4inch-hdmi-lcd-c.stp", "reason":"HDMI display, not the selected DSI display"},
+    {"file":"bentoio-cmx0-v2-cad/BentoIO CMX0_V2_B.step", "reason":"V2 cooler, not the selected V3 cooler"}
+  ],
+  "required_measured_items":["included 5000mAh cell and lead","four WAGO 221-412 connectors and operating-lever envelopes","DSI ribbon and connector bends","installed cooler pads/spacers/screws","USB-C plug/insertion envelope","mounting fasteners","screen rear features","antenna clearance"]
+}

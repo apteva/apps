@@ -3,9 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build src/runner.mjs --target=bun --format=esm --outfile=dist/runner.mjs && cp node_modules/replicad-opencascadejs/src/replicad_single.wasm dist/replicad_single.wasm"
+    "build": "bun build src/runner.mjs --target=bun --format=esm --outfile=dist/runner.mjs && cp node_modules/replicad-opencascadejs/src/replicad_single.wasm dist/replicad_single.wasm && bun build src/step-import.mjs --target=bun --format=esm --outfile=dist/step-import.mjs && cp node_modules/opencascade.js/dist/opencascade.wasm.wasm dist/import.wasm"
   },
   "dependencies": {
+    "opencascade.js": "1.1.1",
     "replicad": "0.23.1",
     "replicad-opencascadejs": "0.23.0"
   }

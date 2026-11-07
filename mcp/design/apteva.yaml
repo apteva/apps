@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.4.0
+version: 0.5.0
 description: |
+  Manufacturer STEP import, purchased-component assemblies, exact solid clearances,
+  keepouts, enclosure templates, inspection, and revision-bound release evidence.
   Agent-native parametric 2D/3D design. Designs are immutable revisions of
   a safe, declarative operation graph rendered by Replicad and OpenCascade.
   Build exact solids, inspect dimensions and topology, preview meshes, export
@@ -68,6 +70,10 @@ provides:
       resource: design
       description: Export CAD files and manufacturing packages.
   mcp_tools:
+    - { name: design_verification_record, description: "Attach revision-bound physical fit or thermal test evidence.", requires: designs.write }
+    - { name: design_step_import, description: "Import manufacturer STEP with immutable assets, assembly names/placements and component evidence.", requires: designs.write }
+    - { name: design_measure, description: "Measure exact CAD instance and face distances in a pinned revision.", requires: designs.read, resource_from: "design/{arg.design_id}" }
+    - { name: design_enclosure_from_assembly, description: "Generate an editable enclosure from a purchased multi-board assembly without PCB Studio.", requires: designs.write }
     - { name: design_examples, description: "Return canonical apteva-design/v1 examples, assembly/open-hardware contracts, supported operations, and the printable Open Rover reference design.", requires: designs.read }
     - { name: design_pcb_source_status, description: "Report whether the optional PCB Studio mechanical source is bound.", requires: designs.read }
     - { name: design_enclosure_from_pcb, description: "Create a parametric enclosure from a validated PCB Studio mechanical envelope.", requires: designs.write }
@@ -127,7 +133,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: design/v0.5.0
     entry: mcp/design
   port: 8080
   health_check: /health
@@ -135,7 +141,7 @@ runtime:
     cpu: 0.1
     memory: 256
     cpu_limit: 2
-    memory_limit: 1024
+    memory_limit: 3072
   storage:
     - name: data
       mount_path: /data
@@ -158,7 +164,7 @@ config_schema:
     description: Optional explicit Bun path. When empty, Design uses PATH or installs its pinned runtime under /data.
   - name: geometry_timeout_seconds
     type: text
-    default: "45"
+    default: "300"
     label: Geometry build timeout
   - name: max_operations
     type: text

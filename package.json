@@ -20,7 +20,8 @@
     "lucide-react": "^0.400.0",
     "marked": "^18.0.10",
     "recharts": "^3.8.1",
-    "yaml": "^2.6.0"
+    "yaml": "^2.6.0",
+    "three": "0.180.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -36,7 +37,8 @@
     "react-dom": "19.2.8",
     "@apteva/web-sdk": "0.7.0",
     "@tailwindcss/cli": "^4.1.0",
-    "tailwindcss": "^4.1.0"
+    "tailwindcss": "^4.1.0",
+    "@types/three": "0.180.0"
   },
   "overrides": {
     "source-map-js": "^1.2.2",

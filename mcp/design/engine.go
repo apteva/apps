@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-//go:embed runner/dist/runner.mjs runner/dist/replicad_single.wasm
+//go:embed runner/dist/runner.mjs runner/dist/replicad_single.wasm runner/dist/step-import.mjs runner/dist/import.wasm
 var runnerAssets embed.FS
 
 const bunVersion = "1.2.22"
@@ -70,7 +70,7 @@ func (e *Engine) materializeAssets() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	for _, name := range []string{"runner.mjs", "replicad_single.wasm"} {
+	for _, name := range []string{"runner.mjs", "replicad_single.wasm", "step-import.mjs", "import.wasm"} {
 		body, err := runnerAssets.ReadFile("runner/dist/" + name)
 		if err != nil {
 			return err
@@ -207,7 +207,7 @@ func (e *Engine) Build(parent context.Context, name string, definition, paramete
 		return nil, err
 	}
 	request := map[string]any{
-		"name": name, "definition": def, "parameters": params, "formats": formats,
+		"expected_engine_version": engineVersion, "name": name, "definition": def, "parameters": params, "formats": formats,
 		"output_dir": filepath.Join(workDir, "output"), "tolerance": 0.1, "angular_tolerance": 0.1,
 	}
 	input, _ := json.Marshal(request)

@@ -1,3 +1,4 @@
+import AssemblyViewer from "./AssemblyViewer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface PanelProps { projectId: string }
@@ -6,7 +7,7 @@ interface Revision { id: number; revision_number: number; definition: Record<str
 interface Build { id: number; status: string; report?: GeometryReport; checks?: Check[]; duration_ms?: number }
 interface Design { id: number; name: string; description: string; kind: string; status: string; tags: string[]; current_revision_id: number; current_revision?: Revision; latest_build?: Build; artifacts?: Artifact[]; updated_at: string }
 interface GeometryReport { valid: boolean; bounds: { size: [number, number, number] }; volume_mm3: number; surface_area_mm2: number; face_count: number; triangle_count: number; body_count: number; mass_g?: number; center_of_mass?: [number, number, number]; parts?: unknown[] }
-interface Check { type: string; status: string; message: string }
+interface Check { id?:string;type: string; status: string; message: string;instances?:string[];details?:any }
 interface MeshPart extends Mesh { id: string; part_id: string; name: string; color?: string }
 interface Mesh { vertices: number[]; triangles: number[]; normals?: number[]; parts?: MeshPart[] }
 
@@ -64,6 +65,14 @@ export default function DesignPanel({ projectId }: PanelProps) {
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ report?: GeometryReport; checks?: Check[]; artifacts?: Artifact[] } | null>(null);
   const [openRover, setOpenRover] = useState<any>(null);
+  const [focus,setFocus]=useState<string[]>([]),[issue,setIssue]=useState<Check|null>(null),[instance,setInstance]=useState(''),[importing,setImporting]=useState(false),[model,setModel]=useState(''),[manufacturer,setManufacturer]=useState(''),[sourceURL,setSourceURL]=useState(''),[hardwareRevision,setHardwareRevision]=useState(''),[omissions,setOmissions]=useState(''),[geometryStatus,setGeometryStatus]=useState('manufacturer_cad'),[uncertainty,setUncertainty]=useState('0'),[complete,setComplete]=useState(false),[capture,setCapture]=useState<string|null>(null);
+  async function importSTEP(file:File) {
+    setBusy('Importing STEP');setError('');
+    try{const data=new FormData();data.append('file',file);data.append('evidence',JSON.stringify({model,manufacturer,hardware_revision:hardwareRevision,source:sourceURL,date:new Date().toISOString().slice(0,10),geometry_status:geometryStatus,complete,uncertainty_mm:Number(uncertainty),omissions:omissions.split('\n').filter(Boolean)}));const r=await fetch(url('/sources',projectId),{method:'POST',credentials:'same-origin',body:data});const b=await r.json();if(!r.ok)throw new Error(b.error||'Import failed');await loadDesigns();setSelectedId(b.design.id);setImporting(false);await loadDesign(b.design.id);setMode('model');}catch(e){setError((e as Error).message)}finally{setBusy('')}
+  }
+  async function createAssemblyEnclosure(){if(!design)return;setBusy('Generating enclosure');setError('');try{const b=await request('/assembly-enclosures',projectId,{method:'POST',body:JSON.stringify({assembly_design_id:design.id,assembly_revision_id:design.current_revision_id,options:{}})});await loadDesigns();setSelectedId(b.design.id);await loadDesign(b.design.id)}catch(e){setError((e as Error).message)}finally{setBusy('')}}
+  function changePlacement(axis:number,value:string,rotation=false){if(!parsed)return;const d=structuredClone(parsed),i=d.assembly?.instances.find((i:any)=>i.id===instance);if(!i)return;const n=Number(value);if(!Number.isFinite(n))return;i.transform ||= {};if(rotation){i.transform.rotate=[{angle:n,direction:[0,0,1]}]}else{i.transform.translate ||= [0,0,0];i.transform.translate[axis]=n}setDefinitionText(JSON.stringify(d,null,2));}
+
 
   const loadDesigns = useCallback(async () => {
     const body = await request("/designs?status=all", projectId);
@@ -178,7 +187,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
   }
 
   const artifacts = result?.artifacts || design?.artifacts || [];
-  const mesh = artifacts.filter((item) => item.format === "mesh-json").sort((a, b) => b.id - a.id)[0];
+  const mesh = artifacts.filter((item) => item.format === "mesh-json" && !(item as any).metadata?.part_id).sort((a, b) => b.id - a.id)[0];
   const report = result?.report || design?.latest_build?.report;
   const checks = result?.checks || design?.latest_build?.checks || [];
 
@@ -187,10 +196,17 @@ export default function DesignPanel({ projectId }: PanelProps) {
       <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent grid place-items-center text-lg">◇</div>
       <div><h1 className="text-sm font-semibold leading-tight">Design Studio</h1><p className="text-[11px] text-text-muted">Open hardware · assemblies · parametric CAD</p></div>
       <span className="flex-1" />
+      <button className="design-button" disabled={!!busy} onClick={()=>setImporting(!importing)}>Import STEP</button>
+      <button className="design-button" disabled={!!busy || !design} onClick={createAssemblyEnclosure}>Enclosure template</button>
       <button className="design-button" disabled={!!busy || !design} onClick={() => build(["mesh-json", "glb"])}>Build preview</button>
       <button className="design-button" disabled={!!busy || !design} onClick={() => build(["step", "stl", "3mf", "glb"])}>Export CAD</button>
       <button className="design-button design-button-primary" disabled={!!busy || !design} onClick={makePackage}>Manufacturing ZIP</button>
     </header>
+    {importing&&<div className="p-4 border-b border-border text-xs" style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8}}>
+      <input className="field" placeholder="Exact manufacturer model (required)" value={model} onChange={e=>setModel(e.target.value)}/><input className="field" placeholder="Manufacturer" value={manufacturer} onChange={e=>setManufacturer(e.target.value)}/><input className="field" placeholder="Hardware revision" value={hardwareRevision} onChange={e=>setHardwareRevision(e.target.value)}/><input className="field" placeholder="CAD source URL" value={sourceURL} onChange={e=>setSourceURL(e.target.value)}/>
+      <select className="field" value={geometryStatus} onChange={e=>setGeometryStatus(e.target.value)}><option value="manufacturer_cad">Manufacturer CAD</option><option value="drawing_derived">Drawing derived</option><option value="measured">Physically measured</option><option value="estimated">Estimated</option></select><input className="field" type="number" min="0" step=".01" aria-label="Dimensional uncertainty in mm" value={uncertainty} onChange={e=>setUncertainty(e.target.value)}/><textarea className="field" placeholder="Known omissions, one per line" value={omissions} onChange={e=>setOmissions(e.target.value)}/><label><input type="checkbox" checked={complete} onChange={e=>setComplete(e.target.checked)}/>Complete geometry evidence</label>
+      <label>STEP file (up to 96 MiB)<input type="file" accept=".step,.stp" disabled={!!busy||!model.trim()} onChange={e=>{if(e.target.files?.[0])importSTEP(e.target.files[0])}}/></label><span>Original file, source hash and assembly placements are retained. Missing features require measured proxy solids.</span>
+    </div>}
     {error && <div className="px-4 py-2 text-xs border-b border-red/30 bg-red/10 text-red">{error}</div>}
     {busy && <div className="h-0.5 bg-accent animate-pulse" />}
     <div className="design-workspace">
@@ -230,7 +246,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
           {design && <span className="text-[10px] text-text-muted font-mono">r{design.current_revision?.revision_number} · {design.current_revision?.source_sha256?.slice(0, 10)}</span>}
         </div>
         {mode === "model" ? <div className="design-viewport">
-          <MeshViewer projectId={projectId} artifactId={mesh?.id} />
+          <AssemblyViewer projectId={projectId} artifactId={mesh?.id} designId={design?.id} revisionId={design?.current_revision_id} focus={focus} issue={issue} onSelect={setInstance} onCapture={setCapture}/>
           {!mesh && <div className="absolute inset-0 grid place-items-center pointer-events-none"><div className="text-center"><div className="text-4xl text-text-muted/30 mb-3">◇</div><p className="text-sm text-text-muted">Build a preview to inspect the model</p><p className="text-[11px] text-text-muted/60 mt-1">Drag to orbit · wheel to zoom</p></div></div>}
           {report && <div className="absolute left-3 bottom-3 flex gap-1.5">
             <Metric label="X" value={`${fmt(report.bounds.size[0])} mm`} /><Metric label="Y" value={`${fmt(report.bounds.size[1])} mm`} /><Metric label="Z" value={`${fmt(report.bounds.size[2])} mm`} />
@@ -239,7 +255,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
       </main>
 
       <aside className="design-inspector">
-        <Section title="Parameters">
+        <Section title="Parameters">{parsed?.print_profiles?.some((p:any)=>p.fits_mm)&&<label className="text-xs">Fit profile<select className="field" value={parsed.fit_profile_id||''} onChange={e=>{const d=structuredClone(parsed);d.fit_profile_id=e.target.value||undefined;setDefinitionText(JSON.stringify(d,null,2))}}><option value="">Parameter defaults</option>{parsed.print_profiles.filter((p:any)=>p.fits_mm).map((p:any)=><option key={p.id} value={p.id}>{p.name}</option>)}</select><p className="text-[10px] mt-1">Save a revision to apply. Explicit parameter values override profile allowances.</p></label>}
           {Object.entries(specs).map(([name, spec]: [string, any]) => <label key={name} className="design-param">
             <span className="design-param-head"><span>{name}</span><span className="design-param-value">{parameters[name] ?? spec.default} mm</span></span>
             <input className="design-range" type="range" min={spec.min ?? 0} max={spec.max ?? Math.max((spec.default || 1) * 3, 10)} step={spec.step ?? 0.1} value={parameters[name] ?? spec.default} onChange={(e) => setParameters((p) => ({ ...p, [name]: Number(e.target.value) }))} />
@@ -261,6 +277,10 @@ export default function DesignPanel({ projectId }: PanelProps) {
           <button className="design-button design-full design-revision-button" disabled={!!busy || !design} onClick={refreshLinkedComponents}>Update to current source revisions</button>
           <p className="text-[10px] leading-4 text-text-muted mt-2">Updates create a new assembly revision. Existing revisions stay pinned and reproducible.</p>
         </Section>}
+        {instance&&parsed?.assembly&&<Section title="Instance placement">
+          <p className="text-xs mb-2">{instance}</p>{[0,1,2].map((axis)=><label key={axis} className="text-xs">{['X','Y','Z'][axis]} mm<input className="field" type="number" step=".1" value={parsed.assembly.instances.find((i:any)=>i.id===instance)?.transform?.translate?.[axis]??0} onChange={e=>changePlacement(axis,e.target.value)}/></label>)}<label className="text-xs">Rotation about Z (degrees)<input className="field" type="number" value={parsed.assembly.instances.find((i:any)=>i.id===instance)?.transform?.rotate?.[0]?.angle??0} onChange={e=>changePlacement(2,e.target.value,true)}/></label><button className="design-button" disabled={!!busy} onClick={saveRevision}>Save placement revision</button><p className="text-[10px] mt-2">Save, then build to validate the new placement. Arbitrary rotations and datum alignment are available in Source.</p>
+        </Section>}
+        {capture&&<Section title="Inspection capture"><img src={capture} alt="Saved assembly inspection" style={{width:'100%'}}/><p className="text-[10px]">Downloaded PNG. Attach it to revision-bound test evidence for release.</p></Section>}
         {report && <Section title="Measurements">
           <Row label="Bodies" value={String(report.body_count || 1)} /><Row label="Mass" value={report.mass_g ? `${fmt(report.mass_g)} g` : "—"} /><Row label="Volume" value={`${fmt(report.volume_mm3)} mm³`} /><Row label="Surface" value={`${fmt(report.surface_area_mm2)} mm²`} /><Row label="Faces" value={String(report.face_count)} /><Row label="Triangles" value={String(report.triangle_count)} />
         </Section>}
@@ -269,7 +289,7 @@ export default function DesignPanel({ projectId }: PanelProps) {
           <Row label="Parts" value={String(parsed.parts?.length || 0)} /><Row label="Instances" value={String(parsed.assembly?.instances?.length || 0)} /><Row label="Joints" value={String(parsed.assembly?.joints?.length || 0)} />
         </Section>}
         {!!checks.length && <Section title="Validation">
-          <div className="space-y-2">{checks.map((check, i) => <div key={i} className="flex gap-2 text-xs"><span className={check.status === "pass" ? "text-green" : "text-red"}>{check.status === "pass" ? "●" : "×"}</span><span className="text-text-muted">{check.message}</span></div>)}</div>
+          <div className="space-y-2">{checks.map((check, i) => <button key={i} onClick={()=>{setFocus(check.instances||[]);setIssue(check)}} className="design-validation-issue flex gap-2 text-xs text-left w-full" title="Focus affected instances"><span className={check.status === "pass" ? "text-green" : "text-red"}>{check.status === "pass" ? "●" : "×"}</span><span className="text-text-muted">{check.status}: {check.message}</span></button>)}</div>
         </Section>}
         <Section title="Artifacts">
           <div className="space-y-1.5">{artifacts.filter((item) => item.format !== "mesh-json").map((item) => <a key={item.id} className="flex items-center gap-2 rounded border border-border p-2 hover:border-accent/50 text-xs" href={url(`/artifacts/${item.id}/content`, projectId)}>
@@ -280,221 +300,6 @@ export default function DesignPanel({ projectId }: PanelProps) {
     </div>
     <style>{styles}</style>
   </div>;
-}
-
-function MeshViewer({ projectId, artifactId }: { projectId: string; artifactId?: number }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const [mesh, setMesh] = useState<Mesh | null>(null);
-  const view = useRef({ rx: -2.07, ry: 0.22, zoom: 1.08, drag: false, x: 0, y: 0 });
-  useEffect(() => {
-    if (!artifactId) { setMesh(null); return; }
-    fetch(url(`/artifacts/${artifactId}/content`, projectId), { credentials: "same-origin" }).then((r) => r.json()).then(setMesh).catch(() => setMesh(null));
-  }, [artifactId, projectId]);
-
-  const draw = useCallback(() => {
-    const target = canvas.current;
-    if (!target || !mesh) return;
-    renderMeshWebGL(target, mesh, view.current);
-  }, [mesh]);
-  useEffect(() => {
-    draw();
-    const resize = new ResizeObserver(draw);
-    if (canvas.current) resize.observe(canvas.current);
-    return () => resize.disconnect();
-  }, [draw]);
-  return <canvas ref={canvas} className="design-canvas" onPointerDown={(e)=>{view.current.drag=true;view.current.x=e.clientX;view.current.y=e.clientY;(e.target as Element).setPointerCapture(e.pointerId)}} onPointerMove={(e)=>{if(!view.current.drag)return;view.current.ry+=(e.clientX-view.current.x)*.01;view.current.rx+=(e.clientY-view.current.y)*.01;view.current.x=e.clientX;view.current.y=e.clientY;draw()}} onPointerUp={()=>view.current.drag=false} onPointerCancel={()=>view.current.drag=false} onWheel={(e)=>{e.preventDefault();view.current.zoom=Math.max(.25,Math.min(5,view.current.zoom*(e.deltaY>0?.9:1.1)));draw()}} />;
-}
-
-type MeshView = { rx: number; ry: number; zoom: number };
-
-const vertexShaderSource = `
-attribute vec3 a_position;
-attribute vec3 a_normal;
-attribute vec3 a_color;
-uniform vec3 u_center;
-uniform vec2 u_rotation;
-uniform float u_scale;
-uniform float u_aspect;
-varying float v_light;
-varying vec3 v_color;
-vec3 rotateModel(vec3 p) {
-  float cy = cos(u_rotation.y), sy = sin(u_rotation.y);
-  float cx = cos(u_rotation.x), sx = sin(u_rotation.x);
-  vec3 y = vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
-  return vec3(y.x, y.y * cx - y.z * sx, y.y * sx + y.z * cx);
-}
-void main() {
-  vec3 position = rotateModel(a_position - u_center);
-  vec3 normal = normalize(rotateModel(a_normal));
-  vec3 lightDirection = normalize(vec3(-0.35, 0.55, -0.75));
-  v_light = 0.28 + 0.72 * max(0.0, abs(dot(normal, lightDirection)));
-  v_color = a_color;
-  gl_Position = vec4(position.x * u_scale / u_aspect, position.y * u_scale, position.z * u_scale, 1.0);
-}`;
-
-const fragmentShaderSource = `
-precision mediump float;
-varying float v_light;
-varying vec3 v_color;
-void main() {
-  gl_FragColor = vec4(v_color * v_light + vec3(0.018, 0.022, 0.028), 1.0);
-}`;
-
-type GLResources = {
-  gl: WebGLRenderingContext;
-  program: WebGLProgram;
-  position: WebGLBuffer;
-  normal: WebGLBuffer;
-  color: WebGLBuffer;
-  vertexCount: number;
-  center: [number, number, number];
-  maxSize: number;
-};
-
-const webglResources = new WeakMap<HTMLCanvasElement, { mesh: Mesh; resources: GLResources }>();
-
-function shader(gl: WebGLRenderingContext, type: number, source: string) {
-  const output = gl.createShader(type);
-  if (!output) throw new Error("WebGL shader allocation failed");
-  gl.shaderSource(output, source);
-  gl.compileShader(output);
-  if (!gl.getShaderParameter(output, gl.COMPILE_STATUS)) {
-    const message = gl.getShaderInfoLog(output) || "WebGL shader compilation failed";
-    gl.deleteShader(output);
-    throw new Error(message);
-  }
-  return output;
-}
-
-function createWebGLResources(canvas: HTMLCanvasElement, mesh: Mesh): GLResources | null {
-  const gl = canvas.getContext("webgl", { alpha: true, antialias: true });
-  if (!gl) return null;
-  const program = gl.createProgram();
-  if (!program) return null;
-  const vertex = shader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-  const fragment = shader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
-  gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program);
-  gl.deleteShader(vertex); gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
-
-  const positions: number[] = [], normals: number[] = [], colors: number[] = [];
-  let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < mesh.vertices.length; i += 3) {
-    for (let axis = 0; axis < 3; axis++) {
-      min[axis] = Math.min(min[axis], mesh.vertices[i + axis]);
-      max[axis] = Math.max(max[axis], mesh.vertices[i + axis]);
-    }
-  }
-  const sources = mesh.parts?.length ? mesh.parts : [{ ...mesh, color: "#228cdd" } as MeshPart];
-  for (const source of sources) {
-    const rgb = parseColor(source.color || "#64748b");
-    for (const index of source.triangles) {
-      const offset = index * 3;
-      positions.push(source.vertices[offset], source.vertices[offset + 1], source.vertices[offset + 2]);
-      if (source.normals?.length === source.vertices.length) normals.push(source.normals[offset], source.normals[offset + 1], source.normals[offset + 2]);
-      else normals.push(0, 0, 1);
-      colors.push(...rgb);
-    }
-  }
-  const position = gl.createBuffer(), normal = gl.createBuffer(), color = gl.createBuffer();
-  if (!position || !normal || !color) return null;
-  gl.bindBuffer(gl.ARRAY_BUFFER, position); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, normal); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, color); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-  return {
-    gl, program, position, normal, color, vertexCount: positions.length / 3,
-    center: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
-    maxSize: Math.max(Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]), 1),
-  };
-}
-
-function parseColor(value: string): [number, number, number] {
-  const match = /^#([0-9a-f]{6})$/i.exec(value);
-  if (!match) return [0.39, 0.45, 0.55];
-  const number = parseInt(match[1], 16);
-  return [((number >> 16) & 255) / 255, ((number >> 8) & 255) / 255, (number & 255) / 255];
-}
-
-function renderMeshWebGL(canvas: HTMLCanvasElement, mesh: Mesh, view: MeshView) {
-  if (mesh.parts?.length) {
-    renderAssemblyCanvas2D(canvas, mesh, view);
-    return;
-  }
-  let cached = webglResources.get(canvas);
-  if (!cached || cached.mesh !== mesh) {
-    if (cached) {
-      cached.resources.gl.deleteBuffer(cached.resources.position);
-      cached.resources.gl.deleteBuffer(cached.resources.normal);
-      cached.resources.gl.deleteBuffer(cached.resources.color);
-      cached.resources.gl.deleteProgram(cached.resources.program);
-    }
-    const resources = createWebGLResources(canvas, mesh);
-    if (!resources) return;
-    cached = { mesh, resources };
-    webglResources.set(canvas, cached);
-  }
-  const { gl, program, position, normal, color, vertexCount, center, maxSize } = cached.resources;
-  const rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
-  const width = Math.max(1, Math.round(rect.width * dpr)), height = Math.max(1, Math.round(rect.height * dpr));
-  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-  gl.viewport(0, 0, width, height);
-  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.BLEND);
-  gl.useProgram(program);
-  const positionLocation = gl.getAttribLocation(program, "a_position"), normalLocation = gl.getAttribLocation(program, "a_normal"), colorLocation = gl.getAttribLocation(program, "a_color");
-  gl.bindBuffer(gl.ARRAY_BUFFER, position); gl.enableVertexAttribArray(positionLocation); gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ARRAY_BUFFER, normal); gl.enableVertexAttribArray(normalLocation); gl.vertexAttribPointer(normalLocation, 3, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ARRAY_BUFFER, color); gl.enableVertexAttribArray(colorLocation); gl.vertexAttribPointer(colorLocation, 3, gl.FLOAT, false, 0, 0);
-  gl.uniform3fv(gl.getUniformLocation(program, "u_center"), center);
-  gl.uniform2f(gl.getUniformLocation(program, "u_rotation"), view.rx, view.ry);
-  gl.uniform1f(gl.getUniformLocation(program, "u_scale"), 1.55 * view.zoom / maxSize);
-  gl.uniform1f(gl.getUniformLocation(program, "u_aspect"), width / height);
-  gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
-}
-
-function renderAssemblyCanvas2D(canvas: HTMLCanvasElement, mesh: Mesh, view: MeshView) {
-  const context = canvas.getContext("2d");
-  if (!context || !mesh.parts?.length) return;
-  const rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
-  const width = Math.max(1, Math.round(rect.width * dpr)), height = Math.max(1, Math.round(rect.height * dpr));
-  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-  context.clearRect(0, 0, width, height);
-  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < mesh.vertices.length; i += 3) for (let axis = 0; axis < 3; axis++) { min[axis] = Math.min(min[axis], mesh.vertices[i + axis]); max[axis] = Math.max(max[axis], mesh.vertices[i + axis]); }
-  const center = [(min[0]+max[0])/2,(min[1]+max[1])/2,(min[2]+max[2])/2];
-  const diagonal = Math.max(Math.hypot(max[0]-min[0],max[1]-min[1],max[2]-min[2]),1);
-  const scale = Math.min(width, height) * 0.76 * view.zoom / diagonal;
-  const rotate = (x:number,y:number,z:number) => {
-    const cy=Math.cos(view.ry),sy=Math.sin(view.ry),cx=Math.cos(view.rx),sx=Math.sin(view.rx);
-    const px=x-center[0],py=y-center[1],pz=z-center[2],yx=px*cy+pz*sy,yz=-px*sy+pz*cy;
-    return [yx,py*cx-yz*sx,py*sx+yz*cx] as [number,number,number];
-  };
-  type Triangle = {p:[number,number,number][],z:number,color:[number,number,number],light:number};
-  const triangles:Triangle[]=[];
-  const total=mesh.parts.reduce((sum,part)=>sum+part.triangles.length/3,0), stride=Math.max(1,Math.ceil(total/150000));
-  for(const part of mesh.parts){
-    const color=parseColor(part.color||"#64748b");
-    for(let tri=0;tri<part.triangles.length/3;tri+=stride){
-      const points:[number,number,number][]=[],normals:[number,number,number][]=[];
-      for(let corner=0;corner<3;corner++){
-        const index=part.triangles[tri*3+corner],offset=index*3;
-        points.push(rotate(part.vertices[offset],part.vertices[offset+1],part.vertices[offset+2]));
-        const nx=part.normals?.[offset]??0,ny=part.normals?.[offset+1]??0,nz=part.normals?.[offset+2]??1;
-        normals.push(rotate(nx+center[0],ny+center[1],nz+center[2]));
-      }
-      const normal=normals[0],light=Math.max(.62,Math.min(1,.58+.42*Math.abs(normal[0]*-.35+normal[1]*.55+normal[2]*-.75)));
-      triangles.push({p:points,z:(points[0][2]+points[1][2]+points[2][2])/3,color,light});
-    }
-  }
-  triangles.sort((a,b)=>b.z-a.z);
-  for(const triangle of triangles){
-    const [r,g,b]=triangle.color.map(value=>Math.round(Math.min(255,value*255*triangle.light+24)));
-    context.beginPath();
-    context.moveTo(width/2+triangle.p[0][0]*scale,height/2-triangle.p[0][1]*scale);
-    context.lineTo(width/2+triangle.p[1][0]*scale,height/2-triangle.p[1][1]*scale);
-    context.lineTo(width/2+triangle.p[2][0]*scale,height/2-triangle.p[2][1]*scale);
-    context.closePath(); context.fillStyle=`rgb(${r},${g},${b})`; context.fill();
-  }
 }
 
 function Section({ title, children }: { title: string; children: any }) { return <section className="design-section"><h2 className="design-section-title">{title}</h2>{children}</section> }
@@ -517,6 +322,7 @@ const styles = `
 .design-button-rover{display:flex;align-items:center;justify-content:center;gap:8px;border-color:color-mix(in srgb,var(--color-accent,#f97316) 55%,var(--color-border,#30363d));background:color-mix(in srgb,var(--color-accent,#f97316) 9%,transparent)}
 .design-studio .field{display:block;width:100%;border:1px solid var(--color-border,#30363d);background:var(--color-bg-input,#151a21);color:inherit;border-radius:6px;padding:7px 8px;font-size:12px;outline:none}.design-studio .field:focus{border-color:var(--color-accent,#f97316)}
 .design-studio .tab,.design-studio .tab-active{font-size:11px;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--color-text-muted,#8b949e);cursor:pointer}.design-studio .tab-active{background:var(--color-bg-input,#151a21);color:var(--color-text,#e8edf2)}
+.design-validation-issue{background:transparent;border:0;color:inherit;cursor:pointer;padding:4px 0;font-size:11px;text-align:left}.design-validation-issue:hover{color:#f97316}
 .design-canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}.design-canvas:active{cursor:grabbing}
 .design-section{padding:16px;border-bottom:1px solid var(--color-border,#252a31)}.design-section-title{margin:0 0 12px;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.12em;color:var(--color-text-muted,#8b949e)}
 .design-param{display:block;margin-bottom:14px}.design-param-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:12px}.design-param-value{color:var(--color-accent,#f97316);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.design-range{display:block;width:100%;accent-color:var(--color-accent,#f97316)}
