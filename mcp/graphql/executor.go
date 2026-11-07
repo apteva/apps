@@ -897,7 +897,7 @@ var databaseErrorCodes = map[string]bool{
 	"invalid_argument": true, "not_found": true, "permission_denied": true,
 	"unique_conflict": true, "version_conflict": true, "schema_conflict": true,
 	"resource_limit": true, "query_too_expensive": true, "unsupported": true,
-	"realtime_disabled": true, "history_expired": true, "resume_invalid": true,
+	"realtime_disabled": true, "history_expired": true, "resume_invalid": true, "cardinality_violation": true,
 }
 
 // App-to-app calls report Database's engine error as text:
@@ -930,6 +930,13 @@ func boundedArg(server, client any) any {
 func (a *App) callDatabase(ctx context.Context, operation string, config map[string]any) (any, error) {
 	if operation == databasePipelineOperation {
 		return a.callDatabasePipeline(ctx, config)
+	}
+	if advancedDatabaseRead(config) {
+		plan, err := canonicalResolverPlan(operation, config)
+		if err != nil {
+			return nil, err
+		}
+		return a.callDatabasePipeline(ctx, plan)
 	}
 	tool, err := databaseTool(operation)
 	if err != nil {

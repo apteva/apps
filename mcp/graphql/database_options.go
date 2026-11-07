@@ -141,6 +141,14 @@ func validateDatabaseResolverOptions(operation string, config map[string]any) er
 	if operation == databasePipelineOperation {
 		return nil
 	}
+	if advancedDatabaseRead(config) {
+		configured, err := canonicalResolverPlan(operation, config)
+		if err != nil {
+			return err
+		}
+		_, err = validateDatabasePipeline(configured)
+		return err
+	}
 	tool, err := databaseTool(operation)
 	if err != nil {
 		return nil // reported when the resolver runs
@@ -237,17 +245,25 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 	}
 	for _, resolver := range resolvers {
 		source := sourceByID[resolver.SourceID]
-		if source.Kind != "database" || resolver.Operation != databasePipelineOperation {
+		if source.Kind != "database" || (resolver.Operation != databasePipelineOperation && !advancedDatabaseRead(mergeMaps(source.Config, resolver.Config))) {
 			continue
 		}
-		plan, err := validateDatabasePipeline(mergeMaps(source.Config, resolver.Config))
+		configured := mergeMaps(source.Config, resolver.Config)
+		if resolver.Operation != databasePipelineOperation {
+			configured, err = canonicalResolverPlan(resolver.Operation, configured)
+			if err != nil {
+				return err
+			}
+		}
+		plan, err := validateDatabasePipeline(configured)
 		if err != nil {
 			continue // publishing reports it with the release checks
 		}
+		run := &databasePipelineRun{app: a, plan: plan, project: project}
 		searches, conditionals, joined := []any{}, []any{}, []any{}
 		for _, step := range plan.Steps {
 			if isJoinedOp(step.Op) {
-				probe, err := step.joinedProbe()
+				probe, err := run.canonicalProbe(ctx, step)
 				if err != nil {
 					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
 				}
@@ -276,14 +292,13 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 				}})
 			}
 		}
-		run := &databasePipelineRun{app: a, plan: plan, project: project}
 		for _, check := range []struct {
 			operations []any
 			problem    string
 		}{
 			{searches, "Database cannot run its text search (" + databaseSearchOp + " requires Database 0.7.0 or later, " + databaseLiteralSearchOp + " Database 0.11.0 or later, and both existing text fields)"},
 			{conditionals, "Database cannot read the fields of its conditional filters"},
-			{joined, "Database cannot run its joined reads (related_read, joined_page and joined_aggregate require Database 0.12.0 or later, existing collections and fields, join keys of one type or a stated comparison, an index on each related field, and a bounded relation)"},
+			{joined, "Database cannot run its joined reads (related_read, joined_page and joined_aggregate require Database 0.12.0 or later, canonical find/aggregate pipelines require Database 0.14.0 or later; existing collections and fields, join keys of one type or a stated comparison, an index on each related field, and a bounded relation)"},
 		} {
 			for start := 0; start < len(check.operations); start += maxDatabaseBatchOperations {
 				probe, cancel := context.WithTimeout(ctx, 15*time.Second)

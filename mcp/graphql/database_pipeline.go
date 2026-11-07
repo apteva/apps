@@ -105,15 +105,16 @@ func (list *accessList) add(item string) {
 const maxDatabasePipelineAccessLevels = 4
 
 type databasePipelineStep struct {
-	ID      string
-	Op      string
-	Args    map[string]any
-	MaxRows int
-	TopN    bool            // find: max_rows is the wanted size, not a bound
-	Metrics map[string]bool // aggregate metrics with integer results
-	Page    *databasePipelinePage
-	CountOf string // count: the find step whose collection and filter it counts
-	Shape   *databasePipelineShape
+	ID        string
+	Canonical string // canonical Database operation; Op retains the shared result/validation shape
+	Op        string
+	Args      map[string]any
+	MaxRows   int
+	TopN      bool            // find: max_rows is the wanted size, not a bound
+	Metrics   map[string]bool // aggregate metrics with integer results
+	Page      *databasePipelinePage
+	CountOf   string // count: the find step whose collection and filter it counts
+	Shape     *databasePipelineShape
 	// StageParams names client params a joined step lets feed its pick or rollup.
 	StageParams []string
 }
@@ -161,8 +162,8 @@ type databasePipelinePlan struct {
 }
 
 var databasePipelineStepArgs = map[string]map[string]bool{
-	"aggregate":       {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true},
-	"find":            {"collection": true, "where": true, "select": true, "orderBy": true, "lookups": true},
+	"aggregate":       {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true, "pipeline": true, "limits": true, "derived": true, "as": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true, "branches": true, "rollup": true},
+	"find":            {"collection": true, "where": true, "select": true, "orderBy": true, "lookups": true, "pipeline": true, "limits": true, "as": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true, "group": true, "relation": true, "match": true, "count": true},
 	"count":           {"collection": true, "where": true},
 	"get":             {"collection": true, "key": true},
 	joinedRelatedRead: {"collection": true, "as": true, "where": true, "select": true, "orderBy": true, "relation": true, "match": true, "count": true},
@@ -1228,6 +1229,7 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 				return invalid("database_pipeline step %s (%s) does not accept %q", step.ID, step.Op, key)
 			}
 		}
+		step.canonicalRead(args)
 		if raw, exists := spec["stage_params"]; exists {
 			names, isList := raw.([]any)
 			if !isList || !isJoinedOp(step.Op) {
@@ -1349,7 +1351,7 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 		}
 		if raw, exists := spec["top_n"]; exists {
 			topN, ok := raw.(bool)
-			if !ok || step.Op != "find" {
+			if !ok || (step.Op != "find" && step.Canonical != "find") {
 				return invalid("database_pipeline step %s top_n applies to find steps and must be Boolean", step.ID)
 			}
 			step.TopN = topN
@@ -1377,6 +1379,9 @@ func (plan *databasePipelinePlan) parseSteps(raw any) error {
 			return invalid("database_pipeline step %s count_of must name a find step", step.ID)
 		}
 		target := plan.Steps[index].Args
+		if advancedDatabaseRead(target) {
+			return invalid("database_pipeline step %s: use find count:true and $steps.<id>.total for advanced reads", step.ID)
+		}
 		plan.Steps[i].Args = map[string]any{"collection": target["collection"]}
 		if target["where"] != nil {
 			plan.Steps[i].Args["where"] = target["where"]
@@ -2110,7 +2115,7 @@ func (run *databasePipelineRun) batch(ctx context.Context, stage string, operati
 	for i, raw := range operations {
 		op, _ := raw.(map[string]any)
 		args, _ := op["args"].(map[string]any)
-		if filterMatchesNothing(args["where"]) {
+		if filterMatchesNothing(args["where"]) && !advancedDatabaseRead(args) {
 			switch op["op"] {
 			case "find":
 				results[i] = map[string]any{"records": []any{}, "hasMore": false}
@@ -2519,7 +2524,7 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 			if err := run.joinedPageArgs(ctx, step, args); err != nil {
 				return nil, err
 			}
-			operations[i] = map[string]any{"op": step.Op, "args": args}
+			operations[i] = map[string]any{"op": step.databaseOperation(), "args": args}
 			continue
 		}
 		args := make(map[string]any, len(step.Args)+1)
@@ -2577,7 +2582,7 @@ func (run *databasePipelineRun) readSteps(ctx context.Context) (map[string]any, 
 		if step.Op == "count" && statistics {
 			args["diagnostics"] = true
 		}
-		operations[i] = map[string]any{"op": step.Op, "args": args}
+		operations[i] = map[string]any{"op": step.databaseOperation(), "args": args}
 	}
 	operations = append(operations, run.accessReads...)
 	results, err := run.batch(ctx, pipelineStageBatch, operations)

@@ -48,6 +48,18 @@ func databaseWatchFor(project string, source sourceRecord, resolver resolverReco
 	pipeline := false
 	switch strings.ToLower(strings.TrimSpace(resolver.Operation)) {
 	case "find", "list", "search", "get", "count", "aggregate":
+		if advancedDatabaseRead(config) {
+			configured, err := canonicalResolverPlan(resolver.Operation, config)
+			if err != nil {
+				return databaseWatchSpec{}, false
+			}
+			plan, err := validateDatabasePipeline(configured)
+			if err != nil {
+				return databaseWatchSpec{}, false
+			}
+			derived, pipeline = plan.Collections(), true
+			break
+		}
 		// Lookup targets change the joined record, so they are watched too.
 		derived = append([]string{stringValue(config["collection"], "")}, databaseLookupCollections(config["lookups"])...)
 	case databasePipelineOperation:

@@ -205,7 +205,7 @@ func (plan *databasePipelinePlan) validateJoinedStages(step *databasePipelineSte
 		}
 		allowed[name] = true
 	}
-	used := false
+	used := args["pipeline"] != nil
 	check := func(owner map[string]any, path string) error {
 		used = true
 		for _, key := range []string{"where", "filter"} {
@@ -253,6 +253,16 @@ func (plan *databasePipelinePlan) validateJoinedRoots(args map[string]any, label
 			return invalid("%s only holds conditional restrictions, so a viewer none applies to would read every record; add a term that always applies, such as the viewer's scope", path)
 		}
 		return nil
+	}
+	if pipeline, ok := args["pipeline"].(map[string]any); ok {
+		for i, raw := range asAnyList(pipeline["nodes"]) {
+			node, _ := raw.(map[string]any)
+			if node["op"] == "scan" {
+				if err := check(fmt.Sprintf("%s.pipeline.nodes[%d]", label, i), node); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	branches := asAnyList(args["branches"])
 	if len(branches) == 0 {

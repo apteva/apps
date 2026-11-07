@@ -1279,3 +1279,40 @@ for configuration, capability contracts and backend consistency boundaries.
 
 See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 3 separate-statement snapshot stages and legacy version 2 stages,
 executed through one Tables snapshot batch with intermediate data kept inside SQLite.
+
+## Database 0.14 canonical reads (GraphQL 0.23.0)
+
+Database resolvers and `database_pipeline` steps now use `find` and `aggregate`
+for ordinary reads, joined/related reads and named dependent calculations.
+Existing `joined_page`, `related_read` and `joined_aggregate` step configurations
+remain compatible. The new canonical advanced forms require Database 0.14.0.
+
+The Database request is supplied under a step's `args`: use
+`pipeline: {version: 1, nodes: [...], from: "relation"}` and final aggregate
+metrics/grouping or find selection/order/count. The full executable acceptance
+fixture is [testdata/dependent-aggregate.json](testdata/dependent-aggregate.json).
+It calculates September's 4000-cent rate and October's 2000-cent rate, joins
+them to sales and sums 6000 cents in a single Database read snapshot.
+GraphQL sends the complete dependency graph as one canonical operation inside
+its existing read batch; it does not orchestrate the graph or calculate money.
+
+Use the existing declared params/access contract to bind identity and authorised
+scopes in **each scan** before aggregation or joining. Structure, collection
+names, expressions and execution limits are server-owned. Client arguments may
+only reach validated filter values; before any intermediate stage they must be
+listed explicitly in `stage_params`. Final filters can narrow displayed output
+without changing the earlier rate calculation. Financial values remain integer
+cents; calculations, overflow checks, null semantics and rounding run in Database.
+
+`find` supports the existing `page` and `shape` contracts, with `count: true`
+and `$steps.<id>.total` for pre-page totals. Its encrypted cursors remain bound
+to the viewer, effective scope and resolver version. All scanned and joined
+collections, related-filter targets and permission sources are watched for
+realtime invalidation. Publishing validates the graph and probes Database's
+compiler with empty source scans, preserving the previous serving release on
+a version, schema or type error. For an unconditional scan, the probe discovers its primary key from collection
+metadata; it does not sample business records.
+
+Plain `find`/`aggregate` resolvers also accept fixed server-owned advanced
+configuration. Use `database_pipeline` for declared identity/access parameters,
+pages and response shaping. Client arguments cannot supply or replace the graph.

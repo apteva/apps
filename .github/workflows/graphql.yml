@@ -1,0 +1,48 @@
+name: GraphQL checks
+on:
+  push:
+    branches: ['release/graphql-v*']
+    tags: ['graphql/v*']
+    paths: ['mcp/graphql/**', '.github/workflows/graphql.yml']
+  pull_request:
+    paths: ['mcp/graphql/**', '.github/workflows/graphql.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: mcp/graphql
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/graphql/go.mod
+          cache-dependency-path: mcp/graphql/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go mod verify
+      - run: bun test ui/telemetry.test.ts
+      - uses: actions/checkout@v4
+        with:
+          ref: database/v0.14.0
+          path: .ci/database
+          sparse-checkout: mcp/database
+      - name: Canonical and compatibility reads across three adapters
+        env:
+          GRAPHQL_TEST_DATABASE_DIR: ${{ github.workspace }}/.ci/database/mcp/database
+        run: |
+          for adapter in sqlite pebble aptevadb; do
+            GRAPHQL_TEST_DATABASE_ADAPTER=$adapter go test -race -run 'TestRealDatabase(CanonicalDependentRead|CanonicalFixedRead|JoinedReads)$' -v -count=1
+          done
+      - run: CGO_ENABLED=0 go build -trimpath -o /tmp/apteva-graphql .

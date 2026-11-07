@@ -154,6 +154,7 @@ func (v joinedVisitor) request(args map[string]any, path string) (map[string]any
 		func() error { return v.branches(out, path) },
 		func() error { return v.rollup(out, path) },
 		func() error { return v.relation(out, path) },
+		func() error { return v.pipeline(out, path) },
 	} {
 		if err := step(); err != nil {
 			return nil, err
@@ -199,7 +200,7 @@ func (v joinedVisitor) expression(expr map[string]any, path string) error {
 			return err
 		}
 	}
-	for _, key := range []string{"coalesce", "concat"} {
+	for _, key := range []string{"coalesce", "concat", "args"} {
 		if err := v.list(expr, key, path, v.expression); err != nil {
 			return err
 		}
@@ -298,6 +299,13 @@ func (plan *databasePipelinePlan) validateJoinedStep(step *databasePipelineStep,
 		return err
 	}
 	_, err = joinedVisitor{filter: func(slot joinedSlot, raw any) (any, error) {
+		if strings.Contains(slot.path, ".pipeline.nodes[") {
+			for _, param := range plan.clientInputsOf(raw) {
+				if !contains(step.StageParams, param) {
+					return nil, invalid("database_pipeline %s reads client param %s before an intermediate calculation; list it in stage_params if intended", slot.path, param)
+				}
+			}
+		}
 		return nil, plan.validateJoinedFilter(slot, raw)
 	}}.request(args, "step "+step.ID)
 	return err
@@ -429,6 +437,9 @@ func (plan *databasePipelinePlan) filterValueSources(raw any) (trusted, client b
 }
 
 func (plan *databasePipelinePlan) validateJoinedStructure(step *databasePipelineStep, args map[string]any, label string) error {
+	if args["pipeline"] != nil {
+		return plan.validateNamedRead(step, args, label)
+	}
 	_, hasCollection := args["collection"]
 	_, hasBranches := args["branches"]
 	switch {
@@ -727,7 +738,7 @@ func (run *databasePipelineRun) decodeJoinedStep(step databasePipelineStep, raw 
 		}
 		return shapeJoinedRows(step, rows, nil)
 	}
-	if result["hasMore"] == true && step.Page == nil {
+	if result["hasMore"] == true && step.Page == nil && !step.TopN {
 		return nil, runtimeError("source_result_truncated", "database step "+step.ID+" exceeded max_rows")
 	}
 	rows, _ := result["records"].([]any)
@@ -1009,8 +1020,18 @@ func (step databasePipelineStep) joinedProbe() (map[string]any, error) {
 			}
 		}
 	}
+	if pipeline, ok := args["pipeline"].(map[string]any); ok {
+		for _, raw := range asAnyList(pipeline["nodes"]) {
+			node, _ := raw.(map[string]any)
+			if node["op"] == "scan" {
+				if err := matchNoRoots(node, step.ID); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	args["limit"] = 1
-	return map[string]any{"op": step.Op, "args": args}, nil
+	return map[string]any{"op": step.databaseOperation(), "args": args}, nil
 }
 
 func matchNoRoots(owner map[string]any, stepID string) error {
@@ -1048,7 +1069,7 @@ func joinedRootField(owner map[string]any) string {
 	}
 	bare := func(name string) string { return strings.TrimPrefix(name, alias+".") }
 	rooted := func(name string) bool { return strings.HasPrefix(name, alias+".") }
-	joined := owner["joins"] != nil || owner["computed"] != nil || owner["relation"] == nil
+	joined := owner["op"] != "scan" && (owner["joins"] != nil || owner["computed"] != nil || owner["relation"] == nil)
 	take := func(name string) {
 		if found != "" || name == "" {
 			return
