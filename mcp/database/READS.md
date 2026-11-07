@@ -1,6 +1,6 @@
 # Core reads: find and aggregate
 
-Unreleased consolidation based on Database 0.13.0. New callers use these nine
+Available in Database 0.14.0. New callers use these nine
 record operations: `get`, `find`, `insert`, `update`, `upsert`, `delete`, `count`,
 `aggregate` and `batch`. MCP names add `db_`; trusted HTTP calls use
 `POST /operations/<operation>`. Database/collection/index management, diagnostics, grants and

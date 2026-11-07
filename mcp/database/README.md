@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.13.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.14.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.13.0.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.14.0.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -231,7 +231,7 @@ In the portable path, filters on stored fields are pushed to the adapter's scan 
 
 `find` accepts the same `lookups` and nests each referenced record under its `as` name (null when absent). Filtering and ordering stay on the collection's own fields, and `select` must include each `localField`.
 
-## Core read operations (unreleased consolidation)
+## Core read operations (Database 0.14.0)
 
 Use the nine record operations `get`, `find`, `insert`, `update`, `upsert`,
 `delete`, `count`, `aggregate` and `batch`. `find` supports joins, grouped pages,
