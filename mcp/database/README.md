@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, based on release 0.12.2. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.13.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.5.3.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.13.0.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -262,7 +262,7 @@ Two more stages answer questions one grouping cannot. `branches [{collection,as,
 
 Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows. The memory budget is an accounting estimate, not a cap on process memory. In `joined_page` an item costs about 500 bytes plus its share of what else the read holds: each join can cache up to 16 MiB, a `distinct` remembers each key it has seen, and `pick` keeps each winner's order values until the page is chosen. A page's own rows count too, so one group with too many rows fails even when the page holds only that group.
 
-## Composable read queries (unreleased)
+## Composable read queries
 
 `query` (`db_query` over MCP) evaluates named scan, compute, join and aggregate relations in one database read snapshot. An aggregate result can be computed and joined back to another relation before a final aggregation. No temporary business records are written. See [the query contract](QUERY.md) and the [cross-adapter acceptance fixture](testdata/dependent-aggregation.json).
 

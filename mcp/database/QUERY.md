@@ -1,6 +1,6 @@
 # Composable read queries
 
-Unreleased extension based on Database 0.12.2. `db_query` (MCP) and
+Available in Database 0.13.0. `db_query` (MCP) and
 `POST /operations/query` (trusted admin HTTP) execute a typed graph of relations
 on one read snapshot in one database. The operation requires `database.read`,
 including a read app grant when a calling app uses `scope: "project"`.
