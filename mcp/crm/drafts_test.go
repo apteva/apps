@@ -41,6 +41,8 @@ func (p *draftPlatform) CallAppResult(app, tool string, args map[string]any, out
 	defer p.mu.Unlock()
 	payload := map[string]any{"ok": true}
 	switch tool {
+	case "message_get":
+		payload = map[string]any{"message": map[string]any{"id": int64Arg(args, "id"), "direction": "in", "channel": "email", "subject": "Question", "message_id_header": "<original@example.test>"}}
 	case "senders_list":
 		senders := []map[string]any{}
 		if !p.wrongSender {
@@ -224,8 +226,13 @@ func TestDraftExplicitSendThreadingAndReplay(t *testing.T) {
 		t.Fatalf("sends=%d", len(p.sends))
 	}
 	sent := p.sends[0]
-	if sent["to"] != "private@example.test" || sent["from"] != "support@example.test" || sent["conversation_id"] != d.ConversationID || sent["body_html"] != "<b>Reply</b>" || sent["in_reply_to"] != "<original@example.test>" || sent["attachments"] == nil {
+	if int64Arg(sent, "reply_to_message_id") != 700 || sent["body_html"] != "<b>Reply</b>" || sent["attachments"] == nil {
 		t.Fatalf("wrong sent payload: %v", sent)
+	}
+	for _, key := range []string{"to", "from", "conversation_id", "in_reply_to", "references", "subject", "headers"} {
+		if _, ok := sent[key]; ok {
+			t.Fatalf("reply-mode override %s leaked: %v", key, sent)
+		}
 	}
 	stored := out["draft"].(*conversationDraft)
 	if stored.Status != "sent" || stored.Content.Body != "Reply" || len(stored.Content.Attachments) != 1 {

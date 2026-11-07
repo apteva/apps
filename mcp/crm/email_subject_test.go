@@ -100,15 +100,21 @@ func TestEmailConversationSubjectsBothTools(t *testing.T) {
 				if sent["in_reply_to"] != "<original@example.test>" || sent["conversation_id"] != convo {
 					t.Fatalf("threading lost: %v", sent)
 				}
-				headers := sent["headers"].(map[string]any)
-				if headers["In-Reply-To"] != "<original@example.test>" || headers["References"] != "<original@example.test>" {
+				if !reflect.DeepEqual(sent["references"], []string{"<original@example.test>"}) {
 					t.Fatal("RFC reply headers lost")
 				}
-				fingerprint := outboundContentFingerprint("test-proj", c.ID, false, sent)
+				fingerprintArgs := map[string]any{}
+				for key, value := range sent {
+					fingerprintArgs[key] = value
+				}
+				act := out.(map[string]any)["activity"].(*Activity)
+				var detail map[string]any
+				_ = json.Unmarshal([]byte(act.SourceDetail), &detail)
+				fingerprintArgs["reply_to_activity_id"] = int64Arg(detail, "reply_to_activity_id")
+				fingerprint := outboundContentFingerprint("test-proj", c.ID, false, fingerprintArgs)
 				if !strings.HasPrefix(strArg(sent, "idempotency_key"), "crm-auto-v1:"+fingerprint+":") {
 					t.Fatal("idempotency fingerprint did not include resolved subject")
 				}
-				act := out.(map[string]any)["activity"].(*Activity)
 				if act.ConversationID != convo || !strings.HasPrefix(act.Body, row.want+"\n\n") {
 					t.Fatalf("incorrect saved sent content: %+v", act)
 				}

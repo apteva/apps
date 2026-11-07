@@ -1,4 +1,17 @@
-# CRM v0.9.26
+# CRM v0.9.27
+
+Release `crm/v0.9.27`: email replies pin the selected inbound activity (or the
+latest by occurrence time and ID) and use Messaging's `send_message` with
+`reply_to_message_id`. Requires Messaging v0.15.0+. Messaging derives addressing,
+subject, RFC references, Gmail thread/account and supported ticket identifiers.
+CRM validates the source installation and message before dispatch, records the
+anchor in its activity log, and includes it in automatic deduplication. A selected
+activity can identify its conversation without a separate `conversation_id`.
+Saved reply drafts retain their selected anchor. Explicit sender/subject overrides
+keep the regular send contract with the selected message's RFC ID and top-level
+references; legacy activities with unknown source provenance use local RFC data
+without looking up potentially unrelated Messaging IDs. Phone-channel switches
+are preserved. No migrations or historical-message repair. Pins app-sdk v0.115.0.
 
 Release `crm/v0.9.26`: normalize display-name email recipients and retain each
 Messaging event's soft-bounce contribution. Confirmed automatic-response
@@ -346,8 +359,11 @@ it does not rewrite existing messages or conversations.
 
 ### Delivery and routing
 
-Both `contacts_send_message` with an existing email `conversation_id` and
-`contacts_reply` inherit `Re: <original subject>` when subject is omitted, empty
+Normal email replies use the selected/latest inbound message's subject and
+Messaging-owned threading. Explicit sender/subject overrides retain the regular
+send path with that selected RFC ID and reference chain. For legacy activities
+without a usable Messaging anchor, both `contacts_send_message` with an existing
+email `conversation_id` and `contacts_reply` inherit `Re: <original subject>` when subject is omitted, empty
 or whitespace-only. An existing `Re:` prefix is recognized case-insensitively
 and is not duplicated. Nonblank explicit subjects remain unchanged. If the
 conversation has no nonblank subject, supply one explicitly, including when

@@ -191,7 +191,7 @@ func TestAuditActivityProjectOwnership(t *testing.T) {
 }
 
 func TestAuditReplyUsesThreadAddress(t *testing.T) {
-	pf := &crmRecordingPlatform{}
+	pf := &crmRecordingPlatform{replyMessages: map[int64]map[string]any{900: {"id": 900, "channel": "email", "direction": "in", "subject": "Private", "message_id_header": "<private-thread>"}}}
 	ctx := newTestCtx(t, tk.WithPlatform(pf))
 	c := mustCreate(t, ctx, map[string]any{"channels": []any{
 		map[string]any{"kind": "email", "value": "work@example.test", "is_primary": true},
@@ -206,8 +206,8 @@ func TestAuditReplyUsesThreadAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, call := range pf.calls {
-		if call.Tool == "send_message" && call.Input["to"] != "private@example.test" {
-			t.Errorf("reply sent to %v instead of thread sender private@example.test", call.Input["to"])
+		if call.Tool == "send_message" && int64Arg(call.Input, "reply_to_message_id") != 900 {
+			t.Errorf("reply did not anchor to the private inbound message: %v", call.Input)
 		}
 	}
 }
