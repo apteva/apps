@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 type Choice = "unselected" | "include" | "later" | "decline";
 type Rule = "any" | "one" | "one_required";
@@ -16,7 +17,7 @@ type Draft = Omit<Content, "categories"> & {
 type Reply = { outcome: string; name: string; note: string; selection: Record<string, Choice>; total_minor: number; created_at: number };
 type Revision = {
   id: number; proposal_id: number; number: number; version: number; state: string;
-  content: Content; expires_at?: number; response?: Reply;
+  content: Content; expires_at?: number; published_at?: number; response?: Reply;
 };
 type Detail = { id: number; revisions: Revision[] };
 type List = { proposals: Revision[]; next_before?: number };
@@ -66,8 +67,9 @@ function money(amount: number, currency: string) {
   return new Intl.NumberFormat(undefined, {style: "currency", currency}).format(amount / 100);
 }
 
-async function api<T>(projectId: string, action: string, body?: object, query?: Record<string, string>) {
+async function api<T>(projectId: string, action: string, body?: object, query?: Record<string, string>, installId?: number) {
   const params = new URLSearchParams({project_id: projectId, ...query});
+  if (installId) params.set("install_id", String(installId));
   const res = await fetch("/api/apps/proposals/proposals" + (action ? "/" + action : "") + "?" + params, {
     method: body ? "POST" : "GET",
     credentials: "same-origin",
@@ -81,16 +83,70 @@ async function api<T>(projectId: string, action: string, body?: object, query?: 
   return result as T;
 }
 
-export default function ProposalsPanel({projectId}: {projectId: string}) {
-  return <ProjectPanel key={projectId} projectId={projectId}/>;
+type Props = { projectId: string; installId?: number; eventRevision?: number };
+type DetailTab = "overview" | "scope" | "preview" | "sharing" | "history";
+type ListTab = "all" | "drafts" | "open" | "responses";
+
+const detailTabs = [
+  ["overview", "Overview"], ["scope", "Scope & pricing"], ["preview", "Client preview"],
+  ["sharing", "Sharing"], ["history", "History"],
+];
+const listTabs = [["all", "All proposals"], ["drafts", "Drafts"], ["open", "Open"], ["responses", "Responses"]];
+
+const iconPaths = {
+  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5",
+  plus: "M12 5v14 M5 12h14",
+  back: "M19 12H5 M12 19l-7-7 7-7",
+  refresh: "M20 7v5h-5 M4 17v-5h5 M6 7a7 7 0 0 1 12-2l2 2 M4 17l2 2a7 7 0 0 0 12-2",
+  search: "m21 21-5-5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
+  link: "M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2 M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2",
+  send: "m22 2-7 20-4-9-9-4Z M22 2 11 13",
+  arrow: "M7 17 17 7 M7 7h10v10",
+  check: "m5 12 4 4L19 6",
+  layers: "m12 3 10 6-10 6L2 9Z M2 15l10 6 10-6",
+  clock: "M12 8v4l3 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0",
+  trash: "M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7",
+};
+function Icon({name}: {name: keyof typeof iconPaths}) {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={iconPaths[name]}/></svg>;
+}
+function StatePill({state}: {state: string}) {
+  return <span className={"pp-pill pp-state-" + state}><span/>{states[state] || state}</span>;
+}
+function Tabs({items, value, onChange, label}: {
+  items: string[][]; value: string; onChange: (value: string) => void; label: string;
+}) {
+  return <div className="pp-tabs" role="tablist" aria-label={label}>
+    {items.map(([id, title], index) => <button key={id} type="button" role="tab" id={"pp-tab-" + id}
+      aria-selected={value === id} aria-controls={"pp-panel-" + id} tabIndex={value === id ? 0 : -1}
+      onKeyDown={(event) => {
+        let next = index;
+        if (event.key === "ArrowRight") next = (index + 1) % items.length;
+        else if (event.key === "ArrowLeft") next = (index + items.length - 1) % items.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = items.length - 1;
+        else return;
+        event.preventDefault();
+        onChange(items[next][0]);
+        (event.currentTarget.parentElement?.children[next] as HTMLButtonElement)?.focus();
+      }} onClick={() => onChange(id)}>{title}</button>)}
+  </div>;
 }
 
-function ProjectPanel({projectId}: {projectId: string}) {
+export default function ProposalsPanel(props: Props) {
+  return <ProjectPanel key={props.projectId + ":" + props.installId} {...props}/>;
+}
+
+function ProjectPanel({projectId, installId, eventRevision}: Props) {
   const [list, setList] = useState<List>({proposals: []});
   const [record, setRecord] = useState<Detail | null>(null);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<Draft>(blankDraft);
-  const [preview, setPreview] = useState<Content | null>(null);
+  const [tab, setTab] = useState<DetailTab>("overview");
+  const [listTab, setListTab] = useState<ListTab>("all");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
   const [historyId, setHistoryId] = useState<number>();
   const [crmID, setCrmID] = useState("");
   const [url, setURL] = useState("");
@@ -98,31 +154,79 @@ function ProjectPanel({projectId}: {projectId: string}) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const reminder = useRef("");
+  const root = useRef<HTMLDivElement>(null);
+  const latest = record?.revisions[0];
+  const open = record?.revisions.find((r) => r.state === "published");
+  const accepted = record?.revisions.find((r) => r.state === "accepted");
+  const responseRevision = record?.revisions.find((r) => r.response);
+  const editing = creating || latest?.state === "draft";
+  const detailVisible = creating || !!record;
+  const shown = record?.revisions.find((r) => r.id === historyId) || latest;
+  const dirty = editing && (creating || JSON.stringify(draft) !== JSON.stringify(editable(latest!.content)));
+  const request = <T,>(action: string, body?: object, query?: Record<string, string>) =>
+    api<T>(projectId, action, body, query, installId);
+  const fields = (revision: Revision) => ({
+    proposal_id: revision.proposal_id, revision_id: revision.id, version: revision.version,
+  });
 
-  function show(next: Detail) {
+  function changeTab(next: DetailTab) {
+    setTab(next);
+    root.current?.scrollTo({top: 0});
+  }
+  function show(next: Detail, nextTab?: DetailTab) {
     setRecord(next);
     setList((previous) => ({
-      ...previous,
-      proposals: previous.proposals.map((row) => row.proposal_id === next.id ? next.revisions[0] : row),
+      ...previous, proposals: previous.proposals.map((row) => row.proposal_id === next.id ? next.revisions[0] : row),
     }));
     setCreating(false);
     setDraft(editable(next.revisions[0].content));
     setHistoryId(undefined);
-    setPreview(null);
+    setCrmID(String(next.revisions[0].content.opportunity_id || ""));
     setURL("");
     reminder.current = "";
+    if (nextTab) changeTab(nextTab);
   }
-
+  function confirmLeave() {
+    return !dirty || window.confirm("Leave this draft and discard your unsaved changes?");
+  }
+  function start(c?: Content) {
+    if (!confirmLeave()) return;
+    setRecord(null);
+    setCreating(true);
+    setDraft(c ? editable({...c, client_name: "", client_email: "", opportunity_id: undefined}) : blankDraft());
+    setHistoryId(undefined);
+    setURL("");
+    setCrmID("");
+    setNotice("");
+    setError("");
+    changeTab("overview");
+  }
+  function back() {
+    if (!confirmLeave()) return;
+    setRecord(null);
+    setCreating(false);
+    setURL("");
+    setNotice("");
+    setError("");
+  }
   async function reload() {
-    setList(await api<List>(projectId, ""));
+    setList(await request<List>(""));
   }
-
   useEffect(() => {
     let active = true;
-    api<List>(projectId, "").then((result) => { if (active) setList(result); })
-      .catch((err) => { if (active) setError(err.message); });
+    api<List>(projectId, "", undefined, undefined, installId).then((result) => {
+      if (active) { setList(result); setLoading(false); }
+    }).catch((err) => {
+      if (active) { setError(err.message); setLoading(false); }
+    });
     return () => { active = false; };
-  }, [projectId]);
+  }, [projectId, installId, eventRevision]);
+  useEffect(() => {
+    if (!dirty) return;
+    const protect = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", protect);
+    return () => window.removeEventListener("beforeunload", protect);
+  }, [dirty]);
 
   async function run(action: () => Promise<void> | void) {
     setBusy(true);
@@ -130,297 +234,573 @@ function ProjectPanel({projectId}: {projectId: string}) {
     setNotice("");
     try { await action(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   }
-
-  function start(c?: Content) {
-    setRecord(null);
-    setCreating(true);
-    setDraft(c ? editable({...c, client_name: "", client_email: "", opportunity_id: undefined}) : blankDraft());
-    setHistoryId(undefined);
-    setPreview(null);
-    setURL("");
-    setCrmID("");
-    setNotice("");
-    setError("");
+  async function loadRecord(id: number) {
+    await run(async () => show(await request<Detail>("get", undefined, {proposal_id: String(id)}), "overview"));
   }
-
-  const latest = record?.revisions[0];
-  const open = record?.revisions.find((r) => r.state === "published");
-  const accepted = record?.revisions.find((r) => r.state === "accepted");
-  const editing = creating || latest?.state === "draft";
-  const shown = record?.revisions.find((r) => r.id === historyId) || latest;
-  const fields = (revision: Revision) => ({proposal_id: revision.proposal_id, revision_id: revision.id, version: revision.version});
-
   async function save(publish: boolean) {
-    const body = {content: toContent(draft)};
-    const saved = await api<Detail>(projectId, creating ? "create" : "update_draft",
-      creating ? body : {...body, ...fields(latest!)});
+    const content = toContent(draft);
+    const saved = await request<Detail>(creating ? "create" : "update_draft",
+      creating ? {content} : {content, ...fields(latest!)});
     show(saved);
     if (publish) {
-      const released = await api<Detail>(projectId, "publish", fields(saved.revisions[0]));
-      show(released);
-      setNotice("Published. Copy the private link or send it by email.");
+      const released = await request<Detail>("publish", fields(saved.revisions[0]));
+      show(released, "sharing");
+      setNotice("Proposal published. Your client can now review and choose their scope.");
     } else {
       setNotice("Draft saved.");
     }
     await reload();
   }
-
-  function loadRecord(id: number) {
-    return run(async () => show(await api<Detail>(projectId, "get", undefined, {proposal_id: String(id)})));
-  }
-
   function updateCategory(index: number, change: Partial<Draft["categories"][number]>) {
-    setDraft((current) => ({...current, categories: current.categories.map((group, i) => i === index ? {...group, ...change} : group)}));
+    setDraft((current) => ({
+      ...current, categories: current.categories.map((group, i) => i === index ? {...group, ...change} : group),
+    }));
   }
-
   function updateLine(group: number, index: number, change: Partial<DraftLine>) {
-    setDraft((current) => ({...current, categories: current.categories.map((category, i) => i === group ? {
-      ...category, items: category.items.map((line, j) => j === index ? {...line, ...change} : line),
-    } : category)}));
+    setDraft((current) => ({
+      ...current, categories: current.categories.map((category, i) => i === group ? {
+        ...category, items: category.items.map((line, j) => j === index ? {...line, ...change} : line),
+      } : category),
+    }));
+  }
+  async function shareLink(rotate = false) {
+    if (!open) return;
+    const result = await request<{url: string}>("link_create", {...fields(open), rotate});
+    setURL(result.url);
+    if (rotate) { setNotice("A new private link is ready. The previous link is revoked."); return; }
+    try { await navigator.clipboard.writeText(result.url); setNotice("Private client link copied."); }
+    catch { setNotice("Your private client link is ready below."); }
+  }
+  async function email(remind: boolean) {
+    if (!open || !window.confirm((remind ? "Send a reminder" : "Send a proposal invitation") + " to " + open.content.client_email + "?")) return;
+    if (remind) reminder.current ||= crypto.randomUUID();
+    await run(async () => {
+      const result = await request<{status: string}>("send", {
+        ...fields(open), ...(remind ? {reminder_key: reminder.current} : {}),
+      });
+      if (remind) reminder.current = "";
+      setNotice("Messaging status · " + result.status + ".");
+    });
   }
 
-  return <div className="prop-panel">
+  const filtered = list.proposals.filter((row) => {
+    const stateMatch = listTab === "all" || (listTab === "drafts" && row.state === "draft") ||
+      (listTab === "open" && row.state === "published") ||
+      (listTab === "responses" && !!row.response);
+    return stateMatch && (row.content.title + " " + row.content.client_name + " " + (row.content.client_email || ""))
+      .toLowerCase().includes(search.toLowerCase().trim());
+  });
+  const draftItemCount = draft.categories.reduce((sum, group) => sum + group.items.length, 0);
+
+  let preview: Content | undefined = shown?.content;
+  let previewError = "";
+  if (editing && tab === "preview") {
+    try { preview = toContent(draft); } catch (err) { previewError = (err as Error).message; }
+  }
+
+  return <div className="ap-proposals" ref={root}>
     <style>{styles}</style>
-    <header className="prop-header">
-      <div><h1>Proposals</h1><p>Share interactive scopes and track client decisions.</p></div>
-      <div className="prop-actions">
-        <button disabled={busy} onClick={() => run(reload)}>Refresh list</button>
-        <button className="prop-primary" disabled={busy} onClick={() => start()}>New proposal</button>
+    {detailVisible && <button type="button" className="pp-back" disabled={busy} onClick={back}>
+      <Icon name="back"/> All proposals
+    </button>}
+    <header className="pp-header">
+      <div className="pp-title">
+        <div className="pp-title-line">
+          <h1>{detailVisible ? draft.title || "New proposal" : "Proposals"}</h1>
+          {detailVisible && <StatePill state={creating ? "draft" : latest!.state}/>}
+        </div>
+        <p>{detailVisible
+          ? [draft.client_name || "Add a client", latest ? "Revision " + latest.number : "New draft", dirty ? "Unsaved changes" : ""].filter(Boolean).join(" · ")
+          : "Create proposals, share scope, and follow client decisions."}</p>
+      </div>
+      <div className="pp-actions">
+        {detailVisible
+          ? <>
+            {record && <button disabled={busy || dirty} onClick={() => run(async () =>
+              show(await request<Detail>("get", undefined, {proposal_id: String(record.id)}))
+            )}><Icon name="refresh"/> Refresh proposal</button>}
+            {!editing && !accepted && <button disabled={busy} onClick={() => run(async () => {
+              show(await request<Detail>("revise", {proposal_id: record!.id}), "overview"); await reload();
+            })}><Icon name="plus"/> Start revision</button>}
+            {!editing && <button disabled={busy} onClick={() => start(shown!.content)}>Use as new proposal</button>}
+          </>
+          : <>
+            <button disabled={busy || loading} onClick={() => run(reload)}><Icon name="refresh"/> Refresh</button>
+            <button className="pp-primary" disabled={busy} onClick={() => start()}><Icon name="plus"/> New proposal</button>
+          </>}
       </div>
     </header>
-    {error && <p className="prop-error" role="alert">{error}</p>}
-    {notice && <p className="prop-notice" role="status">{notice}</p>}
-    <div className="prop-layout">
-      <nav className="prop-card prop-nav" aria-label="Proposals">
-        <strong>Proposals</strong>
-        {!list.proposals.length && <p>No proposals yet.</p>}
-        {list.proposals.map((row) => <button key={row.proposal_id} type="button" disabled={busy} aria-current={record?.id === row.proposal_id}
-          onClick={() => loadRecord(row.proposal_id)}>
-          <span>{row.content.title}</span><small>{row.content.client_name || "No client"} · {states[row.state]}</small>
-        </button>)}
-        {list.next_before && <button disabled={busy} onClick={() => run(async () => {
-          const next = await api<List>(projectId, "", undefined, {before: String(list.next_before)});
+    {error && <div className="pp-notice pp-error" role="alert">{error}</div>}
+    {notice && <div className="pp-notice" role="status"><Icon name="check"/>{notice}</div>}
+
+    <Tabs items={detailVisible ? detailTabs : listTabs} value={detailVisible ? tab : listTab}
+      onChange={(next) => detailVisible ? changeTab(next as DetailTab) : setListTab(next as ListTab)}
+      label={detailVisible ? "Proposal sections" : "Proposal status"}/>
+    <main role="tabpanel" id={"pp-panel-" + (detailVisible ? tab : listTab)}
+      aria-labelledby={"pp-tab-" + (detailVisible ? tab : listTab)}>
+      {!detailVisible && <>
+        <div className="pp-list-toolbar">
+          <label className="pp-search"><Icon name="search"/><input type="search" placeholder="Search proposals or clients"
+            aria-label="Search proposals" value={search} onChange={(event) => setSearch(event.target.value)}/></label>
+          <span className="pp-muted">{filtered.length} {list.next_before ? "loaded " : ""}{filtered.length === 1 ? "proposal" : "proposals"}</span>
+        </div>
+        {loading ? <Empty title="Loading proposals" description="Getting your project’s proposals." icon="clock"/> :
+          filtered.length === 0 ? <Empty
+            title={search ? "No matching proposals" : ({all: "No proposals yet", drafts: "No drafts yet", open: "No open proposals", responses: "No client responses yet"})[listTab]}
+            description={search ? "Try another client name or proposal title." : "Build a clear scope, give clients choices, and keep every decision in one place."}
+            icon="file">
+              {!search && <button className="pp-primary" disabled={busy} onClick={() => start()}><Icon name="plus"/> Create proposal</button>}
+          </Empty> :
+          <div className="pp-table-wrap"><table className="pp-table">
+            <thead><tr><th>Proposal</th><th>Client</th><th>Status</th><th>Scope</th><th>Amount</th><th>Valid until</th><th><span className="pp-sr">Open</span></th></tr></thead>
+            <tbody>{filtered.map((row) => <tr key={row.proposal_id}>
+              <td><button className="pp-table-title" disabled={busy} onClick={() => loadRecord(row.proposal_id)}>{row.content.title}</button>
+                <small>Revision {row.number}</small></td>
+              <td>{row.content.client_name || "—"}<small>{row.content.client_email}</small></td>
+              <td><StatePill state={row.state}/></td>
+              <td>{(row.content.categories || []).reduce((sum, group) => sum + (group.items?.length || 0), 0)} items</td>
+              <td className="pp-amount">{row.response
+                ? <>{money(row.response.total_minor, row.content.currency)}<small>{row.response.outcome === "accepted" ? "Accepted total" : "Selected total"}</small></>
+                : <>{money(requiredTotal(row.content), row.content.currency)}<small>Required scope</small></>}</td>
+              <td>{row.expires_at ? formatDate(row.expires_at) : "—"}</td>
+              <td><button className="pp-icon-button" disabled={busy} aria-label={"Open " + row.content.title}
+                onClick={() => loadRecord(row.proposal_id)}><Icon name="arrow"/></button></td>
+            </tr>)}</tbody>
+          </table></div>}
+        {list.next_before && <div className="pp-load-more"><button disabled={busy} onClick={() => run(async () => {
+          const next = await request<List>("", undefined, {before: String(list.next_before)});
           setList({...next, proposals: [...list.proposals, ...next.proposals]});
-        })}>Load more</button>}
-      </nav>
-      <main className="prop-main">
-        {!editing && !record && <section className="prop-card"><h2>Create your first proposal</h2><p>Group the work into categories and let your client choose their scope.</p></section>}
-        {open && <section className="prop-card">
-          <h2>Live revision {open.number}</h2>
-          <p>Open until {new Date(open.expires_at! * 1000).toLocaleDateString()}.</p>
-          <div className="prop-actions">
-            <button disabled={busy} onClick={() => run(async () => {
-              const result = await api<{url: string}>(projectId, "link_create", fields(open));
-              setURL(result.url);
-              try { await navigator.clipboard.writeText(result.url); setNotice("Private link copied."); }
-              catch { setNotice("Private link is ready to copy."); }
-            })}>Copy private link</button>
-            <button disabled={busy || !open.content.client_email} onClick={() => {
-              if (!window.confirm("Send a real email to " + open.content.client_email + "?")) return;
-              void run(async () => {
-                const result = await api<{status: string}>(projectId, "send", fields(open));
-                setNotice("Messaging status: " + result.status + ".");
-              });
-            }}>Email invitation</button>
-            <button disabled={busy || !open.content.client_email} onClick={() => {
-              if (!window.confirm("Email a reminder to " + open.content.client_email + "?")) return;
-              reminder.current ||= crypto.randomUUID();
-              void run(async () => {
-                const result = await api<{status: string}>(projectId, "send", {...fields(open), reminder_key: reminder.current});
-                reminder.current = "";
-                setNotice("Messaging status: " + result.status + ".");
-              });
-            }}>Send reminder</button>
-            <button disabled={busy} onClick={() => {
-              if (!window.confirm("Revoke the current link and issue a new one?")) return;
-              void run(async () => {
-                const result = await api<{url: string}>(projectId, "link_create", {...fields(open), rotate: true});
-                setURL(result.url);
-                setNotice("New link issued. The previous link is revoked.");
-              });
-            }}>Rotate link</button>
-            <button disabled={busy} onClick={() => {
-              if (!window.confirm("Close this revision to new client responses?")) return;
-              void run(async () => { show(await api<Detail>(projectId, "withdraw", fields(open))); await reload(); });
-            }}>Withdraw</button>
-          </div>
-          {url && <label>Private client link<input readOnly value={url} onFocus={(e) => e.target.select()}/></label>}
-        </section>}
-        {editing && <form className="prop-main" onSubmit={(e) => { e.preventDefault(); void run(() => save(false)); }}>
-          <section className="prop-card">
-            <h2>{creating ? "New proposal" : "Edit revision " + latest!.number}</h2>
-            <div className="prop-grid">
-              <label>Proposal title<input required maxLength={200} value={draft.title} onChange={(e) => setDraft({...draft, title: e.target.value})}/></label>
-              <label>Business or sender name<input maxLength={160} value={draft.sender} onChange={(e) => setDraft({...draft, sender: e.target.value})}/></label>
-              <label>Client name<input maxLength={160} value={draft.client_name} onChange={(e) => setDraft({...draft, client_name: e.target.value})}/></label>
-              <label>Client email<input type="email" value={draft.client_email || ""} onChange={(e) => setDraft({...draft, client_email: e.target.value})}/></label>
-              <label>Currency<select value={draft.currency} onChange={(e) => setDraft({...draft, currency: e.target.value})}>
-                {currencies.map((currency) => <option key={currency}>{currency}</option>)}</select></label>
-              <label>Days open after publishing<input required type="number" min={1} max={365} value={draft.validity_days || ""}
-                onChange={(e) => setDraft({...draft, validity_days: Number(e.target.value)})}/></label>
+        })}>Load more proposals</button></div>}
+      </>}
+
+      {detailVisible && tab === "overview" && (editing ? <div className="pp-editor-grid">
+        <section className="pp-card">
+          <SectionTitle title="Proposal details" description="Give your client the context they need before choosing their scope."/>
+          <div className="pp-fields">
+            <label>Proposal title<input maxLength={200} value={draft.title} placeholder="Website redesign & launch"
+              onChange={(event) => setDraft({...draft, title: event.target.value})}/></label>
+            <div className="pp-grid-two">
+              <label>Business or sender name<input maxLength={160} value={draft.sender} placeholder="Your business"
+                onChange={(event) => setDraft({...draft, sender: event.target.value})}/></label>
+              <label>Days open after publishing<input type="number" min={1} max={365} value={draft.validity_days || ""}
+                onChange={(event) => setDraft({...draft, validity_days: Number(event.target.value)})}/></label>
             </div>
-            <label>Overview<textarea value={draft.overview || ""} onChange={(e) => setDraft({...draft, overview: e.target.value})}/></label>
-            <label>Terms and exclusions<textarea value={draft.terms || ""} onChange={(e) => setDraft({...draft, terms: e.target.value})}/></label>
-            <div className="prop-actions prop-crm">
-              <label>CRM opportunity ID<input type="number" min={1} value={crmID} onChange={(e) => setCrmID(e.target.value)}/></label>
-              <button type="button" disabled={busy || Number(crmID) <= 0} onClick={() => run(async () => {
-                const match = await api<Opportunity>(projectId, "crm_lookup", {opportunity_id: Number(crmID)});
-                setDraft((current) => ({...current, opportunity_id: match.id, title: current.title || match.title,
+            <label>Overview<textarea className="pp-overview-input" maxLength={16000} value={draft.overview || ""}
+              placeholder="What you’re building, the outcome, and how you’ll work together."
+              onChange={(event) => setDraft({...draft, overview: event.target.value})}/></label>
+            <label>Terms and exclusions<textarea maxLength={16000} value={draft.terms || ""}
+              placeholder="Delivery timeline, payment terms, assumptions, and anything outside the scope."
+              onChange={(event) => setDraft({...draft, terms: event.target.value})}/></label>
+          </div>
+        </section>
+        <div className="pp-stack">
+          <section className="pp-card">
+            <SectionTitle title="Client" description="Who this proposal is prepared for."/>
+            <div className="pp-fields">
+              <label>Client name<input maxLength={160} value={draft.client_name} placeholder="Client or company"
+                onChange={(event) => setDraft({...draft, client_name: event.target.value})}/></label>
+              <label>Client email<input type="email" value={draft.client_email || ""} placeholder="client@company.com"
+                onChange={(event) => setDraft({...draft, client_email: event.target.value})}/></label>
+              <label>Currency<select value={draft.currency} onChange={(event) => setDraft({...draft, currency: event.target.value})}>
+                {currencies.map((currency) => <option key={currency}>{currency}</option>)}
+              </select></label>
+            </div>
+          </section>
+          <section className="pp-card">
+            <SectionTitle title="CRM connection" description="Import an opportunity’s client details, then sync the accepted value later."/>
+            <div className="pp-inline-field">
+              <label>CRM opportunity ID<input inputMode="numeric" type="number" min={1} value={crmID}
+                onChange={(event) => setCrmID(event.target.value)}/></label>
+              <button disabled={busy || Number(crmID) <= 0} onClick={() => run(async () => {
+                const match = await request<Opportunity>("crm_lookup", {opportunity_id: Number(crmID)});
+                setDraft((current) => ({
+                  ...current, opportunity_id: match.id, title: current.title || match.title,
                   client_name: match.contact_name || current.client_name, client_email: match.contact_email || current.client_email,
-                  currency: currencies.includes(match.currency || "") ? match.currency! : current.currency}));
+                  currency: currencies.includes(match.currency || "") ? match.currency! : current.currency,
+                }));
               })}>Import from CRM</button>
-              {draft.opportunity_id && <button type="button" onClick={() => setDraft({...draft, opportunity_id: undefined})}>Unlink CRM #{draft.opportunity_id}</button>}
             </div>
+            {!!draft.opportunity_id && <div className="pp-linked"><span><Icon name="link"/> Opportunity #{draft.opportunity_id}</span>
+              <button className="pp-text-button" onClick={() => setDraft({...draft, opportunity_id: undefined})}>Unlink CRM</button></div>}
           </section>
-          <section className="prop-card">
-            <h2>Scope and pricing</h2>
-            <p>Use categories like Core build, Integrations, and Support. Required items are always included.</p>
-            {draft.categories.map((group, i) => <fieldset className="prop-category" key={i}>
-              <legend>Category {i + 1}</legend>
-              <div className="prop-grid">
-                <label>Name<input aria-label={"Category " + (i + 1) + " name"} maxLength={120} value={group.name} onChange={(e) => updateCategory(i, {name: e.target.value})}/></label>
-                <label>Selection rule<select value={group.rule} onChange={(e) => {
-                  const rule = e.target.value as Rule;
-                  updateCategory(i, {rule, items: rule === "any" ? group.items : group.items.map((item) => ({...item, required: false}))});
-                }}>{Object.entries(rules).map(([rule, name]) => <option key={rule} value={rule}>{name}</option>)}</select></label>
-              </div>
-              {group.items.map((line, j) => <fieldset className="prop-line" key={j}>
-                <legend>Item {j + 1}</legend>
-                <div className="prop-grid">
-                  <label>Item name<input maxLength={160} value={line.name} onChange={(e) => updateLine(i, j, {name: e.target.value})}/></label>
-                  <label>Price ({draft.currency})<input inputMode="decimal" value={line.amount} onChange={(e) => updateLine(i, j, {amount: e.target.value})}/></label>
-                </div>
-                <label>Description<textarea maxLength={2000} value={line.description || ""} onChange={(e) => updateLine(i, j, {description: e.target.value})}/></label>
-                <div className="prop-actions">
-                  {group.rule === "any" && <label className="prop-check"><input type="checkbox" checked={!!line.required}
-                    onChange={(e) => updateLine(i, j, {required: e.target.checked})}/> Required item</label>}
-                  <button type="button" onClick={() => updateCategory(i, {items: group.items.filter((_, index) => index !== j)})}>Remove item</button>
-                </div>
-              </fieldset>)}
-              <div className="prop-actions">
-                <button type="button" disabled={draft.categories.reduce((sum, row) => sum + row.items.length, 0) >= 100}
-                  onClick={() => updateCategory(i, {items: [...group.items, {name: "", amount: "0.00"}]})}>Add item</button>
-                <button type="button" onClick={() => setDraft({...draft, categories: draft.categories.filter((_, index) => index !== i)})}>Remove category</button>
-              </div>
-            </fieldset>)}
-            <div className="prop-actions">
-              <button type="button" disabled={draft.categories.length >= 20}
-                onClick={() => setDraft({...draft, categories: [...draft.categories, {name: "", rule: "any", items: []}]})}>Add category</button>
-            </div>
-          </section>
-          <div className="prop-actions">
-            <button type="submit" disabled={busy}>Save draft</button>
-            <button type="button" disabled={busy} onClick={() => run(() => setPreview(toContent(draft)))}>Preview selection</button>
-            <button type="button" className="prop-primary" disabled={busy} onClick={() => {
-              if (open && !window.confirm("Publish this draft and close the previous client link?")) return;
-              void run(() => save(true));
-            }}>Save and publish</button>
+          <button className="pp-next-step" onClick={() => changeTab("scope")}><span><Icon name="layers"/> Add scope & pricing</span><Icon name="arrow"/></button>
+        </div>
+      </div> : <div className="pp-editor-grid">
+        <section className="pp-card">
+          <SectionTitle title="Proposal overview" description={"Prepared by " + latest!.content.sender}/>
+          <div className="pp-metadata">
+            <div><span>Client</span><strong>{latest!.content.client_name || "—"}</strong><small>{latest!.content.client_email}</small></div>
+            <div><span>Required scope</span><strong>{money(requiredTotal(latest!.content), latest!.content.currency)}</strong></div>
+            <div><span>Revision</span><strong>{latest!.number}</strong></div>
+            <div><span>Valid until</span><strong>{latest!.expires_at ? formatDate(latest!.expires_at) : "—"}</strong></div>
           </div>
-          {preview && <SelectionPreview key={JSON.stringify(preview)} content={preview}/>}
-        </form>}
-        {record && <section className="prop-card">
-          <div className="prop-header"><h2>Revision history</h2><label>Revision<select value={shown!.id}
-            onChange={(e) => setHistoryId(Number(e.target.value))}>
-            {record.revisions.map((r) => <option key={r.id} value={r.id}>Revision {r.number} · {states[r.state]}</option>)}
-          </select></label></div>
-          <h3>{shown!.content.title}</h3>
-          {shown!.response && <SelectionPreview key={shown!.id} content={shown!.content} reply={shown!.response}/>}
-          {!shown!.response && shown!.state !== "draft" && <SelectionPreview key={shown!.id} content={shown!.content}/>}
-          <div className="prop-actions">
-            {!editing && !accepted && <button disabled={busy} onClick={() => run(async () => {
-              show(await api<Detail>(projectId, "revise", {proposal_id: record.id})); await reload();
-            })}>Start revision</button>}
-            <button disabled={busy} onClick={() => start(shown!.content)}>Use as new proposal</button>
-            {accepted?.content.opportunity_id && <button disabled={busy} onClick={() => {
+          <div className="pp-prose-block"><h3>Overview</h3><p className="pp-copy">{latest!.content.overview || "No overview added."}</p></div>
+          {latest!.content.terms && <div className="pp-prose-block"><h3>Terms & exclusions</h3><p className="pp-copy">{latest!.content.terms}</p></div>}
+        </section>
+        <div className="pp-stack">
+          <section className="pp-card">
+            <SectionTitle title="Client response" description={responseRevision?.response ? "Recorded decision on revision " + responseRevision.number + "." : "Responses appear here after your client submits a decision."}/>
+            {responseRevision?.response ? <>
+              <StatePill state={responseRevision.response.outcome}/>
+              <p className="pp-response-total">{money(responseRevision.response.total_minor, responseRevision.content.currency)}</p>
+              <p className="pp-muted">{responseRevision.response.name || "Client"} · {formatDate(responseRevision.response.created_at)}</p>
+              {responseRevision.response.note && <p className="pp-copy pp-response-note">{responseRevision.response.note}</p>}
+              <DecisionCounts reply={responseRevision.response}/>
+              <button onClick={() => changeTab("history")}>Review decisions <Icon name="arrow"/></button>
+            </> : <div className="pp-waiting"><Icon name="clock"/><span>Awaiting a client response</span></div>}
+          </section>
+          {!!accepted?.content.opportunity_id && <section className="pp-card">
+            <SectionTitle title="CRM opportunity" description={"Opportunity #" + accepted.content.opportunity_id}/>
+            <button disabled={busy} onClick={() => {
               if (!window.confirm("Update the value of CRM opportunity #" + accepted.content.opportunity_id + "?")) return;
               void run(async () => {
-                await api(projectId, "crm_sync", {proposal_id: record.id});
+                await request("crm_sync", {proposal_id: record!.id});
                 setNotice("Accepted value synced to CRM.");
               });
-            }}>Sync accepted value to CRM</button>}
+            }}><Icon name="refresh"/> Sync accepted value to CRM</button>
+          </section>}
+          {open && <button className="pp-next-step" onClick={() => changeTab("sharing")}><span><Icon name="link"/> Share this proposal</span><Icon name="arrow"/></button>}
+        </div>
+      </div>)}
+
+      {detailVisible && tab === "scope" && (editing ? <div className="pp-stack">
+        <div className="pp-section-toolbar">
+          <SectionTitle title="Scope & pricing" description="Group work into categories. Clients can include, defer, or decline optional items."/>
+          <button disabled={busy || draft.categories.length >= 20} onClick={() => setDraft({
+            ...draft, categories: [...draft.categories, {name: "", rule: "any", items: []}],
+          })}><Icon name="plus"/> Add category</button>
+        </div>
+        {!draft.categories.length && <Empty title="Build your scope" icon="layers"
+          description="Start with a category such as Core build, Integrations, or Support. Add items and set how your client can choose.">
+          <button className="pp-primary" onClick={() => setDraft({
+            ...draft, categories: [{name: "", rule: "any", items: []}],
+          })}><Icon name="plus"/> Add first category</button>
+        </Empty>}
+        {draft.categories.map((group, i) => <fieldset className="pp-scope-category" key={i}>
+          <legend className="pp-sr">Category {i + 1}</legend>
+          <div className="pp-category-header">
+            <span className="pp-category-number">{String(i + 1).padStart(2, "0")}</span>
+            <label className="pp-category-name">Category name<input aria-label={"Category " + (i + 1) + " name"} maxLength={120}
+              placeholder="e.g. Core build" value={group.name} onChange={(event) => updateCategory(i, {name: event.target.value})}/></label>
+            <label className="pp-category-rule">Selection rule<select value={group.rule} onChange={(event) => {
+              const rule = event.target.value as Rule;
+              updateCategory(i, {rule, items: rule === "any" ? group.items : group.items.map((item) => ({...item, required: false}))});
+            }}>{Object.entries(rules).map(([rule, name]) => <option key={rule} value={rule}>{name}</option>)}</select></label>
+            <button className="pp-icon-button pp-danger-text" aria-label={"Remove category " + (i + 1)}
+              onClick={() => {
+                if (group.items.length && !window.confirm("Remove this category and its items?")) return;
+                setDraft({...draft, categories: draft.categories.filter((_, index) => index !== i)});
+              }}><Icon name="trash"/></button>
           </div>
-        </section>}
-      </main>
-    </div>
+          <div className="pp-category-body">
+            {group.items.length === 0 && <p className="pp-muted pp-no-items">Add the first item in this category.</p>}
+            {group.items.map((line, j) => <fieldset className="pp-scope-item" key={j}>
+              <legend className="pp-sr">Item {j + 1}</legend>
+              <div className="pp-item-main">
+                <label>Item name<input maxLength={160} value={line.name} placeholder="e.g. Stripe billing"
+                  onChange={(event) => updateLine(i, j, {name: event.target.value})}/></label>
+                <label>Description<textarea maxLength={2000} value={line.description || ""}
+                  placeholder="Explain what is included and the outcome."
+                  onChange={(event) => updateLine(i, j, {description: event.target.value})}/></label>
+              </div>
+              <div className="pp-item-settings">
+                <label>Price ({draft.currency})<input inputMode="decimal" value={line.amount}
+                  onChange={(event) => updateLine(i, j, {amount: event.target.value})}/></label>
+                {group.rule === "any" ? <label className="pp-check"><input type="checkbox" checked={!!line.required}
+                  onChange={(event) => updateLine(i, j, {required: event.target.checked})}/> Required item</label>
+                  : <p className="pp-muted">Part of a pick-one category</p>}
+                <button className="pp-text-button pp-danger-text" onClick={() => {
+                  if ((line.name || line.description || Number(line.amount)) && !window.confirm("Remove this item from the draft?")) return;
+                  updateCategory(i, {items: group.items.filter((_, index) => index !== j)});
+                }}><Icon name="trash"/> Remove item</button>
+              </div>
+            </fieldset>)}
+            <button className="pp-add-item" disabled={draftItemCount >= 100}
+              onClick={() => updateCategory(i, {items: [...group.items, {name: "", amount: "0.00"}]})}><Icon name="plus"/> Add item</button>
+          </div>
+        </fieldset>)}
+        {!!draft.categories.length && <p className="pp-muted">{draft.categories.length} categories · {draftItemCount} items · Prices in {draft.currency}</p>}
+      </div> : <SelectionPreview content={shown!.content} reply={shown!.response}/>)}
+
+      {detailVisible && tab === "preview" && (previewError
+        ? <div className="pp-notice pp-error" role="alert">{previewError} <button onClick={() => changeTab("scope")}>Back to pricing</button></div>
+        : <div className="pp-stack">
+          <div className="pp-preview-intro"><span><Icon name="file"/> Client preview</span><p>Try the item choices and review the total before sharing.</p></div>
+          <SelectionPreview key={JSON.stringify(preview)} content={preview!}/>
+        </div>)}
+
+      {detailVisible && tab === "sharing" && (open ? <div className="pp-share-grid">
+        <section className="pp-card">
+          <SectionTitle title="Private client link" description="Anyone with this link can review this revision and submit a decision."/>
+          <div className="pp-live-banner"><StatePill state="published"/><span>Revision {open.number} · Open until {formatDate(open.expires_at!)}</span></div>
+          <button className="pp-primary" disabled={busy} onClick={() => run(() => shareLink())}><Icon name="link"/> Copy private link</button>
+          {url && <div className="pp-link-field"><label>Private client link<input readOnly value={url} onFocus={(event) => event.target.select()}/></label>
+            <a className="pp-button" href={url} target="_blank" rel="noopener noreferrer">Open client page <Icon name="arrow"/></a></div>}
+          <div className="pp-section-divider">
+            <h3>Replace a shared link</h3><p>Issue a new link if you need to revoke access through the previous one.</p>
+            <button disabled={busy} onClick={() => {
+              if (window.confirm("Revoke the current link and issue a new one?")) void run(() => shareLink(true));
+            }}><Icon name="refresh"/> Rotate link</button>
+          </div>
+        </section>
+        <div className="pp-stack">
+          <section className="pp-card">
+            <SectionTitle title="Email invitation" description="Send through your project’s configured Messaging sender."/>
+            <dl className="pp-recipient"><dt>Recipient</dt><dd>{open.content.client_name || "Client"}</dd><dd>{open.content.client_email || "No email on this revision"}</dd></dl>
+            <div className="pp-actions">
+              <button disabled={busy || !open.content.client_email} onClick={() => email(false)}><Icon name="send"/> Email invitation</button>
+              <button disabled={busy || !open.content.client_email} onClick={() => email(true)}>Send reminder</button>
+            </div>
+          </section>
+          <section className="pp-card">
+            <SectionTitle title="Close this revision" description="Withdraw it to stop new responses. Its record stays in your history."/>
+            <button className="pp-danger-text" disabled={busy} onClick={() => {
+              if (!window.confirm("Close this revision to new client responses?")) return;
+              void run(async () => { show(await request<Detail>("withdraw", fields(open))); await reload(); });
+            }}>Withdraw proposal</button>
+          </section>
+        </div>
+      </div> : <Empty title={editing ? "Publish when you’re ready" : "This proposal is closed"} icon="link"
+        description={editing ? "Save and publish your draft to get a private client link and send an invitation." : "Review its client response and revision history for the recorded scope."}>
+        {editing && <button onClick={() => changeTab("preview")}>Review client preview</button>}
+      </Empty>)}
+
+      {detailVisible && tab === "history" && (record ? <div className="pp-history-grid">
+        <nav className="pp-card pp-history-list" aria-label="Revision history">
+          <SectionTitle title="Revisions" description="Published scope and client decisions."/>
+          {record.revisions.map((r) => <button className={shown?.id === r.id ? "is-selected" : ""} key={r.id} aria-current={shown?.id === r.id}
+            onClick={() => setHistoryId(r.id)}>
+            <span><strong>Revision {r.number}</strong><StatePill state={r.state}/></span>
+            <small>{r.response ? "Response · " + formatDate(r.response.created_at) : r.published_at ? "Published · " + formatDate(r.published_at) : "Draft"}</small>
+          </button>)}
+        </nav>
+        <section className="pp-stack">
+          <div className="pp-section-toolbar"><div><h2>{shown!.content.title}</h2><p className="pp-muted">Revision {shown!.number}</p></div>
+            <button disabled={busy} onClick={() => start(shown!.content)}>Use as new proposal</button></div>
+          <SelectionPreview key={shown!.id} content={shown!.content} reply={shown!.response} readOnly/>
+        </section>
+      </div> : <Empty title="Your revision history will appear here" icon="clock" description="Save your first draft to start the proposal record."/> )}
+    </main>
+    {editing && detailVisible && <footer className="pp-save-bar">
+      <span className="pp-muted"><span className={"pp-save-dot" + (dirty ? " is-dirty" : "")}/>{dirty ? "Unsaved draft" : "All changes saved"}</span>
+      <div className="pp-actions">
+        <button disabled={busy} onClick={() => changeTab("preview")}>Preview</button>
+        <button disabled={busy} onClick={() => run(() => save(false))}>Save draft</button>
+        <button className="pp-primary" disabled={busy} onClick={() => {
+          if (open && !window.confirm("Publish this draft and close the previous client link?")) return;
+          void run(() => save(true));
+        }}>{busy ? "Saving…" : "Save and publish"}<Icon name="arrow"/></button>
+      </div>
+    </footer>}
   </div>;
 }
 
-function SelectionPreview({content, reply}: {content: Content; reply?: Reply}) {
+function requiredTotal(content: Content) {
+  return (content.categories || []).reduce((total, group) => total +
+    (group.items || []).reduce((sum, item) => sum + (item.required ? item.amount_minor : 0), 0), 0);
+}
+function formatDate(timestamp: number) {
+  return new Date(timestamp * 1000).toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
+}
+function SectionTitle({title, description}: {title: string; description?: string}) {
+  return <div className="pp-section-title"><h2>{title}</h2>{description && <p>{description}</p>}</div>;
+}
+function Empty({title, description, icon, children}: {
+  title: string; description: string; icon: keyof typeof iconPaths; children?: ReactNode;
+}) {
+  return <div className="pp-empty"><span className="pp-empty-icon"><Icon name={icon}/></span><h2>{title}</h2><p>{description}</p>{children}</div>;
+}
+function DecisionCounts({reply}: {reply: Reply}) {
+  const choices = Object.values(reply.selection);
+  return <div className="pp-decision-counts">
+    <span><strong>{choices.filter((choice) => choice === "include").length}</strong> Included</span>
+    <span><strong>{choices.filter((choice) => choice === "later").length}</strong> For later</span>
+    <span><strong>{choices.filter((choice) => choice === "decline").length}</strong> Declined</span>
+  </div>;
+}
+function SelectionPreview({content, reply, readOnly = false}: {content: Content; reply?: Reply; readOnly?: boolean}) {
   const [choices, setChoices] = useState<Record<string, Choice>>({});
   const selection = reply?.selection || choices;
   let total = 0;
-  const categories = (content.categories || []).map((group, i) =>
-    <section className="prop-category" key={i}>
-      <h3>{group.name || "Untitled category"}</h3>
-      <small>{rules[group.rule]}</small>
-      {(group.items || []).map((line, j) => {
-        const key = i + ":" + j;
-        const choice = selection[key] || "unselected";
-        if (line.required || choice === "include") total += line.amount_minor;
-        return <div className="prop-preview-row" key={j}>
-          <div><strong>{line.name || "Untitled item"}</strong>{line.description && <p>{line.description}</p>}</div>
-          <span>{money(line.amount_minor, content.currency)}</span>
-          {line.required ? <span>Required</span> : reply ? <span>{labels[choice]}</span> :
-            <select aria-label={"Choice for " + line.name} value={choice} onChange={(e) => {
-              const value = e.target.value as Choice;
-              setChoices((previous) => {
-                const next = {...previous, [key]: value};
-                if (value === "include" && group.rule !== "any") {
-                  (group.items || []).forEach((_, index) => {
-                    const other = i + ":" + index;
-                    if (other !== key && next[other] === "include") next[other] = "unselected";
-                  });
-                }
-                return next;
-              });
-            }}>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
-        </div>;
-      })}
-    </section>);
-  return <section className="prop-card prop-preview">
-    <h3>{reply ? states[reply.outcome] : "Client selection preview"}</h3>
-    <p className="prop-copy">{content.overview}</p>
-    {categories}
-    <strong>{reply?.outcome === "accepted" ? "Accepted total" : "Selected total"} · {money(reply?.total_minor ?? total, content.currency)}</strong>
-    <p className="prop-copy">{content.terms}</p>
-    {reply && <div><p>{[reply.name, new Date(reply.created_at * 1000).toLocaleString()].filter(Boolean).join(" · ")}</p>
-      {reply.note && <p className="prop-copy">{reply.note}</p>}</div>}
-  </section>;
+  const categories = (content.categories || []).map((group, i) => <section className="pp-preview-category" key={i}>
+    <div className="pp-preview-category-head"><h3>{group.name || "Untitled category"}</h3><span>{rules[group.rule]}</span></div>
+    {(group.items || []).map((line, j) => {
+      const key = i + ":" + j;
+      const choice = selection[key] || "unselected";
+      if (line.required || choice === "include") total += line.amount_minor;
+      return <div className="pp-preview-item" key={j}>
+        <div><strong>{line.name || "Untitled item"}</strong>{line.description && <p className="pp-copy">{line.description}</p>}</div>
+        <span className="pp-amount">{money(line.amount_minor, content.currency)}</span>
+        {line.required ? <span className="pp-required"><Icon name="check"/> Required</span> :
+          reply || readOnly ? <span className={"pp-choice pp-choice-" + choice}>{labels[choice]}</span> :
+          <select aria-label={"Choice for " + line.name} value={choice} onChange={(event) => {
+            const value = event.target.value as Choice;
+            setChoices((previous) => {
+              const next = {...previous, [key]: value};
+              if (value === "include" && group.rule !== "any") {
+                (group.items || []).forEach((_, index) => {
+                  const other = i + ":" + index;
+                  if (other !== key && next[other] === "include") next[other] = "unselected";
+                });
+              }
+              return next;
+            });
+          }}>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
+      </div>;
+    })}
+  </section>);
+  return <div className="pp-client-preview">
+    <section className="pp-card pp-preview-document">
+      <header className="pp-document-header"><p className="pp-eyebrow">{content.sender || "Your business"} · Proposal</p>
+        <h2>{content.title || "Untitled proposal"}</h2>{content.client_name && <p>Prepared for {content.client_name}</p>}
+        {content.overview && <p className="pp-copy pp-document-overview">{content.overview}</p>}
+      </header>
+      {categories.length ? categories : <p className="pp-muted">Add categories and items in Scope & pricing to preview the client’s choices.</p>}
+      {content.terms && <section className="pp-preview-terms"><h3>Terms & exclusions</h3><p className="pp-copy">{content.terms}</p></section>}
+    </section>
+    <aside className="pp-card pp-preview-summary">
+      <SectionTitle title={reply ? states[reply.outcome] : "Selected scope"} description={reply ? "Recorded client response" : "The total updates as items are included."}/>
+      <p className="pp-price">{money(reply?.total_minor ?? total, content.currency)}</p>
+      <span className="pp-muted">{content.currency}{reply?.outcome === "accepted" ? " · Accepted total" : " · Selected total"}</span>
+      {reply && <><DecisionCounts reply={reply}/><div className="pp-section-divider">
+        <strong>{reply.name || "Client"}</strong><p>{formatDate(reply.created_at)}</p>
+        {reply.note && <p className="pp-copy">{reply.note}</p>}
+      </div></>}
+      {!reply && <div className="pp-preview-help"><Icon name="link"/><p>{readOnly
+        ? "This is a saved revision. Its scope and prices are preserved."
+        : "Clients can include items, save them for later, or decline them before responding."}</p></div>}
+    </aside>
+  </div>;
 }
 
 const styles = `
-.prop-panel { max-width: 92rem; margin: 0 auto; padding: 1.25rem; color: var(--foreground, inherit); }
-.prop-panel h1, .prop-panel h2, .prop-panel h3, .prop-panel p { margin: 0; }
-.prop-panel h1 { font-size: 1.65rem; font-weight: 700; }
-.prop-panel h2 { font-size: 1.15rem; font-weight: 650; }
-.prop-panel h3 { font-size: 1rem; font-weight: 650; }
-.prop-panel p, .prop-panel small { opacity: .8; overflow-wrap: anywhere; }
-.prop-header, .prop-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
-.prop-header { justify-content: space-between; margin-bottom: .45rem; }
-.prop-layout { display: grid; grid-template-columns: minmax(12rem, 17rem) minmax(0, 1fr); align-items: start; gap: 1rem; margin-top: 1rem; }
-.prop-main, .prop-card, .prop-panel label { display: grid; gap: .7rem; min-width: 0; }
-.prop-card, .prop-category, .prop-line { padding: 1rem; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: .7rem; }
-.prop-category, .prop-line { display: grid; gap: .55rem; min-width: 0; }
-.prop-category legend, .prop-line legend { padding: 0 .35rem; }
-.prop-nav button { text-align: left; display: grid; gap: .15rem; overflow-wrap: anywhere; }
-.prop-nav [aria-current="true"] { outline: 2px solid #228e81; }
-.prop-panel input:not([type=checkbox]), .prop-panel textarea, .prop-panel select, .prop-panel button {
-  border: 1px solid color-mix(in srgb, currentColor 28%, transparent); border-radius: .4rem; background: transparent;
-  padding: .42rem .58rem; font: inherit; color: inherit; min-width: 0;
+.ap-proposals {
+  --pp-bg: var(--color-bg, var(--bg, #11161c));
+  --pp-card: var(--color-bg-card, var(--bg-card, #1a222b));
+  --pp-input: var(--color-bg-input, var(--bg-input, #141c24));
+  --pp-hover: var(--color-bg-hover, var(--bg-hover, #232d38));
+  --pp-text: var(--color-text, var(--text, #e8edf2));
+  --pp-muted: var(--color-text-muted, var(--text-muted, #a7b0ba));
+  --pp-dim: var(--color-text-dim, var(--text-dim, #7c8793));
+  --pp-line: var(--color-border, var(--border, #2b3642));
+  --pp-accent: var(--color-accent, var(--accent, #4f9cf7));
+  --pp-success: var(--color-success, var(--success, #4ade80));
+  --pp-warn: var(--color-warn, var(--warn, #fbbf24));
+  --pp-error: var(--color-error, var(--error, #f87171));
+  --pp-radius: var(--radius-lg, 10px);
+  color: var(--pp-text); background: var(--pp-bg);
+  font-family: var(--font-base, system-ui, sans-serif); font-size: 14px; line-height: 1.5;
+  width: 100%; height: 100%; min-height: 100%; overflow: auto; padding: 28px; box-sizing: border-box;
 }
-.prop-panel select option { color: #182535; background: #fff; }
-.prop-panel button { cursor: pointer; }
-.prop-panel button:disabled { opacity: .5; cursor: default; }
-.prop-panel button.prop-primary { background: #075e55; color: #fff; border-color: #075e55; }
-.prop-panel label { gap: .25rem; font-size: .87rem; font-weight: 560; }
-.prop-panel textarea { min-height: 3.5rem; resize: vertical; }
-.prop-panel .prop-check { display: flex; align-items: center; }
-.prop-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
-.prop-crm { align-items: end; }
-.prop-preview-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(5rem, 8rem); align-items: center; gap: .55rem; }
-.prop-copy { white-space: pre-wrap; }
-.prop-panel .prop-error { color: #c43b36; opacity: 1; margin-top: .5rem; }
-.prop-panel .prop-notice { margin-top: .5rem; }
-@media (max-width: 760px) { .prop-layout { grid-template-columns: 1fr; } }
-@media (max-width: 430px) { .prop-grid, .prop-preview-row { grid-template-columns: 1fr; } }
+.ap-proposals *, .ap-proposals *::before, .ap-proposals *::after { box-sizing: border-box; }
+.ap-proposals :is(h1,h2,h3,p,fieldset,dl,dd) { margin: 0; }
+.ap-proposals h1 { font-size: 24px; font-weight: 650; letter-spacing: -.025em; line-height: 1.3; overflow-wrap: anywhere; }
+.ap-proposals h2 { font-size: 16px; font-weight: 600; line-height: 1.4; }
+.ap-proposals h3 { font-size: 14px; font-weight: 600; }
+.ap-proposals p, .ap-proposals small { overflow-wrap: anywhere; }
+.ap-proposals svg { flex-shrink: 0; vertical-align: middle; }
+.ap-proposals button, .ap-proposals .pp-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 13px;
+  border: 1px solid var(--pp-line); border-radius: var(--radius-md, 8px); background: var(--pp-card);
+  color: var(--pp-text); font: inherit; font-size: 13px; line-height: 1.4; font-weight: 500;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+}
+.ap-proposals button:hover, .ap-proposals .pp-button:hover { background: var(--pp-hover); border-color: var(--pp-dim); }
+.ap-proposals button:disabled { opacity: .45; cursor: default; }
+.ap-proposals button.pp-primary { background: var(--pp-accent); border-color: var(--pp-accent); color: var(--pp-bg); font-weight: 650; }
+.ap-proposals button.pp-primary:hover { background: var(--color-accent-hover, var(--accent-hover, var(--pp-accent))); }
+.ap-proposals :is(button,a,input,select,textarea):focus-visible { outline: 2px solid var(--pp-accent); outline-offset: 3px; }
+.ap-proposals :is(input,select,textarea) {
+  width: 100%; min-width: 0; padding: 10px 12px; background: var(--pp-input); color: var(--pp-text);
+  border: 1px solid var(--pp-line); border-radius: var(--radius-md, 8px); font: inherit; font-size: 13px; line-height: 1.5;
+}
+.ap-proposals :is(input,textarea)::placeholder { color: var(--pp-dim); opacity: 1; }
+.ap-proposals select option { background: var(--pp-card); color: var(--pp-text); }
+.ap-proposals textarea { min-height: 104px; resize: vertical; }
+.ap-proposals label { display: grid; gap: 7px; font-size: 12px; font-weight: 550; color: var(--pp-muted); min-width: 0; }
+.ap-proposals input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--pp-accent); margin: 0; }
+.pp-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+.pp-title { min-width: 0; }.pp-title-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ap-proposals .pp-title > p { color: var(--pp-muted); margin-top: 5px; font-size: 13px; }
+.pp-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ap-proposals button.pp-back { border: 0; background: transparent; color: var(--pp-muted); padding: 0; margin-bottom: 18px; font-size: 12px; }
+.pp-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--pp-line); margin-bottom: 24px; overflow-x: auto; }
+.ap-proposals .pp-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 10px 0 13px; color: var(--pp-muted); }
+.ap-proposals .pp-tabs button[aria-selected="true"] { border-bottom-color: var(--pp-accent); color: var(--pp-accent); }
+.pp-list-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.ap-proposals .pp-search { position: relative; display: flex; align-items: center; width: min(380px, 100%); }
+.pp-search svg { position: absolute; left: 12px; color: var(--pp-dim); }.ap-proposals .pp-search input { padding-left: 36px; }
+.pp-muted { color: var(--pp-muted); font-size: 12px; }.pp-amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pp-table-wrap { border: 1px solid var(--pp-line); border-radius: var(--pp-radius); overflow-x: auto; background: var(--pp-card); }
+.pp-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+.pp-table th { padding: 13px 18px; color: var(--pp-muted); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .055em; background: var(--pp-bg); white-space: nowrap; }
+.pp-table td { padding: 18px; border-top: 1px solid var(--pp-line); vertical-align: middle; }
+.pp-table tbody tr:hover { background: var(--pp-hover); }.pp-table td:first-child { min-width: 200px; }
+.pp-table small { display: block; margin-top: 3px; color: var(--pp-dim); font-size: 11px; }
+.ap-proposals button.pp-table-title { border: 0; background: transparent; padding: 0; text-align: left; font-weight: 600; white-space: normal; }
+.ap-proposals button.pp-table-title:hover { color: var(--pp-accent); }
+.ap-proposals .pp-icon-button { padding: 8px; }.pp-load-more { text-align: center; padding: 20px; }
+.pp-pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 9px; border: 1px solid var(--pp-line); color: var(--pp-muted); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.pp-pill > span { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pp-state-published { color: var(--pp-accent); background: color-mix(in srgb, var(--pp-accent) 9%, transparent); border-color: color-mix(in srgb, var(--pp-accent) 30%, transparent); }
+.pp-state-accepted { color: var(--pp-success); background: color-mix(in srgb, var(--pp-success) 8%, transparent); border-color: color-mix(in srgb, var(--pp-success) 28%, transparent); }
+.pp-state-changes_requested { color: var(--pp-warn); background: color-mix(in srgb, var(--pp-warn) 8%, transparent); border-color: color-mix(in srgb, var(--pp-warn) 28%, transparent); }
+.pp-state-declined { color: var(--pp-error); background: color-mix(in srgb, var(--pp-error) 8%, transparent); border-color: color-mix(in srgb, var(--pp-error) 28%, transparent); }
+.pp-empty { width: 100%; min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 52px 24px; border: 1px dashed var(--pp-line); border-radius: var(--pp-radius); text-align: center; gap: 12px; }
+.pp-empty p { color: var(--pp-muted); max-width: 450px; font-size: 13px; }.pp-empty button { margin-top: 6px; }
+.pp-empty-icon { display: inline-flex; padding: 12px; border: 1px solid var(--pp-line); background: var(--pp-card); border-radius: var(--pp-radius); color: var(--pp-muted); margin-bottom: 4px; }
+.pp-empty-icon svg { width: 22px; height: 22px; }
+.pp-card { background: var(--pp-card); border: 1px solid var(--pp-line); border-radius: var(--pp-radius); padding: 24px; min-width: 0; box-shadow: var(--shadow-card, none); }
+.pp-section-title { margin-bottom: 22px; }.ap-proposals .pp-section-title p { margin-top: 5px; color: var(--pp-muted); font-size: 12px; max-width: 600px; }
+.pp-section-toolbar { display: flex; align-items: start; justify-content: space-between; gap: 20px; }.pp-section-toolbar .pp-section-title { margin-bottom: 0; }
+.pp-editor-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr); gap: 22px; align-items: start; }
+.pp-share-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(300px, 1fr); gap: 22px; align-items: start; }
+.pp-stack { display: grid; gap: 20px; min-width: 0; }.pp-fields { display: grid; gap: 22px; }.pp-grid-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.ap-proposals .pp-overview-input { min-height: 146px; }
+.pp-inline-field { display: flex; align-items: end; gap: 10px; }.pp-inline-field label { flex: 1; }
+.pp-linked { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--pp-line); margin-top: 18px; padding-top: 15px; font-size: 12px; }.pp-linked > span { display: inline-flex; align-items: center; gap: 7px; }
+.ap-proposals button.pp-next-step { display: flex; justify-content: space-between; padding: 18px 20px; color: var(--pp-accent); width: 100%; }.pp-next-step > span { display: inline-flex; align-items: center; gap: 8px; }
+.pp-scope-category { border: 1px solid var(--pp-line); border-radius: var(--pp-radius); overflow: hidden; padding: 0; min-width: 0; background: var(--pp-card); }
+.pp-category-header { display: flex; gap: 18px; align-items: center; padding: 20px 24px; background: color-mix(in srgb, var(--pp-hover) 45%, var(--pp-card)); border-bottom: 1px solid var(--pp-line); }
+.pp-category-number { font-size: 12px; color: var(--pp-dim); }.pp-category-name { flex: 1; }.pp-category-rule { width: 220px; }.pp-category-header > button { align-self: end; margin-bottom: 1px; }
+.pp-category-body { padding: 0 24px 20px; }.pp-no-items { padding: 24px 0; }
+.pp-scope-item { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 28px; border: 0; border-bottom: 1px solid var(--pp-line); padding: 22px 0; min-width: 0; }
+.pp-item-main { display: grid; gap: 15px; min-width: 0; }.ap-proposals .pp-item-main textarea { min-height: 72px; }
+.pp-item-settings { display: grid; align-content: start; gap: 18px; }.ap-proposals label.pp-check { display: flex; align-items: center; gap: 8px; color: var(--pp-text); }
+.ap-proposals button.pp-text-button { border: 0; padding: 0; background: transparent; justify-content: start; font-size: 12px; }
+.ap-proposals .pp-danger-text { color: var(--pp-error); }.ap-proposals button.pp-add-item { margin-top: 18px; border-style: dashed; background: transparent; }
+.pp-save-bar { display: flex; justify-content: space-between; align-items: center; gap: 16px; position: sticky; bottom: -28px; padding: 18px 0; margin-top: 24px; border-top: 1px solid var(--pp-line); background: var(--pp-bg); z-index: 2; }
+.pp-save-dot { display: inline-block; width: 6px; height: 6px; background: var(--pp-success); border-radius: 50%; margin-right: 7px; }.pp-save-dot.is-dirty { background: var(--pp-warn); }
+.pp-notice { display: flex; align-items: center; gap: 10px; padding: 12px 15px; border: 1px solid var(--pp-line); border-left: 3px solid var(--pp-success); background: var(--pp-card); border-radius: var(--radius-md, 8px); margin-bottom: 20px; font-size: 13px; overflow-wrap: anywhere; }.pp-notice.pp-error { border-left-color: var(--pp-error); color: var(--pp-error); }
+.pp-metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; padding-bottom: 24px; border-bottom: 1px solid var(--pp-line); }.pp-metadata span, .pp-metadata small { display: block; font-size: 12px; color: var(--pp-muted); margin-bottom: 4px; }.pp-metadata strong { display: block; font-size: 14px; font-weight: 550; }
+.pp-prose-block { margin-top: 24px; }.ap-proposals .pp-prose-block p { color: var(--pp-muted); margin-top: 10px; }.pp-copy { white-space: pre-wrap; line-height: 1.7; overflow-wrap: anywhere; }
+.pp-waiting { display: flex; align-items: center; gap: 9px; padding: 18px 0; color: var(--pp-muted); font-size: 13px; }
+.pp-response-total { font-size: 28px; font-weight: 650; letter-spacing: -.025em; padding-top: 16px; }.pp-response-note { margin-top: 18px !important; }
+.pp-decision-counts { display: flex; gap: 20px; flex-wrap: wrap; margin: 20px 0; padding-top: 18px; border-top: 1px solid var(--pp-line); font-size: 11px; color: var(--pp-muted); }.pp-decision-counts strong { display: block; color: var(--pp-text); font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+.pp-live-banner { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--pp-muted); font-size: 12px; padding-bottom: 22px; }.pp-link-field { display: grid; gap: 12px; margin-top: 20px; }.pp-link-field a { justify-self: start; }
+.pp-section-divider { border-top: 1px solid var(--pp-line); padding-top: 22px; margin-top: 24px; }.ap-proposals .pp-section-divider p { color: var(--pp-muted); margin: 8px 0 18px; font-size: 12px; }
+.pp-recipient { font-size: 13px; margin-bottom: 22px !important; }.pp-recipient dt { font-size: 11px; color: var(--pp-muted); margin-bottom: 7px; }.pp-recipient dd + dd { color: var(--pp-muted); font-size: 12px; margin-top: 3px; }
+.pp-preview-intro { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; color: var(--pp-muted); font-size: 12px; }.pp-preview-intro span { display: flex; align-items: center; gap: 8px; }
+.pp-client-preview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, 320px); gap: 24px; align-items: start; }
+.pp-preview-document { padding: 32px; }.pp-document-header { padding-bottom: 28px; }.pp-eyebrow { color: var(--pp-accent); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; font-weight: 600; }
+.ap-proposals .pp-document-header h2 { font-size: 25px; font-weight: 650; margin: 14px 0 8px; letter-spacing: -.025em; }.pp-document-header > p:not(.pp-eyebrow) { color: var(--pp-muted); font-size: 13px; }.pp-document-overview { margin-top: 24px !important; }
+.pp-preview-category { border-top: 1px solid var(--pp-line); padding: 24px 0 8px; }.pp-preview-category-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }.pp-preview-category-head span { color: var(--pp-dim); font-size: 11px; }
+.pp-preview-item { display: grid; grid-template-columns: minmax(0, 1fr) auto 140px; align-items: center; gap: 20px; padding: 18px 0; }.pp-preview-item strong { font-size: 13px; font-weight: 550; }.pp-preview-item p { color: var(--pp-muted); font-size: 12px; margin-top: 5px; }.pp-preview-item .pp-amount { font-size: 13px; }.ap-proposals .pp-preview-item select { padding: 7px 9px; font-size: 12px; }
+.pp-required { display: flex; align-items: center; gap: 5px; color: var(--pp-dim); font-size: 11px; }.pp-required svg { width: 13px; height: 13px; }
+.pp-preview-summary { position: sticky; top: 0; }.pp-preview-summary .pp-section-title { margin-bottom: 18px; }.pp-price { font-size: 30px; font-weight: 650; letter-spacing: -.035em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }.pp-preview-help { border-top: 1px solid var(--pp-line); margin-top: 24px; padding-top: 20px; color: var(--pp-muted); display: flex; align-items: start; gap: 9px; font-size: 12px; }.pp-preview-terms { border-top: 1px solid var(--pp-line); padding-top: 24px; margin-top: 20px; }.pp-preview-terms p { color: var(--pp-muted); margin-top: 10px !important; font-size: 12px; }
+.pp-choice { font-size: 12px; color: var(--pp-muted); }.pp-choice-include { color: var(--pp-success); }.pp-choice-later { color: var(--pp-warn); }.pp-choice-decline { color: var(--pp-error); }
+.pp-history-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 24px; align-items: start; }.pp-history-list { padding: 18px; }.ap-proposals .pp-history-list button { display: grid; gap: 9px; width: 100%; padding: 14px 10px; border-color: transparent; background: transparent; text-align: left; margin-top: 8px; white-space: normal; }.pp-history-list button > span { display: flex; justify-content: space-between; align-items: center; gap: 10px; }.pp-history-list small { color: var(--pp-muted); font-size: 11px; }.ap-proposals .pp-history-list .is-selected { background: var(--pp-hover); border-color: var(--pp-line); }
+.pp-history-grid .pp-client-preview { grid-template-columns: minmax(0, 1fr); }.pp-history-grid .pp-preview-summary { position: static; }.pp-history-grid .pp-price { font-size: 26px; }
+.pp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (min-width: 1800px) { .pp-editor-grid { grid-template-columns: minmax(0, 2fr) minmax(400px, 1fr); }.pp-client-preview { grid-template-columns: minmax(0, 1fr) 380px; } }
+@media (max-width: 1000px) { .pp-editor-grid, .pp-share-grid, .pp-history-grid { grid-template-columns: 1fr; }.pp-client-preview { grid-template-columns: minmax(0, 1fr) 270px; }.pp-preview-item { grid-template-columns: minmax(0, 1fr) auto; }.pp-preview-item select { grid-column: 1/-1; }.pp-history-list { display: flex; flex-wrap: wrap; gap: 8px; }.pp-history-list .pp-section-title { width: 100%; }.ap-proposals .pp-history-list button { width: auto; } }
+@media (max-width: 700px) {
+  .ap-proposals { padding: 18px; }.pp-header { align-items: start; flex-direction: column; gap: 14px; margin-bottom: 18px; }.ap-proposals h1 { font-size: 21px; }
+  .pp-tabs { gap: 22px; margin-bottom: 20px; }.pp-tabs button { white-space: nowrap; }.pp-list-toolbar { align-items: start; flex-direction: column; gap: 10px; }.ap-proposals .pp-search { width: 100%; }
+  .pp-grid-two, .pp-client-preview, .pp-scope-item { grid-template-columns: 1fr; }.pp-scope-item { gap: 18px; }.pp-category-header { flex-wrap: wrap; padding: 18px; gap: 12px; }.pp-category-name { flex-basis: calc(100% - 45px); }.pp-category-rule { width: calc(100% - 50px); }.pp-category-body { padding: 0 18px 18px; }
+  .pp-card { padding: 20px; }.pp-inline-field { flex-wrap: wrap; }.pp-inline-field label { min-width: 150px; }.pp-preview-document { padding: 22px; }.pp-preview-summary { position: static; }
+  .pp-save-bar { bottom: -18px; flex-wrap: wrap; padding: 14px 0; gap: 10px; }.pp-save-bar .pp-actions { width: 100%; justify-content: flex-end; gap: 6px; }.pp-save-bar button { padding: 8px 10px; }.pp-section-toolbar { flex-wrap: wrap; gap: 12px; }
+  .pp-empty { min-height: 280px; padding: 35px 20px; }.pp-preview-category-head { align-items: start; flex-direction: column; gap: 5px; }.pp-preview-item { gap: 12px; }.pp-document-header h2 { font-size: 22px !important; }
+  .pp-table th:nth-child(n+4), .pp-table td:nth-child(n+4) { display: none; }.pp-table td, .pp-table th { padding: 14px 12px; }.pp-table td:first-child { min-width: 0; }.pp-table th:nth-child(2), .pp-table td:nth-child(2) { display: none; }.pp-table td:first-child { width: 100%; }.pp-table .pp-table-title { font-size: 12px; }
+}
 `;
