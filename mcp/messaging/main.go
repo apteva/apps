@@ -245,6 +245,26 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolSendMessage,
 		},
 		{
+			Name: "reply_message",
+			Description: "Reply to an existing message in the current project. Args: message_id, body?, body_html?, attachments?, attachment_storage_ids?, media_url?, template_id?, vars?, reply_all? (email only, default false), idempotency_key?. " +
+				"Derives channel, registered sender, recipients, subject and RFC threading from the original; Gmail retains its thread on the same connection. Inbound replies use Reply-To then From; outbound follow-ups retain original To. Cc requires reply_all; Bcc and original attachments are never copied. " +
+				"Preserves subject ticket tokens and address tags, plus valid X-Ticket-ID and X-Ticket-Number headers (1-128 ASCII letters/digits or . _ : / -). Tagged inbound mailboxes use their registered base sender with the tagged Reply-To. Other original headers are not copied. " +
+				"Sender, recipient, subject and threading overrides are rejected. Existing suppression, provider/template restrictions and send results apply. Retry with the same idempotency_key to avoid duplicate sends; keys are scoped to the original message.",
+			InputSchema: schemaObject(map[string]any{
+				"message_id":             map[string]any{"type": "integer", "minimum": 1},
+				"body":                   map[string]any{"type": "string"},
+				"body_html":              map[string]any{"type": "string"},
+				"reply_all":              map[string]any{"type": "boolean", "default": false},
+				"attachments":            map[string]any{"type": "array", "items": attachmentInputSchema, "maxItems": maxAttachmentCount},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxAttachmentCount},
+				"media_url":              map[string]any{"type": "string"},
+				"template_id":            map[string]any{"type": "integer"},
+				"vars":                   map[string]any{"type": "object"},
+				"idempotency_key":        map[string]any{"type": "string"},
+			}, []string{"message_id"}),
+			Handler: a.toolReplyMessage,
+		},
+		{
 			Name:        "send_message_template",
 			Description: "Render a saved template and send. Args: template_id, channel, from, to, vars?, idempotency_key?.",
 			InputSchema: schemaObject(map[string]any{
@@ -843,6 +863,10 @@ type providerEvent struct {
 // ─── send_message ──────────────────────────────────────────────────
 
 func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.sendMessage(ctx, args, 0)
+}
+
+func (a *App) sendMessage(ctx *sdk.AppCtx, args map[string]any, replyToMessageID int64) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -1018,7 +1042,22 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	headers, _ := args["headers"].(map[string]any)
-	headersJSON, _ := json.Marshal(headers)
+	// Persist Reply-To as well as emitting it so future anchored follow-ups
+	// retain tagged ticket addresses. Keep it out of the custom-header map
+	// sent to the provider, which writes the dedicated Reply-To field itself.
+	storedHeaders := make(map[string]any, len(headers)+1)
+	for key, value := range headers {
+		storedHeaders[key] = value
+	}
+	if replyTo != "" {
+		for key := range storedHeaders {
+			if strings.EqualFold(key, "Reply-To") {
+				delete(storedHeaders, key)
+			}
+		}
+		storedHeaders["Reply-To"] = replyTo
+	}
+	headersJSON, _ := json.Marshal(storedHeaders)
 	if len(headersJSON) == 0 {
 		headersJSON = []byte("{}")
 	}
@@ -1113,8 +1152,15 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		MessageID:        id,
 		ProjectID:        pid,
 	}
-	if channel == channelEmail && emailBound.AppSlug == "gmail" && inReplyTo != "" {
-		_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND provider_slug='gmail' AND provider_connection_id=? AND message_id_header=? AND provider_thread_id<>'' ORDER BY id DESC LIMIT 1`, pid, emailBound.ConnectionID, inReplyTo).Scan(&in.ProviderThreadID)
+	if channel == channelEmail && emailBound.AppSlug == "gmail" {
+		if replyToMessageID > 0 {
+			// The server-resolved anchor also preserves Gmail threads when the
+			// original RFC Message-ID is unavailable. Never use a provider ID
+			// as an RFC header, or a thread from another project/connection.
+			_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND id=? AND provider_slug='gmail' AND provider_connection_id=?`, pid, replyToMessageID, emailBound.ConnectionID).Scan(&in.ProviderThreadID)
+		} else if inReplyTo != "" {
+			_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND provider_slug='gmail' AND provider_connection_id=? AND message_id_header=? AND provider_thread_id<>'' ORDER BY id DESC LIMIT 1`, pid, emailBound.ConnectionID, inReplyTo).Scan(&in.ProviderThreadID)
+		}
 	}
 
 	// Re-check at the last possible point before the external provider call.
