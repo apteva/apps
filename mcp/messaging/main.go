@@ -211,14 +211,18 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send_message",
-			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body?. Attachment-only messages are supported. " +
+			Description: "Send a new message with channel (email|sms|whatsapp), to (string|string[]), optional from and body; or reply using reply_to_message_id and new content, without channel/to/from. Attachment-only messages are supported. " +
+				"Reply mode derives sender, recipients, subject, RFC references and Gmail thread/account from a project-owned original. Inbound replies honor Reply-To, then From; outbound follow-ups retain To. reply_all (email only, default false) adds Cc and excludes own mailboxes. Bcc and original attachments are never copied. Addressing/threading overrides are rejected in reply mode. " +
+				"Preserves subject ticket tokens, tagged reply addresses, and valid X-Ticket-ID/X-Ticket-Number headers; other original headers are not copied. Reply retry keys are scoped to the original message. reply_to sets the email Reply-To address, distinct from reply_to_message_id. " +
 				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers. " +
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, message_id_header?, attachments:[normalized metadata]}. provider_message_id is the provider's opaque ID; message_id_header is the RFC email Message-ID when known and is the value to use for threading. " +
 				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
-			InputSchema: schemaObject(map[string]any{
+			InputSchema: sendMessageInputSchema(map[string]any{
+				"reply_to_message_id":    map[string]any{"type": "integer", "minimum": 1, "description": "Reply to this project-owned message. Omit channel, from, to, subject and threading fields; they are derived from the original."},
+				"reply_all":              map[string]any{"type": "boolean", "description": "Email reply mode only: include original To/Cc participants, excluding own mailboxes. Defaults to false."},
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
 				"connection_id":          map[string]any{"type": "integer", "description": "Optional bound email connection. Registered sender connection always takes precedence."},
@@ -241,28 +245,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"template_id":            map[string]any{"type": "integer"},
 				"vars":                   map[string]any{"type": "object"},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"channel", "to"}),
+			}),
 			Handler: a.toolSendMessage,
-		},
-		{
-			Name: "reply_message",
-			Description: "Reply to an existing message in the current project. Args: message_id, body?, body_html?, attachments?, attachment_storage_ids?, media_url?, template_id?, vars?, reply_all? (email only, default false), idempotency_key?. " +
-				"Derives channel, registered sender, recipients, subject and RFC threading from the original; Gmail retains its thread on the same connection. Inbound replies use Reply-To then From; outbound follow-ups retain original To. Cc requires reply_all; Bcc and original attachments are never copied. " +
-				"Preserves subject ticket tokens and address tags, plus valid X-Ticket-ID and X-Ticket-Number headers (1-128 ASCII letters/digits or . _ : / -). Tagged inbound mailboxes use their registered base sender with the tagged Reply-To. Other original headers are not copied. " +
-				"Sender, recipient, subject and threading overrides are rejected. Existing suppression, provider/template restrictions and send results apply. Retry with the same idempotency_key to avoid duplicate sends; keys are scoped to the original message.",
-			InputSchema: schemaObject(map[string]any{
-				"message_id":             map[string]any{"type": "integer", "minimum": 1},
-				"body":                   map[string]any{"type": "string"},
-				"body_html":              map[string]any{"type": "string"},
-				"reply_all":              map[string]any{"type": "boolean", "default": false},
-				"attachments":            map[string]any{"type": "array", "items": attachmentInputSchema, "maxItems": maxAttachmentCount},
-				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxAttachmentCount},
-				"media_url":              map[string]any{"type": "string"},
-				"template_id":            map[string]any{"type": "integer"},
-				"vars":                   map[string]any{"type": "object"},
-				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"message_id"}),
-			Handler: a.toolReplyMessage,
 		},
 		{
 			Name:        "send_message_template",
@@ -863,6 +847,12 @@ type providerEvent struct {
 // ─── send_message ──────────────────────────────────────────────────
 
 func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, replying := args["reply_to_message_id"]; replying {
+		return a.sendReply(ctx, args)
+	}
+	if _, present := args["reply_all"]; present {
+		return nil, errors.New("reply_all requires reply_to_message_id")
+	}
 	return a.sendMessage(ctx, args, 0)
 }
 

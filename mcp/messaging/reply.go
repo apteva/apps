@@ -14,9 +14,30 @@ import (
 var replyMessageIDPattern = regexp.MustCompile(`^<[^<>\s@]+@[^<>\s@]+>$`)
 var replyTicketIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
-// toolReplyMessage builds a new send request from a project-owned anchor. Only
+// New messages require channel/to; anchored replies derive their transport
+// fields. Advertise both modes without making channel/to mandatory for replies.
+func sendMessageInputSchema(properties map[string]any) map[string]any {
+	schema := schemaObject(properties, nil)
+	replyProperties := map[string]any{}
+	for _, field := range []string{"channel", "from", "from_name", "to", "cc", "bcc", "connection_id", "subject", "reply_to", "in_reply_to", "references", "headers", "message_id_header"} {
+		replyProperties[field] = false
+	}
+	schema["oneOf"] = []any{
+		map[string]any{
+			"required":   []string{"channel", "to"},
+			"properties": map[string]any{"reply_to_message_id": false, "reply_all": false},
+		},
+		map[string]any{
+			"required":   []string{"reply_to_message_id"},
+			"properties": replyProperties,
+		},
+	}
+	return schema
+}
+
+// sendReply builds a new send request from a project-owned anchor. Only
 // new content is caller-controlled; transport fields never come from args.
-func (a *App) toolReplyMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) sendReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -24,19 +45,19 @@ func (a *App) toolReplyMessage(ctx *sdk.AppCtx, args map[string]any) (any, error
 	send := map[string]any{"_project_id": pid}
 	for key, value := range args {
 		switch key {
-		case "body", "body_html", "attachments", "attachment_storage_ids", "media_url", "template_id", "vars":
+		case "body", "body_html", "attachments", "attachment_storage_ids", "media_url", "template_id", "vars", "content_sid", "content_variables":
 			send[key] = value
-		case "message_id", "reply_all", "idempotency_key", "_project_id":
+		case "reply_to_message_id", "reply_all", "idempotency_key", "_project_id":
 		default:
-			return nil, fmt.Errorf("reply_message: unsupported argument %q; addressing and threading are derived from message_id", key)
+			return nil, fmt.Errorf("send_message reply: unsupported argument %q; addressing and threading are derived from reply_to_message_id", key)
 		}
 	}
-	id := int64Arg(args, "message_id")
+	id := int64Arg(args, "reply_to_message_id")
 	if id <= 0 {
-		return nil, errors.New("message_id: positive integer required")
+		return nil, errors.New("reply_to_message_id: positive integer required")
 	}
-	if n, ok := args["message_id"].(float64); ok && n != float64(id) {
-		return nil, errors.New("message_id: positive integer required")
+	if n, ok := args["reply_to_message_id"].(float64); ok && n != float64(id) {
+		return nil, errors.New("reply_to_message_id: positive integer required")
 	}
 	replyAll := false
 	if value, exists := args["reply_all"]; exists {
@@ -50,10 +71,10 @@ func (a *App) toolReplyMessage(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	if m == nil {
-		return nil, errors.New("message_id: message not found in this project")
+		return nil, errors.New("reply_to_message_id: message not found in this project")
 	}
 	if !validChannel(m.Channel) || (m.Direction != "in" && m.Direction != "out") {
-		return nil, errors.New("message_id: unsupported message channel or direction")
+		return nil, errors.New("reply_to_message_id: unsupported message channel or direction")
 	}
 	if replyAll && m.Channel != channelEmail {
 		return nil, errors.New("reply_all: supported only for email")
@@ -177,7 +198,7 @@ func replySender(ctx *sdk.AppCtx, pid string, m *Message) (string, string, error
 			}
 		}
 	}
-	return "", "", errors.New("reply_message: no verified, enabled registered sender matches the original delivery addresses")
+	return "", "", errors.New("send_message reply: no verified, enabled registered sender matches the original delivery addresses")
 }
 
 func prepareEmailReply(ctx *sdk.AppCtx, pid string, m *Message, headers map[string]any, send map[string]any, replyAll bool) error {
