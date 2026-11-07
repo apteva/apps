@@ -83,6 +83,9 @@ func (h *publishGuardHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packet
 	h.mu.Unlock()
 	if !limiter.allow() {
 		h.app.rateLimitedMessages.Add(1)
+		if identity := h.app.clientIdentity(cl); identity != nil {
+			h.app.counters(identity.scope).rateLimited.Add(1)
+		}
 		// CodeSuccessIgnore keeps the connection healthy and lets Mochi send
 		// the normal QoS acknowledgement while skipping retain/routing hooks.
 		// Returning the MQTT-5-only rate error would not suppress QoS 0 or

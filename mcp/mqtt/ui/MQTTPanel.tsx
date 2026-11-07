@@ -8,6 +8,16 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 
 const API_ROOT = "/api/apps/mqtt";
 const APIContext = createContext(API_ROOT);
+const ScopeContext = createContext("");
+
+function useScopedFetch() {
+  const projectId = useContext(ScopeContext);
+  return useCallback((input: string, init?: RequestInit) => {
+    const url = new URL(input, window.location.origin);
+    if (projectId) url.searchParams.set("project_id", projectId);
+    return window.fetch(url.toString(), init);
+  }, [projectId]);
+}
 
 function useAPI() {
   return useContext(APIContext);
@@ -94,6 +104,8 @@ function useAppEvents<T = unknown>(
 }
 
 interface BrokerStatus {
+  scope_id: string;
+  topic_root: string;
   port: number;
   listen_address: string;
   clients: number;
@@ -132,6 +144,7 @@ interface MQTTClient {
 }
 
 interface MQTTUser {
+  scope_id: string;
   id: number;
   username: string;
   allow_publish: string[];
@@ -176,7 +189,8 @@ export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
   // choose an arbitrary project's sidecar.
   const api = `${API_ROOT}/_install/${encodeURIComponent(String(installId))}`;
   return (
-    <APIContext.Provider value={api}>
+    <ScopeContext.Provider value={projectId}>
+    <APIContext.Provider key={`${installId}:${projectId}`} value={api}>
       <div className="flex flex-col h-full">
         <div className="flex border-b border-border">
           {(["live", "discovery", "settings"] as Tab[]).map((t) => (
@@ -196,6 +210,7 @@ export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
         </div>
       </div>
     </APIContext.Provider>
+    </ScopeContext.Provider>
   );
 }
 
@@ -217,6 +232,7 @@ interface LiveMessage {
 
 function LiveTab({ projectId }: { projectId: string }) {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [clients, setClients] = useState<MQTTClient[]>([]);
@@ -230,9 +246,9 @@ function LiveTab({ projectId }: { projectId: string }) {
     refreshRunning.current = true;
     try {
       const [statusResponse, messagesResponse, clientsResponse] = await Promise.all([
-        fetch(`${API}/status`),
-        fetch(`${API}/messages?limit=200`),
-        fetch(`${API}/clients`),
+        scopedFetch(`${API}/status`),
+        scopedFetch(`${API}/messages?limit=200`),
+        scopedFetch(`${API}/clients`),
       ]);
       if (!statusResponse.ok || !messagesResponse.ok || !clientsResponse.ok) {
         throw new Error("Could not load broker state");
@@ -249,7 +265,7 @@ function LiveTab({ projectId }: { projectId: string }) {
     } finally {
       refreshRunning.current = false;
     }
-  }, [API]);
+  }, [API, scopedFetch]);
 
   useEffect(() => {
     refresh();
@@ -357,12 +373,13 @@ function LiveTab({ projectId }: { projectId: string }) {
 
 function DiscoveryTab() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [devices, setDevices] = useState<Device[]>([]);
   const [filter, setFilter] = useState("");
   const refresh = useCallback(async () => {
-    const r = await fetch(`${API}/devices${filter ? `?filter=${encodeURIComponent(filter)}` : ""}`);
+    const r = await scopedFetch(`${API}/devices${filter ? `?filter=${encodeURIComponent(filter)}` : ""}`);
     if (r.ok) setDevices(await r.json());
-  }, [API, filter]);
+  }, [API, scopedFetch, filter]);
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 10_000);
@@ -381,7 +398,7 @@ function DiscoveryTab() {
       </div>
       {devices.length === 0 ? (
         <div className="text-text-dim text-xs italic">
-          No devices discovered yet. Devices that publish to <code className="font-mono">homeassistant/+/+/config</code> will appear here automatically.
+          No devices discovered yet. Devices that publish under their topic root to <code className="font-mono">homeassistant/+/+/config</code> will appear here automatically.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -433,15 +450,17 @@ function SettingsTab() {
 
 function ConnectionSection() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   useEffect(() => {
-    fetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then(setStatus).catch(() => {});
-  }, [API]);
+    scopedFetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then(setStatus).catch(() => {});
+  }, [API, scopedFetch]);
   return (
     <div>
       <h3 className="text-sm font-medium mb-2">Broker connection</h3>
       <div className="border border-border rounded px-3 py-2 text-xs">
         <div>Client endpoint: <code className="font-mono">{status?.endpoint || "…"}</code></div>
+        {status && <div className="mt-1">Topic root: <code className="font-mono">{status.topic_root}</code></div>}
         {status && <div className="text-text-dim mt-1">Bind address: <code className="font-mono">{status.bind_address}</code></div>}
         {status && <div className="text-text-dim mt-1">
           Limits: {status.limits.max_clients.toLocaleString()} clients · {(status.limits.max_payload_bytes / 1024).toLocaleString()} KiB packets · {status.limits.max_publish_per_second}/s per client
@@ -456,13 +475,14 @@ function ConnectionSection() {
 
 function UsersSection() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [users, setUsers] = useState<MQTTUser[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<{ user: MQTTUser; mode: "acl" | "password" } | null>(null);
   const refresh = useCallback(async () => {
-    const r = await fetch(`${API}/users`);
+    const r = await scopedFetch(`${API}/users`);
     if (r.ok) setUsers(await r.json());
-  }, [API]);
+  }, [API, scopedFetch]);
   useEffect(() => { refresh(); }, [refresh]);
   return (
     <div>
@@ -471,7 +491,7 @@ function UsersSection() {
         <button onClick={() => setShowAdd(true)} className="bg-accent text-bg px-2 py-1 rounded text-xs">+ user</button>
       </div>
       {users.length === 0 ? (
-        <div className="text-text-dim text-xs italic">No users.</div>
+        <div className="text-text-dim text-xs italic">Create a credential here to connect. No default credential is generated.</div>
       ) : (
         <div className="border border-border rounded">
           {users.map((u) => (
@@ -482,7 +502,7 @@ function UsersSection() {
               </span>
               <button
                 onClick={async () => {
-                  await fetch(`${API}/users/${encodeURIComponent(u.username)}`, {
+                  await scopedFetch(`${API}/users/${encodeURIComponent(u.username)}`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ enabled: !u.enabled }),
@@ -501,8 +521,8 @@ function UsersSection() {
               </button>
               <button
                 onClick={async () => {
-                  if (!window.confirm(`Delete MQTT user ${u.username}? Connected clients using it will fail their next authentication.`)) return;
-                  await fetch(`${API}/users/${encodeURIComponent(u.username)}`, { method: "DELETE" });
+                  if (!window.confirm(`Delete MQTT user ${u.username}? Active sessions will be disconnected and their subscriptions cleared.`)) return;
+                  await scopedFetch(`${API}/users/${encodeURIComponent(u.username)}`, { method: "DELETE" });
                   refresh();
                 }}
                 className="text-xs text-text-dim hover:text-error"
@@ -521,6 +541,7 @@ function UsersSection() {
 
 function EditUserModal({ user, mode, onClose, onSaved }: { user: MQTTUser; mode: "acl" | "password"; onClose: () => void; onSaved: () => void }) {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [password, setPassword] = useState("");
   const [pub, setPub] = useState(user.allow_publish.join(","));
   const [sub, setSub] = useState(user.allow_subscribe.join(","));
@@ -536,7 +557,7 @@ function EditUserModal({ user, mode, onClose, onSaved }: { user: MQTTUser; mode:
           allow_subscribe: sub.split(",").map((s) => s.trim()).filter(Boolean),
         };
     try {
-      const r = await fetch(`${API}/users/${encodeURIComponent(user.username)}`, {
+      const r = await scopedFetch(`${API}/users/${encodeURIComponent(user.username)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -571,17 +592,18 @@ function EditUserModal({ user, mode, onClose, onSaved }: { user: MQTTUser; mode:
 
 function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [pub, setPub] = useState("#");
-  const [sub, setSub] = useState("#");
+  const [pub, setPub] = useState("");
+  const [sub, setSub] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const submit = async () => {
     setBusy(true);
     setErr("");
     try {
-      const r = await fetch(`${API}/users`, {
+      const r = await scopedFetch(`${API}/users`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -602,8 +624,9 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
     <Modal title="Add MQTT user" onClose={onClose}>
       <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
       <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
-      <input value={pub} onChange={(e) => setPub(e.target.value)} placeholder="publish allow (comma-separated globs)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
-      <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="subscribe allow (comma-separated globs)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
+      <p className="text-xs text-text-dim mb-2">Use full filters under the topic root shown above. Blank permissions deny access. The saved username includes the scope prefix; use it exactly as listed when connecting.</p>
+      <input value={pub} onChange={(e) => setPub(e.target.value)} placeholder="publish allow (comma-separated filters)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
+      <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="subscribe allow (comma-separated filters)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
       {err && <div className="text-error text-xs mb-2">{err}</div>}
       <div className="flex gap-2 justify-end">
         <button className="px-3 py-1 text-sm" onClick={onClose}>Cancel</button>
@@ -615,18 +638,19 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
 
 function SubscriptionsSection() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [subs, setSubs] = useState<BusSubscription[]>([]);
   const [topicPattern, setTopicPattern] = useState("");
   const [busTopic, setBusTopic] = useState("");
   const [err, setErr] = useState("");
   const refresh = useCallback(async () => {
-    const r = await fetch(`${API}/subscriptions`);
+    const r = await scopedFetch(`${API}/subscriptions`);
     if (r.ok) setSubs(await r.json());
-  }, [API]);
+  }, [API, scopedFetch]);
   useEffect(() => { refresh(); }, [refresh]);
   const add = async () => {
     setErr("");
-    const r = await fetch(`${API}/subscriptions`, {
+    const r = await scopedFetch(`${API}/subscriptions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topic_pattern: topicPattern, bus_topic: busTopic }),
@@ -646,7 +670,7 @@ function SubscriptionsSection() {
         Promote MQTT topics to named platform-bus events. Pattern matches re-emit as <code className="font-mono">mqtt.&lt;bus_topic&gt;</code>.
       </p>
       <div className="flex gap-2 mb-2">
-        <input value={topicPattern} onChange={(e) => setTopicPattern(e.target.value)} placeholder="motion/+/state" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
+        <input value={topicPattern} onChange={(e) => setTopicPattern(e.target.value)} placeholder="scopes/…/motion/+/state" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
         <input value={busTopic} onChange={(e) => setBusTopic(e.target.value)} placeholder="motion" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
         <button className="bg-accent text-bg px-3 py-1 rounded text-xs" disabled={!topicPattern || !busTopic} onClick={add}>add</button>
       </div>
@@ -660,7 +684,7 @@ function SubscriptionsSection() {
               <button
                 onClick={async () => {
                   if (!window.confirm(`Delete bridge ${s.topic_pattern} → mqtt.${s.bus_topic}?`)) return;
-                  await fetch(`${API}/subscriptions/${s.id}`, { method: "DELETE" });
+                  await scopedFetch(`${API}/subscriptions/${s.id}`, { method: "DELETE" });
                   refresh();
                 }}
                 className="ml-3 text-xs text-text-dim hover:text-error"
@@ -677,25 +701,26 @@ function SubscriptionsSection() {
 
 function RetainedSection() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [messages, setMessages] = useState<RetainedMessage[]>([]);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
   const refresh = useCallback(async () => {
     const suffix = filter ? `?topic_pattern=${encodeURIComponent(filter)}` : "";
-    const r = await fetch(`${API}/retained${suffix}`);
+    const r = await scopedFetch(`${API}/retained${suffix}`);
     if (!r.ok) {
       setError(await r.text());
       return;
     }
     setMessages(await r.json());
     setError("");
-  }, [API, filter]);
+  }, [API, scopedFetch, filter]);
   useEffect(() => { refresh(); }, [refresh]);
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
         <h3 className="text-sm font-medium flex-1">Retained state ({messages.length})</h3>
-        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="devices/+/state" className="bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
+        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="scopes/…/devices/+/state" className="bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
       </div>
       {error && <div className="text-error text-xs mb-2">{error}</div>}
       {messages.length === 0 ? (
@@ -713,7 +738,7 @@ function RetainedSection() {
                 className="text-xs text-text-dim hover:text-error"
                 onClick={async () => {
                   if (!window.confirm(`Delete retained message ${m.topic}?`)) return;
-                  await fetch(`${API}/retained/${encodeURIComponent(m.topic)}`, { method: "DELETE" });
+                  await scopedFetch(`${API}/retained/${encodeURIComponent(m.topic)}`, { method: "DELETE" });
                   refresh();
                 }}
               >delete</button>
@@ -727,6 +752,7 @@ function RetainedSection() {
 
 function TestPublishSection() {
   const API = useAPI();
+  const scopedFetch = useScopedFetch();
   const [topic, setTopic] = useState("");
   const [payload, setPayload] = useState("");
   const [retain, setRetain] = useState(false);
@@ -737,7 +763,7 @@ function TestPublishSection() {
     setBusy(true);
     setMsg("");
     try {
-      const r = await fetch(`${API}/test_publish`, {
+      const r = await scopedFetch(`${API}/test_publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic, payload, retain, qos }),
@@ -751,7 +777,7 @@ function TestPublishSection() {
     <div>
       <h3 className="text-sm font-medium mb-2">Test publish</h3>
       <div className="flex gap-2 mb-2">
-        <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="foo/bar" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
+        <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="scopes/…/foo/bar" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
         <input value={payload} onChange={(e) => setPayload(e.target.value)} placeholder="payload" className="flex-1 bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
       </div>
       <div className="flex gap-3 items-center text-xs mb-2">

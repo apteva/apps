@@ -30,8 +30,11 @@ type retainedMessage struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-func listRetainedMessages(db *sql.DB, topicPattern string, limit int) ([]retainedMessage, error) {
-	if topicPattern != "" && !mqtt.IsValidFilter(topicPattern, false) {
+func listRetainedMessages(db *sql.DB, scope, topicPattern string, limit int) ([]retainedMessage, error) {
+	if !validScope(scope) {
+		return nil, fmt.Errorf("ownership scope required")
+	}
+	if topicPattern != "" && !scopedFilter(scope, topicPattern) {
 		return nil, fmt.Errorf("topic_pattern %q is not a valid MQTT filter", topicPattern)
 	}
 	if limit <= 0 {
@@ -40,7 +43,7 @@ func listRetainedMessages(db *sql.DB, topicPattern string, limit int) ([]retaine
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := db.Query(`SELECT topic, substr(payload, 1, 4096), length(payload), qos, updated_at FROM mqtt_retained ORDER BY topic`)
+	rows, err := db.Query(`SELECT topic, substr(payload, 1, 4096), length(payload), qos, updated_at FROM mqtt_retained WHERE scope_id = ? ORDER BY topic`, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -64,11 +67,14 @@ func listRetainedMessages(db *sql.DB, topicPattern string, limit int) ([]retaine
 	return out, rows.Err()
 }
 
-func getRetainedMessage(db *sql.DB, topic string) (*retainedMessage, error) {
+func getRetainedMessage(db *sql.DB, scope, topic string) (*retainedMessage, error) {
+	if !scopedTopic(scope, topic) {
+		return nil, fmt.Errorf("retained message not found")
+	}
 	var updated string
 	var payload []byte
 	var qos int
-	err := db.QueryRow(`SELECT payload, qos, updated_at FROM mqtt_retained WHERE topic = ?`, topic).
+	err := db.QueryRow(`SELECT payload, qos, updated_at FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, scope, topic).
 		Scan(&payload, &qos, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("retained message %q not found", topic)
@@ -105,45 +111,53 @@ func (h *retainedHook) Provides(b byte) bool {
 }
 
 func (h *retainedHook) OnRetainMessage(_ *mqtt.Client, pk packets.Packet, result int64) {
+	scope := topicScope(pk.TopicName)
+	if scope == "" {
+		return
+	}
 	if result == -1 || len(pk.Payload) == 0 {
-		_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, pk.TopicName)
+		_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, scope, pk.TopicName)
 		return
 	}
 	props, _ := json.Marshal(storageProperties(pk.Properties))
 	_, _ = h.app.ctx.AppDB().Exec(
-		`INSERT INTO mqtt_retained(topic, payload, qos, properties, updated_at)
-		 VALUES (?,?,?,?,CURRENT_TIMESTAMP)
+		`INSERT INTO mqtt_retained(scope_id, topic, payload, qos, properties, updated_at)
+		 VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)
 		 ON CONFLICT(topic) DO UPDATE SET
 		   payload = excluded.payload,
 		   qos = excluded.qos,
 		   properties = excluded.properties,
 		   updated_at = CURRENT_TIMESTAMP`,
-		pk.TopicName, pk.Payload, pk.FixedHeader.Qos, string(props),
+		scope, pk.TopicName, pk.Payload, pk.FixedHeader.Qos, string(props),
 	)
 }
 
 func (h *retainedHook) OnRetainedExpired(topic string) {
-	_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic)
+	_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, topicScope(topic), topic)
 }
 
 func (h *retainedHook) StoredRetainedMessages() ([]storage.Message, error) {
 	rows, err := h.app.ctx.AppDB().Query(
-		`SELECT topic, payload, qos, properties, unixepoch(updated_at) FROM mqtt_retained ORDER BY topic`)
+		`SELECT scope_id, topic, payload, qos, properties, unixepoch(updated_at) FROM mqtt_retained WHERE scope_id != '' ORDER BY topic`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []storage.Message{}
 	for rows.Next() {
-		var topic, propsJSON string
+		var scope, topic, propsJSON string
 		var payload []byte
 		var qos byte
 		var created int64
-		if err := rows.Scan(&topic, &payload, &qos, &propsJSON, &created); err != nil {
+		if err := rows.Scan(&scope, &topic, &payload, &qos, &propsJSON, &created); err != nil {
 			return nil, err
+		}
+		if !validScope(scope) || topicScope(topic) != scope {
+			return nil, fmt.Errorf("invalid retained ownership namespace")
 		}
 		var props storage.MessageProperties
 		_ = json.Unmarshal([]byte(propsJSON), &props)
+		props.TopicAlias = 0 // aliases belong to a connection, including legacy records.
 		if created == 0 {
 			created = time.Now().Unix()
 		}
@@ -163,6 +177,6 @@ func storageProperties(p packets.Properties) storage.MessageProperties {
 		MessageExpiryInterval: p.MessageExpiryInterval, ContentType: p.ContentType,
 		ResponseTopic: p.ResponseTopic, CorrelationData: append([]byte(nil), p.CorrelationData...),
 		SubscriptionIdentifier: append([]int(nil), p.SubscriptionIdentifier...),
-		TopicAlias:             p.TopicAlias, User: append([]packets.UserProperty(nil), p.User...),
+		User:                   append([]packets.UserProperty(nil), p.User...),
 	}
 }

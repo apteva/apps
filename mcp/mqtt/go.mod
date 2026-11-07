@@ -1,9 +1,9 @@
 module github.com/apteva/apps/mcp/mqtt
 
-go 1.25.0
+go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.53.0
+	github.com/apteva/app-sdk v0.115.0
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	golang.org/x/crypto v0.50.0
 	modernc.org/sqlite v1.50.0

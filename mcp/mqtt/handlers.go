@@ -18,7 +18,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	writeJSON(w, a.snapshotStatus())
+	writeJSON(w, a.snapshotStatus(a.requestContext(r)))
 }
 
 func (a *App) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +26,7 @@ func (a *App) handleClients(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	writeJSON(w, a.snapshotClients())
+	writeJSON(w, a.snapshotClients(a.requestContext(r)))
 }
 
 // /messages?limit=N&topic_pattern=foo/+
@@ -54,9 +54,9 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 		rows, err := a.ctx.AppDB().Query(
 			`SELECT id, ts, topic, payload, payload_size, payload_truncated, qos, retain, client_id, username, is_printable
 			   FROM mqtt_message_log
-			  WHERE id < ?
+			  WHERE scope_id = ? AND id < ?
 			  ORDER BY id DESC
-			  LIMIT ?`, beforeID, batchSize)
+			  LIMIT ?`, projectScope(a.requestContext(r)), beforeID, batchSize)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -111,100 +111,86 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		users, err := listUsers(a.ctx.AppDB())
+		out, err := a.toolUsersList(a.requestContext(r), nil)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, users)
+		writeJSON(w, out)
 	case http.MethodPost:
-		var body struct {
-			Username       string   `json:"username"`
-			Password       string   `json:"password"`
-			AllowPublish   []string `json:"allow_publish"`
-			AllowSubscribe []string `json:"allow_subscribe"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-			httpErr(w, 400, "invalid json: "+err.Error())
+		var args map[string]any
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&args); err != nil {
+			httpErr(w, 400, "invalid json")
 			return
 		}
-		body.Username = strings.TrimSpace(body.Username)
-		if err := createUser(a.ctx.AppDB(), body.Username, body.Password, body.AllowPublish, body.AllowSubscribe); err != nil {
+		out, err := a.toolUsersCreate(a.requestContext(r), args)
+		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		if err := a.reloadUserCache(); err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		a.broker.DisconnectUser(body.Username)
-		writeJSON(w, map[string]any{"ok": true, "username": body.Username})
+		writeJSON(w, out)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
 	}
 }
 
-// /users/{username}    DELETE | PATCH (toggle enabled)
 func (a *App) handleUserItem(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimPrefix(r.URL.Path, "/users/")
 	if username == "" {
 		httpErr(w, 400, "username required")
 		return
 	}
+	args := map[string]any{"username": username}
+	var out any
+	var err error
 	switch r.Method {
 	case http.MethodDelete:
-		if err := deleteUser(a.ctx.AppDB(), username); err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		if err := a.reloadUserCache(); err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		a.broker.DisconnectUser(username)
-		writeJSON(w, map[string]any{"ok": true})
+		out, err = a.toolUsersDelete(a.requestContext(r), args)
 	case http.MethodPatch:
-		var body struct {
-			Enabled        *bool    `json:"enabled"`
-			Password       string   `json:"password"`
-			AllowPublish   []string `json:"allow_publish"`
-			AllowSubscribe []string `json:"allow_subscribe"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
-			httpErr(w, 400, "invalid json: "+err.Error())
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&args); err != nil {
+			httpErr(w, 400, "invalid json")
 			return
 		}
-		if body.Enabled == nil && body.Password == "" && body.AllowPublish == nil && body.AllowSubscribe == nil {
-			httpErr(w, 400, "enabled, password, allow_publish, or allow_subscribe required")
+		if args == nil {
+			httpErr(w, 400, "JSON object required")
 			return
 		}
-		if body.AllowPublish != nil || body.AllowSubscribe != nil {
-			if err := updateUserACL(a.ctx.AppDB(), username, body.AllowPublish, body.AllowSubscribe); err != nil {
-				httpErr(w, 400, err.Error())
-				return
-			}
+		args["username"] = username
+		_, aclPub := args["allow_publish"]
+		_, aclSub := args["allow_subscribe"]
+		_, password := args["password"]
+		_, enabled := args["enabled"]
+		operations := 0
+		if aclPub || aclSub {
+			operations++
 		}
-		if body.Password != "" {
-			if err := rotateUserPassword(a.ctx.AppDB(), username, body.Password); err != nil {
-				httpErr(w, 400, err.Error())
-				return
-			}
+		if password {
+			operations++
 		}
-		if body.Enabled != nil {
-			if err := setUserEnabled(a.ctx.AppDB(), username, *body.Enabled); err != nil {
-				httpErr(w, 400, err.Error())
-				return
-			}
+		if enabled {
+			operations++
 		}
-		if err := a.reloadUserCache(); err != nil {
-			httpErr(w, 500, err.Error())
+		if operations != 1 {
+			httpErr(w, 400, "choose one operation: ACL update, password rotation, or enabled state")
 			return
 		}
-		a.broker.DisconnectUser(username)
-		writeJSON(w, map[string]any{"ok": true, "username": username})
+		switch {
+		case password:
+			out, err = a.toolUsersRotatePassword(a.requestContext(r), args)
+		case enabled:
+			out, err = a.toolUsersSetEnabled(a.requestContext(r), args)
+		default:
+			out, err = a.toolUsersUpdateACL(a.requestContext(r), args)
+		}
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "DELETE or PATCH")
+		return
 	}
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, out)
 }
 
 func (a *App) handleRetained(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +199,7 @@ func (a *App) handleRetained(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	out, err := listRetainedMessages(a.ctx.AppDB(), r.URL.Query().Get("topic_pattern"), limit)
+	out, err := listRetainedMessages(a.ctx.AppDB(), projectScope(a.requestContext(r)), r.URL.Query().Get("topic_pattern"), limit)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -229,14 +215,14 @@ func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := getRetainedMessage(a.ctx.AppDB(), topic)
+		out, err := getRetainedMessage(a.ctx.AppDB(), projectScope(a.requestContext(r)), topic)
 		if err != nil {
 			httpErr(w, 404, err.Error())
 			return
 		}
 		writeJSON(w, out)
 	case http.MethodDelete:
-		if _, err := getRetainedMessage(a.ctx.AppDB(), topic); err != nil {
+		if _, err := getRetainedMessage(a.ctx.AppDB(), projectScope(a.requestContext(r)), topic); err != nil {
 			httpErr(w, 404, err.Error())
 			return
 		}
@@ -246,7 +232,7 @@ func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic); err != nil {
+		if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, projectScope(a.requestContext(r)), topic); err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
@@ -259,7 +245,7 @@ func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		subs, err := listBusSubscriptions(a.ctx.AppDB(), projectScope(a.ctx))
+		subs, err := listBusSubscriptions(a.ctx.AppDB(), projectScope(a.requestContext(r)))
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -276,7 +262,7 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 		// Reuse the MCP path so the in-memory broker subscription
 		// gets registered too.
-		out, err := a.toolSubscribe(a.ctx, map[string]any{
+		out, err := a.toolSubscribe(a.requestContext(r), map[string]any{
 			"topic_pattern": body.TopicPattern,
 			"bus_topic":     body.BusTopic,
 		})
@@ -301,7 +287,7 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "DELETE only")
 		return
 	}
-	sub, err := deleteBusSubscription(a.ctx.AppDB(), projectScope(a.ctx), id)
+	sub, err := deleteBusSubscription(a.ctx.AppDB(), projectScope(a.requestContext(r)), id)
 	if err == sql.ErrNoRows {
 		httpErr(w, http.StatusNotFound, "subscription not found")
 		return
@@ -321,7 +307,7 @@ func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	out, err := a.toolDevices(a.ctx, map[string]any{
+	out, err := a.toolDevices(a.requestContext(r), map[string]any{
 		"filter": r.URL.Query().Get("filter"),
 	})
 	if err != nil {
@@ -346,6 +332,10 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 	maxBody := int64(clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455)) + 64<<10
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&body); err != nil {
 		httpErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	if err := requireTopicScope(a.requestContext(r), body.Topic); err != nil {
+		httpErr(w, 403, err.Error())
 		return
 	}
 	if err := validatePublish(body.Topic, body.QoS); err != nil {

@@ -155,20 +155,6 @@ func (b *Broker) Clients() []*mqtt.Client {
 	return out
 }
 
-func (b *Broker) DisconnectUser(username string) {
-	if b == nil || b.server == nil {
-		return
-	}
-	for _, client := range b.Clients() {
-		client.RLock()
-		matches := string(client.Properties.Username) == username
-		client.RUnlock()
-		if matches {
-			_ = b.server.DisconnectClient(client, packets.ErrNotAuthorized)
-		}
-	}
-}
-
 func (b *Broker) DeleteRetained(topic string) error {
 	if b == nil || b.server == nil {
 		return nil

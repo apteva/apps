@@ -41,6 +41,7 @@ type busHook struct {
 }
 
 type messageRecord struct {
+	scope       string
 	topic       string
 	payload     []byte
 	payloadSize int
@@ -53,6 +54,7 @@ type messageRecord struct {
 }
 
 type aclRecord struct {
+	scope    string
 	username string
 	action   string
 	topic    string
@@ -62,7 +64,7 @@ type aclRecord struct {
 
 func (h *busHook) ID() string { return "apteva-bus" }
 func (h *busHook) Provides(b byte) bool {
-	return b == mqtt.OnPublished
+	return b == mqtt.OnPublished || b == mqtt.OnWillSent
 }
 
 // OnPublished fires after a publish has been routed to subscribers.
@@ -72,14 +74,20 @@ func (h *busHook) OnPublished(cl *mqtt.Client, pk packets.Packet) {
 	h.recordMessage(clientID, username, pk)
 }
 
+func (h *busHook) OnWillSent(cl *mqtt.Client, pk packets.Packet) { h.OnPublished(cl, pk) }
+
 func (h *busHook) recordMessage(clientID, username string, pk packets.Packet) {
+	scope := topicScope(pk.TopicName)
+	if scope == "" {
+		return
+	}
 	maxLogPayload := clampConfigInt(h.app.ctx, "max_log_payload_bytes", 65536, 0, 268435455)
 	payload := pk.Payload
 	truncated := len(payload) > maxLogPayload
 	if truncated {
 		payload = payload[:maxLogPayload]
 	}
-	record := messageRecord{
+	record := messageRecord{scope: scope,
 		topic: pk.TopicName, payload: append([]byte(nil), payload...),
 		payloadSize: len(pk.Payload), truncated: truncated,
 		qos: pk.FixedHeader.Qos, retain: pk.FixedHeader.Retain,
@@ -89,6 +97,7 @@ func (h *busHook) recordMessage(clientID, username string, pk packets.Packet) {
 	case h.app.messageLogCh <- record:
 	default:
 		h.app.droppedLogs.Add(1)
+		h.app.counters(scope).droppedLogs.Add(1)
 	}
 }
 
@@ -127,6 +136,12 @@ func (a *App) runPersistence(ctx context.Context) error {
 	persist:
 		if err := a.persistRecords(messages, acls); err != nil {
 			a.droppedLogs.Add(uint64(len(messages) + len(acls)))
+			for _, rec := range messages {
+				a.counters(rec.scope).droppedLogs.Add(1)
+			}
+			for _, rec := range acls {
+				a.counters(rec.scope).droppedLogs.Add(1)
+			}
 			a.ctx.Logger().Warn("persist mqtt audit batch", "err", err.Error())
 		}
 	}
@@ -140,16 +155,16 @@ func (a *App) persistRecords(messages []messageRecord, acls []aclRecord) error {
 	defer tx.Rollback()
 	for _, rec := range messages {
 		if _, err := tx.Exec(
-			`INSERT INTO mqtt_message_log(topic, payload, payload_size, payload_truncated, qos, retain, client_id, username, is_printable)
-			 VALUES (?,?,?,?,?,?,?,?,?)`,
-			rec.topic, rec.payload, rec.payloadSize, boolToInt(rec.truncated), rec.qos, boolToInt(rec.retain), rec.clientID, rec.username, boolToInt(rec.printable)); err != nil {
+			`INSERT INTO mqtt_message_log(scope_id, topic, payload, payload_size, payload_truncated, qos, retain, client_id, username, is_printable)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			rec.scope, rec.topic, rec.payload, rec.payloadSize, boolToInt(rec.truncated), rec.qos, boolToInt(rec.retain), rec.clientID, rec.username, boolToInt(rec.printable)); err != nil {
 			return err
 		}
 	}
 	for _, rec := range acls {
 		if _, err := tx.Exec(
-			`INSERT INTO mqtt_acl_log(username, action, topic, allowed, reason) VALUES (?,?,?,?,?)`,
-			rec.username, rec.action, rec.topic, boolToInt(rec.allowed), rec.reason); err != nil {
+			`INSERT INTO mqtt_acl_log(scope_id, username, action, topic, allowed, reason) VALUES (?,?,?,?,?,?)`,
+			rec.scope, rec.username, rec.action, rec.topic, boolToInt(rec.allowed), rec.reason); err != nil {
 			return err
 		}
 	}
@@ -193,7 +208,7 @@ func (a *App) bridgeBusLoopback(b *Broker) error {
 	for _, s := range subs {
 		s := s
 		_ = b.Subscribe(s.TopicPattern, int(100+s.ID), func(cl *mqtt.Client, sub packets.Subscription, pk packets.Packet) {
-			a.emitBusMessageForProject(s.BusTopic, s.ProjectID, cl, pk)
+			a.emitBusMessageForProject(s.BusTopic, s.ScopeID, cl, pk)
 		})
 	}
 	return nil
@@ -203,12 +218,16 @@ func (a *App) bridgeBusLoopback(b *Broker) error {
 // Strings stay strings (UTF-8 cheap to inspect), binary becomes a
 // length hint instead of bloating the bus with base64.
 func (a *App) emitBusMessage(busTopic string, cl *mqtt.Client, pk packets.Packet) {
-	a.emitBusMessageForProject(busTopic, projectScope(a.ctx), cl, pk)
+	a.emitBusMessageForProject(busTopic, topicScope(pk.TopicName), cl, pk)
 }
 
 func (a *App) emitBusMessageForProject(busTopic, projectID string, cl *mqtt.Client, pk packets.Packet) {
+	if !validScope(projectID) || topicScope(pk.TopicName) != projectID {
+		return
+	}
 	if a.eventLimiter != nil && !a.eventLimiter.allow() {
 		a.droppedEvents.Add(1)
+		a.counters(projectID).droppedEvents.Add(1)
 		return
 	}
 	maxEventPayload := clampConfigInt(a.ctx, "max_event_payload_bytes", 131072, 0, 268435455)
@@ -241,6 +260,7 @@ func (a *App) emitBusMessageForProject(busTopic, projectID string, cl *mqtt.Clie
 	}
 	clientID, username := a.mqttIdentity(cl, pk)
 	a.ctx.EmitWithProject("mqtt."+busTopic, projectID, map[string]any{
+		"scope_id":  projectID,
 		"topic":     pk.TopicName,
 		"payload":   payloadField,
 		"qos":       int(pk.FixedHeader.Qos),
@@ -249,6 +269,7 @@ func (a *App) emitBusMessageForProject(busTopic, projectID string, cl *mqtt.Clie
 		"username":  username,
 	})
 	a.eventsEmitted.Add(1)
+	a.counters(projectID).eventsEmitted.Add(1)
 }
 
 func (a *App) mqttIdentity(cl *mqtt.Client, pk packets.Packet) (clientID, username string) {
@@ -281,7 +302,7 @@ func (a *App) mqttIdentity(cl *mqtt.Client, pk packets.Packet) (clientID, userna
 // runs on the framework's dispatcher goroutine.)
 //
 // (See main.go where EventHandlers() is overridden to surface this.)
-func (a *App) handleOutboundPublishRequest(_ *sdk.AppCtx, evt map[string]any) error {
+func (a *App) handleOutboundPublishRequest(ctx *sdk.AppCtx, evt map[string]any) error {
 	if a.broker == nil {
 		return fmt.Errorf("broker not running yet")
 	}
@@ -293,6 +314,9 @@ func (a *App) handleOutboundPublishRequest(_ *sdk.AppCtx, evt map[string]any) er
 	}
 	retain, _ := evt["retain"].(bool)
 	qos := intArg(evt, "qos", 0)
+	if err := requireTopicScope(ctx, topic); err != nil {
+		return err
+	}
 	if err := validatePublish(topic, qos); err != nil {
 		return err
 	}

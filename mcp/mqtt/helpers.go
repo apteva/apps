@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -79,19 +78,9 @@ func encodePayload(value any, present bool) ([]byte, error) {
 
 // ─── project scope ──────────────────────────────────────────────────
 
-// projectScope returns the install's project_id. Mirrors the helper
-// the other apps use; the env var is set per-install by the platform.
-func projectScope(ctxs ...*sdk.AppCtx) string {
-	if len(ctxs) > 0 && ctxs[0] != nil {
-		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
-			return pid
-		}
-	}
-	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
-		return pid
-	}
-	return "default"
-}
+// projectScope is used only after the HTTP/MCP boundary has resolved a
+// trusted owner. There is deliberately no shared default scope.
+func projectScope(ctx *sdk.AppCtx) string { return ctx.CurrentProject() }
 
 // ─── HTTP helpers ───────────────────────────────────────────────────
 
@@ -135,9 +124,10 @@ func (a *App) sweepOnce() {
 	maxRetain := configInt(a.ctx, "retain_max_count", 10000)
 	if maxRetain > 0 {
 		rows, err := db.Query(
-			`SELECT topic FROM mqtt_retained
-			  ORDER BY updated_at ASC
-			  LIMIT MAX(0, (SELECT COUNT(*) FROM mqtt_retained) - ?)`, maxRetain)
+			`SELECT topic FROM (
+ SELECT topic, ROW_NUMBER() OVER (PARTITION BY scope_id ORDER BY updated_at DESC, topic) AS position
+ FROM mqtt_retained WHERE scope_id != ''
+ ) WHERE position > ?`, maxRetain)
 		if err == nil {
 			topics := []string{}
 			for rows.Next() {
@@ -148,7 +138,9 @@ func (a *App) sweepOnce() {
 			}
 			rows.Close()
 			for _, topic := range topics {
-				a.broker.DeleteRetained(topic)
+				if a.broker != nil {
+					_ = a.broker.DeleteRetained(topic)
+				}
 				_, _ = db.Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic)
 			}
 		}

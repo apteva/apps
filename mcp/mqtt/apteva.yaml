@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.3.0
+version: 0.4.0
 description: |
   Embedded MQTT broker for Apteva. Acts as the LAN message bus for
   smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
@@ -14,8 +14,11 @@ description: |
 
   Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
   durable retained messages, bounded traffic controls, and MQTT 5 properties.
-  Auth is username/password against this app's own DB; per-user
-  topic ACLs (publish + subscribe filter lists) gate every operation.
+  Auth is username/password against this app's own DB. Credentials belong
+  to an opaque ownership scope, use a scope-qualified wire username, and
+  require explicit publish/subscribe ACLs under the scope's topic root.
+  Client IDs are durably bound to credential identities. Management data
+  and events are isolated by the authenticated ownership scope.
 
   Auto-discovers Home Assistant-convention devices by parsing
   `homeassistant/+/+/config` so any sensor that already speaks the
@@ -49,8 +52,8 @@ provides:
     - { name: mqtt_subscribe_ensure,   description: "Idempotently ensure a subscription bridge exists. Repeated calls return the same row. Args: topic_pattern, bus_topic." }
     - { name: mqtt_subscribe_list,     description: "List persisted bus subscriptions." }
     - { name: mqtt_subscribe_delete,   description: "Delete a bus subscription. Args: id." }
-    - { name: mqtt_users_add,          description: "Legacy create-or-replace user operation. Prefer the explicit credential tools." }
-    - { name: mqtt_users_create,       description: "Create a new MQTT user without replacing an existing credential. Args: username, password, allow_publish?, allow_subscribe?." }
+    - { name: mqtt_users_add,          description: "Legacy create-only alias; existing credentials are never replaced." }
+    - { name: mqtt_users_create,       description: "Create a new MQTT user without replacing an existing credential. Args: username, allow_publish, allow_subscribe, password? (omit to generate and return once). ACLs must use the scope topic root; [] denies access." }
     - { name: mqtt_users_update_acl,   description: "Update a user's publish and/or subscribe ACL without changing its password." }
     - { name: mqtt_users_rotate_password, description: "Rotate a user's password without changing ACLs; disconnects active sessions for that user." }
     - { name: mqtt_users_list,         description: "List users (no passwords)." }
@@ -113,10 +116,15 @@ config_schema:
     description: Hostname or IP returned by mqtt_status for client enrollment. Empty uses bind_interface when it is an IP, otherwise the machine hostname.
   - name: allow_anonymous
     type: select
-    options: ["true", "false"]
+    options: ["false"]
     default: "false"
-    label: Allow anonymous clients
-    description: When true, clients can connect with no username/password. Convenient for trusted LANs; refuse on shared networks.
+    label: Anonymous clients (disabled)
+    description: Anonymous access is incompatible with ownership isolation. Legacy installs configured true must disable it before upgrading.
+  - name: legacy_scope_id
+    type: text
+    default: ""
+    label: Legacy ownership assignment
+    description: For a global install, explicitly assign unowned pre-0.4 data to this opaque scope. Project installs use their fixed scope. Migration prefixes topic names and wire usernames and disables migrated credentials until ACL review and re-enablement. Empty leaves ambiguous records quarantined. Remove after migration; ownership is never reassigned.
   - name: ha_discovery_enabled
     type: select
     options: ["true", "false"]
@@ -126,8 +134,8 @@ config_schema:
   - name: retain_max_count
     type: text
     default: "10000"
-    label: Max retained messages
-    description: Hard ceiling on retained messages stored in the broker. Oldest pruned beyond this.
+    label: Max retained messages per scope
+    description: Oldest retained messages beyond this count are pruned within each ownership scope; one scope cannot evict another scope's state.
   - name: max_payload_bytes
     type: text
     default: "1048576"

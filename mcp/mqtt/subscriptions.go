@@ -17,6 +17,7 @@ import (
 
 type BusSubscription struct {
 	ID           int64  `json:"id"`
+	ScopeID      string `json:"scope_id"`
 	ProjectID    string `json:"project_id"`
 	TopicPattern string `json:"topic_pattern"`
 	BusTopic     string `json:"bus_topic"`
@@ -26,8 +27,8 @@ type BusSubscription struct {
 
 func listBusSubscriptions(db *sql.DB, projectID string) ([]BusSubscription, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
-		   FROM mqtt_subscriptions WHERE project_id = ? ORDER BY id`, projectID)
+		`SELECT id, scope_id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions WHERE scope_id = ? ORDER BY id`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,8 +37,8 @@ func listBusSubscriptions(db *sql.DB, projectID string) ([]BusSubscription, erro
 
 func listAllBusSubscriptions(db *sql.DB) ([]BusSubscription, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
-		   FROM mqtt_subscriptions ORDER BY id`)
+		`SELECT id, scope_id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions WHERE scope_id != '' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +50,7 @@ func scanBusSubscriptions(rows *sql.Rows) ([]BusSubscription, error) {
 	out := []BusSubscription{}
 	for rows.Next() {
 		var s BusSubscription
-		if err := rows.Scan(&s.ID, &s.ProjectID, &s.TopicPattern, &s.BusTopic, &s.CreatedBy, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ScopeID, &s.ProjectID, &s.TopicPattern, &s.BusTopic, &s.CreatedBy, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -58,6 +59,9 @@ func scanBusSubscriptions(rows *sql.Rows) ([]BusSubscription, error) {
 }
 
 func addBusSubscription(db *sql.DB, projectID, topicPattern, busTopic, createdBy string) (*BusSubscription, error) {
+	if !scopedFilter(projectID, topicPattern) {
+		return nil, errors.New("topic_pattern must be inside the ownership topic root")
+	}
 	topicPattern = strings.TrimSpace(topicPattern)
 	busTopic = strings.TrimSpace(busTopic)
 	if topicPattern == "" {
@@ -73,33 +77,33 @@ func addBusSubscription(db *sql.DB, projectID, topicPattern, busTopic, createdBy
 		return nil, fmt.Errorf("bus_topic %q invalid (a-z0-9 plus . _ -)", busTopic)
 	}
 	_, err := db.Exec(
-		`INSERT INTO mqtt_subscriptions(project_id, topic_pattern, bus_topic, created_by)
-		 VALUES (?,?,?,?)
+		`INSERT INTO mqtt_subscriptions(scope_id, project_id, topic_pattern, bus_topic, created_by)
+		 VALUES (?,?,?,?,?)
 		 ON CONFLICT(project_id, topic_pattern, bus_topic) DO NOTHING`,
-		projectID, topicPattern, busTopic, createdBy)
+		projectID, projectID, topicPattern, busTopic, createdBy)
 	if err != nil {
 		return nil, err
 	}
 	var out BusSubscription
 	err = db.QueryRow(
-		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
+		`SELECT id, scope_id, project_id, topic_pattern, bus_topic, created_by, created_at
 		   FROM mqtt_subscriptions
-		  WHERE project_id = ? AND topic_pattern = ? AND bus_topic = ?`,
+		  WHERE scope_id = ? AND topic_pattern = ? AND bus_topic = ?`,
 		projectID, topicPattern, busTopic,
-	).Scan(&out.ID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
+	).Scan(&out.ID, &out.ScopeID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
 	return &out, err
 }
 
 func deleteBusSubscription(db *sql.DB, projectID string, id int64) (*BusSubscription, error) {
 	var out BusSubscription
 	err := db.QueryRow(
-		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
-		   FROM mqtt_subscriptions WHERE id = ? AND project_id = ?`, id, projectID,
-	).Scan(&out.ID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
+		`SELECT id, scope_id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions WHERE id = ? AND scope_id = ?`, id, projectID,
+	).Scan(&out.ID, &out.ScopeID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`DELETE FROM mqtt_subscriptions WHERE id = ? AND project_id = ?`, id, projectID); err != nil {
+	if _, err := db.Exec(`DELETE FROM mqtt_subscriptions WHERE id = ? AND scope_id = ?`, id, projectID); err != nil {
 		return nil, err
 	}
 	return &out, nil

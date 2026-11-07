@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,7 @@ import (
 // MCPTools registers the tool set. Schemas are minimal — descriptive
 // `description` carries the operator-facing detail.
 func (a *App) mcpTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "mqtt_publish",
 			Description: "Publish one MQTT message. Payload may be a string or JSON value; non-strings are JSON-encoded. Args: topic, payload, retain, qos.",
@@ -46,8 +47,8 @@ func (a *App) mcpTools() []sdk.Tool {
 			Name:        "mqtt_clients_list",
 			Description: "List currently connected network MQTT clients with authenticated identity and protocol metadata.",
 			InputSchema: schemaObj(nil, nil),
-			Handler: func(_ *sdk.AppCtx, _ map[string]any) (any, error) {
-				return a.snapshotClients(), nil
+			Handler: func(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+				return a.snapshotClients(ctx), nil
 			},
 		},
 		{
@@ -82,18 +83,18 @@ func (a *App) mcpTools() []sdk.Tool {
 		},
 		{
 			Name:        "mqtt_users_add",
-			Description: "Legacy create-or-replace operation. Prefer mqtt_users_create, mqtt_users_update_acl, and mqtt_users_rotate_password.",
+			Description: "Legacy create-only alias; existing credentials are never replaced. Explicit scoped allow_publish and allow_subscribe arrays required. Prefer mqtt_users_create.",
 			InputSchema: schemaObj(map[string]any{
 				"username":        map[string]any{"type": "string"},
 				"password":        map[string]any{"type": "string"},
 				"allow_publish":   map[string]any{"type": "array"},
 				"allow_subscribe": map[string]any{"type": "array"},
-			}, []string{"username", "password"}),
+			}, []string{"username", "password", "allow_publish", "allow_subscribe"}),
 			Handler: a.toolUsersAdd,
 		},
 		{
 			Name:        "mqtt_users_create",
-			Description: "Create a new MQTT user without replacing an existing credential. Args: username, password, allow_publish, allow_subscribe.",
+			Description: "Create a scope-owned MQTT credential. Explicit allow_publish and allow_subscribe arrays are required; [] denies access. Omit password to generate one returned once. Use the returned scope-qualified username when connecting.",
 			InputSchema: userWriteSchema(),
 			Handler:     a.toolUsersCreate,
 		},
@@ -171,15 +172,27 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler:     a.toolStatus,
 		},
 	}
+	for i := range tools {
+		handler := tools[i].Handler
+		tools[i].Handler = nil
+		tools[i].HandlerCtx = func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			scope, err := a.toolScope(call)
+			if err != nil {
+				return nil, err
+			}
+			return handler(ctx.WithProject(scope), args)
+		}
+	}
+	return tools
 }
 
 func userWriteSchema() map[string]any {
 	return schemaObj(map[string]any{
 		"username":        map[string]any{"type": "string"},
-		"password":        map[string]any{"type": "string"},
+		"password":        map[string]any{"type": "string", "description": "Omit to generate a password returned once."},
 		"allow_publish":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"allow_subscribe": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-	}, []string{"username", "password"})
+	}, []string{"username", "allow_publish", "allow_subscribe"})
 }
 
 func schemaObj(props map[string]any, required []string) map[string]any {
@@ -210,6 +223,9 @@ func (a *App) toolPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	retain := boolArg(args, "retain", false)
 	qos := intArg(args, "qos", 0)
+	if err := requireTopicScope(ctx, topic); err != nil {
+		return nil, err
+	}
 	if err := validatePublish(topic, qos); err != nil {
 		return nil, err
 	}
@@ -232,10 +248,10 @@ func (a *App) toolTopicsRecent(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	rows, err := a.ctx.AppDB().Query(
 		`SELECT topic, MAX(ts) AS last_ts, COUNT(*) AS n
-		   FROM mqtt_message_log
+		   FROM mqtt_message_log WHERE scope_id = ?
 		  GROUP BY topic
 		  ORDER BY last_ts DESC
-		  LIMIT ?`, limit)
+		  LIMIT ?`, projectScope(ctx), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -252,12 +268,18 @@ func (a *App) toolTopicsRecent(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return out, rows.Err()
 }
 
-func (a *App) snapshotClients() []map[string]any {
+func (a *App) snapshotClients(ctx *sdk.AppCtx) []map[string]any {
 	out := []map[string]any{}
 	if a.broker != nil {
 		for _, client := range a.broker.Clients() {
+			identity := a.clientIdentity(client)
+			if identity == nil || identity.scope != projectScope(ctx) {
+				continue
+			}
 			client.RLock()
 			row := map[string]any{
+				"scope_id":         identity.scope,
+				"credential_id":    identity.credentialID,
 				"client_id":        client.ID,
 				"username":         string(client.Properties.Username),
 				"remote":           client.Net.Remote,
@@ -278,6 +300,13 @@ func (a *App) snapshotClients() []map[string]any {
 func (a *App) toolSubscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pat := strArg(args, "topic_pattern")
 	bus := strArg(args, "bus_topic")
+	scope, err := managementScope(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scopedFilter(scope, pat) {
+		return nil, errors.New("topic_pattern must be inside the ownership topic root")
+	}
 	sub, err := addBusSubscription(a.ctx.AppDB(), projectScope(ctx), pat, bus, callerLabel(ctx))
 	if err != nil {
 		return nil, err
@@ -321,102 +350,141 @@ func (a *App) toolSubscribeDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolUsersAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	password := strArg(args, "password")
-	pub := strArrayArg(args, "allow_publish")
-	sub := strArrayArg(args, "allow_subscribe")
-	if err := addUser(a.ctx.AppDB(), username, password, pub, sub); err != nil {
-		return nil, err
-	}
-	if err := a.reloadUserCache(); err != nil {
-		return nil, err
-	}
-	a.broker.DisconnectUser(username)
-	return map[string]any{"ok": true, "username": username}, nil
+	return a.toolUsersCreate(ctx, args)
 }
 
 func (a *App) toolUsersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	if err := createUser(a.ctx.AppDB(), username, strArg(args, "password"),
-		strArrayArg(args, "allow_publish"), strArrayArg(args, "allow_subscribe")); err != nil {
+	scope, err := managementScope(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := aclArrayArg(args, "allow_publish", true)
+	if err != nil {
+		return nil, err
+	}
+	sub, err := aclArrayArg(args, "allow_subscribe", true)
+	if err != nil {
+		return nil, err
+	}
+	password := strArg(args, "password")
+	generated := false
+	if _, exists := args["password"]; !exists {
+		password = randomPassword(32)
+		generated = true
+	}
+	a.credentialsMu.Lock()
+	defer a.credentialsMu.Unlock()
+	username, nameErr := credentialName(scope, strings.TrimSpace(strArg(args, "username")))
+	if nameErr != nil {
+		return nil, nameErr
+	}
+	if err := createUser(a.ctx.AppDB(), scope, username, password, pub, sub); err != nil {
 		return nil, err
 	}
 	if err := a.reloadUserCache(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "username": username}, nil
+	result := map[string]any{"ok": true, "username": username, "scope_id": scope, "topic_root": scopeTopicRoot(scope)}
+	if generated {
+		result["password"] = password
+	}
+	return result, nil
+}
+
+func aclArrayArg(args map[string]any, name string, required bool) ([]string, error) {
+	value, present := args[name]
+	if !present && !required {
+		return nil, nil
+	}
+	out := []string{}
+	switch v := value.(type) {
+	case []string:
+		out = append(out, v...)
+	case []any:
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must contain only strings", name)
+			}
+			out = append(out, str)
+		}
+	default:
+		return nil, fmt.Errorf("%s must be an explicit array; [] denies access", name)
+	}
+	return out, nil
 }
 
 func (a *App) toolUsersUpdateACL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	var pub, sub []string
-	if _, ok := args["allow_publish"]; ok {
-		pub = strArrayArg(args, "allow_publish")
-	}
-	if _, ok := args["allow_subscribe"]; ok {
-		sub = strArrayArg(args, "allow_subscribe")
-	}
-	if err := updateUserACL(a.ctx.AppDB(), username, pub, sub); err != nil {
+	pub, err := aclArrayArg(args, "allow_publish", false)
+	if err != nil {
 		return nil, err
 	}
-	if err := a.reloadUserCache(); err != nil {
+	sub, err := aclArrayArg(args, "allow_subscribe", false)
+	if err != nil {
 		return nil, err
 	}
-	a.broker.DisconnectUser(username)
-	return map[string]any{"ok": true, "username": username}, nil
+	return a.mutateCredential(ctx, args, func(scope, username string) error {
+		return updateUserACL(a.ctx.AppDB(), scope, username, pub, sub)
+	})
 }
 
 func (a *App) toolUsersRotatePassword(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	if err := rotateUserPassword(a.ctx.AppDB(), username, strArg(args, "password")); err != nil {
-		return nil, err
-	}
-	if err := a.reloadUserCache(); err != nil {
-		return nil, err
-	}
-	a.broker.DisconnectUser(username)
-	return map[string]any{"ok": true, "username": username}, nil
+	return a.mutateCredential(ctx, args, func(scope, username string) error {
+		return rotateUserPassword(a.ctx.AppDB(), scope, username, strArg(args, "password"))
+	})
 }
 
 func (a *App) toolUsersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return listUsers(a.ctx.AppDB())
+	scope, err := managementScope(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return listUsers(a.ctx.AppDB(), scope)
 }
 
 func (a *App) toolUsersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	if username == "" {
-		return nil, errors.New("username required")
-	}
-	if err := deleteUser(a.ctx.AppDB(), username); err != nil {
-		return nil, err
-	}
-	if err := a.reloadUserCache(); err != nil {
-		return nil, err
-	}
-	a.broker.DisconnectUser(username)
-	return map[string]any{"ok": true}, nil
+	return a.mutateCredential(ctx, args, func(scope, username string) error { return deleteUser(a.ctx.AppDB(), scope, username) })
 }
 
 func (a *App) toolUsersSetEnabled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strings.TrimSpace(strArg(args, "username"))
-	enabled := boolArg(args, "enabled", true)
-	if err := setUserEnabled(a.ctx.AppDB(), username, enabled); err != nil {
+	enabled, ok := args["enabled"].(bool)
+	if !ok {
+		return nil, errors.New("enabled must be a boolean")
+	}
+	return a.mutateCredential(ctx, args, func(scope, username string) error { return setUserEnabled(a.ctx.AppDB(), scope, username, enabled) })
+}
+
+func (a *App) mutateCredential(ctx *sdk.AppCtx, args map[string]any, change func(string, string) error) (any, error) {
+	scope, err := managementScope(ctx)
+	if err != nil {
 		return nil, err
 	}
+	a.credentialsMu.Lock()
+	defer a.credentialsMu.Unlock()
+	username, nameErr := credentialName(scope, strings.TrimSpace(strArg(args, "username")))
+	if nameErr != nil {
+		return nil, nameErr
+	}
+	if err := change(scope, username); err != nil {
+		return nil, err
+	}
+	// Revoke before returning even if cache reload fails. Existing auth snapshots
+	// cannot inherit the permissions of a deleted/recreated username.
+	a.revokeUser(username)
 	if err := a.reloadUserCache(); err != nil {
+		a.usersMu.Lock()
+		a.users = nil
+		a.usersMu.Unlock()
 		return nil, err
 	}
-	if !enabled {
-		a.broker.DisconnectUser(username)
-	}
-	return map[string]any{"ok": true, "username": username, "enabled": enabled}, nil
+	return map[string]any{"ok": true, "username": username}, nil
 }
 
 func (a *App) toolDevices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	filter := strings.ToLower(strArg(args, "filter"))
 	q := `SELECT id, project_id, slug, component, object_id, display_name,
 	             manufacturer, model, state_topic, command_topic, ha_config_json, last_seen
-	        FROM mqtt_devices WHERE project_id = ?`
+	        FROM mqtt_devices WHERE scope_id = ?`
 	params := []any{projectScope(ctx)}
 	if filter != "" {
 		q += ` AND (LOWER(slug) LIKE ? OR LOWER(model) LIKE ? OR LOWER(manufacturer) LIKE ?)`
@@ -462,7 +530,7 @@ func (a *App) toolDevices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolRetainedList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return listRetainedMessages(a.ctx.AppDB(), strings.TrimSpace(strArg(args, "topic_pattern")), intArg(args, "limit", 100))
+	return listRetainedMessages(a.ctx.AppDB(), projectScope(ctx), strings.TrimSpace(strArg(args, "topic_pattern")), intArg(args, "limit", 100))
 }
 
 func (a *App) toolRetainedGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -470,7 +538,7 @@ func (a *App) toolRetainedGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if topic == "" {
 		return nil, errors.New("topic required")
 	}
-	return getRetainedMessage(a.ctx.AppDB(), topic)
+	return getRetainedMessage(a.ctx.AppDB(), projectScope(ctx), topic)
 }
 
 func (a *App) toolRetainedDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -478,7 +546,7 @@ func (a *App) toolRetainedDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if topic == "" {
 		return nil, errors.New("topic required")
 	}
-	if _, err := getRetainedMessage(a.ctx.AppDB(), topic); err != nil {
+	if _, err := getRetainedMessage(a.ctx.AppDB(), projectScope(ctx), topic); err != nil {
 		return nil, err
 	}
 	if a.broker != nil {
@@ -486,44 +554,34 @@ func (a *App) toolRetainedDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 			return nil, err
 		}
 	}
-	if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic); err != nil {
+	if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, projectScope(ctx), topic); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "topic": topic}, nil
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, err := managementScope(ctx); err != nil {
+		return nil, err
+	}
 	return a.snapshotStatus(ctx), nil
 }
 
-func (a *App) snapshotStatus(ctxs ...*sdk.AppCtx) map[string]any {
+func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 	port := 0
 	if a.broker != nil {
 		port = a.broker.Port()
 	}
 	var retained, msgs, users, devices int
 	db := a.ctx.AppDB()
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_retained`).Scan(&retained)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_message_log`).Scan(&msgs)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_users WHERE enabled = 1`).Scan(&users)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_devices WHERE project_id = ?`, projectScope(ctxs...)).Scan(&devices)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_retained WHERE scope_id = ?`, projectScope(ctx)).Scan(&retained)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_message_log WHERE scope_id = ?`, projectScope(ctx)).Scan(&msgs)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_users WHERE enabled = 1 AND scope_id = ?`, projectScope(ctx)).Scan(&users)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_devices WHERE scope_id = ?`, projectScope(ctx)).Scan(&devices)
 	clients := 0
-	brokerMetrics := map[string]any{}
-	if a.broker != nil {
-		clients = len(a.broker.Clients())
-		info := a.broker.server.Info.Clone()
-		brokerMetrics = map[string]any{
-			"bytes_received":    info.BytesReceived,
-			"bytes_sent":        info.BytesSent,
-			"messages_received": info.MessagesReceived,
-			"messages_sent":     info.MessagesSent,
-			"messages_dropped":  info.MessagesDropped,
-			"packets_received":  info.PacketsReceived,
-			"packets_sent":      info.PacketsSent,
-			"subscriptions":     info.Subscriptions,
-			"inflight":          info.Inflight,
-		}
-	}
+	brokerMetrics := map[string]any{} // broker-wide counters are never exposed to a scope.
+	clients = len(a.snapshotClients(ctx))
+	counters := a.counters(projectScope(ctx))
 	bind := bindAddress(a, port)
 	if a.broker != nil && a.broker.Address() != "" {
 		bind = a.broker.Address()
@@ -534,6 +592,8 @@ func (a *App) snapshotStatus(ctxs ...*sdk.AppCtx) map[string]any {
 		endpoint = "mqtt://" + net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	}
 	return map[string]any{
+		"scope_id":              projectScope(ctx),
+		"topic_root":            scopeTopicRoot(projectScope(ctx)),
 		"port":                  port,
 		"listen_address":        bind,
 		"bind_address":          bind,
@@ -546,12 +606,12 @@ func (a *App) snapshotStatus(ctxs ...*sdk.AppCtx) map[string]any {
 		"message_count":         msgs,
 		"users_enabled":         users,
 		"devices":               devices,
-		"audit_rows_dropped":    a.droppedLogs.Load(),
-		"events_dropped":        a.droppedEvents.Load(),
-		"events_emitted":        a.eventsEmitted.Load(),
-		"rate_limited_messages": a.rateLimitedMessages.Load(),
-		"auth_rejected":         a.authRejected.Load(),
-		"acl_rejected":          a.aclRejected.Load(),
+		"audit_rows_dropped":    counters.droppedLogs.Load(),
+		"events_dropped":        counters.droppedEvents.Load(),
+		"events_emitted":        counters.eventsEmitted.Load(),
+		"rate_limited_messages": counters.rateLimited.Load(),
+		"auth_rejected":         counters.authRejected.Load(),
+		"acl_rejected":          counters.aclRejected.Load(),
 		"started_at":            a.startedAt.Format(time.RFC3339),
 		"uptime_seconds":        int64(time.Since(a.startedAt).Seconds()),
 		"broker_metrics":        brokerMetrics,
@@ -655,25 +715,6 @@ func boolArg(args map[string]any, key string, def bool) bool {
 		}
 	}
 	return def
-}
-
-func strArrayArg(args map[string]any, key string) []string {
-	if args == nil {
-		return nil
-	}
-	switch v := args[key].(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, x := range v {
-			if s, ok := x.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
 }
 
 func callerLabel(ctx *sdk.AppCtx) string {

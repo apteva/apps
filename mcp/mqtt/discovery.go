@@ -52,31 +52,41 @@ func (a *App) bridgeHADiscovery(b *Broker) error {
 	}
 	// Distinct subscription IDs so they coexist with the wildcard
 	// loopback (id=1) and per-pattern bus subs (id=100+).
-	if err := b.Subscribe("homeassistant/+/+/config", 2, cb); err != nil {
+	if err := b.Subscribe("scopes/+/homeassistant/+/+/config", 2, cb); err != nil {
 		return err
 	}
-	if err := b.Subscribe("homeassistant/+/+/+/config", 3, cb); err != nil {
+	if err := b.Subscribe("scopes/+/homeassistant/+/+/+/config", 3, cb); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (a *App) handleHAConfig(topic string, payload []byte) {
-	component, objectID, ok := parseHATopic(topic)
+	scope := topicScope(topic)
+	if scope == "" {
+		return
+	}
+	logicalTopic := strings.TrimPrefix(topic, scopeTopicRoot(scope))
+	component, objectID, ok := parseHATopic(logicalTopic)
 	if !ok {
 		return
 	}
 	if len(payload) == 0 {
 		// Empty payload = HA convention for "remove this device".
 		_, _ = a.ctx.AppDB().Exec(
-			`DELETE FROM mqtt_devices WHERE project_id = ? AND slug = ?`,
-			projectScope(a.ctx), topicWithoutSuffix(topic))
+			`DELETE FROM mqtt_devices WHERE scope_id = ? AND slug = ?`,
+			scope, topicWithoutSuffix(topic))
 		return
 	}
 	var hp haConfigPayload
 	if err := json.Unmarshal(payload, &hp); err != nil {
 		// Don't log every bad payload at warn — discovery is best-effort.
 		return
+	}
+	for _, referenced := range []string{hp.StateTopic, hp.CommandTopic, hp.AvailabilityTopic, hp.JSONAttrTopic} {
+		if referenced != "" && !scopedTopic(scope, referenced) {
+			return
+		}
 	}
 	display := hp.Name
 	if display == "" && hp.Device != nil {
@@ -90,9 +100,9 @@ func (a *App) handleHAConfig(topic string, payload []byte) {
 	slug := topicWithoutSuffix(topic) // homeassistant/<comp>/<obj>
 	_, _ = a.ctx.AppDB().Exec(
 		`INSERT INTO mqtt_devices
-		   (project_id, slug, component, object_id, display_name,
+		   (scope_id, project_id, slug, component, object_id, display_name,
 		    manufacturer, model, state_topic, command_topic, ha_config_json, last_seen)
-		 VALUES (?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(project_id, slug) DO UPDATE SET
 		   display_name = excluded.display_name,
 		   manufacturer = excluded.manufacturer,
@@ -101,7 +111,7 @@ func (a *App) handleHAConfig(topic string, payload []byte) {
 		   command_topic = excluded.command_topic,
 		   ha_config_json = excluded.ha_config_json,
 		   last_seen = CURRENT_TIMESTAMP`,
-		projectScope(a.ctx), slug, component, objectID, display,
+		scope, scope, slug, component, objectID, display,
 		manuf, model, hp.StateTopic, hp.CommandTopic, string(payload),
 	)
 }
