@@ -377,7 +377,7 @@ func TestSidecar_SendMessage_RequiresFrom(t *testing.T) {
 	}
 }
 
-func TestSidecar_ReplyMessageDiscoveryAndReplay(t *testing.T) {
+func TestSidecar_SendMessageReplyDiscoveryAndReplay(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "reply.db")
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("DB_PATH", dbPath))
 	listed, err := sc.MCPRaw("tools/list", map[string]any{})
@@ -388,15 +388,18 @@ func TestSidecar_ReplyMessageDiscoveryAndReplay(t *testing.T) {
 	for _, item := range listed["tools"].([]any) {
 		tool := item.(map[string]any)
 		if tool["name"] == "reply_message" {
+			t.Fatal("removed reply_message tool is still advertised")
+		}
+		if tool["name"] == "send_message" {
 			found = true
 			properties := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
-			if properties["message_id"] == nil || properties["reply_all"] == nil || properties["from"] != nil || properties["to"] != nil {
+			if properties["reply_to_message_id"] == nil || properties["reply_all"] == nil || properties["from"] == nil || properties["to"] == nil {
 				t.Fatalf("incorrect reply tool schema: %+v", properties)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("reply_message is not discoverable through MCP")
+		t.Fatal("send_message is not discoverable through MCP")
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -409,12 +412,16 @@ func TestSidecar_ReplyMessageDiscoveryAndReplay(t *testing.T) {
 		(3,'other-project','email','in','private@example.net','["private@example.com"]','Private','received',NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	out := sc.MCP("reply_message", map[string]any{"message_id": 1, "body": "Retry", "idempotency_key": "once"})
+	out := sc.MCP("send_message", map[string]any{"reply_to_message_id": 1, "body": "Retry", "idempotency_key": "once"})
 	if out["status"] != "sent" || out["id"] != float64(2) {
 		t.Fatalf("MCP replay failed: %+v", out)
 	}
-	_, err = sc.MCPRaw("tools/call", map[string]any{"name": "reply_message", "arguments": map[string]any{"message_id": 3, "body": "Hello"}})
+	_, err = sc.MCPRaw("tools/call", map[string]any{"name": "send_message", "arguments": map[string]any{"reply_to_message_id": 3, "body": "Hello"}})
 	if err == nil || !strings.Contains(err.Error(), "not found in this project") {
 		t.Fatalf("MCP allowed a cross-project anchor: %v", err)
+	}
+	_, err = sc.MCPRaw("tools/call", map[string]any{"name": "reply_message", "arguments": map[string]any{"message_id": 1, "body": "Hello"}})
+	if err == nil {
+		t.Fatal("removed reply_message tool is still callable through MCP")
 	}
 }

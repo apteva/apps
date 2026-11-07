@@ -72,7 +72,7 @@ func seedReplySender(t *testing.T, ctx *sdk.AppCtx, channel, address string) {
 
 func sentReply(t *testing.T, ctx *sdk.AppCtx, args map[string]any) *Message {
 	t.Helper()
-	out, err := (&App{}).toolReplyMessage(ctx, args)
+	out, err := (&App{}).toolSendMessage(ctx, args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func replyWireHeaders(t *testing.T, platform *stubPlatform) mail.Header {
 	return nil
 }
 
-func TestReplyMessageInboundPreservesThreadAndTicketIdentifiers(t *testing.T) {
+func TestSendMessageReplyInboundPreservesThreadAndTicketIdentifiers(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
@@ -126,7 +126,7 @@ func TestReplyMessageInboundPreservesThreadAndTicketIdentifiers(t *testing.T) {
 		References: []string{"<root@example.net>", "<root@example.net>"}, AttachmentStorageIDs: []int64{999},
 		Headers: json.RawMessage(`{"rEpLy-To":"\"Support, Jane\" <case+T-1234@example.net>","x-ticket-id":"T-1234","X-Ticket-Number":"1234","X-Secret":{"unrelated":"metadata"},"Authentication-Results":"untrusted","Bcc":"secret@example.net"}`),
 	})
-	m := sentReply(t, ctx, map[string]any{"message_id": id, "body": "Looking into it."})
+	m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Looking into it."})
 	if m.From != fromAcme || !reflect.DeepEqual(m.To, []string{"case+t-1234@example.net"}) || len(m.CC) != 0 || len(m.BCC) != 0 || len(m.Attachments) != 0 || len(m.AttachmentStorageIDs) != 0 {
 		t.Fatalf("unexpected reply addressing/attachments: %+v", m)
 	}
@@ -150,7 +150,7 @@ func TestReplyMessageInboundPreservesThreadAndTicketIdentifiers(t *testing.T) {
 	}
 }
 
-func TestReplyMessageReplyAllDeduplicatesAndExcludesOwnMailboxes(t *testing.T) {
+func TestSendMessageReplyReplyAllDeduplicatesAndExcludesOwnMailboxes(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
@@ -160,7 +160,7 @@ func TestReplyMessageReplyAllDeduplicatesAndExcludesOwnMailboxes(t *testing.T) {
 		CC: []string{"other@example.net", "cc@example.net", "team@acme.com"}, BCC: []string{"hidden@example.net"},
 		MessageIDHeader: "<original@example.net>",
 	})
-	m := sentReply(t, ctx, map[string]any{"message_id": id, "body": "Reply all", "reply_all": true})
+	m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Reply all", "reply_all": true})
 	if !reflect.DeepEqual(m.To, []string{"customer@example.net"}) || !reflect.DeepEqual(m.CC, []string{"other@example.net", "cc@example.net"}) || len(m.BCC) != 0 {
 		t.Fatalf("reply-all recipients: To=%v Cc=%v Bcc=%v", m.To, m.CC, m.BCC)
 	}
@@ -169,7 +169,7 @@ func TestReplyMessageReplyAllDeduplicatesAndExcludesOwnMailboxes(t *testing.T) {
 	}
 }
 
-func TestReplyMessageOutboundKeepsSenderAndTo(t *testing.T) {
+func TestSendMessageReplyOutboundKeepsSenderAndTo(t *testing.T) {
 	for _, all := range []bool{false, true} {
 		t.Run(map[bool]string{false: "reply", true: "reply-all"}[all], func(t *testing.T) {
 			ctx := newTestCtx(t, &stubPlatform{})
@@ -179,7 +179,7 @@ func TestReplyMessageOutboundKeepsSenderAndTo(t *testing.T) {
 				CC: []string{"cc@example.net"}, BCC: []string{"hidden@example.net"}, Subject: "rE: [T-5] Help",
 				MessageIDHeader: "<sent@acme.com>", Headers: json.RawMessage(`{"Reply-To":"support+T-5@acme.com"}`),
 			})
-			m := sentReply(t, ctx, map[string]any{"message_id": id, "body": "Following up", "reply_all": all})
+			m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Following up", "reply_all": all})
 			if m.From != fromAcme || !reflect.DeepEqual(m.To, []string{"first@example.net", "second@example.net"}) || len(m.BCC) != 0 || m.Subject != "rE: [T-5] Help" || (len(m.CC) == 1) != all {
 				t.Fatalf("outbound follow-up: %+v", m)
 			}
@@ -187,7 +187,7 @@ func TestReplyMessageOutboundKeepsSenderAndTo(t *testing.T) {
 	}
 }
 
-func TestReplyMessageTaggedDeliveryAndFollowupKeepReplyTo(t *testing.T) {
+func TestSendMessageReplyTaggedDeliveryAndFollowupKeepReplyTo(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
@@ -195,8 +195,8 @@ func TestReplyMessageTaggedDeliveryAndFollowupKeepReplyTo(t *testing.T) {
 		To: []string{"unrelated@elsewhere.net"}, MatchedRecipient: "notifications+T-99@acme.com",
 		MessageIDHeader: "<original@example.net>",
 	})
-	first := sentReply(t, ctx, map[string]any{"message_id": id, "body": "First"})
-	second := sentReply(t, ctx, map[string]any{"message_id": first.ID, "body": "Follow-up"})
+	first := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "First"})
+	second := sentReply(t, ctx, map[string]any{"reply_to_message_id": first.ID, "body": "Follow-up"})
 	if first.From != fromAcme || second.From != fromAcme || second.InReplyTo != first.MessageIDHeader {
 		t.Fatalf("tagged reply or follow-up sender/thread changed: %+v %+v", first, second)
 	}
@@ -206,7 +206,7 @@ func TestReplyMessageTaggedDeliveryAndFollowupKeepReplyTo(t *testing.T) {
 	}
 }
 
-func TestReplyMessageGmailPreservesAnchorThreadAndConnection(t *testing.T) {
+func TestSendMessageReplyGmailPreservesAnchorThreadAndConnection(t *testing.T) {
 	for _, messageID := range []string{"<gmail-original@example.net>", ""} {
 		t.Run("RFC-ID="+messageID, func(t *testing.T) {
 			platform := gmailTestPlatform()
@@ -216,7 +216,7 @@ func TestReplyMessageGmailPreservesAnchorThreadAndConnection(t *testing.T) {
 			if _, err := ctx.AppDB().Exec(`UPDATE messages SET provider_thread_id='original-thread' WHERE id=?`, id); err != nil {
 				t.Fatal(err)
 			}
-			m := sentReply(t, ctx, map[string]any{"message_id": id, "body": "Hello"})
+			m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Hello"})
 			if m.InReplyTo != messageID {
 				t.Fatalf("RFC header confused with provider ID: %q", m.InReplyTo)
 			}
@@ -231,11 +231,11 @@ func TestReplyMessageGmailPreservesAnchorThreadAndConnection(t *testing.T) {
 	}
 }
 
-func TestReplyMessageDoesNotInventRFCIDAndSupportsAttachmentsAndTemplates(t *testing.T) {
+func TestSendMessageReplyDoesNotInventRFCIDAndSupportsAttachmentsAndTemplates(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
 	seedReplySender(t, ctx, channelEmail, fromAcme)
 	id := seedReplyAnchor(t, ctx, Message{ProviderMessageID: "opaque-id", InReplyTo: "<parent@example.net>"})
-	m := sentReply(t, ctx, map[string]any{"message_id": id, "attachments": []any{map[string]any{"filename": "answer.txt", "content_type": "text/plain", "content_base64": "aGk="}}})
+	m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "attachments": []any{map[string]any{"filename": "answer.txt", "content_type": "text/plain", "content_base64": "aGk="}}})
 	if m.InReplyTo != "" || !reflect.DeepEqual(m.References, []string{"<parent@example.net>"}) || len(m.Attachments) != 1 || m.Attachments[0].Filename != "answer.txt" {
 		t.Fatalf("attachment-only reply: %+v", m)
 	}
@@ -243,13 +243,13 @@ func TestReplyMessageDoesNotInventRFCIDAndSupportsAttachmentsAndTemplates(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	m = sentReply(t, ctx, map[string]any{"message_id": id, "template_id": tpl.(map[string]any)["template"].(*Template).ID, "vars": map[string]any{"name": "Jane"}})
+	m = sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "template_id": tpl.(map[string]any)["template"].(*Template).ID, "vars": map[string]any{"name": "Jane"}})
 	if m.BodyText != "Hi Jane" || m.Subject != "Re: (no subject)" || m.TemplateSnapshot == nil {
 		t.Fatalf("template reply lost content or original subject: %+v", m)
 	}
 }
 
-func TestReplyMessagePhoneChannelsUseOriginalAddressPair(t *testing.T) {
+func TestSendMessageReplyPhoneChannelsUseOriginalAddressPair(t *testing.T) {
 	for _, channel := range []string{channelSMS, channelWhatsApp} {
 		t.Run(channel, func(t *testing.T) {
 			platform := &stubPlatform{bindingsOverride: map[string]any{"phone_provider": float64(2)}, replyByTool: map[string]*sdk.ExecuteResult{
@@ -258,7 +258,7 @@ func TestReplyMessagePhoneChannelsUseOriginalAddressPair(t *testing.T) {
 			ctx := newTestCtx(t, platform)
 			seedReplySender(t, ctx, channel, "+15551112222")
 			id := seedReplyAnchor(t, ctx, Message{Channel: channel, From: "+15553334444", To: []string{"+15551112222"}, Headers: json.RawMessage(`{"Reply-To":"attacker@example.net","X-Ticket-ID":"T-5"}`)})
-			m := sentReply(t, ctx, map[string]any{"message_id": id, "body": "Hello"})
+			m := sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Hello"})
 			if m.Channel != channel || m.From != "+15551112222" || !reflect.DeepEqual(m.To, []string{"+15553334444"}) || m.InReplyTo != "" || m.Subject != "" {
 				t.Fatalf("phone reply: %+v", m)
 			}
@@ -274,7 +274,7 @@ func TestReplyMessagePhoneChannelsUseOriginalAddressPair(t *testing.T) {
 	}
 }
 
-func TestReplyMessageValidationDoesNotSend(t *testing.T) {
+func TestSendMessageReplyValidationDoesNotSend(t *testing.T) {
 	for _, scenario := range []string{"missing-id", "fractional-id", "unknown-id", "other-project", "no-sender", "disabled-sender", "unverified-sender", "deleted-sender", "invalid-reply-to", "conflicting-reply-to", "invalid-message-id", "invalid-references", "empty-content", "phone-reply-all", "reply-all-type", "changed-connection"} {
 		t.Run(scenario, func(t *testing.T) {
 			platform := &stubPlatform{}
@@ -300,14 +300,14 @@ func TestReplyMessageValidationDoesNotSend(t *testing.T) {
 				preseedSender(t, ctx, senderUpsert{Channel: channelEmail, Address: fromAcme, Kind: "email_mailbox", Provider: "aws-ses", ProviderConnectionID: 1, Verified: true, SendingEnabled: true})
 			}
 			id := seedReplyAnchor(t, ctx, anchor)
-			args := map[string]any{"message_id": id, "body": "Hello"}
+			args := map[string]any{"reply_to_message_id": id, "body": "Hello"}
 			switch scenario {
 			case "missing-id":
-				delete(args, "message_id")
+				delete(args, "reply_to_message_id")
 			case "fractional-id":
-				args["message_id"] = float64(id) + 0.5
+				args["reply_to_message_id"] = float64(id) + 0.5
 			case "unknown-id":
-				args["message_id"] = id + 1000
+				args["reply_to_message_id"] = id + 1000
 			case "no-sender", "disabled-sender", "unverified-sender", "deleted-sender":
 				query := map[string]string{"no-sender": `DELETE FROM senders`, "disabled-sender": `UPDATE senders SET sending_enabled=0`, "unverified-sender": `UPDATE senders SET verified=0`, "deleted-sender": `UPDATE senders SET deleted_at=CURRENT_TIMESTAMP`}[scenario]
 				if _, err := ctx.AppDB().Exec(query); err != nil {
@@ -320,7 +320,7 @@ func TestReplyMessageValidationDoesNotSend(t *testing.T) {
 			case "reply-all-type":
 				args["reply_all"] = "true"
 			}
-			if _, err := (&App{}).toolReplyMessage(ctx, args); err == nil {
+			if _, err := (&App{}).toolSendMessage(ctx, args); err == nil {
 				t.Fatal("expected validation error")
 			}
 			if len(platform.executeCalls) != 0 {
@@ -330,12 +330,12 @@ func TestReplyMessageValidationDoesNotSend(t *testing.T) {
 	}
 }
 
-func TestReplyMessageRejectsAddressingAndThreadingOverrides(t *testing.T) {
+func TestSendMessageReplyRejectsAddressingAndThreadingOverrides(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
 	id := seedReplyAnchor(t, ctx, Message{})
-	for _, field := range []string{"from", "to", "cc", "bcc", "reply_to", "channel", "connection_id", "subject", "headers", "in_reply_to", "references", "message_id_header"} {
+	for _, field := range []string{"from", "from_name", "to", "cc", "bcc", "reply_to", "channel", "connection_id", "subject", "headers", "in_reply_to", "references", "message_id_header"} {
 		t.Run(field, func(t *testing.T) {
-			_, err := (&App{}).toolReplyMessage(ctx, map[string]any{"message_id": id, "body": "Hello", field: "override"})
+			_, err := (&App{}).toolSendMessage(ctx, map[string]any{"reply_to_message_id": id, "body": "Hello", field: "override"})
 			if err == nil || !strings.Contains(err.Error(), "unsupported argument") {
 				t.Fatalf("override accepted: %v", err)
 			}
@@ -343,7 +343,7 @@ func TestReplyMessageRejectsAddressingAndThreadingOverrides(t *testing.T) {
 	}
 }
 
-func TestReplyMessageSuppressionAndWhatsAppWindowStillApply(t *testing.T) {
+func TestSendMessageReplySuppressionAndWhatsAppWindowStillApply(t *testing.T) {
 	t.Run("suppression", func(t *testing.T) {
 		platform := &stubPlatform{}
 		ctx := newTestCtx(t, platform)
@@ -352,7 +352,7 @@ func TestReplyMessageSuppressionAndWhatsAppWindowStillApply(t *testing.T) {
 		if _, err := (&App{}).toolSuppressionAdd(ctx, map[string]any{"address": "customer@example.net", "channel": channelEmail}); err != nil {
 			t.Fatal(err)
 		}
-		_, err := (&App{}).toolReplyMessage(ctx, map[string]any{"message_id": id, "body": "Hello"})
+		_, err := (&App{}).toolSendMessage(ctx, map[string]any{"reply_to_message_id": id, "body": "Hello"})
 		var blocked *recipientSuppressedError
 		if !errors.As(err, &blocked) || len(platform.executeCalls) != 0 {
 			t.Fatalf("suppression bypassed: %v calls=%+v", err, platform.executeCalls)
@@ -366,14 +366,14 @@ func TestReplyMessageSuppressionAndWhatsAppWindowStillApply(t *testing.T) {
 		if _, err := ctx.AppDB().Exec(`UPDATE messages SET created_at=?,received_at=? WHERE id=?`, time.Now().Add(-48*time.Hour).Format(time.RFC3339), time.Now().Add(-48*time.Hour).Format(time.RFC3339), id); err != nil {
 			t.Fatal(err)
 		}
-		_, err := (&App{}).toolReplyMessage(ctx, map[string]any{"message_id": id, "body": "Hello"})
+		_, err := (&App{}).toolSendMessage(ctx, map[string]any{"reply_to_message_id": id, "body": "Hello"})
 		if err == nil || !strings.Contains(err.Error(), "24 hours") || len(platform.executeCalls) != 0 {
 			t.Fatalf("WhatsApp window bypassed: %v calls=%+v", err, platform.executeCalls)
 		}
 	})
 }
 
-func TestReplyMessageRetriesAreScopedToAnchorAndDoNotResend(t *testing.T) {
+func TestSendMessageReplyRetriesAreScopedToAnchorAndDoNotResend(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
@@ -384,8 +384,8 @@ func TestReplyMessageRetriesAreScopedToAnchorAndDoNotResend(t *testing.T) {
 	}
 	first := seedReplyAnchor(t, ctx, Message{})
 	second := seedReplyAnchor(t, ctx, Message{})
-	a := sentReply(t, ctx, map[string]any{"message_id": first, "body": "First reply", "idempotency_key": "request-1"})
-	b := sentReply(t, ctx, map[string]any{"message_id": second, "body": "Other reply", "idempotency_key": "request-1"})
+	a := sentReply(t, ctx, map[string]any{"reply_to_message_id": first, "body": "First reply", "idempotency_key": "request-1"})
+	b := sentReply(t, ctx, map[string]any{"reply_to_message_id": second, "body": "Other reply", "idempotency_key": "request-1"})
 	if a.ID == b.ID || a.BodyText != "First reply" || b.BodyText != "Other reply" {
 		t.Fatal("idempotency keys collided across anchors")
 	}
@@ -393,18 +393,18 @@ func TestReplyMessageRetriesAreScopedToAnchorAndDoNotResend(t *testing.T) {
 	if _, err := ctx.AppDB().Exec(`UPDATE senders SET sending_enabled=0`); err != nil {
 		t.Fatal(err)
 	}
-	replayed := sentReply(t, ctx, map[string]any{"message_id": first, "body": "Changed retry body", "idempotency_key": "request-1"})
+	replayed := sentReply(t, ctx, map[string]any{"reply_to_message_id": first, "body": "Changed retry body", "idempotency_key": "request-1"})
 	if replayed.ID != a.ID || replayed.BodyText != a.BodyText || len(platform.executeCalls) != 3 {
 		t.Fatalf("retry resent: %+v calls=%d", replayed, len(platform.executeCalls))
 	}
 }
 
-func TestReplyMessageUnsafeTicketHeadersAreNotCopied(t *testing.T) {
+func TestSendMessageReplyUnsafeTicketHeadersAreNotCopied(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
 	id := seedReplyAnchor(t, ctx, Message{MessageIDHeader: "<original@example.net>", Headers: json.RawMessage(`{"X-Ticket-ID":"T-1\r\nBcc: evil@example.net","X-Ticket-Number":"ticket with spaces","X-Case-ID":"unsupported"}`)})
-	sentReply(t, ctx, map[string]any{"message_id": id, "body": "Hello"})
+	sentReply(t, ctx, map[string]any{"reply_to_message_id": id, "body": "Hello"})
 	h := replyWireHeaders(t, platform)
 	for _, name := range []string{"X-Ticket-ID", "X-Ticket-Number", "X-Case-ID", "Bcc"} {
 		if h.Get(name) != "" {
@@ -413,7 +413,7 @@ func TestReplyMessageUnsafeTicketHeadersAreNotCopied(t *testing.T) {
 	}
 }
 
-func TestReplyMessageFailedAndUncertainSendsAreNotRetried(t *testing.T) {
+func TestSendMessageReplyFailedAndUncertainSendsAreNotRetried(t *testing.T) {
 	for _, uncertain := range []bool{false, true} {
 		t.Run(map[bool]string{false: "rejected", true: "unknown-outcome"}[uncertain], func(t *testing.T) {
 			platform := gmailTestPlatform()
@@ -427,10 +427,10 @@ func TestReplyMessageFailedAndUncertainSendsAreNotRetried(t *testing.T) {
 			} else {
 				platform.replyByTool["send_raw_email"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":"rejected"}`)}
 			}
-			args := map[string]any{"message_id": id, "body": "Hello", "idempotency_key": "once"}
+			args := map[string]any{"reply_to_message_id": id, "body": "Hello", "idempotency_key": "once"}
 			var firstID any
 			for i := 0; i < 2; i++ {
-				out, err := (&App{}).toolReplyMessage(ctx, args)
+				out, err := (&App{}).toolSendMessage(ctx, args)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -451,7 +451,7 @@ func TestReplyMessageFailedAndUncertainSendsAreNotRetried(t *testing.T) {
 	}
 }
 
-func TestReplyMessageHTTPDispatcherAndGlobalProjectIsolation(t *testing.T) {
+func TestSendMessageReplyHTTPDispatcherAndGlobalProjectIsolation(t *testing.T) {
 	platform := &stubPlatform{}
 	ctx := newTestCtx(t, platform)
 	seedReplySender(t, ctx, channelEmail, fromAcme)
@@ -459,7 +459,7 @@ func TestReplyMessageHTTPDispatcherAndGlobalProjectIsolation(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	app := &App{}
 	call := func(project string) *httptest.ResponseRecorder {
-		body := mustJSON(map[string]any{"tool": "reply_message", "args": map[string]any{"message_id": id, "body": "Hello"}})
+		body := mustJSON(map[string]any{"tool": "send_message", "args": map[string]any{"reply_to_message_id": id, "body": "Hello"}})
 		r := httptest.NewRequest(http.MethodPost, "/tools/call?project_id="+project, bytes.NewReader(body))
 		w := httptest.NewRecorder()
 		app.handleToolsCall(w, r)
@@ -470,5 +470,64 @@ func TestReplyMessageHTTPDispatcherAndGlobalProjectIsolation(t *testing.T) {
 	}
 	if w := call("test-proj"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"sent"`) {
 		t.Fatalf("tool dispatch failed: %d %s", w.Code, w.Body.String())
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/tools/call?project_id=test-proj", strings.NewReader(`{"tool":"reply_message","args":{"message_id":1,"body":"Hello"}}`))
+	app.handleToolsCall(w, r)
+	if w.Code != http.StatusNotFound || len(platform.executeCalls) != 1 {
+		t.Fatalf("removed reply_message tool is still callable: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSendMessageReplyModeNeverFallsBackToNewSend(t *testing.T) {
+	platform := &stubPlatform{}
+	ctx := newTestCtx(t, platform)
+	for _, anchor := range []any{nil, 0, -1, 1.5, "invalid"} {
+		_, err := (&App{}).toolSendMessage(ctx, map[string]any{
+			"reply_to_message_id": anchor, "channel": channelEmail,
+			"from": fromAcme, "to": "customer@example.net", "body": "Hello",
+		})
+		if err == nil {
+			t.Fatalf("invalid anchor %v fell back to a new send", anchor)
+		}
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatal("invalid reply called a provider")
+	}
+}
+
+func TestSendMessageNewSendKeepsReplyToAddressAndRequiresChannelAndTo(t *testing.T) {
+	platform := &stubPlatform{}
+	ctx := newTestCtx(t, platform)
+	for _, args := range []map[string]any{
+		{"to": "customer@example.net", "body": "Hello"},
+		{"channel": channelEmail, "body": "Hello"},
+		{"channel": channelEmail, "to": "customer@example.net", "body": "Hello", "reply_all": false},
+	} {
+		if _, err := (&App{}).toolSendMessage(ctx, args); err == nil {
+			t.Fatalf("invalid new send accepted: %v", args)
+		}
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatal("invalid new send called a provider")
+	}
+	out, err := (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel": channelEmail, "from": fromAcme, "to": "customer@example.net",
+		"subject": "New message", "body": "Hello", "reply_to": "support@acme.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	m, err := dbMessageGet(ctx.AppDB(), "test-proj", r["id"].(int64))
+	if err != nil || r["status"] != "sent" || m.Subject != "New message" || m.InReplyTo != "" {
+		t.Fatalf("new send changed behavior: %+v %v", out, err)
+	}
+	var headers map[string]any
+	if err := json.Unmarshal(m.Headers, &headers); err != nil || headers["Reply-To"] != "support@acme.com" {
+		t.Fatalf("reply_to address confused with a message anchor: %s %v", m.Headers, err)
+	}
+	if !reflect.DeepEqual(platform.executeCalls[0].Input["ReplyToAddresses"], []string{"support@acme.com"}) {
+		t.Fatalf("new send Reply-To address not sent: %+v", platform.executeCalls[0])
 	}
 }
