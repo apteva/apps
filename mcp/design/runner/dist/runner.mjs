@@ -22746,7 +22746,7 @@ async function run(request) {
       for (const f of faces)
         f.delete();
     }
-    return { id: item.id, part_id: item.part_id, name: item.name, color: item.color, visible: !assembly.instances.some((i) => i.visible === false && (item.id === i.id || item.id.startsWith(i.id + "/"))), instance_id: assembly.instances.find((i) => item.id === i.id || item.id.startsWith(i.id + "/"))?.id, ...visualMesh };
+    return { id: item.id, part_id: item.part_id, name: item.name, color: item.color, visible: !assembly.instances.some((i) => i.visible === false && (item.id === i.id || item.id.startsWith(i.id + "/"))), instance_id: assembly.instances.find((i) => item.id === i.id || item.id.startsWith(i.id + "/"))?.id || (!request.definition.assembly ? request.definition.parts?.find((p) => p.output === request.definition.output)?.id || "output" : undefined), ...visualMesh };
   });
   const mesh = { vertices: [], triangles: [], normals: [] };
   for (const part of partMeshes) {

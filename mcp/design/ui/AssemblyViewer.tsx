@@ -63,8 +63,8 @@ export default function AssemblyViewer({
     [error, setError] = useState("");
   const pickMode = useRef({ measuring, measureMode });
   pickMode.current = { measuring, measureMode };
-  const choose = (id: string) => {
-    setSelected(id);
+  const choose = (id: string, visual?: string) => {
+    setSelected(visual || id);
     onSelect?.(id);
   };
   useEffect(() => {
@@ -221,7 +221,7 @@ export default function AssemblyViewer({
           if (!hits.length) return;
           const hit = hits[0],
             o = hit.object as THREE.Mesh;
-          choose(o.userData.instance);
+          choose(o.userData.instance, o.userData.id);
           if (pickMode.current.measuring) {
             const source = o.userData.part as MeshData;
             const group = source.faceGroups?.find(
@@ -650,14 +650,14 @@ export default function AssemblyViewer({
                     flex: 1,
                     textAlign: "left",
                     borderColor:
-                      selected === (p.instance_id || p.id)
+                      selected === p.id || selected === p.instance_id
                         ? "#f97316"
                         : "transparent",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                   }}
                   title={p.id}
-                  onClick={() => choose(p.instance_id || p.id || "")}
+                  onClick={() => choose(p.instance_id || p.id || "", p.id)}
                 >
                   {p.name || p.id}
                 </button>
@@ -672,8 +672,8 @@ export default function AssemblyViewer({
                           .map((x) => x.id || ""),
                       ),
                     );
-                    choose(p.instance_id || p.id || "");
-                    fit([p.instance_id || p.id || ""]);
+                    choose(p.instance_id || p.id || "", p.id);
+                    fit([p.id || ""]);
                   }}
                 >
                   ◎

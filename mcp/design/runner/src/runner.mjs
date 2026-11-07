@@ -627,7 +627,7 @@ async function run(request) {
       const faces=item.shape.faces,faceIndices=new Map(faces.map((f,index)=>[f.hashCode,index]));
       visualMesh.faceGroups=visualMesh.faceGroups.map(g=>({...g,faceId:faceIndices.get(g.faceId)}));for(const f of faces)f.delete();
     }
-    return {id:item.id,part_id:item.part_id,name:item.name,color:item.color,visible:!assembly.instances.some(i=>i.visible===false&&(item.id===i.id||item.id.startsWith(i.id+'/'))),instance_id:assembly.instances.find(i=>item.id===i.id||item.id.startsWith(i.id+'/'))?.id,...visualMesh};
+    return {id:item.id,part_id:item.part_id,name:item.name,color:item.color,visible:!assembly.instances.some(i=>i.visible===false&&(item.id===i.id||item.id.startsWith(i.id+'/'))),instance_id:assembly.instances.find(i=>item.id===i.id||item.id.startsWith(i.id+'/'))?.id||(!request.definition.assembly?(request.definition.parts?.find(p=>p.output===request.definition.output)?.id||'output'):undefined),...visualMesh};
   });
   const mesh={vertices:[],triangles:[],normals:[]};
   for(const part of partMeshes){const offset=mesh.vertices.length/3;for(const v of part.vertices)mesh.vertices.push(v);for(const n of part.normals||[])mesh.normals.push(n);for(const i of part.triangles)mesh.triangles.push(i+offset);}

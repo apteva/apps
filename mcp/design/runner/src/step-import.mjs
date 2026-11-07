@@ -16,18 +16,23 @@ try {
     throw new Error(
       "Not a STEP Part 21 file. Upload the original .step/.stp file, not HTML or an archive.",
     );
-  const units = [
-    ...new Set(
-      [
-        ...text.matchAll(
-          /SI_UNIT\s*\(\s*(\.[A-Z]+\.|\$)\s*,\s*\.METRE\.\s*\)|CONVERSION_BASED_UNIT\s*\(\s*'([^']+)'/gi,
-        ),
-      ].map(
-        (m) =>
-          m[2] || { ".MILLI.": "mm", ".CENTI.": "cm", $: "m" }[m[1]] || m[1],
-      ),
-    ),
-  ];
+  const lengthUnits = new Set();
+  for (const m of text.matchAll(
+    /SI_UNIT\s*\(\s*(\.[A-Z]+\.|\$)\s*,\s*\.METRE\.\s*\)/gi,
+  ))
+    lengthUnits.add({ ".MILLI.": "mm", ".CENTI.": "cm", $: "m" }[m[1]] || m[1]);
+  for (const entity of text.matchAll(/#\d+\s*=\s*([\s\S]*?);/g)) {
+    const match = entity[1].match(/CONVERSION_BASED_UNIT\s*\(\s*'([^']+)'/i);
+    if (
+      match &&
+      (/LENGTH_UNIT\s*\(/i.test(entity[1]) ||
+        /^(inch|in|foot|feet|ft|millimet(?:re|er)|centimet(?:re|er)|met(?:re|er))s?$/i.test(
+          match[1],
+        ))
+    )
+      lengthUnits.add(match[1]);
+  }
+  const units = [...lengthUnits];
   if (!units.length)
     throw new Error(
       "No supported length-unit declaration found; supply a corrected manufacturer STEP with explicit units.",

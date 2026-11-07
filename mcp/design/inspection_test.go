@@ -160,6 +160,22 @@ func TestSTEPImportRoundtripAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalidUnits := strings.ReplaceAll(string(body), ".METRE.", ".RADIAN.")
+	if _, err := s.importSTEP(context.Background(), "missing-length-unit.step", []byte(invalidUnits), ComponentEvidence{Model: "Invalid units", GeometryStatus: "measured"}); err == nil || !strings.Contains(err.Error(), "length-unit") {
+		t.Fatalf("missing length units were not rejected: %v", err)
+	}
+	metres := strings.ReplaceAll(string(body), ".MILLI.,.METRE.", "$,.METRE.")
+	if metres == string(body) {
+		t.Fatal("STEP fixture has no expected unit declaration")
+	}
+	metric, err := s.importSTEP(context.Background(), "metre-fixture.step", []byte(metres), ComponentEvidence{Model: "Metre fixture", GeometryStatus: "measured", Complete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(metric.Geometry.Bounds.Size[0]-20000) > .01 {
+		t.Fatalf("metres were not converted to millimetres: %v", metric.Geometry.Bounds.Size)
+	}
+
 	if asset.Geometry == nil || math.Abs(asset.Geometry.Bounds.Size[0]-20) > .01 || len(asset.Components) == 0 {
 		t.Fatalf("invalid import: %#v", asset)
 	}
@@ -171,6 +187,30 @@ func TestSTEPImportRoundtripAndIsolation(t *testing.T) {
 	first, err := s.Build(context.Background(), design.ID, 0, []string{"step", "stl", "3mf"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, a := range first.Artifacts {
+		if a.Format != "mesh-json" {
+			continue
+		}
+		raw, _ := os.ReadFile(a.LocalPath)
+		var m struct {
+			Parts []struct {
+				ID         string `json:"id"`
+				InstanceID string `json:"instance_id"`
+			} `json:"parts"`
+		}
+		_ = json.Unmarshal(raw, &m)
+		if len(m.Parts) == 0 || m.Parts[0].InstanceID != "component" {
+			t.Fatal("standalone STEP has no measurable component identity")
+		}
+		result, err := s.Measure(context.Background(), design.ID, design.CurrentRevisionID, map[string]any{"a": "component", "b": "component", "visual_a": m.Parts[0].ID, "visual_b": m.Parts[0].ID, "face_a": 0, "face_b": 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.(map[string]any)["measurement"].(CheckResult).Status != "pass" {
+			t.Fatal("standalone STEP face measurement failed")
+		}
+		break
 	}
 	if first.Report.BodyCount != 1 {
 		t.Fatalf("wrong body count %d", first.Report.BodyCount)
