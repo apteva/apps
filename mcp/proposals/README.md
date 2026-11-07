@@ -6,7 +6,7 @@ Clients can include, defer, or decline optional items. Categories support any nu
 
 ## Client backlog
 
-Use the **Client backlog** tab to create clients and keep private ideas, categories, scope descriptions, optional estimates, and internal notes. Existing CRM contacts can be imported by contact ID. Items without a price can be planned now and priced later.
+Use the **Client backlog** tab to create clients and keep private ideas, categories, scope descriptions, optional estimates, and internal notes. When CRM is linked, search contacts by name, email, or company and select a result to fill the client details. Items without a price can be planned now and priced later.
 
 Select priced items and choose **Create proposal from selection**, or select a saved client in an existing draft and use **Add from client backlog** under **Scope & pricing**. The draft receives copies of only the selected scope and prices. Unselected items and internal notes stay in the backlog. Later backlog edits do not change those copies. Archive items when they are no longer needed.
 

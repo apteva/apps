@@ -31,19 +31,82 @@ function Dialog({title, onClose, busy, children}: {title: string; onClose: () =>
   </dialog>;
 }
 
+type CRMContact = {crm_contact_id: number; name: string; email: string; company?: string};
+type CRMPage = {linked: boolean; contacts: CRMContact[]; next_offset?: number};
+
+function CRMContactPicker({request, selectedID, selectedName, busy, onSelect, onClear}: {
+  request: Request; selectedID: number; selectedName: string; busy: boolean;
+  onSelect: (contact: CRMContact) => Promise<void>; onClear: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState<CRMPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const generation = useRef(0);
+  useEffect(() => {
+    const current = ++generation.current;
+    setLoading(true);setMoreBusy(false);setError("");
+    const timer = window.setTimeout(() => {
+      request<CRMPage>("clients_crm_search", {q: query, limit: 20}).then((next) => {
+        if (generation.current === current) {setPage(next);setLoading(false);}
+      }).catch((err) => {
+        if (generation.current === current) {setError(err.message);setLoading(false);}
+      });
+    }, 250);
+    return () => {window.clearTimeout(timer);generation.current++;};
+  }, [query, retry]);
+  async function loadMore() {
+    const current = generation.current;
+    setMoreBusy(true);setError("");
+    try {
+      const next = await request<CRMPage>("clients_crm_search", {q: query, offset: page!.next_offset, limit: 20});
+      if (generation.current === current) {
+        setPage((previous) => previous ? {...next, contacts: [
+          ...previous.contacts, ...next.contacts.filter((contact) => !previous.contacts.some((old) => old.crm_contact_id === contact.crm_contact_id)),
+        ]} : next);
+      }
+    } catch (err) {if (generation.current === current) setError((err as Error).message);}
+    finally {if (generation.current === current) setMoreBusy(false);}
+  }
+  return <section className="pp-section-divider pp-crm-picker">
+    <h3>CRM contact</h3>
+    {page?.linked ? <label>Search CRM contacts<input type="search" value={query} maxLength={200}
+      placeholder="Name, email, or company" disabled={busy} onChange={(event) => setQuery(event.target.value)}/></label> : null}
+    {loading && <p role="status">{query ? "Searching contacts…" : "Checking CRM connection…"}</p>}
+    {error && <div className="pp-crm-search-error"><p className="pp-error-text" role="alert">{error}</p>
+      <button type="button" disabled={busy} onClick={() => setRetry((value) => value + 1)}>Retry CRM search</button></div>}
+    {page && !page.linked && <p>Link CRM in Proposals’ app settings to search and select contacts.</p>}
+    {page?.linked && !loading && <>
+      {page.contacts.length ? <ul className="pp-crm-results" aria-label="CRM contacts">
+        {page.contacts.map((contact) => <li key={contact.crm_contact_id}>
+          <button type="button" disabled={busy} aria-label={"Select CRM contact " + contact.name + (contact.email ? " · " + contact.email : "")}
+            className={selectedID === contact.crm_contact_id ? "is-selected" : ""} onClick={() => onSelect(contact)}>
+            <strong>{contact.name}</strong><span>{[contact.email, contact.company].filter(Boolean).join(" · ") || "No email added"}</span>
+            {selectedID === contact.crm_contact_id && <small>Selected</small>}
+          </button>
+        </li>)}
+      </ul> : <p role="status">{query ? "No CRM contacts match your search." : "No contacts found in the linked CRM."}</p>}
+      {page.next_offset && <button type="button" disabled={busy || moreBusy} onClick={loadMore}>{moreBusy ? "Loading…" : "Load more CRM contacts"}</button>}
+    </>}
+    {!!selectedID && <div className="pp-linked"><span>Linked CRM contact · {selectedName || "Selected contact"}</span>
+      <button type="button" disabled={busy} className="pp-text-button" onClick={onClear}>Unlink</button></div>}
+  </section>;
+}
+
 function ClientEditor({value, request, onClose, onSaved}: {
   value: Client | null; request: Request; onClose: () => void; onSaved: (client: Client) => Promise<void>;
 }) {
   const [name, setName] = useState(value?.name || "");
   const [email, setEmail] = useState(value?.email || "");
-  const [contactID, setContactID] = useState(String(value?.crm_contact_id || ""));
   const [linkedContactID, setLinkedContactID] = useState(value?.crm_contact_id || 0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  async function lookup() {
+  async function chooseContact(contact: CRMContact) {
     setBusy(true); setError("");
     try {
-      const match = await request<Client>("clients_crm_lookup", {contact_id: Number(contactID)});
+      const match = await request<Client>("clients_crm_lookup", {contact_id: contact.crm_contact_id});
       setName(match.name); setEmail(match.email); setLinkedContactID(match.crm_contact_id);
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   }
@@ -60,16 +123,10 @@ function ClientEditor({value, request, onClose, onSaved}: {
     }}>
       <p className="pp-muted">Keep a private backlog for this client before preparing a proposal.</p>
       {error && <div className="pp-notice pp-error" role="alert">{error}</div>}
-      <label>Client name<input required maxLength={160} value={name} onChange={(event) => setName(event.target.value)}/></label>
-      <label>Client email<input type="email" maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)}/></label>
-      <div className="pp-section-divider">
-        <h3>Import from CRM</h3><p>Optionally reuse an existing contact.</p>
-        <div className="pp-inline-field"><label>CRM contact ID<input type="number" min={1} value={contactID}
-          onChange={(event) => setContactID(event.target.value)}/></label>
-          <button type="button" disabled={busy || Number(contactID) <= 0} onClick={lookup}>Import contact</button></div>
-        {!!linkedContactID && <div className="pp-linked"><span>CRM contact #{linkedContactID}</span>
-          <button type="button" className="pp-text-button" onClick={() => {setLinkedContactID(0);setContactID("");}}>Unlink</button></div>}
-      </div>
+      <CRMContactPicker request={request} selectedID={linkedContactID} selectedName={name} busy={busy}
+        onSelect={chooseContact} onClear={() => setLinkedContactID(0)}/>
+      <label>Client name<input required disabled={busy} maxLength={160} value={name} onChange={(event) => setName(event.target.value)}/></label>
+      <label>Client email<input type="email" disabled={busy} maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)}/></label>
       <footer><button type="button" disabled={busy} onClick={onClose}>Cancel</button>
         <button className="pp-primary" disabled={busy} type="submit">{busy ? "Saving…" : "Save client"}</button></footer>
     </form>
@@ -129,6 +186,7 @@ function ItemEditor({client, value, request, onClose, onSaved}: {
 export function ClientSelector({request, selected, onChange}: {
   request: Request; selected?: {id: number; name: string}; onChange: (client?: Client) => void;
 }) {
+  const [adding, setAdding] = useState(false);
   const [page, setPage] = useState<ClientPage>({clients: []});
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
@@ -147,6 +205,12 @@ export function ClientSelector({request, selected, onChange}: {
       {selected && !page.clients.some((client) => client.id === selected.id) && <option value={selected.id}>{selected.name}</option>}
       {page.clients.map((client) => <option key={client.id} value={client.id}>{client.name}{client.email ? " · " + client.email : ""}</option>)}
     </select></label>
+    <button type="button" onClick={() => setAdding(true)}>Add client</button>
+    {adding && <ClientEditor value={null} request={request} onClose={() => setAdding(false)}
+      onSaved={async (client) => {
+        setPage((previous) => ({...previous, clients: [client, ...previous.clients.filter((old) => old.id !== client.id)]}));
+        onChange(client);setAdding(false);
+      }}/>}
     {page.next_before && <button type="button" onClick={async () => {
       try {
         const next = await request<ClientPage>("clients_list", {q: query, before: page.next_before});

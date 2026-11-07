@@ -21,6 +21,7 @@ type input struct {
 	ItemIDs       []int64      `json:"item_ids,omitempty"`
 	ContactID     int64        `json:"contact_id,omitempty"`
 	RequestKey    string       `json:"request_key,omitempty"`
+	Offset        int          `json:"offset,omitempty"`
 	Q             string       `json:"q,omitempty"`
 	Archived      bool         `json:"archived,omitempty"`
 	ProposalID    int64        `json:"proposal_id,omitempty"`
