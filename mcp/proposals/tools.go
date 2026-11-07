@@ -53,6 +53,7 @@ var (
 	contentSchema = objectSchema(map[string]any{
 		"title": textSchema, "sender": textSchema, "client_name": textSchema, "client_email": textSchema,
 		"overview": textSchema, "terms": textSchema, "currency": textSchema, "validity_days": idSchema,
+		"language":       map[string]any{"type": "string", "enum": []string{"en", "fr"}, "default": "en", "description": "Client-facing language. Translate the proposal content separately; this sets interface labels, dates, and number formatting."},
 		"client_id":      map[string]any{"type": "integer", "minimum": 0},
 		"opportunity_id": map[string]any{"type": "integer", "minimum": 0},
 		"categories": arraySchema(objectSchema(map[string]any{
@@ -311,20 +312,34 @@ func (a *App) share(ctx context.Context, operation string, in input) (any, error
 	if len(reminderKey) > 80 {
 		return nil, invalid("reminder_key must be at most 80 characters")
 	}
-	subject := "Proposal: " + strings.ReplaceAll(strings.ReplaceAll(r.Content.Title, "\r", " "), "\n", " ")
-	if reminderKey != "" {
-		subject = "Reminder: " + subject
-	}
+	title := strings.ReplaceAll(strings.ReplaceAll(r.Content.Title, "\r", " "), "\n", " ")
+	subject := "Proposal: " + title
+	intro, review := " has shared a proposal with you.", "Review proposal"
 	body := fmt.Sprintf("%s has shared a proposal with you. Review the scope and choose what to include:\n\n%s\n\nThis proposal is open until %s.",
 		r.Content.Sender, base.String(), time.Unix(r.ExpiresAt, 0).UTC().Format("2 January 2006, 15:04 UTC"))
+	if r.Content.Language == "fr" {
+		subject = "Proposition : " + title
+		intro, review = " a partagé une proposition avec vous.", "Consulter la proposition"
+		expires := time.Unix(r.ExpiresAt, 0).UTC()
+		months := []string{"janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"}
+		body = fmt.Sprintf("%s a partagé une proposition avec vous. Consultez le périmètre et choisissez les éléments à inclure :\n\n%s\n\nCette proposition est valable jusqu’au %d %s %d à %s UTC.",
+			r.Content.Sender, base.String(), expires.Day(), months[expires.Month()-1], expires.Year(), expires.Format("15:04"))
+	}
+	if reminderKey != "" {
+		if r.Content.Language == "fr" {
+			subject = "Rappel : " + subject
+		} else {
+			subject = "Reminder: " + subject
+		}
+	}
 	var result struct {
 		ID     int64  `json:"id"`
 		Status string `json:"status"`
 	}
 	err = a.call("messaging", "send_message", map[string]any{
 		"channel": "email", "to": r.Content.ClientEmail, "subject": subject, "body": body,
-		"body_html": "<p>" + html.EscapeString(r.Content.Sender) + " has shared a proposal with you.</p><p><a href=\"" +
-			html.EscapeString(base.String()) + "\">Review proposal</a></p>",
+		"body_html": "<p>" + html.EscapeString(r.Content.Sender) + intro + "</p><p><a href=\"" +
+			html.EscapeString(base.String()) + "\">" + review + "</a></p>",
 		"idempotency_key": fmt.Sprintf("proposals:%d:%s:%s", r.ID, r.nonce, reminderKey),
 	}, &result)
 	if err != nil {
