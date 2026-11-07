@@ -335,6 +335,28 @@ func compileQuery(tx transaction, r Request) (*queryPlan, error) {
 		return nil, e
 	}
 	p.result = result
+	// Only reachable consumers should force materialization. Unused validated
+	// nodes must not increase the execution plan's memory requirements.
+	for _, n := range p.nodes {
+		n.refs = 0
+	}
+	reachable := map[*queryNodePlan]bool{}
+	var countReferences func(*queryNodePlan)
+	countReferences = func(n *queryNodePlan) {
+		if reachable[n] {
+			return
+		}
+		reachable[n] = true
+		if n.input != nil {
+			n.input.refs++
+			countReferences(n.input)
+		}
+		for _, j := range n.joins {
+			j.right.refs++
+			countReferences(j.right)
+		}
+	}
+	countReferences(result)
 	if p.output.Limit == 0 {
 		p.output.Limit = MaxRecords
 	}

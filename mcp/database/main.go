@@ -81,13 +81,13 @@ var specs = []toolSpec{
 	{"index_create", "Create a single-field or compound ordered index, optionally unique. Builds atomically; duplicates abort a unique build.", []string{"index"}, []string{"collection", "index"}},
 	{"index_drop", "Drop a secondary index; confirm=true is required.", []string{"name", "confirm"}, []string{"collection", "name", "confirm"}},
 	{"get", "Get a record by its exact primary-key object.", []string{"key"}, []string{"collection", "key"}},
-	{"find", "Find records with typed filters ({field,op,value}, and/or, {field,op:\"contains_ascii\",value} literal substring search, {fields:[...],op:\"like_contains_ascii\",value} multi-field wildcard search, and {exists:{collection,on:[{localField,foreignField,comparison?}] or anyOf:[{on:[...]}],where?}} or {not_exists:{...}} tests of related records), projection, ordering and cursor pagination. lookups [{as,collection,localField,select?}] nest the record of another collection whose single-field primary key equals localField (null when absent). Broad queries default to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "select", "orderBy", "limit", "cursor", "requireIndex", "timeoutMs", "lookups"}, []string{"collection"}},
+	{"find", "Read records with filters, projection, sorting, pagination and optional count:true. Supports lookups; indexed relational joins/computed/filter/distinct/pick/group; bounded related rows via relation/match; or pipeline:{version,nodes,from} for calculated input rows. Ordinary reads keep plain field names; explicit relational reads use alias.field. See READS.md.", []string{"where", "select", "orderBy", "limit", "cursor", "requireIndex", "timeoutMs", "lookups", "as", "joins", "computed", "filter", "distinct", "pick", "group", "offset", "count", "relation", "match", "pipeline", "limits"}, nil},
 	{"insert", "Atomically insert 1–1000 records. Integers use decimal strings; undeclared fields are rejected.", []string{"records"}, []string{"collection", "records"}},
 	{"update", "Atomically patch records using set or increment. Exact key, where, or key plus a where guard; maxAffected defaults to 1.", []string{"key", "where", "set", "increment", "ifVersion", "maxAffected", "all", "requireIndex"}, []string{"collection"}},
 	{"delete", "Atomically delete records by key, filter, or key plus a where guard. maxAffected defaults to 1; full deletion needs all=true.", []string{"key", "where", "ifVersion", "maxAffected", "all", "requireIndex"}, []string{"collection"}},
 	{"upsert", "Atomically insert or patch records using their primary key or a named unique conflictIndex.", []string{"records", "conflictIndex"}, []string{"collection", "records"}},
 	{"count", "Count matching records exactly; returns a decimal string. Filters accept {field,op:\"contains_ascii\",value} literal substring search, {fields:[text fields],op:\"like_contains_ascii\",value} wildcard search and exists/not_exists tests of related records. Defaults to a 30-second deadline, configurable up to 60 seconds with timeoutMs. diagnostics:true also reports what actually ran: plan, index, whether it was index-only, documents and index entries read, peak memory and timings.", []string{"where", "requireIndex", "timeoutMs", "diagnostics"}, []string{"collection"}},
-	{"aggregate", "Group matching records and compute count, count_distinct, sum, avg, min or max. Metrics use {name,op,field?,where?}; a metric where counts only matching rows (conditional metrics in one pass). lookups [{as,collection,localField,select?}] join the record whose single-field primary key equals localField, so \"as.field\" works in where, groupBy and metrics without duplicating rows. buckets [{name,field,unit,timezone?,weekStart?}] derive hour/day/week/month/year keys from a datetime in an IANA timezone for groupBy. Integers/counts are decimal strings; no groups means one summary row. Defaults to 30 seconds; timeoutMs can set up to 60 seconds.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs", "lookups", "buckets"}, []string{"collection", "metrics"}},
+	{"aggregate", "Calculate grouped count, distinct count, sum, avg, min or max. Accepts ordinary collection/where/groupBy/metrics, relational joins/computed/filter/distinct/pick/branches/rollup, or pipeline:{version,nodes,from} for dependent calculations. Top-level metrics aggregate the full input; only final groups are limited. Supports metric filters, lookups, timezone buckets and derived division. One read snapshot with checked integers and resource bounds. See READS.md.", []string{"where", "groupBy", "metrics", "orderBy", "limit", "requireIndex", "timeoutMs", "lookups", "buckets", "as", "joins", "computed", "filter", "distinct", "pick", "branches", "rollup", "derived", "pipeline", "limits"}, []string{"metrics"}},
 	{"batch", "Run operations {op,args} in ONE database: either record writes (insert, update, delete, upsert) applied atomically, at most 1000 affected records; or reads (get, find, count, aggregate) answered from one consistent snapshot, which only needs read access. At most 100 operations; reads and writes cannot mix. timeoutMs applies to read batches.", []string{"operations", "timeoutMs"}, []string{"operations"}},
 	{"related_read", "Read parents with their ordered, bounded related rows. relation {as,limit,sources:[{name,joins,computed,filter,distinct,orderBy,select}]} fills one shared limit source by source: filter decides which rows take a slot, rows are ordered, the first limit kept, and only then does match test them, so a row past the limit can never match. Each parent returns the exact rows under its as name. Database applies the filters it receives; access policy stays with the caller. count:true adds an exact total.", []string{"as", "where", "orderBy", "select", "limit", "cursor", "offset", "count", "relation", "match"}, []string{"collection", "relation"}},
 	{"joined_page", "Join through indexes, deduplicate, and count and page at the requested grain. joins [{as,collection,kind:inner|left|semi|anti,on|anyOf:[{on:[{local:\"alias.field\",foreign,comparison?}]}],where}]. comparison \"text\" compares exact decimal text, \"numeric\" reads the local text as a number. distinct collapses by aliases (physical records) or fields; group {by,orderBy:[{field,direction,agg:min|max}]} pages groups and returns their ordered rows. total is computed before paging at the same grain.", []string{"as", "where", "joins", "computed", "filter", "distinct", "pick", "group", "orderBy", "select", "limit", "cursor", "offset"}, []string{"collection"}},
@@ -132,7 +132,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	out := []sdk.Tool{}
 	for _, s := range specs {
 		s := s
-		out = append(out, sdk.Tool{Name: "db_" + s.op, Description: s.description, InputSchema: inputSchema(s), HandlerCtx: func(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+		out = append(out, sdk.Tool{Name: "db_" + s.op, Description: toolDescription(s), InputSchema: inputSchema(s), Meta: compatibilityMeta(s.op), HandlerCtx: func(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
 			caller := sdk.CallerFrom(ctx)
 			if caller == nil || caller.ProjectID == "" {
 				return nil, &engine.Error{Code: "permission_denied", Message: "authenticated caller and project are required"}
@@ -272,6 +272,11 @@ func parseArgs(args map[string]any, s toolSpec) (engine.Request, error) {
 	if e = d.Decode(&r); e != nil {
 		return r, engine.Invalid("invalid request: %v", e)
 	}
+	if s.op == "find" || s.op == "aggregate" {
+		if e := engine.ValidateCoreRead(s.op, r); e != nil {
+			return r, e
+		}
+	}
 	return r, nil
 }
 func (a *App) run(ctx context.Context, scope, op string, r engine.Request) (any, error) {
@@ -382,8 +387,11 @@ func inputSchema(s toolSpec) map[string]any {
 	arr := func(items any) map[string]any { return map[string]any{"type": "array", "items": items} }
 	order := map[string]any{"type": "object", "properties": map[string]any{"field": str(), "direction": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}}, "required": []string{"field"}}
 	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate", "query"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	pipelineFields := queryInputProperties()
+	all["pipeline"] = map[string]any{"type": "object", "properties": map[string]any{"version": map[string]any{"type": "integer", "enum": []int{1}}, "nodes": pipelineFields["nodes"], "from": str()}, "required": []string{"version", "nodes", "from"}, "additionalProperties": false}
+	all["limits"] = pipelineFields["limits"]
 	all["version"] = map[string]any{"type": "integer", "enum": []int{1}}
-	for k, v := range queryInputProperties() {
+	for k, v := range pipelineFields {
 		all[k] = v
 	}
 	all["lookups"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "object", "properties": map[string]any{"as": str(), "collection": str(), "localField": str(), "select": arr(str())}, "required": []string{"as", "collection", "localField"}, "additionalProperties": false}}
@@ -420,5 +428,37 @@ func inputSchema(s toolSpec) map[string]any {
 	for _, k := range s.args {
 		props[k] = all[k]
 	}
-	return map[string]any{"type": "object", "properties": props, "required": s.required, "additionalProperties": false}
+	schema := map[string]any{"type": "object", "properties": props, "required": s.required, "additionalProperties": false}
+	if s.op == "find" || s.op == "aggregate" {
+		sources := []any{map[string]any{"required": []string{"collection"}}, map[string]any{"required": []string{"pipeline"}}}
+		if s.op == "aggregate" {
+			sources = append(sources, map[string]any{"required": []string{"branches"}})
+		}
+		schema["oneOf"] = sources
+	}
+	return schema
+}
+
+func compatibilityReplacement(op string) string {
+	switch op {
+	case "query":
+		return "db_aggregate or db_find with pipeline"
+	case "joined_aggregate":
+		return "db_aggregate"
+	case "joined_page", "related_read":
+		return "db_find"
+	}
+	return ""
+}
+func toolDescription(s toolSpec) string {
+	if replacement := compatibilityReplacement(s.op); replacement != "" {
+		return "Compatibility alias; new callers should use " + replacement + ". " + s.description
+	}
+	return s.description
+}
+func compatibilityMeta(op string) map[string]any {
+	if replacement := compatibilityReplacement(op); replacement != "" {
+		return map[string]any{"deprecated": true, "replacement": replacement}
+	}
+	return nil
 }

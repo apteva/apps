@@ -76,7 +76,37 @@ func TestQueryMCPHTTPAndReadGrants(t *testing.T) {
 				}
 			}
 			assertAnswer(call("query", plan))
+			var consolidated map[string]any
+			queryTestJSON(t, "testdata/dependent-aggregate.json", &consolidated)
+			consolidated["database"] = "reporting"
+			assertAnswer(call("aggregate", consolidated))
+			findPlan := map[string]any{"database": "reporting", "pipeline": map[string]any{"version": 1, "nodes": plan["nodes"], "from": "rates"}, "count": true, "orderBy": []any{map[string]any{"field": "period", "direction": "desc"}}, "limit": 1}
+			first := call("find", findPlan).(map[string]any)
+			if first["total"] != "2" || first["hasMore"] != true {
+				t.Fatal(first)
+			}
+			findPlan["cursor"] = first["nextCursor"]
+			second := call("find", findPlan).(map[string]any)
+			if second["hasMore"] != false {
+				t.Fatal(second)
+			}
+			for _, tool := range a.MCPTools() {
+				if tool.Name == "db_query" || tool.Name == "db_joined_aggregate" || tool.Name == "db_joined_page" || tool.Name == "db_related_read" {
+					if tool.Meta["deprecated"] != true {
+						t.Fatal("compatibility alias unmarked", tool.Name)
+					}
+				}
+			}
+
 			plan["scope"] = "project"
+			consolidated["scope"] = "project"
+			findPlan["scope"] = "project"
+			for op, args := range map[string]map[string]any{"aggregate": consolidated, "find": findPlan} {
+				if _, e := invoke(a, app, op, args); e == nil {
+					t.Fatal("ungranted canonical read", op)
+				}
+			}
+
 			if _, e := invoke(a, app, "query", plan); e == nil {
 				t.Fatal("ungranted app read project database")
 			}
@@ -86,6 +116,15 @@ func TestQueryMCPHTTPAndReadGrants(t *testing.T) {
 				t.Fatal(e)
 			}
 			assertAnswer(v)
+			v, e = invoke(a, app, "aggregate", consolidated)
+			if e != nil {
+				t.Fatal(e)
+			}
+			assertAnswer(v)
+			if _, e := invoke(a, app, "find", findPlan); e != nil {
+				t.Fatal(e)
+			}
+
 			denied := &sdk.Caller{ProjectID: "p", AgentID: 2, DefaultEffect: "deny"}
 			if _, e := invoke(a, denied, "query", plan); e == nil {
 				t.Fatal("missing read permission accepted")
@@ -93,6 +132,25 @@ func TestQueryMCPHTTPAndReadGrants(t *testing.T) {
 			foreign := &sdk.Caller{ProjectID: "q", AppInstallID: 7, AppName: "graphql", DefaultEffect: "allow"}
 			if _, e := invoke(a, foreign, "query", plan); e == nil {
 				t.Fatal("foreign project read accepted")
+			}
+			for _, caller := range []*sdk.Caller{denied, foreign} {
+				for op, args := range map[string]map[string]any{"aggregate": consolidated, "find": findPlan} {
+					if _, e := invoke(a, caller, op, args); e == nil {
+						t.Fatal("unauthorized canonical read", op)
+					}
+				}
+			}
+			delete(consolidated, "scope")
+			delete(findPlan, "scope")
+			for op, args := range map[string]map[string]any{"aggregate": consolidated, "find": findPlan} {
+				raw, _ := json.Marshal(args)
+				req := httptest.NewRequest("POST", "/operations/"+op, bytes.NewReader(raw))
+				req.Header.Set("X-Apteva-Project-ID", "p")
+				w := httptest.NewRecorder()
+				a.handleHTTP(w, req)
+				if w.Code != 200 {
+					t.Fatal(op, w.Code, w.Body.String())
+				}
 			}
 			delete(plan, "scope")
 			body, _ := json.Marshal(plan)
@@ -130,6 +188,16 @@ func TestQueryMCPHTTPAndReadGrants(t *testing.T) {
 			}
 			result := v.(map[string]any)["results"].([]any)
 			assertAnswer(result[0])
+			aggregateBatch := map[string]any{}
+			raw, _ := json.Marshal(consolidated)
+			json.Unmarshal(raw, &aggregateBatch)
+			delete(aggregateBatch, "database")
+			v, e = invoke(a, app, "batch", map[string]any{"database": "reporting", "scope": "project", "operations": []any{map[string]any{"op": "aggregate", "args": aggregateBatch}, map[string]any{"op": "find", "args": map[string]any{"collection": "facts", "limit": 1, "count": true}}}})
+			if e != nil {
+				t.Fatal(e)
+			}
+			assertAnswer(v.(map[string]any)["results"].([]any)[0])
+
 		})
 	}
 }

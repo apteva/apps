@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.13.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.14.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.13.0.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.14.0.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -231,9 +231,21 @@ In the portable path, filters on stored fields are pushed to the adapter's scan 
 
 `find` accepts the same `lookups` and nests each referenced record under its `as` name (null when absent). Filtering and ordering stay on the collection's own fields, and `select` must include each `localField`.
 
+## Core read operations (Database 0.14.0)
+
+Use the nine record operations `get`, `find`, `insert`, `update`, `upsert`,
+`delete`, `count`, `aggregate` and `batch`. `find` supports joins, grouped pages,
+bounded related rows and calculated pipeline records. `aggregate` supports
+ordinary summaries, joined aggregation and dependent pipelines with top-level
+final metrics. See [the canonical contracts and migration guide](READS.md) and
+[the 6000-cent acceptance request](testdata/dependent-aggregate.json).
+
+Ordinary reads retain their native paths. Legacy specialised operation names
+remain supported as marked compatibility aliases while callers migrate.
+
 ## Relational reads
 
-`related_read`, `joined_page` and `joined_aggregate` read joined rows inside one snapshot, on every adapter, and can share a read `batch`. Database applies the filters it is given. Who may see what remains the caller's decision, so pass the eligibility filters you need.
+`find` and `aggregate` read joined rows inside one snapshot, on every adapter, and can share a read `batch`. The legacy `related_read`, `joined_page` and `joined_aggregate` names below are compatibility aliases; their request details also apply to the canonical operations. Database applies the filters it is given. Who may see what remains the caller's decision, so pass the eligibility filters you need.
 
 Joins name earlier fields as `alias.field`; the root's alias is `as`, default `root`.
 
@@ -262,11 +274,14 @@ Two more stages answer questions one grouping cannot. `branches [{collection,as,
 
 Each read has a work budget and a 128 MiB memory budget, and exceeding either fails the read rather than returning partial rows. The memory budget is an accounting estimate, not a cap on process memory. In `joined_page` an item costs about 500 bytes plus its share of what else the read holds: each join can cache up to 16 MiB, a `distinct` remembers each key it has seen, and `pick` keeps each winner's order values until the page is chosen. A page's own rows count too, so one group with too many rows fails even when the page holds only that group.
 
-## Composable read queries
+## Dependent pipelines
 
-`query` (`db_query` over MCP) evaluates named scan, compute, join and aggregate relations in one database read snapshot. An aggregate result can be computed and joined back to another relation before a final aggregation. No temporary business records are written. See [the query contract](QUERY.md) and the [cross-adapter acceptance fixture](testdata/dependent-aggregation.json).
-
-Numeric `op`/`args` expressions also work in the existing relational `computed` fields. Money can stay in checked int64 cents; safe division stays exact inside an expression, and rounding remains explicit at the supplied stage.
+Use `aggregate` with `pipeline: {version: 1, nodes, from}` and the usual final
+`groupBy` and `metrics`. Use `find` with the same pipeline to page calculated
+records. Aggregate outputs can be computed and joined back to another relation
+before the final calculation, all in one read snapshot without temporary business
+records. See [READS.md](READS.md). The old `query`/`db_query` operation remains a
+compatibility entry point; [QUERY.md](QUERY.md) retains the stage/expression reference.
 
 ## Query and mutation rules
 
