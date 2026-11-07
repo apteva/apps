@@ -63,13 +63,14 @@ func (r *fakeRecorder) Stop(context.Context) error {
 }
 
 type fakeRecordBackend struct {
-	mu      sync.Mutex
-	src     string
-	audio   bool
-	starts  int
-	last    *fakeRecorder
-	backend *fakeBackend
-	stopped chan int
+	mu         sync.Mutex
+	src        string
+	audio      bool
+	starts     int
+	last       *fakeRecorder
+	backend    *fakeBackend
+	stopped    chan int
+	readyDelay time.Duration
 }
 
 func (f *fakeRecordBackend) RecordPlan(_ Device, o recordOptions) (recordPlan, error) {
@@ -81,6 +82,9 @@ func (f *fakeRecordBackend) RecordPlan(_ Device, o recordOptions) (recordPlan, e
 func (f *fakeRecordBackend) StartRecording(_ context.Context, _ Session, _ recordPlan, _ recordOptions, path string) (recorder, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.readyDelay > 0 {
+		time.Sleep(f.readyDelay)
+	}
 	f.starts++
 	f.last = &fakeRecorder{src: f.src, path: path, done: make(chan struct{}), stopped: f.stopped, closes: func() int {
 		f.backend.mu.Lock()
@@ -160,6 +164,21 @@ func TestRecordingLifecycleMarkersAndMetadata(t *testing.T) {
 	if _, err := os.Stat(e.recordingPath(got)); !os.IsNotExist(err) {
 		t.Fatal("delete kept the runner file")
 	}
+}
+
+func TestRecordingStartTimeExcludesPreparation(t *testing.T) {
+	e, _, backend := recordFixture(t, testVideo(t, 1, false))
+	backend.readyDelay = 1100 * time.Millisecond
+	s := openFixture(t, e, "p")
+	r := recordingOf(t, execute(t, e, "p", "mobile_record", map[string]any{"action": "start", "session_id": s.ID}))
+	if r.StartedAt <= r.CreatedAt {
+		t.Fatalf("preparation counted as recording time: created=%d started=%d", r.CreatedAt, r.StartedAt)
+	}
+	persisted, err := e.recording("p", r.ID)
+	if err != nil || persisted.StartedAt != r.StartedAt {
+		t.Fatalf("panel timer differs from ready boundary: %+v %v", persisted, err)
+	}
+	execute(t, e, "p", "mobile_record", map[string]any{"action": "stop", "recording_id": r.ID})
 }
 
 func TestSessionCloseFinalisesRecordingBeforeDriverClose(t *testing.T) {

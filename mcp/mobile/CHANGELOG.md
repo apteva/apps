@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.2 — 2026-11-07
+
+- Fix shortened iPhone USB recordings caused by overlapping QuickTime edit
+  lists and discontinuous device timestamps. Write H.264/AAC on a shared
+  monotonic host timeline, preserving continuous audio sample timing.
+- Hold the latest video frame on a host-clock cadence and through stop so
+  static screens and idle tails retain their real elapsed duration.
+- Start the panel timer after capture is ready, excluding compilation and
+  encoder warm-up; align markers and recording limits with the same boundary.
+- Add compiled Swift regression fixtures for backward device-clock jumps,
+  audio/video sync, static tails, exact duration and monotonic packet timestamps.
+
+Validation: Go race suite, vet, Darwin/Linux builds, compiled Swift media
+fixtures, and a physical iPhone capture measuring 18.0005 seconds elapsed
+versus 18.0017 seconds of media, with monotonic audio/video packet timestamps.
+
 ## 0.3.1 — 2026-11-07
 
 - Bootstrap native iPhone signing from Xcode team metadata before a development

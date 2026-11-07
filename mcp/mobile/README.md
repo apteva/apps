@@ -55,6 +55,10 @@ pin without changing the workspace's go.work. The SDK pin is v0.115.0, selected
 from fetched tags by ancestry (it descends from v0.108.0 and local HEAD's
 v0.82.0). No local SDK replace directive is distributed.
 
+On macOS with Xcode and ffprobe, the suite compiles the shipped Swift capture
+helper and tests discontinuous device timestamps and long static tails without
+a phone or Camera permission (`TestIOSCaptureMonotonicTimeline`).
+
 Build just this panel from the apps root:
 
 ```sh
@@ -234,7 +238,10 @@ its label, `record_mark` adds a named one, and `wait` holds the shot:
 ### iOS USB capture
 
 On first use Mobile compiles a small Swift helper (`capture/ioscapture.swift`)
-with `xcrun swiftc` into its data directory. The phone must be connected by
+with `xcrun swiftc` into its data directory. USB video uses a monotonic host
+clock and continuous audio sample timing; static frames are held through stop
+so idle sections retain their duration. Device-clock jumps cannot shorten or
+rewind a recording. The phone must be connected by
 cable, unlocked and trusted. macOS asks for Camera permission for the app that
 runs Mobile (Terminal, the Apteva app or the runner's service); grant it under
 System Settings > Privacy & Security > Camera. If the capture device ID
