@@ -346,6 +346,11 @@ func (a *App) applyOperation(op lifecycleOperation) error {
 	if err != nil {
 		return err
 	}
+	if op.Kind == "rotate" || op.Kind == "disable" {
+		if _, err = tx.Exec(`UPDATE device_http_credentials SET revoked_at=?,secret_cipher='' WHERE project_id=? AND device_id=? AND revoked_at IS NULL`, at, a.projectID, id); err != nil {
+			return err
+		}
+	}
 	if op.Kind == "disable" {
 		if err = a.cancelDeviceCommands(tx, id, at); err != nil {
 			return err

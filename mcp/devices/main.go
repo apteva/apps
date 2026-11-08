@@ -19,15 +19,23 @@ import (
 var manifestYAML []byte
 
 type App struct {
-	mutationMu sync.Mutex
-	outboxMu   sync.Mutex
-	secretKey  []byte
-	outboxWake chan struct{}
-	ctx        *sdk.AppCtx
-	projectID  string
+	policyMu            sync.RWMutex
+	policy              map[string]int
+	policyRevision      int64
+	consumerMu          sync.Mutex
+	activeMQTTMessageID string
+	mutationMu          sync.Mutex
+	outboxMu            sync.Mutex
+	secretKey           []byte
+	outboxWake          chan struct{}
+	ctx                 *sdk.AppCtx
+	projectID           string
 
-	brokerMu sync.RWMutex
-	broker   brokerStatus
+	consumerStateMu  sync.RWMutex
+	consumerError    string
+	consumerLastPoll string
+	brokerMu         sync.RWMutex
+	broker           brokerStatus
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{}
@@ -71,6 +79,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.loadRecoveryKey(); err != nil {
 		return err
 	}
+	if err := a.loadPolicy(); err != nil {
+		return err
+	}
+	if err := a.initUsageCoverage(); err != nil {
+		return err
+	}
 	if err := a.migrateTransport(); err != nil {
 		return err
 	}
@@ -78,12 +92,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.refreshBrokerStatus(); err != nil {
 		return fmt.Errorf("devices: MQTT dependency unavailable: %w", err)
 	}
-	var subscription map[string]any
-	if err := a.ctx.PlatformAPI().CallAppResult("mqtt", "mqtt_subscribe_ensure", map[string]any{
-		"topic_pattern": a.topicRoot() + "devices/+/+",
-		"bus_topic":     "devices.message",
-	}, &subscription); err != nil {
-		return fmt.Errorf("devices: ensure MQTT device bridge: %w", err)
+	if err := a.ensureConsumer(context.Background()); err != nil {
+		return fmt.Errorf("devices MQTT durable consumer: %w", err)
 	}
 	if err := a.reconcileRetained(); err != nil {
 		ctx.Logger().Warn("devices reconcile retained state", "err", err.Error())
@@ -101,7 +111,6 @@ func (a *App) MCPTools() []sdk.Tool           { return a.mcpTools() }
 func (a *App) HTTPRoutes() []sdk.Route        { return a.httpRoutes() }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
-		{Event: "mqtt.devices.message", Handler: a.handleMQTTMessage},
 		{Event: "mqtt.client.connected", Handler: a.handleMQTTConnected},
 		{Event: "mqtt.client.disconnected", Handler: a.handleMQTTDisconnected},
 	}
@@ -109,6 +118,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "mqtt-durable-consumer", Run: a.runMQTTConsumer},
 		{Name: "reconciliation", Run: a.runReconciliation},
 		{Name: "connection-reconciliation", Schedule: "@every 30s", Run: func(_ context.Context, _ *sdk.AppCtx) error { return a.reconcileConnectedClients() }},
 		{Name: "command-timeouts", Run: a.runCommandTimeouts},
@@ -147,6 +157,12 @@ func (a *App) runTelemetryPrune(_ context.Context, _ *sdk.AppCtx) error {
 		table, column, config string
 		days                  int
 	}{{"device_outbox", "created_at", "event_retention_days", 90}, {"device_usage", "created_at", "usage_retention_days", 365}} {
+		if spec.table == "device_usage" {
+			cutoff := formatTime(now.Add(-time.Duration(a.limit(spec.config, spec.days)) * 24 * time.Hour))
+			if _, err = tx.Exec(`UPDATE device_usage_coverage SET pruned_before=MAX(pruned_before,?) WHERE project_id=?`, cutoff, a.projectID); err != nil {
+				return err
+			}
+		}
 		extra := ""
 		if spec.table == "device_outbox" {
 			extra = " AND delivered_at IS NOT NULL"
@@ -188,6 +204,21 @@ func (a *App) runTelemetryPrune(_ context.Context, _ *sdk.AppCtx) error {
 	}
 	cutoffOperations := formatTime(now.Add(-time.Duration(a.limit("operation_retention_days", 90)) * 24 * time.Hour))
 	if _, err = tx.Exec(`DELETE FROM device_operations WHERE project_id=? AND status='completed' AND completed_at<?`, a.projectID, cutoffOperations); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE device_http_credentials SET secret_cipher='' WHERE recovery_until<? AND project_id=?`, nowText(), a.projectID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM device_transport_receipts WHERE project_id=? AND acknowledged_at IS NOT NULL AND acknowledged_at<?`, a.projectID, formatTime(now.Add(-time.Duration(a.limit("transport_receipt_retention_hours", 168))*time.Hour))); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM device_ingest_rejections WHERE project_id=? AND created_at<? AND message_id NOT IN(SELECT message_id FROM device_transport_receipts WHERE project_id=? AND acknowledged_at IS NULL)`, a.projectID, commandCutoff, a.projectID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM device_http_credentials WHERE project_id=? AND (expires_at<? OR revoked_at<?)`, a.projectID, cutoffOperations, cutoffOperations); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM device_policy_updates WHERE project_id=? AND created_at<?`, a.projectID, cutoffOperations); err != nil {
 		return err
 	}
 	return tx.Commit()

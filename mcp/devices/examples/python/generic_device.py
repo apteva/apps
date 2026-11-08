@@ -5,12 +5,13 @@ import os
 import time
 import paho.mqtt.client as mqtt
 from device_runtime import DeviceRuntime
+from mqtt_transport import configure_tls
 
 BASE = os.environ["APTEVA_DEVICE_TOPIC_BASE"].rstrip("/")
 USERNAME = os.environ["APTEVA_DEVICE_USERNAME"]
 PASSWORD = os.environ["APTEVA_DEVICE_PASSWORD"]
 HOST = os.environ["APTEVA_MQTT_HOST"]
-PORT = int(os.environ.get("APTEVA_MQTT_PORT", "1883"))
+PORT = int(os.environ.get("APTEVA_MQTT_PORT", "8883"))
 RUNTIME = DeviceRuntime(os.environ.get("APTEVA_DEVICE_JOURNAL", "device-journal.sqlite"))
 
 
@@ -41,6 +42,7 @@ def on_message(client, _userdata, message):
 def main():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                          client_id=os.environ.get("APTEVA_MQTT_CLIENT_ID", USERNAME))
+    configure_tls(client)
     client.username_pw_set(USERNAME, PASSWORD)
     client.will_set(f"{BASE}/availability", "offline", qos=1, retain=True)
     client.on_connect, client.on_message = on_connect, on_message

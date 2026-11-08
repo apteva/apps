@@ -6,6 +6,7 @@
 #else
 #include <WiFi.h>
 #endif
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -14,7 +15,11 @@
 const char* WIFI_SSID = "replace-me";
 const char* WIFI_PASSWORD = "replace-me";
 const char* MQTT_HOST = "your-apteva-host";
-const uint16_t MQTT_PORT = 1883;
+const uint16_t MQTT_PORT = 8883;
+const bool MQTT_TLS = true; // Use false only for explicitly configured local MQTT.
+const char* MQTT_CA_CERT = R"PEM(-----BEGIN CERTIFICATE-----
+replace-with-the-issuer-CA-certificate
+-----END CERTIFICATE-----)PEM";
 const char* DEVICE_ID = "esp32-1";
 const char* MQTT_USERNAME = "scope-qualified-username-from-enrollment";
 const char* TOPIC_BASE = "scopes/scope-token/devices/esp32-1";
@@ -29,7 +34,8 @@ constexpr int SENSOR_PIN = 34; // Change for your ESP32 board when needed.
 #endif
 
 WiFiClient network;
-PubSubClient mqtt(network);
+WiFiClientSecure secureNetwork;
+PubSubClient mqtt;
 unsigned long lastTelemetry = 0;
 
 String topic(const char* suffix) { return String(TOPIC_BASE) + "/" + suffix; }
@@ -173,6 +179,17 @@ void setup() {
   pinMode(LED_PIN, OUTPUT); pinMode(SENSOR_PIN, INPUT);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD); while (WiFi.status() != WL_CONNECTED) delay(250);
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  if (MQTT_TLS) {
+#if defined(ESP8266)
+    static BearSSL::X509List trustAnchor(MQTT_CA_CERT);
+    secureNetwork.setTrustAnchors(&trustAnchor);
+#else
+    secureNetwork.setCACert(MQTT_CA_CERT);
+#endif
+    // A trusted wall clock is required for certificate expiry validation.
+    while (time(nullptr) < 1700000000) delay(250);
+    mqtt.setClient(secureNetwork);
+  } else mqtt.setClient(network);
   mqtt.setServer(MQTT_HOST, MQTT_PORT); mqtt.setCallback(handleCommand); mqtt.setBufferSize(1536); connectMQTT();
 }
 

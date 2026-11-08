@@ -47,6 +47,13 @@ func TestUpgradeAndRestartPreserveDataAndRecovery(t *testing.T) {
 	if _, err = db.Exec(string(raw)); err != nil {
 		t.Fatal(err)
 	}
+	extra, e := os.ReadFile("migrations/004_ingress_policy.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec(string(extra)); e != nil {
+		t.Fatal(e)
+	}
 	manifest, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +96,22 @@ func TestUpgradeAndRestartPreserveDataAndRecovery(t *testing.T) {
 	completed, err := restarted.provision(args)
 	if err != nil || completed["status"] != "completed" || completed["mqtt"].(map[string]any)["password"] != password {
 		t.Fatalf("restart=%#v %v", completed, err)
+	}
+
+	// A fresh process loads both committed policy and device-scoped credentials.
+	token := issueHTTP(t, restarted, "new")
+	if _, err = restarted.applyPolicy(map[string]any{"expected_revision": 0, "request_id": "restart-policy", "limits": map[string]any{"max_devices": 7}}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &App{}
+	if err = fresh.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.limit("max_devices", 10000) != 7 || fresh.policyRevision != 1 {
+		t.Fatal("restart lost live policy")
+	}
+	if w := ingestHTTP(fresh, "new", token, "state", dataPayload("restart-http", nowText(), map[string]any{"temperature": 23})); w.Code != 201 {
+		t.Fatalf("restart lost HTTP credential: %d %s", w.Code, w.Body)
 	}
 	keyPath := filepath.Join(filepath.Dir(path), "devices-recovery.key")
 	info, err := os.Stat(keyPath)

@@ -22,11 +22,14 @@ type mqttCall struct {
 
 type mqttStub struct {
 	tk.BasePlatformClient
-	mu        sync.Mutex
-	calls     []mqttCall
-	users     map[string]string
-	failTool  string
-	failAfter bool
+	mu              sync.Mutex
+	calls           []mqttCall
+	users           map[string]string
+	failTool        string
+	failAfter       bool
+	consumerRecords []MQTTRecord
+	consumerAckFail bool
+	consumerAckHook func()
 }
 
 func (s *mqttStub) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -50,6 +53,22 @@ func (s *mqttStub) CallAppResult(app, tool string, input map[string]any, out any
 		value = map[string]any{"endpoint": "mqtt://broker.test:1883", "advertised_host": "broker.test", "advertised_port": 1883, "tls": false}
 	case "mqtt_subscribe_ensure":
 		value = map[string]any{"id": 1, "topic_pattern": str(input, "topic_pattern"), "bus_topic": "devices.message"}
+	case "mqtt_consumer":
+		value = map[string]any{"name": deviceConsumerName, "messages": []any{}}
+		switch str(input, "action") {
+		case "claim":
+			if len(s.consumerRecords) > 0 {
+				value = map[string]any{"messages": s.consumerRecords, "lease_token": "test-lease"}
+			}
+		case "ack":
+			if s.consumerAckHook != nil {
+				s.consumerAckHook()
+			}
+			if s.consumerAckFail {
+				return errors.New("injected MQTT acknowledgment loss")
+			}
+		}
+
 	case "mqtt_clients_list", "mqtt_retained_list":
 		value = []map[string]any{}
 	case "mqtt_users_list":
@@ -80,6 +99,22 @@ func (s *mqttStub) CallAppResult(app, tool string, input map[string]any, out any
 	}
 	raw, _ := json.Marshal(value)
 	return json.Unmarshal(raw, out)
+}
+
+func (s *mqttStub) CallAppResultContext(ctx context.Context, app, tool string, input map[string]any, out any) error {
+	return s.CallAppResult(app, tool, input, out)
+}
+
+func (s *mqttStub) CallAppContext(ctx context.Context, app, tool string, input map[string]any) (json.RawMessage, error) {
+	var out any
+	if err := s.CallAppResult(app, tool, input, &out); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(out)
+	return raw, err
+}
+func (s *mqttStub) CallAppBatchContext(context.Context, string, []sdk.AppCall, sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
+	return nil, errors.New("batch is not used by Devices")
 }
 
 func (s *mqttStub) callsFor(tool string) []mqttCall {
@@ -116,13 +151,13 @@ func TestManifestAndRuntimeSurfaceMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Name != "devices" || m.Version != "0.2.0" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
+	if m.Name != "devices" || m.Version != "0.3.0" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
 		t.Fatalf("unexpected manifest identity/scope: %#v", m)
 	}
-	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "mqtt" || m.Requires.Apps[0].Version != ">=0.4.0" {
+	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "mqtt" || m.Requires.Apps[0].Version != ">=0.6.0" {
 		t.Fatalf("MQTT dependency = %#v", m.Requires.Apps)
 	}
-	if !reflect.DeepEqual(m.Requires.Apps[0].Events, []string{"mqtt.devices.message", "mqtt.client.connected", "mqtt.client.disconnected"}) {
+	if !reflect.DeepEqual(m.Requires.Apps[0].Events, []string{"mqtt.client.connected", "mqtt.client.disconnected"}) {
 		t.Fatalf("MQTT events = %#v", m.Requires.Apps[0].Events)
 	}
 	declared := map[string]bool{}
@@ -139,7 +174,7 @@ func TestManifestAndRuntimeSurfaceMatch(t *testing.T) {
 		t.Fatalf("manifest-only tools: %#v", declared)
 	}
 	for _, route := range (&App{}).HTTPRoutes() {
-		if route.NoAuth {
+		if route.NoAuth && (route.Pattern != "/ingest/" || route.Method != "POST") {
 			t.Errorf("management route %s must be authenticated", route.Pattern)
 		}
 	}

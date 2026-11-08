@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: devices
 display_name: Devices
-version: 0.2.0
+version: 0.3.0
 description: |
   Manage scoped device resources, arbitrary structured data, capability-described
   operations, recoverable enrollment, asynchronous commands, durable events and
@@ -24,15 +24,15 @@ requires:
     - platform.apps.call
   apps:
     - name: mqtt
-      version: ">=0.4.0"
+      version: ">=0.6.0"
       reason: "Provides the project-scoped MQTT broker, per-device credentials and ACLs, retained state, and device event bridge."
       events:
-        - mqtt.devices.message
         - mqtt.client.connected
         - mqtt.client.disconnected
 
 provides:
   http_routes:
+    - { method: POST, prefix: /ingest/, no_auth: true }
     - prefix: /
   mcp_tools:
     - { name: devices_list, description: "List managed devices. Args: status?, q?, limit?." }
@@ -70,6 +70,12 @@ provides:
     - { name: devices_operation_get, description: "Get lifecycle operation status and recover credentials within the recovery window." }
     - { name: devices_limits_get, description: "Get configured operational limits." }
     - { name: devices_responses_list, description: "Query accepted and late command responses with cursor pagination." }
+    - { name: devices_ingest_credential_create, description: "Issue a scoped device-only HTTP write credential." }
+    - { name: devices_ingest_credentials_list, description: "List device HTTP credential metadata." }
+    - { name: devices_ingest_credential_revoke, description: "Revoke one device HTTP credential." }
+    - { name: devices_usage_summary, description: "Exact usage totals in a time window and current resources." }
+    - { name: devices_policy_get, description: "Get effective policy and revision." }
+    - { name: devices_policy_set, description: "Controller-authorized revision-checked live policy update." }
   ui_panels:
     - slot: project.page
       label: Devices
@@ -91,6 +97,10 @@ provides:
     - { name: devices.command.submitted, description: "A command was durably accepted for dispatch." }
     - { name: devices.command.cancelled, description: "A command was cancelled by device disable or deletion; execution may be unconfirmed." }
     - { name: devices.command.late_response, description: "A response arrived after its deadline." }
+    - { name: devices.policy.updated, description: "A live operational policy was committed." }
+    - { name: devices.credential.created, description: "A device HTTP write credential was issued; no secret is included." }
+    - { name: devices.credential.revoked, description: "A device HTTP write credential was revoked." }
+    - { name: devices.data.rejected, description: "A durable MQTT message was quarantined after terminal validation failure." }
 
 runtime:
   kind: source
@@ -201,5 +211,36 @@ config_schema:
     type: text
     default: "90"
     label: Completed operation and idempotency retention (days)
+
+  - name: policy_controller_app
+    type: text
+    default: "saas"
+    label: Trusted live policy controller app
+  - name: policy_admin_user_ids
+    type: text
+    default: ""
+    label: Platform operator IDs allowed to update live policy
+    description: Comma-separated IDs supplied by the trusted installer. Empty disables HTTP policy writes. Device and ordinary agent credentials cannot update policy.
+  - name: max_http_credentials_per_device
+    type: text
+    default: "5"
+    label: Maximum active HTTP credentials per device
+  - name: max_http_credential_ttl_seconds
+    type: text
+    default: "31536000"
+    label: Maximum HTTP credential lifetime (seconds)
+
+  - name: max_transport_receipts
+    type: text
+    default: "1000000"
+    label: Maximum durable transport receipts
+  - name: max_ingest_rejections
+    type: text
+    default: "10000"
+    label: Maximum acknowledged rejection diagnostics
+  - name: transport_receipt_retention_hours
+    type: text
+    default: "168"
+    label: Acknowledged transport receipt retention (hours)
 
 upgrade_policy: auto-patch

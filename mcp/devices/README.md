@@ -1,9 +1,9 @@
 # Devices
 
-Devices 0.2.0 is Apteva's project-scoped device control plane. It owns device
+Devices 0.3.0 is Apteva's project-scoped device control plane. It owns device
 resources, structured data, operation capabilities, recoverable enrollment,
 command execution tracking, durable events, and usage measurements. MQTT
-**0.4.0 or newer** owns the broker, topic authorization, credentials, and sessions.
+**0.6.0 or newer** owns the broker, topic authorization, credentials, and sessions.
 SaaS maps customers to authorized projects and supplies operational limits; no
 customer, product, billing, or Thinglane concepts are built into Devices.
 
@@ -13,9 +13,7 @@ The ownership scope is the gateway-authenticated project ID. Devices remains a
 project installation with its own database. MCP requires `sdk.CallerFrom(call)`
 and a matching `ProjectID`; model arguments cannot choose another scope. HTTP
 uses the SDK install-token gate, verifies delegated signed principals, and
-rejects foreign project headers. Missing install tokens fail closed. Incoming
-MQTT events require source app `mqtt`, matching event project and `scope_id`, a
-scoped topic, and the enrolled device's exact credential username.
+rejects foreign project headers. Missing install tokens fail closed. Incoming MQTT data is consumed from the authenticated app-owned durable MQTT consumer. Scoped topics and the enrolled device's exact publisher username are checked before processing. Connection events still require source app `mqtt` and matching ownership metadata.
 
 Arbitrary customer subscopes within one project are not a delegation mechanism.
 Use separate authorized projects. Any future independent scope delegation must
@@ -111,7 +109,7 @@ Message IDs are unique per device across state/telemetry. Identical retries
 produce one history sample, usage record, and logical event; changed content
 using the same ID conflicts. History, deduplication, state, usage, and outgoing
 event records commit in one SQLite transaction. Invalid or over-limit messages
-have no partial state effects. The server also records `received_at`.
+have no partial state effects. The server also records `received_at` (MQTT broker acceptance time for durable MQTT records; HTTP arrival/ingestion time for HTTP submissions).
 
 Within one session, increasing sequence is authoritative. Across sessions or
 without sequence, normalized `observed_at` and message ID order determine the
@@ -120,14 +118,92 @@ overwrite current state. New session IDs are required after sequence reset.
 `observed_at` must be RFC3339; future clock skew defaults to 300 seconds. Keep a
 synchronized clock for both data and command expiry.
 
-After a successful commit (including an identical duplicate), Devices publishes
-`{"message_id":"...","status":"accepted"}` to the device receipt topic.
-A reliable client persists samples and resends the **same envelope** until it
-gets this receipt. MQTT PUBACK alone is not application acceptance. This closes
-the best-effort MQTT event-bridge gap for cooperating clients. Native v1 clients
-without this envelope retain their older best-effort telemetry behavior.
-Deduplication lasts while message history is retained; clients must keep their
-retry window within that configured retention window.
+After a successful commit (including an identical logical duplicate), MQTT
+clients receive `{"message_id":"...","status":"accepted"}` on their receipt
+topic. HTTP clients receive the equivalent acceptance in the response body.
+Receipts never precede the Devices database commit.
+
+Devices uses MQTT 0.6's app-owned `mqtt_consumer` named
+`devices-ingestion-v1`. It claims leased batches, commits each message's effects
+and transport receipt together, and acknowledges the whole batch only after all
+records are processed. A lost broker acknowledgment or process restart can
+redeliver messages; the stable broker ID suppresses repeated effects, including
+native v1 telemetry and manifest events. Logical v2 IDs additionally suppress
+producer retries and duplicate submissions across MQTT and HTTP.
+
+Permanent invalid messages are durably quarantined with a sanitized reason and
+a `devices.data.rejected` event, then acknowledged so they cannot block valid
+traffic forever. Capacity/storage failures leave the batch unacknowledged and
+request retry. Unacknowledged broker history stays pinned, so persistent failure
+can explicitly backpressure MQTT capacity; inspect broker/Devices diagnostics
+and raise limits or repair storage rather than deleting a consumer cursor.
+Acknowledged transport receipts default to seven days of retention, with a
+one-million-row safety ceiling. Rejection diagnostics default to the newest
+10,000 acknowledged records; pending diagnostics are retained. Keep the receipt
+retention at least as long as any intended broker replay window.
+
+Reliable clients still persist logical samples until application receipts:
+MQTT PUBACK confirms broker persistence, not Devices ingestion. V1 clients gain
+durable broker-to-Devices delivery but do not gain producer-side logical
+identifiers or exactly-once hardware execution. Logical deduplication lasts
+while device message history is retained; keep producer retries within that
+window. Platform data notifications are no longer the ingestion source.
+
+## Device-authenticated HTTP/HTTPS ingestion
+
+The write endpoints are `POST /ingest/<device_id>/state` and
+`POST /ingest/<device_id>/telemetry`, under the installation's normal proxy:
+
+```text
+https://your-server/api/apps/devices/_install/<install_id>/ingest/<device_id>/state
+```
+
+Use HTTPS at the platform ingress; local loopback HTTP is suitable for local
+tests. These two routes deliberately bypass the platform/SDK management-token
+gate and authenticate a separate device-only write credential themselves. All
+other routes retain management authentication. Prefer `X-Device-Token`; bearer
+credentials are also understood when the proxy preserves them. Never give a
+device `APTEVA_APP_TOKEN` or a platform operator API key.
+
+Issue a credential with `devices_ingest_credential_create` or
+`POST /devices/<device_id>/ingest-credentials`:
+
+```json
+{"label":"Sensor HTTPS uploader","idempotency_key":"enroll-http-1","expires_in_seconds":2592000}
+```
+
+The response contains a `token`, credential metadata, recovery deadline, and
+relative ingestion path. Credentials are 256-bit random secrets verified by
+hash and constant-time comparison, with encrypted recovery during the same
+bounded secret-recovery window used for enrollment. A repeated issuance key
+returns the same result; changed reuse conflicts. The token can write only the
+named device's state/telemetry, never read history, invoke commands, change
+capabilities, issue credentials, or modify policy. Scope comes from the fixed
+installation and credential binding, not JSON arguments.
+
+Submit the same v2 envelope described above. The path/body device and scope
+must agree with the credential; a foreign device is denied. The generic data
+contract is available for HTTP submissions to native v1 resources as well.
+
+- New logical message: HTTP 201 with `accepted`, `message_id`, `duplicate:false`,
+  device/scope, and original `received_at`.
+- Identical retry, including a message first ingested over MQTT: HTTP 200 with
+  `duplicate:true`; no repeated usage or state effect.
+- Changed logical ID reuse: HTTP 409.
+- Capacity exceeded: HTTP 429 and `Retry-After: 1`; no acceptance receipt.
+- Invalid/revoked/expired/disabled credentials: HTTP 401. Invalid envelopes:
+  HTTP 400. Bodies above the hard 128 KiB protocol maximum: HTTP 413.
+- Storage failure: an error response, with no partial data or acceptance.
+
+An accepted identical retry remains recoverable after limits are lowered.
+Credential revocation takes precedence over receipt replay. Disable/rotation
+intent immediately blocks HTTP submissions; completed disable or rotation
+revokes all existing HTTP credentials. Enabling a device does not resurrect
+revoked credentials. Deletion removes credentials. List metadata with
+`devices_ingest_credentials_list` or GET on the credential collection; revoke
+with `devices_ingest_credential_revoke` or
+`DELETE /devices/<device_id>/ingest-credentials/<credential_id>`.
+
 
 ## Capabilities and adapters
 
@@ -212,6 +288,9 @@ an ambiguous outcome times out instead of risking automatic reexecution.
 | `devices_usage_list` | `GET /usage` | Durable usage measurements |
 | `devices_responses_list` | `GET /responses` | Accepted and late command response history |
 | `devices_limits_get` | `GET /limits` | Active operational limits |
+| `devices_usage_summary` | `GET /usage/summary` | Exact window totals and current resource counts |
+| `devices_policy_get` | `GET /policy` | Effective live policy, revision, and over-limit status |
+| `devices_policy_set` | `PUT /policy` | Authorized revision-checked live policy update |
 | `devices_operation_get` | `GET /operations/<id>` | Lifecycle status and bounded secret recovery |
 
 History queries accept `device_id`, `kind`, `from`, `to`, `limit` (1–500), and
@@ -234,11 +313,78 @@ are scoped and deduplicated independently per device, measurement, and source
 ID. Transport retries and rejected data do not increase accepted usage. Pricing,
 entitlements, invoices, customer attribution, and commercial policy stay in SaaS.
 
+## Aggregated usage and resource counts
+
+`devices_usage_summary` / `GET /usage/summary` accepts RFC3339 `from`, `to`,
+and optional `measurement`; the default is the preceding 24 hours. Windows are
+`[from,to)`, using persisted usage-record creation time. Totals group by
+measurement in the authenticated ownership scope and are exact decimal strings,
+so JSON/JavaScript clients cannot silently round large counts. Independent
+queries never expose another scope; an authorized external adapter can combine
+summaries across scopes if needed.
+
+The same database snapshot reports devices (enabled/online), pending provisions,
+queued/in-flight commands, state keys/logical bytes, history records/logical
+bytes, pending events, active HTTP credentials, durable transport receipts, and
+quarantined messages, plus per-device maxima used by policy checks. Logical
+payload bytes are not filesystem allocation or broker transport bytes. Current
+resource counts and historical usage have different semantics; deletion lowers
+resource counts without erasing retained usage.
+
+`coverage` reports v0.3 tracking start, earliest retained record, the monotonic
+pruning watermark, and whether the requested window is fully covered. Existing
+v0.2 usage is included when retained but is conservatively marked incomplete
+before v0.3 tracking began. Extending retention cannot recreate previously
+pruned history. SaaS must distinguish incomplete coverage from zero activity.
+
 ## Limits and retention
 
-Installation configuration is the trusted policy input. Clients/agents cannot
-override limits per request. `GET /limits` returns the effective settings;
-invalid policy values fail mount instead of silently weakening enforcement.
+Installation configuration supplies the trusted base policy. Durable live
+overrides take precedence and survive restart. Clients cannot override limits
+per submission. `GET /limits` returns effective settings. Invalid base policy
+fails mount; invalid live updates fail before persistence or activation.
+
+`devices_policy_set` is restricted to a bound application whose authenticated
+SDK caller name matches `policy_controller_app` (default `saas`) and whose
+project matches the installation. Supplying an app name or scope in arguments
+does not authorize a caller. Ordinary agent and device credentials are denied.
+`PUT /policy` additionally supports explicitly configured platform operator IDs
+from `policy_admin_user_ids`; empty (the default) disables HTTP policy writes.
+These are installer-controlled settings, never client-provided identity headers.
+
+```json
+{
+  "expected_revision": 0,
+  "request_id": "plan-change-123",
+  "limits": {"max_devices": 25, "max_concurrent_commands": 5}
+}
+```
+
+Updates are positive-integer patches to known operational keys, validated
+against hard safety bounds. JSON fractions, unknown/commercial fields, and
+out-of-range values fail. An atomic commit records the new revision, overrides,
+request fingerprint, and outbox event before the running process swaps its
+policy snapshot. Admissions serialize with updates; a successful update is
+immediately effective without a restart. Stale revisions or changed request ID
+reuse return 409. An identical request replay returns its applied snapshot and
+the current revision. Completed request replay records use the operation
+retention window; stale revisions still prevent old requests from reapplying
+after their replay record expires.
+
+Lower capacity limits preserve devices, stored state, queued commands, and
+active commands. Responses report `over_limit`; additional consumption is
+rejected until usage drops or policy increases. Already active commands finish,
+and new dispatch waits for concurrency to fall below the new cap. Accepted
+identical data retries still get their original receipt. Retention changes are
+separate explicit cleanup policy: they apply at the hourly cleanup, preserving
+current state, pending work, and unacknowledged transport/outbox records. Lower
+HTTP credential TTL affects new issuance; it does not silently revoke otherwise
+valid existing credentials.
+
+The Operations tab displays usage, resources, and the policy revision and lets
+authorized operators submit live updates. Setup issues and revokes device-only
+HTTP credentials. No pricing, plan names, invoices, or billing decisions are
+implemented in Devices.
 
 Defaults: 10,000 devices; 128 KiB data/command arguments; 1,024 state keys and
 1 MiB current-state JSON per device; 10,000 pending commands per scope and 100 per
@@ -256,6 +402,29 @@ Usage and event rows survive device deletion until their retention cutoff.
 Completed operation secrets have the shorter recovery window described above.
 Hourly pruning preserves current state. MQTT has separate transport limits and
 retained-message policy; Devices limits cannot override them.
+
+## Upgrade from 0.2.x
+
+Upgrade MQTT to at least 0.6.0 first and back up both app databases plus the
+Devices recovery key. MQTT 0.5+ requires valid TLS configuration, or explicit
+`transport_mode: local` with a restricted private/loopback endpoint. There is no
+silent plaintext fallback. The Devices migration is additive: current devices,
+credentials, history, and commands remain. A stable app-owned MQTT consumer is
+created from the earliest retained broker history; original v2 logical IDs avoid
+repeating already processed data. Pre-0.6 lost broker messages cannot be restored.
+Do not change the Devices app installation identity to upgrade; consumer
+ownership is bound to it. Review old consumer cursors before deleting an install.
+
+Set `APTEVA_MQTT_TLS=true` and use the advertised host/port for TLS Python clients;
+`APTEVA_MQTT_CA_FILE` supplies a private issuer CA. Defaults are TLS and port 8883,
+with hostname and chain verification enabled. For explicit local MQTT, set
+`APTEVA_MQTT_TLS=false` and the returned local port. Arduino examples use a CA
+certificate and WiFiClientSecure for TLS; copy the enrollment transport mode and
+port. No example uses an insecure certificate-verification bypass.
+
+Policy changes through the platform installation config endpoint still restart
+the sidecar. Configure the trusted controller/operator allowlist there once,
+then use the live policy endpoint for immediate plan changes.
 
 ## Upgrade from 0.1.1
 
@@ -275,6 +444,8 @@ first mount. Rollback requires the matching pre-upgrade database backup.
 
 - `examples/python/generic_device.py`: generic v2 data, persisted retry queue,
   application receipts, schema-advertised echo operation, and durable commands.
+- `examples/python/https_device.py`: HTTPS-only sensor with a device-specific
+  write token, verified TLS, persisted submissions, and receipt-driven retries.
 - `examples/python/apteva_device.py`: native Raspberry Pi/Linux GPIO adapter,
   using the same durable command runtime.
 - `examples/arduino/AptevaDevices.ino`: native ESP32/ESP8266 GPIO, LittleFS command
@@ -291,12 +462,12 @@ python3 -m unittest discover -s examples/python -p 'test_*.py'
 bun run scripts/build-panels.ts --app devices
 ```
 
-The sidecar integration test builds real MQTT 0.4 and Devices sidecars, checks
+The sidecar integration test builds real current MQTT and Devices sidecars, checks both verified TLS and explicit local MQTT, and tests HTTPS ingestion, policy updates, and usage summaries. It also checks
 scoped enrollment and HTTP isolation, connects a real MQTT client, verifies
 data receipts/deduplication, command completion, and deletion replay. Tests also
 cover database/remote-call failures, process restart, v0.1 migration, encrypted
 secret recovery, outbox delivery failure, retention, and concurrent limits.
 The ESP8266 toolchain distributed for macOS is x86_64 and was unavailable on the ARM validation host. The changed ArduinoJson expressions were syntax checked with ArduinoJson 6.21.6; a full board build and physical Arduino/Raspberry Pi behavior still require validation on the target toolchain/hardware.
-MQTT 0.4 remains plaintext TCP and does not provide durable app consumption;
-application receipts improve delivery for cooperating clients without claiming
-TLS, durable broker sessions, or exactly-once physical execution.
+MQTT 0.6+ supplies TLS and durable broker/session recovery. Devices acknowledges
+durable consumer batches after local commit; downstream event subscribers and
+physical hardware still need their own idempotency and recovery contracts.

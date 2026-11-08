@@ -47,6 +47,26 @@ class RuntimeTests(unittest.TestCase):
             runtime.resend(lambda *_: self.fail("resent acknowledged sample"))
             runtime.close()
 
+class TLSConfigurationTests(unittest.TestCase):
+    def test_tls_keeps_hostname_and_chain_verification(self):
+        import os
+        import ssl
+        from unittest.mock import patch
+        from mqtt_transport import configure_tls
+        class Client:
+            context = None
+            def tls_set_context(self, context):
+                self.context = context
+        client = Client()
+        with patch.dict(os.environ, {"APTEVA_MQTT_TLS": "true", "APTEVA_MQTT_CA_FILE": ""}):
+            configure_tls(client)
+        self.assertTrue(client.context.check_hostname)
+        self.assertEqual(client.context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertGreaterEqual(client.context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        with patch.dict(os.environ, {"APTEVA_MQTT_TLS": "invalid"}):
+            with self.assertRaises(ValueError):
+                configure_tls(Client())
+
 
 if __name__ == "__main__":
     unittest.main()

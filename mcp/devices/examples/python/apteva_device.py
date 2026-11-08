@@ -9,6 +9,7 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 from device_runtime import DeviceRuntime
+from mqtt_transport import configure_tls
 
 try:
     import RPi.GPIO as GPIO  # type: ignore
@@ -18,7 +19,7 @@ except ImportError:
 DEVICE_ID = os.environ.get("APTEVA_DEVICE_ID", "raspberry-pi-1")
 PASSWORD = os.environ.get("APTEVA_DEVICE_PASSWORD", "replace-me")
 HOST = os.environ.get("APTEVA_MQTT_HOST", "localhost")
-PORT = int(os.environ.get("APTEVA_MQTT_PORT", "1883"))
+PORT = int(os.environ.get("APTEVA_MQTT_PORT", "8883"))
 USERNAME = os.environ["APTEVA_DEVICE_USERNAME"]
 BASE = os.environ["APTEVA_DEVICE_TOPIC_BASE"].rstrip("/")
 RUNTIME = DeviceRuntime(os.environ.get("APTEVA_DEVICE_JOURNAL", "device-journal.sqlite"))
@@ -120,6 +121,7 @@ def main() -> None:
     if GPIO is not None:
         GPIO.setmode(GPIO.BCM)
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=os.environ.get("APTEVA_MQTT_CLIENT_ID", USERNAME))
+    configure_tls(client)
     client.username_pw_set(USERNAME, PASSWORD)
     client.will_set(f"{BASE}/availability", payload="offline", qos=1, retain=True)
     client.on_connect = on_connect

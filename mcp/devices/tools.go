@@ -45,6 +45,9 @@ func (a *App) mcpTools() []sdk.Tool {
 	}
 	tools = append(tools, a.extraTools()...)
 	for i := range tools {
+		if tools[i].HandlerCtx != nil {
+			continue
+		}
 		handler := tools[i].Handler
 		tools[i].Handler = nil
 		tools[i].HandlerCtx = func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
