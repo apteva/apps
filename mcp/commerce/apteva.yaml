@@ -178,6 +178,10 @@ runtime:
     repo: github.com/apteva/apps
     ref: commerce/v0.11.3-feliqo.1
     entry: mcp/commerce
+  artifacts:
+    linux-amd64:
+      url: https://github.com/apteva/apps/releases/download/commerce%2Fv0.11.3-feliqo.1/commerce-v0.11.3-feliqo.1-linux-amd64.tar.gz
+      sha256: 8431cf47af6a81a24e5493358558c00d7cca6799857695bd70ef68a5c9a820b2
   port: 8080
   health_check: /health
 
