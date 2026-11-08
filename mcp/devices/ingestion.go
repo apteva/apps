@@ -33,16 +33,22 @@ func (a *App) ingest(d Device, kind, payload, received string) error {
 	return err
 }
 func (a *App) ingestLocked(d Device, kind, payload, received string) error {
+	return a.ingestWithProtocolLocked(d, kind, payload, received, "")
+}
+func (a *App) ingestWithProtocolLocked(d Device, kind, payload, received, protocol string) error {
 	// Recheck authorization under the mutation lock, after lifecycle changes.
 	current, err := getDevice(a.ctx.AppDB(), a.projectID, d.ID, false)
 	if err != nil {
 		return err
 	}
 	if !current.Enabled {
-		return errors.New("device is disabled")
+		return ErrDeviceAuth
 	}
 	d = current
-	if len(payload) > a.limit("max_device_payload_bytes", 131072) {
+	if len(payload) > 131072 {
+		return invalidData(errors.New("device payload exceeds protocol maximum of 128 KiB"))
+	}
+	if (kind == "manifest" || kind == "availability") && len(payload) > a.limit("max_device_payload_bytes", 131072) {
 		return ErrLimit
 	}
 	if kind == "manifest" || kind == "availability" {
@@ -56,20 +62,20 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 		if kind == "manifest" {
 			var m map[string]any
 			if e = decodeJSON(payload, &m); e != nil {
-				return e
+				return invalidData(e)
 			}
 			if e = validateManifest(m); e != nil {
-				return e
+				return invalidData(e)
 			}
 			if p := str(m, "protocol"); p != "" && p != d.Protocol {
-				return errors.New("manifest cannot change the enrolled protocol")
+				return invalidData(errors.New("manifest cannot change the enrolled protocol"))
 			}
 			raw, _ := json.Marshal(m)
 			_, e = tx.Exec(`UPDATE devices SET manifest_json=?,last_seen=?,updated_at=? WHERE project_id=? AND id=?`, string(raw), received, received, a.projectID, d.ID)
 		} else {
 			availability := parseAvailability(payload)
 			if availability == d.Availability {
-				return nil
+				return a.commitIngestion(tx, d.ID)
 			}
 			_, e = tx.Exec(`UPDATE devices SET availability=?,status=?,last_seen=?,updated_at=? WHERE project_id=? AND id=?`, availability, availability, received, received, a.projectID, d.ID)
 			topic = "devices.device.status_changed"
@@ -81,25 +87,28 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 		if e = a.event(tx, d.ID, topic, data); e != nil {
 			return e
 		}
-		return tx.Commit()
+		return a.commitIngestion(tx, d.ID)
 	}
 	if kind != "state" && kind != "telemetry" {
-		return errors.New("unknown device data kind")
+		return invalidData(errors.New("unknown device data kind"))
 	}
-	adapter, err := adapterFor(d.Protocol)
+	if protocol == "" {
+		protocol = d.Protocol
+	}
+	adapter, err := adapterFor(protocol)
 	if err != nil {
 		return err
 	}
 	m, err := adapter.Decode(kind, payload)
 	if err != nil {
-		return err
+		return invalidData(err)
 	}
 	if m.ObservedAt == "" {
 		m.ObservedAt = received
 	}
 	observed, err := time.Parse(time.RFC3339Nano, m.ObservedAt)
 	if err != nil {
-		return errors.New("observed_at must be RFC3339")
+		return invalidData(errors.New("observed_at must be RFC3339"))
 	}
 	m.ObservedAt = formatTime(observed)
 	receivedTime, err := time.Parse(time.RFC3339Nano, received)
@@ -107,11 +116,13 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 		return err
 	}
 	received = formatTime(receivedTime)
-	if observed.After(receivedTime.Add(time.Duration(a.limit("max_clock_skew_seconds", 300)) * time.Second)) {
-		return errors.New("observed_at exceeds allowed clock skew")
-	}
+
 	if m.MessageID == "" {
-		m.MessageID = newID("legacy_")
+		if a.activeMQTTMessageID != "" {
+			m.MessageID = "mqtt_" + a.activeMQTTMessageID
+		} else {
+			m.MessageID = newID("legacy_")
+		}
 	}
 	raw, err := json.Marshal(m.Data)
 	if err != nil {
@@ -130,10 +141,16 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 		if oldHash != hash {
 			return ErrConflict
 		}
-		return nil
+		return a.commitIngestion(tx, d.ID)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if len(payload) > a.limit("max_device_payload_bytes", 131072) {
+		return ErrLimit
+	}
+	if observed.After(receivedTime.Add(time.Duration(a.limit("max_clock_skew_seconds", 300)) * time.Second)) {
+		return invalidData(errors.New("observed_at exceeds allowed clock skew"))
 	}
 	var pending int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM device_outbox WHERE project_id=? AND delivered_at IS NULL`, a.projectID).Scan(&pending); err != nil {
@@ -197,7 +214,7 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 			}
 			for key, value := range values {
 				if key == "" || len(key) > 128 {
-					return errors.New("state key must contain 1 to 128 characters")
+					return invalidData(errors.New("state key must contain 1 to 128 characters"))
 				}
 				v, _ := json.Marshal(value)
 				var previous string
@@ -248,7 +265,7 @@ func (a *App) ingestLocked(d Device, kind, payload, received string) error {
 			return err
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	if err = a.commitIngestion(tx, d.ID); err != nil {
 		return fmt.Errorf("persist device data: %w", err)
 	}
 	return nil

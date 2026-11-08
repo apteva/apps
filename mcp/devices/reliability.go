@@ -63,8 +63,16 @@ func fingerprint(v any) string {
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("%x", sum)
 }
-func newID(prefix string) string             { return prefix + strings.ReplaceAll(uuid.NewString(), "-", "") }
-func (a *App) limit(key string, def int) int { return configInt(a.ctx, key, def, 1, limitMaximum(key)) }
+func newID(prefix string) string { return prefix + strings.ReplaceAll(uuid.NewString(), "-", "") }
+func (a *App) limit(key string, def int) int {
+	a.policyMu.RLock()
+	value, ok := a.policy[key]
+	a.policyMu.RUnlock()
+	if ok {
+		return value
+	}
+	return a.baseLimit(key, def)
+}
 func (a *App) migrateTransport() error {
 	if _, err := a.ctx.AppDB().Exec(`INSERT INTO device_installation(singleton,project_id)VALUES(1,?) ON CONFLICT DO NOTHING`, a.projectID); err != nil {
 		return err
@@ -276,15 +284,15 @@ func (a *App) runReconciliation(ctx context.Context, _ *sdk.AppCtx) error {
 			return nil
 		case <-ticker.C:
 		case <-a.outboxWake:
-			if err := a.reconcileOperations(); err != nil {
-				a.ctx.Logger().Warn("devices lifecycle recovery", "err", err.Error())
-			}
-			if err := a.dispatchCommands(); err != nil {
-				a.ctx.Logger().Warn("devices dispatch", "err", err.Error())
-			}
-			if err := a.flushOutbox(ctx); err != nil {
-				a.ctx.Logger().Warn("devices outbox", "err", err.Error())
-			}
+		}
+		if err := a.reconcileOperations(); err != nil {
+			a.ctx.Logger().Warn("devices lifecycle recovery", "err", err.Error())
+		}
+		if err := a.dispatchCommands(); err != nil {
+			a.ctx.Logger().Warn("devices dispatch", "err", err.Error())
+		}
+		if err := a.flushOutbox(ctx); err != nil {
+			a.ctx.Logger().Warn("devices outbox", "err", err.Error())
 		}
 	}
 }
@@ -349,7 +357,7 @@ func limitMaximum(key string) int {
 	switch key {
 	case "max_device_payload_bytes":
 		return 131072
-	case "telemetry_retention_hours":
+	case "telemetry_retention_hours", "transport_receipt_retention_hours":
 		return 87600
 	case "event_retention_days", "usage_retention_days", "command_retention_days", "operation_retention_days":
 		return 3650
@@ -359,6 +367,10 @@ func limitMaximum(key string) int {
 		return 86400
 	case "command_timeout_ms":
 		return 86400000
+	case "max_http_credential_ttl_seconds":
+		return 31536000
+	case "max_http_credentials_per_device":
+		return 100
 	default:
 		return 1000000000
 	}
@@ -370,7 +382,7 @@ func (a *App) validateLimits() error {
 			continue
 		}
 		n, e := strconv.Atoi(value)
-		if e != nil || n < 1 || n > limitMaximum(key) {
+		if e != nil || n < limitMinimum(key) || n > limitMaximum(key) {
 			return fmt.Errorf("invalid %s: expected integer between 1 and %d", key, limitMaximum(key))
 		}
 	}
@@ -381,4 +393,15 @@ func (a *App) validateLimits() error {
 		}
 	}
 	return nil
+}
+
+func limitMinimum(key string) int {
+	switch key {
+	case "command_timeout_ms":
+		return 500
+	case "max_http_credential_ttl_seconds":
+		return 60
+	default:
+		return 1
+	}
 }

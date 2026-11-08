@@ -341,6 +341,9 @@ func TestScopeBoundariesAndMissingToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, route := range a.HTTPRoutes() {
+		if route.NoAuth {
+			continue
+		}
 		req := httptest.NewRequest(http.MethodGet, route.Pattern, nil)
 		req.Header.Set("X-Apteva-Project-ID", "other")
 		w := httptest.NewRecorder()

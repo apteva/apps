@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-11-08
+
+- Add device-only authenticated HTTP/HTTPS state and telemetry writes through the shared ingestion transaction, with exact acceptance/duplicate receipts.
+- Issue bounded, hashed HTTP write credentials with encrypted recovery, per-device isolation, and lifecycle revocation.
+- Add exact aggregated usage windows, resource snapshots, coverage reporting, and a panel Operations tab.
+- Add controller-authorized, revision-checked live policy updates with durable idempotency, immediate admission changes, over-limit reporting, and no restart.
+- Consume MQTT through durable app-owned leased batches; atomically persist transport receipts, quarantine terminal invalid data, and retry capacity/storage failures.
+- Update Python/Arduino clients to support verified MQTT TLS and explicit local plaintext mode.
+- Add panel credential management, real MQTT TLS and HTTPS tests, policy/concurrency/restart/recovery tests, and fix periodic reconciliation running only on explicit wake notifications.
+
+Requires MQTT >=0.6.0. The migration from Devices 0.2 is additive; preserve the app install identity and recovery-key backup. Configure MQTT TLS or explicit restricted local mode before upgrading it.
+
 ## 0.2.0 — 2026-11-08
 
 - Integrate MQTT 0.4 scoped topics, qualified credentials, and authenticated event identities.

@@ -37,6 +37,7 @@ func (a *App) extraTools() []sdk.Tool {
 		tool("devices_state_query", "Query current state with key cursor pagination.", schema(map[string]any{"device_id": stringProp(), "cursor": stringProp(), "limit": intProp()}, []string{"device_id"}), func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.queryState(args) }),
 		tool("devices_limits_get", "Get active operational limits.", schema(map[string]any{}, nil), func(_ *sdk.AppCtx, _ map[string]any) (any, error) { return a.activeLimits(), nil }),
 	)
+	tools = append(tools, a.ingressPolicyTools()...)
 	return tools
 }
 func (a *App) extraRoutes() []sdk.Route {
@@ -78,6 +79,7 @@ func (a *App) extraRoutes() []sdk.Route {
 			writeJSON(w, 200, a.activeLimits())
 		}},
 	)
+	routes = append(routes, sdk.Route{Pattern: "/usage/summary", Handler: a.handleUsageSummary}, sdk.Route{Pattern: "/policy", Handler: a.handlePolicy})
 	return routes
 }
 func queryArgs(r *http.Request) map[string]any {
@@ -273,11 +275,13 @@ func (a *App) queryState(args map[string]any) (Page, error) {
 	}
 	return page, rows.Err()
 }
-func (a *App) activeLimits() map[string]int {
+func (a *App) baseLimits() map[string]int {
 	return map[string]int{
-		"operation_retention_days": a.limit("operation_retention_days", 90), "max_state_bytes_per_device": a.limit("max_state_bytes_per_device", 1048576),
-		"max_pending_events": a.limit("max_pending_events", 50000),
-		"max_devices":        a.limit("max_devices", 10000), "max_device_payload_bytes": a.limit("max_device_payload_bytes", 131072), "max_state_keys_per_device": a.limit("max_state_keys_per_device", 1024), "max_pending_commands": a.limit("max_pending_commands", 10000), "max_pending_commands_per_device": a.limit("max_pending_commands_per_device", 100), "max_concurrent_commands": a.limit("max_concurrent_commands", 100), "max_concurrent_commands_per_device": a.limit("max_concurrent_commands_per_device", 1), "max_history_bytes_per_device": a.limit("max_history_bytes_per_device", 67108864), "telemetry_retention_hours": a.limit("telemetry_retention_hours", 168), "telemetry_max_rows_per_device": a.limit("telemetry_max_rows_per_device", 10000), "event_retention_days": a.limit("event_retention_days", 90), "usage_retention_days": a.limit("usage_retention_days", 365), "command_retention_days": a.limit("command_retention_days", 90), "secret_recovery_hours": a.limit("secret_recovery_hours", 24), "max_clock_skew_seconds": a.limit("max_clock_skew_seconds", 300),
+		"max_transport_receipts": a.baseLimit("max_transport_receipts", 1000000), "max_ingest_rejections": a.baseLimit("max_ingest_rejections", 10000), "transport_receipt_retention_hours": a.baseLimit("transport_receipt_retention_hours", 168),
+		"command_timeout_ms": a.baseLimit("command_timeout_ms", 10000), "max_http_credentials_per_device": a.baseLimit("max_http_credentials_per_device", 5), "max_http_credential_ttl_seconds": a.baseLimit("max_http_credential_ttl_seconds", 31536000),
+		"operation_retention_days": a.baseLimit("operation_retention_days", 90), "max_state_bytes_per_device": a.baseLimit("max_state_bytes_per_device", 1048576),
+		"max_pending_events": a.baseLimit("max_pending_events", 50000),
+		"max_devices":        a.baseLimit("max_devices", 10000), "max_device_payload_bytes": a.baseLimit("max_device_payload_bytes", 131072), "max_state_keys_per_device": a.baseLimit("max_state_keys_per_device", 1024), "max_pending_commands": a.baseLimit("max_pending_commands", 10000), "max_pending_commands_per_device": a.baseLimit("max_pending_commands_per_device", 100), "max_concurrent_commands": a.baseLimit("max_concurrent_commands", 100), "max_concurrent_commands_per_device": a.baseLimit("max_concurrent_commands_per_device", 1), "max_history_bytes_per_device": a.baseLimit("max_history_bytes_per_device", 67108864), "telemetry_retention_hours": a.baseLimit("telemetry_retention_hours", 168), "telemetry_max_rows_per_device": a.baseLimit("telemetry_max_rows_per_device", 10000), "event_retention_days": a.baseLimit("event_retention_days", 90), "usage_retention_days": a.baseLimit("usage_retention_days", 365), "command_retention_days": a.baseLimit("command_retention_days", 90), "secret_recovery_hours": a.baseLimit("secret_recovery_hours", 24), "max_clock_skew_seconds": a.baseLimit("max_clock_skew_seconds", 300),
 	}
 }
 

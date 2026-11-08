@@ -27,6 +27,9 @@ beforeEach(()=>{
   if(path==="/devices")return json([device]);
   if(path==="/devices/lamp")return json(device);
   if(path==="/devices/lamp/commands"){if(init?.method==="POST")return json({command_id:"cmd_one",command:{status:"queued"}},202);return json([])}
+  if(path==="/usage/summary")return json({totals:{"data.messages":"12","data.bytes":"1024"},resources:{devices:1},coverage:{complete:true}});
+  if(path==="/policy"){if(init?.method==="PUT")return json({revision:1,limits:JSON.parse(init.body as string).limits,over_limit:[]});return json({revision:0,limits:{max_devices:10},over_limit:[]})}
+  if(path==="/devices/lamp/ingest-credentials"){if(init?.method==="POST")return json({token:"device-write-test-token"});return json([])}
   if(path==="/data")return json({items:[{message_id:url.searchParams.get("cursor")?"second":"first"}],next_cursor:url.searchParams.get("cursor")?undefined:"next"});
   if(path==="/history/events")return json({items:[]});
   return json({items:[]});
@@ -46,4 +49,11 @@ test("generic commands are asynchronous and carry a retry identity",async()=>{
 });
 test("lost enrollment responses reuse the same provisioning key",async()=>{
  await render();await click("Provision device");await input("Name","New lamp");failProvision=true;await click("Create credentials");await click("Create credentials");const posts=calls.filter(c=>c.init?.method==="POST" && c.url.pathname.endsWith("/devices"));expect(posts.length).toBe(2);expect((posts[0].init!.headers as any)["Idempotency-Key"]).toBe((posts[1].init!.headers as any)["Idempotency-Key"]);expect(JSON.parse(posts[0].init!.body as string).protocol).toBe("apteva.devices/v2");expect(container.textContent).toContain("scopes/token/devices/lamp/state");expect(container.textContent).toContain("scoped-user");
+});
+
+test("operators can inspect usage and submit a revision-checked live policy",async()=>{
+ await render();await click("operations");expect(container.textContent).toContain("data.messages");expect(container.textContent).toContain("12");await click("Apply live policy");const request=calls.find(c=>c.url.pathname.endsWith("/policy") && c.init?.method==="PUT")!;expect(request).toBeDefined();const body=JSON.parse(request.init!.body as string);expect(body.expected_revision).toBe(0);expect(body.request_id).toBeTruthy();expect(body.limits.max_devices).toBe(10);expect(container.textContent).toContain("applied without restarting Devices");
+});
+test("setup creates a device-only HTTP credential and displays the scoped ingest endpoint",async()=>{
+ await render();await click("setup");await click("Create HTTP write credential");expect(container.textContent).toContain("device-write-test-token");expect(container.textContent).toContain("/api/apps/devices/_install/7/ingest/lamp/state");const request=calls.find(c=>c.url.pathname.endsWith("/ingest-credentials") && c.init?.method==="POST")!;expect(JSON.parse(request.init!.body as string).idempotency_key).toBeTruthy();
 });

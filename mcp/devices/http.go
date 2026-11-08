@@ -26,6 +26,7 @@ func (a *App) httpRoutes() []sdk.Route {
 	for i := range routes {
 		routes[i].Handler = a.scopedHTTP(routes[i].Handler)
 	}
+	routes = append(routes, sdk.Route{Pattern: "/ingest/", Method: "POST", NoAuth: true, Handler: a.handleDeviceIngest})
 	return routes
 }
 
@@ -112,6 +113,10 @@ func (a *App) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "" {
 		a.handleDeviceRoot(w, r, id)
+		return
+	}
+	if strings.HasPrefix(action, "ingest-credentials") {
+		a.handleHTTPCredentials(w, r, id, action)
 		return
 	}
 	switch action {
@@ -259,6 +264,16 @@ func ensureEOF(dec *json.Decoder) error {
 func respond(w http.ResponseWriter, value any, err error) {
 	if err != nil {
 		status := http.StatusBadRequest
+		var storageError interface{ Code() int }
+		if errors.As(err, &storageError) {
+			status = http.StatusServiceUnavailable
+		}
+		if errors.Is(err, ErrForbidden) {
+			status = http.StatusForbidden
+		}
+		if errors.Is(err, ErrDeviceAuth) {
+			status = http.StatusUnauthorized
+		}
 		if errors.Is(err, ErrCursorExpired) {
 			status = http.StatusGone
 		}
@@ -267,6 +282,7 @@ func respond(w http.ResponseWriter, value any, err error) {
 		}
 		if errors.Is(err, ErrLimit) {
 			status = http.StatusTooManyRequests
+			w.Header().Set("Retry-After", "1")
 		}
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound

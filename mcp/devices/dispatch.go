@@ -52,7 +52,7 @@ func (a *App) submitCommand(d Device, operation, target string, arguments map[st
 		}
 	}
 	if timeoutMS == 0 {
-		timeoutMS = configInt(a.ctx, "command_timeout_ms", 10000, 500, 86400000)
+		timeoutMS = a.limit("command_timeout_ms", 10000)
 	}
 	if timeoutMS < 500 || timeoutMS > 86400000 {
 		return Command{}, errors.New("timeout_ms must be between 500 and 86400000")
@@ -283,15 +283,15 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 		return err
 	}
 	if !current.Enabled {
-		return errors.New("device is disabled")
+		return ErrDeviceAuth
 	}
 	var response map[string]any
 	if err = decodeJSON(payload, &response); err != nil {
-		return err
+		return invalidData(err)
 	}
 	id := firstString(response, "command_id", "id")
 	if id == "" {
-		return errors.New("command_id required")
+		return invalidData(errors.New("command_id required"))
 	}
 	success, valid := response["success"].(bool)
 	if !valid {
@@ -301,7 +301,7 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 		case "failed", "error":
 			success = false
 		default:
-			return errors.New("terminal response status required")
+			return invalidData(errors.New("terminal response status required"))
 		}
 	}
 	c, err := getCommand(a.ctx.AppDB(), id)
@@ -309,7 +309,7 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 		return err
 	}
 	if c.DeviceID != d.ID {
-		return errors.New("command does not belong to device")
+		return invalidData(errors.New("command does not belong to device"))
 	}
 	tx, err := a.ctx.AppDB().Begin()
 	if err != nil {
@@ -327,13 +327,13 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
-		return nil
+		return a.commitIngestion(tx, d.ID)
 	}
 	if commandTerminal(c.Status) {
 		if err = a.event(tx, d.ID, "devices.command.late_response", map[string]any{"command_id": id, "response": response}); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return a.commitIngestion(tx, d.ID)
 	}
 	status := "failed"
 	if success {
@@ -352,7 +352,7 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 		schema := jsonObject(schemaRaw)
 		if len(schema) > 0 {
 			if err = validateJSONSchema(schema, response["result"]); err != nil {
-				return fmt.Errorf("invalid command result: %w", err)
+				return invalidData(fmt.Errorf("invalid command result: %w", err))
 			}
 		}
 	}
@@ -370,7 +370,7 @@ func (a *App) responseLocked(d Device, payload, at string) error {
 			return err
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	if err = a.commitIngestion(tx, d.ID); err != nil {
 		return err
 	}
 	a.notifyWaiters(id)
