@@ -162,7 +162,7 @@ type databasePipelinePlan struct {
 }
 
 var databasePipelineStepArgs = map[string]map[string]bool{
-	"aggregate":       {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true, "pipeline": true, "limits": true, "derived": true, "as": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true, "branches": true, "rollup": true},
+	"aggregate":       {"collection": true, "where": true, "groupBy": true, "metrics": true, "lookups": true, "buckets": true, "orderBy": true, "pipeline": true, "limits": true, "derived": true, "as": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true, "branches": true, "rollup": true, "relation": true, "match": true},
 	"find":            {"collection": true, "where": true, "select": true, "orderBy": true, "lookups": true, "pipeline": true, "limits": true, "as": true, "joins": true, "computed": true, "filter": true, "distinct": true, "pick": true, "group": true, "relation": true, "match": true, "count": true},
 	"count":           {"collection": true, "where": true},
 	"get":             {"collection": true, "key": true},

@@ -1316,3 +1316,27 @@ metadata; it does not sample business records.
 Plain `find`/`aggregate` resolvers also accept fixed server-owned advanced
 configuration. Use `database_pipeline` for declared identity/access parameters,
 pages and response shaping. Client arguments cannot supply or replace the graph.
+
+## Related-parent aggregate summaries (unreleased)
+
+`database_pipeline` aggregate steps accept `relation` and `match`, using the same
+bounded context rules as canonical find. Supply identical parent filters,
+relation and match definitions to a page and its aggregate step; their shared
+read-only Database batch keeps the page, exact total and summary in one snapshot.
+The outgoing operation remains `aggregate`. Metrics count each matching parent
+once, and averages retain Database's null and numeric semantics.
+
+The context cap and source definitions remain fixed server configuration.
+Identity/access values bind before execution, client search belongs in `match`,
+and related-entry eligibility remains trusted policy. Existing restrictions on
+`when`, `access_when`, requested scopes and mixed authorisation/client OR filters
+continue to apply. Every parent, related and permission collection participates
+in realtime dependencies, and the result batch rechecks grants before delivery.
+Publishing probes the actual Database capability and keeps the serving release
+if it rejects relation/match on aggregate.
+
+[testdata/related-aggregate.json](testdata/related-aggregate.json) contains the
+Database argument fixture. `database_related_aggregate_test.go` demonstrates the
+paired find/aggregate resolver, permission bindings and optional literal search.
+The matching Database implementation is required; Database 0.14.0 does not expose
+this related-parent aggregate input.

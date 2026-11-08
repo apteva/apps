@@ -483,8 +483,13 @@ func (plan *databasePipelinePlan) validateJoinedStructure(step *databasePipeline
 			return err
 		}
 	}
-	if step.Op == joinedRelatedRead {
-		return validateJoinedRelation(args["relation"], label)
+	if step.Op == joinedRelatedRead || args["relation"] != nil {
+		if step.Op == joinedAggregate && step.Canonical != "aggregate" {
+			return invalid("%s: relation and match belong to canonical aggregate", label)
+		}
+		if err := validateJoinedRelation(args["relation"], label); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -261,8 +261,10 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 		}
 		run := &databasePipelineRun{app: a, plan: plan, project: project}
 		searches, conditionals, joined := []any{}, []any{}, []any{}
+		relatedAggregate := false
 		for _, step := range plan.Steps {
 			if isJoinedOp(step.Op) {
+				relatedAggregate = relatedAggregate || (step.databaseOperation() == "aggregate" && step.Args["relation"] != nil)
 				probe, err := run.canonicalProbe(ctx, step)
 				if err != nil {
 					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
@@ -305,6 +307,9 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 				_, err := run.send(probe, check.operations[start:min(start+maxDatabaseBatchOperations, len(check.operations))])
 				cancel()
 				if err != nil {
+					if relatedAggregate && len(joined) > 0 && strings.Contains(check.problem, "joined reads") {
+						return invalid("resolver %s.%s: Database cannot run aggregate with relation/match; install the matching Database update with bounded related-parent aggregation: %s", resolver.ParentType, resolver.FieldName, err)
+					}
 					return invalid("resolver %s.%s: %s: %s", resolver.ParentType, resolver.FieldName, check.problem, err)
 				}
 			}
