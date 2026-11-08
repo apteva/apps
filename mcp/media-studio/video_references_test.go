@@ -259,3 +259,31 @@ func TestToolMediaGenerate_Video_VeniceKlingIdentityGroups(t *testing.T) {
 		t.Fatalf("Kling queue should not contain flat references: %+v", queue.Input)
 	}
 }
+
+func TestKlingV4UsesFlatReferencesWithoutLegacyFields(t *testing.T) {
+	for _, model := range []string{"kling-v4-reference-to-video", "kling-v4-flash-reference-to-video"} {
+		t.Run(model, func(t *testing.T) {
+			for _, args := range []map[string]any{
+				{"source_images": []string{"https://example.com/product.png", "https://example.com/room.png"}},
+				{"_resolved_reference_groups": []videoReferenceGroup{{Role: videoReferenceRoleIdentity, Images: []string{"https://example.com/product.png"}}, {Role: videoReferenceRoleReference, Images: []string{"https://example.com/room.png"}}}},
+			} {
+				out := map[string]any{}
+				if err := buildVeniceReferenceArgs(model, args, out); err != nil {
+					t.Fatal(err)
+				}
+				refs, ok := out["reference_image_urls"].([]string)
+				if !ok || len(refs) != 2 || refs[0] != "https://example.com/product.png" || refs[1] != "https://example.com/room.png" {
+					t.Fatalf("wrong references: %#v", out)
+				}
+				for _, key := range []string{"elements", "scene_image_urls"} {
+					if _, present := out[key]; present {
+						t.Fatalf("legacy field %s: %#v", key, out)
+					}
+				}
+			}
+			if err := validateVeniceVideoReferences(model, nil, make([]string, 8)); err == nil {
+				t.Fatal("accepted more than seven images")
+			}
+		})
+	}
+}
