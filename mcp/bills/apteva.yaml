@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.2.5
+version: 0.2.6
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -63,14 +63,18 @@ provides:
     - name: bills_create_obligation
       description: Create or retrieve an unapproved bill by stable source identity; never pays.
     - name: bills_get_obligation
+      read_only: true
       description: Read a source obligation bill with payment and adjustment balances.
     - name: bills_record_adjustment
       description: Record an explicit credit, refund or payment reversal with retry protection.
     - name: vendors_search
+      read_only: true
       description: Filtered vendor search by name / email / external_id / metadata.
     - name: vendors_get
+      read_only: true
       description: Fetch one vendor (snapshot only).
     - name: vendors_get_context
+      read_only: true
       description: Snapshot + open bills + recent payments + lifetime spend — pre-flight read before logging a bill.
     - name: vendors_upsert_by_email
       description: Find-or-create by email. Returns was_created. Right-by-default primitive.
@@ -106,8 +110,10 @@ provides:
     - name: bills_void
       description: Void a bill. Use when entered by mistake. Cannot void paid bills (record an offsetting refund instead). Confirm before voiding.
     - name: bills_get
+      read_only: true
       description: Fetch one bill with line items, payment history, and audit log.
     - name: bills_search
+      read_only: true
       description: Filter bills by status / vendor / bill-date range / due-date range / total range / category / currency.
     - name: bills_render_pdf
       description: |
@@ -142,6 +148,7 @@ provides:
         covered. method='external_rail' is reserved for v0.2's bank
         integrations and rejected here.
     - name: bill_payments_list
+      read_only: true
       description: List payments OUT, optionally filtered by vendor / bill / method / date range.
   publishes:
     - name: bill.payment_recorded
@@ -205,7 +212,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bills/v0.2.5
+    ref: bills/v0.2.6
     entry: mcp/bills
   port: 8080
   health_check: /health

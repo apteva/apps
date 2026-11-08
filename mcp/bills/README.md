@@ -1,8 +1,29 @@
-# Bills (v0.2.5)
+# Bills (v0.2.6)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.2.6
+
+Adds agent project-grant support for all-project reads. Seven tools declare
+`read_only: true` in the manifest; app-sdk v0.115.0 exposes them with the
+standard MCP `readOnlyHint` so the platform can run a `project_id: "*"`
+call across the agent's own project and every project its grant reaches:
+`vendors_search`, `vendors_get`, `vendors_get_context`, `bills_search`,
+`bills_get`, `bills_get_obligation`, and `bill_payments_list`.
+
+Attach a globally installed Bills app to a project agent, then configure
+its project grant in the agent view: chosen projects or "All projects you
+can edit". Both the agent's owner and the grant's author must retain editor
+access. Projects with their own Bills install are excluded. The server
+authorizes each call, injects `_project_id` for each project, and combines
+all-project replies into one entry per project. Bills keeps its existing
+project partitioning; it does not query every project's rows directly.
+
+Write tools still target one authorized project per call. PDF rendering is
+not marked read-only because `save_to_storage=true` uploads a file. No new
+tools, tool arguments, or database migrations.
 
 ## What's in v0.2.5
 

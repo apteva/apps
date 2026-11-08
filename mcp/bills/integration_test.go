@@ -5,6 +5,7 @@ package main
 // Tier 2 — boot the real binary, exercise REST + MCP end-to-end.
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +19,113 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	resp := sc.GET("/health", &got)
 	if resp.Status != 200 || got["ok"] != true {
 		t.Fatalf("/health status=%d body=%v", resp.Status, got)
+	}
+}
+
+func TestSidecar_ProjectGrantedReads(t *testing.T) {
+	// The server authorizes and expands project_id "*", then sends one
+	// _project_id per call to the global sidecar. Exercise that boundary
+	// with real MCP listings and two partitions in the same database.
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(""))
+	listed, err := sc.MCPRaw("tools/list", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readOnly []string
+	for _, raw := range listed["tools"].([]any) {
+		tool := raw.(map[string]any)
+		annotations, _ := tool["annotations"].(map[string]any)
+		if annotations["readOnlyHint"] == true {
+			readOnly = append(readOnly, tool["name"].(string))
+		}
+	}
+	slices.Sort(readOnly)
+	if !slices.Equal(readOnly, readOnlyToolNames()) {
+		t.Fatalf("tools/list readOnlyHint = %v, want %v", readOnly, readOnlyToolNames())
+	}
+
+	projects := []string{"grant-project-a", "grant-project-b"}
+	vendorIDs, billIDs, paymentIDs := make([]float64, 2), make([]float64, 2), make([]float64, 2)
+	for i, pid := range projects {
+		vendor := sc.MCP("vendors_upsert_by_email", map[string]any{
+			"_project_id": pid, "email": "shared@vendor.example",
+			"defaults": map[string]any{"name": "Shared vendor"},
+		})["vendor"].(map[string]any)
+		vendorIDs[i] = vendor["id"].(float64)
+		bill := sc.MCP("bills_create_obligation", map[string]any{
+			"_project_id": pid, "source_key": "shared-source", "vendor_id": vendorIDs[i], "currency": "EUR",
+			"line_items": []any{map[string]any{"description": "Service", "quantity": 1, "unit_price_cents": 1000}},
+		})["bill"].(map[string]any)
+		billIDs[i] = bill["id"].(float64)
+		sc.MCP("bills_approve", map[string]any{"_project_id": pid, "bill_id": billIDs[i]})
+		payment := sc.MCP("bill_payments_record", map[string]any{
+			"_project_id": pid, "bill_id": billIDs[i], "amount_cents": 100, "method": "wire",
+		})["payment"].(map[string]any)
+		paymentIDs[i] = payment["id"].(float64)
+	}
+
+	for i, pid := range projects {
+		t.Run(pid, func(t *testing.T) {
+			call := func(t *testing.T, tool string, args map[string]any) map[string]any {
+				t.Helper()
+				out, err := sc.MCPRaw("tools/call", map[string]any{"name": tool, "arguments": args})
+				if err != nil {
+					t.Fatalf("%s: %v", tool, err)
+				}
+				return out
+			}
+			for _, tc := range []struct {
+				tool, key string
+				args      map[string]any
+				id        float64
+				list      bool
+			}{
+				{"vendors_search", "vendors", map[string]any{"email": "shared@vendor.example"}, vendorIDs[i], true},
+				{"vendors_get", "vendor", map[string]any{"id": vendorIDs[i]}, vendorIDs[i], false},
+				{"vendors_get_context", "vendor", map[string]any{"id": vendorIDs[i]}, vendorIDs[i], false},
+				{"bills_search", "bills", map[string]any{}, billIDs[i], true},
+				{"bills_get", "bill", map[string]any{"id": billIDs[i]}, billIDs[i], false},
+				{"bills_get_obligation", "bill", map[string]any{"source_key": "shared-source"}, billIDs[i], false},
+				{"bill_payments_list", "payments", map[string]any{}, paymentIDs[i], true},
+			} {
+				t.Run(tc.tool, func(t *testing.T) {
+					tc.args["_project_id"] = pid
+					out := call(t, tc.tool, tc.args)
+					value := out[tc.key]
+					if tc.list {
+						rows := value.([]any)
+						if len(rows) != 1 {
+							t.Fatalf("expected one row in %s, got %v", pid, rows)
+						}
+						value = rows[0]
+					}
+					row := value.(map[string]any)
+					if row["id"] != tc.id || row["project_id"] != pid {
+						t.Fatalf("got %v, want id=%v in %s", row, tc.id, pid)
+					}
+					if tc.tool == "vendors_get_context" {
+						for _, key := range []string{"open_bills", "recent_payments"} {
+							rows := out[key].([]any)
+							if len(rows) != 1 || rows[0].(map[string]any)["project_id"] != pid {
+								t.Fatalf("%s leaked across projects: %v", key, rows)
+							}
+						}
+					}
+				})
+			}
+			for _, tool := range []string{"vendors_get", "vendors_get_context", "bills_get"} {
+				id := vendorIDs[1-i]
+				if tool == "bills_get" {
+					id = billIDs[1-i]
+				}
+				out := call(t, tool, map[string]any{
+					"_project_id": pid, "id": id,
+				})
+				if out["found"] != false {
+					t.Errorf("%s exposed a record from another project: %v", tool, out)
+				}
+			}
+		})
 	}
 }
 
