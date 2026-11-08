@@ -580,3 +580,25 @@ func TestDataLimitsAreAtomicAndCountUTF8Bytes(t *testing.T) {
 		t.Fatal("over-limit data partially committed")
 	}
 }
+
+func TestCommandReplaySurvivesCapabilityAndEnabledChanges(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	d := provisionTest(t, a, "replay-policy", "apteva.devices/v2")
+	c, err := a.sendCommand(d, "lamp.set", "", map[string]any{"on": true}, false, 0, "original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.updateCapabilities(d.ID, map[string]any{"operations": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.setEnabled(d.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := a.sendCommand(d, "lamp.set", "", map[string]any{"on": true}, false, 0, "original")
+	if err != nil || replay.ID != c.ID || replay.Status != "cancelled" {
+		t.Fatalf("replay=%#v %v", replay, err)
+	}
+	if _, err = a.sendCommand(d, "lamp.set", "", map[string]any{"on": false}, false, 0, "original"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed retry=%v", err)
+	}
+}

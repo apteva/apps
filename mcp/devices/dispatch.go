@@ -28,6 +28,29 @@ func (a *App) submitCommand(d Device, operation, target string, arguments map[st
 		return Command{}, err
 	}
 	d = current
+	// Retry identity describes caller input, before defaults, schema changes,
+	// or native adapters normalize arguments. Replays survive policy changes.
+	originalArgs, err := json.Marshal(arguments)
+	if err != nil {
+		return Command{}, err
+	}
+	if len(key) > 128 {
+		return Command{}, errors.New("idempotency_key exceeds 128 characters")
+	}
+	hash := fingerprint(map[string]any{"operation": operation, "target": target, "arguments": json.RawMessage(originalArgs), "timeout_ms": timeoutMS})
+	if key != "" {
+		var id, oldHash string
+		e := a.ctx.AppDB().QueryRow(`SELECT id,fingerprint FROM device_commands WHERE device_id=? AND idempotency_key=?`, d.ID, key).Scan(&id, &oldHash)
+		if e == nil {
+			if oldHash != hash {
+				return Command{}, ErrConflict
+			}
+			return getCommand(a.ctx.AppDB(), id)
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return Command{}, e
+		}
+	}
 	if timeoutMS == 0 {
 		timeoutMS = configInt(a.ctx, "command_timeout_ms", 10000, 500, 86400000)
 	}
@@ -48,26 +71,12 @@ func (a *App) submitCommand(d Device, operation, target string, arguments map[st
 	if len(raw) > a.limit("max_device_payload_bytes", 131072) {
 		return Command{}, ErrLimit
 	}
-	hash := fingerprint(map[string]any{"operation": operation, "target": target, "arguments": arguments, "timeout_ms": timeoutMS})
 	tx, err := a.ctx.AppDB().Begin()
 	if err != nil {
 		return Command{}, err
 	}
 	defer tx.Rollback()
-	if key != "" {
-		var id, oldHash string
-		err = tx.QueryRow(`SELECT id,fingerprint FROM device_commands WHERE device_id=? AND idempotency_key=?`, d.ID, key).Scan(&id, &oldHash)
-		if err == nil {
-			if oldHash != hash {
-				return Command{}, ErrConflict
-			}
-			tx.Rollback()
-			return getCommand(a.ctx.AppDB(), id)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return Command{}, err
-		}
-	}
+
 	if !d.Enabled {
 		return Command{}, errors.New("device is disabled")
 	}
