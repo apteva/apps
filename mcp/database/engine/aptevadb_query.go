@@ -186,6 +186,11 @@ func nativeQueryFilter(c Collection, q Query) any {
 	return filter
 }
 func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
+	var selectionErr error
+	q, selectionErr = t.selectLookupIndex(c, q)
+	if selectionErr != nil {
+		return nil, selectionErr
+	}
 	if q.RequireIndex && !plan(c, q).IndexedLookup {
 		return nil, fail("query_too_expensive", "query requires a selective index")
 	}
@@ -350,7 +355,14 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	if e != nil {
 		return e
 	}
-	opts := nativeQueryOptions(c, Query{Where: q.Where}, 0)
+	// This is an unordered stream: retain the full predicate and internal
+	// index selection, but leave paging and result ordering to the consumer.
+	stream := Query{Where: q.Where, hint: q.hint, diag: q.diag}
+	stream, e = t.selectLookupIndex(c, stream)
+	if e != nil {
+		return e
+	}
+	opts := nativeQueryOptions(c, stream, 0)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
 	opts.Stats = q.diag.nativeStats("documents")
 	if q.examined != nil {
@@ -447,7 +459,23 @@ func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 		return rows, err
 	}
 	if len(t.pending) == 0 && len(r.GroupBy) == 0 && len(r.Metrics) == 1 && r.Metrics[0].Op == "count" && r.Metrics[0].Field == "" {
+		var selectionErr error
+		r.Query, selectionErr = t.selectLookupIndex(c, r.Query)
+		if selectionErr != nil {
+			return nil, selectionErr
+		}
 		p := plan(c, r.Query)
+		if nativeCountHasResidual(c, r.Query, p) {
+			// Native CountDocuments treats its hint as a covering-index hint
+			// and discards it on residual fallback. Stream the selected lookup
+			// with the complete filter instead of widening to another index.
+			var count int64
+			e := t.scanFields(c, r.Query, c.PrimaryKey, func(Record, []byte) bool { count++; return true }, nil)
+			if e != nil {
+				return nil, e
+			}
+			return []Record{{r.Metrics[0].Name: strconv.FormatInt(count, 10)}}, t.ctx.Err()
+		}
 		if r.RequireIndex && !p.IndexedLookup {
 			return nil, fail("query_too_expensive", "query requires a selective index")
 		}

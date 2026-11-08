@@ -600,6 +600,7 @@ func unionRanges(c Collection, idx Index, terms []Filter) (out []keyRange, n int
 func plan(c Collection, q Query) accessPlan {
 	best := accessPlan{Sort: true}
 	score := -1
+	bestRank := -1
 	var union *accessPlan
 	unionScore := -1
 	for _, idx := range indexes(c) {
@@ -609,6 +610,7 @@ func plan(c Collection, q Query) accessPlan {
 		prefix := indexPrefix(c, idx, false)
 		eq := map[string]bool{}
 		n := 0
+		exact := len(idx.Fields) > 0
 		terms := conjuncts(q.Where)
 		var lower, upper []byte
 		for _, o := range idx.Fields {
@@ -622,11 +624,13 @@ func plan(c Collection, q Query) accessPlan {
 				}
 			}
 			if equal != nil {
+				exact = exact && equal.Op == "eq" && equal.Value != nil
 				prefix = append(prefix, scalar(f, equal.Value, o.Direction == "desc")...)
 				eq[o.Field] = true
 				n += 10
 				continue
 			}
+			exact = false
 			var m int
 			lower, upper, m = fieldBounds(f, o, prefix, terms)
 			n += m
@@ -697,7 +701,15 @@ func plan(c Collection, q Query) accessPlan {
 		if ordered {
 			s++
 		}
-		if s > score {
+		rank := 0
+		if exact && idx.Unique {
+			rank = 1
+			if idx.Name == "primary" {
+				rank = 2
+			}
+		}
+		if rank > bestRank || rank == bestRank && s > score {
+			bestRank = rank
 			score = s
 			best = accessPlan{Index: idx.Name, IndexedLookup: n > 0, Sort: !ordered, lower: lower, upper: upper}
 		}
@@ -711,7 +723,7 @@ func plan(c Collection, q Query) accessPlan {
 			}
 		}
 	}
-	if union == nil {
+	if union == nil || bestRank > 0 {
 		return best
 	}
 	// A union is in key order only within each range, so it reads every match to
