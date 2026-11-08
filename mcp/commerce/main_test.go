@@ -1631,3 +1631,36 @@ func execMigration(t *testing.T, db *sql.DB, path string) {
 		t.Fatalf("exec migration %s: %v\n%s", path, err, strings.TrimSpace(string(body)))
 	}
 }
+
+func TestCJExplicitZeroShippingAndInvalidAmounts(t *testing.T) {
+	bound := &sdk.BoundIntegration{AppSlug: "cjdropshipping", ConnectionID: 94}
+	tests := []struct {
+		name  string
+		row   map[string]any
+		count int
+		cents int64
+	}{
+		{"explicit zero", map[string]any{"totalPostageFee": 0.0, "logisticPrice": 9.50}, 1, 0},
+		{"string zero", map[string]any{"totalPostageFee": "0.00"}, 1, 0},
+		{"legacy zero", map[string]any{"logisticPrice": 0.0}, 1, 0},
+		{"null total legacy paid", map[string]any{"totalPostageFee": nil, "logisticPrice": 4.71}, 1, 471},
+		{"missing amounts", map[string]any{}, 0, 0},
+		{"null amounts", map[string]any{"totalPostageFee": nil}, 0, 0},
+		{"malformed total", map[string]any{"totalPostageFee": "invalid", "logisticPrice": 5.0}, 0, 0},
+		{"negative total", map[string]any{"totalPostageFee": -1.0, "logisticPrice": 5.0}, 0, 0},
+		{"not a number", map[string]any{"totalPostageFee": "NaN"}, 0, 0},
+		{"infinite", map[string]any{"totalPostageFee": "Inf"}, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.row["logisticName"] = "US carrier"
+			options := normalizeCJShippingOptions(bound, map[string]any{"code": 200, "data": []any{tt.row}})
+			if len(options) != tt.count {
+				t.Fatalf("options=%#v, want count %d", options, tt.count)
+			}
+			if len(options) > 0 && options[0].AmountCents != tt.cents {
+				t.Fatalf("amount=%d, want %d", options[0].AmountCents, tt.cents)
+			}
+		})
+	}
+}

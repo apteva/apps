@@ -932,10 +932,17 @@ func normalizeCJShippingOptions(bound *sdk.BoundIntegration, raw any) []Shipping
 	var out []ShippingOption
 	for i, row := range rows {
 		item := anyMap(row)
-		amount := firstMoneyCents(item, "totalPostageFee", "logisticPrice")
-		if amount <= 0 {
+		// A present total is authoritative, including zero. Missing or malformed
+		// amounts must never turn into a free-shipping fallback.
+		value, present := item["totalPostageFee"]
+		if !present || value == nil {
+			value = item["logisticPrice"]
+		}
+		amountUSD, valid := numberValue(value)
+		if !valid || math.IsNaN(amountUSD) || math.IsInf(amountUSD, 0) || amountUSD < 0 || amountUSD > float64(math.MaxInt64)/100 {
 			continue
 		}
+		amount := int64(math.Round(amountUSD * 100))
 		name := firstNonEmpty(firstString(item, "logisticName"), "CJ shipping")
 		rawOption := copyMap(item)
 		minDays, maxDays := shippingDayRange(firstString(item, "logisticAging"))
