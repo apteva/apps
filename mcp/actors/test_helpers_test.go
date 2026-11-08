@@ -133,6 +133,8 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 	}
 	switch app + "." + tool {
+	case "computer.computer_context_get":
+		return map[string]any{"found": true, "context": map[string]any{"id": in["id"], "backend": "local"}}
 	case "computer.browser_open":
 		if u, ok := in["url"].(string); ok {
 			p.openURL = u

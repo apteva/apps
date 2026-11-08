@@ -1,6 +1,6 @@
 # Actors
 
-Actors v0.2.0 adds durable schema version 2 crawls with URL fan-out, route matching, bounded retries, resumable frontier state, keyed materialized datasets, and declarative normalization transforms. Computer remains the browser and JavaScript runtime.
+Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
 
 Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
 
@@ -447,3 +447,55 @@ whose ID was assigned by the site during upload.
 Record selection and duplicate assertions use only the latest verified
 collection. Prior composer extractions and older catalog snapshots remain in
 the audit dataset but cannot satisfy those checks.
+
+
+## Mobile screen workflows (v0.4.0)
+
+Requires Computer 0.8.0 and its Mobile binding (Mobile 0.3.2+). Select
+`browser.backend: mobile` with `device_id`, `target`, or a Computer-owned
+Mobile `context_id`. A target uses `kind: mobile`, `device_id`, optional
+`platform`, `physical`, and `mode: screen`. Saved contexts bind the exact device
+and project. They reuse shared device/app data; they do not isolate accounts
+or restore snapshots. Use explicit `launch_app` steps instead of target.app_id.
+Browser proxy, viewport and emulation settings are unavailable for Mobile.
+
+```json
+{
+  "schema_version": 1,
+  "browser": {"backend": "mobile", "target": {"kind": "mobile", "device_id": "YOUR_DEVICE_ID", "mode": "screen"}},
+  "allowed_hosts": ["example.com"],
+  "limits": {"max_duration_seconds": 180, "step_retries": 0},
+  "steps": [
+    {"action": "open"},
+    {"action": "goto", "url": "https://example.com/"},
+    {"action": "screenshot", "label": "Mobile page"}
+  ]
+}
+```
+
+`open` acquires a session without navigating; a first `goto` also opens one.
+Actors checks the complete operation against Computer's returned capabilities
+before sending navigation or input. Supported steps: `open`, `goto`,
+`screenshot`, `wait`, `tap` (`x`, `y`), `swipe` (`x`, `y`, `to_x`, `to_y`),
+`type` (`text`), `key` (`key`), `scroll` (`direction`, `amount`), `home`,
+`launch_app`/`stop_app` (`app_id`), and local `assert_inputs`.
+Coordinates are integer pixels in a fresh Computer screenshot, including zero;
+they may be templated. Keys are capability-dependent (`home`, `enter`, and
+Android `back`). Empty allowed_hosts is permitted for native-only operations;
+web navigation still requires an allowed host. Screen inputs are unavailable
+in read_only operations.
+
+DOM/SoM locators, extraction, form controls, uploads, semantic consequence
+guards and crawls are rejected for Mobile. Existing selector-based actors,
+including KDP, require a browser backend. Screen inputs have no semantic target
+verification; inspect screenshots to choose coordinates. Mobile steps are not
+automatically retried. A failed or timed-out input retains possible external
+write/reconciliation evidence before any explicit retry.
+
+Runs resolve saved contexts to device IDs before enqueueing. Different contexts
+for the same phone share a device queue lock across projects; unrelated devices
+and browser sessions can use other worker slots. If a saved target changes while
+queued, execution fails before opening a session. Failed cleanup quarantines the
+device until its existing lease expires. Mobile itself also owns device leases
+across other callers. Run details show the resolved device and normal queue and
+execution timing. Closing a session preserves device app data.

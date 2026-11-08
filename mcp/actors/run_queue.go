@@ -25,6 +25,9 @@ func actorQueueKey(run *actorQueuedRun) string {
 		// validation error without opening a browser.
 		return ""
 	}
+	if key := mobileQueueKey(def.Browser); key != "" {
+		return key
+	}
 	if id := strings.TrimSpace(def.Browser.ContextID); id != "" {
 		return "context:" + id
 	}
@@ -42,7 +45,8 @@ const actorContextBusy = `queued.queue_key<>'' AND (
 	EXISTS (SELECT 1 FROM actors_runs AS active
 		WHERE active.status='running' AND active.queue_key=queued.queue_key)
 	OR EXISTS (SELECT 1 FROM actors_context_locks AS lock
-		WHERE lock.context_id=substr(queued.queue_key,9) AND queued.queue_key LIKE 'context:%'
+		WHERE ((lock.context_id=substr(queued.queue_key,9) AND queued.queue_key LIKE 'context:%')
+ OR (lock.context_id=queued.queue_key AND queued.queue_key LIKE 'mobile-device:%'))
 		AND lock.expires_at>unixepoch())
 )`
 

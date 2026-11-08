@@ -193,6 +193,9 @@ func (e *actorExecution) interact(step actorStep) error {
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
 	}
+	if e.session.Backend == "mobile" {
+		return finishScreenInteraction(out)
+	}
 	return e.finishInteraction(out)
 }
 

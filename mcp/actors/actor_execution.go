@@ -194,7 +194,11 @@ func enqueueActorSnapshot(ctx *sdk.AppCtx, actorID int64, revision int, inputJSO
 		return 0, "", false, errors.New("operation requires actors_run_recover with original saved-resource evidence")
 	}
 	triggerJSON, _ := json.Marshal(trigger)
-	queueKey := actorQueueKey(&actorQueuedRun{InputJSON: inputJSON, DefinitionSnapshot: definitionJSON})
+	queued := &actorQueuedRun{InputJSON: inputJSON, DefinitionSnapshot: definitionJSON}
+	queueKey, err := resolveActorQueueKey(ctx, queued)
+	if err != nil {
+		return 0, "", false, err
+	}
 	triggerKey := stringFromAny(trigger["trigger_key"])
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -468,7 +472,7 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	} else if operationTimedOut {
 		out["failure_reason"] = "operation_timeout"
 	}
-	if exec.possibleExternalWrite && (timedOut || operationTimedOut || runCtx.Err() != nil || status == "cancelled") {
+	if exec.possibleExternalWrite && (timedOut || operationTimedOut || runCtx.Err() != nil || status == "cancelled" || (exec.definition.Browser.Backend == "mobile" && runErr != nil)) {
 		out["reconciliation_required"] = true
 	}
 	out["run_id"] = queued.ID
@@ -504,6 +508,12 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	}
 	if exec.session != nil {
 		out["proxy"] = exec.session.Proxy
+		if exec.session.Capabilities != nil {
+			out["capabilities"] = exec.session.Capabilities
+		}
+		if exec.session.Target != nil {
+			out["target"] = exec.session.Target
+		}
 	}
 	if exec.selectedPreset != "" {
 		out["preset"] = exec.selectedPreset
@@ -604,13 +614,28 @@ func renderQueuedActor(run *actorQueuedRun) (actorDefinition, map[string]any, st
 }
 
 func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run *actorQueuedRun) (*actorExecution, error) {
+	now := time.Now().UTC()
 	rendered, vars, preset, err := renderQueuedActor(run)
 	if err != nil {
 		return nil, err
 	}
+	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
+	preflightCtx, cancel := context.WithDeadline(workerCtx, now.Add(time.Duration(maxSeconds)*time.Second))
+	defer cancel()
+	if err := resolveMobileBrowser(preflightCtx, ctx, &rendered); err != nil {
+		return nil, err
+	}
+	if rendered.Browser.Backend == "mobile" && run.ID > 0 {
+		var key string
+		if err := ctx.AppDB().QueryRow(`SELECT queue_key FROM actors_runs WHERE id=?`, run.ID).Scan(&key); err != nil {
+			return nil, err
+		}
+		if key != mobileQueueKey(rendered.Browser) {
+			return nil, errors.New("Mobile target changed after enqueue; create a fresh run")
+		}
+	}
 	maxPages := boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages)
 	maxItems := boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems)
-	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
 	if rendered.Crawl != nil {
 		maxPages = boundedInt(rendered.Crawl.Frontier.MaxPages, maxCrawlFrontierSize, 1, maxCrawlFrontierSize)
 		maxItems = boundedInt(rendered.Crawl.Frontier.MaxItems, maxActorItems, 1, maxActorItems)
@@ -625,12 +650,17 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	if rendered.Limits.StepRetries != nil {
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
-	now := time.Now().UTC()
 	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, lastStartedStep: -1, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
 	out := map[string]any{}
+	if browser.Target != nil {
+		out["target"] = browser.Target
+	}
+	if browser.DeviceID != "" {
+		out["device_id"] = browser.DeviceID
+	}
 	if browser.Backend != "" {
 		out["backend"] = browser.Backend
 	}
@@ -684,7 +714,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		for attempt := 0; attempt <= retries; attempt++ {
 			err = e.runStep(step)
-			if err == nil || errors.Is(err, errActorCancelled) || (actorStepMayWrite(step) && actorOperationTimedOut(err)) || !retryableActorError(err) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
+			if err == nil || errors.Is(err, errActorCancelled) || (actorStepMayWrite(step) && actorOperationTimedOut(err)) || !retryableActorError(err) || e.definition.Browser.Backend == "mobile" || screenInputAction(step.Action) || step.Action == "click" || step.Action == "fill_secret" || step.Action == "goto_secret" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
 			if step.ReadRetries != nil && !transientReadNavigationError(err) {
@@ -712,7 +742,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			// Earlier effects remain recorded; unknown dispatch failures stay true.
 			e.commitAttempted, e.preparationAttempted, e.possibleExternalWrite = priorCommit, priorPreparation, priorWrite
 		}
-		if err != nil && step.Optional && !errors.Is(err, errActorCancelled) && !(actorStepMayWrite(step) && actorOperationTimedOut(err)) {
+		if err != nil && step.Optional && e.definition.Browser.Backend != "mobile" && !errors.Is(err, errActorCancelled) && !(actorStepMayWrite(step) && actorOperationTimedOut(err)) {
 			e.addTrace(step.Action, "skipped", err.Error(), map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds()})
 			continue
 		}
@@ -782,6 +812,10 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return errors.New("write action rejected in read_only operation")
 	}
 	switch step.Action {
+	case "open":
+		return e.gotoURL("")
+	case "tap", "swipe", "home", "launch_app", "stop_app":
+		return e.screenInteract(step)
 	case "prepare_upload":
 		return e.prepareUpload(step)
 	case "reveal_control":
@@ -1081,11 +1115,15 @@ func actorValuesEqual(left, right any, tolerance float64) bool {
 }
 
 func (e *actorExecution) gotoURL(target string) error {
-	if !hostAllowed(target, e.definition.AllowedHosts) {
+	if target != "" && !hostAllowed(target, e.definition.AllowedHosts) {
 		return fmt.Errorf("URL host is not in allowed_hosts: %s", target)
 	}
-	if err := validateBrowserTarget(e.ctx, target); err != nil {
-		return err
+	if target != "" {
+		if err := validateBrowserTarget(e.ctx, target); err != nil {
+			return err
+		}
+	} else if e.definition.Browser.Backend != "mobile" {
+		return errors.New("open requires mobile backend")
 	}
 	if e.session == nil {
 		remainingSeconds := maxInt64(1, int64(math.Ceil(time.Until(e.deadline).Seconds())))
@@ -1093,6 +1131,15 @@ func (e *actorExecution) gotoURL(target string) error {
 			remainingSeconds = maxInt64(60, remainingSeconds)
 		}
 		args := map[string]any{"persist": e.definition.Browser.Persist, "timeout": remainingSeconds}
+		mobile := e.definition.Browser.Backend == "mobile"
+		if mobile {
+			args["persist"] = true
+			args["timeout"] = maxInt64(30, remainingSeconds)
+			args["target"] = e.definition.Browser.Target
+			if err := e.lockMobileDevice(); err != nil {
+				return err
+			}
+		}
 		if e.definition.Browser.ContextID != "" {
 			if err := e.lockContext(); err != nil {
 				return err
@@ -1121,11 +1168,22 @@ func (e *actorExecution) gotoURL(target string) error {
 		if e.definition.Browser.ProxySticky != "" {
 			args["proxy_sticky"] = e.definition.Browser.ProxySticky
 		}
-		session, err := e.app.openBrowser(e.workerCtx, e.ctx, target, args)
+		openURL := target
+		if mobile {
+			openURL = ""
+		}
+		session, err := e.app.openBrowser(e.workerCtx, e.ctx, openURL, args)
 		if err != nil {
 			return err
 		}
 		e.session = session
+		if mobile {
+			if err := validateMobileCapabilities(e.definition, session); err != nil {
+				return err
+			}
+		} else if session.Backend == "mobile" {
+			return errors.New("Mobile sessions require explicit browser.backend=mobile and target capability checks")
+		}
 		e.currentURL = firstNonEmpty(session.CurrentURL, target)
 		if e.definition.Browser.Backend != "" && session.Backend != e.definition.Browser.Backend {
 			e.app.closeBrowser(e.ctx, session.SessionID)
@@ -1138,6 +1196,12 @@ func (e *actorExecution) gotoURL(target string) error {
 			return err
 		}
 		e.persistProgress("browser opened")
+		if mobile && target != "" {
+			return e.gotoURL(target)
+		}
+		return nil
+	}
+	if target == "" {
 		return nil
 	}
 	var out map[string]any
@@ -1534,6 +1598,12 @@ func (e *actorExecution) persistProgress(message string) error {
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID
 		progress["backend"] = e.session.Backend
+		if e.session.Target != nil {
+			progress["target"] = e.session.Target
+		}
+		if browser := actorBrowserAudit(e.definition.Browser); len(browser) > 0 {
+			progress["browser_config"] = browser
+		}
 	}
 	b, _ := json.Marshal(progress)
 	result, err := e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))

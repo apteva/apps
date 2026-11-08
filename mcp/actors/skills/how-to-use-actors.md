@@ -14,7 +14,7 @@ For multi-page crawls, use `actors_crawl_save` with `schema_version: 2`. Start f
 
 Supported v1 actions: `goto`, `click`, `fill`/`set_text`, `upload_file`, `key`, `scroll`, `wait`, `wait_for`, `extract`, `paginate`, `assert_url`, `assert_element`, and `screenshot`. `fill` and `set_text` accept either a CSS selector or a semantic SOM locator (`text`, `role`, `exact`, `som_only`). `upload_file` uses the same locator and accepts exactly one of `source_url`, `base64`, or `file_path`, with optional `filename` and `mime_type`; its result is returned under `media`. Use semantic locators for upload controls and composers so the action is tied to the live page. Crawl routes use rendered HTML and CSS selectors, durable URL fan-out, and dataset transforms: `trim`, `lowercase`, `integer`, `number`, `date`, `duration_seconds`, `ratio_landed`, and `ratio_attempted`. Arbitrary JavaScript and unbounded control flow are not part of the actor definition; Computer executes browser JavaScript for pages that require it.
 
-Omit browser.backend to respect Computer's configured default. Explicit supported backend names are local, browserbase, steel, browser-engine and service, subject to that backend's browser capabilities. For a saved login, use a Computer-owned `browser.context_id` from Computer's context tools; Actors forces persistence for that context. Account signup and login are user-defined workflows. Do not put passwords or cookies in definition defaults, presets, or input: definitions and inputs are retained in run history. Templates such as `{{context_id}}` can reference a non-secret context ID.
+Omit browser.backend to respect Computer's configured default. Explicit supported backend names are local, browserbase, steel, browser-engine, service and mobile, subject to that backend's browser capabilities. For a saved login, use a Computer-owned `browser.context_id` from Computer's context tools; Actors forces persistence for that context. Account signup and login are user-defined workflows. Do not put passwords or cookies in definition defaults, presets, or input: definitions and inputs are retained in run history. Templates such as `{{context_id}}` can reference a non-secret context ID.
 
 Use assertions to detect expired login or unexpected pages. A failed login assertion fails this release's run; reconnect through Computer and explicitly retry. Do not imply that automatic authentication pause/resume exists. Account locking covers Actors runs within this installation, not unrelated Computer clients.
 
@@ -121,3 +121,55 @@ Named operations may declare `browser` to fully replace the actor browser config
 For credential fields, use `fill_secret` with a normal locator and a non-secret `secret_ref`. The reference resolves only at dispatch from encrypted install `browser_secrets`, indexed first by project ID, then reference. Each entry requires `value`, exact `context_id`, exact HTTPS `host`, and RFC3339 `expires_at`; missing/expired/cross-project/cross-context/cross-host references fail before input. Literal `text`/`value` and optional secret fills are rejected. Raw values are not added to definition/input snapshots; fill errors suppress text-bearing backend diagnostics, and Actors screenshots are disabled after secret input. Computer/provider recording and telemetry have their own retention rules. Keep credential selectors out of extraction fields. Email retrieval, secret provisioning and signup-state reconciliation belong to the caller/process, not to site-specific engine code.
 
 For an emailed verification link, `goto_secret` uses the same expiring secret reference after opening the bound saved context. It permits only HTTPS on the current bound host, suppresses URL-bearing errors and in-flight progress, and retains only the resulting origin (no path, query or fragment). Secret input and navigation steps are not automatically retried.
+
+
+## Mobile screen workflows (v0.4.0)
+
+Requires Computer 0.8.0 and its Mobile binding (Mobile 0.3.2+). Select
+`browser.backend: mobile` with `device_id`, `target`, or a Computer-owned
+Mobile `context_id`. A target uses `kind: mobile`, `device_id`, optional
+`platform`, `physical`, and `mode: screen`. Saved contexts bind the exact device
+and project. They reuse shared device/app data; they do not isolate accounts
+or restore snapshots. Use explicit `launch_app` steps instead of target.app_id.
+Browser proxy, viewport and emulation settings are unavailable for Mobile.
+
+```json
+{
+  "schema_version": 1,
+  "browser": {"backend": "mobile", "target": {"kind": "mobile", "device_id": "YOUR_DEVICE_ID", "mode": "screen"}},
+  "allowed_hosts": ["example.com"],
+  "limits": {"max_duration_seconds": 180, "step_retries": 0},
+  "steps": [
+    {"action": "open"},
+    {"action": "goto", "url": "https://example.com/"},
+    {"action": "screenshot", "label": "Mobile page"}
+  ]
+}
+```
+
+`open` acquires a session without navigating; a first `goto` also opens one.
+Actors checks the complete operation against Computer's returned capabilities
+before sending navigation or input. Supported steps: `open`, `goto`,
+`screenshot`, `wait`, `tap` (`x`, `y`), `swipe` (`x`, `y`, `to_x`, `to_y`),
+`type` (`text`), `key` (`key`), `scroll` (`direction`, `amount`), `home`,
+`launch_app`/`stop_app` (`app_id`), and local `assert_inputs`.
+Coordinates are integer pixels in a fresh Computer screenshot, including zero;
+they may be templated. Keys are capability-dependent (`home`, `enter`, and
+Android `back`). Empty allowed_hosts is permitted for native-only operations;
+web navigation still requires an allowed host. Screen inputs are unavailable
+in read_only operations.
+
+DOM/SoM locators, extraction, form controls, uploads, semantic consequence
+guards and crawls are rejected for Mobile. Existing selector-based actors,
+including KDP, require a browser backend. Screen inputs have no semantic target
+verification; inspect screenshots to choose coordinates. Mobile steps are not
+automatically retried. A failed or timed-out input retains possible external
+write/reconciliation evidence before any explicit retry.
+
+Runs resolve saved contexts to device IDs before enqueueing. Different contexts
+for the same phone share a device queue lock across projects; unrelated devices
+and browser sessions can use other worker slots. If a saved target changes while
+queued, execution fails before opening a session. Failed cleanup quarantines the
+device until its existing lease expires. Mobile itself also owns device leases
+across other callers. Run details show the resolved device and normal queue and
+execution timing. Closing a session preserves device app data.

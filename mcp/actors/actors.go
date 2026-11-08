@@ -55,15 +55,17 @@ type actorDefinition struct {
 }
 
 type actorBrowser struct {
-	ContextID    string         `json:"context_id,omitempty"`
-	Backend      string         `json:"backend,omitempty"`
-	ProxyMode    string         `json:"proxy_mode,omitempty"`
-	ProxyProfile string         `json:"proxy_profile,omitempty"`
-	ProxyCountry string         `json:"proxy_country,omitempty"`
-	ProxySticky  string         `json:"proxy_sticky,omitempty"`
-	Persist      bool           `json:"persist,omitempty"`
-	Viewport     map[string]any `json:"viewport,omitempty"`
-	Environment  map[string]any `json:"environment,omitempty"`
+	DeviceID     string              `json:"device_id,omitempty"`
+	Target       *actorSessionTarget `json:"target,omitempty"`
+	ContextID    string              `json:"context_id,omitempty"`
+	Backend      string              `json:"backend,omitempty"`
+	ProxyMode    string              `json:"proxy_mode,omitempty"`
+	ProxyProfile string              `json:"proxy_profile,omitempty"`
+	ProxyCountry string              `json:"proxy_country,omitempty"`
+	ProxySticky  string              `json:"proxy_sticky,omitempty"`
+	Persist      bool                `json:"persist,omitempty"`
+	Viewport     map[string]any      `json:"viewport,omitempty"`
+	Environment  map[string]any      `json:"environment,omitempty"`
 }
 
 type actorLimits struct {
@@ -74,6 +76,11 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	X                  any                   `json:"x,omitempty"`
+	Y                  any                   `json:"y,omitempty"`
+	ToX                any                   `json:"to_x,omitempty"`
+	ToY                any                   `json:"to_y,omitempty"`
+	AppID              string                `json:"app_id,omitempty"`
 	SecretRef          string                `json:"secret_ref,omitempty"`
 	Reveal             *actorReveal          `json:"reveal,omitempty"`
 	URLFromField       string                `json:"url_from_field,omitempty"`
@@ -381,7 +388,7 @@ func validateActorDefinition(def actorDefinition) error {
 	if len(def.Steps) == 0 || len(def.Steps) > maxActorSteps {
 		return fmt.Errorf("definition.steps must contain 1-%d steps", maxActorSteps)
 	}
-	if len(def.AllowedHosts) == 0 {
+	if len(def.AllowedHosts) == 0 && def.Browser.Backend != "mobile" {
 		return errors.New("definition.allowed_hosts must contain at least one host")
 	}
 	if len(def.AllowedHosts) > 100 || len(def.Presets) > 100 {
@@ -397,7 +404,7 @@ func validateActorDefinition(def actorDefinition) error {
 	}
 	if backend := def.Browser.Backend; backend != "" && !strings.Contains(backend, "{{") {
 		switch backend {
-		case "local", "browserbase", "steel", "browser-engine", "service":
+		case "local", "browserbase", "steel", "browser-engine", "service", "mobile":
 		default:
 			return fmt.Errorf("definition.browser.backend %q is unsupported", backend)
 		}
@@ -440,6 +447,9 @@ func validateActorDefinition(def actorDefinition) error {
 	}
 	if err := validateActorEnvironment(def.Browser.Environment); err != nil {
 		return fmt.Errorf("definition.browser.environment: %w", err)
+	}
+	if err := validateMobileActor(def, true); err != nil {
+		return err
 	}
 	for i, step := range def.Steps {
 		if err := validateReadRetries(step); err != nil {
@@ -699,6 +709,10 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 		case "wait_for":
 			if err := validateWaitStep(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
+		case "open", "tap", "swipe", "home", "launch_app", "stop_app":
+			if err := validateScreenStep(step, true); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
 		case "wait", "screenshot":

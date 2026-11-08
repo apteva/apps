@@ -65,18 +65,20 @@ var manifestYAML []byte
 var globalCtx *sdk.AppCtx
 
 type browserSession struct {
-	AppContextID      string            `json:"app_context_id,omitempty"`
-	ProviderExpiresAt string            `json:"provider_expires_at,omitempty"`
-	SessionID         string            `json:"session_id"`
-	Backend           string            `json:"backend"`
-	RequestedBackend  *string           `json:"requested_backend"`
-	EffectiveBackend  string            `json:"effective_backend"`
-	CurrentURL        string            `json:"current_url"`
-	DebugURL          string            `json:"debug_url,omitempty"`
-	StreamURL         string            `json:"stream_url,omitempty"`
-	Width             int               `json:"width"`
-	Height            int               `json:"height"`
-	Proxy             browserProxyState `json:"proxy"`
+	Target            *actorSessionTarget `json:"target,omitempty"`
+	Capabilities      *actorCapabilities  `json:"capabilities,omitempty"`
+	AppContextID      string              `json:"app_context_id,omitempty"`
+	ProviderExpiresAt string              `json:"provider_expires_at,omitempty"`
+	SessionID         string              `json:"session_id"`
+	Backend           string              `json:"backend"`
+	RequestedBackend  *string             `json:"requested_backend"`
+	EffectiveBackend  string              `json:"effective_backend"`
+	CurrentURL        string              `json:"current_url"`
+	DebugURL          string              `json:"debug_url,omitempty"`
+	StreamURL         string              `json:"stream_url,omitempty"`
+	Width             int                 `json:"width"`
+	Height            int                 `json:"height"`
+	Proxy             browserProxyState   `json:"proxy"`
 }
 
 type browserProxyState struct {
@@ -187,20 +189,24 @@ func clampInt(v, min, max int) int {
 }
 
 func (a *App) openBrowser(callCtx context.Context, ctx *sdk.AppCtx, target string, args map[string]any) (*browserSession, error) {
-	if err := validateBrowserTarget(ctx, target); err != nil {
-		return nil, err
+	if target != "" {
+		if err := validateBrowserTarget(ctx, target); err != nil {
+			return nil, err
+		}
+	} else if stringArg(args, "backend") != "mobile" {
+		return nil, errors.New("empty URL requires mobile backend")
 	}
 	openArgs := map[string]any{"url": target}
 	requestedBackend := ""
 	if rawBackend := stringArg(args, "backend"); rawBackend != "" {
 		b := strings.ToLower(strings.TrimSpace(rawBackend))
 		if !validBrowserBackend(b) {
-			return nil, fmt.Errorf("unsupported browser backend %q; omit backend to use Computer's configured default, or choose one of: local, browserbase, steel, browser-engine, service", rawBackend)
+			return nil, fmt.Errorf("unsupported browser backend %q; omit backend to use Computer's configured default, or choose one of: local, browserbase, steel, browser-engine, service, mobile", rawBackend)
 		}
 		requestedBackend = b
 		openArgs["backend"] = b
 	}
-	for _, key := range []string{"viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
+	for _, key := range []string{"device_id", "target", "viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
 		if v, ok := args[key]; ok {
 			openArgs[key] = v
 		}
@@ -494,7 +500,7 @@ func schemaObject(props map[string]any, req []string) map[string]any {
 
 func validBrowserBackend(backend string) bool {
 	switch strings.ToLower(strings.TrimSpace(backend)) {
-	case "local", "browserbase", "steel", "browser-engine", "service":
+	case "local", "browserbase", "steel", "browser-engine", "service", "mobile":
 		return true
 	default:
 		return false

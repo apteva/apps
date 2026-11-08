@@ -1,8 +1,12 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.3.7
+version: 0.4.0
 description: |
+  v0.4.0 adds Computer Mobile targets, saved device contexts, screenshot and
+  screen-input workflows, capability preflight, and per-device queue locks.
+  Requires Computer 0.8.0. Mobile reuses shared device data; DOM/form/upload
+  operations remain browser-only.
   v0.3.7 allows time for Computer to close persisted Browserbase sessions and
   keeps the context locked when Computer reports cleanup is pending.
   v0.3.6 runs independent browser jobs concurrently with a configurable worker
@@ -78,8 +82,8 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.98"
-      reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
+      version: ">=0.8.0"
+      reason: Browser and Mobile screen control, saved contexts, explicit capabilities, extraction and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
     - name: jobs
@@ -156,7 +160,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.3.7
+    ref: actors/v0.4.0
     entry: mcp/actors
   port: 8080
   health_check: /health
@@ -169,7 +173,7 @@ config_schema:
     type: number
     default: 4
     label: Concurrent actor runs
-    description: Maximum concurrent queued actor runs per installation (1 to 32). Runs sharing a saved browser context or continuation still run in order.
+    description: Maximum concurrent queued actor runs per installation (1 to 32). Runs sharing a saved browser context, Mobile device or continuation still run in order.
   - name: browser_secrets
     type: secret
     label: Browser secret references
