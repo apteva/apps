@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: devices
 display_name: Devices
-version: 0.1.1
+version: 0.2.0
 description: |
-  Provision and control Arduino, ESP8266/ESP32, Raspberry Pi, and other
-  MQTT-capable hardware. Devices owns identity, narrowly-scoped credentials,
-  capabilities, GPIO operations, live state, telemetry, and correlated command
-  history while the MQTT app remains the transport and broker.
+  Manage scoped device resources, arbitrary structured data, capability-described
+  operations, recoverable enrollment, asynchronous commands, durable events and
+  usage measurements. Native GPIO clients remain supported through a protocol
+  adapter. MQTT owns transport and credentials; SaaS supplies commercial policy.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/devices
@@ -24,7 +24,7 @@ requires:
     - platform.apps.call
   apps:
     - name: mqtt
-      version: ">=0.3.0"
+      version: ">=0.4.0"
       reason: "Provides the project-scoped MQTT broker, per-device credentials and ACLs, retained state, and device event bridge."
       events:
         - mqtt.devices.message
@@ -37,11 +37,11 @@ provides:
   mcp_tools:
     - { name: devices_list, description: "List managed devices. Args: status?, q?, limit?." }
     - { name: devices_get, description: "Get one device with capabilities and current state. Args: device_id." }
-    - { name: devices_provision, description: "Provision a device and return its one-time MQTT password, endpoint, ACL topics, and setup details. Args: name, device_id?, protocol?, model?, manufacturer?, metadata?, capabilities?." }
+    - { name: devices_provision, description: "Provision a device and return its recoverable MQTT password, endpoint, ACL topics, and setup details. Args: name, device_id?, protocol?, model?, manufacturer?, metadata?, capabilities?." }
     - { name: devices_update, description: "Update device name, model, description, or metadata. Args: device_id, patch." }
     - { name: devices_enable, description: "Enable a device credential. Args: device_id." }
     - { name: devices_disable, description: "Disable and disconnect a device credential. Args: device_id." }
-    - { name: devices_rotate_secret, description: "Rotate a device MQTT password, disconnecting the old session. The new password is returned once. Args: device_id." }
+    - { name: devices_rotate_secret, description: "Rotate a device MQTT password, disconnecting the old session. The chosen password is recoverable for a bounded window. Args: device_id." }
     - { name: devices_delete, description: "Delete a managed device and its MQTT credential. Args: device_id, confirm=true." }
     - { name: devices_state_get, description: "Get current state values for a device. Args: device_id, key?." }
     - { name: devices_capabilities_set, description: "Set the allowlisted variables, functions, and pins for a device. Required for GPIO pins that firmware cannot self-advertise. Args: device_id, manifest." }
@@ -60,9 +60,16 @@ provides:
           mode: once
           events: [devices.command.completed, devices.command.failed, devices.command.timed_out]
           match: { command_id: "$result.command_id" }
-          expires_after: 5m
+          expires_after: 24h
     - { name: devices_command_get, description: "Get one command and its response. Args: command_id." }
     - { name: devices_commands_list, description: "List recent commands. Args: device_id?, status?, limit?." }
+    - { name: devices_data_list, description: "Query scoped device data history with cursor pagination." }
+    - { name: devices_events_list, description: "Read durable scoped events with cursor pagination." }
+    - { name: devices_usage_list, description: "Read durable scoped usage measurements with cursor pagination." }
+    - { name: devices_state_query, description: "Query generic current state with cursor pagination." }
+    - { name: devices_operation_get, description: "Get lifecycle operation status and recover credentials within the recovery window." }
+    - { name: devices_limits_get, description: "Get configured operational limits." }
+    - { name: devices_responses_list, description: "Query accepted and late command responses with cursor pagination." }
   ui_panels:
     - slot: project.page
       label: Devices
@@ -80,6 +87,10 @@ provides:
     - { name: devices.command.completed, description: "A correlated device command succeeded." }
     - { name: devices.command.failed, description: "A correlated device command failed." }
     - { name: devices.command.timed_out, description: "A device command passed its response deadline." }
+    - { name: devices.data.received, description: "Device data was durably accepted." }
+    - { name: devices.command.submitted, description: "A command was durably accepted for dispatch." }
+    - { name: devices.command.cancelled, description: "A command was cancelled by device disable or deletion; execution may be unconfirmed." }
+    - { name: devices.command.late_response, description: "A response arrived after its deadline." }
 
 runtime:
   kind: source
@@ -100,7 +111,7 @@ config_schema:
     type: text
     default: "10000"
     label: Default command timeout (ms)
-    description: How long commands wait for a correlated device response. Clamped between 500 and 60000 milliseconds.
+    description: How long commands wait for a correlated device response. Must be between 500 and 86400000 milliseconds.
   - name: telemetry_retention_hours
     type: text
     default: "168"
@@ -116,5 +127,79 @@ config_schema:
     default: "90"
     label: Command history retention (days)
     description: Completed commands and lifecycle audit events older than this are pruned. Active commands are never pruned.
+
+  - name: max_devices
+    type: text
+    default: "10000"
+    label: Max devices
+
+  - name: max_device_payload_bytes
+    type: text
+    default: "131072"
+    label: Max device payload bytes
+
+  - name: max_state_keys_per_device
+    type: text
+    default: "1024"
+    label: Max state keys per device
+
+  - name: max_pending_commands
+    type: text
+    default: "10000"
+    label: Max pending commands
+
+  - name: max_pending_commands_per_device
+    type: text
+    default: "100"
+    label: Max pending commands per device
+
+  - name: max_concurrent_commands
+    type: text
+    default: "100"
+    label: Max concurrent commands
+
+  - name: max_concurrent_commands_per_device
+    type: text
+    default: "1"
+    label: Max concurrent commands per device
+
+  - name: max_history_bytes_per_device
+    type: text
+    default: "67108864"
+    label: Max history bytes per device
+
+  - name: event_retention_days
+    type: text
+    default: "90"
+    label: Event retention days
+
+  - name: usage_retention_days
+    type: text
+    default: "365"
+    label: Usage retention days
+
+  - name: secret_recovery_hours
+    type: text
+    default: "24"
+    label: Secret recovery hours
+
+  - name: max_clock_skew_seconds
+    type: text
+    default: "300"
+    label: Max clock skew seconds
+
+  - name: max_pending_events
+    type: text
+    default: "50000"
+    label: Maximum pending data events
+
+  - name: max_state_bytes_per_device
+    type: text
+    default: "1048576"
+    label: Maximum current-state bytes per device
+  - name: operation_retention_days
+    type: text
+    default: "90"
+    label: Completed operation and idempotency retention (days)
 
 upgrade_policy: auto-patch

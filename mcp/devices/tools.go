@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,25 +13,24 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	"github.com/google/uuid"
 )
 
 var deviceIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 var operationPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
 
 func (a *App) mcpTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		tool("devices_list", "List managed devices.", schema(map[string]any{"status": stringProp(), "q": stringProp(), "limit": intProp()}, nil), a.toolList),
 		tool("devices_get", "Get one device with capabilities and current state.", schema(map[string]any{"device_id": stringProp()}, []string{"device_id"}), a.toolGet),
-		tool("devices_provision", "Provision a device and return its one-time MQTT credentials and setup details.", schema(map[string]any{
+		tool("devices_provision", "Provision a device and return its recoverable MQTT credentials and setup details.", schema(map[string]any{
 			"name": stringProp(), "device_id": stringProp(), "protocol": stringProp(), "model": stringProp(),
-			"manufacturer": stringProp(), "metadata": objectProp(), "capabilities": objectProp(),
+			"manufacturer": stringProp(), "metadata": objectProp(), "capabilities": objectProp(), "idempotency_key": stringProp(),
 		}, []string{"name"}), a.toolProvision),
 		tool("devices_update", "Update device metadata.", schema(map[string]any{"device_id": stringProp(), "patch": objectProp()}, []string{"device_id", "patch"}), a.toolUpdate),
 		tool("devices_enable", "Enable a device credential.", deviceOnlySchema(), a.toolEnable),
 		tool("devices_disable", "Disable and disconnect a device credential.", deviceOnlySchema(), a.toolDisable),
-		tool("devices_rotate_secret", "Rotate a device MQTT password and return it once.", deviceOnlySchema(), a.toolRotateSecret),
-		tool("devices_delete", "Delete a device and MQTT credential.", schema(map[string]any{"device_id": stringProp(), "confirm": boolProp()}, []string{"device_id", "confirm"}), a.toolDelete),
+		tool("devices_rotate_secret", "Rotate a device MQTT password and return a recoverable result.", deviceOnlySchema(), a.toolRotateSecret),
+		tool("devices_delete", "Delete a device and MQTT credential.", schema(map[string]any{"device_id": stringProp(), "confirm": boolProp(), "idempotency_key": stringProp()}, []string{"device_id", "confirm"}), a.toolDelete),
 		tool("devices_state_get", "Get current device state.", schema(map[string]any{"device_id": stringProp(), "key": stringProp()}, []string{"device_id"}), a.toolStateGet),
 		tool("devices_capabilities_set", "Set the allowlisted variables, functions, and pins for a device.", schema(map[string]any{"device_id": stringProp(), "manifest": objectProp()}, []string{"device_id", "manifest"}), a.toolCapabilitiesSet),
 		tool("devices_capabilities_refresh", "Ask a device to report identity and capabilities.", commandHelperSchema(map[string]any{}, nil), a.toolCapabilitiesRefresh),
@@ -43,6 +43,18 @@ func (a *App) mcpTools() []sdk.Tool {
 		tool("devices_command_get", "Get one command and its response.", schema(map[string]any{"command_id": stringProp()}, []string{"command_id"}), a.toolCommandGet),
 		tool("devices_commands_list", "List recent commands.", schema(map[string]any{"device_id": stringProp(), "status": stringProp(), "limit": intProp()}, nil), a.toolCommandsList),
 	}
+	tools = append(tools, a.extraTools()...)
+	for i := range tools {
+		handler := tools[i].Handler
+		tools[i].Handler = nil
+		tools[i].HandlerCtx = func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			if err := a.authorizeCaller(call); err != nil {
+				return nil, err
+			}
+			return handler(ctx, args)
+		}
+	}
+	return tools
 }
 
 func tool(name, description string, input map[string]any, handler sdk.ToolHandler) sdk.Tool {
@@ -63,7 +75,7 @@ func intProp() map[string]any    { return map[string]any{"type": "integer"} }
 func objectProp() map[string]any { return map[string]any{"type": "object"} }
 
 func deviceOnlySchema() map[string]any {
-	return schema(map[string]any{"device_id": stringProp()}, []string{"device_id"})
+	return schema(map[string]any{"device_id": stringProp(), "idempotency_key": stringProp()}, []string{"device_id"})
 }
 
 func commandHelperSchema(extra map[string]any, required []string) map[string]any {
@@ -89,67 +101,16 @@ func (a *App) toolProvision(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) provision(args map[string]any) (map[string]any, error) {
-	name := strings.TrimSpace(str(args, "name"))
-	if name == "" {
-		return nil, errors.New("name required")
-	}
-	if len(name) > 128 {
-		return nil, errors.New("name must be 128 characters or fewer")
-	}
-	id := strings.TrimSpace(str(args, "device_id"))
-	if id == "" {
-		id = slugDeviceID(name)
-	}
-	if !validDeviceID(id) {
-		return nil, errors.New("device_id must match [a-z0-9][a-z0-9_-]{0,63}")
-	}
-	if _, err := getDevice(a.ctx.AppDB(), a.projectID, id, false); err == nil {
-		return nil, fmt.Errorf("device %q already exists", id)
-	}
-	protocol := strings.TrimSpace(str(args, "protocol"))
-	if protocol == "" {
-		protocol = "apteva.devices/v1"
-	}
-	if protocol != "apteva.devices/v1" {
-		return nil, errors.New("protocol must be apteva.devices/v1")
-	}
-	secret, err := generateSecret()
+	result, err := a.lifecycle("provision", args)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.mqttCreateUser(id, secret); err != nil {
-		return nil, fmt.Errorf("create MQTT device credential: %w", err)
-	}
-	manifest := object(args, "capabilities")
-	if manifest == nil {
-		manifest = map[string]any{}
-	}
-	manifest["protocol"] = protocol
-	if err := validateManifest(manifest); err != nil {
-		_ = a.mqttDeleteUser(id)
-		return nil, err
-	}
-	d := Device{
-		ID: id, ProjectID: a.projectID, Name: name, Protocol: protocol,
-		Model: strings.TrimSpace(str(args, "model")), Manufacturer: strings.TrimSpace(str(args, "manufacturer")),
-		MQTTUsername: id, Manifest: manifest, Metadata: object(args, "metadata"),
-		CreatedAt: nowText(), UpdatedAt: nowText(),
-	}
-	if d.Metadata == nil {
-		d.Metadata = map[string]any{}
-	}
-	if err := insertDevice(a.ctx.AppDB(), d); err != nil {
-		_ = a.mqttDeleteUser(id)
-		return nil, err
-	}
-	a.ctx.Emit("devices.device.created", map[string]any{"device_id": id, "name": name, "protocol": protocol})
-	insertEvent(a.ctx.AppDB(), id, "created", map[string]any{"protocol": protocol})
-	return a.enrollmentResponse(d, secret), nil
+	return result, nil
 }
 
 func (a *App) enrollmentResponse(d Device, secret string) map[string]any {
 	broker := a.currentBroker()
-	base := "devices/" + d.ID
+	base := a.topicRoot() + "devices/" + d.ID
 	return map[string]any{
 		"device": d, "mqtt": map[string]any{
 			"endpoint": broker.Endpoint, "host": broker.AdvertisedHost, "port": broker.AdvertisedPort,
@@ -158,83 +119,38 @@ func (a *App) enrollmentResponse(d Device, secret string) map[string]any {
 		"password_shown_once": true,
 		"topics": map[string]any{
 			"commands": base + "/commands", "response": base + "/response", "telemetry": base + "/telemetry",
-			"state": base + "/state", "manifest": base + "/manifest", "availability": base + "/availability",
+			"state": base + "/state", "manifest": base + "/manifest", "availability": base + "/availability", "receipts": base + "/receipts",
 		},
 	}
 }
 
 func (a *App) toolUpdate(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	d, err := updateDeviceFields(a.ctx.AppDB(), a.projectID, str(args, "device_id"), object(args, "patch"))
-	if err == nil {
-		a.ctx.Emit("devices.device.updated", map[string]any{"device_id": d.ID, "changed": "metadata"})
-	}
-	return d, err
+	return a.updateMetadata(str(args, "device_id"), object(args, "patch"))
 }
 
 func (a *App) toolEnable(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.setEnabled(str(args, "device_id"), true)
+	return a.lifecycle("enable", args)
 }
 
 func (a *App) toolDisable(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.setEnabled(str(args, "device_id"), false)
+	return a.lifecycle("disable", args)
 }
 
 func (a *App) setEnabled(id string, enabled bool) (any, error) {
-	d, err := getDevice(a.ctx.AppDB(), a.projectID, id, false)
-	if err != nil {
-		return nil, err
+	kind := "disable"
+	if enabled {
+		kind = "enable"
 	}
-	if err := a.mqttSetEnabled(d.MQTTUsername, enabled); err != nil {
-		return nil, err
-	}
-	if err := setDeviceEnabled(a.ctx.AppDB(), a.projectID, id, enabled); err != nil {
-		return nil, err
-	}
-	d, err = getDevice(a.ctx.AppDB(), a.projectID, id, true)
-	if err == nil {
-		a.ctx.Emit("devices.device.status_changed", map[string]any{"device_id": id, "status": d.Status, "enabled": enabled})
-	}
-	return d, err
+	return a.lifecycle(kind, map[string]any{"device_id": id})
 }
-
 func (a *App) toolRotateSecret(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	id := str(args, "device_id")
-	d, err := getDevice(a.ctx.AppDB(), a.projectID, id, false)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := generateSecret()
-	if err != nil {
-		return nil, err
-	}
-	if err := a.mqttRotatePassword(d.MQTTUsername, secret); err != nil {
-		return nil, err
-	}
-	_, err = a.ctx.AppDB().Exec(`UPDATE devices SET credential_version=credential_version+1,status='offline',availability='offline',updated_at=? WHERE id=?`, nowText(), id)
-	if err != nil {
-		return nil, err
-	}
-	d, _ = getDevice(a.ctx.AppDB(), a.projectID, id, false)
-	return map[string]any{"device_id": id, "username": d.MQTTUsername, "password": secret, "password_shown_once": true, "credential_version": d.CredentialVersion}, nil
+	return a.lifecycle("rotate", args)
 }
-
 func (a *App) toolDelete(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if !boolean(args, "confirm", false) {
 		return nil, errors.New("confirm=true required")
 	}
-	id := str(args, "device_id")
-	d, err := getDevice(a.ctx.AppDB(), a.projectID, id, false)
-	if err != nil {
-		return nil, err
-	}
-	if err := a.mqttDeleteUser(d.MQTTUsername); err != nil {
-		return nil, err
-	}
-	if err := deleteDeviceRow(a.ctx.AppDB(), a.projectID, id); err != nil {
-		return nil, err
-	}
-	a.ctx.Emit("devices.device.deleted", map[string]any{"device_id": id})
-	return map[string]any{"ok": true, "device_id": id}, nil
+	return a.lifecycle("delete", args)
 }
 
 func (a *App) toolStateGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -246,26 +162,7 @@ func (a *App) toolStateGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolCapabilitiesSet(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	id := str(args, "device_id")
-	d, err := getDevice(a.ctx.AppDB(), a.projectID, id, false)
-	if err != nil {
-		return nil, err
-	}
-	manifest := object(args, "manifest")
-	if manifest == nil {
-		return nil, errors.New("manifest required")
-	}
-	if _, ok := manifest["protocol"]; !ok {
-		manifest["protocol"] = d.Protocol
-	}
-	if err := validateManifest(manifest); err != nil {
-		return nil, err
-	}
-	if err := saveManifest(a.ctx.AppDB(), a.projectID, id, manifest, nowText()); err != nil {
-		return nil, err
-	}
-	a.ctx.Emit("devices.device.updated", map[string]any{"device_id": id, "changed": "capabilities"})
-	return getDevice(a.ctx.AppDB(), a.projectID, id, true)
+	return a.updateCapabilities(str(args, "device_id"), object(args, "manifest"))
 }
 
 func (a *App) toolCapabilitiesRefresh(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -333,6 +230,11 @@ func (a *App) toolPinMode(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolCommandSend(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	if v, exists := args["arguments"]; exists {
+		if _, ok := v.(map[string]any); !ok {
+			return nil, errors.New("arguments must be a JSON object")
+		}
+	}
 	operation := strings.TrimSpace(str(args, "operation"))
 	if operation == "" {
 		return nil, errors.New("operation required")
@@ -345,69 +247,11 @@ func (a *App) sendStandard(args map[string]any, operation, target string, argume
 	if err != nil {
 		return nil, err
 	}
-	command, err := a.sendCommand(d, operation, target, arguments, boolean(args, "wait", true), integer(args, "timeout_ms", 0), str(args, "idempotency_key"))
+	command, err := a.sendCommand(d, operation, target, arguments, boolean(args, "wait", false), integer(args, "timeout_ms", 0), str(args, "idempotency_key"))
 	if err != nil {
 		return nil, err
 	}
 	return commandResult(command), nil
-}
-
-func (a *App) sendCommand(d Device, operation, target string, arguments map[string]any, wait bool, timeoutMS int, idempotencyKey string) (Command, error) {
-	if !d.Enabled {
-		return Command{}, errors.New("device is disabled")
-	}
-	if err := validateCommand(d, operation, target, arguments, idempotencyKey); err != nil {
-		return Command{}, err
-	}
-	if idempotencyKey != "" {
-		if existing, err := getCommandByIdempotency(a.ctx.AppDB(), d.ID, idempotencyKey); err == nil {
-			return a.waitForExistingCommand(existing, wait)
-		}
-	}
-	if timeoutMS == 0 {
-		timeoutMS = configInt(a.ctx, "command_timeout_ms", 10000, 500, 60000)
-	}
-	if timeoutMS < 500 || timeoutMS > 60000 {
-		return Command{}, errors.New("timeout_ms must be between 500 and 60000")
-	}
-	id := "cmd_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	now := time.Now().UTC()
-	request := buildWireCommand(id, operation, target, arguments, timeoutMS)
-	c := Command{
-		ID: id, DeviceID: d.ID, Operation: operation, Target: target, Arguments: arguments,
-		Request: request, Status: "queued", IdempotencyKey: idempotencyKey, TimeoutMS: timeoutMS,
-		CreatedAt: formatTime(now), DeadlineAt: formatTime(now.Add(time.Duration(timeoutMS) * time.Millisecond)),
-	}
-	if err := insertCommand(a.ctx.AppDB(), c); err != nil {
-		return Command{}, err
-	}
-	var waiter <-chan struct{}
-	var unregister func()
-	if wait {
-		waiter, unregister = a.registerWaiter(id)
-		defer unregister()
-	}
-	if err := a.mqttPublish("devices/"+d.ID+"/commands", request, false, 1); err != nil {
-		_ = markCommandPublishFailed(a.ctx.AppDB(), id, err)
-		a.ctx.Emit("devices.command.failed", map[string]any{"command_id": id, "device_id": d.ID, "operation": operation, "status": "failed"})
-		insertEvent(a.ctx.AppDB(), d.ID, "command.failed", map[string]any{"command_id": id, "operation": operation, "error": err.Error()})
-		a.notifyWaiters(id)
-		return Command{}, fmt.Errorf("publish device command: %w", err)
-	}
-	if err := markCommandSent(a.ctx.AppDB(), id, nowText()); err != nil {
-		return Command{}, err
-	}
-	if wait {
-		timer := time.NewTimer(time.Duration(timeoutMS) * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-waiter:
-		case <-timer.C:
-			ids, _ := markTimedOutCommands(a.ctx.AppDB(), time.Now().UTC())
-			a.emitTimedOutCommands(ids)
-		}
-	}
-	return getCommand(a.ctx.AppDB(), id)
 }
 
 func (a *App) waitForExistingCommand(existing Command, wait bool) (Command, error) {
@@ -427,8 +271,8 @@ func (a *App) waitForExistingCommand(existing Command, wait bool) (Command, erro
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		ids, _ := markTimedOutCommands(a.ctx.AppDB(), time.Now().UTC())
-		a.emitTimedOutCommands(ids)
+		ids, _ := a.expireCommands(time.Now().UTC())
+		_ = ids
 		return getCommand(a.ctx.AppDB(), existing.ID)
 	}
 	timer := time.NewTimer(remaining)
@@ -436,8 +280,8 @@ func (a *App) waitForExistingCommand(existing Command, wait bool) (Command, erro
 	select {
 	case <-waiter:
 	case <-timer.C:
-		ids, _ := markTimedOutCommands(a.ctx.AppDB(), time.Now().UTC())
-		a.emitTimedOutCommands(ids)
+		ids, _ := a.expireCommands(time.Now().UTC())
+		_ = ids
 	}
 	return getCommand(a.ctx.AppDB(), existing.ID)
 }
@@ -560,7 +404,7 @@ func (a *App) toolCommandsList(_ *sdk.AppCtx, args map[string]any) (any, error) 
 			return nil, err
 		}
 	}
-	return listCommands(a.ctx.AppDB(), id, str(args, "status"), integer(args, "limit", 100))
+	return a.scopedCommands(id, str(args, "status"), integer(args, "limit", 100))
 }
 
 func commandResult(c Command) map[string]any { return map[string]any{"command_id": c.ID, "command": c} }
@@ -661,7 +505,7 @@ func slugDeviceID(name string) string {
 	if len(id) > 54 {
 		id = id[:54]
 	}
-	return id + "-" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	return id
 }
 
 func validDeviceID(id string) bool { return deviceIDPattern.MatchString(id) }

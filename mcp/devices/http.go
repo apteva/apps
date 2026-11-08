@@ -14,7 +14,7 @@ import (
 )
 
 func (a *App) httpRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		{Pattern: "/summary", Handler: a.handleSummary},
 		{Pattern: "/broker", Handler: a.handleBroker},
 		{Pattern: "/devices", Handler: a.handleDevices},
@@ -22,6 +22,11 @@ func (a *App) httpRoutes() []sdk.Route {
 		{Pattern: "/commands", Handler: a.handleCommands},
 		{Pattern: "/commands/", Handler: a.handleCommand},
 	}
+	routes = append(routes, a.extraRoutes()...)
+	for i := range routes {
+		routes[i].Handler = a.scopedHTTP(routes[i].Handler)
+	}
+	return routes
 }
 
 func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -29,18 +34,28 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var total, online, offline, disabled, commands, failed int
-	db := a.ctx.AppDB()
-	_ = db.QueryRow(`SELECT COUNT(*) FROM devices WHERE project_id=?`, a.projectID).Scan(&total)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM devices WHERE project_id=? AND status='online'`, a.projectID).Scan(&online)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM devices WHERE project_id=? AND status='offline'`, a.projectID).Scan(&offline)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM devices WHERE project_id=? AND enabled=0`, a.projectID).Scan(&disabled)
+	tx, err := a.ctx.AppDB().Begin()
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	defer tx.Rollback()
+	err = tx.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='online'),0),COALESCE(SUM(status='offline'),0),COALESCE(SUM(enabled=0),0) FROM devices WHERE project_id=?`, a.projectID).Scan(&total, &online, &offline, &disabled)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
 	cutoff := formatTime(time.Now().Add(-24 * time.Hour))
-	_ = db.QueryRow(`SELECT COUNT(*) FROM device_commands WHERE created_at>=?`, cutoff).Scan(&commands)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM device_commands WHERE created_at>=? AND status IN ('failed','timed_out')`, cutoff).Scan(&failed)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"devices": total, "online": online, "offline": offline, "disabled": disabled,
-		"commands_24h": commands, "failed_commands_24h": failed,
-	})
+	err = tx.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status IN ('failed','timed_out')),0) FROM device_commands WHERE device_id IN(SELECT id FROM devices WHERE project_id=?) AND created_at>=?`, a.projectID, cutoff).Scan(&commands, &failed)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"devices": total, "online": online, "offline": offline, "disabled": disabled, "commands_24h": commands, "failed_commands_24h": failed})
 }
 
 func (a *App) handleBroker(w http.ResponseWriter, r *http.Request) {
@@ -65,12 +80,19 @@ func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
 		if !decodeBody(w, r, &input) {
 			return
 		}
-		result, err := a.provision(input)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
+		if !idempotencyHeader(w, r, input) {
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		result, err := a.provision(input)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		status := http.StatusCreated
+		if str(result, "status") == "pending" {
+			status = http.StatusAccepted
+		}
+		writeJSON(w, status, result)
 	default:
 		methodNotAllowed(w)
 	}
@@ -106,7 +128,7 @@ func (a *App) handleDevice(w http.ResponseWriter, r *http.Request) {
 	case "commands":
 		if r.Method == http.MethodGet {
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-			value, err := listCommands(a.ctx.AppDB(), id, r.URL.Query().Get("status"), limit)
+			value, err := a.scopedCommands(id, r.URL.Query().Get("status"), limit)
 			respond(w, value, err)
 			return
 		}
@@ -116,6 +138,9 @@ func (a *App) handleDevice(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			input["device_id"] = id
+			if !idempotencyHeader(w, r, input) {
+				return
+			}
 			result, err := a.toolCommandSend(a.ctx, input)
 			respond(w, result, err)
 			return
@@ -141,19 +166,19 @@ func (a *App) handleDevice(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		value, err := a.toolRotateSecret(a.ctx, map[string]any{"device_id": id})
+		value, err := a.toolRotateSecret(a.ctx, map[string]any{"device_id": id, "idempotency_key": r.Header.Get("Idempotency-Key")})
 		respond(w, value, err)
 	case "enable":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		value, err := a.setEnabled(id, true)
+		value, err := a.lifecycle("enable", map[string]any{"device_id": id, "idempotency_key": r.Header.Get("Idempotency-Key")})
 		respond(w, value, err)
 	case "disable":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		value, err := a.setEnabled(id, false)
+		value, err := a.lifecycle("disable", map[string]any{"device_id": id, "idempotency_key": r.Header.Get("Idempotency-Key")})
 		respond(w, value, err)
 	default:
 		writeError(w, http.StatusNotFound, errors.New("route not found"))
@@ -170,13 +195,10 @@ func (a *App) handleDeviceRoot(w http.ResponseWriter, r *http.Request, id string
 		if !decodeBody(w, r, &patch) {
 			return
 		}
-		result, err := updateDeviceFields(a.ctx.AppDB(), a.projectID, id, patch)
-		if err == nil {
-			a.ctx.Emit("devices.device.updated", map[string]any{"device_id": id, "changed": "metadata"})
-		}
+		result, err := a.updateMetadata(id, patch)
 		respond(w, result, err)
 	case http.MethodDelete:
-		value, err := a.toolDelete(a.ctx, map[string]any{"device_id": id, "confirm": true})
+		value, err := a.toolDelete(a.ctx, map[string]any{"device_id": id, "confirm": true, "idempotency_key": r.Header.Get("Idempotency-Key")})
 		respond(w, value, err)
 	default:
 		methodNotAllowed(w)
@@ -188,7 +210,7 @@ func (a *App) handleCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	value, err := listCommands(a.ctx.AppDB(), r.URL.Query().Get("device_id"), r.URL.Query().Get("status"), limit)
+	value, err := a.scopedCommands(r.URL.Query().Get("device_id"), r.URL.Query().Get("status"), limit)
 	respond(w, value, err)
 }
 
@@ -212,6 +234,10 @@ func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
 		writeError(w, http.StatusBadRequest, err)
 		return false
 	}
+	if value, ok := out.(*map[string]any); ok && *value == nil {
+		writeError(w, 400, errors.New("body must be a JSON object"))
+		return false
+	}
 	if err := ensureEOF(dec); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return false
@@ -233,13 +259,31 @@ func ensureEOF(dec *json.Decoder) error {
 func respond(w http.ResponseWriter, value any, err error) {
 	if err != nil {
 		status := http.StatusBadRequest
+		if errors.Is(err, ErrCursorExpired) {
+			status = http.StatusGone
+		}
+		if errors.Is(err, ErrConflict) {
+			status = http.StatusConflict
+		}
+		if errors.Is(err, ErrLimit) {
+			status = http.StatusTooManyRequests
+		}
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		}
 		writeError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, value)
+	status := http.StatusOK
+	if result, ok := value.(map[string]any); ok {
+		if str(result, "status") == "pending" {
+			status = http.StatusAccepted
+		}
+		if c, ok := result["command"].(Command); ok && !commandTerminal(c.Status) {
+			status = http.StatusAccepted
+		}
+	}
+	writeJSON(w, status, value)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -262,4 +306,17 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 
 func methodNotAllowed(w http.ResponseWriter) {
 	writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+}
+
+func idempotencyHeader(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return true
+	}
+	if existing := str(args, "idempotency_key"); existing != "" && existing != key {
+		writeError(w, 409, ErrConflict)
+		return false
+	}
+	args["idempotency_key"] = key
+	return true
 }

@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 import paho.mqtt.client as mqtt
+from device_runtime import DeviceRuntime
 
 try:
     import RPi.GPIO as GPIO  # type: ignore
@@ -18,7 +19,9 @@ DEVICE_ID = os.environ.get("APTEVA_DEVICE_ID", "raspberry-pi-1")
 PASSWORD = os.environ.get("APTEVA_DEVICE_PASSWORD", "replace-me")
 HOST = os.environ.get("APTEVA_MQTT_HOST", "localhost")
 PORT = int(os.environ.get("APTEVA_MQTT_PORT", "1883"))
-BASE = f"devices/{DEVICE_ID}"
+USERNAME = os.environ["APTEVA_DEVICE_USERNAME"]
+BASE = os.environ["APTEVA_DEVICE_TOPIC_BASE"].rstrip("/")
+RUNTIME = DeviceRuntime(os.environ.get("APTEVA_DEVICE_JOURNAL", "device-journal.sqlite"))
 
 # Only these pins can be touched. Keep this list narrow for the attached board.
 PINS = {
@@ -99,7 +102,7 @@ def on_connect(client: mqtt.Client, _userdata: Any, _flags: Any, reason_code: An
     client.subscribe(f"{BASE}/commands", qos=1)
     publish_json(client, "availability", "online", retain=True)
     publish_json(client, "manifest", {
-        "protocol": "apteva.devices/v1", "name": platform.node(), "model": platform.machine(),
+        "protocol": "apteva.devices/v1", "command_contract": "apteva.commands/v1", "name": platform.node(), "model": platform.machine(),
         "manufacturer": "Raspberry Pi" if GPIO else "Linux", "firmware": platform.release(),
         "variables": [{"name": "cpu_load_1m", "type": "number", "readable": True},
                       {"name": "uptime_seconds", "type": "number", "unit": "s", "readable": True}],
@@ -108,25 +111,16 @@ def on_connect(client: mqtt.Client, _userdata: Any, _flags: Any, reason_code: An
 
 
 def on_message(client: mqtt.Client, _userdata: Any, message: mqtt.MQTTMessage) -> None:
-    try:
-        command = json.loads(message.payload)
-        command_id = command.get("command_id") or command.get("id")
-        if not command_id:
-            raise ValueError("command_id is required")
-        result = execute(command)
-        response = {"command_id": command_id, "device_id": DEVICE_ID, "success": True, "result": result,
-                    "timestamp": time.time()}
-    except Exception as exc:
-        response = {"command_id": locals().get("command", {}).get("command_id", "unknown"), "device_id": DEVICE_ID,
-                    "success": False, "error": str(exc), "timestamp": time.time()}
+    command = json.loads(message.payload)
+    response = RUNTIME.command(command, execute)
     publish_json(client, "response", response)
 
 
 def main() -> None:
     if GPIO is not None:
         GPIO.setmode(GPIO.BCM)
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"apteva-{DEVICE_ID}")
-    client.username_pw_set(DEVICE_ID, PASSWORD)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=os.environ.get("APTEVA_MQTT_CLIENT_ID", USERNAME))
+    client.username_pw_set(USERNAME, PASSWORD)
     client.will_set(f"{BASE}/availability", payload="offline", qos=1, retain=True)
     client.on_connect = on_connect
     client.on_message = on_message
