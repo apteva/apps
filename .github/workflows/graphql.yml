@@ -35,7 +35,8 @@ jobs:
       - run: bun test ui/telemetry.test.ts
       - uses: actions/checkout@v4
         with:
-          ref: database/v0.15.0
+          # Immutable Database 0.15.0 source; app subtree must match its release tag.
+          ref: aa31eb47fcd33ab26fae6815e597e3d309948a0a
           path: .ci/database
           sparse-checkout: mcp/database
       - name: Canonical and compatibility reads across three adapters
