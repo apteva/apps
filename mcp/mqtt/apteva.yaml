@@ -2,16 +2,21 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.7.0
+version: 0.8.0
 description: |
   Ownership-scoped MQTT 3.1.1/5.0 broker with TLS by default, renewable
   certificate files or automatic ACME renewal, and validated public endpoints.
   Credentials require explicit topic permissions; client IDs belong to their
   authenticated credential identities.
 
-  Version 0.7.0 adds persistent per-scope transport and acceptance counters,
-  fixed-window message/byte/connection quotas, payload limits, and atomic
-  retained-storage limits. Trusted install configuration sets default policies
+  Version 0.8.0 adds complete, paginated retained-message reads with binary-safe
+  payloads, MQTT properties, message IDs, expiry metadata, and signed scoped
+  cursors. HTTP/MCP callers can traverse all retained topics; the panel supports
+  loading more, inspecting full records and downloading complete payloads.
+
+  Persistent per-scope transport and acceptance counters, fixed-window
+  message/byte/connection quotas, payload limits, and atomic retained-storage
+  limits remain available. Trusted install configuration sets default policies
   and per-scope overrides. Scoped usage is available through HTTP and MCP.
 
   The broker commits accepted messages, retained changes and QoS subscriber
@@ -45,6 +50,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: mqtt_retained_page, description: "Complete retained-message pages with binary-safe payloads, properties, IDs, expiry, signed scoped cursors and journal watermarks." }
     - { name: mqtt_usage, description: "Persistent scoped usage counters, quota windows, retained storage and effective policy." }
     - { name: mqtt_consumer, description: "Durable scoped consumption: create, claim, ack, retry, replay, status, delete, or paginated history. Full payloads, stable message IDs and persisted cursors." }
     - { name: mqtt_publish,            description: "Publish one message. Payload may be a string or JSON value; non-strings are JSON-encoded. Args: topic, payload, retain?, qos?." }
@@ -61,8 +67,8 @@ provides:
     - { name: mqtt_users_list,         description: "List users (no passwords)." }
     - { name: mqtt_users_delete,       description: "Delete a user. Args: username." }
     - { name: mqtt_users_set_enabled,  description: "Enable / disable a user. Args: username, enabled (bool)." }
-    - { name: mqtt_retained_list,      description: "List retained MQTT state. Args: topic_pattern?, limit?." }
-    - { name: mqtt_retained_get,       description: "Get one retained MQTT message. Args: topic." }
+    - { name: mqtt_retained_list,      description: "Legacy bounded retained previews. Use mqtt_retained_page for complete, paginated reads." }
+    - { name: mqtt_retained_get,       description: "Get one complete, unexpired retained message, including binary-safe payload, properties, ID and expiry. Args: exact topic." }
     - { name: mqtt_retained_delete,    description: "Delete one retained MQTT message from memory and durable storage. Args: topic." }
     - { name: mqtt_devices,            description: "List HA-discovered devices. Args: filter? (substring on slug or model)." }
     - { name: mqtt_status,             description: "Broker endpoint, uptime, client/retained counts, traffic counters, rejection/drop metrics, and active safety limits." }

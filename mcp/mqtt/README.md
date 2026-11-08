@@ -1,8 +1,10 @@
 # MQTT Broker
 
-Version 0.7.0 adds persistent transport usage and per-scope quotas to durable
-acceptance, recoverable sessions and application consumers from 0.6.0. A scope is an opaque identifier with no customer, billing, device, or
-application-specific semantics. All changes are contained in this app.
+Version 0.8.0 adds complete, cursor-paginated retained reads and a panel that can
+load every page, inspect full records and download payloads. Scoped credentials,
+TLS, durable acceptance, recoverable sessions, application consumers, persistent
+usage and quotas remain contained in this app. A scope is an opaque identifier
+without customer, billing, device or application-specific meaning.
 
 ## Ownership boundary
 
@@ -354,11 +356,100 @@ passed; MQTT delivery still honors expiry.
 
 The platform event bridge and diagnostic audit feed remain best effort; use the
 durable consumer API for reliable application processing. Complete retained
-pagination remains separate work.
-Existing retained list previews are unchanged; individual retained reads are full.
+pagination is available through the 0.8.0 interfaces below. The legacy bounded
+preview list retains its array contract.
 Before upgrading, back up the app database. Migration 004 is additive and cannot
 recover messages or sessions lost before 0.6.0. Reconnect persistent MQTT clients
 after upgrade to establish their recoverable sessions.
+
+## Complete retained reads (0.8.0)
+
+Use MCP `mqtt_retained_page` or HTTP `GET /retained/page` / `POST /retained/page`.
+All require the same authenticated ownership scope as the existing management
+API. They return complete retained values, not diagnostic payload previews:
+
+```json
+{"topic_pattern":"scopes/YQ/devices/+/state","limit":100}
+```
+
+POST and MCP accept JSON arguments. GET uses the equivalent query parameters.
+The response includes:
+
+- `messages`: complete records with exact `topic`, `qos`, `retain: true`, full
+  `payload`, canonical full `payload_base64`, `size_bytes`, `updated_at`, MQTT
+  `properties`, optional `message_id`, and optional absolute `expires_at`.
+- `next_cursor` and `has_more`: pass the cursor to fetch the next page until
+  `has_more` is false. A terminal page has an empty cursor.
+- `topic_pattern`, `as_of` (Unix seconds), `consistency: "live"`, and `scanned`.
+- Decimal-string `start_sequence` and `high_sequence` for journal reconciliation.
+
+`payload_base64` is lossless for every payload, including invalid UTF-8 and empty
+legacy values. `payload` is the full printable UTF-8 text or a binary/base64
+object. Properties retain the broker's stored JSON names, including `contentType`,
+`responseTopic`, base64 `correlationData`, `messageExpiry`, payload-format flags,
+subscription identifiers and ordered `user` properties. Repeated user-property
+keys are preserved. Connection-local topic aliases are omitted. `message_id` is
+present for retained values accepted since 0.6.0; older records may lack one.
+`messageExpiry` is the original interval; use absolute `expires_at` for expiry.
+Expired records are excluded from page, single-message and legacy-preview reads.
+
+`limit` defaults to 100 and accepts 1–1000. There is no 1000-message total cap.
+Each request scans at most 1000 candidate topics, and targets at most 4 MiB of
+complete serialized record data. One larger record is returned whole in its own
+page. Records are never split or silently truncated. Sparse filters can produce
+an empty `messages` array with `has_more: true`; continue with `next_cursor`.
+Topic comparisons are binary and case-sensitive. Empty levels, Unicode and
+meaningful trailing spaces are preserved; MQTT `+` and `#` matching applies.
+
+Cursors bind the authenticated scope, exact filter and last scanned topic using
+HMAC-SHA256 with an app-owned OS-random signing key persisted in the app database.
+They survive broker restart and expire 15 minutes after the first page. Omit the
+filter on continuation or repeat the same filter; changing it, editing a cursor,
+or using it in another scope returns HTTP 400. Expiry returns HTTP 410; restart
+from the first page. You may change `limit` between pages. Retrying a cursor
+reuses its boundary and never consumes server-side pagination state. Cursors
+are positions, not authorization, and contain no message payloads. Use POST for
+long filters/topics/cursors to avoid browser or proxy URL limits.
+
+Pagination is a **live keyset scan**, with one consistent SQLite read transaction
+per page. It does not lock broker writes between requests or retain historical
+snapshots. An unchanged retained set is traversed completely without duplicate
+topics. Concurrent insertion behind the cursor requires a fresh scan or journal
+reconciliation; replacements/deletions can change later pages. A retry can see a
+newer value at the same boundary. This behavior is explicit in `consistency`.
+
+For a consuming app that needs to reconcile mutations during traversal:
+
+1. Read the first page and keep its `start_sequence`.
+2. Create a durable consumer for the same filter, with `start: "after"` and
+   `after_sequence` set to that value, to pin subsequent journal history.
+3. Finish every retained page. `start_sequence` stays constant; `high_sequence`
+   identifies the journal watermark visible to each page.
+4. Apply retained journal records after the starting sequence through at least
+   the final watermark. Empty retained payloads delete state. Honor absolute
+   message expiry, including for records returned on earlier pages. Continue
+   normal durable consumption for further changes and acknowledge processed
+   batches according to the consumer contract.
+
+History gaps are reported by the durable consumer interface; restart the scan
+if reconciliation history is no longer available. Retained reads do not consume
+publish/transport quotas, so they remain available after those quotas exhaust.
+
+The legacy `GET /retained` and `mqtt_retained_list` still return bounded arrays
+of payload previews for compatibility. `GET /retained/<encoded-topic>` and
+`mqtt_retained_get` now include complete metadata as well as the full payload.
+Malformed stored properties and database failures surface as HTTP 503 rather
+than a misleading empty page or missing record. Restart also reports invalid
+stored properties instead of restoring a value with silently discarded metadata.
+The panel uses the new page API with Load more, View full and binary downloads.
+Changing scope/filter cancels stale page requests. Retained deletion goes through
+one durable broker operation without a second unjournaled deletion.
+
+Migration 006 adds the cursor-key table and backfills absolute expiry for legacy
+values that stored only the original interval, matching broker recovery. The
+signing key is initialized using the OS CSPRNG on first paginated read. Back up
+the app database as usual. Payloads, properties and quota accounting are preserved.
+
 
 ## Persistent usage and per-scope quotas (0.7.0)
 

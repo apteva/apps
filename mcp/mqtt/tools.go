@@ -137,8 +137,14 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler: a.toolUsersSetEnabled,
 		},
 		{
+			Name:        "mqtt_retained_page",
+			Description: "Read complete retained messages in live, binary-topic order with signed scope/filter-bound cursors. Returns full payload_base64, properties, IDs and expiry; messages, next_cursor, has_more, and journal reconciliation watermarks. Continue until has_more=false, including empty filtered pages. Args: topic_pattern?, limit? (1-1000), cursor?.",
+			InputSchema: schemaObj(map[string]any{"topic_pattern": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolRetainedPage,
+		},
+		{
 			Name:        "mqtt_retained_list",
-			Description: "List retained MQTT state. Args: topic_pattern (optional), limit (default 100, max 1000).",
+			Description: "Legacy bounded preview list; use mqtt_retained_page for complete, paginated reads. Args: topic_pattern (optional), limit (default 100, max 1000).",
 			InputSchema: schemaObj(map[string]any{
 				"topic_pattern": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000},
@@ -147,7 +153,7 @@ func (a *App) mcpTools() []sdk.Tool {
 		},
 		{
 			Name:        "mqtt_retained_get",
-			Description: "Get one retained MQTT message by exact topic.",
+			Description: "Get one complete, unexpired retained message by exact topic, including payload_base64, properties and expiry.",
 			InputSchema: schemaObj(map[string]any{"topic": map[string]any{"type": "string"}}, []string{"topic"}),
 			Handler:     a.toolRetainedGet,
 		},
@@ -544,7 +550,7 @@ func (a *App) toolRetainedList(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolRetainedGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	topic := strings.TrimSpace(strArg(args, "topic"))
+	topic := strArg(args, "topic")
 	if topic == "" {
 		return nil, errors.New("topic required")
 	}
@@ -552,19 +558,17 @@ func (a *App) toolRetainedGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolRetainedDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	topic := strings.TrimSpace(strArg(args, "topic"))
+	topic := strArg(args, "topic")
 	if topic == "" {
 		return nil, errors.New("topic required")
 	}
 	if _, err := getRetainedMessage(a.ctx.AppDB(), projectScope(ctx), topic); err != nil {
 		return nil, err
 	}
-	if a.broker != nil {
-		if err := a.broker.DeleteRetained(topic); err != nil {
-			return nil, err
-		}
+	if a.broker == nil {
+		return nil, errors.New("broker not running")
 	}
-	if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, projectScope(ctx), topic); err != nil {
+	if err := a.broker.DeleteRetained(topic); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "topic": topic}, nil

@@ -164,6 +164,10 @@ interface BusSubscription {
 }
 
 interface RetainedMessage {
+  payload_base64?: string;
+  properties?: Record<string, unknown>;
+  message_id?: string;
+  expires_at?: number;
   topic: string;
   qos: number;
   payload: unknown;
@@ -712,51 +716,108 @@ function SubscriptionsSection() {
 
 function RetainedSection() {
   const API = useAPI();
+  const scope = useContext(ScopeContext);
+  return <RetainedPageSection key={JSON.stringify([API, scope])} />;
+}
+
+function RetainedPageSection() {
+  const API = useAPI();
   const scopedFetch = useScopedFetch();
   const [messages, setMessages] = useState<RetainedMessage[]>([]);
   const [filter, setFilter] = useState("");
+  const [nextCursor, setNextCursor] = useState("");
+  const [expanded, setExpanded] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const refresh = useCallback(async () => {
-    const suffix = filter ? `?topic_pattern=${encodeURIComponent(filter)}` : "";
-    const r = await scopedFetch(`${API}/retained${suffix}`);
-    if (!r.ok) {
-      setError(await r.text());
-      return;
-    }
-    setMessages(await r.json());
+  const requestId = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+  const loadPage = useCallback(async (cursor = "") => {
+    const id = ++requestId.current;
+    controller.current?.abort();
+    const abort = new AbortController();
+    controller.current = abort;
+    setBusy(true);
     setError("");
+    try {
+      const r = await scopedFetch(`${API}/retained/page`, {
+        method: "POST", signal: abort.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic_pattern: filter, limit: 100, cursor }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const page = await r.json() as { messages: RetainedMessage[]; has_more: boolean; next_cursor: string };
+      if (id !== requestId.current) return;
+      setMessages((old) => cursor ? [...new Map([...old, ...page.messages].map((m) => [m.topic, m])).values()] : page.messages);
+      setNextCursor(page.has_more ? page.next_cursor : "");
+    } catch (e) {
+      if (id === requestId.current && !abort.signal.aborted) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (id === requestId.current) setBusy(false);
+    }
   }, [API, scopedFetch, filter]);
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    setMessages([]); setNextCursor(""); setExpanded("");
+    void loadPage();
+    return () => { requestId.current++; controller.current?.abort(); };
+  }, [loadPage]);
+  const remove = async (topic: string) => {
+    if (!window.confirm(`Delete retained message ${topic}?`)) return;
+    const id = requestId.current;
+    setBusy(true);
+    try {
+      const r = await scopedFetch(`${API}/retained/${encodeURIComponent(topic)}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(await r.text());
+      if (id === requestId.current) await loadPage();
+    } catch (e) {
+      if (id === requestId.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (id === requestId.current) setBusy(false);
+    }
+  };
+  const download = (message: RetainedMessage) => {
+    const bytes = Uint8Array.from(atob(message.payload_base64 ?? ""), (c) => c.charCodeAt(0));
+    const href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    const link = document.createElement("a"); link.href = href; link.download = "mqtt-retained.bin"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  };
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
-        <h3 className="text-sm font-medium flex-1">Retained state ({messages.length})</h3>
+        <h3 className="text-sm font-medium flex-1">Retained state ({messages.length}{nextCursor ? "+" : ""})</h3>
         <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="scopes/…/devices/+/state" className="bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
+        <button disabled={busy} onClick={() => void loadPage()} className="text-xs text-text-dim disabled:opacity-50">Refresh</button>
       </div>
-      {error && <div className="text-error text-xs mb-2">{error}</div>}
-      {messages.length === 0 ? (
-        <div className="text-text-dim text-xs italic">No retained messages.</div>
-      ) : (
-        <div className="border border-border rounded max-h-64 overflow-auto">
+      <p className="text-xs text-text-dim mb-2">Live retained state. Load more to continue; refresh to rescan changes.</p>
+      {error && <div role="alert" className="text-error text-xs mb-2">{error}</div>}
+      {messages.length === 0 && !busy && <div className="text-text-dim text-xs italic">{nextCursor ? "No matches in this page. Continue loading." : "No retained messages."}</div>}
+      {messages.length > 0 && (
+        <div className="border border-border rounded max-h-96 overflow-auto">
           {messages.map((m) => (
-            <div key={m.topic} className="flex items-center gap-3 px-3 py-2 border-b border-border last:border-b-0">
-              <span className="font-mono text-xs flex-1 truncate" title={m.topic}>{m.topic}</span>
-              <span className="font-mono text-xs text-text-dim max-w-xs truncate" title={typeof m.payload === "string" ? m.payload : JSON.stringify(m.payload)}>
-                {typeof m.payload === "string" ? m.payload : JSON.stringify(m.payload)}
-              </span>
-              <span className="text-xs text-text-dim">{m.size_bytes}B · Q{m.qos}</span>
-              <button
-                className="text-xs text-text-dim hover:text-error"
-                onClick={async () => {
-                  if (!window.confirm(`Delete retained message ${m.topic}?`)) return;
-                  await scopedFetch(`${API}/retained/${encodeURIComponent(m.topic)}`, { method: "DELETE" });
-                  refresh();
-                }}
-              >delete</button>
+            <div key={m.topic} className="px-3 py-2 border-b border-border last:border-b-0">
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs flex-1 truncate" title={m.topic}>{m.topic}</span>
+                <span className="font-mono text-xs text-text-dim max-w-xs truncate">{typeof m.payload === "string" ? m.payload.slice(0, 160) : "Binary payload"}</span>
+                <span className="text-xs text-text-dim">{m.size_bytes}B · Q{m.qos}</span>
+                <button className="text-xs text-text-dim" onClick={() => setExpanded(expanded === m.topic ? "" : m.topic)}>{expanded === m.topic ? "Hide" : "View full"}</button>
+                <button className="text-xs text-text-dim" onClick={() => download(m)}>Download</button>
+                <button disabled={busy} className="text-xs text-text-dim hover:text-error disabled:opacity-50" onClick={() => void remove(m.topic)}>delete</button>
+              </div>
+              {expanded === m.topic && <div className="mt-2 text-xs space-y-2">
+                <div className="font-mono break-all">{m.topic}</div>
+                <pre className="font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto">{typeof m.payload === "string" ? m.payload : m.payload_base64}</pre>
+                {typeof m.payload !== "string" && <div className="text-text-dim">Complete binary payload in base64</div>}
+                <div className="text-text-dim">Updated {m.updated_at}{m.expires_at ? ` · Expires ${new Date(m.expires_at * 1000).toISOString()}` : ""}</div>
+                {m.message_id && <div className="font-mono break-all">{m.message_id}</div>}
+                <pre className="font-mono whitespace-pre-wrap break-all">{JSON.stringify(m.properties ?? {}, null, 2)}</pre>
+              </div>}
             </div>
           ))}
         </div>
       )}
+      <div className="mt-2 flex items-center gap-3">
+        {nextCursor && <button disabled={busy} onClick={() => void loadPage(nextCursor)} className="text-xs font-medium disabled:opacity-50">Load more</button>}
+        {busy && <span role="status" className="text-xs text-text-dim">Loading…</span>}
+      </div>
     </div>
   );
 }

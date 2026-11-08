@@ -217,23 +217,21 @@ func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		out, err := getRetainedMessage(a.ctx.AppDB(), projectScope(a.requestContext(r)), topic)
 		if err != nil {
-			httpErr(w, 404, err.Error())
+			retainedHTTPError(w, err)
 			return
 		}
 		writeJSON(w, out)
 	case http.MethodDelete:
 		if _, err := getRetainedMessage(a.ctx.AppDB(), projectScope(a.requestContext(r)), topic); err != nil {
-			httpErr(w, 404, err.Error())
+			retainedHTTPError(w, err)
 			return
 		}
-		if a.broker != nil {
-			if err := a.broker.DeleteRetained(topic); err != nil {
-				publishHTTPError(w, err)
-				return
-			}
+		if a.broker == nil {
+			httpErr(w, 503, "broker not running")
+			return
 		}
-		if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, projectScope(a.requestContext(r)), topic); err != nil {
-			httpErr(w, 500, err.Error())
+		if err := a.broker.DeleteRetained(topic); err != nil {
+			publishHTTPError(w, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "topic": topic})

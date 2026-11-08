@@ -149,6 +149,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/users/", Handler: a.handleUserItem},
 		{Pattern: "/subscriptions", Handler: a.handleSubscriptions},
 		{Pattern: "/subscriptions/", Handler: a.handleSubscriptionItem},
+		{Pattern: "/retained/page", Handler: a.handleRetainedPage},
 		{Pattern: "/retained", Handler: a.handleRetained},
 		{Pattern: "/retained/", Handler: a.handleRetainedItem},
 		{Pattern: "/devices", Handler: a.handleDevices},
