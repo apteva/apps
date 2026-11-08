@@ -48,6 +48,24 @@ If you're logging a bill a vendor sent us, that's here.
   — different meaning from `billing`'s output tax even though the
   column is identical.
 
+## Agent access across projects
+
+With a global Bills install and a project grant, pass `project_id` to work
+in another authorized project. Omit it for the agent's own project. The
+platform adds this argument to the granted tools and checks access on
+every call; a grant can cover chosen projects or all editable projects.
+Projects with their own Bills install are excluded.
+
+For a combined read across the agent's own project and every granted
+project, pass `project_id: "*"` to `vendors_search`, `vendors_get`,
+`vendors_get_context`, `bills_search`, `bills_get`, `bills_get_obligation`,
+or `bill_payments_list`. The reply contains one entry per project. Keep
+record IDs paired with their project when following up.
+
+Create, update, approval, payment, attachment, adjustment, and PDF tools
+must target one project per call. `bills_render_pdf` can save a file to
+Storage, so it cannot run with `project_id: "*"`.
+
 ## v0.1.0 reality check
 
 This install is on **v0.1.0**:
