@@ -158,7 +158,7 @@ The old `query` endpoint keeps its strict final-overflow behavior and
 only final groups. Ambiguous combinations and unknown fields are rejected rather
 than ignored. No storage migration or adapter format change is required.
 
-## Bounded related-parent aggregates (unreleased)
+## Bounded related-parent aggregates (Database 0.15.0)
 
 `aggregate` can use the same `relation` and `match` input as `find`. Use identical
 parent scopes, relation source definitions and match filters for a list and its
