@@ -42,7 +42,13 @@ func planCoreRead(op string, r Request) (string, error) {
 		if len(r.Metrics) == 0 {
 			return "", Invalid("aggregate requires metrics")
 		}
-		if r.Relation != nil || r.Match != nil || r.Group != nil || r.Offset != 0 || r.Count {
+		if r.Relation != nil {
+			if r.Cursor != "" || len(r.Select) > 0 || r.Group != nil || r.Offset != 0 || r.Count || len(r.Joins) > 0 || r.Filter != nil || len(r.Distinct) > 0 || r.Pick != nil || len(r.Branches) > 0 || r.Rollup != nil || len(r.Lookups) > 0 || len(r.Buckets) > 0 || r.RequireIndex {
+				return "", Invalid("related aggregate accepts parent computed values, groupBy and metrics; put related-row transformations in relation.sources")
+			}
+			return opJoinedAggregate, nil
+		}
+		if r.Match != nil || r.Group != nil || r.Offset != 0 || r.Count {
 			return "", Invalid("relation, match, group, offset and count belong to find")
 		}
 		if r.Cursor != "" || len(r.Select) > 0 {

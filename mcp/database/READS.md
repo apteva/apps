@@ -157,3 +157,35 @@ The old `query` endpoint keeps its strict final-overflow behavior and
 `{rows,truncated:false}` response; canonical `find` pages and `aggregate` limits
 only final groups. Ambiguous combinations and unknown fields are rejected rather
 than ignored. No storage migration or adapter format change is required.
+
+## Bounded related-parent aggregates (Database 0.15.0)
+
+`aggregate` can use the same `relation` and `match` input as `find`. Use identical
+parent scopes, relation source definitions and match filters for a list and its
+summary. Eligibility filters, deduplication and ordering run before the single
+context cap shared by all sources in source order. `match` tests only retained
+entries. Each matching parent feeds aggregate metrics once, regardless of how
+many context entries match. Without `match`, every scoped parent participates,
+including parents with no context.
+
+Parent fields may be named directly or as `<as>.field` (`root` by default).
+Parent-level `computed` expressions use the existing relational expression syntax;
+their names must not shadow stored parent fields. `groupBy`, conditional metrics,
+checked arithmetic, nulls, distinct counts and final `derived` expressions retain
+their ordinary semantics. `orderBy` and `limit` apply to final groups, with the
+usual `truncated` flag. A sum or average over no non-null values is null.
+
+A related aggregate rejects parent paging (`cursor`, `offset`, `select`, `count`
+and `group`) and top-level joins, filter, distinct, pick, branches, rollup,
+lookups, buckets and requireIndex. Put related-row transformations inside
+`relation.sources`. Pipelines and relation inputs remain alternative input forms.
+The operation projects the parent fields it needs, streams parents, accounts for
+related lookup buffers while decoding them and shares retained-memory/work limits
+with aggregate state. Cancellation and resource failures return no partial result.
+
+See [the executable request fixture](testdata/related-aggregate.json) and
+`engine/related_aggregate_test.go`. The fixture returns two matching parents,
+60 points and a 50% average, while an out-of-cap or ineligible entry matches none.
+A read-only `batch` can contain the corresponding `find` and `aggregate` so a page,
+exact total and summary share a snapshot. Callers still derive permission policy
+and supply scope/eligibility filters; Database executes those supplied rules.
