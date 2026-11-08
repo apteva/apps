@@ -387,17 +387,16 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	}
 	opts := nativeScanOptions(c, stream)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
-	opts.Stats = q.diag.nativeStats("documents")
-	if offer != nil && opts.Stats == nil {
-		opts.Stats = &native.QueryStats{}
-	}
+	total := q.diag.nativeStats("documents")
 	if q.examined != nil {
-		stats := opts.Stats
-		if stats == nil {
-			stats = &native.QueryStats{}
-			opts.Stats = stats
+		if total == nil {
+			total = &native.QueryStats{}
 		}
-		defer func() { *q.examined += stats.DocumentFetches }()
+		defer func() { *q.examined += total.DocumentFetches }()
+	}
+	var stats native.QueryStats
+	if total != nil || offer != nil {
+		opts.Stats = &stats
 	}
 	decoder := newNativeScanDecoder(c, fields, q.Where)
 	var consumeErr error
@@ -429,11 +428,24 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 		stopped = !consume(r, data)
 		return !stopped
 	}
-	e = h.Query(t.ctx, marshal(nativeFilter(c, stripExists(q.Where))), opts, func(key, data []byte) bool {
-		if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
-			return true
+	eachNativeScanFilter(c, stream, func(where *Filter) bool {
+		e = h.Query(t.ctx, marshal(nativeFilter(c, stripExists(where))), opts, func(key, data []byte) bool {
+			if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
+				return true
+			}
+			return visit(data)
+		})
+		if total != nil {
+			total.DocumentFetches += stats.DocumentFetches
+			total.IndexEntriesExamined += stats.IndexEntriesExamined
+			total.Examined += stats.Examined
+			total.Returned += stats.Returned
+			total.PeakMemoryBytes = max(total.PeakMemoryBytes, stats.PeakMemoryBytes)
+			ranges := total.Plan.Ranges + 1
+			total.Plan = stats.Plan
+			total.Plan.Ranges = ranges
 		}
-		return visit(data)
+		return e == nil && consumeErr == nil && !stopped
 	})
 	if e != nil {
 		return nativeError(e)

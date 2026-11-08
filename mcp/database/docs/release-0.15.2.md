@@ -4,8 +4,9 @@ Fixes bounded pages whose unordered native input scan retained all matching
 rows before Database's page heap saw them. No API, storage, permission-policy
 or GraphQL change is required.
 
-- Unordered adapter scans explicitly request the chosen index's complete
-  physical order, or `$natural` when no indexed lookup applies. This avoids
+- Unordered adapter scans stream bounded, disjoint IN-prefix ranges in the
+  chosen index's complete physical order, or use `$natural` when no indexed
+  lookup applies. This avoids
   native global sorting and candidate-key materialisation, including multi-range
   IN filters. The complete predicate and internal join hints remain intact.
   Ordinary native find ordering semantics are unchanged.
