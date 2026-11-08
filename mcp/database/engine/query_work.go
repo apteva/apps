@@ -41,6 +41,8 @@ func retainedBytes(v any) int {
 		return n
 	case map[string]any:
 		return retainedBytes(Record(x))
+	case []Record:
+		return queryRowsBytes(x)
 	case []any:
 		n := 24 + 16*len(x)
 		for _, v := range x {

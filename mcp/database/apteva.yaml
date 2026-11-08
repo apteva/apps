@@ -46,7 +46,7 @@ provides:
     - {name: db_delete, description: Atomically delete matching records.}
     - {name: db_upsert, description: Atomically insert or patch by a unique key.}
     - {name: db_count, description: Count matching records exactly.}
-    - {name: db_aggregate, description: "Aggregate stored or joined records and dependent pipelines with exact numeric expressions."}
+    - {name: db_aggregate, description: "Aggregate stored, joined or bounded related parents and dependent pipelines with exact numeric expressions."}
     - {name: db_related_read, description: "Compatibility alias. Use db_find with relation and match."}
     - {name: db_joined_page, description: "Compatibility alias. Use db_find with joins, distinct, pick or group."}
     - {name: db_joined_aggregate, description: "Compatibility alias. Use db_aggregate with relational input or pipeline."}

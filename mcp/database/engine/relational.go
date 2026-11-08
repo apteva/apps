@@ -524,7 +524,7 @@ func (j *relJoinPlan) matches(tx transaction, budget *relBudget, row Record, fir
 				limit = 1
 			}
 			var e error
-			rows, e = tx.find(j.foreign, Query{Where: conjunction(terms), Select: j.fields, hint: alt.index}, limit)
+			rows, e = relProbeRows(tx, j.foreign, Query{Where: conjunction(terms), Select: j.fields, hint: alt.index}, limit, budget)
 			if e == nil {
 				e = j.state.failure()
 			}
@@ -1700,6 +1700,10 @@ func relCursorItem(p *relChain, order []Order, values Record) (*relItem, error) 
 // executeJoinedAggregate groups the joined, deduplicated rows with the same
 // accumulators as aggregate: exact integers, and null, not zero, over no values.
 func executeJoinedAggregate(tx transaction, c Collection, r Request) (any, error) {
+	if r.Relation != nil {
+		return executeRelatedReadMode(tx, c, r, nil, true)
+	}
+
 	budget := &relBudget{ctx: relContext(tx)}
 	base, e := relAggregateInput(tx, c, &r, budget)
 	if e != nil {
@@ -1752,6 +1756,17 @@ func executeJoinedAggregate(tx transaction, c Collection, r Request) (any, error
 // executeRelatedRead selects each parent's related rows in a fixed order, takes
 // the first N, and only then tests Match. Nothing past N can match.
 func executeRelatedRead(tx transaction, c Collection, r Request, key []byte) (any, error) {
+	return executeRelatedReadMode(tx, c, r, key, false)
+}
+
+// A related aggregate consumes each matching parent once. Related entries only
+// determine eligibility: their number never weights the parent's metrics.
+func executeRelatedReadMode(tx transaction, c Collection, r Request, key []byte, aggregate bool) (any, error) {
+	finalOrder, finalLimit := r.OrderBy, r.Limit
+	if aggregate {
+		r.OrderBy, r.Select, r.Limit = nil, nil, 1
+	}
+
 	rel := r.Relation
 	if rel == nil {
 		return nil, Invalid("related_read requires relation")
@@ -1882,6 +1897,9 @@ func executeRelatedRead(tx transaction, c Collection, r Request, key []byte) (an
 			}
 		}
 		return out, nil
+	}
+	if aggregate {
+		return aggregateRelatedParents(tx, c, r, alias, budget, state, context, matchView, finalOrder, finalLimit, chains)
 	}
 	var after Record
 	if r.Cursor != "" {

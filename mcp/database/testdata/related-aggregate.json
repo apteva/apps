@@ -1,0 +1,112 @@
+{
+  "collection": "parents",
+  "as": "p",
+  "where": {
+    "field": "centre",
+    "op": "eq",
+    "value": "allowed"
+  },
+  "relation": {
+    "as": "context",
+    "limit": 2,
+    "sources": [
+      {
+        "name": "calls",
+        "joins": [
+          {
+            "collection": "contexts",
+            "as": "c",
+            "kind": "inner",
+            "on": [
+              {
+                "local": "p.id",
+                "foreign": "parent"
+              }
+            ]
+          }
+        ],
+        "filter": {
+          "field": "c.allowed",
+          "op": "eq",
+          "value": true
+        },
+        "distinct": [
+          "c.id"
+        ],
+        "orderBy": [
+          {
+            "field": "c.sequence",
+            "direction": "asc"
+          }
+        ],
+        "select": [
+          "c.text"
+        ]
+      }
+    ]
+  },
+  "match": {
+    "field": "c.text",
+    "op": "contains_ascii",
+    "value": "match"
+  },
+  "computed": [
+    {
+      "name": "percentage",
+      "type": "number",
+      "expr": {
+        "if": {
+          "and": [
+            {
+              "field": "p.maximum",
+              "op": "gt",
+              "value": 0
+            },
+            {
+              "field": "p.points",
+              "op": "is_not_null"
+            }
+          ]
+        },
+        "then": {
+          "op": "safe_divide",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "field": "p.points"
+                },
+                {
+                  "const": 100
+                }
+              ]
+            },
+            {
+              "field": "p.maximum"
+            }
+          ]
+        },
+        "else": {
+          "const": null
+        }
+      }
+    }
+  ],
+  "metrics": [
+    {
+      "name": "parents",
+      "op": "count"
+    },
+    {
+      "name": "points",
+      "op": "sum",
+      "field": "points"
+    },
+    {
+      "name": "average",
+      "op": "avg",
+      "field": "percentage"
+    }
+  ]
+}
