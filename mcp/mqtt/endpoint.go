@@ -15,6 +15,10 @@ func (b *Broker) endpointStatus() map[string]any {
 		ready, _ = certificate["ready"].(bool)
 		scheme = "mqtts"
 	}
+	if b.app.durable != nil {
+		ready = ready && b.app.durable.ready.Load() && !b.app.durable.failed.Load()
+	}
+	out["durable_acceptance"] = ready
 	out["ready"] = ready
 	out["endpoint"] = ""
 	if ready {

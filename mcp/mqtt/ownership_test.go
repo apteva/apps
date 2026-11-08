@@ -21,7 +21,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/apteva/app-sdk/testkit"
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
@@ -204,7 +204,7 @@ func TestMigrationCollisionRollsBackAndRetainedPruningIsPerScope(t *testing.T) {
 	}
 	for _, scope := range []string{"a", "b"} {
 		for i := 0; i < 2; i++ {
-			(&retainedHook{app: a}).OnRetainMessage(nil, packets.Packet{TopicName: scopeTopicRoot(scope) + fmt.Sprint(i), Payload: []byte("state")}, 1)
+			putRetainedFixture(t, a, packets.Packet{TopicName: scopeTopicRoot(scope) + fmt.Sprint(i), Payload: []byte("state")})
 		}
 	}
 	// Both scopes retain one message. A broker-wide pruning query would leave
@@ -277,7 +277,7 @@ func TestHTTPDataAndMetricsAreScoped(t *testing.T) {
 	b := scopedUser(t, a, "b", "two", []string{}, []string{})
 	for _, scope := range []string{"a", "b"} {
 		topic := scopeTopicRoot(scope) + "private"
-		(&retainedHook{app: a}).OnRetainMessage(nil, packets.Packet{TopicName: topic, Payload: []byte("secret-" + scope)}, 1)
+		putRetainedFixture(t, a, packets.Packet{TopicName: topic, Payload: []byte("secret-" + scope)})
 		if err := a.persistRecords([]messageRecord{{scope: scope, topic: topic, payload: []byte("secret-" + scope), payloadSize: 8}}, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -509,6 +509,18 @@ func wireWrite(t *testing.T, conn net.Conn, pk packets.Packet) {
 		err = pk.SubscribeEncode(&buf)
 	case packets.Publish:
 		err = pk.PublishEncode(&buf)
+	case packets.Puback:
+		err = pk.PubackEncode(&buf)
+	case packets.Pubrec:
+		err = pk.PubrecEncode(&buf)
+	case packets.Pubrel:
+		err = pk.PubrelEncode(&buf)
+	case packets.Pubcomp:
+		err = pk.PubcompEncode(&buf)
+	case packets.Unsubscribe:
+		err = pk.UnsubscribeEncode(&buf)
+	case packets.Disconnect:
+		err = pk.DisconnectEncode(&buf)
 	case packets.Pingreq:
 		err = pk.PingreqEncode(&buf)
 	default:

@@ -32,7 +32,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/apteva/app-sdk/testkit"
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
@@ -248,14 +248,15 @@ func TestHADiscoveryParser(t *testing.T) {
 }
 
 func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
-	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("proj-test"))
-	app := &App{ctx: ctx}
+	app, _, _ := startTransportBroker(t, map[string]string{"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false"})
 	hook := &retainedHook{app: app}
 	pk := packets.Packet{
 		TopicName: scopeTopicRoot("proj-test") + "devices/lamp/state", Payload: []byte(`{"on":true}`),
 		FixedHeader: packets.FixedHeader{Type: packets.Publish, Qos: 1, Retain: true},
 	}
-	hook.OnRetainMessage(nil, pk, 1)
+	if err := app.broker.Publish(pk.TopicName, pk.Payload, true, 1); err != nil {
+		t.Fatal(err)
+	}
 	stored, err := hook.StoredRetainedMessages()
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +264,9 @@ func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
 	if len(stored) != 1 || stored[0].TopicName != pk.TopicName || string(stored[0].Payload) != string(pk.Payload) {
 		t.Fatalf("stored retained = %#v", stored)
 	}
-	hook.OnRetainMessage(nil, packets.Packet{TopicName: pk.TopicName}, -1)
+	if err := app.broker.DeleteRetained(pk.TopicName); err != nil {
+		t.Fatal(err)
+	}
 	stored, err = hook.StoredRetainedMessages()
 	if err != nil || len(stored) != 0 {
 		t.Fatalf("retained delete: len=%d err=%v", len(stored), err)
@@ -612,5 +615,12 @@ func TestPanelContract(t *testing.T) {
 		if !declared[want] && !declared[want+"/"] {
 			t.Errorf("backend missing route %s — panel will hang", want)
 		}
+	}
+}
+
+func putRetainedFixture(t *testing.T, a *App, pk packets.Packet) {
+	t.Helper()
+	if _, err := a.ctx.AppDB().Exec(`INSERT INTO mqtt_retained(scope_id,topic,payload,qos,properties) VALUES(?,?,?,?, '{}')`, topicScope(pk.TopicName), pk.TopicName, pk.Payload, pk.FixedHeader.Qos); err != nil {
+		t.Fatal(err)
 	}
 }

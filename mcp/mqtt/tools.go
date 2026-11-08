@@ -14,7 +14,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
@@ -170,13 +170,18 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler:     a.toolStatus,
 		},
 	}
+	tools = append(tools, a.consumerTool())
 	for i := range tools {
 		handler := tools[i].Handler
+		contextHandler := tools[i].HandlerCtx
 		tools[i].Handler = nil
 		tools[i].HandlerCtx = func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			scope, err := a.toolScope(call)
 			if err != nil {
 				return nil, err
+			}
+			if contextHandler != nil {
+				return contextHandler(call, ctx.WithProject(scope), args)
 			}
 			return handler(ctx.WithProject(scope), args)
 		}
@@ -230,10 +235,11 @@ func (a *App) toolPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.validatePayloadSize(payload); err != nil {
 		return nil, err
 	}
-	if err := a.broker.Publish(topic, payload, retain, byte(qos)); err != nil {
+	id, err := a.broker.PublishMessage(topic, payload, retain, byte(qos))
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "topic": topic, "bytes": len(payload)}, nil
+	return map[string]any{"ok": true, "accepted": true, "durable": true, "message_id": id, "topic": topic, "bytes": len(payload)}, nil
 }
 
 func (a *App) toolTopicsRecent(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -457,8 +463,14 @@ func (a *App) mutateCredential(ctx *sdk.AppCtx, args map[string]any, change func
 	if err != nil {
 		return nil, err
 	}
+	revoked := ""
 	a.credentialsMu.Lock()
-	defer a.credentialsMu.Unlock()
+	defer func() {
+		a.credentialsMu.Unlock()
+		if revoked != "" {
+			a.revokeUser(revoked)
+		}
+	}()
 	username, nameErr := credentialName(scope, strings.TrimSpace(strArg(args, "username")))
 	if nameErr != nil {
 		return nil, nameErr
@@ -468,7 +480,7 @@ func (a *App) mutateCredential(ctx *sdk.AppCtx, args map[string]any, change func
 	}
 	// Revoke before returning even if cache reload fails. Existing auth snapshots
 	// cannot inherit the permissions of a deleted/recreated username.
-	a.revokeUser(username)
+	revoked = username
 	if err := a.reloadUserCache(); err != nil {
 		a.usersMu.Lock()
 		a.users = nil
@@ -588,7 +600,18 @@ func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 	if a.broker != nil {
 		endpoint = a.broker.endpointStatus()
 	}
+
+	durability := map[string]any{"ready": false}
+	if a.durable != nil {
+		var journalCount, journalBytes, sessionCount, sessionBytes, consumers int64
+		scope := projectScope(ctx)
+		_ = db.QueryRow(`SELECT count(*),coalesce(sum(length(packet)),0) FROM mqtt_journal WHERE scope_id=?`, scope).Scan(&journalCount, &journalBytes)
+		_ = db.QueryRow(`SELECT count(*),coalesce(sum(length(snapshot)),0) FROM mqtt_sessions WHERE scope_id=?`, scope).Scan(&sessionCount, &sessionBytes)
+		_ = db.QueryRow(`SELECT count(*) FROM mqtt_consumers WHERE scope_id=?`, scope).Scan(&consumers)
+		durability = map[string]any{"ready": a.durable.ready.Load(), "storage_fault": a.durable.failed.Load(), "journal_messages": journalCount, "journal_bytes": journalBytes, "sessions": sessionCount, "session_bytes": sessionBytes, "consumers": consumers, "max_journal_messages": a.durable.maxMessages, "max_journal_bytes": a.durable.maxBytes, "max_session_bytes": a.durable.maxSessionBytes, "application_delivery": "at-least-once via mqtt_consumer or POST /consumers; deduplicate message_id", "publisher_ack": "SQLite FULL commit of journal, retained mutation and QoS subscriber obligations"}
+	}
 	return map[string]any{
+		"durability":            durability,
 		"scope_id":              projectScope(ctx),
 		"topic_root":            scopeTopicRoot(projectScope(ctx)),
 		"port":                  port,

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
@@ -43,12 +43,24 @@ func NewBroker(a *App) (*Broker, error) {
 		return nil, err
 	}
 	capabilities := mqtt.NewDefaultServerCapabilities()
+	capabilities.MaximumMessageExpiryInterval = 0 // only explicit MQTT expiry expires deliveries
+	maximumSession, err := strictInt(a.ctx, "max_session_expiry_seconds", 604800, 1, 2147483647)
+	if err != nil {
+		return nil, err
+	}
+	capabilities.MaximumSessionExpiryInterval = uint32(maximumSession)
 	capabilities.MaximumClients = int64(clampConfigInt(a.ctx, "max_clients", 1000, 1, 1000000))
 	capabilities.MaximumPacketSize = uint32(clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455))
 	capabilities.ReceiveMaximum = uint16(clampConfigInt(a.ctx, "max_inflight_per_client", 128, 1, 65535))
 	capabilities.MaximumInflight = capabilities.ReceiveMaximum
 	capabilities.MaximumClientWritesPending = int32(clampConfigInt(a.ctx, "max_pending_writes_per_client", 1024, 1, 1048576))
+	durable, err := newDurableStore(a)
+	if err != nil {
+		return nil, fmt.Errorf("durable storage: %w", err)
+	}
+	a.durable = durable
 	server := mqtt.New(&mqtt.Options{
+		Persistence:  durable,
 		InlineClient: true, // needed for the bus loopback subscriber.
 		Capabilities: capabilities,
 	})
@@ -152,6 +164,9 @@ func (b *Broker) Serve(ctx context.Context) error {
 
 func (b *Broker) Close() error {
 	b.closeOnce.Do(func() {
+		if b.app.durable != nil {
+			b.app.durable.ready.Store(false)
+		}
 		if b.certificates != nil {
 			b.certificates.cancel()
 		}
@@ -164,13 +179,27 @@ func (b *Broker) Close() error {
 
 // Publish — used by MCP tool + HTTP handler + inbound bus bridge.
 func (b *Broker) Publish(topic string, payload []byte, retain bool, qos byte) error {
+	_, err := b.PublishMessage(topic, payload, retain, qos)
+	return err
+}
+func (b *Broker) PublishMessage(topic string, payload []byte, retain bool, qos byte) (string, error) {
+	if b.app.durable == nil || !b.app.durable.ready.Load() {
+		return "", fmt.Errorf("MQTT recovery incomplete or durable storage unavailable")
+	}
 	if err := b.app.validatePayloadSize(payload); err != nil {
-		return err
+		return "", err
 	}
 	if err := b.app.admitScope(topicScope(topic)); err != nil {
-		return err
+		return "", err
 	}
-	return b.server.Publish(topic, payload, retain, qos)
+	pk, err := b.server.PublishAccepted(topic, payload, retain, qos)
+	if err == packets.ErrQuotaExceeded {
+		return "", errOverloaded
+	}
+	if err != nil {
+		return "", err
+	}
+	return mqtt.MessageID(pk), nil
 }
 
 // Subscribe — wraps the inline subscription. Filter id is caller-managed;

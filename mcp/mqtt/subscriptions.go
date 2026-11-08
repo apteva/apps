@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 )
 
 type BusSubscription struct {

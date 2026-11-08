@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -540,16 +540,19 @@ func (a *App) revokeUser(username string) {
 	if a.broker == nil {
 		return
 	}
-	for _, cl := range a.broker.server.Clients.GetAll() {
-		identity := a.clientIdentity(cl)
-		if identity == nil || identity.username != username {
-			continue
+	_ = a.broker.server.MutateSessions(func() {
+		for _, cl := range a.broker.server.Clients.GetAll() {
+			identity := a.clientIdentity(cl)
+			if identity == nil || identity.username != username {
+				continue
+			}
+			// Stop first: writing DISCONNECT to a slow peer must not delay revocation
+			// while holding the credential lock. OnWill rechecks the revision after
+			// this mutation releases that lock, so a revoked will is neutralized.
+			cl.Stop(packets.ErrNotAuthorized)
+			a.broker.server.UnsubscribeClient(cl)
+			cl.ClearInflights()
+			a.broker.server.Clients.Delete(cl.ID)
 		}
-		// Stop first: writing DISCONNECT to a slow peer must not delay revocation
-		// while holding the credential lock. OnWill rechecks the revision after
-		// this mutation releases that lock, so a revoked will is neutralized.
-		cl.Stop(packets.ErrNotAuthorized)
-		a.broker.server.UnsubscribeClient(cl)
-		cl.ClearInflights()
-	}
+	})
 }

@@ -105,6 +105,13 @@ func startTransportBroker(t *testing.T, cfg map[string]string) (*App, *sdk.AppCt
 			}
 		}
 	})
+	deadline := time.Now().Add(3 * time.Second)
+	for !app.durable.ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !app.durable.ready.Load() {
+		t.Fatal("recovery not ready")
+	}
 	return app, ctx, recorder
 }
 func filesConfig(t *testing.T, ca *testCA) map[string]string {
@@ -321,7 +328,7 @@ func TestRetainedCleanupDoesNotDeleteOnRejectedPublish(t *testing.T) {
 	bucket.rate = 0.001
 	bucket.mu.Unlock()
 	for _, name := range []string{"old", "new"} {
-		(&retainedHook{app: app}).OnRetainMessage(nil, packets.Packet{TopicName: root + name, Payload: []byte("keep")}, 1)
+		putRetainedFixture(t, app, packets.Packet{TopicName: root + name, Payload: []byte("keep")})
 	}
 	app.sweepOnce()
 	stored, err := listRetainedMessages(ctx.AppDB(), "a", "", 10)

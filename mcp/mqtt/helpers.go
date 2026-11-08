@@ -112,6 +112,11 @@ func (a *App) runRetentionSweep(ctx context.Context) error {
 }
 
 func (a *App) sweepOnce() {
+	if a.durable != nil {
+		if err := a.pruneJournal(); err != nil {
+			a.durable.fault(err, a.broker.server)
+		}
+	}
 	hours := configInt(a.ctx, "message_log_retention_hours", 168)
 	if hours <= 0 {
 		return

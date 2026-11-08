@@ -350,9 +350,10 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 503, "broker not running")
 		return
 	}
-	if err := a.broker.Publish(body.Topic, []byte(body.Payload), body.Retain, byte(body.QoS)); err != nil {
+	id, err := a.broker.PublishMessage(body.Topic, []byte(body.Payload), body.Retain, byte(body.QoS))
+	if err != nil {
 		publishHTTPError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "ts": time.Now().UTC().Format(time.RFC3339)})
+	writeJSON(w, map[string]any{"ok": true, "accepted": true, "durable": true, "message_id": id, "ts": time.Now().UTC().Format(time.RFC3339)})
 }

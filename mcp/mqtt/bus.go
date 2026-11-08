@@ -29,7 +29,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
@@ -260,13 +260,14 @@ func (a *App) emitBusMessageForProject(busTopic, projectID string, cl *mqtt.Clie
 	}
 	clientID, username := a.mqttIdentity(cl, pk)
 	a.ctx.EmitWithProject("mqtt."+busTopic, projectID, map[string]any{
-		"scope_id":  projectID,
-		"topic":     pk.TopicName,
-		"payload":   payloadField,
-		"qos":       int(pk.FixedHeader.Qos),
-		"retain":    pk.FixedHeader.Retain,
-		"client_id": clientID,
-		"username":  username,
+		"message_id": mqtt.MessageID(pk),
+		"scope_id":   projectID,
+		"topic":      pk.TopicName,
+		"payload":    payloadField,
+		"qos":        int(pk.FixedHeader.Qos),
+		"retain":     pk.FixedHeader.Retain,
+		"client_id":  clientID,
+		"username":   username,
 	})
 	a.eventsEmitted.Add(1)
 	a.counters(projectID).eventsEmitted.Add(1)

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
@@ -110,35 +110,18 @@ func (h *retainedHook) Provides(b byte) bool {
 	return b == mqtt.OnRetainMessage || b == mqtt.OnRetainedExpired || b == mqtt.StoredRetainedMessages
 }
 
-func (h *retainedHook) OnRetainMessage(_ *mqtt.Client, pk packets.Packet, result int64) {
-	scope := topicScope(pk.TopicName)
-	if scope == "" {
-		return
-	}
-	if result == -1 || len(pk.Payload) == 0 {
-		_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, scope, pk.TopicName)
-		return
-	}
-	props, _ := json.Marshal(storageProperties(pk.Properties))
-	_, _ = h.app.ctx.AppDB().Exec(
-		`INSERT INTO mqtt_retained(scope_id, topic, payload, qos, properties, updated_at)
-		 VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)
-		 ON CONFLICT(topic) DO UPDATE SET
-		   payload = excluded.payload,
-		   qos = excluded.qos,
-		   properties = excluded.properties,
-		   updated_at = CURRENT_TIMESTAMP`,
-		scope, pk.TopicName, pk.Payload, pk.FixedHeader.Qos, string(props),
-	)
-}
+func (h *retainedHook) OnRetainMessage(_ *mqtt.Client, _ packets.Packet, _ int64) {}
 
 func (h *retainedHook) OnRetainedExpired(topic string) {
-	_, _ = h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, topicScope(topic), topic)
+	_, err := h.app.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE scope_id = ? AND topic = ?`, topicScope(topic), topic)
+	if err != nil {
+		h.app.durable.fault(err, h.app.broker.server)
+	}
 }
 
 func (h *retainedHook) StoredRetainedMessages() ([]storage.Message, error) {
 	rows, err := h.app.ctx.AppDB().Query(
-		`SELECT scope_id, topic, payload, qos, properties, unixepoch(updated_at) FROM mqtt_retained WHERE scope_id != '' ORDER BY topic`)
+		`SELECT scope_id, topic, payload, qos, properties, unixepoch(updated_at), expires_at FROM mqtt_retained WHERE scope_id != '' AND (expires_at=0 OR expires_at>unixepoch()) ORDER BY topic`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +131,8 @@ func (h *retainedHook) StoredRetainedMessages() ([]storage.Message, error) {
 		var scope, topic, propsJSON string
 		var payload []byte
 		var qos byte
-		var created int64
-		if err := rows.Scan(&scope, &topic, &payload, &qos, &propsJSON, &created); err != nil {
+		var created, expiry int64
+		if err := rows.Scan(&scope, &topic, &payload, &qos, &propsJSON, &created, &expiry); err != nil {
 			return nil, err
 		}
 		if !validScope(scope) || topicScope(topic) != scope {
@@ -157,6 +140,9 @@ func (h *retainedHook) StoredRetainedMessages() ([]storage.Message, error) {
 		}
 		var props storage.MessageProperties
 		_ = json.Unmarshal([]byte(propsJSON), &props)
+		if expiry > 0 {
+			props.MessageExpiryInterval = uint32(expiry - created)
+		}
 		props.TopicAlias = 0 // aliases belong to a connection, including legacy records.
 		if created == 0 {
 			created = time.Now().Unix()

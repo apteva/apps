@@ -1,9 +1,9 @@
 # MQTT Broker
 
-Version 0.5.0 adds TLS, certificate renewal, public endpoint metadata, and explicit
-ingress overload rejection to 0.4.0 ownership isolation and explicit credentials. All
-ownership logic lives in this app. A scope is an opaque identifier, without
-customer, billing, device, or application-specific semantics.
+Version 0.6.0 adds durable acceptance, recoverable MQTT sessions and generic
+application consumers to the scoped credentials, TLS and overload handling in
+0.5.0. A scope is an opaque identifier with no customer, billing, device, or
+application-specific semantics. All changes are contained in this app.
 
 ## Ownership boundary
 
@@ -255,20 +255,106 @@ Budgets are process-local and are not durable usage or billing counters.
 
 A full subscriber outbound queue disconnects the affected subscriber explicitly.
 Other broker limits reject connections or packets at their protocol boundaries.
-Ingress admission does **not** reserve every subscriber's inflight storage or
-establish durable delivery. Retained cleanup preserves the stored record when
-its deletion publish is rejected, so a failed cleanup cannot partially delete it.
+Durable acceptance also reserves every matching QoS 1/2 subscriber obligation
+before success. A full offline/in-flight queue rejects the whole publish; it does
+not update retained state or partially fan out. Retained cleanup preserves the
+stored record when its deletion publish is rejected.
 
-## Remaining delivery guarantees
+## Durable acceptance and recovery (0.6.0)
 
-Event and audit queues remain best effort. This release does not add durable
-message acceptance, MQTT session/offline/inflight recovery, acknowledged app
-consumption/replay, persistent usage accounting/quotas, or complete retained
-pagination. Retained writes still need stronger storage-error propagation.
-A successful MQTT acknowledgment or HTTP/MCP publish result proves ingress was
-admitted; it does not prove disk durability, delivery to every subscriber, or
-processing by a consuming application. Application receipts and retries remain
-necessary for stronger end-to-end guarantees until that later work is complete.
+A successful MQTT PUBACK/PUBREC, or an HTTP/MCP result with `accepted: true`,
+means one SQLite transaction committed the complete message journal record,
+retained update/deletion, incoming QoS2 marker, and matching QoS 1/2 delivery
+obligations. SQLite uses WAL and `synchronous=FULL`. Keep `/data/mqtt.db` and its
+SQLite companion files on persistent storage that honors fsync. This is a
+single-broker guarantee, without replication or protection from volume loss.
+
+`mqtt_publish` and `POST /test_publish` return `message_id` and `durable: true`.
+The same ID appears in journal records, best-effort bus notifications, and MQTT 5
+user property `apteva.message_id`. Publisher-supplied values of that property are
+replaced. QoS2 retries within a session reuse the committed record; an ambiguous
+QoS1 producer retry may create a second acceptance and ID, as MQTT permits.
+Producers still need their own logical identifiers for deduplicating those retries.
+QoS0 is journaled if accepted, but has no protocol receipt and no offline delivery.
+
+MQTT 3.1.1 clients use `CleanSession=false`. MQTT 5 clients request a positive
+Session Expiry Interval; Clean Start abandons an earlier session. The maximum
+expiry is `max_session_expiry_seconds` (default 604800, seven days), negotiated in
+MQTT 5 CONNACK. Subscriptions, subscription options, queued QoS 1/2 packets,
+incoming QoS2 receipt markers, and outgoing QoS2 PUBREL state recover before
+listeners open. Incoming and outgoing packet ID namespaces are independent.
+Restored offline expiry remains anchored to the saved disconnect/checkpoint time
+across repeated restarts. Explicit MQTT message expiry expires queued PUBLISH
+bodies, while QoS2 completion state remains until completion or session expiry.
+Credential changes invalidate active and offline recoverable sessions.
+
+Immediate wills use the same transaction boundary. A restart publishes an
+interrupted connection's saved, still-authorized will once; clearing its flag is
+atomic with acceptance. Delayed wills remain unsupported. A will that cannot be
+persisted makes storage unhealthy, preserving the previous recovery record.
+
+Persistence failures close connections before success, set `ready: false`, clear
+the enrollment endpoint and expose `durability.storage_fault` in `/status` and
+`mqtt_status`. Repair storage/capacity and restart the app to resume. Capacity
+rejections alone remain retryable and do not latch a storage fault.
+
+Defaults per scope: 100000 journal records, 64 MiB serialized journal data and
+64 MiB serialized session/queue data. Configure `max_journal_messages_per_scope`,
+`max_journal_bytes_per_scope` and `max_session_bytes_per_scope`. Existing
+`max_inflight_per_client` also bounds each subscriber queue. Capacity checks and
+persistent journal byte/count accounting share the acceptance transaction.
+Durable mutations are serialized; throughput depends on SQLite and the amount
+of outstanding session state. Unchanged session rows are not rewritten for every
+publish. These storage capacities are separate from future durable transport
+usage/billing quotas.
+
+## Application consumption
+
+Use MCP `mqtt_consumer` or HTTP `POST /consumers` with the same JSON arguments.
+Ownership is derived from the authenticated app installation, delegated subject,
+agent, or HTTP operator. An argument cannot select another owner's consumer.
+Consumer names are local to that owner and scope. Topic filters use the full
+scope topic root. Message bodies are complete `payload_base64`, with properties,
+publisher identity, `message_id` and decimal-string `sequence`.
+
+1. Create: `{"action":"create","name":"worker","topic_filter":"scopes/YQ/#","start":"earliest"}`.
+   `start` can also be `latest`, or `after` with `after_sequence`.
+2. Claim: `{"action":"claim","name":"worker","limit":100,"lease_seconds":60}`.
+   Process the returned messages, then persist the application's effects.
+3. Acknowledge the whole batch: `{"action":"ack","name":"worker","lease_token":"<returned token>"}`.
+   Only the current, unexpired token advances the durable committed cursor.
+4. Retry: `{"action":"retry","name":"worker","lease_token":"<token>","retry_seconds":10}`.
+   Unacknowledged/expired leases become claimable after restart with the same IDs.
+5. Replay: `{"action":"replay","name":"worker","after_sequence":"0"}`.
+   This resets the cursor and invalidates existing lease tokens. `status` inspects
+   the cursor; `delete` removes a consumer and releases its history pin.
+
+Application delivery is **at least once**. Deduplicate `message_id` in the same
+application transaction as side effects where possible; acknowledgment cannot
+be atomic with another app's database. Leases default to 60 seconds, allow
+1–3600 seconds, and retries allow delays of 0–86400 seconds. Claims return at
+most 1000 records and about 4 MiB per page (one complete large record is allowed).
+One batch per consumer can be leased at a time; independent consumers each see
+their own stream.
+
+`{"action":"history","topic_filter":"scopes/YQ/#","limit":100}` reads paginated
+history without a consumer. Omit `after_sequence` to start at the earliest
+available record, then pass returned `next_sequence` until `has_more=false`.
+Filtering can produce an empty page that still advances the cursor. History is
+bounded by `journal_retention_hours` (default 168). Registered consumers pin all
+unacknowledged history; the app rejects new publishes when pinned history fills
+capacity. Acknowledged/unpinned records are pruned by the retention worker after
+the window. Explicit replay into pruned history returns an error (HTTP 410),
+with no silent gap. Historical reads may include messages whose MQTT expiry has
+passed; MQTT delivery still honors expiry.
+
+The platform event bridge and diagnostic audit feed remain best effort; use the
+durable consumer API for reliable application processing. Complete retained
+pagination and persistent connection/traffic usage quotas remain separate work.
+Existing retained list previews are unchanged; individual retained reads are full.
+Before upgrading, back up the app database. Migration 004 is additive and cannot
+recover messages or sessions lost before 0.6.0. Reconnect persistent MQTT clients
+after upgrade to establish their recoverable sessions.
 
 ## Validation
 

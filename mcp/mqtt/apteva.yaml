@@ -2,31 +2,23 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.5.0
+version: 0.6.0
 description: |
-  Embedded MQTT broker for Apteva. Acts as the LAN message bus for
-  smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
-  speaks MQTT 3.1.1 or 5.0). Every published message is mirrored
-  onto the platform event bus as `mqtt.message` so sibling apps
-  (messaging, jobs, calendar) can react without speaking MQTT
-  themselves; per-pattern subscriptions promote interesting topics
-  to named bus events (e.g. `mqtt.motion.frontdoor`).
+  Ownership-scoped MQTT 3.1.1/5.0 broker with TLS by default, renewable
+  certificate files or automatic ACME renewal, and validated public endpoints.
+  Credentials require explicit topic permissions; client IDs belong to their
+  authenticated credential identities.
 
-  Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
-  retained-message persistence, explicit ingress overload rejection, and MQTT 5 properties.
-  TLS is the default transport, using renewable certificate files or automatic
-  ACME TLS-ALPN-01 issuance/renewal. Enrollment advertises a validated public
-  host and port independently of the internal listener.
-  Auth is username/password against this app's own DB. Credentials belong
-  to an opaque ownership scope, use a scope-qualified wire username, and
-  require explicit publish/subscribe ACLs under the scope's topic root.
-  Client IDs are durably bound to credential identities. Management data
-  and events are isolated by the authenticated ownership scope.
+  Version 0.6.0 commits accepted messages, retained changes and QoS subscriber
+  obligations atomically before acknowledgment. Persistent subscriptions and
+  QoS 1/2 in-flight state recover after restart. Generic application consumers
+  use persisted cursors, leased batches, acknowledgments, retry and replay with
+  stable message IDs and complete payloads. Storage/queue capacity rejects
+  acceptance explicitly; storage faults remove endpoint readiness.
 
-  Auto-discovers Home Assistant-convention devices by parsing
-  `homeassistant/+/+/config` so any sensor that already speaks the
-  HA discovery convention shows up in the Devices tab without
-  hand-config.
+  Platform events remain best-effort notifications. Optional Home Assistant
+  discovery and existing event bridges remain available. All ownership,
+  transport and durability logic is contained in this app, using its own DB.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/mqtt
@@ -48,6 +40,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: mqtt_consumer, description: "Durable scoped consumption: create, claim, ack, retry, replay, status, delete, or paginated history. Full payloads, stable message IDs and persisted cursors." }
     - { name: mqtt_publish,            description: "Publish one message. Payload may be a string or JSON value; non-strings are JSON-encoded. Args: topic, payload, retain?, qos?." }
     - { name: mqtt_topics_recent,      description: "Last N topics seen by the broker. Args: limit? (default 50)." }
     - { name: mqtt_clients_list,       description: "List currently connected network MQTT clients with authenticated identity and protocol metadata." }
@@ -106,6 +99,31 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: max_session_expiry_seconds
+    type: text
+    default: "604800"
+    label: Maximum persistent session lifetime
+    description: Maximum offline lifetime in seconds; MQTT 5 negotiates a shorter requested expiry. MQTT 3 persistent sessions use this limit.
+  - name: max_journal_messages_per_scope
+    type: text
+    default: "100000"
+    label: Durable messages per scope
+    description: Reject publishes before acknowledgment when this journal capacity is reached. Consumers pin unacknowledged history.
+  - name: max_journal_bytes_per_scope
+    type: text
+    default: "67108864"
+    label: Durable journal bytes per scope
+    description: Serialized complete packet bytes; rejection is atomic with retained and session updates.
+  - name: max_session_bytes_per_scope
+    type: text
+    default: "67108864"
+    label: Durable session bytes per scope
+    description: Serialized subscription and in-flight state capacity. Full queues backpressure publishers.
+  - name: journal_retention_hours
+    type: text
+    default: "168"
+    label: Journal replay window in hours
+    description: Acknowledged history can be pruned after this window; registered consumers pin unread history until acknowledged or deleted.
   - name: transport_mode
     type: select
     options: ["tls", "local"]
