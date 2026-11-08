@@ -1,0 +1,6 @@
+/devices
+__pycache__/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+devices-recovery.key
