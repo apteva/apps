@@ -332,7 +332,30 @@ func (t *aptevaTx) findPending(c Collection, q Query, limit int) ([]Record, erro
 		}
 	}
 	top := &topRecords{collection: c, query: order, limit: limit, workLimit: t.backend.options.QueryWorkBytes}
-	e := t.scanFields(c, q, nil, func(r Record, _ []byte) bool { return true }, func(r Record) error { return top.offer(r) })
+	var fields []string
+	if len(q.Select) > 0 {
+		fields = append(fields, q.Select...)
+		for _, o := range order.OrderBy {
+			fields = append(fields, o.Field)
+		}
+	}
+	e := t.scanFields(c, q, fields, func(r Record, _ []byte) bool { return true }, func(r Record, scanBytes int) error {
+		// The scan buffer, decoded scratch and a possible projected copy live
+		// alongside the retained page, rather than receiving separate budgets.
+		top.workLimit = t.backend.options.QueryWorkBytes - scanBytes
+		if top.workLimit <= 0 || top.bytes > top.workLimit {
+			return fail("resource_limit", "scan and retained page exceed query memory budget")
+		}
+		if e := top.offer(r); e != nil {
+			return e
+		}
+		if q.diag != nil {
+			q.diag.pageHeapBytes = max(q.diag.pageHeapBytes, top.bytes)
+			q.diag.scanBytes = max(q.diag.scanBytes, scanBytes)
+			q.diag.pagePeakBytes = max(q.diag.pagePeakBytes, top.bytes+scanBytes)
+		}
+		return nil
+	})
 	if e != nil {
 		return nil, e
 	}
@@ -347,7 +370,7 @@ func (t *aptevaTx) findPending(c Collection, q Query, limit int) ([]Record, erro
 // Native query execution is streaming. A write overlay masks old snapshot rows
 // and contributes staged records, so filtered writes/upserts see earlier batch
 // operations without repeatedly rebuilding an optimistic transaction's batch.
-func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume func(Record, []byte) bool, offer func(Record) error) error {
+func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume func(Record, []byte) bool, offer func(Record, int) error) error {
 	if q.RequireIndex && !plan(c, q).IndexedLookup {
 		return fail("query_too_expensive", "query requires a selective index")
 	}
@@ -362,16 +385,18 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	if e != nil {
 		return e
 	}
-	opts := nativeQueryOptions(c, stream, 0)
+	opts := nativeScanOptions(c, stream)
 	opts.MaxMemoryBytes = int64(t.backend.options.QueryWorkBytes)
-	opts.Stats = q.diag.nativeStats("documents")
+	total := q.diag.nativeStats("documents")
 	if q.examined != nil {
-		stats := opts.Stats
-		if stats == nil {
-			stats = &native.QueryStats{}
-			opts.Stats = stats
+		if total == nil {
+			total = &native.QueryStats{}
 		}
-		defer func() { *q.examined += stats.DocumentFetches }()
+		defer func() { *q.examined += total.DocumentFetches }()
+	}
+	var stats native.QueryStats
+	if total != nil || offer != nil {
+		opts.Stats = &stats
 	}
 	decoder := newNativeScanDecoder(c, fields, q.Where)
 	var consumeErr error
@@ -389,17 +414,38 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 			return true
 		}
 		if offer != nil {
-			consumeErr = offer(r)
+			// Reserve decoded scratch and one possible projected copy while the
+			// previous heap row is still live. Native statistics cover retained
+			// engine buffers; the current borrowed document is accounted separately.
+			decodedBytes := retainedBytes(r)
+			if q.diag != nil {
+				q.diag.pageDecodedBytes = max(q.diag.pageDecodedBytes, decodedBytes)
+			}
+			scanBytes := len(data) + 2*decodedBytes + int(opts.Stats.PeakMemoryBytes)
+			consumeErr = offer(r, scanBytes)
 			return consumeErr == nil
 		}
 		stopped = !consume(r, data)
 		return !stopped
 	}
-	e = h.Query(t.ctx, marshal(nativeFilter(c, stripExists(q.Where))), opts, func(key, data []byte) bool {
-		if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
-			return true
+	eachNativeScanFilter(c, stream, func(where *Filter) bool {
+		e = h.Query(t.ctx, marshal(nativeFilter(c, stripExists(where))), opts, func(key, data []byte) bool {
+			if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
+				return true
+			}
+			return visit(data)
+		})
+		if total != nil {
+			total.DocumentFetches += stats.DocumentFetches
+			total.IndexEntriesExamined += stats.IndexEntriesExamined
+			total.Examined += stats.Examined
+			total.Returned += stats.Returned
+			total.PeakMemoryBytes = max(total.PeakMemoryBytes, stats.PeakMemoryBytes)
+			ranges := total.Plan.Ranges + 1
+			total.Plan = stats.Plan
+			total.Plan.Ranges = ranges
 		}
-		return visit(data)
+		return e == nil && consumeErr == nil && !stopped
 	})
 	if e != nil {
 		return nativeError(e)

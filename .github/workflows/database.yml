@@ -29,7 +29,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.13
-      - run: go test -race ./...
+      # Keep the large paging stress fixture separate from the contract suite's
+      # Go process deadline; both retain the default timeout and race detector.
+      - run: go test -race ./... -skip '^TestLargeScopedPageStreams$'
+      - name: Verify large scoped paging against SQLite
+        run: go test -race ./engine -run '^TestLargeScopedPageStreams$'
       - run: go vet ./...
       - run: go mod verify
       - run: bun test ui/realtime-client.test.ts

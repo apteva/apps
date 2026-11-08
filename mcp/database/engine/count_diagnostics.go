@@ -15,6 +15,8 @@ type countDiagnostics struct {
 	stats                                   *native.QueryStats
 	selectionProbes                         int64
 	selectionEntries                        int64
+	pageHeapBytes, scanBytes, pagePeakBytes int
+	pageDecodedBytes                        int
 }
 
 func (d *countDiagnostics) queued() {
