@@ -106,6 +106,9 @@ function useAppEvents<T = unknown>(
 interface BrokerStatus {
   scope_id: string;
   topic_root: string;
+  tls: boolean;
+  ready: boolean;
+  transport: { mode: string; certificate?: { provider: string; ready: boolean; expires_at?: string; renewal_due?: boolean; last_error: string } };
   port: number;
   listen_address: string;
   clients: number;
@@ -332,7 +335,7 @@ function LiveTab({ projectId }: { projectId: string }) {
       )}
       {status && (status.events_dropped > 0 || status.rate_limited_messages > 0) && (
         <div className="mx-4 mt-3 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
-          {status.events_dropped.toLocaleString()} platform events dropped · {status.rate_limited_messages.toLocaleString()} client publishes rate-limited.
+          {status.events_dropped.toLocaleString()} platform events dropped · {status.rate_limited_messages.toLocaleString()} publishes rejected before acceptance.
         </div>
       )}
       <div className="px-4 py-2">
@@ -453,21 +456,29 @@ function ConnectionSection() {
   const scopedFetch = useScopedFetch();
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   useEffect(() => {
-    scopedFetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then(setStatus).catch(() => {});
+    let cancelled = false;
+    const refresh = () => scopedFetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then((s) => { if (!cancelled) setStatus(s); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [API, scopedFetch]);
   return (
     <div>
       <h3 className="text-sm font-medium mb-2">Broker connection</h3>
       <div className="border border-border rounded px-3 py-2 text-xs">
-        <div>Client endpoint: <code className="font-mono">{status?.endpoint || "…"}</code></div>
+        <div>Client endpoint: <code className="font-mono">{status?.endpoint || (status ? "Certificate pending or unavailable" : "…")}</code></div>
         {status && <div className="mt-1">Topic root: <code className="font-mono">{status.topic_root}</code></div>}
         {status && <div className="text-text-dim mt-1">Bind address: <code className="font-mono">{status.bind_address}</code></div>}
         {status && <div className="text-text-dim mt-1">
           Limits: {status.limits.max_clients.toLocaleString()} clients · {(status.limits.max_payload_bytes / 1024).toLocaleString()} KiB packets · {status.limits.max_publish_per_second}/s per client
         </div>}
         <div className="text-text-dim mt-1">
-          Connect to the host running this sidecar. Authentication is required by default; TLS is not terminated by this app, so expose it only on a trusted network, VPN, or protected TCP proxy.
+          {status ? (status.tls ? "TLS connections must verify the certificate chain and advertised hostname." : "Local plaintext mode is enabled. Use only the configured private endpoint.") : "Loading transport status…"}
         </div>
+        {status?.transport.certificate?.expires_at && <div className="text-text-dim mt-1">Certificate expires: {new Date(status.transport.certificate.expires_at).toLocaleString()} · {status.transport.certificate.provider}</div>}
+        {status?.transport.certificate?.renewal_due && <div className="text-warning mt-1">Certificate renewal is due.</div>}
+        {status?.transport.certificate?.last_error && <div className="text-error mt-1">{status.transport.certificate.last_error}</div>}
+        {status && !status.ready && <div className="text-warning mt-1">Enrollment is unavailable until a valid certificate is ready.</div>}
       </div>
     </div>
   );

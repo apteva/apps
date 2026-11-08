@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
+	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/listeners"
@@ -20,15 +22,26 @@ import (
 )
 
 type Broker struct {
-	server  *mqtt.Server
-	port    int
-	address string
-	app     *App
+	server       *mqtt.Server
+	port         int
+	address      string
+	app          *App
+	transport    transportConfig
+	certificates *certificateService
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 // NewBroker constructs a server with hooks wired up and the TCP
 // listener bound. Doesn't start serving yet — that's the worker.
 func NewBroker(a *App) (*Broker, error) {
+	transport, err := parseTransport(a.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.initAdmission(); err != nil {
+		return nil, err
+	}
 	capabilities := mqtt.NewDefaultServerCapabilities()
 	capabilities.MaximumClients = int64(clampConfigInt(a.ctx, "max_clients", 1000, 1, 1000000))
 	capabilities.MaximumPacketSize = uint32(clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455))
@@ -40,7 +53,7 @@ func NewBroker(a *App) (*Broker, error) {
 		Capabilities: capabilities,
 	})
 
-	br := &Broker{server: server, app: a}
+	br := &Broker{server: server, app: a, transport: transport}
 
 	// AuthHook satisfies the broker's auth/ACL hook interface and
 	// delegates to users.go.
@@ -62,14 +75,33 @@ func NewBroker(a *App) (*Broker, error) {
 		return nil, fmt.Errorf("retained storage hook: %w", err)
 	}
 
-	port, err := pickListenerPort(a)
-	if err != nil {
-		return nil, err
+	if transport.mode == "tls" {
+		certificates, tlsConfig, err := newCertificateService(transport)
+		if err != nil {
+			return nil, err
+		}
+		br.certificates = certificates
+		listener, err := net.Listen("tcp", net.JoinHostPort(transport.bind, strconv.Itoa(transport.port)))
+		if err != nil {
+			return nil, err
+		}
+		secure := &mqttTLSListener{listener: listener, config: tlsConfig, timeout: time.Duration(transport.handshakeSeconds) * time.Second, slots: make(chan struct{}, transport.maxHandshakes), conns: map[net.Conn]struct{}{}}
+		if err := server.AddListener(secure); err != nil {
+			listener.Close()
+			return nil, err
+		}
+		br.address = secure.Address()
+		_, actual, _ := net.SplitHostPort(br.address)
+		br.port, _ = strconv.Atoi(actual)
+	} else {
+		br.port, br.address, err = attachTCPListener(server, a, transport.port)
+		if err != nil {
+			_ = server.Close()
+			return nil, err
+		}
 	}
-	br.port, br.address, err = attachTCPListener(server, a, port)
-	if err != nil {
-		_ = server.Close()
-		return nil, err
+	if br.transport.publicPort == 0 {
+		br.transport.publicPort = br.port
 	}
 	return br, nil
 }
@@ -108,26 +140,36 @@ func (b *Broker) Serve(ctx context.Context) error {
 		b.app.ctx.Logger().Warn("ha discovery bridge", "err", err.Error())
 	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- b.server.Serve() }()
-	select {
-	case <-ctx.Done():
-		_ = b.server.Close()
-		return nil
-	case err := <-errCh:
+	// Mochi's Serve starts goroutines and returns. Keep this supervised worker
+	// alive until cancellation so all sockets and pending TLS work are closed.
+	if err := b.server.Serve(); err != nil {
+		_ = b.Close()
 		return err
 	}
+	<-ctx.Done()
+	return b.Close()
 }
 
 func (b *Broker) Close() error {
-	if b.server == nil {
-		return nil
-	}
-	return b.server.Close()
+	b.closeOnce.Do(func() {
+		if b.certificates != nil {
+			b.certificates.cancel()
+		}
+		if b.server != nil {
+			b.closeErr = b.server.Close()
+		}
+	})
+	return b.closeErr
 }
 
 // Publish — used by MCP tool + HTTP handler + inbound bus bridge.
 func (b *Broker) Publish(topic string, payload []byte, retain bool, qos byte) error {
+	if err := b.app.validatePayloadSize(payload); err != nil {
+		return err
+	}
+	if err := b.app.admitScope(topicScope(topic)); err != nil {
+		return err
+	}
 	return b.server.Publish(topic, payload, retain, qos)
 }
 
@@ -162,36 +204,14 @@ func (b *Broker) DeleteRetained(topic string) error {
 	// MQTT's retained-delete operation is a retained publish with an empty
 	// payload. Going through Publish notifies subscribers and the storage hook,
 	// keeping clients, memory, and SQLite in sync.
-	return b.server.Publish(topic, nil, true, 0)
-}
-
-// pickListenerPort validates config["listen_port"]. The Mochi TCP listener
-// performs the actual bind during NewBroker, eliminating the probe/close/bind
-// race. Port 0 stays zero until that bind, then Broker.port records the actual
-// kernel-assigned port.
-func pickListenerPort(a *App) (int, error) {
-	want := configInt(a.ctx, "listen_port", 1883)
-	if want < 0 || want > 65535 {
-		return 0, fmt.Errorf("listen_port must be between 0 and 65535")
-	}
-	if want != 0 && want != 1883 {
-		return 0, fmt.Errorf("listen_port must be 1883 for managed installs or 0 for local development/tests")
-	}
-	return want, nil
+	return b.Publish(topic, nil, true, 0)
 }
 
 func bindAddress(a *App, port int) string {
-	iface := configString(a.ctx, "bind_interface", "")
-	if iface == "" {
-		return ":" + strconv.Itoa(port)
-	}
-	// User-supplied interface name. We don't resolve it here — the
-	// listener takes "host:port"; if they pass an interface name like
-	// "en0" we'd need to lookup its IP. Keep it simple: only bind by
-	// IP. Document this in apteva.yaml.
+	iface := configString(a.ctx, "bind_interface", "127.0.0.1")
+	// parseTransport has validated the runtime configuration before binding.
 	if ip := net.ParseIP(iface); ip != nil {
 		return net.JoinHostPort(iface, strconv.Itoa(port))
 	}
-	a.ctx.Logger().Warn("bind_interface must be an IP, falling back to all interfaces", "got", iface)
-	return ":" + strconv.Itoa(port)
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 }

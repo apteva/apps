@@ -81,6 +81,9 @@ func (h *aclHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool
 	}
 	cl.Properties.Props.TopicAliasMaximum = 0
 	h.app.authenticatedClients.Store(cl, &authenticatedIdentity{credentialID: u.ID, scope: u.ScopeID, username: u.Username, revision: u.Revision})
+	if transport, ok := cl.Net.Conn.(*tlsAdmissionConn); ok {
+		transport.authenticated()
+	}
 	h.logACL(username, "connect", "", true, "")
 	return true
 }

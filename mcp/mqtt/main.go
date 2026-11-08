@@ -45,6 +45,7 @@ type App struct {
 	credentialsMu        sync.RWMutex
 	authenticatedClients sync.Map
 	scopeCounters        sync.Map
+	admission            *scopeAdmission
 	usersMu              sync.RWMutex
 	users                map[string]*MQTTUser
 }
@@ -109,7 +110,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{
+	workers := []sdk.Worker{
 		{
 			Name: "broker",
 			Run: func(ctx context.Context, app *sdk.AppCtx) error {
@@ -129,6 +130,10 @@ func (a *App) Workers() []sdk.Worker {
 			},
 		},
 	}
+	if a.broker != nil && a.broker.certificates != nil {
+		workers = append(workers, sdk.Worker{Name: "tls-certificates", Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.broker.certificates.run(ctx) }})
+	}
+	return workers
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {

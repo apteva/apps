@@ -1,6 +1,7 @@
 # MQTT Broker
 
-Version 0.4.0 introduces ownership isolation and explicit credentials. All
+Version 0.5.0 adds TLS, certificate renewal, public endpoint metadata, and explicit
+ingress overload rejection to 0.4.0 ownership isolation and explicit credentials. All
 ownership logic lives in this app. A scope is an opaque identifier, without
 customer, billing, device, or application-specific semantics.
 
@@ -134,15 +135,140 @@ historical labels; ownership is stored separately.
 Anonymous access is unsupported. An existing `allow_anonymous=true` installation
 must change that setting before this version will mount.
 
-## Delivery and transport status
+## TLS and public enrollment (0.5.0)
 
-This stage implements isolation and credentials. It does not add TLS or
-certificate renewal, durable message acceptance, durable MQTT sessions,
-acknowledged app consumption/replay, or persistent usage quotas. The existing
-transport is plaintext TCP, event/audit queues are best effort, and the existing
-publish rate limiter can still acknowledge discarded messages. These behaviors
-must change in the subsequent transport and durability stages before claiming
-the full proposal's security and delivery guarantees.
+TLS is the default. An upgrade from 0.4.0 must configure certificates and an
+advertised host, or explicitly choose restricted local plaintext mode. Missing
+or invalid TLS configuration fails mount; there is no plaintext fallback.
+Only one MQTT listener is started. Runtime port declarations expose 8883 (TLS)
+and 1883 (local), but the inactive port has no listener.
+
+For an existing certificate issuer:
+
+```json
+{
+  "transport_mode": "tls",
+  "advertised_host": "mqtt.example.com",
+  "advertised_port": "8883",
+  "tls_provider": "files",
+  "tls_cert_file": "/data/tls/fullchain.pem",
+  "tls_key_file": "/data/tls/privkey.pem"
+}
+```
+
+The certificate must be currently valid, match `advertised_host`, and have a
+matching private key. Supply the complete intermediate chain. Clients must
+verify both chain trust and the advertised hostname; private issuers require
+installing their CA in clients. Never disable client certificate verification.
+TLS 1.2 is the minimum; obsolete protocol versions are rejected. MQTT credentials
+and scope ACLs remain required inside TLS.
+
+The app reloads renewed files every `tls_reload_seconds` (default 30). Its
+certificate issuer renews the source files; replace them atomically. Invalid,
+not-yet-valid, expired, or mismatched replacements preserve the last valid pair
+and report a reload error. Once the last usable certificate expires, new
+handshakes fail and enrollment becomes unavailable. Existing authenticated TLS
+sessions are not interrupted merely by loading a replacement. Protect private
+key file permissions and back up the source certificate configuration.
+
+For app-owned automatic ACME issuance and renewal:
+
+```json
+{
+  "transport_mode": "tls",
+  "advertised_host": "mqtt.example.com",
+  "advertised_port": "443",
+  "tls_provider": "acme",
+  "acme_accept_terms": "true",
+  "acme_email": "operator@example.com",
+  "acme_cache_dir": "/data/mqtt-acme"
+}
+```
+
+ACME uses TLS-ALPN-01. Public TCP **443 must forward unchanged to this app's
+internal TLS listener on 8883**, preserving SNI and ALPN `acme-tls/1`. DNS must
+resolve to that public endpoint. An HTTP reverse proxy or TLS-terminating proxy
+is insufficient for this mode. Routing is operator-managed; the app neither
+changes DNS nor takes over another service's port 443. Choose files mode when
+an existing ingress/certificate issuer already owns that routing. An alternate
+HTTPS ACME v2 directory is configurable; validate with an issuer's staging
+directory before production. Automatic provisioning uses ECDSA P-256 certificates.
+
+The default cache is `mqtt-acme` under the SDK per-install persistent data
+directory (or an explicit `acme_cache_dir`). It holds ACME account keys and renewed certificates; the
+cache directory must be mode 0700 and files are written mode 0600. Back it up
+with the app data. Terms acceptance must be explicitly configured. The manager
+issues and renews certificates within `tls_renew_before_days` (1–30, default 30)
+and retries CA failures. Ordinary client handshakes never perform CA network
+requests. The certificate worker proactively loads/provisions the certificate;
+enrollment stays pending until it is valid. Public CA failures and certificate
+expiry never cause plaintext fallback.
+
+`mqtt_status` and HTTP `/status` return the external `advertised_host`, external
+`advertised_port`, `tls`, and `mqtts://...` endpoint. `port`/`bind_address` describe
+the actual listener independently, including NAT/forwarding cases. An unavailable
+certificate produces `ready: false` and an empty `endpoint`, preventing enrollment
+against a falsely ready endpoint. `transport.certificate` reports provider,
+expiry, renewal due state, and load errors. Hostnames cannot contain schemes,
+ports, paths, wildcards, or wildcard bind addresses. IPv6 hosts are correctly
+bracketed in endpoint URLs. There is no container-hostname inference.
+
+For a trusted local network only, explicitly set `transport_mode: local`.
+It defaults to loopback port 1883. An explicit private bind IP and private
+advertised IP can expose a LAN endpoint. Public/wildcard bind addresses and
+public advertised hosts are rejected. Local mode's default advertised port is
+1883; do not set the TLS port unless a private TCP forward actually provides it.
+No TLS is claimed in local enrollment metadata. Ports other than the declared
+1883/8883 are rejected for managed listeners; port 0 is only for local tests.
+
+Pending TLS handshakes and connections awaiting MQTT authentication are bounded
+by `tls_max_pending_handshakes` (default 128). Handshake/CONNECT waits are bounded
+by `tls_handshake_timeout_seconds` (default 15). Completing TLS without MQTT
+authentication does not release this capacity. Service cancellation closes the
+listener, active connections, and certificate worker.
+
+## Overload and retry contract (0.5.0)
+
+Ingress rate admission runs **before routing, retained mutation, PUBACK, or
+PUBREC**, for MQTT 3.1.1/5 and QoS 0/1/2. A rejected publish has no successful
+acceptance acknowledgment and produces no retained value or application event.
+
+| Surface | Capacity exhaustion |
+| --- | --- |
+| MQTT 5 | DISCONNECT reason `0x97` (quota exceeded), then close; no successful publish acknowledgment |
+| MQTT 3.1.1 | Close TCP/TLS before a publish acknowledgment; the protocol has no negative PUBACK |
+| HTTP publish / retained deletion | HTTP 429 with `Retry-After: 1` |
+| MCP / inbound app publish request | An explicit capacity error, without a success result |
+| Oversized HTTP payload | HTTP 413; MCP returns a size error; oversized network packets close before acceptance |
+
+Wait at least the HTTP retry delay and use exponential backoff with jitter for
+reconnect/retry. A retry delay does not reserve capacity. QoS 0 has no receipt:
+applications requiring confirmation must use an application acknowledgment and
+stable identifiers. Do not equate reconnection with successful prior delivery.
+
+`max_publish_per_second`/`max_publish_burst` limit individual client connections.
+`max_publish_per_scope_per_second`/`max_publish_per_scope_burst` (defaults
+1000/2000) share admission across all credentials, connections, and HTTP/MCP
+publishes in an ownership scope. Reconnecting does not reset that scope's bucket.
+A rate of zero explicitly disables its limiter. Invalid policy values fail mount.
+Budgets are process-local and are not durable usage or billing counters.
+
+A full subscriber outbound queue disconnects the affected subscriber explicitly.
+Other broker limits reject connections or packets at their protocol boundaries.
+Ingress admission does **not** reserve every subscriber's inflight storage or
+establish durable delivery. Retained cleanup preserves the stored record when
+its deletion publish is rejected, so a failed cleanup cannot partially delete it.
+
+## Remaining delivery guarantees
+
+Event and audit queues remain best effort. This release does not add durable
+message acceptance, MQTT session/offline/inflight recovery, acknowledged app
+consumption/replay, persistent usage accounting/quotas, or complete retained
+pagination. Retained writes still need stronger storage-error propagation.
+A successful MQTT acknowledgment or HTTP/MCP publish result proves ingress was
+admitted; it does not prove disk durability, delivery to every subscriber, or
+processing by a consuming application. Application receipts and retries remain
+necessary for stronger end-to-end guarantees until that later work is complete.
 
 ## Validation
 

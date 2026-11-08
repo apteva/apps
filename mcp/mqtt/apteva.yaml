@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.4.0
+version: 0.5.0
 description: |
   Embedded MQTT broker for Apteva. Acts as the LAN message bus for
   smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
@@ -13,7 +13,10 @@ description: |
   to named bus events (e.g. `mqtt.motion.frontdoor`).
 
   Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
-  durable retained messages, bounded traffic controls, and MQTT 5 properties.
+  retained-message persistence, explicit ingress overload rejection, and MQTT 5 properties.
+  TLS is the default transport, using renewable certificate files or automatic
+  ACME TLS-ALPN-01 issuance/renewal. Enrollment advertises a validated public
+  host and port independently of the internal listener.
   Auth is username/password against this app's own DB. Credentials belong
   to an opaque ownership scope, use a scope-qualified wire username, and
   require explicit publish/subscribe ACLs under the scope's topic root.
@@ -91,6 +94,10 @@ runtime:
       container_port: 1883
       host_port: 1883
       protocol: tcp
+    - name: mqtts
+      container_port: 8883
+      host_port: 8883
+      protocol: tcp
   health_check: /health
 
 db:
@@ -99,21 +106,93 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: transport_mode
+    type: select
+    options: ["tls", "local"]
+    default: "tls"
+    label: MQTT transport
+    description: TLS is required for public enrollment. Local plaintext is an explicit opt-in and accepts only loopback/private bind and advertised IPs. Only the selected listener is started.
+  - name: tls_listen_port
+    type: text
+    default: "8883"
+    label: Internal TLS listener port
+    description: Fixed 8883 for managed installs, or 0 for tests. Configure external port forwarding separately and advertise its public port.
+  - name: tls_provider
+    type: select
+    options: ["files", "acme"]
+    default: "files"
+    label: TLS certificate provider
+    description: Files hot-reloads renewed PEM certificates; ACME automatically issues and renews using TLS-ALPN-01 on public TCP 443. No plaintext fallback.
+  - name: tls_cert_file
+    type: text
+    default: ""
+    label: Certificate chain PEM path
+    description: Full leaf/intermediate certificate chain for files mode. Must match advertised_host and be currently valid. Replace atomically when renewed.
+  - name: tls_key_file
+    type: text
+    default: ""
+    label: Private key PEM path
+    description: Matching private key for files mode. Keep it readable only by the service identity; it is never returned in management responses.
+  - name: tls_reload_seconds
+    type: text
+    default: "30"
+    label: Certificate refresh interval
+    description: Seconds between file reloads or ACME enrollment-status refreshes (1 to 3600). Invalid replacements preserve the last valid certificate; expired certificates reject new handshakes.
+  - name: tls_renew_before_days
+    type: text
+    default: "30"
+    label: Certificate renewal window
+    description: ACME renews automatically before expiry within this 1 to 30 day window. Files mode reports renewal_due; its certificate issuer must renew the source files.
+  - name: tls_handshake_timeout_seconds
+    type: text
+    default: "15"
+    label: TLS handshake and CONNECT timeout
+    description: Maximum unauthenticated handshake/CONNECT wait, from 1 to 120 seconds.
+  - name: tls_max_pending_handshakes
+    type: text
+    default: "128"
+    label: Maximum pending TLS handshakes
+    description: Bounded concurrent TLS handshakes. Additional TCP peers are closed before MQTT acceptance.
+  - name: acme_accept_terms
+    type: select
+    options: ["false", "true"]
+    default: "false"
+    label: Accept ACME issuer terms
+    description: Must explicitly be true before ACME account registration or certificate issuance.
+  - name: acme_email
+    type: text
+    default: ""
+    label: ACME account contact email
+  - name: acme_directory_url
+    type: text
+    default: "https://acme-v02.api.letsencrypt.org/directory"
+    label: ACME directory URL
+    description: HTTPS ACME v2 directory. Use an issuer staging directory while validating routing.
+  - name: acme_cache_dir
+    type: text
+    default: ""
+    label: Durable ACME cache directory
+    description: Empty uses mqtt-acme under the SDK per-install data directory. Persistent mode-0700 directory holding account keys and renewed certificates. Back it up. ACME needs advertised_port 443 and public TCP 443 forwarded unchanged to this app's TLS listener, including ALPN.
+  - name: advertised_port
+    type: text
+    default: ""
+    label: Client-facing port
+    description: External forwarded MQTT port, independent of the bound port. Default 8883 for TLS, 1883 for local. ACME requires 443. Port 0 is accepted only with an ephemeral test listener.
   - name: listen_port
     type: text
     default: "1883"
-    label: MQTT listener port
-    description: Managed installs use strict port 1883 and fail if it is unavailable. 0 is accepted only for local development/tests and uses a kernel-assigned port; other values are rejected because they would contradict runtime.ports.
+    label: Local plaintext listener port
+    description: Used only in explicit local mode. Fixed 1883 for managed installs or 0 for tests; TLS mode does not start a plaintext listener.
   - name: bind_interface
     type: text
     default: ""
     label: Bind interface (advanced)
-    description: Pin the listener to an IP address (for example 192.168.1.20). Empty = all interfaces. Interface names such as en0 are not accepted.
+    description: Pin the listener to an IP address (for example 192.168.1.20). Empty binds all interfaces for TLS and loopback for local mode. Interface names such as en0 are not accepted.
   - name: advertised_host
     type: text
     default: ""
     label: Client-facing hostname
-    description: Hostname or IP returned by mqtt_status for client enrollment. Empty uses bind_interface when it is an IP, otherwise the machine hostname.
+    description: Required DNS hostname or IP for TLS enrollment and certificate validation. No container-hostname fallback. Local mode defaults to its private bind IP. Do not include a scheme or port.
   - name: allow_anonymous
     type: select
     options: ["false"]
@@ -156,11 +235,21 @@ config_schema:
     default: "1024"
     label: Maximum pending writes per client
     description: Bounds each client's outbound queue so slow consumers cannot grow memory without limit.
+  - name: max_publish_per_scope_per_second
+    type: text
+    default: "1000"
+    label: Publish rate per ownership scope
+    description: Shared ingress rate across every credential, connection, and HTTP/MCP publish in a scope. 0 disables this limiter. Rejected work receives no successful acceptance acknowledgment.
+  - name: max_publish_per_scope_burst
+    type: text
+    default: "2000"
+    label: Publish burst per ownership scope
+    description: Shared burst capacity. Reconnecting does not reset the scope bucket; counters and buckets remain process-local in this release.
   - name: max_publish_per_second
     type: text
     default: "100"
     label: Publish rate per client
-    description: Sustained accepted publishes per second for each network client. 0 disables the limiter.
+    description: Sustained admitted publishes per second per network client. 0 disables this client limiter. Overload closes MQTT 3.1.1 connections or sends MQTT 5 quota-exceeded DISCONNECT before any publish acknowledgment. Retry with exponential backoff and jitter.
   - name: max_publish_burst
     type: text
     default: "200"

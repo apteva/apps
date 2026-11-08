@@ -228,7 +228,7 @@ func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
 		}
 		if a.broker != nil {
 			if err := a.broker.DeleteRetained(topic); err != nil {
-				httpErr(w, 500, err.Error())
+				publishHTTPError(w, err)
 				return
 			}
 		}
@@ -343,7 +343,7 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.validatePayloadSize([]byte(body.Payload)); err != nil {
-		httpErr(w, 400, err.Error())
+		publishHTTPError(w, err)
 		return
 	}
 	if a.broker == nil {
@@ -351,7 +351,7 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.broker.Publish(body.Topic, []byte(body.Payload), body.Retain, byte(body.QoS)); err != nil {
-		httpErr(w, 500, err.Error())
+		publishHTTPError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "ts": time.Now().UTC().Format(time.RFC3339)})

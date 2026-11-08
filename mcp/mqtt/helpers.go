@@ -139,7 +139,9 @@ func (a *App) sweepOnce() {
 			rows.Close()
 			for _, topic := range topics {
 				if a.broker != nil {
-					_ = a.broker.DeleteRetained(topic)
+					if err := a.broker.DeleteRetained(topic); err != nil {
+						continue
+					}
 				}
 				_, _ = db.Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic)
 			}

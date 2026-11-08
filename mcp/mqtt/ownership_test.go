@@ -28,7 +28,7 @@ import (
 func ownershipApp(t *testing.T) (*App, *sdk.AppCtx) {
 	t.Helper()
 	t.Setenv("APTEVA_PROJECT_ID", "")
-	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"listen_port": "0", "ha_discovery_enabled": "false"}))
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false"}))
 	return &App{ctx: ctx, messageLogCh: make(chan messageRecord, 100), aclLogCh: make(chan aclRecord, 100)}, ctx
 }
 
@@ -467,7 +467,7 @@ func startOwnershipBroker(t *testing.T) (*App, *sdk.AppCtx, *testkit.EmitRecorde
 	t.Helper()
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	recorder := testkit.NewEmitRecorder()
-	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithEmitter(recorder), testkit.WithConfig(map[string]string{"listen_port": "0", "ha_discovery_enabled": "false"}))
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithEmitter(recorder), testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false"}))
 	a := &App{}
 	if err := a.OnMount(ctx); err != nil {
 		t.Fatal(err)

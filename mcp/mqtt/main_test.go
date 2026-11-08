@@ -168,7 +168,7 @@ func TestExplicitCredentialLifecycleKeepsPasswordAndACLSeparate(t *testing.T) {
 // TestFixedPortConflictFails — a declared fixed port must never silently
 // relocate, because clients and runtime metadata depend on it.
 func TestFixedPortConflictFails(t *testing.T) {
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestFixedPortConflictFails(t *testing.T) {
 	busy := l.Addr().(*net.TCPAddr).Port
 	ctx := testkit.NewAppCtx(t, "apteva.yaml",
 		testkit.WithProjectID("test"),
-		testkit.WithConfig(map[string]string{"listen_port": strconv.Itoa(busy)}),
+		testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": strconv.Itoa(busy)}),
 	)
 	app := &App{ctx: ctx}
 	server := mqtt.New(nil)
@@ -192,7 +192,7 @@ func TestFixedPortConflictFails(t *testing.T) {
 func TestDynamicPortRequiresExplicitZero(t *testing.T) {
 	ctx := testkit.NewAppCtx(t, "apteva.yaml",
 		testkit.WithProjectID("test"),
-		testkit.WithConfig(map[string]string{"listen_port": "0"}),
+		testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": "0"}),
 	)
 	broker, err := NewBroker(&App{ctx: ctx})
 	if err != nil || broker.Port() <= 0 {
@@ -204,9 +204,9 @@ func TestDynamicPortRequiresExplicitZero(t *testing.T) {
 func TestManagedPortDeclarationCannotDrift(t *testing.T) {
 	ctx := testkit.NewAppCtx(t, "apteva.yaml",
 		testkit.WithProjectID("test"),
-		testkit.WithConfig(map[string]string{"listen_port": "1884"}),
+		testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": "1884"}),
 	)
-	if _, err := pickListenerPort(&App{ctx: ctx}); err == nil || !strings.Contains(err.Error(), "managed installs") {
+	if _, err := parseTransport(ctx); err == nil || !strings.Contains(err.Error(), "managed installs") {
 		t.Fatalf("unexpected drift validation error: %v", err)
 	}
 }
@@ -286,24 +286,28 @@ func TestRetainedPublicHelpersFilterGetAndDelete(t *testing.T) {
 	}
 }
 
-func TestPublishGuardDropsOverLimit(t *testing.T) {
-	app := &App{}
+func TestPublishGuardRejectsOverLimit(t *testing.T) {
+	app := &App{ctx: testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"transport_mode": "local"}))}
+	if err := app.initAdmission(); err != nil {
+		t.Fatal(err)
+	}
 	hook := &publishGuardHook{app: app, clients: map[*mqtt.Client]*tokenBucket{}, rate: 1, burst: 1}
 	client := &mqtt.Client{ID: "noisy"}
-	pk := packets.Packet{TopicName: "devices/noisy/state"}
-	if _, err := hook.OnPublish(client, pk); err != nil {
-		t.Fatalf("first publish: %v", err)
+	app.authenticatedClients.Store(client, &authenticatedIdentity{scope: "test"})
+	pk := packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Publish}, TopicName: scopeTopicRoot("test") + "state"}
+	if _, err := hook.OnPacketRead(client, pk); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := hook.OnPublish(client, pk); !errors.Is(err, packets.CodeSuccessIgnore) {
-		t.Fatalf("second publish error=%v", err)
+	if _, err := hook.OnPacketRead(client, pk); !errors.Is(err, packets.ErrRejectPacket) {
+		t.Fatalf("overload was not explicitly rejected: %v", err)
 	}
 	if app.rateLimitedMessages.Load() != 1 {
-		t.Fatalf("rate limited=%d", app.rateLimitedMessages.Load())
+		t.Fatal("rejection not counted")
 	}
 }
 
 func TestAuditPayloadIsBounded(t *testing.T) {
-	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"max_log_payload_bytes": "4"}))
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"transport_mode": "local", "max_log_payload_bytes": "4"}))
 	app := &App{ctx: ctx, messageLogCh: make(chan messageRecord, 1)}
 	hook := &busHook{app: app}
 	hook.recordMessage("client", "device", packets.Packet{TopicName: scopeTopicRoot("test") + "audit", Payload: []byte("abcdef")})
@@ -368,7 +372,7 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 	ctx := testkit.NewAppCtx(t, "apteva.yaml",
 		testkit.WithProjectID("proj-test"),
 		testkit.WithEmitter(recorder),
-		testkit.WithConfig(map[string]string{
+		testkit.WithConfig(map[string]string{"transport_mode": "local",
 			"listen_port":          "0",
 			"allow_anonymous":      "false",
 			"ha_discovery_enabled": "false",
@@ -550,7 +554,7 @@ func TestManifestValidates(t *testing.T) {
 	if len(m.Provides.Publishes) != 4 || m.Provides.Publishes[0].Name != "mqtt.message" {
 		t.Fatalf("publishes=%#v", m.Provides.Publishes)
 	}
-	if len(m.Runtime.Ports) != 1 || m.Runtime.Ports[0].ContainerPort != 1883 {
+	if len(m.Runtime.Ports) != 2 || m.Runtime.Ports[0].ContainerPort != 1883 {
 		t.Fatalf("embedded runtime ports=%#v", m.Runtime.Ports)
 	}
 	declaredTools := map[string]bool{}
@@ -574,7 +578,7 @@ func TestManifestValidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apteva.yaml invalid: %v", err)
 	}
-	if len(fileManifest.Runtime.Ports) != 1 || fileManifest.Runtime.Ports[0].ContainerPort != 1883 {
+	if len(fileManifest.Runtime.Ports) != 2 || fileManifest.Runtime.Ports[0].ContainerPort != 1883 {
 		t.Fatalf("runtime ports=%#v", fileManifest.Runtime.Ports)
 	}
 }

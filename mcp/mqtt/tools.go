@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -586,10 +584,9 @@ func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 	if a.broker != nil && a.broker.Address() != "" {
 		bind = a.broker.Address()
 	}
-	host := advertisedHost(a)
-	endpoint := ""
-	if port > 0 {
-		endpoint = "mqtt://" + net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	endpoint := map[string]any{"endpoint": "", "advertised_host": "", "advertised_port": 0, "tls": true, "ready": false}
+	if a.broker != nil {
+		endpoint = a.broker.endpointStatus()
 	}
 	return map[string]any{
 		"scope_id":              projectScope(ctx),
@@ -597,10 +594,13 @@ func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 		"port":                  port,
 		"listen_address":        bind,
 		"bind_address":          bind,
-		"advertised_host":       host,
-		"advertised_port":       port,
-		"endpoint":              endpoint,
-		"tls":                   false,
+		"advertised_host":       endpoint["advertised_host"],
+		"advertised_port":       endpoint["advertised_port"],
+		"endpoint":              endpoint["endpoint"],
+		"ready":                 endpoint["ready"],
+		"transport":             endpoint,
+		"overload_policy":       map[string]any{"mqtt5": "disconnect with quota-exceeded reason (0x97), no publish acknowledgment", "mqtt311": "close before publish acknowledgment", "http": 429, "retry": "reconnect with exponential backoff and jitter; retry unacknowledged messages using stable application identifiers"},
+		"tls":                   endpoint["tls"],
 		"clients":               clients,
 		"retained_count":        retained,
 		"message_count":         msgs,
@@ -630,19 +630,6 @@ func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 	}
 }
 
-func advertisedHost(a *App) string {
-	if host := strings.TrimSpace(configString(a.ctx, "advertised_host", "")); host != "" {
-		return host
-	}
-	if bind := strings.TrimSpace(configString(a.ctx, "bind_interface", "")); net.ParseIP(bind) != nil {
-		return bind
-	}
-	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
-		return strings.TrimSpace(host)
-	}
-	return "localhost"
-}
-
 func validatePublish(topic string, qos int) error {
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
@@ -660,7 +647,7 @@ func validatePublish(topic string, qos int) error {
 func (a *App) validatePayloadSize(payload []byte) error {
 	max := clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455)
 	if len(payload) > max {
-		return fmt.Errorf("payload is %d bytes; maximum is %d", len(payload), max)
+		return fmt.Errorf("%w: payload is %d bytes; maximum is %d", errPayloadTooLarge, len(payload), max)
 	}
 	return nil
 }

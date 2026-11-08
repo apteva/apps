@@ -22,8 +22,8 @@ func newTokenBucket(rate, burst int) *tokenBucket {
 	if rate <= 0 {
 		return &tokenBucket{}
 	}
-	if burst < rate {
-		burst = rate
+	if burst < 1 {
+		burst = 1
 	}
 	now := time.Now()
 	return &tokenBucket{rate: float64(rate), burst: float64(burst), tokens: float64(burst), last: now}
@@ -67,12 +67,16 @@ func newPublishGuardHook(app *App) *publishGuardHook {
 func (h *publishGuardHook) ID() string { return "apteva-publish-guard" }
 
 func (h *publishGuardHook) Provides(b byte) bool {
-	return b == mqtt.OnPublish || b == mqtt.OnDisconnect
+	return b == mqtt.OnPacketRead || b == mqtt.OnDisconnect || b == mqtt.OnPublishDropped
 }
 
-func (h *publishGuardHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
-	if cl == nil || cl.Net.Inline || h.rate <= 0 {
+func (h *publishGuardHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
+	if cl == nil || cl.Net.Inline || pk.FixedHeader.Type != packets.Publish {
 		return pk, nil
+	}
+	identity := h.app.clientIdentity(cl)
+	if identity == nil {
+		return pk, packets.ErrRejectPacket
 	}
 	h.mu.Lock()
 	limiter := h.clients[cl]
@@ -83,16 +87,34 @@ func (h *publishGuardHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packet
 	h.mu.Unlock()
 	if !limiter.allow() {
 		h.app.rateLimitedMessages.Add(1)
-		if identity := h.app.clientIdentity(cl); identity != nil {
-			h.app.counters(identity.scope).rateLimited.Add(1)
-		}
-		// CodeSuccessIgnore keeps the connection healthy and lets Mochi send
-		// the normal QoS acknowledgement while skipping retain/routing hooks.
-		// Returning the MQTT-5-only rate error would not suppress QoS 0 or
-		// MQTT 3.1.1 publishes in Mochi's processing path.
-		return pk, packets.CodeSuccessIgnore
+		h.app.counters(identity.scope).rateLimited.Add(1)
+		h.reject(cl)
+		return pk, packets.ErrRejectPacket
+	}
+	if err := h.app.admitScope(identity.scope); err != nil {
+		h.reject(cl)
+		return pk, packets.ErrRejectPacket
 	}
 	return pk, nil
+}
+
+func (h *publishGuardHook) reject(cl *mqtt.Client) {
+	// A read rejection terminates processing before retain, routing and PUBACK /
+	// PUBREC for every QoS/protocol combination. Ordinary hook errors are ignored
+	// by Mochi. MQTT 3.1.1 has no negative PUBACK or server DISCONNECT packet.
+	if cl.Properties.ProtocolVersion == 5 && cl.Net.Conn != nil {
+		_ = cl.Net.Conn.SetWriteDeadline(time.Now().Add(overloadWriteTimeout))
+		_ = cl.WritePacket(packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Disconnect}, ReasonCode: packets.ErrQuotaExceeded.Code, Properties: packets.Properties{ReasonString: "Publish capacity exhausted; reconnect with backoff and retry unacknowledged work"}})
+	}
+	cl.Stop(packets.ErrQuotaExceeded)
+}
+
+// Make outbound queue exhaustion visible to the affected subscriber. This does
+// not make publisher acceptance a durable subscriber-delivery acknowledgment.
+func (h *publishGuardHook) OnPublishDropped(cl *mqtt.Client, _ packets.Packet) {
+	if cl != nil && !cl.Net.Inline {
+		h.reject(cl)
+	}
 }
 
 func (h *publishGuardHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
