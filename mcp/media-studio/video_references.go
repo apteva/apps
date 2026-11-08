@@ -40,6 +40,14 @@ func veniceReferenceProfile(model string) veniceVideoReferenceProfile {
 		profile.MaxSceneImages = 0
 		return profile
 	}
+	// Kling 4 uses flat image references; the older Kling element/scene
+	// format is explicitly rejected by Venice for this family.
+	if strings.HasPrefix(lower, "kling-v4-") {
+		profile.MaxImages = 7
+		profile.MaxIdentityImages = 7
+		profile.MaxSceneImages = 7
+		return profile
+	}
 	if strings.HasPrefix(lower, "kling-") {
 		profile.Style = "elements"
 		profile.MaxImages = 7
