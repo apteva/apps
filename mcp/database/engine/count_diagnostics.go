@@ -13,6 +13,8 @@ type countDiagnostics struct {
 	running                                 time.Duration
 	route                                   string
 	stats                                   *native.QueryStats
+	selectionProbes                         int64
+	selectionEntries                        int64
 }
 
 func (d *countDiagnostics) queued() {
@@ -63,6 +65,9 @@ func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists 
 	if !d.started.IsZero() {
 		out["queueMs"] = milliseconds(d.queuedAt.Sub(d.started))
 		out["snapshotMs"] = milliseconds(d.snapshotAt.Sub(d.queuedAt))
+	}
+	if d.selectionProbes > 0 {
+		out["indexSelection"] = map[string]any{"probes": d.selectionProbes, "indexEntriesExamined": d.selectionEntries}
 	}
 	if d.route != "" {
 		out["strategy"] = d.route

@@ -59,7 +59,19 @@ func TestConcurrentReadBatchMatchesSequential(t *testing.T) {
 			if e != nil {
 				t.Fatal(n, e)
 			}
-			results[n] = string(marshal(v))
+			var out map[string]any
+			checkErr(t, decode(marshal(v), &out))
+			page := out["results"].([]any)[2].(map[string]any)
+			// Cursors issued in different seconds have different expiry times
+			// and signatures. Check that each authentic cursor resumes the same
+			// query at the same row before comparing the batch's stable values.
+			resumed, err := exec("find", Request{Database: "d", Collection: "c", Query: Query{Where: shared, Limit: 5, OrderBy: []Order{{"id", "asc"}}, Cursor: page["nextCursor"].(string)}})
+			checkErr(t, err)
+			var next map[string]any
+			checkErr(t, decode(marshal(resumed), &next))
+			relEqual(t, "cursor resumes", relList(next["records"])[0]["id"], "0033")
+			page["nextCursor"] = "verified resume at 0033"
+			results[n] = string(marshal(out))
 		}()
 	}
 	if results[1] != results[2] || results[1] != results[4] {
