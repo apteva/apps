@@ -37,5 +37,7 @@ resource limits, cancellation, concurrent writes and same-snapshot batches.
 
 Full module and race suites, vet and standalone builds pass locally. Release
 CI checks Linux and macOS. Existing native, pipeline and relational reads remain
-covered. No storage migration or native data-format change is required; SDK
+covered. The manifest omits an optional read_only annotation unsupported by older local
+server parsers; read-only permission checks are unchanged. No storage migration
+or native data-format change is required; SDK
 remains v0.115.0 and AptevaDB v0.2.0-alpha.18.

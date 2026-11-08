@@ -24,7 +24,7 @@ provides:
     - {name: database.write, resource: database, description: Insert and modify records.}
     - {name: database.manage, resource: database, description: "Create and delete databases, collections and indexes."}
   mcp_tools:
-    - {name: db_query, description: "Compatibility alias. Use db_aggregate or db_find with pipeline for named calculations.", read_only: true}
+    - {name: db_query, description: "Compatibility alias. Use db_aggregate or db_find with pipeline for named calculations."}
     - {name: db_realtime_configure, description: Enable or disable native realtime capture.}
     - {name: db_realtime_describe, description: Inspect realtime support and usage.}
     - {name: db_changes, description: Wait for resumable collection invalidations.}
