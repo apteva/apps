@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var ErrPayloadLimit = errors.New("ownership scope payload limit exceeded")
+
 var ErrDurableCapacity = errors.New("durable storage capacity reached")
 
 type Delivery struct {
@@ -22,6 +24,8 @@ type Persistence interface {
 	Restore(*Server) error
 }
 type Session struct {
+	PendingWill   bool
+	WillRetryAt   int64
 	ID            string
 	Properties    ClientProperties
 	Subscriptions []packets.Subscription
@@ -37,7 +41,7 @@ func (s *Server) Sessions(planned []Delivery) []Session {
 		if cl.Net.Inline || cl.IsTakenOver() {
 			continue
 		}
-		v := Session{ID: cl.ID, Properties: cl.Properties, Disconnected: cl.StopTime(), Outgoing: cl.State.Inflight.GetAll(false), Incoming: cl.State.Incoming.GetAll(false)}
+		v := Session{PendingWill: cl.State.PendingWill, WillRetryAt: cl.State.WillRetryAt, ID: cl.ID, Properties: cl.Properties, Disconnected: cl.StopTime(), Outgoing: cl.State.Inflight.GetAll(false), Incoming: cl.State.Incoming.GetAll(false)}
 		for _, sub := range cl.State.Subscriptions.GetAll() {
 			v.Subscriptions = append(v.Subscriptions, sub)
 		}
@@ -53,6 +57,8 @@ func (s *Server) Sessions(planned []Delivery) []Session {
 func (s *Server) RestoreSession(v Session) *Client {
 	cl := s.NewClient(nil, "recovered", v.ID, false)
 	cl.Properties = v.Properties
+	cl.State.PendingWill = v.PendingWill
+	cl.State.WillRetryAt = v.WillRetryAt
 	cl.Stop(nil)
 	atomic.StoreInt64(&cl.State.disconnected, v.Disconnected)
 	for _, sub := range v.Subscriptions {
@@ -187,6 +193,9 @@ func (s *Server) acceptPublish(cl *Client, pk packets.Packet, acknowledge bool) 
 	if err := s.Options.Persistence.Commit(s, cl, &pk, plan); err != nil {
 		if pk.FixedHeader.Qos == 2 && !cl.Net.Inline && acknowledge {
 			cl.State.Incoming.Delete(pk.PacketID)
+		}
+		if errors.Is(err, ErrPayloadLimit) {
+			return pk, packets.ErrPacketTooLarge
 		}
 		if errors.Is(err, ErrDurableCapacity) {
 			return pk, packets.ErrQuotaExceeded

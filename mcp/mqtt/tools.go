@@ -170,7 +170,7 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler:     a.toolStatus,
 		},
 	}
-	tools = append(tools, a.consumerTool())
+	tools = append(tools, a.consumerTool(), a.usageTool())
 	for i := range tools {
 		handler := tools[i].Handler
 		contextHandler := tools[i].HandlerCtx
@@ -610,7 +610,16 @@ func (a *App) snapshotStatus(ctx *sdk.AppCtx) map[string]any {
 		_ = db.QueryRow(`SELECT count(*) FROM mqtt_consumers WHERE scope_id=?`, scope).Scan(&consumers)
 		durability = map[string]any{"ready": a.durable.ready.Load(), "storage_fault": a.durable.failed.Load(), "journal_messages": journalCount, "journal_bytes": journalBytes, "sessions": sessionCount, "session_bytes": sessionBytes, "consumers": consumers, "max_journal_messages": a.durable.maxMessages, "max_journal_bytes": a.durable.maxBytes, "max_session_bytes": a.durable.maxSessionBytes, "application_delivery": "at-least-once via mqtt_consumer or POST /consumers; deduplicate message_id", "publisher_ack": "SQLite FULL commit of journal, retained mutation and QoS subscriber obligations"}
 	}
+	var usage any
+	if a.usage != nil {
+		var err error
+		usage, err = a.usageSnapshot(projectScope(ctx))
+		if err != nil {
+			usage = map[string]any{"error": "persistent usage unavailable"}
+		}
+	}
 	return map[string]any{
+		"usage":                 usage,
 		"durability":            durability,
 		"scope_id":              projectScope(ctx),
 		"topic_root":            scopeTopicRoot(projectScope(ctx)),

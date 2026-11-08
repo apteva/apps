@@ -20,7 +20,7 @@ type connectedClientIdentity struct {
 func (h *lifecycleHook) ID() string { return "apteva-lifecycle" }
 
 func (h *lifecycleHook) Provides(b byte) bool {
-	return b == mqtt.OnSessionEstablished || b == mqtt.OnDisconnect
+	return b == mqtt.OnSessionEstablished || b == mqtt.OnDisconnect || b == mqtt.OnClientExpired
 }
 
 func (h *lifecycleHook) OnSessionEstablished(cl *mqtt.Client, _ packets.Packet) {
@@ -58,7 +58,7 @@ func (h *lifecycleHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	if auth == nil {
 		return
 	}
-	if expire {
+	if expire && !cl.State.PendingWill {
 		defer h.app.authenticatedClients.Delete(cl)
 	}
 	payload := clientEventPayload(cl)
@@ -95,4 +95,9 @@ func clientEventPayload(cl *mqtt.Client) map[string]any {
 		"protocol_version": int(cl.Properties.ProtocolVersion),
 		"clean_session":    cl.Properties.Clean,
 	}
+}
+
+func (h *lifecycleHook) OnClientExpired(cl *mqtt.Client) {
+	h.app.authenticatedClients.Delete(cl)
+	h.app.clientConnectedAt.Delete(cl)
 }

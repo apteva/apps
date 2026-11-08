@@ -182,7 +182,7 @@ func TestManagementFailsClosedWithoutInstallToken(t *testing.T) {
 	}
 }
 
-func TestMigrationCollisionRollsBackAndRetainedPruningIsPerScope(t *testing.T) {
+func TestMigrationCollisionRollsBackAndRetainedStateIsNotEvicted(t *testing.T) {
 	a, ctx := ownershipApp(t)
 	a.ctx = ctx.WithProject("a")
 	_, err := ctx.AppDB().Exec(`INSERT INTO mqtt_users(username,password_hash) VALUES ('legacy','unchanged');
@@ -207,13 +207,13 @@ func TestMigrationCollisionRollsBackAndRetainedPruningIsPerScope(t *testing.T) {
 			putRetainedFixture(t, a, packets.Packet{TopicName: scopeTopicRoot(scope) + fmt.Sprint(i), Payload: []byte("state")})
 		}
 	}
-	// Both scopes retain one message. A broker-wide pruning query would leave
-	// only one message in total, allowing one owner to evict the other's state.
+	// Existing retained state survives quota reductions; admission rejects growth.
+	// A cleanup sweep must never evict another accepted retained message.
 	ctx.Config()["retain_max_count"] = "1"
 	a.sweepOnce()
 	for _, scope := range []string{"a", "b"} {
 		messages, err := listRetainedMessages(ctx.AppDB(), scope, "", 10)
-		if err != nil || len(messages) != 1 {
+		if err != nil || len(messages) != 2 {
 			t.Fatalf("scope %s lost retained state: %v %v", scope, messages, err)
 		}
 	}

@@ -96,7 +96,8 @@ type Compatibilities struct {
 
 // Options contains configurable options for the server.
 type Options struct {
-	Persistence Persistence `yaml:"-" json:"-"`
+	TransportUsage TransportUsage `yaml:"-" json:"-"`
+	Persistence    Persistence    `yaml:"-" json:"-"`
 	// Listeners specifies any listeners which should be dynamically added on serve. Used when setting listeners by config.
 	Listeners []listeners.Config `yaml:"listeners" json:"listeners"`
 
@@ -136,6 +137,7 @@ type Options struct {
 // Server is an MQTT broker server. It should be created with server.New()
 // in order to ensure all the internal fields are correctly populated.
 type Server struct {
+	loopWg       sync.WaitGroup
 	staging      bool
 	staged       []Delivery
 	durableMu    sync.Mutex
@@ -373,9 +375,10 @@ func (s *Server) Serve() error {
 			return err
 		}
 	}
-	go s.eventLoop()                            // spin up event loop for issuing $SYS values and closing server.
-	s.Listeners.ServeAll(s.EstablishConnection) // start listening on all listeners.
-	s.publishSysTopics()                        // begin publishing $SYS system values.
+	s.loopWg.Add(1)
+	go func() { defer s.loopWg.Done(); s.eventLoop() }() // spin up event loop for issuing $SYS values and closing server.
+	s.Listeners.ServeAll(s.EstablishConnection)          // start listening on all listeners.
+	s.publishSysTopics()                                 // begin publishing $SYS system values.
 	s.hooks.OnStarted()
 
 	return nil
@@ -417,8 +420,9 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 	defer s.Listeners.ClientsWg.Done()
 	s.Listeners.ClientsWg.Add(1)
 
-	go cl.WriteLoop()
-	defer cl.Stop(nil)
+	writeDone := make(chan struct{})
+	go func() { defer close(writeDone); cl.WriteLoop() }()
+	defer func() { cl.Stop(nil); <-writeDone }()
 
 	pk, err := s.readConnectionPacket(cl)
 	if err != nil {
@@ -459,6 +463,11 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 		return packets.ErrBadUsernameOrPassword
 	}
 
+	defer func() {
+		if current, ok := s.Clients.Get(cl.ID); !ok || current != cl {
+			s.hooks.OnClientExpired(cl)
+		}
+	}()
 	atomic.AddInt64(&s.Info.ClientsConnected, 1)
 	defer atomic.AddInt64(&s.Info.ClientsConnected, -1)
 
@@ -469,6 +478,25 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 			s.durableMu.Unlock()
 		}
 	}()
+	if old, ok := s.Clients.Get(cl.ID); ok && old.State.PendingWill {
+		s.sendLWT(old)
+		if old.State.PendingWill {
+			_ = s.SendConnack(cl, packets.ErrQuotaExceeded, false, nil)
+			return packets.ErrQuotaExceeded
+		}
+	}
+	if s.Options.TransportUsage != nil {
+		if err := s.Options.TransportUsage.Open(cl, pk); err != nil {
+			reason := packets.ErrServerUnavailable
+			var code packets.Code
+			if errors.As(err, &code) {
+				reason = code
+			}
+			_ = s.SendConnack(cl, reason, false, nil)
+			return err
+		}
+		defer s.Options.TransportUsage.Close(cl)
+	}
 	s.hooks.OnSessionEstablish(cl, pk)
 
 	sessionPresent := s.inheritClientSession(pk, cl)
@@ -522,7 +550,9 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 	if expire && !cl.IsTakenOver() {
 		cl.ClearInflights()
 		s.UnsubscribeClient(cl)
-		s.Clients.Delete(cl.ID) // [MQTT-4.1.0-2] ![MQTT-3.1.2-23]
+		if !cl.State.PendingWill {
+			s.Clients.Delete(cl.ID)
+		} // pending wills retain a recoverable session shell ![MQTT-3.1.2-23]
 	}
 
 	if saveErr := s.checkpoint(); saveErr != nil {
@@ -607,6 +637,7 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 			s.UnsubscribeClient(existing)
 			existing.ClearInflights()
 			s.Clients.Delete(existing.ID)
+			s.hooks.OnClientExpired(existing)
 			return false
 		}
 		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver)                                   // [MQTT-3.1.4-3]
@@ -614,7 +645,8 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 			s.UnsubscribeClient(existing)
 			existing.ClearInflights()
 			existing.State.isTakenOver.Store(true) // only set isTakenOver after unsubscribe has occurred
-			return false                           // [MQTT-3.2.2-3]
+			s.hooks.OnClientExpired(existing)
+			return false // [MQTT-3.2.2-3]
 		}
 
 		existing.State.isTakenOver.Store(true)
@@ -644,6 +676,7 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 		// from increasing memory usage by inflights + subs * client-id.
 		s.UnsubscribeClient(existing)
 		existing.ClearInflights()
+		s.hooks.OnClientExpired(existing)
 
 		s.Log.Debug("session taken over", "client", cl.ID, "old_remote", existing.Net.Remote, "new_remote", cl.Net.Remote)
 
@@ -675,6 +708,10 @@ func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, prop
 		if cl.Properties.ProtocolVersion < 5 {
 			if v3reason, ok := packets.V5CodesToV3[reason]; ok { // NB v3 3.2.2.3 Connack return codes
 				reason = v3reason
+			} else if reason == packets.ErrNotAuthorized {
+				reason = packets.Err3NotAuthorized
+			} else {
+				reason = packets.Err3ServerUnavailable
 			}
 		}
 
@@ -1587,6 +1624,7 @@ func (s *Server) Close() error {
 	close(s.done)
 	s.Log.Info("gracefully stopping server")
 	s.Listeners.CloseAll(s.closeListenerClients)
+	s.loopWg.Wait()
 	s.hooks.OnStopped()
 	s.hooks.Stop()
 
@@ -1634,9 +1672,15 @@ func (s *Server) sendLWT(cl *Client) {
 
 	if s.Options.Persistence != nil {
 		atomic.StoreUint32(&cl.Properties.Will.Flag, 0)
+		cl.State.PendingWill = false
 		if pk.TopicName != "" {
 			if _, err := s.acceptPublish(cl, pk, false); err != nil {
 				atomic.StoreUint32(&cl.Properties.Will.Flag, 1)
+				if errors.Is(err, packets.ErrQuotaExceeded) || errors.Is(err, packets.ErrPacketTooLarge) {
+					cl.State.PendingWill = true
+					cl.State.WillRetryAt = time.Now().Unix() + 30
+					return
+				}
 				if sink, ok := s.Options.Persistence.(interface{ Failure(*Server, error) error }); ok {
 					_ = sink.Failure(s, fmt.Errorf("persist will: %v", err))
 				}
@@ -1810,12 +1854,15 @@ func (s *Server) clearExpiredClients(dt int64) {
 			continue
 		}
 
+		if client.State.PendingWill && dt >= client.State.WillRetryAt {
+			s.sendLWT(client)
+		}
 		expire := s.Options.Capabilities.MaximumSessionExpiryInterval
-		if client.Properties.ProtocolVersion == 5 && client.Properties.Props.SessionExpiryIntervalFlag {
+		if client.Properties.ProtocolVersion == 5 {
 			expire = min(expire, client.Properties.Props.SessionExpiryInterval)
 		}
 
-		if disconnected+int64(expire) < dt {
+		if disconnected+int64(expire) < dt && !client.State.PendingWill {
 			s.hooks.OnClientExpired(client)
 			s.UnsubscribeClient(client)
 			client.ClearInflights()

@@ -83,7 +83,16 @@ func (d *durableStore) Commit(s *mqtt.Server, sender *mqtt.Client, pk *packets.P
 	if d.failed.Load() {
 		return errors.New("MQTT durable storage unavailable; restart after repair")
 	}
-	defer func() { err = d.fault(err, s) }()
+	quotaScope := ""
+	defer func() {
+		var q *quotaError
+		if errors.As(err, &q) && d.app.usage != nil && quotaScope != "" {
+			if e := d.app.usage.rejected(quotaScope); e != nil {
+				err = e
+			}
+		}
+		err = d.fault(err, s)
+	}()
 	tx, err := d.app.ctx.AppDB().Begin()
 	if err != nil {
 		return err
@@ -92,6 +101,7 @@ func (d *durableStore) Commit(s *mqtt.Server, sender *mqtt.Client, pk *packets.P
 	now := time.Now().Unix()
 	if pk != nil {
 		scope := topicScope(pk.TopicName)
+		quotaScope = scope
 		if !validScope(scope) {
 			return errors.New("durable ownership scope required")
 		}
@@ -109,6 +119,18 @@ func (d *durableStore) Commit(s *mqtt.Server, sender *mqtt.Client, pk *packets.P
 				return packets.ErrNotAuthorized
 			}
 			username = identity.username
+		}
+		oldCount, oldBytes := int64(0), int64(0)
+		if d.app.usage != nil {
+			if err = d.app.usage.accepted(tx, scope, *pk); err != nil {
+				return err
+			}
+			if pk.FixedHeader.Retain {
+				oldCount, oldBytes, err = retainedUsage(tx, scope)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		data, e := json.Marshal(pk)
 		if e != nil {
@@ -136,6 +158,11 @@ func (d *durableStore) Commit(s *mqtt.Server, sender *mqtt.Client, pk *packets.P
 			}
 			if err != nil {
 				return err
+			}
+			if d.app.usage != nil {
+				if err = d.app.usage.retained(tx, scope, oldCount, oldBytes); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -254,7 +281,7 @@ func (d *durableStore) Restore(s *mqtt.Server) (err error) {
 		active := r.v.Disconnected == 0
 		if active {
 			r.v.Disconnected = r.seen
-		} else {
+		} else if !r.v.PendingWill {
 			r.v.Properties.Will.Flag = 0
 		}
 		lifetime := sessionLifetime(s, r.v)
@@ -262,7 +289,9 @@ func (d *durableStore) Restore(s *mqtt.Server) (err error) {
 			r.v.Subscriptions = nil
 			r.v.Outgoing = nil
 			r.v.Incoming = nil
-			expired = append(expired, r.v.ID)
+			if !r.v.PendingWill {
+				expired = append(expired, r.v.ID)
+			}
 		}
 		kept := []packets.Packet{}
 		for _, pk := range r.v.Outgoing {

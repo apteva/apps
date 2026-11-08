@@ -133,7 +133,7 @@ func diskContext(t *testing.T, path string) *sdk.AppCtx {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := sdk.NewAppCtxForTest(m, db, sdk.Config{"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false"}, nil, nil)
+	ctx := sdk.NewAppCtxForTest(m, db, sdk.Config{"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false", "quota_defaults_json": os.Getenv("MQTT_TEST_QUOTAS")}, nil, nil)
 	ctx.SetEmitter(testkit.NewEmitRecorder())
 	return ctx
 }

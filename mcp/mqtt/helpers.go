@@ -126,30 +126,6 @@ func (a *App) sweepOnce() {
 	_, _ = db.Exec(`DELETE FROM mqtt_acl_log WHERE ts < ?`, cutoff)
 	_, _ = db.Exec(`DELETE FROM mqtt_message_log WHERE ts < ?`, cutoff)
 
-	maxRetain := configInt(a.ctx, "retain_max_count", 10000)
-	if maxRetain > 0 {
-		rows, err := db.Query(
-			`SELECT topic FROM (
- SELECT topic, ROW_NUMBER() OVER (PARTITION BY scope_id ORDER BY updated_at DESC, topic) AS position
- FROM mqtt_retained WHERE scope_id != ''
- ) WHERE position > ?`, maxRetain)
-		if err == nil {
-			topics := []string{}
-			for rows.Next() {
-				var topic string
-				if rows.Scan(&topic) == nil {
-					topics = append(topics, topic)
-				}
-			}
-			rows.Close()
-			for _, topic := range topics {
-				if a.broker != nil {
-					if err := a.broker.DeleteRetained(topic); err != nil {
-						continue
-					}
-				}
-				_, _ = db.Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic)
-			}
-		}
-	}
+	// Retained capacity is enforced atomically at acceptance in v0.7.0. Do not
+	// silently evict an owner's retained messages to make room.
 }

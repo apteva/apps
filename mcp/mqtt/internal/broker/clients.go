@@ -143,6 +143,9 @@ type Will struct {
 
 // ClientState tracks the state of the client.
 type ClientState struct {
+	WillRetryAt     int64
+	headerBytes     int
+	PendingWill     bool
 	TopicAliases    TopicAliases // a map of topic aliases
 	stopCause       atomic.Value // reason for stopping
 	Incoming        *Inflight
@@ -472,10 +475,11 @@ func (cl *Client) ReadFixedHeader(fh *packets.FixedHeader) error {
 		return err
 	}
 
-	if cl.ops.options.Capabilities.MaximumPacketSize > 0 && uint32(fh.Remaining+1) > cl.ops.options.Capabilities.MaximumPacketSize {
+	if cl.ops.options.Capabilities.MaximumPacketSize > 0 && uint32(fh.Remaining+bu+1) > cl.ops.options.Capabilities.MaximumPacketSize {
 		return packets.ErrPacketTooLarge // [MQTT-3.2.2-15]
 	}
 
+	cl.State.headerBytes = bu + 1
 	atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bu+1))
 	return nil
 }
@@ -537,6 +541,14 @@ func (cl *Client) ReadPacket(fh *packets.FixedHeader) (pk packets.Packet, err er
 		return pk, err
 	}
 
+	if meter := cl.ops.options.TransportUsage; meter != nil {
+		if err = meter.Read(cl, pk, cl.InboundPacketBytes(pk)); err != nil {
+			if reason, ok := err.(packets.Code); ok && cl.Properties.ProtocolVersion == 5 {
+				_ = cl.WritePacket(packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Disconnect}, ReasonCode: reason.Code})
+			}
+			return pk, err
+		}
+	}
 	pk, err = cl.ops.hooks.OnPacketRead(cl, pk)
 	return
 }
@@ -618,6 +630,12 @@ func (cl *Client) WritePacket(pk packets.Packet) error {
 		return packets.ErrPacketTooLarge // [MQTT-3.1.2-24] [MQTT-3.1.2-25]
 	}
 
+	if meter := cl.ops.options.TransportUsage; meter != nil {
+		if err := meter.Write(cl, pk, buf.Len()); err != nil {
+			cl.Stop(err)
+			return err
+		}
+	}
 	n, err := func() (int64, error) {
 		cl.Lock()
 		defer cl.Unlock()

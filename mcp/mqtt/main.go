@@ -30,6 +30,7 @@ var manifestYAML string
 type App struct {
 	ctx                  *sdk.AppCtx
 	durable              *durableStore
+	usage                *usageMeter
 	broker               *Broker
 	messageLogCh         chan messageRecord
 	aclLogCh             chan aclRecord
@@ -140,6 +141,7 @@ func (a *App) Workers() []sdk.Worker {
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
 		{Pattern: "/consumers", Handler: a.handleConsumers},
+		{Pattern: "/usage", Handler: a.handleUsage},
 		{Pattern: "/status", Handler: a.handleStatus},
 		{Pattern: "/clients", Handler: a.handleClients},
 		{Pattern: "/messages", Handler: a.handleMessages},

@@ -22,14 +22,17 @@ import (
 )
 
 type Broker struct {
-	server       *mqtt.Server
-	port         int
-	address      string
-	app          *App
-	transport    transportConfig
-	certificates *certificateService
-	closeOnce    sync.Once
-	closeErr     error
+	storageRelease func()
+	startMu        sync.Mutex
+	closed         bool
+	server         *mqtt.Server
+	port           int
+	address        string
+	app            *App
+	transport      transportConfig
+	certificates   *certificateService
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 // NewBroker constructs a server with hooks wired up and the TCP
@@ -54,18 +57,34 @@ func NewBroker(a *App) (*Broker, error) {
 	capabilities.ReceiveMaximum = uint16(clampConfigInt(a.ctx, "max_inflight_per_client", 128, 1, 65535))
 	capabilities.MaximumInflight = capabilities.ReceiveMaximum
 	capabilities.MaximumClientWritesPending = int32(clampConfigInt(a.ctx, "max_pending_writes_per_client", 1024, 1, 1048576))
+	release, err := lockUsageDatabase(a.ctx.AppDB())
+	if err != nil {
+		return nil, err
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			release()
+		}
+	}()
 	durable, err := newDurableStore(a)
 	if err != nil {
 		return nil, fmt.Errorf("durable storage: %w", err)
 	}
 	a.durable = durable
+	usage, err := newUsageMeter(a)
+	if err != nil {
+		return nil, fmt.Errorf("usage quotas: %w", err)
+	}
+	a.usage = usage
 	server := mqtt.New(&mqtt.Options{
-		Persistence:  durable,
-		InlineClient: true, // needed for the bus loopback subscriber.
-		Capabilities: capabilities,
+		Persistence:    durable,
+		TransportUsage: usage,
+		InlineClient:   true, // needed for the bus loopback subscriber.
+		Capabilities:   capabilities,
 	})
 
-	br := &Broker{server: server, app: a, transport: transport}
+	br := &Broker{storageRelease: release, server: server, app: a, transport: transport}
 
 	// AuthHook satisfies the broker's auth/ACL hook interface and
 	// delegates to users.go.
@@ -115,6 +134,7 @@ func NewBroker(a *App) (*Broker, error) {
 	if br.transport.publicPort == 0 {
 		br.transport.publicPort = br.port
 	}
+	owned = true
 	return br, nil
 }
 
@@ -142,19 +162,31 @@ func (b *Broker) Address() string { return b.address }
 // when ctx is cancelled — mochi's Server doesn't take a Context, so
 // we wire the cancellation translator here.
 func (b *Broker) Serve(ctx context.Context) error {
-	// Register the bus loopback as soon as we're serving (Subscribe
-	// is safe pre-Serve too, but doing it here keeps the dependency
-	// order clear: server up → bus bridge → traffic).
-	if err := b.app.bridgeBusLoopback(b); err != nil {
-		return fmt.Errorf("bus loopback: %w", err)
-	}
-	if err := b.app.bridgeHADiscovery(b); err != nil {
-		b.app.ctx.Logger().Warn("ha discovery bridge", "err", err.Error())
-	}
+	err := func() error {
+		b.startMu.Lock()
+		defer b.startMu.Unlock()
+		if b.closed {
+			return nil
+		}
+		// Register the bus loopback as soon as we're serving (Subscribe
+		// is safe pre-Serve too, but doing it here keeps the dependency
+		// order clear: server up → bus bridge → traffic).
+		if err := b.app.bridgeBusLoopback(b); err != nil {
+			return fmt.Errorf("bus loopback: %w", err)
+		}
+		if err := b.app.bridgeHADiscovery(b); err != nil {
+			b.app.ctx.Logger().Warn("ha discovery bridge", "err", err.Error())
+		}
 
-	// Mochi's Serve starts goroutines and returns. Keep this supervised worker
-	// alive until cancellation so all sockets and pending TLS work are closed.
-	if err := b.server.Serve(); err != nil {
+		// Mochi's Serve starts goroutines and returns. Keep this supervised worker
+		// alive until cancellation so all sockets and pending TLS work are closed.
+		if err := b.server.Serve(); err != nil {
+			return err
+		}
+		return nil
+
+	}()
+	if err != nil {
 		_ = b.Close()
 		return err
 	}
@@ -164,6 +196,9 @@ func (b *Broker) Serve(ctx context.Context) error {
 
 func (b *Broker) Close() error {
 	b.closeOnce.Do(func() {
+		b.startMu.Lock()
+		defer b.startMu.Unlock()
+		b.closed = true
 		if b.app.durable != nil {
 			b.app.durable.ready.Store(false)
 		}
@@ -172,6 +207,9 @@ func (b *Broker) Close() error {
 		}
 		if b.server != nil {
 			b.closeErr = b.server.Close()
+		}
+		if b.storageRelease != nil {
+			b.storageRelease()
 		}
 	})
 	return b.closeErr
@@ -193,6 +231,9 @@ func (b *Broker) PublishMessage(topic string, payload []byte, retain bool, qos b
 		return "", err
 	}
 	pk, err := b.server.PublishAccepted(topic, payload, retain, qos)
+	if err == packets.ErrPacketTooLarge {
+		return "", errPayloadTooLarge
+	}
 	if err == packets.ErrQuotaExceeded {
 		return "", errOverloaded
 	}

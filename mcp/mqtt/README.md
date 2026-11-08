@@ -1,8 +1,7 @@
 # MQTT Broker
 
-Version 0.6.0 adds durable acceptance, recoverable MQTT sessions and generic
-application consumers to the scoped credentials, TLS and overload handling in
-0.5.0. A scope is an opaque identifier with no customer, billing, device, or
+Version 0.7.0 adds persistent transport usage and per-scope quotas to durable
+acceptance, recoverable sessions and application consumers from 0.6.0. A scope is an opaque identifier with no customer, billing, device, or
 application-specific semantics. All changes are contained in this app.
 
 ## Ownership boundary
@@ -37,9 +36,9 @@ including standalone development runs.
 
 Users, clients, retained state, message logs, discovery records, subscriptions,
 events, and status counters are scope-filtered. Broker-wide usage counters are
-not exposed to scoped callers. Diagnostic counters are currently process-local;
-durable usage accounting is a later stage. Retained pruning operates separately
-within each scope.
+not exposed to scoped callers. Diagnostic event/audit counters remain process-local;
+transport and acceptance usage persist in SQLite and are enforced per scope.
+Retained capacity rejects growth without evicting existing retained state.
 
 ## Credentials
 
@@ -251,7 +250,9 @@ stable identifiers. Do not equate reconnection with successful prior delivery.
 1000/2000) share admission across all credentials, connections, and HTTP/MCP
 publishes in an ownership scope. Reconnecting does not reset that scope's bucket.
 A rate of zero explicitly disables its limiter. Invalid policy values fail mount.
-Budgets are process-local and are not durable usage or billing counters.
+These protective token buckets remain process-local. The persistent quota
+windows below enforce separate budgets that survive restart. Neither mechanism
+assigns billing semantics to usage.
 
 A full subscriber outbound queue disconnects the affected subscriber explicitly.
 Other broker limits reject connections or packets at their protocol boundaries.
@@ -290,8 +291,11 @@ Credential changes invalidate active and offline recoverable sessions.
 
 Immediate wills use the same transaction boundary. A restart publishes an
 interrupted connection's saved, still-authorized will once; clearing its flag is
-atomic with acceptance. Delayed wills remain unsupported. A will that cannot be
-persisted makes storage unhealthy, preserving the previous recovery record.
+atomic with acceptance. Delayed wills remain unsupported. A will rejected by a normal quota/capacity limit remains pending in a persisted
+session shell and is retried every 30 seconds (or when that client ID reconnects).
+It does not disable other scopes. Reconnect with the same ID is rejected until
+the pending will can be accepted; explicit credential revocation cancels it.
+An actual persistence failure makes storage unhealthy and preserves recovery state.
 
 Persistence failures close connections before success, set `ready: false`, clear
 the enrollment endpoint and expose `durability.storage_fault` in `/status` and
@@ -305,8 +309,8 @@ Defaults per scope: 100000 journal records, 64 MiB serialized journal data and
 persistent journal byte/count accounting share the acceptance transaction.
 Durable mutations are serialized; throughput depends on SQLite and the amount
 of outstanding session state. Unchanged session rows are not rewritten for every
-publish. These storage capacities are separate from future durable transport
-usage/billing quotas.
+publish. These journal/session storage capacities remain separate from the transport
+quotas below. This app attaches no billing or customer-specific meaning to usage.
 
 ## Application consumption
 
@@ -350,11 +354,109 @@ passed; MQTT delivery still honors expiry.
 
 The platform event bridge and diagnostic audit feed remain best effort; use the
 durable consumer API for reliable application processing. Complete retained
-pagination and persistent connection/traffic usage quotas remain separate work.
+pagination remains separate work.
 Existing retained list previews are unchanged; individual retained reads are full.
 Before upgrading, back up the app database. Migration 004 is additive and cannot
 recover messages or sessions lost before 0.6.0. Reconnect persistent MQTT clients
 after upgrade to establish their recoverable sessions.
+
+## Persistent usage and per-scope quotas (0.7.0)
+
+`GET /usage`, MCP `mqtt_usage`, and the `usage` field of `/status` / `mqtt_status`
+return only the authenticated ownership scope. They include lifetime counters,
+the current quota window, effective limits, connection reservations, current
+retained logical storage, and the metering start timestamp. Counter values are
+decimal strings to preserve 64-bit precision. Metering starts at migration 005;
+traffic from older releases is not reconstructed. Existing retained storage is
+backfilled, including legacy data assigned to a scope during migration.
+
+| Quota key | Meaning | Default |
+| --- | --- | --- |
+| `connections` | Concurrent authenticated MQTT client IDs; same-ID takeover reuses its slot | `max_clients` (1000) |
+| `connection_admissions` | Authenticated connection reservations per window, including reconnects/takeovers | 0 |
+| `accepted_messages` | Durable acceptances per window, across MQTT, HTTP/MCP, event publishes, and wills | 0 |
+| `accepted_payload_bytes` | Payload bytes durably accepted per window, across all publish interfaces | 0 |
+| `mqtt_ingress_messages` / `mqtt_ingress_bytes` | Admitted incoming MQTT PUBLISH packets / complete encoded packet bytes per window | 0 |
+| `mqtt_egress_messages` / `mqtt_egress_bytes` | Reserved outgoing MQTT PUBLISH packets / complete encoded packet bytes per window | 0 |
+| `payload_bytes` | Maximum payload bytes for one ingress publish, including a configured will | `max_payload_bytes` (1048576) |
+| `retained_messages` | Current retained messages; replacement of a topic does not add a message | `retain_max_count` (10000) |
+| `retained_bytes` | Current logical bytes of retained topic, payload and stored properties | 67108864 |
+
+Zero disables a scope quota; global connection, packet/payload and durable-storage
+safety limits continue to apply. Windowed quotas default to unlimited. Set trusted
+install configuration `quota_defaults_json` for shared defaults and
+`scope_quotas_json` for partial overrides keyed by the exact opaque scope ID:
+
+```json
+{
+  "quota_defaults_json": "{\"connections\":100,\"accepted_messages\":100000,\"mqtt_egress_bytes\":1073741824}",
+  "scope_quotas_json": "{\"project-1\":{\"connections\":20,\"payload_bytes\":65536,\"retained_bytes\":16777216}}",
+  "quota_period_seconds": "86400"
+}
+```
+
+Policies allow only the documented nonnegative integer keys; malformed policies
+fail mount. Restart the app after changing quota configuration. Omitted override fields inherit defaults. They are persisted as an
+effective policy snapshot on mount, with install configuration authoritative on
+restart. MQTT, HTTP and MCP callers cannot raise limits or select another scope
+through arguments. `quota_period_seconds` defines UTC-aligned windows from 60 to
+2678400 seconds (default one day). An open window's start/end and consumption are
+persisted: reconnect, restart, clock rollback and a changed window length do not
+refill it. At natural expiry a new window starts; lifetime totals never reset.
+Only lifetime and the current window are stored, rather than unbounded history.
+
+Lifetime/current-window metrics include `connection_admissions`,
+`accepted_messages`, `accepted_payload_bytes`, `mqtt_ingress_messages`,
+`mqtt_ingress_bytes`, `mqtt_egress_messages`, `mqtt_egress_bytes`, and
+`quota_rejections`. `peak_connections` is a lifetime high-water mark. Additional
+`ingress_packets`, `ingress_packet_bytes`, `egress_packets`, and
+`egress_packet_bytes` count all admitted authenticated MQTT packets, including
+CONNECT and protocol control. Unauthenticated handshakes, malformed packets, TLS/TCP framing and HTTP/inter-app
+transport bytes are not charged to these MQTT packet counters. An admitted
+MQTT frame later rejected by ACL or acceptance limits still consumes transport
+quota; a frame denied by transport quota does not. Control packets are counted but are exempt from
+PUBLISH quotas so ACKs and session completion can make progress.
+
+Usage is **durably reserved before admission/writing**, rather than sampled after
+I/O. Retries, retained deliveries, fan-out to each subscriber and replay consume
+MQTT transport quota each time; a duplicate incoming QoS2 PUBLISH does not consume
+another durable-acceptance quota. HTTP/MCP/event publishes cannot bypass the
+shared acceptance/payload quotas. A reservation may survive a crash, partial
+write, or failed connection establishment without the peer observing the packet;
+this conservative accounting prevents overspending and is not an exact network
+interface meter. Counter writes and quota decisions are transactional, including
+concurrent callers. Acceptance counters, retained gauges and the journal commit
+or roll back together. A metering/storage error prevents success and fails closed.
+
+Quota denial sends MQTT 5 quota-exceeded DISCONNECT/CONNACK (0x97), or a legacy
+MQTT 3.1.1 connection refusal (code 3) / close before publish acknowledgment.
+Per-scope payload denial uses MQTT 5 packet-too-large (0x95), HTTP 413; other HTTP
+publish denials use 429 and retry guidance. Outgoing quota exhaustion closes the
+subscriber before writing the denied packet. For a persistent session its QoS
+1/2 obligation stays queued for retry after replenishment, until session/message
+expiry; clean sessions retain MQTT's normal disconnect semantics. A durable publisher success still means
+acceptance/queuing, not delivery to that subscriber. Check `window_ends_at`, then
+retry with backoff and jitter. Ordinary quota denials do not latch storage faults.
+
+Retained limits enforce logical stored bytes, excluding SQLite page/index/WAL
+and filesystem overhead. They no longer prune old messages. Replacements,
+empty retained deletions and MQTT expiry update persistent gauges atomically.
+When a policy is lowered below existing storage, accepted data stays intact and
+operations that reduce or preserve an over-limit dimension remain possible;
+new growth in that dimension is rejected. Journal and session quotas from 0.6.0
+continue to apply independently. Read-only usage and durable consumer ACKs remain
+available after traffic quota exhaustion.
+
+The broker owns an exclusive local database lock for its lifetime; a second
+process cannot clear a running broker's connection reservations. On crash the OS
+releases that lock. Startup reconciles stale transport reservations to zero while
+leaving counters, current quota windows, offline sessions and retained gauges
+intact. Live connections are not restored as active sockets. Keep the database,
+its SQLite companion files, and `.mqtt.lock` path on a local persistent volume
+with working file locks/fsync; the app is not a multi-broker shared-database cluster.
+Do not remove a live lock file. Clean shutdown joins protocol writers/housekeeping
+before releasing ownership. In-memory databases are only used by unit tests.
+
 
 ## Validation
 

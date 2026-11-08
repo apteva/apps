@@ -553,6 +553,7 @@ func (a *App) revokeUser(username string) {
 			a.broker.server.UnsubscribeClient(cl)
 			cl.ClearInflights()
 			a.broker.server.Clients.Delete(cl.ID)
+			a.authenticatedClients.Delete(cl)
 		}
 	})
 }
