@@ -1317,7 +1317,7 @@ Plain `find`/`aggregate` resolvers also accept fixed server-owned advanced
 configuration. Use `database_pipeline` for declared identity/access parameters,
 pages and response shaping. Client arguments cannot supply or replace the graph.
 
-## Related-parent aggregate summaries (unreleased)
+## Related-parent aggregate summaries (GraphQL 0.24.0)
 
 `database_pipeline` aggregate steps accept `relation` and `match`, using the same
 bounded context rules as canonical find. Supply identical parent filters,
@@ -1338,5 +1338,4 @@ if it rejects relation/match on aggregate.
 [testdata/related-aggregate.json](testdata/related-aggregate.json) contains the
 Database argument fixture. `database_related_aggregate_test.go` demonstrates the
 paired find/aggregate resolver, permission bindings and optional literal search.
-The matching Database implementation is required; Database 0.14.0 does not expose
-this related-parent aggregate input.
+Database 0.15.0 or later is required for this related-parent aggregate input.

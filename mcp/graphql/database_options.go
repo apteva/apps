@@ -308,7 +308,7 @@ func (a *App) verifyPublishDatabaseFilters(ctx context.Context, project, api str
 				cancel()
 				if err != nil {
 					if relatedAggregate && len(joined) > 0 && strings.Contains(check.problem, "joined reads") {
-						return invalid("resolver %s.%s: Database cannot run aggregate with relation/match; install the matching Database update with bounded related-parent aggregation: %s", resolver.ParentType, resolver.FieldName, err)
+						return invalid("resolver %s.%s: Database cannot run aggregate with relation/match; install Database 0.15.0 or later for bounded related-parent aggregation: %s", resolver.ParentType, resolver.FieldName, err)
 					}
 					return invalid("resolver %s.%s: %s: %s", resolver.ParentType, resolver.FieldName, check.problem, err)
 				}

@@ -35,7 +35,7 @@ jobs:
       - run: bun test ui/telemetry.test.ts
       - uses: actions/checkout@v4
         with:
-          ref: database/v0.14.0
+          ref: database/v0.15.0
           path: .ci/database
           sparse-checkout: mcp/database
       - name: Canonical and compatibility reads across three adapters
@@ -43,6 +43,6 @@ jobs:
           GRAPHQL_TEST_DATABASE_DIR: ${{ github.workspace }}/.ci/database/mcp/database
         run: |
           for adapter in sqlite pebble aptevadb; do
-            GRAPHQL_TEST_DATABASE_ADAPTER=$adapter go test -race -run 'TestRealDatabase(CanonicalDependentRead|CanonicalFixedRead|JoinedReads)$' -v -count=1
+            GRAPHQL_TEST_DATABASE_ADAPTER=$adapter go test -race -run 'TestRealDatabase(CanonicalDependentRead|CanonicalFixedRead|RelatedAggregate|JoinedReads)$' -v -count=1
           done
       - run: CGO_ENABLED=0 go build -trimpath -o /tmp/apteva-graphql .
