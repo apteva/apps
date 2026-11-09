@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS game_studio_identity (id INTEGER PRIMARY KEY CHECK(id
 `
 
 func initializeStudio(ctx *sdk.AppCtx) error {
-	if _, err := ctx.AppDB().Exec(studioSchema + setupSchema); err != nil {
+	if _, err := ctx.AppDB().Exec(studioSchema + setupSchema + appleAnalyticsSchema); err != nil {
 		return err
 	}
 	_, err := ctx.AppDB().Exec(`INSERT OR IGNORE INTO game_studio_identity(id,namespace) VALUES(1,?)`, randomID())
@@ -673,7 +673,7 @@ func (a *App) handleStudio(w http.ResponseWriter, r *http.Request) {
 	}
 	args["_project_id"] = p
 	args["game_id"] = r.PathValue("game_id")
-	for _, k := range []string{"target_id", "source_id", "app", "channel"} {
+	for _, k := range []string{"target_id", "source_id", "app", "channel", "topic"} {
 		if v := r.URL.Query().Get(k); v != "" {
 			args[k] = v
 		}

@@ -869,6 +869,119 @@ export function formatMicros(raw: string): string {
     return "Unavailable";
   }
 }
+const appleMetrics = [
+  ["impressions", "App Store impressions"],
+  ["product_page_views", "Product page views"],
+  ["first_time_downloads", "First-time downloads"],
+  ["redownloads", "Redownloads"],
+  ["installations", "Installations (opt-in)"],
+] as const;
+
+const appleReportLabels = {
+  discovery: "Discovery and engagement",
+  downloads: "Downloads",
+  installations: "Installations",
+} as const;
+
+const appleReportStatus: Record<string, string> = {
+  waiting: "Waiting for Apple",
+  failed: "Sync failed",
+  unavailable: "No data reported",
+  reported: "Data available",
+};
+
+function AppleAcquisition({
+  source,
+  call,
+}: {
+  source: Item;
+  call: ActionProps["call"];
+}) {
+  const [days, setDays] = useState<Item[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const { id, last_success, last_error, next_attempt } = source;
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    call("metrics_query", {
+      source_id: id,
+      topic: "app_store_analytics",
+      limit: 30,
+    })
+      .then((data) => {
+        if (active) setDays(data.days || []);
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [call, id, last_success, last_error, next_attempt]);
+
+  return (
+    <section className={card} aria-label="App Store acquisition">
+      <h4>App Store Analytics · {source.external_id}</h4>
+      <p className="text-text-muted text-xs">
+        Impressions exclude page views. Installations cover users who share
+        usage data with Apple. A dash means Apple supplied no count.
+      </p>
+      <ul className="text-xs">
+        {Object.entries(appleReportLabels).map(([key, label]) => {
+          const report = source.report_status?.[key];
+          return (
+            <li key={key}>
+              {label} ·{" "}
+              {appleReportStatus[report?.status] || "Waiting for Apple"}
+              {report?.latest_data_date &&
+                ` · Latest data ${report.latest_data_date}`}
+            </li>
+          );
+        })}
+      </ul>
+      {error && <ErrorBox error={error} />}
+      {loading && !days.length && <p>Loading daily metrics…</p>}
+      {days.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr>
+                <th scope="col" className="text-left">
+                  Date
+                </th>
+                {appleMetrics.map(([key, label]) => (
+                  <th scope="col" className="px-2 text-right" key={key}>
+                    {label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {days.map((day) => (
+                <tr key={day.date}>
+                  <th scope="row" className="text-left font-normal">
+                    {day.date}
+                  </th>
+                  {appleMetrics.map(([key]) => (
+                    <td className="px-2 text-right" key={key}>
+                      {day.counts?.[key]?.toLocaleString() ?? "—"}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Metrics({
   call,
   run,
@@ -932,7 +1045,13 @@ function Metrics({
           value={connection}
           onChange={(e) => {
             setConnection(e.target.value);
-            setFamily("network");
+            setFamily(
+              connections.find(
+                (c) => String(c.connection_id) === e.target.value,
+              )?.provider === "app-store-connect"
+                ? "store_sales"
+                : "network",
+            );
             setExternal("");
             setAccount("");
             setStream("");
@@ -953,7 +1072,9 @@ function Metrics({
               label={
                 selected.provider === "google-play-developer"
                   ? "Android package ID"
-                  : "External app or GA4 property ID"
+                  : selected.provider === "app-store-connect"
+                    ? "Apple app ID"
+                    : "External app or GA4 property ID"
               }
               value={external}
               onChange={setExternal}
@@ -992,11 +1113,24 @@ function Metrics({
               </>
             )}
             {selected.provider === "app-store-connect" && (
-              <Field
-                label="Apple vendor number"
-                value={vendor}
-                onChange={setVendor}
-              />
+              <>
+                <select
+                  aria-label="Apple report family"
+                  className={input}
+                  value={family}
+                  onChange={(e) => setFamily(e.target.value)}
+                >
+                  <option value="store_sales">Sales and Trends</option>
+                  <option value="store_analytics">App Store Analytics</option>
+                </select>
+                {family === "store_sales" && (
+                  <Field
+                    label="Apple vendor number"
+                    value={vendor}
+                    onChange={setVendor}
+                  />
+                )}
+              </>
             )}
             {selected.provider === "google-play-developer" && (
               <>
@@ -1065,13 +1199,19 @@ function Metrics({
         {sources.map((s) => (
           <article key={s.id} className={card}>
             <strong>
-              {s.provider} · {s.family}
+              {s.family === "store_analytics"
+                ? "App Store Analytics"
+                : s.family === "store_sales"
+                  ? "Sales and Trends"
+                  : `${s.provider} · ${s.family}`}
             </strong>
             <p>{s.external_id}</p>
             <p>
               {s.last_success
                 ? `Updated ${new Date(s.last_success).toLocaleString()}`
-                : "No imported data yet"}
+                : s.family === "store_analytics"
+                  ? "Awaiting first sync"
+                  : "No imported data yet"}
             </p>
             {s.last_error && <p className="text-red">{s.last_error}</p>}
             {s.provider === "google-play-developer" && (
@@ -1087,17 +1227,22 @@ function Metrics({
               disabled={busy}
               onClick={() =>
                 run(async () => {
-                  await call("metrics_sync", {
-                    source_id: s.id,
-                    ...(s.provider === "google-play-developer" && reportMonth
-                      ? { month: reportMonth }
-                      : {}),
-                  });
-                  await load();
+                  try {
+                    await call("metrics_sync", {
+                      source_id: s.id,
+                      ...(s.provider === "google-play-developer" && reportMonth
+                        ? { month: reportMonth }
+                        : {}),
+                    });
+                  } finally {
+                    await load();
+                  }
                   notice(
                     s.provider === "google-play-developer"
                       ? "Monthly reports refreshed."
-                      : "Seven-day report window refreshed.",
+                      : s.family === "store_analytics"
+                        ? "Checked for Apple Analytics reports."
+                        : "Seven-day report window refreshed.",
                   );
                 })
               }
@@ -1107,6 +1252,11 @@ function Metrics({
           </article>
         ))}
       </div>
+      {sources
+        .filter((s) => s.family === "store_analytics")
+        .map((s) => (
+          <AppleAcquisition key={s.id} source={s} call={call} />
+        ))}
       <div className={card}>
         <h4>Measurements</h4>
         <select
@@ -1116,11 +1266,13 @@ function Metrics({
           onChange={(e) => setSource(e.target.value)}
         >
           <option value="">All sources (shown separately)</option>
-          {sources.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.provider} · {s.family} · {s.external_id}
-            </option>
-          ))}
+          {sources
+            .filter((s) => s.family !== "store_analytics")
+            .map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.provider} · {s.family} · {s.external_id}
+              </option>
+            ))}
         </select>
         <select
           aria-label="Measurement type"

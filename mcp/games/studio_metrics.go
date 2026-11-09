@@ -141,9 +141,13 @@ func metricSourceSet(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, er
 		}
 		source["timezone"] = facts[0]["timezone"]
 	case "app-store-connect":
-		source["family"] = "store_sales"
-		if txt(object(source["config"])["vendor_number"]) == "" {
-			return nil, errors.New("config.vendor_number required for Apple sales reports")
+		if source["family"] == appleAnalyticsFamily {
+			source["platform"] = "ios"
+		} else {
+			source["family"] = "store_sales"
+			if txt(object(source["config"])["vendor_number"]) == "" {
+				return nil, errors.New("config.vendor_number required for Apple sales reports")
+			}
 		}
 		app, e := metricExecute(ctx, s, source, "get_app", map[string]any{"app_id": external})
 		if e != nil {
@@ -153,6 +157,10 @@ func metricSourceSet(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, er
 			return nil, errors.New("store app not found in selected account")
 		}
 		source["timezone"] = "America/Los_Angeles"
+		if source["family"] == appleAnalyticsFamily {
+			// Apple's event dates are calendar labels, with no time conversion.
+			source["timezone"] = "UTC"
+		}
 	case "google-play-developer":
 		if !validPlayPackage(external) {
 			return nil, errors.New("external_id must be an Android package ID")
@@ -172,11 +180,26 @@ func metricSourceSet(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, er
 	}
 	id := studioHash([]any{provider, source["connection_id"], external, source["account_id"], source["stream_id"], source["family"]})[:24]
 	source["id"] = id
-	if e = linkPut(ctx, s, "metric", id, source); e != nil {
+	payload, e := json.Marshal(source)
+	if e != nil {
 		return nil, e
 	}
-	_, e = ctx.AppDB().Exec(`INSERT OR IGNORE INTO game_metric_syncs(project_id,game_id,source_id) VALUES(?,?,?)`, s.ProjectID, s.GameID, id)
-	return source, e
+	tx, e := ctx.AppDB().Begin()
+	if e != nil {
+		return nil, e
+	}
+	defer tx.Rollback()
+	if _, e = tx.Exec(`INSERT INTO game_studio_links VALUES(?,?,'metric',?,?,?)
+ON CONFLICT(project_id,game_id,kind,id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at`, s.ProjectID, s.GameID, id, string(payload), nowRFC()); e != nil {
+		return nil, e
+	}
+	if _, e = tx.Exec(`INSERT OR IGNORE INTO game_metric_syncs(project_id,game_id,source_id) VALUES(?,?,?)`, s.ProjectID, s.GameID, id); e != nil {
+		return nil, e
+	}
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return source, nil
 }
 func metricSources(ctx *sdk.AppCtx, s GameScope) ([]map[string]any, error) {
 	sources, e := linksList(ctx, s, "metric")
@@ -194,6 +217,12 @@ func metricSources(ctx *sdk.AppCtx, s GameScope) ([]map[string]any, error) {
 		source["last_error"] = err
 		source["next_attempt"] = next
 		source["failures"] = failures
+		if source["family"] == appleAnalyticsFamily {
+			source["report_status"], e = appleAnalyticsStatus(ctx, s, source)
+			if e != nil {
+				return nil, e
+			}
+		}
 	}
 	return sources, nil
 }
@@ -429,8 +458,10 @@ func syncMetricSourceMonth(ctx *sdk.AppCtx, s GameScope, id string, days int, mo
 	if err != nil {
 		return nil, err
 	}
-	if _, err = studioBinding(ctx, "analytics"); err != nil {
-		return nil, err
+	if source["family"] != appleAnalyticsFamily {
+		if _, err = studioBinding(ctx, "analytics"); err != nil {
+			return nil, err
+		}
 	}
 	token := randomID()
 	now := time.Now().UTC()
@@ -462,6 +493,9 @@ func syncMetricSourceMonth(ctx *sdk.AppCtx, s GameScope, id string, days int, mo
 	}
 	if month != "" {
 		return nil, errors.New("month is only supported for Google Play reports")
+	}
+	if source["family"] == appleAnalyticsFamily {
+		return syncAppleAnalytics(ctx, s, source, token, downloadAppleSegment)
 	}
 	zone, err := time.LoadLocation(txt(source["timezone"]))
 	if err != nil {
@@ -498,6 +532,10 @@ func syncMetricSourceMonth(ctx *sdk.AppCtx, s GameScope, id string, days int, mo
 	return map[string]any{"days": count, "source_id": id, "status": "synced"}, nil
 }
 func gameMetricsQuery(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, error) {
+	topic := stringArg(args, "topic", "provider_daily")
+	if topic == appleAnalyticsTopic {
+		return queryAppleAnalytics(ctx, s, args)
+	}
 	if _, e := studioBinding(ctx, "analytics"); e != nil {
 		return nil, e
 	}
@@ -508,9 +546,8 @@ func gameMetricsQuery(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, e
 		}
 		where["props.source_id"] = id
 	}
-	topic := stringArg(args, "topic", "provider_daily")
 	if topic != "provider_daily" && topic != "provider_monthly" && !strings.HasPrefix(topic, "play.") {
-		return nil, errors.New("choose provider_daily, provider_monthly or a play.* telemetry topic")
+		return nil, errors.New("choose app_store_analytics, provider_daily, provider_monthly or a play.* telemetry topic")
 	}
 	in := map[string]any{"app": "games", "topic": topic, "where": where, "limit": boundedArg(args, "limit", 100, 1, 500)}
 	for _, k := range []string{"since", "until"} {
