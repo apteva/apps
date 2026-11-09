@@ -462,3 +462,91 @@ test("partial setup edits reuse the completed repository and deployment", async 
     deployment_id: 7,
   });
 });
+
+test("App Store Analytics separates reported zero, unavailable data and sync failure", async () => {
+  let enabled = false;
+  let failed = false;
+  let saved: unknown;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), "http://local").pathname;
+    if (path.endsWith("/discovery"))
+      return reply([{ connection_id: 9, provider: "app-store-connect" }]);
+    if (path.endsWith("/metric_source_set")) {
+      saved = JSON.parse(String(init?.body));
+      enabled = true;
+      return reply({ id: "apple-analytics" });
+    }
+    if (path.endsWith("/metric_sources")) {
+      return reply(
+        enabled
+          ? [
+              {
+                id: "apple-analytics",
+                provider: "app-store-connect",
+                family: "store_analytics",
+                external_id: "6828775568",
+                last_error: failed ? "Apple is unreachable" : "",
+                report_status: {
+                  discovery: { status: "waiting" },
+                  downloads: {
+                    status: failed ? "failed" : "reported",
+                    latest_data_date: "2026-11-04",
+                  },
+                  installations: { status: "unavailable" },
+                },
+              },
+            ]
+          : [],
+      );
+    }
+    if (path.endsWith("/metrics_query")) {
+      expect(path).toContain("/games/a/");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        source_id: "apple-analytics",
+        topic: "app_store_analytics",
+      });
+      return reply({
+        days: [{ date: "2026-11-04", counts: { redownloads: 0 } }],
+      });
+    }
+    if (path.endsWith("/metrics_sync")) {
+      failed = true;
+      return reply("Apple is unreachable", 400);
+    }
+    return reply({});
+  }) as typeof fetch;
+
+  render(<StudioPanel projectId="p" gameId="a" view="metrics" />);
+  fireEvent.click(screen.getByText("Discover reporting connections"));
+  await screen.findByText("app-store-connect · #9");
+  fireEvent.change(screen.getByLabelText("Reporting connection"), {
+    target: { value: "9" },
+  });
+  expect(screen.getByLabelText("Apple vendor number")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Apple report family"), {
+    target: { value: "store_analytics" },
+  });
+  expect(screen.queryByLabelText("Apple vendor number")).toBeNull();
+  fireEvent.change(screen.getByLabelText("Apple app ID"), {
+    target: { value: "6828775568" },
+  });
+  fireEvent.click(screen.getByText("Connect reporting source"));
+  expect(
+    await screen.findByText("Discovery and engagement · Waiting for Apple"),
+  ).toBeTruthy();
+  expect(screen.getByText("Installations · No data reported")).toBeTruthy();
+  expect(saved).toMatchObject({
+    family: "store_analytics",
+    external_id: "6828775568",
+    connection_id: 9,
+  });
+  const cells = (await screen.findAllByRole("cell")).map(
+    (cell) => cell.textContent,
+  );
+  expect(cells).toEqual(["—", "—", "—", "0", "—"]);
+
+  fireEvent.click(screen.getByText("Refresh reports"));
+  expect(
+    await screen.findByText("Downloads · Sync failed · Latest data 2026-11-04"),
+  ).toBeTruthy();
+});

@@ -110,8 +110,17 @@ entry is reused unchanged.
 |---|---|---|
 | AdMob | Publisher ID, AdMob app ID, Network or mediation | Daily impressions, clicks and estimated earnings |
 | GA4 | Property ID and game stream ID | Daily active users, sessions and event counts |
-| App Store Connect | App ID and vendor number | Daily units and sales-report proceeds, separated by currency |
+| App Store Connect · Sales and Trends | App ID and vendor number | Daily units and sales-report proceeds, separated by currency |
+| App Store Connect · App Store Analytics | Apple app ID | Daily impressions, product page views, first-time downloads, redownloads, and opt-in installations |
 | Google Play Developer | Android package ID; report bucket and report permissions on the connection | Monthly estimated buyer-paid sales or merchant-currency earnings, selected as separate sources |
+
+In **Game metrics**, connect **App Store Analytics** using the reporting connection
+and the game's Apple app ID. Games reuses an active ongoing request or creates one
+with an Admin API key. Apple generally delivers the first report within 24–48 hours.
+Each report shows its latest event date. A dash means Apple supplied no count, and
+a reported zero displays as `0`. Impressions count Apple's Discovery impression
+events, which exclude page views. Installation counts cover opted-in users.
+See [Apple's Analytics Reports API guide](https://developer.apple.com/help/app-store-connect-analytics/overview/analytics-reports-api/).
 
 For Google Play, set the Play Console report bucket on the connection and grant
 global report access. Existing OAuth connections may need reconnection to add the

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.7.1
+version: 0.8.0
 description: |
   Guided source and deployment setup, versioned build recipes, runner selection
   and actionable readiness checks with exact-build artifact evidence.
@@ -12,7 +12,7 @@ description: |
   Multi-game backend for Apteva: independent games, players, cloud saves,
   transactional statistics, leaderboards and achievements within each project.
   Links Code source and Deploy releases to each game, imports reporting from
-  AdMob, GA4, Apple sales and Google Play sales/earnings, and provides bounded gameplay telemetry.
+  AdMob, GA4, App Store Analytics, Apple sales and Google Play sales/earnings, and provides bounded gameplay telemetry.
   Game-specific Auth clients and login tickets protect player APIs. Legacy
   clients remain bound to their migrated game. Agents use scoped MCP tools.
 author: Apteva
@@ -344,7 +344,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: games/v0.7.1
+    ref: games/v0.8.0
     entry: mcp/games
   port: 8080
   health_check: /health
