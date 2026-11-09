@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -229,4 +230,55 @@ func TestPreparationBuildOnlyThenWarm(t *testing.T) {
 	if status.State != "ready" || !status.BootValidated || p.artifactBuilds.Load() != before {
 		t.Fatalf("warm operation recompiled: %+v", status)
 	}
+}
+
+func TestConfiguredWarmWorkers(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := mountApp(t, ctx)
+	p := currentPool()
+	<-p.initialPreparationScan
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "warm-target", "source": echoHandler, "worker_isolation": isolateInvocation,
+		"limits": map[string]any{"warm_workers": 2},
+	})
+	waitForWarm := func() {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if p.runtimeReadiness(fn).WarmWorkers == 2 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("warm target not reached: %+v", p.runtimeReadiness(fn))
+	}
+	waitForWarm()
+	func() {
+		// Hold preparation at activation so the request has to bypass
+		// the pending refill and use an idle worker immediately.
+		release, err := lockBuild(context.Background(), fmt.Sprintf("activation-%d", fn.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		if _, err := p.requestPreparation(fn, 3, false, false); err != nil {
+			t.Fatal(err)
+		}
+		parent, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		res, err := invokeFunction(ctx, parent, fn, nil, "manual")
+		if err != nil || res.Status != "ok" || res.ColdStartMS != 0 {
+			t.Fatalf("refill blocked the request from using a warm worker: %+v %v", res, err)
+		}
+	}()
+	waitForWarm()
+	var err error
+	if err = app.OnUnmount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p = currentPool()
+	waitForWarm()
 }

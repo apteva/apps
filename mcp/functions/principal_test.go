@@ -174,7 +174,7 @@ func TestAuthenticatedWorkerRetirementAndLegacyReuse(t *testing.T) {
 	requireBin(t, "node")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
-	fn := createFn(t, app, ctx, map[string]any{"name": "reuse", "source": `let saved=null;let count=0;export default async(e,c)=>{let previous=saved;saved=e.requestContext?.authorizer;count++;if(e.fail)throw Error("failed");if(e.wait)await new Promise(r=>setTimeout(r,10000));return {previous,count,identity:c.invocation,authorizer:saved};};`, "invocation_policy": principalPolicy()})
+	fn := createFn(t, app, ctx, map[string]any{"name": "reuse", "worker_isolation": isolateAuthenticatedInvocation, "source": `let saved=null;let count=0;export default async(e,c)=>{let previous=saved;saved=e.requestContext?.authorizer;count++;if(e.fail)throw Error("failed");if(e.wait)await new Promise(r=>setTimeout(r,10000));return {previous,count,identity:c.invocation,authorizer:saved};};`, "invocation_policy": principalPolicy()})
 	for _, mode := range []string{"ok", "fail", "cancel"} {
 		args := principalArgs(fn)
 		if mode == "fail" {
@@ -196,6 +196,84 @@ func TestAuthenticatedWorkerRetirementAndLegacyReuse(t *testing.T) {
 	res, err := invokeFunction(ctx, context.Background(), fn, map[string]any{}, "manual")
 	if err != nil || !strings.Contains(res.Response, `"count":2`) {
 		t.Fatalf("legacy worker was not reused: %v %v", res, err)
+	}
+}
+
+func TestAuthenticatedWorkerReuseByVersion(t *testing.T) {
+	for _, tc := range []struct{ runtime, source string }{
+		{"node", `let count=0, oldContext;export default async (event,ctx)=>{
+			let expired = true;
+			if (oldContext) {
+				try { await oldContext.call("functions","functions_invoke",{}); expired=false; }
+				catch(e) { expired=e.message==="invocation already completed"; }
+			}
+			oldContext=ctx;
+			return {count:++count, subject:ctx.invocation.subject, expired};
+		};`},
+		{"go", `package main
+import "encoding/json"
+var count int
+var oldContext *Context
+func Handle(event json.RawMessage, ctx *Context) (any,error) {
+	expired := true
+	if oldContext != nil {
+		_, err := oldContext.Call("functions","functions_invoke",nil)
+		expired = err != nil && err.Error() == "invocation already completed"
+	}
+	oldContext = ctx
+	count++
+	var identity struct { Subject string }
+	if err := json.Unmarshal(ctx.Invocation, &identity); err != nil { return nil, err }
+	return map[string]any{"count":count,"subject":identity.Subject,"expired":expired},nil
+}`},
+	} {
+		t.Run(tc.runtime, func(t *testing.T) {
+			requireBin(t, tc.runtime)
+			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+			app := mountApp(t, ctx)
+			fn := createFn(t, app, ctx, map[string]any{
+				"name": "reuse", "runtime": tc.runtime, "source": tc.source, "invocation_policy": principalPolicy(),
+			})
+			if fn.WorkerIsolation != isolateFunctionVersion || currentPool().runtimeReadiness(fn).WarmWorkers != 0 {
+				t.Fatalf("new deployment should reuse workers without prewarming: %+v", fn)
+			}
+			call := func(subject string, count int) {
+				t.Helper()
+				args := principalArgs(fn)
+				args["principal"].(map[string]any)["subject"] = subject
+				out := authInvoke(t, app, ctx, args)
+				var result struct {
+					Subject string
+					Count   int
+					Expired bool
+				}
+				if err := json.Unmarshal([]byte(out["response"].(string)), &result); err != nil || result.Subject != subject || result.Count != count || !result.Expired {
+					t.Fatalf("unexpected handler result %v: %v", out, err)
+				}
+				if count > 1 && out["cold_start_ms"] != int64(0) {
+					t.Fatalf("reused worker reported a cold start: %v", out)
+				}
+			}
+			call("first-user", 1)
+			call("second-user", 2)
+
+			for _, mode := range []string{isolateInvocation, isolateFunctionVersion} {
+				if _, err := app.toolUpdate(ctx, map[string]any{"id": fn.ID, "worker_isolation": mode}); err != nil {
+					t.Fatal(err)
+				}
+				call("third-user", 1)
+				if mode == isolateInvocation {
+					call("fourth-user", 1)
+					if res, err := app.toolInvokeContext(context.Background(), ctx, map[string]any{"id": fn.ID}); err != nil || res.(map[string]any)["status"] != "ok" {
+						t.Fatalf("ordinary invocation failed: %v %v", res, err)
+					}
+					current, err := dbGetFunction(ctx.AppDB(), fn.ProjectID, fn.ID, "")
+					if err != nil || current == nil || currentPool().runtimeReadiness(current).WarmWorkers != 0 {
+						t.Fatalf("strict mode retained an ordinary worker or failed to load: %v", err)
+					}
+				}
+			}
+		})
 	}
 }
 

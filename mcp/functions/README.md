@@ -1,4 +1,8 @@
-# Functions 1.17.1
+# Functions 1.19.0
+
+New functions reuse healthy workers after authenticated and ordinary requests.
+Existing functions preserve their previous isolation behavior. See
+[worker isolation and warm targets](TRUSTED_INVOCATIONS.md#isolation-audit-and-session-lifecycle).
 
 **Fixed in 1.17.1:** project-wide cursor reads use a dedicated
 project/ID index and fetch telemetry only after selecting the page. First index
@@ -46,7 +50,21 @@ See [Capacity and memory API](CAPACITY_API.md) for per-call measurements, live f
 
 ## Runtime preparation in 1.9.0
 
-Active functions are prepared automatically after startup and checked again every 30 seconds. A bounded pool (two preparation workers by default) validates the current runtime artifact, rebuilds missing or incompatible artifacts from the immutable source snapshot, and boots a worker without invoking the business handler. Explicit priority functions run first, followed by public Function URLs and other active functions. One failed function does not prevent the app's management API from starting.
+Active functions have their runtime artifacts prepared after startup and checked
+again every 30 seconds. Preparation rebuilds missing or incompatible artifacts
+from the immutable source snapshot. Explicit priority functions run first,
+followed by public Function URLs and other active functions.
+
+Proactive process warming defaults to zero. Deploy and rollback still boot a
+process to validate the handler before activation. Without a warm target that
+validation process is retired, and workers started by actual requests can stay
+in the idle pool until their idle timeout or until capacity is needed.
+
+Set `limits.warm_workers` on a function to maintain an optional idle target.
+It is best effort, capped by `limits.max_idle_workers` when set, and subject to
+the shared process, memory and background preparation limits. Live requests can
+evict idle workers under pressure. Warming runs module initialization or Go
+`init()` and never invokes the request handler.
 
 Function list/detail responses expose `runtime_readiness` independently of deployment `build_status`:
 

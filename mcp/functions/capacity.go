@@ -21,6 +21,7 @@ type RuntimePolicy struct {
 	Class         string `json:"class,omitempty"`
 	Concurrency   int    `json:"concurrency,omitempty"`
 	MaxIdle       *int   `json:"max_idle_workers,omitempty"`
+	WarmWorkers   int    `json:"warm_workers,omitempty"`
 	IdleMS        int    `json:"idle_timeout_ms,omitempty"`
 	QueueMS       int    `json:"queue_timeout_ms,omitempty"`
 	AppMS         int    `json:"app_timeout_ms,omitempty"`
@@ -31,7 +32,7 @@ func (r RuntimePolicy) validate() error {
 	if r.Class != "" && r.Class != "interactive" && r.Class != "background" {
 		return errors.New("limits.class must be interactive or background")
 	}
-	if r.Concurrency < 0 || r.Concurrency > 1024 || r.MaxIdle != nil && (*r.MaxIdle < 0 || *r.MaxIdle > 1024) {
+	if r.WarmWorkers < 0 || r.WarmWorkers > 1024 || r.Concurrency < 0 || r.Concurrency > 1024 || r.MaxIdle != nil && (*r.MaxIdle < 0 || *r.MaxIdle > 1024) {
 		return errors.New("worker limits must be between 0 and 1024")
 	}
 	for _, v := range []int{r.IdleMS, r.QueueMS, r.AppMS, r.IntegrationMS} {

@@ -103,6 +103,29 @@ type fnPool struct {
 	signature, identity string
 }
 
+const (
+	isolateFunctionVersion         = "function_version"
+	isolateInvocation              = "invocation"
+	isolateAuthenticatedInvocation = "authenticated_invocation"
+)
+
+func validateWorkerIsolation(value any) error {
+	mode, _ := value.(string)
+	switch mode {
+	case isolateFunctionVersion, isolateInvocation, isolateAuthenticatedInvocation:
+		return nil
+	default:
+		return errors.New("worker_isolation must be function_version, invocation, or authenticated_invocation")
+	}
+}
+
+func workerIsolationSchema() map[string]any {
+	return map[string]any{
+		"type": "string", "enum": []string{isolateFunctionVersion, isolateInvocation, isolateAuthenticatedInvocation},
+		"description": "Reuse healthy workers for the function version (default for new functions), retire after every invocation, or retire after authenticated invocations only (upgrade default).",
+	}
+}
+
 func configHash(fn *Function) string {
 	b, _ := json.Marshal(struct {
 		Env              map[string]string
@@ -110,7 +133,8 @@ func configHash(fn *Function) string {
 		Access           *FunctionAccess
 		Limits           RuntimePolicy
 		InvocationPolicy *InvocationPolicy
-	}{fn.Env, fn.MaxMemoryMB, fn.Access, fn.Limits, fn.InvocationPolicy})
+		WorkerIsolation  string
+	}{fn.Env, fn.MaxMemoryMB, fn.Access, fn.Limits, fn.InvocationPolicy, fn.WorkerIsolation})
 	return hashSource(b)
 }
 func newPool(ctx *sdk.AppCtx) (*pool, error) {
@@ -257,9 +281,14 @@ func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, s
 	return w, nil
 }
 
-func (p *pool) put(fn *Function, fp *fnPool, w *worker) {
+// idleTarget caps a preparation worker's contribution. Zero uses the
+// normal retention policy for workers that served a request.
+func (p *pool) put(fn *Function, fp *fnPool, w *worker, idleTarget int) {
 	p.mu.Lock()
 	keep := (policy(fn).MaxIdle == nil || len(fp.idle) < *policy(fn).MaxIdle) && !p.closed && !fp.closed && fp.identity == fn.InstanceKey && fp.signature == w.signature
+	if idleTarget > 0 && len(fp.idle) >= idleTarget {
+		keep = false
+	}
 	if current := p.cachedFunction(fn.ProjectID, fn.ID, ""); current != nil {
 		keep = keep && current.ActiveVersionID != nil && *current.ActiveVersionID == w.versionID && current.Status == "active"
 	}
@@ -313,22 +342,32 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	}
 	var w *worker
 	for w == nil {
+		p.mu.Lock()
+		var candidate *worker
 		select {
-		case candidate := <-fp.idle:
-			if candidate.alive() && !candidate.stale(v.ID) && candidate.signature == configHash(fn) && p.reclassify(candidate, requestClass(parent, fn)) {
-				w = candidate
-			} else {
-				p.discard(candidate)
-				continue
-			}
+		case candidate = <-fp.idle:
 		default:
 		}
-		break
+		p.mu.Unlock()
+		if candidate == nil {
+			break
+		}
+		if candidate.alive() && !candidate.stale(v.ID) && candidate.signature == configHash(fn) && p.reclassify(candidate, requestClass(parent, fn)) {
+			w = candidate
+		} else {
+			p.discard(candidate)
+		}
 	}
 	if w == nil {
 		var err error
 		w, err = p.start(parent, fn, v, spec, dir)
 		if err != nil {
+			deadline, bounded := parent.Deadline()
+			if parent.Err() != nil || bounded && !time.Now().Before(deadline) {
+				// The invocation finalizer assigns the specific timeout or
+				// cancellation status, just as for an interrupted handler.
+				return &invokeResult{ExitCode: -1}, nil
+			}
 			return nil, fmt.Errorf("cold start: %w", err)
 		}
 	}
@@ -387,15 +426,23 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 		res.Error = "Worker exceeded its cgroup memory limit"
 	}
 
-	// An authenticated handler can retain arbitrary globals or background tasks.
-	// Retire its process even on success so identity data cannot survive reuse.
+	// Authentication and callback authority are scoped to this invocation.
+	// Process state is retained only when the function's isolation policy allows it.
 	security := securityFrom(parent)
-	if err == nil && w.alive() && (security == nil || security.Principal == nil) {
-		p.put(fn, fp, w)
+	authenticated := security != nil && security.Principal != nil
+	reusable := fn.WorkerIsolation == isolateFunctionVersion ||
+		(fn.WorkerIsolation != isolateInvocation && !authenticated)
+	if err == nil && parent.Err() == nil && oom == 0 && w.alive() {
 		p.markBootValidated(fn, t.cold)
+		if reusable {
+			p.put(fn, fp, w, 0)
+		} else {
+			p.discard(w)
+		}
 	} else {
 		p.discard(w)
 	}
+	p.scheduleWarmWorkers(fn)
 	return res, err
 }
 func (p *pool) acquireBuild(ctx context.Context) error {

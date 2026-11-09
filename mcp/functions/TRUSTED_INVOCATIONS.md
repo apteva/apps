@@ -138,15 +138,30 @@ remain service calls and receive no automatically forwarded user principal.
 
 ## Isolation, audit, and session lifecycle
 
-Invocation identity is per request and never stored in worker environment
-variables. Each worker request gets separate metadata; existing protocol sequence
-checks reject late calls. Authenticated workers are retired on completion,
-including success, failure and cancellation. This prevents arbitrary handler
-globals and background tasks from retaining a prior principal for a later
-request. Existing idle workers may serve an authenticated invocation once;
-subsequent execution requires another worker. Prepared artifacts remain cached.
-Ordinary invocations continue to reuse warm workers. This deliberately trades
-some authenticated-call startup latency for process-level context cleanup.
+Invocation identity is per request. The worker protocol ties downstream calls
+to the current invocation. Handler callback authority expires when that
+invocation completes. Authentication policy applies independently of worker
+reuse.
+
+The `worker_isolation` setting is available in function settings and on HTTP/MCP
+create and update. Deploys and rollbacks preserve it.
+
+| Mode | Worker lifecycle |
+| --- | --- |
+| `function_version` | Default for new functions. A healthy process can serve authenticated and ordinary requests, one at a time, for the same function version and configuration. |
+| `invocation` | Each call consumes one unused worker. The process is retired on completion. |
+| `authenticated_invocation` | Upgrade default for existing functions. Authenticated calls retire the process. Ordinary calls can reuse their workers. |
+
+With `function_version`, globals, caches, temporary files, connections, and
+background work may persist between callers. Keep caller data and authorization
+decisions in the request handler. Switch an existing function after reviewing
+its handler and dependencies for that contract. Existing functions can opt in
+with `functions_update` and `worker_isolation: "function_version"`.
+
+Idle workers from older versions or configurations are retired when the function
+changes. Workers that crash, lose protocol synchronization, exceed memory, or
+are interrupted are retired. Proactive warming is off by default and can be
+enabled with `limits.warm_workers` within the existing capacity budgets.
 
 Each invocation's `identity` audit record contains kind, verified subject and
 issuer (when present), project, verified caller installation/app, request ID and

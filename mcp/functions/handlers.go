@@ -1203,14 +1203,15 @@ func buildAndCreateFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid 
 		return nil, err
 	}
 	fn := &Function{
-		ProjectID:   pid,
-		Name:        strArg(args, "name"),
-		Runtime:     strArg(args, "runtime"),
-		SourceKind:  strArg(args, "source_kind"),
-		Source:      strArg(args, "source"),
-		RepoPath:    strArg(args, "repo_path"),
-		TimeoutMS:   intArg(args, "timeout_ms", defaultTimeout),
-		MaxMemoryMB: intArg(args, "max_memory_mb", defaultMemoryMB),
+		ProjectID:       pid,
+		WorkerIsolation: strArg(args, "worker_isolation"),
+		Name:            strArg(args, "name"),
+		Runtime:         strArg(args, "runtime"),
+		SourceKind:      strArg(args, "source_kind"),
+		Source:          strArg(args, "source"),
+		RepoPath:        strArg(args, "repo_path"),
+		TimeoutMS:       intArg(args, "timeout_ms", defaultTimeout),
+		MaxMemoryMB:     intArg(args, "max_memory_mb", defaultMemoryMB),
 	}
 	if raw, ok := args["invocation_policy"]; ok {
 		var err error
@@ -1297,9 +1298,20 @@ func updateFunctionMeta(ctx *sdk.AppCtx, pid string, id int64, patch map[string]
 	if cur == nil {
 		return nil, errors.New("function not found")
 	}
+	p := currentPool()
+	activationCtx := context.Background()
+	if p != nil {
+		activationCtx = p.life
+	}
+	release, err := lockBuild(activationCtx, fmt.Sprintf("activation-%d", id))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	updated, err := dbUpdateFunction(dbFor(ctx), pid, id, patch, "")
-	if p := currentPool(); err == nil && updated != nil && p != nil {
+	if err == nil && updated != nil && p != nil {
 		p.refreshFunction(updated)
+		p.scheduleWarmWorkers(updated)
 		ctx.EmitWithProject("function.updated", pid, map[string]any{"id": id})
 	}
 	return updated, err
