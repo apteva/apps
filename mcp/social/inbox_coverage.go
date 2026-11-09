@@ -161,7 +161,14 @@ func loadInboxCoverage(db *sql.DB, pid string, accountID int64) (*inboxAccountCo
 	}
 	switch out.Coverage {
 	case coverageNeedsReconnect:
-		out.Missing = append(out.Missing, "Reconnect this account in Integrations to grant inbox permissions.")
+		switch {
+		case out.Provider == "native" && out.Platform == "youtube":
+			out.Missing = append(out.Missing, "Reconnect from the Social account card to grant comment permissions.")
+		case out.Provider == "native":
+			out.Missing = append(out.Missing, "Reconnect from the Social account card to grant inbox permissions.")
+		default:
+			out.Missing = append(out.Missing, "Reconnect the account through its provider to grant inbox permissions.")
+		}
 	case coverageNeedsUpdate:
 		out.Missing = append(out.Missing, "The platform's integration catalog is older than this Social version; update the platform.")
 	}

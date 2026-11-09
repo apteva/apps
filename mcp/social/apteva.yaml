@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.24.5
+version: 0.24.6
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -103,6 +103,8 @@ provides:
     - { name: account_provider_sync_update, description: "Set automatic provider synchronization to off, managed_only (safe default), or explicitly opted-in full_history without changing publishing access." }
     - { name: account_audience_capabilities, description: "Optional account audience capabilities; no provider calls." }
     - { name: account_membership_levels, description: "Optional cached tier discovery; refresh=true queries the existing integration connection." }
+    - { name: account_reconnect,          description: "Reauthorize the same native account on its existing Social connection." }
+    - { name: account_reconnect_status,   description: "Check or cancel reconnect and verify supported inbox access." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
     - { name: account_disconnect,          description: "Disconnect an account while preserving history; explicit confirmed hard delete can remove local history." }
     - { name: post_create,                 description: "Create a post with required explicit mode=draft|schedule|publish. Draft is optional and may omit targets; schedule remains a direct path and requires schedule_at; publish is immediate. Omitting mode never publishes. Args: mode, body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
@@ -208,7 +210,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.5
+    ref: social/v0.24.6
     entry: mcp/social
   port: 8080
   health_check: /health

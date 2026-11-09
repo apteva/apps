@@ -427,6 +427,16 @@ func commentModerationStub(ctx *sdk.AppCtx, args map[string]any, action string) 
 
 // ─── inbox_sync ────────────────────────────────────────────────────
 
+type inboxSyncResult struct {
+	SocialAccountID int64  `json:"social_account_id"`
+	Platform        string `json:"platform,omitempty"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason,omitempty"`
+	Error           string `json:"error,omitempty"`
+	Report          any    `json:"report,omitempty"`
+	Coverage        string `json:"coverage,omitempty"`
+}
+
 func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
@@ -460,16 +470,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 
-	type syncResult struct {
-		SocialAccountID int64  `json:"social_account_id"`
-		Platform        string `json:"platform,omitempty"`
-		Status          string `json:"status"`
-		Reason          string `json:"reason,omitempty"`
-		Error           string `json:"error,omitempty"`
-		Report          any    `json:"report,omitempty"`
-		Coverage        string `json:"coverage,omitempty"`
-	}
-	results := make([]syncResult, 0, len(ids))
+	results := make([]inboxSyncResult, 0, len(ids))
 	for _, id := range ids {
 		resetInboxCounts(ctx.AppDB(), id)
 		var platform, providerSlug string
@@ -480,7 +481,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			   FROM social_accounts WHERE id=? AND project_id=?`,
 			id, pid,
 		).Scan(&platform, &providerSlug, &providerAccountID, &connID); err != nil {
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Status:          "failed",
 				Error:           err.Error(),
@@ -490,7 +491,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if providerSlug == zernioProviderSlug {
 			report, err := a.syncZernioInbox(ctx, pid, id, connID, providerAccountID, platform)
 			if err != nil {
-				results = append(results, syncResult{
+				results = append(results, inboxSyncResult{
 					SocialAccountID: id,
 					Platform:        platform,
 					Status:          "failed",
@@ -498,7 +499,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				})
 				continue
 			}
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          "ok",
@@ -510,7 +511,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "facebook":
 			report, err := syncFacebookAccount(ctx, pid, id)
 			if err != nil {
-				results = append(results, syncResult{
+				results = append(results, inboxSyncResult{
 					SocialAccountID: id,
 					Platform:        platform,
 					Status:          "failed",
@@ -518,7 +519,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				})
 				continue
 			}
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          inboxSyncStatus(report.Warnings),
@@ -527,7 +528,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "instagram":
 			report, err := syncInstagramAccount(ctx, pid, id)
 			if err != nil {
-				results = append(results, syncResult{
+				results = append(results, inboxSyncResult{
 					SocialAccountID: id,
 					Platform:        platform,
 					Status:          "failed",
@@ -535,7 +536,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				})
 				continue
 			}
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          inboxSyncStatus(report.Warnings),
@@ -544,7 +545,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "twitter":
 			report, err := syncTwitterAccount(ctx, pid, id)
 			if err != nil {
-				results = append(results, syncResult{
+				results = append(results, inboxSyncResult{
 					SocialAccountID: id,
 					Platform:        platform,
 					Status:          "failed",
@@ -556,7 +557,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			if len(report.Warnings) > 0 {
 				status = "partial"
 			}
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          status,
@@ -565,7 +566,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "youtube":
 			report, err := syncYouTubeAccount(ctx, pid, id, scheduled)
 			if err != nil {
-				results = append(results, syncResult{
+				results = append(results, inboxSyncResult{
 					SocialAccountID: id,
 					Platform:        platform,
 					Status:          "failed",
@@ -573,7 +574,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				})
 				continue
 			}
-			result := syncResult{
+			result := inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          inboxSyncStatus(report.Warnings),
@@ -588,7 +589,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			if limits := inboxPlatformLimits[platform]; len(limits.Missing) > 0 {
 				reason = strings.Join(limits.Missing, " ")
 			}
-			results = append(results, syncResult{
+			results = append(results, inboxSyncResult{
 				SocialAccountID: id,
 				Platform:        platform,
 				Status:          "unsupported",

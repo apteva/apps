@@ -124,6 +124,8 @@ interface SocialAccount {
   profile_id?: number;
   last_check_at?: string;
   last_check_status?: "ok" | "failed" | "unsupported" | "";
+  inbox_coverage?: string;
+  reconnect_supported?: boolean;
   last_check_error?: string;
   last_check_details?: Record<string, unknown> | null;
 }
@@ -525,7 +527,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         ev.topic === "account.disconnected" || ev.topic === "account.deleted") {
       loadAccounts();
     }
-    if (ev.topic === "account.checked") {
+    if (ev.topic === "account.checked" || ev.topic === "inbox.coverage_changed") {
       loadAccounts();
     }
     if (ev.topic === "post.created" || ev.topic === "post.completed" ||
@@ -1183,7 +1185,7 @@ function AccountsView({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {accounts.map((a) => (
-            <AccountCard key={a.id} account={a} projectId={projectId} onChange={onChange} setStatus={setStatus} />
+            <AccountCard key={`${projectId}:${a.id}`} account={a} projectId={projectId} onChange={onChange} setStatus={setStatus} />
           ))}
         </div>
       )}
@@ -2583,6 +2585,7 @@ function AccountCard({
           ×
         </button>
       </div>
+      <AccountReconnect account={account} projectId={projectId} onChange={onChange} />
       {destinationsOpen&&<div className="border border-border rounded p-3"><DestinationPicker accountId={account.id} projectId={projectId} capabilities={account.destination_capabilities} defaultId={account.default_destination_id} manage onDefaultChanged={onChange}/>{account.account_kind==="destination_preset"&&<div className="text-xs text-text-dim mt-2">Saved destination preset from an earlier connection. Other destinations on the account are also available.</div>}</div>}
       {confirming && (
         <ConfirmDialog
@@ -2617,19 +2620,148 @@ function AccountCard({
   );
 }
 
+type ReconnectResponse = {
+  reconnect_id: string;
+  status: string;
+  authorize_url?: string;
+  error?: string;
+};
+
+const reconnectMessages: Record<string, string> = {
+  comments_connected: "Comment access verified",
+  inbox_connected: "Inbox access verified",
+  account_connected: "Account reconnected",
+  comments_unverified: "Comment access could not be verified",
+  inbox_unverified: "Inbox access could not be verified",
+  account_unverified: "Account access could not be verified",
+  wrong_account: "Choose the original account and include all linked destinations",
+  cancelled: "Reconnect cancelled",
+  expired: "Reconnect expired",
+  failed: "Reconnect failed",
+};
+
+function AccountReconnect({ account, projectId, onChange }: {
+  account: SocialAccount; projectId?: string | null; onChange: () => void;
+}) {
+  const [receipt, setReceipt] = useState("");
+  const [canCancel, setCanCancel] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [checking, setChecking] = useState(false);
+  const active = useRef<AbortController | null>(null);
+  const popup = useRef<Window | null>(null);
+  const changed = useRef(onChange);
+  changed.current = onChange;
+  useEffect(() => () => {
+    active.current?.abort();
+    popup.current?.close();
+  }, []);
+  const path = `/accounts/${account.id}/reconnect`;
+  const request = async (suffix: string, signal: AbortSignal, body?: object): Promise<ReconnectResponse> => {
+    const response = await fetch(appURL(path + suffix, projectId), {
+      method: "POST", credentials: "same-origin", signal,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await response.json().catch(() => ({}));
+    const error = mcpEnvelopeError(data);
+    if (!response.ok || error || !data.status) throw new Error(error || `Reconnect failed (${response.status})`);
+    return data;
+  };
+  const watch = async (id: string, controller: AbortController, cancel = false) => {
+    setChecking(true);
+    setMessage(cancel ? "Cancelling reconnect…" : "Waiting for authorization…");
+    try {
+      let result = await request("/status", controller.signal, { reconnect_id: id, cancel });
+      while (result.status === "pending" || result.status === "checking") {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (controller.signal.aborted) return;
+        result = await request("/status", controller.signal, { reconnect_id: id });
+      }
+      if (controller.signal.aborted) return;
+      popup.current?.close();
+      popup.current = null;
+      setCanCancel(false);
+      const label = reconnectMessages[result.status] || "Reconnect could not be verified";
+      setMessage(result.error ? `${label}. ${result.error}` : label);
+      if (!result.status.endsWith("_unverified")) setReceipt("");
+      changed.current();
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage((error as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setChecking(false);
+    }
+  };
+  const start = async () => {
+    const win = window.open("about:blank", "_blank", "popup,width=560,height=720");
+    if (!win) {
+      setMessage("Allow popups to reconnect this account.");
+      return;
+    }
+    win.opener = null;
+    popup.current = win;
+    const controller = new AbortController();
+    active.current = controller;
+    setBusy(true);
+    setMessage("");
+    try {
+      const data = await request("", controller.signal);
+      if (!data.reconnect_id || !data.authorize_url) throw new Error("Reconnect did not return an authorization link.");
+      setReceipt(data.reconnect_id);
+      setCanCancel(true);
+      win.location.href = data.authorize_url;
+      void watch(data.reconnect_id, controller);
+    } catch (error) {
+      win.close();
+      if (!controller.signal.aborted) setMessage((error as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  };
+  const check = (cancel: boolean) => {
+    active.current?.abort();
+    const controller = new AbortController();
+    active.current = controller;
+    void watch(receipt, controller, cancel);
+  };
+
+  const needsPermission = account.inbox_coverage === "needs_reconnect";
+  if (!needsPermission && !account.reconnect_supported && !message) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 text-xs">
+      {needsPermission && (
+        <span className="text-warn">{account.platform === "youtube" ? "Comments need permission" : "Inbox needs permission"}</span>
+      )}
+      {needsPermission && !account.reconnect_supported && (
+        <span className="text-text-dim">Manage permissions through {account.provider_slug || "the connection provider"}</span>
+      )}
+      {account.reconnect_supported && !canCancel && !checking && (
+        <button type="button" className="text-accent hover:underline" onClick={start} disabled={busy}>Reconnect</button>
+      )}
+      {receipt && !checking && (
+        <button type="button" className="text-accent hover:underline" onClick={() => check(false)}>Check access again</button>
+      )}
+      {receipt && canCancel && (
+        <button type="button" className="text-text-muted hover:underline" onClick={() => check(true)}>Cancel reconnect</button>
+      )}
+      {message && <span role="status">{message}</span>}
+    </div>
+  );
+}
+
 function HealthPill({ account }: { account: SocialAccount }) {
   const status = account.last_check_status || "";
   if (!status) {
-    return <span className="text-text-dim">never checked</span>;
+    return <span className="text-text-dim">Profile unchecked</span>;
   }
   const when = account.last_check_at ? new Date(account.last_check_at).toLocaleString() : "";
   if (status === "ok") {
-    return <span className="text-success" title={when}>ok</span>;
+    return <span className="text-success" title={when}>Profile check passed</span>;
   }
   if (status === "failed") {
-    return <span className="text-error" title={account.last_check_error || when}>failed</span>;
+    return <span className="text-error" title={account.last_check_error || when}>Profile check failed</span>;
   }
-  return <span className="text-text-dim" title={account.last_check_error || when}>unsupported</span>;
+  return <span className="text-text-dim" title={account.last_check_error || when}>Profile check unavailable</span>;
 }
 
 export function AddAccountDialog({
