@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -177,6 +178,17 @@ func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection
 	if e != nil {
 		return nil, nativeError(e)
 	}
+	out, err := normalizeNativeAggregateRows(t.ctx, c, r, outSchema, spec, values, workLimit)
+	if errors.Is(err, errNativeSumUnsafe) {
+		return t.aggregatePortable(c, r, outSchema)
+	}
+	if errors.Is(err, native.ErrLimit) {
+		return t.aggregateStream(c, r, outSchema, spec)
+	}
+	return out, err
+}
+
+func normalizeNativeAggregateRows(ctx context.Context, c Collection, r Request, outSchema Collection, spec nativeAggregationPlan, values []map[string]any, workLimit int) ([]Record, error) {
 	if len(values) == 0 && len(r.GroupBy) == 0 {
 		values = []map[string]any{{}}
 		for _, m := range r.Metrics {
@@ -190,19 +202,16 @@ func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection
 	out := make([]Record, 0, len(values))
 	retained := 0
 	for _, row := range values {
-		if err := t.ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		record, err := normalizeNativeAggregateRow(c, r, outSchema, spec, row)
-		if errors.Is(err, errNativeSumUnsafe) {
-			return t.aggregatePortable(c, r, outSchema)
-		}
 		if err != nil {
 			return nil, err
 		}
 		retained += retainedBytes(record)
 		if retained > workLimit {
-			return t.aggregateStream(c, r, outSchema, spec)
+			return nil, native.ErrLimit
 		}
 		out = append(out, record)
 	}
@@ -210,7 +219,7 @@ func (t *aptevaTx) aggregateNative(c Collection, r Request, outSchema Collection
 	if len(out) > r.Limit+1 {
 		out = out[:r.Limit+1]
 	}
-	return out, t.ctx.Err()
+	return out, ctx.Err()
 }
 
 var errNativeSumUnsafe = errors.New("native sum needs checked scan-order evaluation")

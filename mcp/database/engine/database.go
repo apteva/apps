@@ -72,6 +72,8 @@ type Manager struct {
 	nativeCacheBudget     int64
 	nativeQueries         chan struct{}
 	nativeQueryAdmissions chan struct{}
+	nativeShortQueries    chan struct{}
+	nativeShortAdmissions chan struct{}
 	cacheClock            uint64
 }
 
@@ -111,7 +113,7 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 	}
 	concurrency := options.MaxConcurrentAptevaQueries
 	if concurrency == 0 {
-		concurrency = 2
+		concurrency = DefaultMaxConcurrentAptevaQueries
 	}
 	if concurrency < 1 || concurrency > 64 {
 		return nil, Invalid("native query concurrency must be 1–64")
@@ -137,7 +139,15 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
-	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva, nativeCacheBudget: cacheBudget, nativeQueries: make(chan struct{}, concurrency), nativeQueryAdmissions: make(chan struct{}, concurrency+maxQueuedNativeQueries)}
+	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva, nativeCacheBudget: cacheBudget}
+	bulkSlots := concurrency
+	if concurrency > 1 {
+		bulkSlots--
+		m.nativeShortQueries = make(chan struct{}, 1)
+		m.nativeShortAdmissions = make(chan struct{}, 1+maxQueuedShortQueries)
+	}
+	m.nativeQueries = make(chan struct{}, bulkSlots)
+	m.nativeQueryAdmissions = make(chan struct{}, bulkSlots+maxQueuedNativeQueries)
 	if e = db.QueryRow(`SELECT value FROM settings WHERE name='secret'`).Scan(&m.secret); e != nil {
 		db.Close()
 		return nil, e
@@ -324,12 +334,17 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		return nil, e
 	}
 	defer release()
+	shortReadLocked := false
 	if d.info.Adapter == "aptevadb" && (kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch") {
-		done, err := m.acquireNativeQuery(ctx)
+		done, locked, err := m.admitNativeRead(ctx, d, op, r)
 		if err != nil {
 			return nil, err
 		}
 		defer done()
+		shortReadLocked = locked
+		if locked {
+			defer d.mu.RUnlock()
+		}
 	}
 	r.diag.queued()
 	if op == "database_create" || op == "database_describe" {
@@ -386,7 +401,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if write {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-	} else {
+	} else if !shortReadLocked {
 		d.mu.RLock()
 		defer d.mu.RUnlock()
 	}

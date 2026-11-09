@@ -58,7 +58,7 @@ func managerOptions(config map[string]string, getenv func(string) string) (engin
 		return options, engine.Invalid("aptevadb_total_cache_mib must cover one database cache")
 	}
 	if options.MaxConcurrentAptevaQueries == 0 {
-		options.MaxConcurrentAptevaQueries = 2
+		options.MaxConcurrentAptevaQueries = engine.DefaultMaxConcurrentAptevaQueries
 	}
 	options.Apteva = &native
 	return options, nil
