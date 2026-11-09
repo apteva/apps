@@ -3,22 +3,32 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
 
 func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
-	m, err := OpenWithConfig(t.TempDir(), ManagerOptions{MaxConcurrentAptevaQueries: 2})
+	m, err := OpenWithConfig(t.TempDir(), ManagerOptions{MaxConcurrentAptevaQueries: 3})
 	checkErr(t, err)
 	t.Cleanup(func() { checkErr(t, m.Close()) })
 	resourceDatabase(t, m, "lab")
 	bounded := Request{Database: "lab", Collection: "items", Diagnostics: true,
 		Query: Query{Where: &Filter{Field: "id", Op: "eq", Value: "one"}}}
-	// Populate schema metadata through the ordinary entry point.
+	for _, collection := range []string{"actor_access", "catalogue"} {
+		call(t, m, "p", "collection_create", Request{Database: "lab", Collection: collection,
+			Fields: []Field{{Name: "id", Type: "text"}, {Name: "centres", Type: "json"}}, PrimaryKey: []string{"id"}})
+		call(t, m, "p", "insert", Request{Database: "lab", Collection: collection,
+			Records: []Record{{"id": "known", "centres": []any{"a", "b"}}}})
+	}
+	// Populate schema metadata after DDL invalidates the cache.
 	call(t, m, "p", "count", bounded)
-	release, err := m.acquireNativeQuery(context.Background())
-	checkErr(t, err)
-	defer release()
+	for range 2 {
+		release, err := m.acquireNativeQuery(context.Background())
+		checkErr(t, err)
+		defer release()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -28,6 +38,32 @@ func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
 	if out["count"] != "1" || out["diagnostics"].(map[string]any)["admissionClass"] != "interactive" {
 		t.Fatal(out)
 	}
+	permissions := Request{Database: "lab", Diagnostics: true, Operations: []Operation{
+		{Op: "get", Request: Request{Collection: "actor_access", Key: Record{"id": "known"}}},
+		{Op: "get", Request: Request{Collection: "catalogue", Key: Record{"id": "known"}}},
+	}}
+	getPermissions := func(actorCentres []any) {
+		t.Helper()
+		v, err := m.Execute(ctx, "p", "batch", permissions)
+		checkErr(t, err)
+		batch := v.(map[string]any)
+		diagnostics := batch["diagnostics"].(map[string]any)
+		if diagnostics["admissionClass"] != "interactive" || diagnostics["admissionMs"].(float64) >= 100 ||
+			diagnostics["queueMs"].(float64) < diagnostics["admissionMs"].(float64) {
+			t.Fatal(diagnostics)
+		}
+		for i, centres := range [][]any{actorCentres, {"a", "b"}} {
+			entry := batch["results"].([]any)[i].(map[string]any)
+			record := entry["record"].(Record)
+			if entry["found"] != true || !reflect.DeepEqual(record["centres"], centres) {
+				t.Fatal(entry)
+			}
+		}
+	}
+	getPermissions([]any{"a", "b"})
+	call(t, m, "p", "update", Request{Database: "lab", Collection: "actor_access", Key: Record{"id": "known"},
+		Set: Record{"centres": []any{"a"}}})
+	getPermissions([]any{"a"})
 	for _, r := range []Request{
 		{Database: "lab", Collection: "items", Query: Query{Limit: 1}},
 		{Database: "lab", Collection: "items", Query: Query{Where: &Filter{And: []Filter{
@@ -67,16 +103,34 @@ func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
 }
 
 func TestNativeBatchSharesScanWithIndependentDistinctSets(t *testing.T) {
-	rt := relOpen(t, "aptevadb")
-	relCollection(rt, "calls", "id", "id text, caller text, commercial text, centre text, eligible boolean, seconds integer", "centre")
+	workers := readBatchConcurrency
+	readBatchConcurrency = 4
+	t.Cleanup(func() { readBatchConcurrency = workers })
+	options := DefaultAptevaOptions()
+	options.AggregateWorkers = 4
+	m, err := OpenWithConfig(t.TempDir(), ManagerOptions{Apteva: &options})
+	checkErr(t, err)
+	t.Cleanup(func() { checkErr(t, m.Close()) })
+	rt := relT{t, m}
+	relCall(rt, "database_create", `{"adapter":"aptevadb"}`)
+	relCollection(rt, "calls", "id", "id text, caller text, commercial text, centre text, eligible boolean, seconds integer, day text", "day")
 	relInsert(rt, "calls",
-		map[string]any{"id": "1", "caller": "shared", "commercial": "a", "centre": "allowed", "eligible": true, "seconds": "2"},
-		map[string]any{"id": "2", "caller": "shared", "commercial": "b", "centre": "allowed", "eligible": true, "seconds": "3"},
-		map[string]any{"id": "3", "caller": "other", "commercial": "a", "centre": "allowed", "eligible": false, "seconds": "5"},
-		map[string]any{"id": "4", "commercial": "b", "centre": "allowed", "eligible": true},
-		map[string]any{"id": "5", "caller": "foreign", "commercial": "a", "centre": "foreign", "eligible": true, "seconds": "99"},
+		map[string]any{"id": "1", "day": "2026-10-01", "caller": "shared", "commercial": "a", "centre": "allowed", "eligible": true, "seconds": "2"},
+		map[string]any{"id": "2", "day": "2026-10-01", "caller": "shared", "commercial": "b", "centre": "allowed", "eligible": true, "seconds": "3"},
+		map[string]any{"id": "3", "day": "2026-10-01", "caller": "other", "commercial": "a", "centre": "allowed", "eligible": false, "seconds": "5"},
+		map[string]any{"id": "4", "day": "2026-10-01", "commercial": "b", "centre": "allowed", "eligible": true},
+		map[string]any{"id": "5", "day": "2026-10-01", "caller": "foreign", "commercial": "a", "centre": "foreign", "eligible": true, "seconds": "99"},
 	)
-	q := Query{Where: &Filter{Field: "centre", Op: "eq", Value: "allowed"}}
+	for batch := range 12 {
+		rows := make([]map[string]any, 1000)
+		for i := range rows {
+			rows[i] = map[string]any{"id": fmt.Sprintf("foreign-%05d", batch*1000+i), "day": "2026-10-02",
+				"caller": "foreign", "commercial": "b", "centre": "foreign", "eligible": true}
+		}
+		relInsert(rt, "calls", rows...)
+	}
+	scope := Filter{Field: "centre", Op: "eq", Value: "allowed"}
+	q := Query{Where: &Filter{And: []Filter{scope, {Field: "day", Op: "eq", Value: "2026-10-01"}}}}
 	distinct := Metric{Name: "n", Op: "count_distinct", Field: "caller", Where: &Filter{Field: "eligible", Op: "eq", Value: true}}
 	ops := []Operation{
 		{Op: "aggregate", Request: Request{Collection: "calls", Query: q, Metrics: []Metric{distinct}}},
@@ -87,19 +141,38 @@ func TestNativeBatchSharesScanWithIndependentDistinctSets(t *testing.T) {
 	for i, op := range ops {
 		want[i] = coreExecute(t, rt, op.Op, op.Request)
 	}
-	batch := coreExecute(t, rt, "batch", Request{Operations: ops})
+	batch := coreExecute(t, rt, "batch", Request{Operations: ops, Diagnostics: true})
+	var small []batchAggregateDecision
+	checkErr(t, decode(marshal(batch["diagnostics"].(map[string]any)["aggregateGroups"]), &small))
+	if len(small) != 1 || small[0].Path != "shared" || small[0].CandidateRows != 5 {
+		t.Fatalf("narrow aggregate plan: %+v", small)
+	}
 	relEqual(t, "batch results equal independent aggregates", string(marshal(batch["results"])), string(marshal(want)))
 	results := batch["results"].([]any)
 	relEqual(t, "one distinct caller globally", relList(results[0].(map[string]any)["rows"])[0]["n"], "1")
 	for _, row := range relList(results[2].(map[string]any)["rows"]) {
 		relEqual(t, "one distinct caller in each commercial", row["n"], "1")
 	}
+	broad := append([]Operation(nil), ops...)
+	for i := range broad {
+		broad[i].Request.Where = &Filter{And: []Filter{scope,
+			{Field: "day", Op: "gte", Value: "2026-10-01"},
+			{Field: "day", Op: "lt", Value: "2026-11-01"},
+		}}
+	}
+	batch = coreExecute(t, rt, "batch", Request{Operations: broad, Diagnostics: true})
+	var wide []batchAggregateDecision
+	checkErr(t, decode(marshal(batch["diagnostics"].(map[string]any)["aggregateGroups"]), &wide))
+	if len(wide) != 1 || wide[0].Path != "independent" || wide[0].Reason != "parallel_scans_cheaper" || wide[0].DistinctStates != 2 {
+		t.Fatalf("broad aggregate plan: %s", marshal(wide))
+	}
+	relEqual(t, "independent plan returns exact scoped aggregates", string(marshal(batch["results"])), string(marshal(want)))
 	ctx := context.Background()
 	d, release, err := rt.m.acquireDatabase(ctx, "p", "d", "", false)
 	checkErr(t, err)
 	defer release()
 	checkErr(t, d.backend.transaction(ctx, false, func(tx transaction) error {
-		group := batchAggregateGroups(tx, ops, 4)[0]
+		group := batchAggregateGroups(tx, ops, 4, nil)[0]
 		if group == nil || len(group.members) != 3 {
 			t.Fatal("expected one shared input for three aggregates")
 		}

@@ -146,11 +146,24 @@ func boundedNativeRead(d *database, op string, r Request) bool {
 		return false
 	}
 	c, ok := d.schemas.get(r.Collection)
+	if op == "get" {
+		// Even with cold schema, get can only resolve a primary key or
+		// reject it. It cannot fall back to scanning records.
+		if !ok {
+			return len(r.Key) > 0
+		}
+		if len(r.Key) != len(c.PrimaryKey) {
+			return false
+		}
+		for _, field := range c.PrimaryKey {
+			if r.Key[field] == nil {
+				return false
+			}
+		}
+		return true
+	}
 	if !ok {
 		return false
-	}
-	if op == "get" {
-		return len(r.Key) == len(c.PrimaryKey)
 	}
 	if QueryKind(op, r) != op || len(r.Lookups) != 0 || len(r.Buckets) != 0 || r.Cursor != "" || r.Offset != 0 {
 		return false

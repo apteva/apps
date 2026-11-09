@@ -69,7 +69,7 @@ func (d *countDiagnostics) nativeStats(route string) *native.QueryStats {
 
 func milliseconds(v time.Duration) float64 { return float64(v.Microseconds()) / 1000 }
 
-func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists *existsState) map[string]any {
+func (d *countDiagnostics) timings() map[string]any {
 	out := map[string]any{"executed": true, "executionMs": milliseconds(d.running)}
 	// A count inside a read batch shares the batch's queue and snapshot.
 	if !d.started.IsZero() {
@@ -80,6 +80,11 @@ func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists 
 		out["admissionClass"] = d.admissionClass
 		out["admissionMs"] = milliseconds(d.admissionWait)
 	}
+	return out
+}
+
+func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists *existsState) map[string]any {
+	out := d.timings()
 	if d.selectionProbes > 0 {
 		out["indexSelection"] = map[string]any{"probes": d.selectionProbes, "indexEntriesExamined": d.selectionEntries}
 	}

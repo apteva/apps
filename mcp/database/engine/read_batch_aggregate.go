@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 
 	native "github.com/apteva/db"
@@ -16,6 +17,7 @@ type batchAggregateGroup struct {
 	input      Query
 	members    []batchAggregateMember
 	results    map[int]any
+	decision   *batchAggregateDecision
 }
 
 type batchAggregateMember struct {
@@ -26,7 +28,7 @@ type batchAggregateMember struct {
 
 // Use scan sharing on native read snapshots. Keep the normal executor available
 // for unsupported shapes and when independent scans are needed to fit budgets.
-func batchAggregateGroups(tx transaction, ops []Operation, workers int) map[int]*batchAggregateGroup {
+func batchAggregateGroups(tx transaction, ops []Operation, workers int, decisions *[]*batchAggregateDecision) map[int]*batchAggregateGroup {
 	native := nativeBatchTx(tx)
 	if native == nil || workers < 2 {
 		return nil
@@ -69,13 +71,145 @@ func batchAggregateGroups(tx transaction, ops []Operation, workers int) map[int]
 	}
 	byIndex := map[int]*batchAggregateGroup{}
 	for _, group := range groups {
-		if len(group.members) > 1 && len(group.members) <= min(workers, native.backend.options.AggregateWorkers) {
+		if len(group.members) < 2 {
+			continue
+		}
+		choice := native.chooseBatchAggregateScan(group, workers)
+		if decisions != nil {
+			choice.Operations = make([]int, 0, len(group.members))
+			for _, member := range group.members {
+				choice.Operations = append(choice.Operations, member.index)
+			}
+			group.decision = &choice
+			*decisions = append(*decisions, group.decision)
+		}
+		if choice.Path == "shared" {
 			for _, member := range group.members {
 				byIndex[member.index] = group
 			}
 		}
 	}
+	if decisions != nil {
+		sort.Slice(*decisions, func(i, j int) bool {
+			return (*decisions)[i].Operations[0] < (*decisions)[j].Operations[0]
+		})
+	}
 	return byIndex
+}
+
+type batchAggregateDecision struct {
+	Collection      string  `json:"collection"`
+	Index           string  `json:"index,omitempty"`
+	Operations      []int   `json:"operations"`
+	Path            string  `json:"path"`
+	Reason          string  `json:"reason"`
+	CandidateRows   int64   `json:"candidateRows"`
+	ProjectedBytes  int64   `json:"projectedBytes"`
+	DistinctStates  int     `json:"distinctStates"`
+	SharedCost      float64 `json:"sharedCost"`
+	IndependentCost float64 `json:"independentCost"`
+}
+
+func (t *aptevaTx) chooseBatchAggregateScan(g *batchAggregateGroup, workers int) batchAggregateDecision {
+	d := batchAggregateDecision{Collection: g.collection.Name, Path: "independent", Reason: "worker_capacity"}
+	reducers := len(g.members)
+	options := t.backend.options
+	if reducers > min(workers, options.AggregateWorkers) {
+		return d
+	}
+	c := g.collection
+	opts := nativeScanOptions(c, g.input)
+	d.Index = opts.Hint
+	if g.input.RequireIndex && opts.Hint == "$natural" {
+		d.Reason = "required_index_unavailable"
+		return d
+	}
+	d.Reason = "candidate_estimate_unavailable"
+	h, err := t.readCollection(c)
+	if err != nil {
+		return d
+	}
+	eachNativeScanFilter(c, g.input, func(where *Filter) bool {
+		var rows int
+		rows, err = h.EstimateQueryCandidates(t.ctx, marshal(nativeFilter(c, where)), opts)
+		d.CandidateRows += int64(rows)
+		return err == nil
+	})
+	if err != nil {
+		return d
+	}
+
+	// Compare scan, projection and exact distinct work in byte-equivalent
+	// units. The producer copies raw records, even though reducers decode
+	// only their projected fields. Estimate one distinct entry per candidate
+	// as a conservative planning allowance. The executor still enforces its
+	// memory limit using actual sizes.
+	rowWidth := 32
+	for _, field := range c.Fields {
+		rowWidth += batchAggregateFieldWidth(field) + len(field.Name)
+	}
+	var totalReducer, peakReducer, peakDistinct int
+	for _, member := range g.members {
+		fields := map[string]bool{}
+		for _, field := range member.request.GroupBy {
+			fields[field] = true
+		}
+		distinct := 0
+		for _, metric := range member.request.Metrics {
+			fields[metric.Field] = metric.Field != ""
+			visitFilterFields(metric.Where, func(field string) { fields[field] = true })
+			if metric.Op == "count_distinct" {
+				f, _ := c.field(metric.Field)
+				distinct += 48 + batchAggregateFieldWidth(f)
+				d.DistinctStates++
+			}
+		}
+		projection := 0
+		for _, f := range c.Fields {
+			if fields[f.Name] {
+				projection += batchAggregateFieldWidth(f)
+			}
+		}
+		d.ProjectedBytes += int64(projection) * d.CandidateRows
+		work := 16 + projection + distinct
+		totalReducer += work
+		peakReducer = max(peakReducer, work)
+		peakDistinct = max(peakDistinct, distinct)
+	}
+
+	rows := float64(max(1, d.CandidateRows))
+	// Small inputs rarely fill several native shards. Wide inputs benefit
+	// from their parallel scans and avoid repeated chunk rendezvous.
+	parallel := 1 + float64(min(workers, options.AggregateWorkers, 4)-1)*min(1, rows/8192)*0.60
+	scanBudget := min(reducers*options.QueryWorkBytes/8, 512<<10)
+	chunkRows := min(1024, scanBudget*3/8/rowWidth)
+	handoffs := max(0, rows/float64(max(1, chunkRows))-1)
+	scan := float64(64 + rowWidth)
+	d.SharedCost = rows*(scan+float64(rowWidth)/2+float64(peakReducer)) + handoffs*float64(4096*reducers)
+	d.IndependentCost = rows * (scan*float64(reducers) + float64(totalReducer)) / parallel
+	reducerBudget := options.QueryWorkBytes - scanBudget/reducers
+	switch {
+	case rows*float64(peakDistinct) > float64(reducerBudget):
+		d.Reason = "distinct_state_budget"
+	case d.IndependentCost <= d.SharedCost:
+		d.Reason = "parallel_scans_cheaper"
+	default:
+		d.Path, d.Reason = "shared", "repeated_scan_cost"
+	}
+	return d
+}
+
+func batchAggregateFieldWidth(f Field) int {
+	switch f.Type {
+	case "text", "datetime":
+		return 32
+	case "json":
+		return 128
+	case "boolean":
+		return 1
+	default:
+		return 8
+	}
 }
 
 func nativeBatchTx(tx transaction) *aptevaTx {
@@ -248,10 +382,6 @@ func (t *aptevaTx) batchAggregateSource(c Collection, q Query) native.Source {
 			return fail("query_too_expensive", "query requires a selective index")
 		}
 		h, err := t.readCollection(c)
-		if err != nil {
-			return err
-		}
-		q, err = t.selectLookupIndex(c, q)
 		if err != nil {
 			return err
 		}

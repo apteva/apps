@@ -301,10 +301,10 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if op == "changes" {
 		return m.pollChanges(ctx, scope, r)
 	}
-	if op == "count" && r.Diagnostics {
+	kind := QueryKind(op, r)
+	if r.Diagnostics && (op == "count" || kind == "read_batch") {
 		r.diag = &countDiagnostics{started: time.Now()}
 	}
-	kind := QueryKind(op, r)
 	timeout, err := OperationTimeout(kind, r.TimeoutMS)
 	if err != nil {
 		return nil, err
@@ -479,8 +479,8 @@ func isWrite(op string) bool {
 	return true
 }
 func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error) {
-	if r.Diagnostics && op != "count" {
-		return nil, Invalid("diagnostics is supported by count")
+	if r.Diagnostics && op != "count" && op != "batch" {
+		return nil, Invalid("diagnostics is supported by count and read batches")
 	}
 	r.diag.snapshotted()
 	if op == "collections_list" {
@@ -493,6 +493,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		}
 		if reads {
 			return executeReads(tx, r, cursorKey)
+		}
+		if r.Diagnostics {
+			return nil, Invalid("diagnostics is supported by count and read batches")
 		}
 		out := []any{}
 		total := 0

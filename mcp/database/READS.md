@@ -10,6 +10,19 @@ realtime subscription controls remain separate administration/streaming APIs.
 computed values and dependent pipelines are capabilities of those operations.
 Ordinary requests keep their existing native execution paths and response formats.
 
+## Read batches
+
+A read-only `batch` runs all operations on one snapshot. In AptevaDB, batches of
+up to eight full-key `get` operations qualify for reserved read capacity when
+the installation has a reserved slot.
+
+Set `diagnostics: true` on a read batch to report queue, snapshot and execution
+timings. AptevaDB also reports the admission class and the slot wait separately
+as `admissionClass` and `admissionMs`. Compatible aggregate groups include their
+chosen scan path, reason, candidate-row estimate, projected bytes and number of
+exact distinct states. The estimates use index and collection tree metadata.
+Each aggregate keeps its own accumulator on either path.
+
 ## Aggregate
 
 The ordinary request is unchanged:
