@@ -1352,6 +1352,19 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 }
 
 func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, callID string) {
+	receivedAt, ok := r.Context().Value(answerRequestArrivalKey{}).(time.Time)
+	if !ok {
+		receivedAt = time.Now()
+	}
+	var decidedAt time.Time
+	var decision, destination string
+	defer func() {
+		if decision != "" {
+			logSoftphone("softphone answer claim decision",
+				"request_id", telemetryRequestID(r), "call_id", callID, "destination_id", destination,
+				"received_at", ringTime(receivedAt), "decided_at", ringTime(decidedAt), "outcome", decision)
+		}
+	}()
 	a.autoAnswerMu.Lock()
 	defer a.autoAnswerMu.Unlock()
 	var request struct {
@@ -1371,6 +1384,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
 	}
+	recordDecision := func(outcome string) {
+		if request.AutoAnswerSession == "" && !request.Rejoin {
+			decision, destination, decidedAt = outcome, request.DestinationID, time.Now()
+		}
+	}
 	unlock := a.softphones.lockClaim(callID)
 	defer unlock()
 	row, err := a.db().findCall(callID)
@@ -1388,6 +1406,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			dest := a.phoneOfferDestination(p, row, request.DestinationID)
 			if dest == "" {
 				if a.phoneHadOfferedDestination(p, row, request.DestinationID) {
+					recordDecision("offer_expired")
 					writePhoneOfferExpired(w)
 					return
 				}
@@ -1405,6 +1424,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		}
 	}
 	if isTerminalStatus(row.Status) {
+		recordDecision("call_ended")
 		http.Error(w, "call has ended", http.StatusGone)
 		return
 	}
@@ -1425,6 +1445,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	// Answer click must never silently take over a live call.
 	if row.Status == "answering" || row.Status == "answered" || row.Status == "in-progress" || (row.Direction == "outbound" && (row.Status == "initiated" || row.Status == "ringing")) {
 		if !request.Rejoin {
+			recordDecision("already_claimed")
 			http.Error(w, "another operator already claimed this call; use Join audio to reconnect explicitly", http.StatusConflict)
 			return
 		}
@@ -1480,6 +1501,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	}
 	claimed, err := a.db().claimPendingCallForHuman(callID, project, request.DestinationID)
 	if err != nil {
+		recordDecision("claim_error")
 		http.Error(w, "claim pending call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1488,18 +1510,22 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			current, reloadErr := a.db().findCall(callID)
 			if reloadErr == nil && current != nil {
 				if isTerminalStatus(current.Status) {
+					recordDecision("call_ended")
 					http.Error(w, "call has ended", http.StatusGone)
 					return
 				}
 				if a.phoneOfferDestination(p, current, request.DestinationID) == "" {
+					recordDecision("offer_expired")
 					writePhoneOfferExpired(w)
 					return
 				}
 			}
 		}
+		recordDecision("claim_rejected")
 		http.Error(w, "call was already answered", http.StatusConflict)
 		return
 	}
+	recordDecision("claimed")
 	if err := a.db().settleHumanOffers(callID, project); err != nil {
 		if releaseErr := a.db().releaseAnswerClaim(callID); releaseErr != nil {
 			logSoftphone("softphone answer claim release failed", "call", callID, "error", releaseErr)

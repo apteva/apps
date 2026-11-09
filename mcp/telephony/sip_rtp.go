@@ -1129,6 +1129,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			// SIP teardown can close the Core socket while this read is blocked.
+			if ctx.Err() != nil {
+				return
+			}
 			if a.handleAgentCompletionClose(row, err) {
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusNormalClosure, "agent conversation completed")
 				return

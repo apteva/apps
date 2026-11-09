@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func browserTelemetryTestBody(call, offer, session, stage string) map[string]any {
@@ -165,5 +167,105 @@ func TestDeliveryRequestCorrelationIncludesRejectedAdmission(t *testing.T) {
 	}
 	if w.Code != http.StatusServiceUnavailable || w.Header().Get("X-Request-ID") != "tel-client-123" {
 		t.Fatalf("lost correlation %d %s %s", w.Code, w.Header(), w.Body)
+	}
+}
+
+type answerDecisionLogger struct {
+	sdk.Logger
+	decisions []map[string]any
+}
+
+func (l *answerDecisionLogger) Info(message string, fields ...any) {
+	if message != "softphone answer claim decision" {
+		return
+	}
+	values := make(map[string]any, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		values[fields[i].(string)] = fields[i+1]
+	}
+	l.decisions = append(l.decisions, values)
+}
+
+func TestManualPickupClaimTimingAndReleaseAfterOfferDeadline(t *testing.T) {
+	ctx := softphoneTestCtx(t)
+	logger := &answerDecisionLogger{Logger: ctx.Logger()}
+	globalCtx = sdk.NewAppCtxForTest(ctx.Manifest(), ctx.AppDB(), ctx.Config(), ctx.PlatformAPI(), logger).WithProject("project-a")
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	alice, eve := phoneTestIdentity("alice"), phoneTestIdentity("eve")
+
+	row := phoneTestRingOfferCall(t, app, "manual-pickup")
+	answer := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"})
+	var session softphoneSession
+	if answer.Code != http.StatusOK || json.Unmarshal(answer.Body.Bytes(), &session) != nil || session.SessionToken == "" {
+		t.Fatalf("answer: %d %s", answer.Code, answer.Body.String())
+	}
+
+	// Advance the routing worker past the 20-second offer deadline while the
+	// operator still owns the claim and has yet to attach media.
+	tx, err := app.db().db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err = advanceRingRunTx(tx, "run-"+row.ID, time.Now().Add(21*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := app.db().findCall(row.ID)
+	if err != nil || claimed == nil || claimed.Status != "answering" || !app.validPhoneMedia(claimed, session.SessionToken) {
+		t.Fatalf("accepted claim lost after offer expiry: %v", err)
+	}
+	release := phoneTestRequest(app, &alice, "POST", "/softphone/release/"+row.ID, map[string]any{"session_token": session.SessionToken})
+	if release.Code != http.StatusOK {
+		t.Fatalf("release: %d %s", release.Code, release.Body.String())
+	}
+	if answerable, code := phoneTestAnswerable(t, app, &eve, row.ID); code != http.StatusOK || !answerable {
+		t.Fatalf("next destination unavailable: %d %v", code, answerable)
+	}
+
+	expired := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"})
+	if expired.Code != http.StatusConflict || !strings.Contains(expired.Body.String(), "offer_expired") {
+		t.Fatalf("expired answer: %d %s", expired.Code, expired.Body.String())
+	}
+	if len(logger.decisions) != 2 {
+		t.Fatalf("claim decisions: %v", logger.decisions)
+	}
+	for i, expected := range []struct{ outcome, requestID string }{
+		{"claimed", answer.Header().Get("X-Request-ID")},
+		{"offer_expired", expired.Header().Get("X-Request-ID")},
+	} {
+		decision := logger.decisions[i]
+		receivedAt, receivedErr := time.Parse(time.RFC3339Nano, decision["received_at"].(string))
+		decidedAt, decidedErr := time.Parse(time.RFC3339Nano, decision["decided_at"].(string))
+		if decision["outcome"] != expected.outcome || expected.requestID == "" || decision["request_id"] != expected.requestID ||
+			receivedErr != nil || decidedErr != nil || decidedAt.Before(receivedAt) {
+			t.Fatalf("invalid claim decision: %v", decision)
+		}
+	}
+
+	requestID := answer.Header().Get("X-Request-ID")
+	for _, stage := range []string{"answer_audio_started", "answer_audio_finished"} {
+		body := browserTelemetryTestBody(row.ID, "sales-"+row.ID, "manual-pickup-browser", stage)
+		body["events"].([]any)[0].(map[string]any)["request_id"] = requestID
+		w := phoneTestRequest(app, &alice, "POST", "/softphone/telemetry", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("audio timing: %d %s", w.Code, w.Body.String())
+		}
+	}
+	diagnostics, err := app.browserOfferTelemetry(row.ProjectID, row.ID, alice.key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := diagnostics["events"].([]map[string]any)
+	if len(events) != 2 {
+		t.Fatalf("missing timing evidence: %v", events)
+	}
+	for _, event := range events {
+		if event["request_id"] != requestID || event["client_occurred_at"] == "" || event["received_at"] == "" {
+			t.Fatalf("timing evidence lost correlation: %v", event)
+		}
 	}
 }

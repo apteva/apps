@@ -21,6 +21,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/emiago/sipgo/sip"
+	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/rtp"
 	"github.com/pion/srtp/v3"
@@ -365,6 +366,102 @@ func TestSIPMediaStartupFailureSendsBYE(t *testing.T) {
 	f.respond(t, bye, "")
 	f.waitEnded(t)
 }
+
+type sipObservedReadConn struct {
+	net.Conn
+	once    sync.Once
+	started chan struct{}
+}
+
+func (c *sipObservedReadConn) Read(p []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.Conn.Read(p)
+}
+
+func TestSIPAIHangupMediaOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		coreFirst bool
+		wantMedia string
+	}{
+		{name: "caller_hangup", wantMedia: "disconnected"},
+		{name: "core_failure_before_hangup", coreFirst: true, wantMedia: "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSIPDialogFixture(t, false, 2*time.Second)
+			f.answer(t)
+			if f.call.PeerKind != peerKindRealtime {
+				t.Fatalf("expected a realtime peer, got %q", f.call.PeerKind)
+			}
+			socket, peer := net.Pipe()
+			t.Cleanup(func() {
+				socket.Close()
+				peer.Close()
+			})
+			core := &sipObservedReadConn{Conn: socket, started: make(chan struct{})}
+			f.session.preparedMu.Lock()
+			f.session.preparedBridge = core
+			f.session.preparedMu.Unlock()
+			if err := f.gateway.StartMedia(f.call); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-core.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SIP bridge did not start reading from Core")
+			}
+
+			const normalClearing = "Reason: Q.850;cause=16;text=\"Normal call clearing\"\r\n"
+			if tc.coreFirst {
+				peer.Close()
+				// The bridge persists the Core error before sending its own BYE.
+				bye := readSIPResponseContaining(t, f.signaling, "BYE sip:")
+				f.send(t, "BYE", 2, "", normalClearing)
+				readSIPResponseContaining(t, f.signaling, "200 OK")
+				f.respond(t, bye, "")
+			} else {
+				f.send(t, "BYE", 2, "", normalClearing)
+				readSIPResponseContaining(t, f.signaling, "200 OK")
+				select {
+				case <-f.session.ctx.Done():
+				case <-time.After(2 * time.Second):
+					t.Fatal("caller BYE did not cancel the SIP session")
+				}
+				// Core can close its socket as soon as the call thread is stopped.
+				peer.Close()
+			}
+
+			f.waitEnded(t)
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				var status, mediaStatus, closeLeg, mediaError string
+				var closeCode int
+				var active bool
+				err := f.app.db().db.QueryRow(`SELECT status, media_status, media_close_leg, media_close_code, media_error_message, media_active FROM calls WHERE id=?`, f.call.ID).
+					Scan(&status, &mediaStatus, &closeLeg, &closeCode, &mediaError, &active)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if active {
+					time.Sleep(5 * time.Millisecond)
+					continue
+				}
+				if status != "completed" || mediaStatus != tc.wantMedia {
+					t.Fatalf("want completed/%s, got %s/%s (leg=%s code=%d error=%q)", tc.wantMedia, status, mediaStatus, closeLeg, closeCode, mediaError)
+				}
+				if tc.coreFirst && (closeLeg != string(mediaCloseLegCore) || closeCode != int(ws.StatusInternalServerError)) {
+					t.Fatalf("lost Core failure attribution: leg=%s code=%d", closeLeg, closeCode)
+				}
+				if !tc.coreFirst && mediaError != "" {
+					t.Fatalf("normal hangup recorded a media error: %q", mediaError)
+				}
+				return
+			}
+			t.Fatal("SIP bridge did not release media")
+		})
+	}
+}
+
 func TestSIPLocallyInitiatedSessionRefresh(t *testing.T) {
 	f := newSIPDialogFixture(t, true, 2*time.Second)
 	f.answer(t)
