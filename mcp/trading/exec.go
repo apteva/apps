@@ -879,6 +879,10 @@ func tryFill(e *engine, o *Order) error {
 	if o.Status != "working" {
 		return nil
 	}
+	qty := o.Qty - o.FilledQty
+	if qty <= 0 {
+		return nil
+	}
 	if o.TIF == "day" {
 		placed, err := parseOrderTime(o.PlacedAt)
 		if err == nil && utcDay(placed) != utcDay(executionTime(e.db, o.PortfolioID)) {
@@ -908,6 +912,34 @@ func tryFill(e *engine, o *Order) error {
 		return nil
 	}
 
+	outcome := polyOutcome(o)
+	deskOrder := false
+	if o.DecisionRef != "" {
+		var exitReason string
+		err := e.db.QueryRow(`SELECT exit_reason FROM paper_decisions WHERE portfolio_id=? AND decision_id=? AND (order_id=? OR exit_order_id=?)`,
+			pf.ID, o.DecisionRef, o.ID, o.ID).Scan(&exitReason)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		deskOrder = err == nil
+		if deskOrder {
+			if pf.Mode != "paper" || pf.ExecutionEnvironment != "simulation" || pf.LiveArmed {
+				return nil
+			}
+			if isBuySide(o.Side) && exitReason != "" {
+				_, err = dbCancelOrder(e.db, pf.ProjectID, o.ID, "approved paper exit triggered")
+				return err
+			}
+			mark, err = paperTradeMark(mark, o.Symbol, strings.ToLower(outcome))
+			if err != nil {
+				return nil
+			}
+			if isBuySide(o.Side) && !contains(pf.AllowedClasses, mark.AssetClass) {
+				_, err = dbCancelOrder(e.db, pf.ProjectID, o.ID, "asset class no longer allowed by portfolio")
+				return err
+			}
+		}
+	}
 	if err := validateWorkingPolicy(e.db, pf, o); err != nil {
 		_, cancelErr := dbCancelOrder(e.db, pf.ProjectID, o.ID, err.Error())
 		return cancelErr
@@ -938,14 +970,7 @@ func tryFill(e *engine, o *Order) error {
 			return err
 		}
 	}
-	// Mark used for the rule decision: YES vs NO for polymarket.
-	outcome := polyOutcome(o)
-	mp := mark.Price
-	if o.AssetClass == "polymarket" {
-		if outcome == "NO" && mark.NoPrice != nil {
-			mp = *mark.NoPrice
-		}
-	}
+	mp := markPriceForSide(mark, outcome)
 
 	if mark.QuoteAt != "" {
 		q := *mark
@@ -965,7 +990,7 @@ func tryFill(e *engine, o *Order) error {
 
 	// Decide fill price by order type.
 	var fillPrice float64
-	estimate := estimateSimulationExecution(mark, o.Side, o.Type, o.Qty, mp, profile, o.LiquidityRole)
+	estimate := estimateSimulationExecution(mark, o.Side, o.Type, qty, mp, profile, o.LiquidityRole)
 	switch o.Type {
 	case "market":
 		fillPrice = estimate.Price
@@ -1008,7 +1033,7 @@ func tryFill(e *engine, o *Order) error {
 		// A marketable limit may cap adverse slippage. Attribute the actual
 		// executed distance rather than retaining the pre-cap estimate.
 		if estimate.LiquidityRole == "taker" {
-			estimate.SlippageCost = math.Abs(fillPrice-estimate.TouchPrice) * o.Qty
+			estimate.SlippageCost = math.Abs(fillPrice-estimate.TouchPrice) * qty
 		}
 	case "stop":
 		if o.StopPrice == nil {
@@ -1031,8 +1056,17 @@ func tryFill(e *engine, o *Order) error {
 	default:
 		return nil
 	}
+	if deskOrder && outcome != "" {
+		if !finite(fillPrice) || fillPrice <= 0 {
+			return nil
+		}
+		if fillPrice > 1 {
+			fillPrice = 1
+			estimate.SlippageCost = math.Abs(fillPrice-estimate.TouchPrice) * qty
+		}
+	}
 	if isBuySide(o.Side) {
-		breach, err := preTradeRiskCheckExcluding(e.db, pf, o.Symbol, o.Side, o.Qty-o.FilledQty, fillPrice, o.ID)
+		breach, err := preTradeRiskCheckExcluding(e.db, pf, o.Symbol, o.Side, qty, fillPrice, o.ID)
 		if err != nil {
 			return err
 		}
@@ -1042,7 +1076,7 @@ func tryFill(e *engine, o *Order) error {
 		}
 	}
 	estimate.Price = fillPrice
-	estimate.Fee = fillFee(o.Qty, fillPrice, estimate.FeeBps)
+	estimate.Fee = fillFee(qty, fillPrice, estimate.FeeBps)
 	fee := estimate.Fee
 
 	// Claim, validate, and apply inside one transaction. The status CAS stops
@@ -1060,7 +1094,8 @@ func tryFill(e *engine, o *Order) error {
 	if currentStatus != "active" {
 		return nil
 	}
-	claimed, err := dbMarkOrderFilled(tx, o.ID, o.Qty, fillPrice)
+	avgFillPrice := fillPrice + o.FilledQty/o.Qty*(o.AvgFillPrice-fillPrice)
+	claimed, err := dbMarkOrderFilled(tx, o, avgFillPrice)
 	if err != nil {
 		return err
 	}
@@ -1073,7 +1108,7 @@ func tryFill(e *engine, o *Order) error {
 		if err := tx.QueryRow(`SELECT cash FROM portfolios WHERE id = ?`, pf.ID).Scan(&cash); err != nil {
 			return err
 		}
-		needed := o.Qty*fillPrice + fee
+		needed := qty*fillPrice + fee
 		if cash < needed-1e-6 {
 			rejectCode = "insufficient_cash"
 			rejectDetail = fmt.Sprintf("need %.2f, have %.2f", needed, cash)
@@ -1081,21 +1116,21 @@ func tryFill(e *engine, o *Order) error {
 	} else {
 		var have float64
 		err := tx.QueryRow(`SELECT qty FROM positions WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ?`,
-			pf.ID, o.Symbol, polyOutcome(o)).Scan(&have)
+			pf.ID, o.Symbol, outcome).Scan(&have)
 		if errors.Is(err, sql.ErrNoRows) {
 			have = 0
 		} else if err != nil {
 			return err
 		}
-		if have < o.Qty-1e-9 {
+		if have < qty-1e-9 {
 			rejectCode = "insufficient_position"
-			rejectDetail = fmt.Sprintf("need %v, have %v", o.Qty, have)
+			rejectDetail = fmt.Sprintf("need %v, have %v", qty, have)
 		}
 	}
 	if rejectCode != "" {
-		if _, err := tx.Exec(`UPDATE orders SET status='rejected', filled_qty=0, avg_fill_price=0,
+		if _, err := tx.Exec(`UPDATE orders SET status='rejected', filled_qty=?, avg_fill_price=?,
 			rejection_code=?, rejection_detail=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?`,
-			rejectCode, rejectDetail, o.ID); err != nil {
+			o.FilledQty, o.AvgFillPrice, rejectCode, rejectDetail, o.ID); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -1105,7 +1140,7 @@ func tryFill(e *engine, o *Order) error {
 		notifyInstances(e, pf, fmt.Sprintf("REJECTED %s — %s", o.ID, rejectDetail))
 		return nil
 	}
-	if err := dbInsertFillDetailed(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, fee, FillCostDetails{
+	if err := dbInsertFillDetailed(tx, pf.ProjectID, o.ID, pf.ID, qty, fillPrice, fee, FillCostDetails{
 		VenueSlug: profile.VenueSlug, FeeCurrency: estimate.FeeCurrency, FeeSource: "model",
 		LiquidityRole: estimate.LiquidityRole, FeeBps: estimate.FeeBps,
 		SpreadCost: estimate.SpreadCost, SlippageCost: estimate.SlippageCost,
@@ -1114,11 +1149,11 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := dbApplyFill(tx, pf.ID, pf.ProjectID, o, o.Qty, fillPrice); err != nil {
+	if err := dbApplyFill(tx, pf.ID, pf.ProjectID, o, qty, fillPrice); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, polyOutcome(o), 0, fee); err != nil {
+	if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, outcome, 0, fee); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -1133,9 +1168,9 @@ func tryFill(e *engine, o *Order) error {
 		}
 	}
 	body := fmt.Sprintf("%s %s %v @ %s — %s",
-		strings.ToUpper(o.Symbol), strings.ToUpper(o.Side), o.Qty, formatPrice(fillPrice, o.AssetClass), o.ID)
+		strings.ToUpper(o.Symbol), strings.ToUpper(o.Side), qty, formatPrice(fillPrice, o.AssetClass), o.ID)
 	if err := dbInsertJournalTx(tx, pf.ProjectID, pf.ID, "fill", body, map[string]any{
-		"order_id": o.ID, "qty": o.Qty, "price": fillPrice, "fee": fee,
+		"order_id": o.ID, "qty": qty, "price": fillPrice, "fee": fee,
 		"fee_bps": estimate.FeeBps, "slippage_bps": profile.SlippageBps,
 		"liquidity_role": estimate.LiquidityRole, "fee_currency": estimate.FeeCurrency,
 		"spread_cost": estimate.SpreadCost, "slippage_cost": estimate.SlippageCost,
@@ -1156,12 +1191,12 @@ func tryFill(e *engine, o *Order) error {
 	// re-fetching the whole portfolio.
 	emit("order.filled", map[string]any{
 		"order_id": o.ID, "portfolio_id": pf.ID, "symbol": o.Symbol,
-		"side": o.Side, "qty": o.Qty, "price": fillPrice, "fee": fee,
+		"side": o.Side, "qty": qty, "price": fillPrice, "fee": fee,
 		"fee_currency": estimate.FeeCurrency, "liquidity_role": estimate.LiquidityRole,
 		"spread_cost": estimate.SpreadCost, "slippage_cost": estimate.SlippageCost,
 		"venue_slug": profile.VenueSlug,
 	})
-	if newPos, _ := dbGetPosition(e.db, pf.ID, o.Symbol, polyOutcome(o)); newPos != nil {
+	if newPos, _ := dbGetPosition(e.db, pf.ID, o.Symbol, outcome); newPos != nil {
 		emit("position.changed", map[string]any{
 			"portfolio_id": pf.ID, "symbol": newPos.Symbol,
 			"asset_class": newPos.AssetClass, "outcome": newPos.Outcome,
@@ -1171,7 +1206,7 @@ func tryFill(e *engine, o *Order) error {
 	} else {
 		// Position closed entirely (sell flat). Surface it explicitly.
 		emit("position.changed", map[string]any{
-			"portfolio_id": pf.ID, "symbol": o.Symbol, "qty": 0.0, "closed": true,
+			"portfolio_id": pf.ID, "symbol": o.Symbol, "outcome": outcome, "qty": 0.0, "closed": true,
 		})
 	}
 	emit("journal.appended", map[string]any{

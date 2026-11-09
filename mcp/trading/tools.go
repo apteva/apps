@@ -1582,7 +1582,15 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 		return rejectStruct("invalid_args", "symbol, side, type, qty are required and qty > 0"), nil
 	}
 	class := inferAssetClass(symbol)
-	if !contains(pf.AllowedClasses, class) {
+	var mark *Mark
+	if authorization != nil {
+		mark, err = ensurePaperTradeMark(ctx, pf, authorization.decision.Packet)
+		if err != nil {
+			return rejectStruct("market_data_unavailable", err.Error()), nil
+		}
+		class = mark.AssetClass
+	}
+	if !contains(pf.AllowedClasses, class) && !(authorization != nil && authorization.exit) {
 		return rejectStruct("asset_class_blocked",
 			fmt.Sprintf("class %q not in allowed_classes %v", class, pf.AllowedClasses)), nil
 	}
@@ -1648,9 +1656,11 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 			return rejectStruct("invalid_args", "polymarket limit_price must be in (0, 1)"), nil
 		}
 	}
-	mark, err := ensureExecutableMark(ctx, pf, symbol)
-	if err != nil {
-		return rejectStruct("market_data_unavailable", err.Error()), nil
+	if mark == nil {
+		mark, err = ensureExecutableMark(ctx, pf, symbol)
+		if err != nil {
+			return rejectStruct("market_data_unavailable", err.Error()), nil
+		}
 	}
 	riskPrice := markPriceForSide(mark, strings.ToUpper(outcome))
 	if lp != nil {
@@ -1698,6 +1708,10 @@ func (a *App) placeOrder(ctx *sdk.AppCtx, args map[string]any, authorization *pa
 	if pf.Status != "active" || (pf.ExecutionEnvironment == "broker_live" && !pf.LiveArmed) {
 		orderPlacementMu.Unlock()
 		return rejectStruct("portfolio_not_active", "portfolio changed during order preflight"), nil
+	}
+	if authorization != nil && (pf.Mode != "paper" || pf.ExecutionEnvironment != "simulation" || pf.LiveArmed) {
+		orderPlacementMu.Unlock()
+		return rejectStruct("desk_approval_required", "paper desk cannot execute a broker/live order"), nil
 	}
 	if side == "sell" && !portfolioCanReducePosition(ctx.AppDB(), pf.ID, symbol, outcome, qty) {
 		orderPlacementMu.Unlock()

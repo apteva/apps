@@ -10,7 +10,9 @@ Strategies scheduler.
 1. The operator enables `desk_configure` on a paper/simulation portfolio and
    assigns three distinct manager, reviewer and executor agent IDs.
 2. The manager calls `desk_propose` with immutable quantity, entry, stop,
-   target, maximum holding time, hypothesis, setup version and evidence.
+   target, maximum holding time, hypothesis, setup version and evidence. For
+   prediction markets, pass `outcome: "yes"` or `outcome: "no"`. All prices
+   in the packet refer to that outcome.
 3. The reviewer independently checks the stored packet and calls `desk_review`.
    Trading authenticates the calling agent, validates current risk/data, and
    persists the verdict, packet hash and approval reference.
@@ -53,10 +55,11 @@ cash. Existing portfolio risk/universe policies also apply. These settings are
 per-portfolio and do not enable broker or live execution.
 
 The `paper_desk_exits` worker checks durable plans every five seconds. It
-recovers filled entries, starts the holding clock at the actual fill, and
-submits a reduce-only market exit when the stop, target or holding deadline is
-reached. The exit is idempotent and survives agent/app restarts. Expired
-unfilled entries are cancelled.
+recovers entry fills, starts the holding clock at the first fill, and submits
+a reduce-only market exit when the stop, target or holding deadline is reached.
+It cancels any unfilled entry remainder and exits only the quantity filled for
+that plan, on the approved outcome. The exit is idempotent and survives
+agent/app restarts. Expired unfilled entries are cancelled.
 
 Stops and planned-loss budgets are not fill-price guarantees. The worker waits
 for valid quotes and executable sessions, respects a paused/halted portfolio,
@@ -90,12 +93,13 @@ for stock, ETF, and crypto analysis, and the general quote and history tools
 for event-market research. Discovery is not proof that an instrument is active,
 liquid, or currently executable.
 
-Paper entries support stocks, ETFs, and USD spot crypto. The native portfolio
+Paper entries support stocks, ETFs, USD spot crypto, and binary prediction
+markets with a fresh price for the selected outcome. The native portfolio
 universe policy determines symbol eligibility at proposal, approval, submission
 and while an entry is working. Existing protective exits can reduce positions
 even after the symbol is removed from the entry universe. An open plan owns its
-symbol until it closes. Prediction markets are research-only in this workflow
-until outcome execution, order-book liquidity and expiry can be verified.
+symbol and outcome until it closes. Prediction-market fills use Trading's paper
+simulation and the selected outcome's mark price.
 
 Record the hypothesis, versioned setup, source evidence, invalidation, expected
 holding time and cost assumptions. Review gross fill-price P&L and fees together
