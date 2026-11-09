@@ -288,15 +288,18 @@ func dbListCorporateActions(db *sql.DB, symbol, actionType, since, until string,
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
+	// A newer revision supersedes the candidate even if it no longer matches the filters.
 	query := `SELECT a.provider,a.provider_event_id,a.revision,a.action_type,a.status,COALESCE(a.security_id,''),COALESCE(a.related_security_id,''),
 		a.symbol,a.new_symbol,a.cusip,a.isin,a.announcement_date,a.ex_date,a.record_date,a.payable_date,a.effective_date,a.process_date,
 		a.ratio_numerator,a.ratio_denominator,a.cash_amount,a.currency,a.data_quality,a.payload_sha256,a.ingested_at,a.updated_at
 		FROM corporate_actions a
-		JOIN (SELECT provider,provider_event_id,MAX(revision) revision FROM corporate_actions GROUP BY provider,provider_event_id) latest
-		ON latest.provider=a.provider AND latest.provider_event_id=a.provider_event_id AND latest.revision=a.revision WHERE 1=1`
+		WHERE NOT EXISTS (
+			SELECT 1 FROM corporate_actions newer
+			WHERE newer.provider=a.provider AND newer.provider_event_id=a.provider_event_id AND newer.revision>a.revision
+		)`
 	args := []any{}
 	if symbol = canonicalSymbol(symbol); symbol != "" {
-		query += ` AND (a.symbol=? OR a.new_symbol=?)`
+		query += ` AND (a.symbol=? OR (a.new_symbol=? AND a.new_symbol<>''))`
 		args = append(args, symbol, symbol)
 	}
 	if actionType = strings.ToLower(strings.TrimSpace(actionType)); actionType != "" {
@@ -1130,6 +1133,7 @@ func applyDueCorporateActions(_ context.Context, ctx *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
+	actionsBySymbol := make(map[string][]*CorporateAction)
 	for _, portfolio := range portfolios {
 		if portfolio.Mode != "paper" {
 			continue
@@ -1139,9 +1143,14 @@ func applyDueCorporateActions(_ context.Context, ctx *sdk.AppCtx) error {
 			return err
 		}
 		for _, position := range positions {
-			actions, err := dbListCorporateActions(ctx.AppDB(), position.Symbol, "", projectorStart, today, 1000)
-			if err != nil {
-				return err
+			symbol := canonicalSymbol(position.Symbol)
+			actions, cached := actionsBySymbol[symbol]
+			if !cached {
+				actions, err = dbListCorporateActions(ctx.AppDB(), symbol, "", projectorStart, today, 1000)
+				if err != nil {
+					return err
+				}
+				actionsBySymbol[symbol] = actions
 			}
 			for _, action := range actions {
 				if action.Status == "cancelled" || action.Status == "deleted" || action.DataQuality == "incomplete" {
@@ -1464,8 +1473,13 @@ func applyWorthlessRemoval(db *sql.DB, portfolio *Portfolio, action *CorporateAc
 
 func insertPostingTx(tx *sql.Tx, portfolio *Portfolio, action *CorporateAction, effect, symbol, related string, qty, cash, basis float64, details map[string]any) (bool, error) {
 	raw, _ := json.Marshal(details)
+	// A correction can arrive after the projector caches the action.
 	result, err := tx.Exec(`INSERT INTO corporate_action_postings(project_id,portfolio_id,provider,provider_event_id,provider_revision,effect_type,security_id,related_security_id,symbol,related_symbol,quantity_delta,cash_delta,cost_basis_delta,status,details_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'applied',?) ON CONFLICT(portfolio_id,provider,provider_event_id,provider_revision,effect_type,symbol,related_symbol) DO NOTHING`, portfolio.ProjectID, portfolio.ID, action.Provider, action.ProviderEventID, action.Revision, effect, nullableText(action.SecurityID), nullableText(action.RelatedSecurityID), symbol, related, qty, cash, basis, string(raw))
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,'applied',?
+		WHERE NOT EXISTS (SELECT 1 FROM corporate_actions WHERE provider=? AND provider_event_id=? AND revision>?)
+		ON CONFLICT(portfolio_id,provider,provider_event_id,provider_revision,effect_type,symbol,related_symbol) DO NOTHING`,
+		portfolio.ProjectID, portfolio.ID, action.Provider, action.ProviderEventID, action.Revision, effect, nullableText(action.SecurityID), nullableText(action.RelatedSecurityID), symbol, related, qty, cash, basis, string(raw),
+		action.Provider, action.ProviderEventID, action.Revision)
 	if err != nil {
 		return false, err
 	}
