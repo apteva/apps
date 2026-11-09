@@ -1218,10 +1218,10 @@ func dbInsertFillDetailed(tx *sql.Tx, projectID, orderID string, portfolioID int
 	return nil
 }
 
-func dbMarkOrderFilled(tx *sql.Tx, orderID string, qty, avgFill float64) (bool, error) {
+func dbMarkOrderFilled(tx *sql.Tx, order *Order, avgFill float64) (bool, error) {
 	res, err := tx.Exec(`
 		UPDATE orders SET status='filled', filled_qty=?, avg_fill_price=?,
-		                  resolved_at=CURRENT_TIMESTAMP WHERE id = ? AND status = 'working'`, qty, avgFill, orderID)
+		                  resolved_at=CURRENT_TIMESTAMP WHERE id = ? AND status = 'working' AND filled_qty=?`, order.Qty, avgFill, order.ID, order.FilledQty)
 	if err != nil {
 		return false, err
 	}

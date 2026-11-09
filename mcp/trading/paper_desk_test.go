@@ -269,6 +269,217 @@ func TestPaperDeskDurableExitsAndScorecard(t *testing.T) {
 	}
 }
 
+func TestPaperDeskExpandedUniverseExitsOnlyApprovedFills(t *testing.T) {
+	for _, tc := range []struct {
+		symbol, class, outcome, trigger string
+		partial                         bool
+	}{
+		{symbol: "AAPL", class: "equity", trigger: "stop_loss"},
+		{symbol: "AAPL", class: "equity", trigger: "take_profit"},
+		{symbol: "AAPL", class: "equity", trigger: "time_exit"},
+		{symbol: "VOO", class: "etf", trigger: "take_profit", partial: true},
+		{symbol: "POLY:test-event", class: "polymarket", outcome: "no", trigger: "stop_loss"},
+		{symbol: "POLY:test-event", class: "polymarket", outcome: "no", trigger: "take_profit"},
+		{symbol: "POLY:test-event", class: "polymarket", outcome: "no", trigger: "time_exit", partial: true},
+	} {
+		t.Run(tc.symbol+"/"+tc.trigger, func(t *testing.T) {
+			ctx := newTestCtx(t)
+			db := ctx.AppDB()
+			pf := mustCreatePortfolio(t, ctx, "Expanded desk", []string{tc.class})
+			app := &App{}
+			if _, err := app.toolPaperConfigure(ctx, map[string]any{"portfolio_id": pf, "manager_id": 11, "reviewer_id": 12, "executor_id": 13}); err != nil {
+				t.Fatal(err)
+			}
+			profile := defaultVenueProfile("simulation", tc.class)
+			profile.SessionPolicy = "continuous"
+			if err := dbUpsertVenueProfile(db, &profile); err != nil {
+				t.Fatal(err)
+			}
+			entryPrice, stop, target, step := 100.0, 98.0, 104.0, 1.0
+			if tc.outcome != "" {
+				entryPrice, stop, target, step = .30, .25, .35, .01
+			}
+			setPrice := func(price float64) {
+				t.Helper()
+				now := time.Now().UTC()
+				m := &Mark{Symbol: tc.symbol, AssetClass: tc.class, Source: "fixture", Price: price, MarkedAt: now.Format(time.RFC3339Nano), Instrument: defaultInstrument(tc.symbol, tc.class, "fixture", now)}
+				if tc.outcome != "" {
+					m.Price, m.NoPrice = 1-price, ptr(price)
+					m.BidPrice, m.AskPrice = ptr(m.Price-.01), ptr(m.Price+.01)
+					m.Instrument.QuoteCurrency = "USDC"
+					m.Instrument.ExpiresAt = now.Add(48 * time.Hour).Format(time.RFC3339)
+				}
+				if err := dbUpsertMark(db, m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setPrice(entryPrice)
+			outcome := strings.ToUpper(tc.outcome)
+			if err := dbInsertPositionRaw(db, "test-proj", pf, tc.symbol, tc.class, outcome, 3, entryPrice); err != nil {
+				t.Fatal(err)
+			}
+			if tc.outcome != "" {
+				if err := dbInsertPositionRaw(db, "test-proj", pf, tc.symbol, tc.class, "YES", 7, 1-entryPrice); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := paperTestArgs(pf, "expanded-exit")
+			args["symbol"], args["stop_loss"], args["take_profit"], args["max_holding_minutes"] = tc.symbol, stop, target, 1
+			if tc.outcome != "" {
+				if _, err := app.toolPaperPropose(paperCall(11), ctx, args); err == nil || !strings.Contains(err.Error(), "explicit yes or no") {
+					t.Fatalf("proposal without outcome: %v", err)
+				}
+				args["outcome"] = tc.outcome
+			}
+			proposal, err := app.toolPaperPropose(paperCall(11), ctx, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := proposal.(*paperDecision)
+			if d.Packet.ReferencePrice != entryPrice || d.Packet.Outcome != tc.outcome {
+				t.Fatalf("incorrect reviewed leg: %+v", d.Packet)
+			}
+			if _, err = app.toolPaperSubmit(paperCall(13), ctx, paperSubmitArgs(d)); err == nil {
+				t.Fatal("unapproved submission succeeded")
+			}
+			raw, err := app.toolOrderPlace(ctx, paperEntryArgs(pf, d.Packet))
+			if err != nil || raw.(map[string]any)["code"] != "desk_approval_required" {
+				t.Fatalf("raw order was not rejected: %v, %v", raw, err)
+			}
+			d = paperApproved(t, ctx, pf, args)
+			accepted, err := app.toolPaperSubmit(paperCall(13), ctx, paperSubmitArgs(d))
+			if err != nil {
+				t.Fatal(err)
+			}
+			entryID, _ := accepted.(map[string]any)["order_id"].(string)
+			getOrder := func(id string) *Order {
+				t.Helper()
+				o, err := dbGetOrder(db, "test-proj", id)
+				if err != nil {
+					t.Fatalf("read order %q: %v", id, err)
+				}
+				return o
+			}
+			entry := getOrder(entryID)
+			filledQty := entry.Qty
+			if tc.partial {
+				filledQty = 2
+				paperTestRecordPartialFill(t, ctx, entry, filledQty, entryPrice)
+			} else if err = tryFill(globalEngine, entry); err != nil {
+				t.Fatal(err)
+			}
+			entry = getOrder(entryID)
+			if entry.FilledQty != filledQty || entry.AssetClass != tc.class || entry.Outcome != outcome || math.Abs(entry.AvgFillPrice/entryPrice-1) > .005 {
+				t.Fatalf("incorrect entry fill: %+v", entry)
+			}
+			loadPlan := func() *paperDecision {
+				t.Helper()
+				plan, err := loadPaperDecision(db, pf, d.Packet.DecisionID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return plan
+			}
+			tick := func() {
+				t.Helper()
+				if err := paperDeskTick(context.Background(), ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.trigger == "time_exit" {
+				if _, err := db.Exec(`UPDATE fills SET filled_at=? WHERE order_id=?`, time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), entryID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tick()
+				if plan := loadPlan(); plan.ExitOrderID != "" || plan.Status != "active" {
+					t.Fatalf("unexpected exit before trigger: %+v", plan)
+				}
+				if tc.trigger == "stop_loss" {
+					setPrice(stop - step)
+				} else {
+					setPrice(target + step)
+				}
+			}
+			if tc.symbol == "AAPL" && tc.trigger == "stop_loss" {
+				profile.Status = "maintenance"
+				if err := dbUpsertVenueProfile(db, &profile); err != nil {
+					t.Fatal(err)
+				}
+				tick()
+				if plan := loadPlan(); plan.ExitReason != tc.trigger || plan.ExitOrderID != "" || plan.LastError == "" {
+					t.Fatalf("blocked stop was not persisted: %+v", plan)
+				}
+				profile.Status = "active"
+				if err := dbUpsertVenueProfile(db, &profile); err != nil {
+					t.Fatal(err)
+				}
+				globalEngine = &engine{db: db, provider: newMockProvider(), logger: ctx.Logger()}
+				setPrice(entryPrice)
+			}
+			tick()
+			plan := loadPlan()
+			if plan.ExitReason != tc.trigger || plan.ExitOrderID == "" {
+				t.Fatalf("exit was not scheduled: %+v", plan)
+			}
+			exit := getOrder(plan.ExitOrderID)
+			if exit.Side != "sell" || exit.Qty != filledQty || exit.Outcome != outcome || (tc.partial && getOrder(entryID).Status != "cancelled") {
+				t.Fatalf("exit did not match the filled entry: %+v", exit)
+			}
+			if tc.partial {
+				paperTestRecordPartialFill(t, ctx, exit, 1, entryPrice)
+			}
+			// Start a new engine and run the exit worker again with the persisted orders.
+			globalEngine = &engine{db: db, provider: newMockProvider(), logger: ctx.Logger()}
+			tick()
+			if err := tryFill(globalEngine, getOrder(exit.ID)); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+			tick()
+			orders, err := dbListOrders(db, pf, "all", 100)
+			if plan := loadPlan(); err != nil || len(orders) != 2 || plan.Status != "closed" || plan.ExitOrderID != exit.ID {
+				t.Fatalf("restart did not close exactly one exit: plan=%+v, orders=%d, err=%v", plan, len(orders), err)
+			}
+			if exit := getOrder(exit.ID); exit.Status != "filled" || exit.FilledQty != filledQty {
+				t.Fatalf("incorrect exit fill: %+v", exit)
+			}
+			assertHeld := func(leg string, want float64) {
+				t.Helper()
+				pos, err := dbGetPosition(db, pf, tc.symbol, leg)
+				if err != nil || pos == nil || pos.Qty != want {
+					t.Fatalf("unrelated %q holdings changed: %+v, err=%v", leg, pos, err)
+				}
+			}
+			assertHeld(outcome, 3)
+			if tc.outcome != "" {
+				assertHeld("YES", 7)
+			}
+		})
+	}
+}
+
+func paperTestRecordPartialFill(t *testing.T, ctx *sdk.AppCtx, order *Order, qty, price float64) {
+	t.Helper()
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := dbInsertFill(tx, "test-proj", order.ID, order.PortfolioID, qty, price, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbApplyFill(tx, order.PortfolioID, "test-proj", order, qty, price); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE orders SET filled_qty=?,avg_fill_price=? WHERE id=?`, qty, price, order.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPaperDeskLimitCancellationAndStaleExit(t *testing.T) {
 	ctx, pf := paperTest(t)
 	args := paperTestArgs(pf, "cancel")
@@ -403,7 +614,7 @@ func TestPaperDeskDiscoversResearchOutsideEntryPolicyAndAdmitsExpandedCrypto(t *
 		t.Fatal(err)
 	}
 	raw, err := json.Marshal(discovery)
-	if err != nil || !strings.Contains(string(raw), "POLY:test") || !strings.Contains(string(raw), "research-only") {
+	if err != nil || !strings.Contains(string(raw), "POLY:test") || !strings.Contains(string(raw), "not allowed by this portfolio") {
 		t.Fatalf("prediction-market discovery = %s, %v", raw, err)
 	}
 	observation := map[string]any{"portfolio_id": pfID, "symbol": "POLY:test", "observation_id": "event-1", "setup": "event-research", "verdict": "hold", "reason": "Resolution rules are under independent review."}

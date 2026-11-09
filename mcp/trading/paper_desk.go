@@ -33,6 +33,7 @@ type paperDeskPolicy struct {
 type paperPacket struct {
 	DecisionID        string   `json:"decision_id"`
 	Symbol            string   `json:"symbol"`
+	Outcome           string   `json:"outcome,omitempty"`
 	Qty               float64  `json:"qty"`
 	Type              string   `json:"type"`
 	TIF               string   `json:"tif"`
@@ -148,9 +149,10 @@ func (a *App) paperDeskTools() []sdk.Tool {
 	}
 	str := func() map[string]any { return map[string]any{"type": "string"} }
 	num := func() map[string]any { return map[string]any{"type": "number"} }
+	outcome := map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Required for a prediction market. Prices and exits refer to this outcome."}
 	return []sdk.Tool{
 		{Name: "desk_configure", Description: "Operator: enable an authenticated paper desk with manager, reviewer, executor and bounded experiment policy.", InputSchema: schemaObject(props(map[string]any{"manager_id": num(), "reviewer_id": num(), "executor_id": num(), "max_planned_loss": num(), "max_order_notional": num(), "min_cash_pct": num()}), []string{"portfolio_id", "manager_id", "reviewer_id", "executor_id"}), Handler: a.toolPaperConfigure},
-		{Name: "desk_propose", Description: "Manager: persist an immutable long-only paper experiment with exact entry, loss budget and automatic stop/target/time exits. Unknown predictive edge is allowed; no performance guarantee is required.", InputSchema: schemaObject(props(map[string]any{"decision_id": str(), "symbol": str(), "qty": num(), "type": map[string]any{"type": "string", "enum": []string{"market", "limit"}}, "tif": str(), "limit_price": num(), "stop_loss": num(), "take_profit": num(), "max_holding_minutes": num(), "setup": str(), "purpose": map[string]any{"type": "string", "enum": []string{"experiment", "rehearsal"}}, "thesis": str(), "evidence": map[string]any{"type": "array", "items": str()}}), []string{"portfolio_id", "decision_id", "symbol", "qty", "stop_loss", "take_profit", "setup", "thesis"}), HandlerCtx: a.toolPaperPropose},
+		{Name: "desk_propose", Description: "Manager: persist an immutable long-only paper experiment with exact entry, loss budget and automatic stop/target/time exits. Unknown predictive edge is allowed; no performance guarantee is required.", InputSchema: schemaObject(props(map[string]any{"decision_id": str(), "symbol": str(), "outcome": outcome, "qty": num(), "type": map[string]any{"type": "string", "enum": []string{"market", "limit"}}, "tif": str(), "limit_price": num(), "stop_loss": num(), "take_profit": num(), "max_holding_minutes": num(), "setup": str(), "purpose": map[string]any{"type": "string", "enum": []string{"experiment", "rehearsal"}}, "thesis": str(), "evidence": map[string]any{"type": "array", "items": str()}}), []string{"portfolio_id", "decision_id", "symbol", "qty", "stop_loss", "take_profit", "setup", "thesis"}), HandlerCtx: a.toolPaperPropose},
 		{Name: "desk_review", Description: "Independent reviewer: approve or reject a stored immutable packet. Approval is bound to packet hash, authenticated reviewer, fresh quote and 15-minute expiry.", InputSchema: schemaObject(props(map[string]any{"decision_id": str(), "verdict": map[string]any{"type": "string", "enum": []string{"approved", "rejected"}}, "reason": str()}), []string{"portfolio_id", "decision_id", "verdict", "reason"}), HandlerCtx: a.toolPaperReview},
 		{Name: "desk_submit", Description: "Executor: submit the exact stored approved packet by decision ID and risk_review_ref. Do not pass changed order terms. Safe retries return the same order. Trading owns durable preapproved exits.", InputSchema: schemaObject(props(map[string]any{"decision_id": str(), "risk_review_ref": str()}), []string{"portfolio_id", "decision_id", "risk_review_ref"}), HandlerCtx: a.toolPaperSubmit},
 		{Name: "desk_cancel", Description: "Executor: cancel a decision's unfilled entry. Filled entries and preapproved automatic exits cannot be cancelled through this tool.", InputSchema: schemaObject(props(map[string]any{"decision_id": str(), "reason": str()}), []string{"portfolio_id", "decision_id", "reason"}), HandlerCtx: a.toolPaperCancel},
@@ -190,23 +192,69 @@ func (a *App) toolPaperConfigure(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 func paperEntryArgs(pf int64, p paperPacket) map[string]any {
 	args := map[string]any{"portfolio_id": pf, "symbol": p.Symbol, "side": "buy", "type": p.Type, "qty": p.Qty, "tif": p.TIF, "decision_ref": p.DecisionID, "idempotency_key": "desk:" + p.DecisionID + ":entry", "rationale": p.Thesis}
+	if p.Outcome != "" {
+		args["side"], args["outcome"] = p.Outcome, p.Outcome
+	}
 	if p.LimitPrice > 0 {
 		args["limit_price"] = p.LimitPrice
 	}
 	return args
 }
 
+func ensurePaperTradeMark(ctx *sdk.AppCtx, pf *Portfolio, p paperPacket) (*Mark, error) {
+	mark, err := ensureExecutableMark(ctx, pf, p.Symbol)
+	if err != nil {
+		return nil, err
+	}
+	return paperTradeMark(mark, p.Symbol, p.Outcome)
+}
+
+func paperTradeMark(mark *Mark, symbol, outcome string) (*Mark, error) {
+	if mark == nil || mark.Instrument == nil || !markFresh(mark, time.Now()) || oneOfString(mark.Source, "", "mock", "backtest") {
+		return nil, errors.New("fresh non-synthetic market data required")
+	}
+	class := inferAssetClass(symbol)
+	if class == "equity" && mark.AssetClass == "etf" {
+		class = "etf"
+	}
+	if mark.Symbol != symbol || mark.Instrument.Symbol != symbol || mark.AssetClass != class || mark.Instrument.AssetClass != class {
+		return nil, errors.New("matching instrument metadata required")
+	}
+	if mark.Instrument.QuoteCurrency != "USD" && !(class == "polymarket" && mark.Instrument.QuoteCurrency == "USDC") {
+		return nil, errors.New("USD instrument metadata required (USDC is supported for prediction markets)")
+	}
+	if class != "polymarket" {
+		if outcome != "" {
+			return nil, errors.New("outcome is only valid for prediction markets")
+		}
+		return mark, nil
+	}
+	if !oneOfString(outcome, "yes", "no") {
+		return nil, errors.New("prediction market requires an explicit yes or no outcome")
+	}
+	price := paperReferencePrice(mark, outcome)
+	if (outcome == "no" && mark.NoPrice == nil) || !finite(price) || price <= 0 || price >= 1 {
+		return nil, errors.New("valid price for the selected prediction-market outcome required")
+	}
+	// The generic mark book has no outcome identity. Use the explicit
+	// outcome prices in the existing simulator rather than a different leg's book.
+	quote := *mark
+	quote.BidPrice, quote.AskPrice = nil, nil
+	return &quote, nil
+}
+
+func paperReferencePrice(mark *Mark, outcome string) float64 {
+	return markPriceForSide(mark, strings.ToUpper(outcome))
+}
+
 func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p paperPacket, mark *Mark) error {
 	if pf.Status != "active" {
 		return errors.New("portfolio is not active")
 	}
-	if mark == nil || mark.Instrument == nil || !markFresh(mark, time.Now()) || oneOfString(mark.Source, "", "mock", "backtest") {
-		return errors.New("fresh non-synthetic market data required")
-	}
 	if p.Symbol == "" || !finite(p.Qty) || p.Qty <= 0 || !finite(p.StopLoss) || !finite(p.TakeProfit) || p.StopLoss <= 0 {
 		return errors.New("invalid paper experiment terms")
 	}
-	price := mark.Price
+	price := paperReferencePrice(mark, p.Outcome)
 	if mark.AskPrice != nil {
 		price = *mark.AskPrice
 	}
@@ -221,6 +269,9 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 	if p.StopLoss >= entry || p.TakeProfit <= entry {
 		return errors.New("stop must be below entry and target above entry")
 	}
+	if p.Outcome != "" && p.TakeProfit >= 1 {
+		return errors.New("prediction-market stop, entry and target prices must be in (0, 1)")
+	}
 	if p.Type != "market" && p.Type != "limit" {
 		return errors.New("market or limit entry required")
 	}
@@ -229,9 +280,6 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 	}
 	if !finite(riskPrice) || riskPrice*p.Qty > policy.MaxOrderNotional+1e-6 {
 		return errors.New("paper order exceeds notional cap")
-	}
-	if mark.Symbol != p.Symbol || mark.Instrument.AssetClass != mark.AssetClass || mark.Instrument.QuoteCurrency != "USD" {
-		return errors.New("matching USD instrument metadata required")
 	}
 	if err := paperEntryClass(pf, mark.AssetClass); err != nil {
 		return err
@@ -263,11 +311,12 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 	if err := ctx.AppDB().QueryRow(`SELECT EXISTS(
 		SELECT 1 FROM paper_decisions d JOIN orders o ON o.id=d.order_id
 		WHERE d.portfolio_id=? AND d.decision_id<>? AND o.symbol=?
-		AND d.status IN ('submitted','active','exiting'))`, pf.ID, p.DecisionID, p.Symbol).Scan(&overlapping); err != nil {
+		AND COALESCE(NULLIF(o.outcome,''), CASE WHEN o.side IN ('yes','no') THEN UPPER(o.side) ELSE '' END)=?
+		AND d.status IN ('submitted','active','exiting'))`, pf.ID, p.DecisionID, p.Symbol, strings.ToUpper(p.Outcome)).Scan(&overlapping); err != nil {
 		return err
 	}
 	if overlapping {
-		return errors.New("an existing paper plan already owns this symbol")
+		return errors.New("an existing paper plan already owns this symbol and outcome")
 	}
 	if v, err := preTradeRiskCheck(ctx.AppDB(), pf, p.Symbol, "buy", p.Qty, riskPrice); err != nil {
 		return err
@@ -289,7 +338,7 @@ func paperPreflight(ctx *sdk.AppCtx, pf *Portfolio, policy *paperDeskPolicy, p p
 			if err != nil {
 				return err
 			}
-			px := m.Price
+			px := markPriceForSide(m, polyOutcome(o))
 			if o.LimitPrice != nil {
 				px = max(px, *o.LimitPrice)
 			}
@@ -312,6 +361,7 @@ func (a *App) toolPaperPropose(call context.Context, ctx *sdk.AppCtx, args map[s
 		return nil, err
 	}
 	p := paperPacket{DecisionID: strings.TrimSpace(strArg(args, "decision_id")), Symbol: canonicalSymbol(strArg(args, "symbol")), Qty: floatArg(args, "qty", 0), Type: strArg(args, "type"), TIF: strArg(args, "tif"), LimitPrice: floatArg(args, "limit_price", 0), StopLoss: floatArg(args, "stop_loss", 0), TakeProfit: floatArg(args, "take_profit", 0), MaxHoldingMinutes: intArg(args, "max_holding_minutes", 240), Setup: strings.TrimSpace(strArg(args, "setup")), Purpose: strArg(args, "purpose"), Thesis: strings.TrimSpace(strArg(args, "thesis"))}
+	p.Outcome = strings.ToLower(strings.TrimSpace(strArg(args, "outcome")))
 	if p.Type == "" {
 		p.Type = "market"
 	}
@@ -340,14 +390,14 @@ func (a *App) toolPaperPropose(call context.Context, ctx *sdk.AppCtx, args map[s
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	mark, err := ensureExecutableMark(ctx, pf, p.Symbol)
+	mark, err := ensurePaperTradeMark(ctx, pf, p)
 	if err != nil {
 		return nil, err
 	}
 	if err = paperPreflight(ctx, pf, policy, p, mark); err != nil {
 		return nil, err
 	}
-	p.ReferencePrice = mark.Price
+	p.ReferencePrice = paperReferencePrice(mark, p.Outcome)
 	p.ReferenceAt = mark.MarkedAt
 	p.EntryExpiresAt = time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339Nano)
 	raw, _ = json.Marshal(p)
@@ -395,14 +445,14 @@ func (a *App) toolPaperReview(call context.Context, ctx *sdk.AppCtx, args map[st
 	}
 	ref := ""
 	if verdict == "approved" {
-		mark, err := ensureExecutableMark(ctx, pf, d.Packet.Symbol)
+		mark, err := ensurePaperTradeMark(ctx, pf, d.Packet)
 		if err != nil {
 			return nil, err
 		}
 		if err = paperPreflight(ctx, pf, policy, d.Packet, mark); err != nil {
 			return nil, err
 		}
-		if math.Abs(mark.Price/d.Packet.ReferencePrice-1) > .005 {
+		if math.Abs(paperReferencePrice(mark, d.Packet.Outcome)/d.Packet.ReferencePrice-1) > .005 {
 			return nil, errors.New("reference price moved over 0.5%; create a fresh decision")
 		}
 		ref = "review-" + uuid.NewString()
@@ -437,6 +487,7 @@ func (a *App) toolPaperSubmit(call context.Context, ctx *sdk.AppCtx, args map[st
 		return nil, errors.New("matching independent stored risk approval required")
 	}
 	entryArgs := paperEntryArgs(pf.ID, d.Packet)
+	entryArgs["_project_id"] = pf.ProjectID
 	// Recover an accepted intent even after a crash between order insertion and
 	// decision linking. Retrying never creates another order after expiry.
 	prior, err := previousOrderRequest(ctx.AppDB(), pf.ProjectID, pf.ID, strArg(entryArgs, "idempotency_key"), orderIntentHash(entryArgs))
@@ -455,11 +506,11 @@ func (a *App) toolPaperSubmit(call context.Context, ctx *sdk.AppCtx, args map[st
 	if err != nil || !time.Now().Before(expires) {
 		return nil, errors.New("risk approval expired")
 	}
-	mark, err := ensureExecutableMark(ctx, pf, d.Packet.Symbol)
+	mark, err := ensurePaperTradeMark(ctx, pf, d.Packet)
 	if err != nil {
 		return nil, err
 	}
-	if math.Abs(mark.Price/d.Packet.ReferencePrice-1) > .005 {
+	if math.Abs(paperReferencePrice(mark, d.Packet.Outcome)/d.Packet.ReferencePrice-1) > .005 {
 		return nil, errors.New("price moved over 0.5%; new review required")
 	}
 	if err = paperPreflight(ctx, pf, policy, d.Packet, mark); err != nil {
@@ -506,6 +557,8 @@ func (a *App) toolPaperCancel(call context.Context, ctx *sdk.AppCtx, args map[st
 	if d.OrderID == "" {
 		return nil, errors.New("entry has not been submitted")
 	}
+	orderPlacementMu.Lock()
+	defer orderPlacementMu.Unlock()
 	o, err := dbGetOrder(ctx.AppDB(), pf.ProjectID, d.OrderID)
 	if err != nil {
 		return nil, err

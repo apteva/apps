@@ -12,8 +12,8 @@ import (
 )
 
 func paperEntryClass(pf *Portfolio, class string) error {
-	if !oneOfString(class, "equity", "etf", "crypto") {
-		return fmt.Errorf("%s is research-only in the paper desk", class)
+	if !oneOfString(class, "equity", "etf", "crypto", "polymarket") {
+		return fmt.Errorf("%s is unsupported in the paper desk", class)
 	}
 	if !contains(pf.AllowedClasses, class) {
 		return fmt.Errorf("asset class %s is not allowed by this portfolio", class)
@@ -151,6 +151,11 @@ func (a *App) toolPaperHealth(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		profile := resolveVenueProfile(db, pf, m.Symbol, m.AssetClass)
 		session, err := marketSessionAt(profile.Calendar, now)
 		open := err == nil && session.IsOpen
+		outcome := ""
+		if m.AssetClass == "polymarket" {
+			outcome = "yes"
+		}
+		_, markErr := paperTradeMark(m, m.Symbol, outcome)
 		fresh := markFresh(m, now) && m.Source != "" && m.Source != "mock" && m.Source != "backtest"
 		// Use a valid minimum size here to report venue/instrument readiness;
 		// actual order size and costs are checked independently at preflight.
@@ -162,12 +167,14 @@ func (a *App) toolPaperHealth(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			qty = math.Ceil(qty/profile.QtyStep) * profile.QtyStep
 		}
 		check := validateExecutionOrderAt(profile, instrument, m, qty, m.Price, now)
-		valid := fresh && open && check == nil && instrument.AssetClass == m.AssetClass && instrument.QuoteCurrency == "USD"
+		valid := markErr == nil && open && check == nil
 		if valid {
 			ready++
 		}
 		state := map[string]any{"ready": valid, "fresh": fresh, "session_open": open, "source": m.Source, "marked_at": m.MarkedAt}
-		if check != nil {
+		if markErr != nil {
+			state["reason"] = markErr.Error()
+		} else if check != nil {
 			state["reason"] = check.Detail
 		}
 		symbols[m.Symbol] = state

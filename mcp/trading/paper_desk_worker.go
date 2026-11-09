@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -16,6 +16,9 @@ func authorizePaperOrder(ctx *sdk.AppCtx, pf *Portfolio, args map[string]any, au
 		return err
 	}
 	if p == nil || !p.Enabled {
+		if auth != nil {
+			return errors.New("paper desk is no longer enabled")
+		}
 		return nil
 	}
 	if pf.Mode != "paper" || pf.ExecutionEnvironment != "simulation" || pf.LiveArmed {
@@ -44,7 +47,7 @@ func authorizePaperOrder(ctx *sdk.AppCtx, pf *Portfolio, args map[string]any, au
 			return errors.New("approval expired")
 		}
 	} else {
-		if !oneOfString(d.Status, "submitted", "active", "exiting") || strArg(args, "symbol") != d.Packet.Symbol || strArg(args, "side") != "sell" || strArg(args, "type") != "market" || floatArg(args, "qty", 0) > d.Packet.Qty+1e-9 {
+		if !oneOfString(d.Status, "submitted", "active", "exiting") || strArg(args, "symbol") != d.Packet.Symbol || strArg(args, "outcome") != d.Packet.Outcome || strArg(args, "side") != "sell" || strArg(args, "type") != "market" || floatArg(args, "qty", 0) > d.Packet.Qty+1e-9 {
 			return errors.New("exit differs from approved reduce-only plan")
 		}
 	}
@@ -98,6 +101,15 @@ func paperPlanState(ctx *sdk.AppCtx, d *paperDecision, status, reason string) er
 	return err
 }
 
+func cancelPaperEntryRemainder(ctx *sdk.AppCtx, pf *Portfolio, entry *Order, reason string) (*Order, error) {
+	orderPlacementMu.Lock()
+	defer orderPlacementMu.Unlock()
+	if _, err := dbCancelOrder(ctx.AppDB(), pf.ProjectID, entry.ID, reason); err != nil {
+		return nil, err
+	}
+	return dbGetOrder(ctx.AppDB(), pf.ProjectID, entry.ID)
+}
+
 func advancePaperPlan(ctx *sdk.AppCtx, d *paperDecision) error {
 	pf, err := dbGetPortfolioAnyProject(ctx.AppDB(), d.PortfolioID)
 	if err != nil {
@@ -110,19 +122,28 @@ func advancePaperPlan(ctx *sdk.AppCtx, d *paperDecision) error {
 	if err != nil {
 		return err
 	}
-	if oneOfString(entry.Status, "cancelled", "rejected") && entry.FilledQty == 0 {
-		return paperPlanState(ctx, d, entry.Status, "entry "+entry.Status)
+	outcome := polyOutcome(entry)
+	if entry.PortfolioID != pf.ID || entry.Symbol != d.Packet.Symbol || outcome != strings.ToUpper(d.Packet.Outcome) || !isBuySide(entry.Side) || entry.FilledQty > d.Packet.Qty+1e-9 {
+		return errors.New("entry differs from approved paper plan")
 	}
-	if entry.Status != "filled" {
+	if entry.Status == "working" {
 		expires, err := time.Parse(time.RFC3339Nano, d.Packet.EntryExpiresAt)
 		if err != nil {
 			return err
 		}
 		if !time.Now().Before(expires) {
-			if _, err = dbCancelOrder(ctx.AppDB(), pf.ProjectID, entry.ID, "paper desk entry expired"); err != nil {
+			entry, err = cancelPaperEntryRemainder(ctx, pf, entry, "paper desk entry expired")
+			if err != nil {
 				return err
 			}
-			return paperPlanState(ctx, d, "cancelled", "entry expired")
+			if entry.FilledQty == 0 {
+				return paperPlanState(ctx, d, "cancelled", "entry expired")
+			}
+		}
+	}
+	if entry.FilledQty == 0 {
+		if oneOfString(entry.Status, "cancelled", "rejected") {
+			return paperPlanState(ctx, d, entry.Status, "entry "+entry.Status)
 		}
 		return nil
 	}
@@ -159,13 +180,6 @@ func advancePaperPlan(ctx *sdk.AppCtx, d *paperDecision) error {
 		}
 		d.Status = "active"
 	}
-	pos, err := dbGetPosition(ctx.AppDB(), pf.ID, d.Packet.Symbol, "")
-	if err != nil {
-		return err
-	}
-	if pos == nil || pos.Qty < entry.FilledQty-1e-9 {
-		return errors.New("position changed outside this plan; reconcile before automated exit")
-	}
 	if pf.Status != "active" {
 		return errors.New("approved exit pending: portfolio paused or halted")
 	}
@@ -173,10 +187,11 @@ func advancePaperPlan(ctx *sdk.AppCtx, d *paperDecision) error {
 	if err != nil {
 		return err
 	}
-	if mark.Source == "mock" || !markFresh(mark, time.Now()) {
-		return errors.New("approved exit waiting for fresh real market data")
+	mark, err = paperTradeMark(mark, d.Packet.Symbol, d.Packet.Outcome)
+	if err != nil {
+		return fmt.Errorf("approved exit waiting for executable market data: %w", err)
 	}
-	price := mark.Price
+	price := markPriceForSide(mark, outcome)
 	if mark.BidPrice != nil && *mark.BidPrice > 0 {
 		q := *mark
 		q.MarkedAt = mark.QuoteAt
@@ -184,24 +199,44 @@ func advancePaperPlan(ctx *sdk.AppCtx, d *paperDecision) error {
 			price = *mark.BidPrice
 		}
 	}
-	reason := ""
-	if price <= d.Packet.StopLoss {
-		reason = "stop_loss"
-	} else if price >= d.Packet.TakeProfit {
-		reason = "take_profit"
-	} else if due, err := time.Parse(time.RFC3339Nano, d.ExitAt); err != nil {
-		return err
-	} else if !time.Now().Before(due) {
-		reason = "time_exit"
-	}
+	reason := d.ExitReason
 	if reason == "" {
-		return nil
+		if price <= d.Packet.StopLoss {
+			reason = "stop_loss"
+		} else if price >= d.Packet.TakeProfit {
+			reason = "take_profit"
+		} else if due, err := time.Parse(time.RFC3339Nano, d.ExitAt); err != nil {
+			return err
+		} else if !time.Now().Before(due) {
+			reason = "time_exit"
+		}
+		if reason == "" {
+			return nil
+		}
+		// Keep the trigger even if submission fails or the price recovers.
+		if _, err := ctx.AppDB().Exec(`UPDATE paper_decisions SET exit_reason=?,updated_at=? WHERE portfolio_id=? AND decision_id=?`, reason, paperNow(), pf.ID, d.Packet.DecisionID); err != nil {
+			return err
+		}
 	}
-	qty := entry.FilledQty
-	if math.Abs(qty-d.Packet.Qty) > 1e-9 {
-		return errors.New("partial entry requires reconciliation")
+	if entry.Status == "working" {
+		// An exit owns only fills already recorded for this entry. Stop any
+		// further entry fills before computing the protected quantity.
+		entry, err = cancelPaperEntryRemainder(ctx, pf, entry, "approved paper exit triggered")
+		if err != nil {
+			return err
+		}
 	}
-	args := map[string]any{"portfolio_id": pf.ID, "symbol": d.Packet.Symbol, "side": "sell", "type": "market", "qty": qty, "tif": "gtc", "decision_ref": d.Packet.DecisionID, "idempotency_key": "desk:" + d.Packet.DecisionID + ":exit", "rationale": "Preapproved paper plan " + d.Packet.DecisionID + " automatic reduce-only " + reason}
+	pos, err := dbGetPosition(ctx.AppDB(), pf.ID, d.Packet.Symbol, outcome)
+	if err != nil {
+		return err
+	}
+	if pos == nil || pos.Qty < entry.FilledQty-1e-9 {
+		return errors.New("position changed outside this plan; reconcile before automated exit")
+	}
+	args := map[string]any{"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": d.Packet.Symbol, "side": "sell", "type": "market", "qty": entry.FilledQty, "tif": "gtc", "decision_ref": d.Packet.DecisionID, "idempotency_key": "desk:" + d.Packet.DecisionID + ":exit", "rationale": "Preapproved paper plan " + d.Packet.DecisionID + " automatic reduce-only " + reason}
+	if d.Packet.Outcome != "" {
+		args["outcome"] = d.Packet.Outcome
+	}
 	out, err := (&App{}).placeOrder(ctx, args, &paperOrderAuthorization{decision: d, exit: true, exitReason: reason})
 	if err != nil {
 		return err
