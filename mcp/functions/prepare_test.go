@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -252,11 +253,26 @@ func TestConfiguredWarmWorkers(t *testing.T) {
 		t.Fatalf("warm target not reached: %+v", p.runtimeReadiness(fn))
 	}
 	waitForWarm()
-	res, err := invokeFunction(ctx, context.Background(), fn, nil, "manual")
-	if err != nil || res.Status != "ok" || res.ColdStartMS != 0 {
-		t.Fatalf("request did not use a prewarmed worker: %+v %v", res, err)
-	}
+	func() {
+		// Hold preparation at activation so the request has to bypass
+		// the pending refill and use an idle worker immediately.
+		release, err := lockBuild(context.Background(), fmt.Sprintf("activation-%d", fn.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		if _, err := p.requestPreparation(fn, 3, false, false); err != nil {
+			t.Fatal(err)
+		}
+		parent, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		res, err := invokeFunction(ctx, parent, fn, nil, "manual")
+		if err != nil || res.Status != "ok" || res.ColdStartMS != 0 {
+			t.Fatalf("refill blocked the request from using a warm worker: %+v %v", res, err)
+		}
+	}()
 	waitForWarm()
+	var err error
 	if err = app.OnUnmount(ctx); err != nil {
 		t.Fatal(err)
 	}

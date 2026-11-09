@@ -408,6 +408,16 @@ func (p *pool) awaitPreparation(ctx context.Context, fn *Function) error {
 	if err != nil {
 		return err
 	}
+	// An optional warm refill must not make live traffic wait on a
+	// background boot when the artifact is already available.
+	p.prepareMu.Lock()
+	warming := job.warm > 0
+	p.prepareMu.Unlock()
+	if warming {
+		if v := p.cachedVersion(versionID(fn)); v != nil && artifactAvailable(versionDir(p.buildBase, v), v) {
+			return nil
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
