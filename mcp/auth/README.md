@@ -180,7 +180,7 @@ The `/me` endpoint continues to return `user`, `org`, and `authorization`.
 
 ## Development and tests
 
-Use the pinned Go 1.25.13+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
+Use the pinned Go 1.26.10+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
 workspace overlay from replacing the release SDK dependency.
 
 ```sh
