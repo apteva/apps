@@ -141,32 +141,32 @@ func checkPasswordPolicy(ctx *sdk.AppCtx, org *Organization, pw string) error {
 
 func sessionEligibility(ctx *sdk.AppCtx, org *Organization, u *User, c *Client) error {
 	if org == nil || org.Status != "active" {
-		return errors.New("organization_inactive")
+		return sessionRejection{code: "organization_inactive"}
 	}
 	if u == nil || u.Status != "active" {
-		return errors.New("user_inactive")
+		return sessionRejection{code: "user_inactive"}
 	}
 	if c == nil || c.DisabledAt != "" || c.Type == "m2m" || hasGrant(c, "client_credentials") {
-		return errors.New("client_not_allowed")
+		return sessionRejection{code: "client_not_allowed"}
 	}
 	if c.OrganizationID > 0 && c.OrganizationID != org.ID {
-		return errors.New("client_not_allowed")
+		return sessionRejection{code: "client_not_allowed"}
 	}
 	if u.OrganizationID != org.ID {
-		return errors.New("user_inactive")
+		return sessionRejection{code: "user_inactive"}
 	}
 	if c.RequireMFA || u.MFAEnabled {
-		return errors.New("mfa_required: MFA authentication is not implemented")
+		return sessionRejection{code: "mfa_required: MFA authentication is not implemented"}
 	}
 	if userLocked(u) {
-		return errors.New("account_locked")
+		return sessionRejection{code: "account_locked"}
 	}
 	p, err := effectivePolicy(ctx, org)
 	if err != nil {
 		return err
 	}
 	if p.Verify && u.Kind != userKindGuest && u.EmailVerifiedAt == "" {
-		return errors.New("email_unverified")
+		return sessionRejection{code: "email_unverified"}
 	}
 	return nil
 }

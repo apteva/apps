@@ -1,8 +1,10 @@
-# Auth v0.12.1
+# Auth v0.13.0
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.12.1 distinguishes retryable refresh failures from uncertain
+permissions. v0.13.0 adds private bearer-session verification for bound apps.
+This release preserves existing sessions and requires no database migration.
+v0.12.1 distinguishes retryable refresh failures from uncertain
 rotation outcomes for persistent SDK sessions. v0.12.0 added opt-in role-bound
 platform credentials and a renewal
 endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
@@ -166,9 +168,19 @@ trusted to prove provider/device identity. Do not bind an untrusted application
 that can assert arbitrary provider subjects; per-caller provider/client
 allowlists and possession proofs belong in that integration boundary.
 
+## Session verification for bound apps
+
+Call the app-only `auth_verify_session` tool with a
+`credential` object containing `type: "bearer"` and the access `token`.
+The platform supplies the caller identity and project scope. Auth returns
+the verified expiry and a principal with the stable user ID, organization slug,
+and current authorization claims. A rejected session returns
+`{"authenticated": false}`. Service failures return a tool error.
+The `/me` endpoint continues to return `user`, `org`, and `authorization`.
+
 ## Development and tests
 
-Use the pinned Go 1.25.13+ toolchain and SDK v0.74.1. `GOWORK=off` prevents the
+Use the pinned Go 1.25.13+ toolchain and SDK v0.115.1. `GOWORK=off` prevents the
 workspace overlay from replacing the release SDK dependency.
 
 ```sh

@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.12.1
+version: 0.13.0
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -52,6 +52,8 @@ description: |
   with platform CORS. OAuth/OIDC, magic-link login and MFA challenges are not
   implemented; accounts requiring MFA fail closed. v0.11.0 invalidates old
   sessions and recovery links and requires login after recovery.
+  v0.13.0 adds private bearer-session verification for bound apps, with
+  verified expiry and current permissions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
 icon: /ui/icon.svg
@@ -115,6 +117,9 @@ provides:
       no_auth: true
     - prefix: /admin/
   mcp_tools:
+    - name: auth_verify_session
+      description: Verify an Auth bearer session for a bound app in the authenticated project.
+      exposure: app_only
     - name: auth_orgs_list
       description: List organizations in the project.
     - name: auth_orgs_create
@@ -199,7 +204,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: auth/v0.12.1
+    ref: auth/v0.13.0
     entry: mcp/auth
   port: 8080
   health_check: /health
@@ -428,6 +433,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		return out
 	}
 	tools := []sdk.Tool{
+		{
+			Name:        "auth_verify_session",
+			Description: "Verify an Auth bearer session for a bound app in the authenticated project.",
+			Exposure:    sdk.ToolExposureAppOnly,
+			InputSchema: schemaObject(map[string]any{
+				"credential": schemaObject(map[string]any{
+					"type":  map[string]any{"type": "string", "enum": []string{"bearer"}},
+					"token": map[string]any{"type": "string", "minLength": 1, "maxLength": maxSessionTokenBytes},
+				}, []string{"type", "token"}),
+			}, []string{"credential"}),
+			HandlerCtx: a.toolVerifySession,
+		},
 		// ─── Organizations ─────────────────────────────────────────
 		{
 			Name:        "auth_orgs_list",
