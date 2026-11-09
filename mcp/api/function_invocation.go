@@ -70,9 +70,8 @@ func (a *App) dispatchAuthenticatedFunction(w http.ResponseWriter, r *http.Reque
 	if base == "" || token == "" {
 		return writeGatewayFailure(w, r.Context(), errors.New("platform app credentials unavailable"))
 	}
-	// CallAppResult has no request-context variant in SDK v0.79.0. Use the same
-	// MCP callback explicitly so browser cancellation and the original deadline
-	// cover transport and response reading, with bounded envelope decoding below.
+	// Use the MCP callback directly to preserve request correlation, HTTP status
+	// mapping, and Function-specific response limits.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/api/apps/callback/apps/functions/call", bytes.NewReader(raw))
 	if err != nil {
 		return writeGatewayFailure(w, r.Context(), err)

@@ -64,7 +64,11 @@ export function updatedAuth(kind: string, settings: Record<string, unknown>) {
     kind,
     ...scope,
     ...(kind === "authorizer" ? { provider } : {}),
-    ...(provider === "app" ? { app: settings.app || "", path: settings.path || "/authorize", issuer: settings.issuer || "" } : {}),
+    ...(provider === "app" ? {
+      app: settings.app || "",
+      issuer: settings.issuer || "",
+      ...(typeof settings.tool === "string" ? { tool: settings.tool } : { path: settings.path || "/authorize" }),
+    } : {}),
     ...(settings.tenant_id ? { tenant_id: settings.tenant_id } : {}),
     claims: Array.isArray(settings.claims) ? settings.claims.filter((v): v is string => typeof v === "string" && !!v.trim()).map(v => v.trim()) : [],
   };

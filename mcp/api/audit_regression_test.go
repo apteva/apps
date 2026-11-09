@@ -392,16 +392,20 @@ func TestAuditRevocationStopsExistingStream(t *testing.T) {
 		}
 		frame.Write(b)
 	}
-	if _, err := app.toolKeyRevoke(ctx, map[string]any{"id": key.ID}); err != nil {
-		t.Fatal(err)
-	}
+	// Revocation can remove the last subscriber and evict this hub immediately.
 	app.eventHubs.mu.Lock()
 	hub := app.eventHubs.hubs[testProject+"\x00tables"]
 	app.eventHubs.mu.Unlock()
+	if hub == nil {
+		t.Fatal("ready stream has no event hub")
+	}
+	if _, err := app.toolKeyRevoke(ctx, map[string]any{"id": key.ID}); err != nil {
+		t.Fatal(err)
+	}
 	hub.broadcast(appBusEvent{Seq: 1, Topic: "row.updated", App: "tables", ProjectID: testProject})
 	n, err := resp.Body.Read(make([]byte, 512))
-	if n > 0 && err == nil {
-		t.Fatal("revoked key continues receiving new events on existing connection")
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("expected revoked stream to close without new events, read %d bytes: %v", n, err)
 	}
 }
 

@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Real SDK processes and databases, with an isolated platform callback adapter.
@@ -91,6 +93,127 @@ func TestSidecarProjectScopeAndBoundHTTPDispatch(t *testing.T) {
 	}
 	if code, _ := call(gateway, "/tools/call", testProject, `{"tool":"api_key_create","args":{"project_id":"victim","api_slug":"private","name":"unauthorized"}}`); code != 403 {
 		t.Fatalf("cross-project body accepted: %d", code)
+	}
+}
+
+func TestSidecarToolAuthorizer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and starts the API Gateway sidecar")
+	}
+	const largeClaim = "9007199254740993"
+	const budget = 2 * time.Second
+	var dispatches atomic.Int32
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/callback/apps/identity/call":
+			var call struct {
+				Tool  string `json:"tool"`
+				Input struct {
+					Project    string            `json:"project_id"`
+					Scope      string            `json:"_project_id"`
+					Credential map[string]string `json:"credential"`
+				} `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&call); err != nil {
+				t.Error(err)
+				http.Error(w, "invalid call", http.StatusBadRequest)
+				return
+			}
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer gateway-outbound" ||
+				r.Header.Get(sdk.HeaderAppResultFormat) != sdk.AppResultJSON || call.Tool != "verify_bearer" ||
+				call.Input.Project != testProject || call.Input.Scope != testProject || call.Input.Credential["type"] != "bearer" {
+				t.Error("incorrect authorizer callback transport or scope")
+			}
+			millis, err := strconv.ParseInt(r.Header.Get(sdk.HeaderAppCallDeadline), 10, 64)
+			remaining := time.Until(time.UnixMilli(millis))
+			if err != nil || remaining <= 0 || remaining > budget {
+				t.Errorf("callback deadline remaining=%s, err=%v", remaining, err)
+			}
+			token := call.Input.Credential["token"]
+			project := testProject
+			switch token {
+			case "denied":
+				w.Header().Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+				fmt.Fprint(w, `{"authenticated":false}`)
+				return
+			case "wrong-project":
+				project = "other-project"
+			case "timed-out":
+				<-r.Context().Done()
+				return
+			case "backend-error":
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"private verifier failure"}}`)
+				return
+			}
+			principal := fmt.Sprintf(`{"authenticated":true,"expires_at":%q,"principal":{"issuer":"example","subject":"person-123","project_id":%q,"tenant_id":"tenant-a","claims":{"account_number":%s,"role":"hidden"}}}`, time.Now().Add(time.Minute).Format(time.RFC3339), project, largeClaim)
+			if token == "legacy" {
+				fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%q}]}}`, principal)
+				return
+			}
+			w.Header().Set(sdk.HeaderAppResultFormat, sdk.AppResultJSON)
+			fmt.Fprint(w, principal)
+		case "/api/apps/callback/apps/functions/call":
+			dispatches.Add(1)
+			var call struct {
+				Input struct {
+					Principal functionPrincipal `json:"principal"`
+				} `json:"input"`
+			}
+			decoder := json.NewDecoder(r.Body)
+			decoder.UseNumber()
+			if err := decoder.Decode(&call); err != nil {
+				t.Error(err)
+			}
+			principal := call.Input.Principal
+			if principal.Subject != "person-123" || principal.ProjectID != testProject ||
+				principal.Claims["account_number"] != json.Number(largeClaim) || principal.Claims["role"] != nil {
+				t.Errorf("incorrect forwarded principal: %+v", principal)
+			}
+			fmt.Fprint(w, `{"status":"ok","response":"{\"statusCode\":200,\"body\":\"ok\"}"}`)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	t.Cleanup(platform.Close)
+	gateway := tk.SpawnSidecar(t, ".", tk.WithProjectID(""), tk.WithEnv("APTEVA_GATEWAY_URL", platform.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "gateway-outbound"))
+	create := gateway.POST("/apis?project_id="+url.QueryEscape(testProject), map[string]any{"slug": "tool-auth", "auth": map[string]any{
+		"kind": "authorizer", "provider": "app", "app": "identity", "tool": "verify_bearer", "issuer": "example", "tenant_id": "tenant-a", "claims": []string{"account_number"}, "function_ids": []int{12},
+	}}, nil)
+	if create.Status != http.StatusOK {
+		t.Fatalf("create API: %d %s", create.Status, create.Body)
+	}
+	addRoute := gateway.POST("/tools/call?project_id="+url.QueryEscape(testProject), map[string]any{
+		"tool": "api_route_add",
+		"args": map[string]any{"api_slug": "tool-auth", "method": "GET", "path_pattern": "/test", "target_kind": "function", "target_ref": "test", "timeout_ms": budget.Milliseconds()},
+	}, nil)
+	if addRoute.Status != http.StatusOK {
+		t.Fatalf("add route: %d %s", addRoute.Status, addRoute.Body)
+	}
+	for _, test := range []struct {
+		token  string
+		status int
+	}{
+		{"direct", 200}, {"legacy", 200}, {"denied", 401}, {"wrong-project", 403}, {"backend-error", 502}, {"timed-out", 504},
+	} {
+		t.Run(test.token, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, gateway.URL()+"/gw/tool-auth/test?project_id="+url.QueryEscape(testProject)+"&app=attacker&tool=attacker", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+test.token)
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != test.status {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status=%d, want %d: %s", resp.StatusCode, test.status, body)
+			}
+		})
+	}
+	if n := dispatches.Load(); n != 2 {
+		t.Fatalf("expected only the two authorized requests to dispatch, got %d", n)
 	}
 }
 

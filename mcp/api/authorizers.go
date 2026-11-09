@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // Principal is gateway-owned identity, separate from the browser's body.
@@ -31,13 +33,17 @@ type authorizerPolicy struct {
 	Provider       string   `json:"provider,omitempty"`
 	App            string   `json:"app,omitempty"`
 	Path           string   `json:"path,omitempty"`
+	Tool           string   `json:"tool,omitempty"`
 	Issuer         string   `json:"issuer,omitempty"`
 	TenantID       string   `json:"tenant_id,omitempty"`
 	Claims         []string `json:"claims,omitempty"`
 }
 
 var authorizerName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+var authorizerToolName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 var claimName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,63}$`)
+
+const maxAuthorizerResponseBytes = 1 << 20
 
 func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	obj, err := policyObject(raw)
@@ -52,7 +58,7 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	}
 	for name, value := range obj {
 		switch name {
-		case "kind", "provider", "app", "path", "issuer", "tenant_id", "claims", "function_ids", "required_scopes":
+		case "kind", "provider", "app", "path", "tool", "issuer", "tenant_id", "claims", "function_ids", "required_scopes":
 		default:
 			return policy, errors.New("unsupported auth field: " + name)
 		}
@@ -101,9 +107,10 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 		if policy.Kind == "auth_jwt" {
 			policy.Provider = "auth"
 		}
+		_, hasTool := obj["tool"]
 		switch policy.Provider {
 		case "auth":
-			if policy.App != "" || policy.Path != "" || policy.Issuer != "" {
+			if policy.App != "" || policy.Path != "" || hasTool || policy.Issuer != "" {
 				return policy, errors.New("Auth uses its built-in endpoint and issuer")
 			}
 			if v, ok := obj["provider"]; ok && v != "auth" {
@@ -113,7 +120,14 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 			if !authorizerName.MatchString(policy.App) || policy.App == "api" {
 				return policy, errors.New("authorizer app must name another installed app")
 			}
-			if policy.Path == "" || strings.ContainsAny(policy.Path, "%?#\\") || strings.HasPrefix(policy.Path, "//") || validateRouteTargetPath(policy.Path) != nil {
+			_, hasPath := obj["path"]
+			if hasTool == hasPath {
+				return policy, errors.New("app authorizer requires exactly one of auth.path or auth.tool")
+			}
+			if hasTool && !authorizerToolName.MatchString(policy.Tool) {
+				return policy, errors.New("authorizer tool must be a valid MCP tool name")
+			}
+			if hasPath && (policy.Path == "" || strings.ContainsAny(policy.Path, "%?#\\") || strings.HasPrefix(policy.Path, "//") || validateRouteTargetPath(policy.Path) != nil) {
 				return policy, errors.New("authorizer path must be a literal absolute app path")
 			}
 			if !identityString(policy.Issuer) {
@@ -218,58 +232,9 @@ func (a *App) authenticatePrincipal(r *http.Request, projectID string, policy au
 	if len(token) > 16000 {
 		return nil, time.Time{}, authFailure(401, "invalid bearer token", nil)
 	}
-	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
-	if base == "" {
-		return nil, time.Time{}, authFailure(503, "authentication service unavailable", nil)
-	}
-	var req *http.Request
-	var err error
-	if policy.Provider == "app" {
-		// Browser credentials are sent only to the configured authorizer, inside
-		// an authenticated, project-scoped platform app call. No browser URL or
-		// header controls the provider, project, endpoint, or expected issuer.
-		outbound := outboundAppToken()
-		if outbound == "" {
-			return nil, time.Time{}, authFailure(503, "authentication service unavailable", nil)
-		}
-		input, _ := json.Marshal(map[string]any{"credential": map[string]string{"type": "bearer", "token": token}, "project_id": projectID})
-		target := base + "/api/apps/callback/apps/" + policy.App + "/proxy" + policy.Path + "?project_id=" + url.QueryEscape(projectID)
-		req, err = http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(input))
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+outbound)
-			req.Header.Set("Content-Type", "application/json")
-		}
-	} else {
-		req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, base+"/api/apps/auth/me?project_id="+url.QueryEscape(projectID), nil)
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-	}
+	raw, err := a.authorizerResponse(r, projectID, policy, token)
 	if err != nil {
-		return nil, time.Time{}, authBackendFailure(err)
-	}
-	req.Header.Set("X-Request-ID", gatewayRequestID(r.Context()))
-	resp, err := a.performRequest(req)
-	if err != nil {
-		return nil, time.Time{}, authBackendFailure(err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case 401:
-		return nil, time.Time{}, authFailure(401, "invalid or expired bearer token", nil)
-	case 403:
-		return nil, time.Time{}, authFailure(403, "access forbidden", nil)
-	case 429, 503:
-		return nil, time.Time{}, authFailure(503, "authentication service unavailable", nil)
-	case 408, 504:
-		return nil, time.Time{}, authFailure(504, "authentication service timed out", nil)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, time.Time{}, authFailure(502, "authentication service failed", nil)
-	}
-	raw, err := readBounded(resp.Body, 1<<20)
-	if err != nil {
-		return nil, time.Time{}, authBackendFailure(err)
+		return nil, time.Time{}, err
 	}
 	var out map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -339,6 +304,80 @@ func (a *App) authenticatePrincipal(r *http.Request, projectID string, policy au
 	return principal, expiry, nil
 }
 
+func (a *App) authorizerResponse(r *http.Request, projectID string, policy authorizerPolicy, token string) ([]byte, error) {
+	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	outbound := outboundAppToken()
+	if base == "" || (policy.Provider == "app" && outbound == "") {
+		return nil, authFailure(503, "authentication service unavailable", nil)
+	}
+	if policy.Provider == "app" && policy.Tool != "" {
+		client := a.ctx.WithProject(projectID).PlatformAPI()
+		if client == nil {
+			return nil, authFailure(503, "authentication service unavailable", nil)
+		}
+		var raw json.RawMessage
+		if err := sdk.CallAppResultContext(r.Context(), client, policy.App, policy.Tool, appAuthorizerInput(projectID, token), &raw); err != nil {
+			if ctxErr := r.Context().Err(); ctxErr != nil {
+				return nil, authBackendFailure(ctxErr)
+			}
+			// An authorizer error can echo its input, including the bearer token.
+			return nil, authFailure(502, "authentication service failed", nil)
+		}
+		if len(raw) > maxAuthorizerResponseBytes {
+			return nil, invalidAuthorizerResponse()
+		}
+		return raw, nil
+	}
+
+	var req *http.Request
+	var err error
+	if policy.Provider == "app" {
+		input, _ := json.Marshal(appAuthorizerInput(projectID, token))
+		target := base + "/api/apps/callback/apps/" + policy.App + "/proxy" + policy.Path + "?project_id=" + url.QueryEscape(projectID)
+		req, err = http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(input))
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+outbound)
+			req.Header.Set("Content-Type", "application/json")
+		}
+	} else {
+		req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, base+"/api/apps/auth/me?project_id="+url.QueryEscape(projectID), nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	if err != nil {
+		return nil, authBackendFailure(err)
+	}
+	req.Header.Set("X-Request-ID", gatewayRequestID(r.Context()))
+	resp, err := a.performRequest(req)
+	if err != nil {
+		return nil, authBackendFailure(err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 401:
+		return nil, authFailure(401, "invalid or expired bearer token", nil)
+	case 403:
+		return nil, authFailure(403, "access forbidden", nil)
+	case 429, 503:
+		return nil, authFailure(503, "authentication service unavailable", nil)
+	case 408, 504:
+		return nil, authFailure(504, "authentication service timed out", nil)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, authFailure(502, "authentication service failed", nil)
+	}
+	raw, err := readBounded(resp.Body, maxAuthorizerResponseBytes)
+	if err != nil {
+		return nil, authBackendFailure(err)
+	}
+	return raw, nil
+}
+
+func appAuthorizerInput(projectID, token string) map[string]any {
+	return map[string]any{"credential": map[string]string{"type": "bearer", "token": token}, "project_id": projectID}
+}
+
 func invalidAuthorizerResponse() error {
 	return authFailure(502, "invalid authentication service response", nil)
 }
@@ -346,12 +385,13 @@ func invalidAuthorizerResponse() error {
 func authPolicySchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
-		"description": "Empty route auth inherits API auth; otherwise replaces the full policy. authorizer selects provider auth or a bound app implementing the authorizer contract. Claims are an explicit allowlist; no claims by default.",
+		"description": "Empty route auth inherits API auth; otherwise replaces the full policy. An app authorizer requires exactly one of path or tool. Claims are an explicit allowlist; no claims by default.",
 		"properties": map[string]any{
 			"kind":            map[string]any{"type": "string", "enum": []string{"public", "api_key", "auth_jwt", "authorizer"}},
 			"provider":        map[string]any{"type": "string", "enum": []string{"auth", "app"}},
 			"app":             map[string]any{"type": "string", "description": "Installed and bound authorizer app name (provider=app)."},
 			"path":            map[string]any{"type": "string", "description": "Absolute POST endpoint on the authorizer app (provider=app)."},
+			"tool":            map[string]any{"type": "string", "description": "MCP tool on the bound authorizer app. Receives credential {type: bearer, token} and project_id. Returns authenticated and, on success, principal and expires_at (RFC3339)."},
 			"issuer":          map[string]any{"type": "string", "description": "Required expected issuer (provider=app)."},
 			"tenant_id":       map[string]any{"type": "string", "description": "Optional required tenant; Auth uses the organization slug."},
 			"function_ids":    map[string]any{"type": "array", "maxItems": 100, "uniqueItems": true, "items": map[string]any{"type": "integer", "minimum": 1}, "description": "Exact permitted Function IDs including the root and nested targets. Required for authenticated Function routes; never taken from the request or authorizer response."},

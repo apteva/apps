@@ -679,12 +679,16 @@ function date(s?: string): string {
 
 function AuthorizerFields({ kind, value, onChange }: { kind: string; value: Record<string, unknown>; onChange(value: Record<string, unknown>): void }) {
   const provider = kind === "auth_jwt" ? "auth" : value.provider === "app" ? "app" : "auth";
+  const usesTool = typeof value.tool === "string";
   const field = (name: string, text: string) => onChange({ ...value, [name]: text });
   return <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 border border-border rounded p-3">
     {kind === "authorizer" && <Field label="Authentication provider"><select className={inputCls} value={provider} onChange={e => field("provider", e.target.value)}><option value="auth">Auth</option><option value="app">Installed authorizer app</option></select></Field>}
     {kind !== "api_key" && provider === "app" && <>
       <Field label="Authorizer app"><input className={inputCls} required value={String(value.app || "")} onChange={e => field("app", e.target.value)} placeholder="identity-provider" /></Field>
-      <Field label="Authorizer endpoint"><input className={inputCls} required value={String(value.path || "/authorize")} onChange={e => field("path", e.target.value)} placeholder="/authorize" /></Field>
+      <Field label="Authorizer transport"><select className={inputCls} value={usesTool ? "tool" : "path"} onChange={e => onChange({ ...value, tool: e.target.value === "tool" ? "" : undefined })}><option value="path">HTTP endpoint</option><option value="tool">MCP tool</option></select></Field>
+      {usesTool
+        ? <Field label="Authorizer tool"><input className={inputCls} required value={String(value.tool)} onChange={e => field("tool", e.target.value)} placeholder="verify_bearer" /></Field>
+        : <Field label="Authorizer endpoint"><input className={inputCls} required value={String(value.path || "/authorize")} onChange={e => field("path", e.target.value)} placeholder="/authorize" /></Field>}
       <Field label="Expected issuer"><input className={inputCls} required value={String(value.issuer || "")} onChange={e => field("issuer", e.target.value)} placeholder="https://identity.example.com" /></Field>
     </>}
     {kind !== "api_key" && <><Field label="Required tenant (optional)"><input className={inputCls} value={String(value.tenant_id || "")} onChange={e => field("tenant_id", e.target.value)} placeholder="Accept only this tenant" /></Field>

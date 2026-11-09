@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11.0 Adds MCP tool authorizers for bound apps alongside HTTP authorizers.
+  Gateway scopes tool calls to the API project, honors the request deadline,
+  and applies the same principal checks to both transports. Uses app-sdk v0.115.1.
+
   v0.10.0 Extends API keys into generic attributed credentials with opaque
   subjects and claims, exact route scopes, expiration, idempotent issuance,
   subject lookup/revocation, and optional operational usage plans. Existing
@@ -166,7 +170,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.10.0
+    ref: api/v0.11.0
     entry: mcp/api
   port: 8080
   health_check: /health

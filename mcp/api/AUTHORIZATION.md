@@ -93,8 +93,12 @@ authorizers. The platform enforces authenticated app-to-app calls and bindings.
 }
 ```
 
-API sends a POST through the platform's project-scoped bound-app proxy, using
-its outbound app credential. The provider receives:
+Set exactly one of `path` or `tool`. With `path`, Gateway sends a POST through
+the platform's project-scoped bound-app proxy. With `tool`, Gateway calls the
+named MCP tool through the platform's bound-app `/call` endpoint. For example,
+replace `"path": "/authorize"` with `"tool": "verify_bearer"` for an app that
+exposes that tool. Gateway uses its outbound app credential for both transports.
+The authorizer receives this input.
 
 ```json
 {
@@ -122,9 +126,9 @@ revocation/expiry and project/tenant membership, then return:
 
 The configured issuer and gateway-selected project must match exactly. If a
 tenant is configured it must also match. The subject must be nonempty and the
-RFC3339 expiry must be in the future. Return HTTP 401/403 or
-`{"authenticated":false}` to deny access. Invalid responses, unavailable
-providers and timeouts fail closed. Authorizer requests have a five-second
+RFC3339 expiry must be in the future. Return `{"authenticated":false}` to deny
+access. HTTP authorizers can also deny access with HTTP 401 or 403. Invalid
+responses, unavailable providers and timeouts fail closed. Authorizer requests have a five-second
 maximum and honor earlier request deadlines and browser cancellation.
 Authenticated `app_events` streams also close at the returned identity expiry.
 
