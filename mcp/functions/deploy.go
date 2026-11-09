@@ -121,9 +121,7 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 			p.discard(candidate)
 			return nil, errors.New("function deleted during deployment")
 		}
-		p.refreshFunction(updated)
-		p.put(updated, p.poolFor(fn.ID), candidate)
-		p.markPrepared(updated, ver)
+		p.finishDeployment(updated, ver, candidate)
 	}
 	ctx.WithProject(fn.ProjectID).Emit("function.deployed", map[string]any{"id": fn.ID, "version": ver.Version})
 	return ver, nil
@@ -206,15 +204,24 @@ func rollbackFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string
 	if p != nil {
 		p.cacheVersion(ver)
 		updated, _ := dbGetFunction(db, pid, fnID, "")
-		p.refreshFunction(updated)
 		if updated != nil {
-			p.put(updated, p.poolFor(fnID), candidate)
-			p.markPrepared(updated, ver)
+			p.finishDeployment(updated, ver, candidate)
 			kept = true
 		}
 	}
 	ctx.WithProject(pid).Emit("function.deployed", map[string]any{"id": fnID, "version": ver.Version, "rollback": true})
 	return ver, nil
+}
+
+// Validate boot before activation, then release the deployment worker.
+// Optional warming uses the background capacity budget.
+func (p *pool) finishDeployment(fn *Function, v *FunctionVersion, candidate *worker) {
+	p.refreshFunction(fn)
+	if candidate.signature == configHash(fn) {
+		p.markPrepared(fn, v)
+	}
+	p.discard(candidate)
+	p.scheduleWarmWorkers(fn)
 }
 
 // deployFromArgs reads source / package_json from a tool or HTTP arg

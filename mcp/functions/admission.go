@@ -79,6 +79,11 @@ func (p *pool) reserveWorker(ctx context.Context, fn *Function) (string, error) 
 			return class, nil
 		}
 		p.mu.Unlock()
+		// Prewarming is best effort. It must not cycle through other idle
+		// workers or evict workers already available to live requests.
+		if class == "preparation" {
+			return class, p.reject(reason)
+		}
 		if p.evictIdleClass(class) {
 			continue
 		}
@@ -88,7 +93,7 @@ func (p *pool) reserveWorker(ctx context.Context, fn *Function) (string, error) 
 			reason.Code = "nested_capacity_exhausted"
 			return class, p.reject(reason)
 		}
-		if !reason.Retryable || class == "preparation" {
+		if !reason.Retryable {
 			return class, p.reject(reason)
 		}
 		select {

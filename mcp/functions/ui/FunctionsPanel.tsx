@@ -93,7 +93,9 @@ type InvStatus = "ok" | "error" | "timeout" | "canceled" | "upstream_timeout" | 
 type BuildStatus = "pending" | "building" | "ready" | "failed";
 
 interface RuntimeReadiness {state:"preparing"|"prepared"|"ready"|"failed"|"inactive";error?:string;build_ms:number;worker_start_ms:number;boot_validated:boolean;warm_workers:number}
+type WorkerIsolation = "function_version" | "invocation" | "authenticated_invocation";
 interface FunctionRow {
+ worker_isolation?: WorkerIsolation;
  limits?: Record<string,any>;
  runtime_readiness?:RuntimeReadiness;
   id: number;
@@ -1430,9 +1432,20 @@ function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:(
  const [timeout,setTimeoutValue]=useState(fn.timeout_ms),[memory,setMemory]=useState(fn.max_memory_mb);
  const [limits,setLimits]=useState<Record<string,any>>(fn.limits||{});
  const [access,setAccess]=useState(JSON.stringify(fn.access??null,null,2));
+ const [workerIsolation,setWorkerIsolation]=useState(fn.worker_isolation);
  const [error,setError]=useState(""),[saving,setSaving]=useState(false);
- const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,limits,access:JSON.parse(access)});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
- return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Hard worker memory limit (MiB)<input type="number" min={16} max={65536} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Capacity class<select value={limits.class||"interactive"} onChange={e=>setLimits({...limits,class:e.target.value})} className={inputCls}><option value="interactive">Interactive</option><option value="background">Background</option></select></label>{[["concurrency","Concurrent workers",1024],["max_idle_workers","Maximum idle workers",1024],["idle_timeout_ms","Idle lifetime (ms)",600000],["queue_timeout_ms","Capacity wait (ms)",600000],["app_timeout_ms","App call timeout (ms)",600000],["integration_timeout_ms","Integration timeout (ms)",600000]].map(([key,label,max])=><label key={String(key)}>{label}<input type="number" min={0} max={Number(max)} placeholder="Default" value={limits[String(key)]??""} onChange={e=>setLimits({...limits,[String(key)]:e.target.value===""?undefined:Number(e.target.value)})} className={inputCls}/></label>)}<label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
+ const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,limits,access:JSON.parse(access),worker_isolation:workerIsolation});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
+ return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Hard worker memory limit (MiB)<input type="number" min={16} max={65536} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Capacity class<select value={limits.class||"interactive"} onChange={e=>setLimits({...limits,class:e.target.value})} className={inputCls}><option value="interactive">Interactive</option><option value="background">Background</option></select></label>
+ {fn.worker_isolation && <label>
+   Worker isolation
+   <select value={workerIsolation ?? fn.worker_isolation} onChange={e=>setWorkerIsolation(e.target.value as WorkerIsolation)} className={inputCls}>
+     <option value="function_version">Reuse within function version</option>
+     <option value="invocation">Fresh worker per invocation</option>
+     <option value="authenticated_invocation">Fresh worker for authenticated calls</option>
+   </select>
+   <span className="block text-text-muted">Reused workers keep process state. Keep caller data in the request handler.</span>
+ </label>}
+ {[["concurrency","Concurrent workers",1024],["max_idle_workers","Maximum idle workers",1024],["warm_workers","Proactive warm workers (default 0)",1024],["idle_timeout_ms","Idle lifetime (ms)",600000],["queue_timeout_ms","Capacity wait (ms)",600000],["app_timeout_ms","App call timeout (ms)",600000],["integration_timeout_ms","Integration timeout (ms)",600000]].map(([key,label,max])=><label key={String(key)}>{label}<input type="number" min={0} max={Number(max)} placeholder="Default" value={limits[String(key)]??""} onChange={e=>setLimits({...limits,[String(key)]:e.target.value===""?undefined:Number(e.target.value)})} className={inputCls}/></label>)}<label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
 }
 
 function LoadedInvocation({inv,id,api}:{inv?:Invocation;id?:number;api:ApiFn}) {

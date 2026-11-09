@@ -18,6 +18,7 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Function struct {
+	WorkerIsolation    string             `json:"worker_isolation"`
 	InvocationPolicy   *InvocationPolicy  `json:"invocation_policy,omitempty"`
 	Limits             RuntimePolicy      `json:"limits"`
 	RuntimeReadiness   *RuntimeReadiness  `json:"runtime_readiness,omitempty"`
@@ -170,6 +171,12 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 	if fn.SourceKind == "repo" && (fn.RepoID == nil || fn.RepoPath == "") {
 		return nil, errors.New("repo_id and repo_path required for source_kind=repo")
 	}
+	if fn.WorkerIsolation == "" {
+		fn.WorkerIsolation = isolateFunctionVersion
+	}
+	if err := validateWorkerIsolation(fn.WorkerIsolation); err != nil {
+		return nil, err
+	}
 	fn.TimeoutMS = clampInt(fn.TimeoutMS, defaultTimeout, 1, maxTimeoutMS)
 	fn.MaxMemoryMB = clampInt(fn.MaxMemoryMB, defaultMemoryMB, 1, maxMemoryMB)
 
@@ -187,12 +194,12 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 		`INSERT INTO functions (
 			project_id, name, runtime, source_kind, source, repo_id, repo_path,
 			source_hash, env_json, timeout_ms, max_memory_mb, status,
-			function_url_json, created_at, updated_at, instance_key, access_json
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, lower(hex(randomblob(16))), ?)`,
+			function_url_json, created_at, updated_at, instance_key, access_json, worker_isolation
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, lower(hex(randomblob(16))), ?, ?)`,
 		pid, fn.Name, fn.Runtime, fn.SourceKind,
 		nullStr(fn.Source), nullableInt64Ptr(fn.RepoID), nullStr(fn.RepoPath),
 		fn.SourceHash, envJSON, fn.TimeoutMS, fn.MaxMemoryMB,
-		fnURLJSON, now, now, accessJSON(fn.Access))
+		fnURLJSON, now, now, accessJSON(fn.Access), fn.WorkerIsolation)
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +311,13 @@ func dbUpdateFunction(db *sql.DB, pid string, id int64, patch map[string]any, ne
 		}
 		sets = append(sets, "access_json = ?")
 		args = append(args, string(b))
+	}
+	if raw, has := patch["worker_isolation"]; has {
+		if err := validateWorkerIsolation(raw); err != nil {
+			return nil, err
+		}
+		sets = append(sets, "worker_isolation = ?")
+		args = append(args, raw)
 	}
 	if newSourceHash != "" {
 		sets = append(sets, "source_hash = ?")
@@ -437,7 +451,7 @@ const fnColumns = `id, project_id, name, runtime, source_kind,
 		source_hash, COALESCE(env_json,''),
 		timeout_ms, max_memory_mb, status,
 		COALESCE(function_url_json,''),
-		active_version_id, created_at, updated_at, instance_key, deployment_revision, COALESCE(access_json,''), COALESCE((SELECT policy_json FROM function_runtime_policies WHERE function_id=functions.id),'{}'), COALESCE((SELECT policy_json FROM function_invocation_policies WHERE function_id=functions.id),'null')`
+		active_version_id, created_at, updated_at, instance_key, deployment_revision, COALESCE(access_json,''), COALESCE((SELECT policy_json FROM function_runtime_policies WHERE function_id=functions.id),'{}'), COALESCE((SELECT policy_json FROM function_invocation_policies WHERE function_id=functions.id),'null'), worker_isolation`
 
 type scanRow interface {
 	Scan(dest ...any) error
@@ -453,7 +467,7 @@ func scanFunction(row scanRow) (*Function, error) {
 		&fn.SourceHash, &envJSON,
 		&fn.TimeoutMS, &fn.MaxMemoryMB, &fn.Status,
 		&fnURLJSON,
-		&activeVer, &fn.CreatedAt, &fn.UpdatedAt, &fn.InstanceKey, &fn.DeploymentRevision, &accessJSON, &policyJSON, &invocationPolicyJSON)
+		&activeVer, &fn.CreatedAt, &fn.UpdatedAt, &fn.InstanceKey, &fn.DeploymentRevision, &accessJSON, &policyJSON, &invocationPolicyJSON, &fn.WorkerIsolation)
 	if err != nil {
 		return nil, err
 	}

@@ -26,7 +26,7 @@ type preparation struct {
 	fn        *Function
 	signature string
 	result    RuntimeReadiness
-	warm      bool
+	warm      int
 	done      chan struct{}
 }
 
@@ -156,7 +156,7 @@ func (p *pool) scanPreparation() {
 }
 func (p *pool) enqueueBackground(fn *Function, high bool) {
 	for p.life.Err() == nil {
-		_, err := p.requestPreparation(fn, true, false, high)
+		_, err := p.requestPreparation(fn, warmTarget(fn), false, high)
 		if !errors.Is(err, errFunctionBusy) {
 			return
 		}
@@ -167,7 +167,26 @@ func (p *pool) enqueueBackground(fn *Function, high bool) {
 		}
 	}
 }
-func (p *pool) requestPreparation(fn *Function, warm, retry, high bool) (*preparation, error) {
+func warmTarget(fn *Function) int {
+	target := fn.Limits.WarmWorkers
+	if fn.Limits.MaxIdle != nil {
+		target = min(target, *fn.Limits.MaxIdle)
+	}
+	return target
+}
+
+func (p *pool) scheduleWarmWorkers(fn *Function) {
+	target := warmTarget(fn)
+	if target == 0 || fn.Status != "active" || versionID(fn) == 0 {
+		return
+	}
+	current := p.cachedFunction(fn.ProjectID, fn.ID, "")
+	if current != nil && preparationSignature(current) == preparationSignature(fn) {
+		_, _ = p.requestPreparation(current, target, false, priorityFunction(current))
+	}
+}
+
+func (p *pool) requestPreparation(fn *Function, warm int, retry, high bool) (*preparation, error) {
 	if fn.Status != "active" || fn.ActiveVersionID == nil {
 		return nil, errors.New("function has no active deployment")
 	}
@@ -180,18 +199,18 @@ func (p *pool) requestPreparation(fn *Function, warm, retry, high bool) (*prepar
 	if entry := p.preparations[fn.InstanceKey]; entry != nil && entry.signature == signature {
 		switch entry.result.State {
 		case "preparing":
-			entry.warm = entry.warm || warm
+			entry.warm = max(entry.warm, warm)
 			return entry, nil
 		case "ready", "prepared":
 			v := p.cachedVersion(versionID(fn))
 			needWarm := false
-			if warm && retry {
+			if warm > 0 {
 				p.mu.Lock()
 				fp := p.byFn[fn.ID]
-				needWarm = fp == nil || len(fp.idle) == 0
+				needWarm = fp == nil || fp.signature != configHash(fn) || len(fp.idle) < warm
 				p.mu.Unlock()
 			}
-			if !needWarm && v != nil && artifactAvailable(versionDir(p.buildBase, v), v) && (!warm || entry.result.BootValidated) {
+			if !needWarm && v != nil && artifactAvailable(versionDir(p.buildBase, v), v) && (warm == 0 || entry.result.BootValidated) {
 				return entry, nil
 			}
 		case "failed":
@@ -227,11 +246,15 @@ func (p *pool) runPreparation(job *preparation) {
 		result.Error = redactSecrets(result.Error, job.fn.Env)
 		p.prepareMu.Lock()
 		job.result = result
-		followWarm := job.warm && result.State == "prepared" && result.Error == "" && p.preparations[job.fn.InstanceKey] == job
+		warm := job.warm
+		followWarm := warm > 0 && result.Error == "" && p.preparations[job.fn.InstanceKey] == job
 		close(job.done)
 		p.prepareMu.Unlock()
-		if followWarm {
-			_, _ = p.requestPreparation(job.fn, true, true, priorityFunction(job.fn))
+		if followWarm && result.State == "prepared" {
+			// A warm request can join a build-only job as it finishes.
+			_, _ = p.requestPreparation(job.fn, warm, false, priorityFunction(job.fn))
+		} else if followWarm && result.State == "ready" {
+			p.scheduleWarmWorkers(job.fn)
 		}
 	}()
 	fn, err := dbGetFunction(p.ctx.AppDB(), job.fn.ProjectID, job.fn.ID, "")
@@ -295,7 +318,7 @@ func (p *pool) runPreparation(job *preparation) {
 	p.prepareMu.Lock()
 	warm := job.warm
 	p.prepareMu.Unlock()
-	if warm {
+	if warm > 0 {
 		started = time.Now()
 		candidate, err = p.start(context.WithValue(ctx, admissionClassKey{}, "preparation"), fn, v, spec, dir)
 		result.WorkerStartMS = time.Since(started).Milliseconds()
@@ -323,7 +346,7 @@ func (p *pool) runPreparation(job *preparation) {
 	p.artifacts.Store(dir, true)
 	if candidate != nil {
 		p.refreshFunction(current)
-		p.put(current, p.poolFor(fn.ID), candidate)
+		p.put(current, p.poolFor(fn.ID), candidate, warm)
 		result.BootValidated = true
 	}
 	result.State = "prepared"
@@ -381,7 +404,7 @@ func withReadiness(fn *Function) *Function {
 	return &copyFn
 }
 func (p *pool) awaitPreparation(ctx context.Context, fn *Function) error {
-	job, err := p.requestPreparation(fn, false, false, priorityFunction(fn))
+	job, err := p.requestPreparation(fn, 0, false, priorityFunction(fn))
 	if err != nil {
 		return err
 	}
@@ -416,7 +439,10 @@ func (a *App) toolPrepare(parent context.Context, ctx *sdk.AppCtx, args map[stri
 	if p == nil {
 		return nil, errors.New("runtime unavailable")
 	}
-	warm := args["warm"] != false
+	warm := 0
+	if args["warm"] != false {
+		warm = 1
+	}
 	job, err := p.requestPreparation(fn, warm, true, true)
 	if err != nil {
 		return nil, err
@@ -433,12 +459,12 @@ func (a *App) toolPrepare(parent context.Context, ctx *sdk.AppCtx, args map[stri
 			p.prepareMu.Lock()
 			result := job.result
 			p.prepareMu.Unlock()
-			if !warm || result.State != "prepared" || result.Error != "" {
+			if warm == 0 || result.State != "prepared" || result.Error != "" {
 				break
 			}
 			// A build-only job can be upgraded while finishing. Wait for the
 			// resulting warm job as well, even if the background scanner queued it.
-			job, err = p.requestPreparation(fn, true, false, true)
+			job, err = p.requestPreparation(fn, warm, false, true)
 			if err != nil {
 				return nil, err
 			}

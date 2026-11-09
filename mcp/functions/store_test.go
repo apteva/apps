@@ -257,3 +257,16 @@ func strRepeat(s string, n int) string {
 	}
 	return string(out)
 }
+
+func TestWorkerIsolationForOlderWriters(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	mountApp(t, ctx)
+	// Older releases omit this column. Existing rows receive the same SQL default.
+	if _, err := ctx.AppDB().Exec("INSERT INTO functions(project_id,name,runtime,source_hash) VALUES(?,?,?,?)", testProj, "older-writer", "node", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	fn, err := dbGetFunction(ctx.AppDB(), testProj, 0, "older-writer")
+	if err != nil || fn == nil || fn.WorkerIsolation != isolateAuthenticatedInvocation {
+		t.Fatalf("old row lost authenticated isolation: %+v %v", fn, err)
+	}
+}

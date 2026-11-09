@@ -140,8 +140,8 @@ func TestAuditColdStartRespectsDeadline(t *testing.T) {
 	start := time.Now()
 	res, err := invokeFunction(ctx, context.Background(), fn, nil, "manual")
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || res == nil || res.Status != "timeout" {
+		t.Fatalf("cold start should return an invocation timeout: %+v %v", res, err)
 	}
 	if elapsed > 400*time.Millisecond {
 		t.Errorf("100ms deadline took %s, reported %dms", elapsed, res.DurationMS)

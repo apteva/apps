@@ -230,3 +230,39 @@ func TestPreparationBuildOnlyThenWarm(t *testing.T) {
 		t.Fatalf("warm operation recompiled: %+v", status)
 	}
 }
+
+func TestConfiguredWarmWorkers(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := mountApp(t, ctx)
+	p := currentPool()
+	<-p.initialPreparationScan
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "warm-target", "source": echoHandler, "worker_isolation": isolateInvocation,
+		"limits": map[string]any{"warm_workers": 2},
+	})
+	waitForWarm := func() {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if p.runtimeReadiness(fn).WarmWorkers == 2 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("warm target not reached: %+v", p.runtimeReadiness(fn))
+	}
+	waitForWarm()
+	res, err := invokeFunction(ctx, context.Background(), fn, nil, "manual")
+	if err != nil || res.Status != "ok" || res.ColdStartMS != 0 {
+		t.Fatalf("request did not use a prewarmed worker: %+v %v", res, err)
+	}
+	waitForWarm()
+	if err = app.OnUnmount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p = currentPool()
+	waitForWarm()
+}

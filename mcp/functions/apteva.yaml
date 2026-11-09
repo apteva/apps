@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.18.0
+version: 1.19.0
 description: |
+  v1.19.0 Reuses healthy workers across authenticated and ordinary calls for
+  newly created functions. Existing functions keep their isolation policy
+  until switched. Every invocation still has its own authorization context.
+  Proactive worker warming is off by default and configurable per function.
+
   v1.18.0 Adds bounded incremental space reclamation, independent summary
   and success/failure detail retention, and storage health metrics/alerts.
   Defaults keep summaries and failure details for 30 days and successful
@@ -137,9 +142,9 @@ provides:
     - name: functions_prepare
       description: "Prepare active runtime artifacts without invoking the handler. Args: id or name, warm (default true) to start a worker, wait (default false). Initialization and build scripts can run."
     - name: functions_create
-      description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?."
+      description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?, worker_isolation?, limits?."
     - name: functions_update
-      description: "Update a function's metadata (env, timeout_ms, max_memory_mb, status, function_url). Source/runtime changes go through functions_deploy."
+      description: "Update a function's metadata (env, timeout_ms, max_memory_mb, status, function_url, worker_isolation, limits). Source/runtime changes go through functions_deploy."
     - name: functions_delete
       description: "Delete a function and all its versions + invocation rows."
     - name: functions_list
@@ -194,7 +199,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.18.0
+    ref: functions/v1.19.0
     entry: mcp/functions
   port: 8080
   health_check: /health
