@@ -1,9 +1,9 @@
 # Devices
 
-Devices 0.3.0 is Apteva's project-scoped device control plane. It owns device
+Devices 0.3.1 is Apteva's project-scoped device control plane. It owns device
 resources, structured data, operation capabilities, recoverable enrollment,
 command execution tracking, durable events, and usage measurements. MQTT
-**0.6.0 or newer** owns the broker, topic authorization, credentials, and sessions.
+**0.8.0 or newer** owns the broker, topic authorization, credentials, and sessions.
 SaaS maps customers to authorized projects and supplies operational limits; no
 customer, product, billing, or Thinglane concepts are built into Devices.
 
@@ -36,6 +36,11 @@ Use returned credentials and topics verbatim; the username is independent of
 the device ID. Credential names are private to an enrollment operation, avoiding
 collisions with manually managed MQTT users. MQTT client IDs are durably bound
 to credential identities: use a new client ID when replacing a credential.
+
+Startup recovery reads complete retained payloads from `mqtt_retained_page`
+in the installation's device topic namespace. It follows `next_cursor` until
+`has_more` is false, including empty pages. MQTT's retained scan is live. The
+existing durable consumer handles broker journal deliveries after startup.
 
 ## Recoverable lifecycle
 
@@ -405,7 +410,7 @@ retained-message policy; Devices limits cannot override them.
 
 ## Upgrade from 0.2.x
 
-Upgrade MQTT to at least 0.6.0 first and back up both app databases plus the
+Upgrade MQTT to at least 0.8.0 first and back up both app databases plus the
 Devices recovery key. MQTT 0.5+ requires valid TLS configuration, or explicit
 `transport_mode: local` with a restricted private/loopback endpoint. There is no
 silent plaintext fallback. The Devices migration is additive: current devices,

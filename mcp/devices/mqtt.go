@@ -132,42 +132,61 @@ func (a *App) reconcileConnectedClients() error {
 	return nil
 }
 
+type retainedDeviceMessage struct {
+	Topic     string `json:"topic"`
+	Payload   any    `json:"payload"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type retainedDevicePage struct {
+	Messages   []retainedDeviceMessage `json:"messages"`
+	NextCursor string                  `json:"next_cursor"`
+	HasMore    bool                    `json:"has_more"`
+}
+
 func (a *App) reconcileRetained() error {
-	var retained []struct {
-		Topic   string `json:"topic"`
-		Payload any    `json:"payload"`
-		Updated string `json:"updated_at"`
+	root := a.topicRoot()
+	args := map[string]any{"topic_pattern": root + "devices/+/+", "limit": 100}
+	for {
+		var page retainedDevicePage
+		if err := a.callMQTT("mqtt_retained_page", args, &page); err != nil {
+			return fmt.Errorf("read retained MQTT page: %w", err)
+		}
+		for _, item := range page.Messages {
+			topic, ok := strings.CutPrefix(item.Topic, root)
+			if !ok {
+				continue
+			}
+			parts, ok := parseDeviceTopic(topic)
+			if !ok {
+				continue
+			}
+			payload, ok := item.Payload.(string)
+			if !ok {
+				continue
+			}
+			d, err := getDevice(a.ctx.AppDB(), a.projectID, parts.deviceID, false)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			at := item.UpdatedAt
+			if at == "" {
+				at = nowText()
+			}
+			_ = a.processDevicePayload(d, parts.kind, payload, at)
+		}
+		if !page.HasMore {
+			return nil
+		}
+		// A sparse filter can return an empty page with a valid continuation.
+		if page.NextCursor == "" || page.NextCursor == str(args, "cursor") {
+			return errors.New("MQTT retained page did not advance its cursor")
+		}
+		args["cursor"] = page.NextCursor
 	}
-	if err := a.callMQTT("mqtt_retained_list", map[string]any{"topic_pattern": a.topicRoot() + "devices/#", "limit": 1000}, &retained); err != nil {
-		return err
-	}
-	for _, item := range retained {
-		var full struct {
-			Payload any    `json:"payload"`
-			Updated string `json:"updated_at"`
-		}
-		if err := a.callMQTT("mqtt_retained_get", map[string]any{"topic": item.Topic}, &full); err != nil {
-			continue
-		}
-		payload, ok := full.Payload.(string)
-		if !ok {
-			continue
-		}
-		parts, ok := parseDeviceTopic(strings.TrimPrefix(item.Topic, a.topicRoot()))
-		if !ok {
-			continue
-		}
-		d, err := getDevice(a.ctx.AppDB(), a.projectID, parts.deviceID, false)
-		if err != nil {
-			continue
-		}
-		at := item.Updated
-		if at == "" {
-			at = nowText()
-		}
-		_ = a.processDevicePayload(d, parts.kind, payload, at)
-	}
-	return nil
 }
 
 type deviceTopic struct {
