@@ -88,6 +88,75 @@ func TestAlpacaCorporateActionSSE_NormalizesAndPersistsMutation(t *testing.T) {
 	}
 }
 
+func TestCorporateActionLookup_FiltersLatestRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		symbol     string
+		revise     func(*CorporateAction)
+		wantStatus string
+	}{
+		{"changed symbol", "AAPL", func(a *CorporateAction) { a.Symbol = "MSFT" }, ""},
+		{"changed new symbol", "NEW", func(a *CorporateAction) { a.NewSymbol = "OTHER" }, ""},
+		{"changed date", "AAPL", func(a *CorporateAction) { a.EffectiveDate = "2026-02-01" }, ""},
+		{"cancelled", "AAPL", func(a *CorporateAction) { a.Status = "cancelled" }, "cancelled"},
+		{"matches new symbol", "NEW", func(a *CorporateAction) { a.EffectiveDate = "2026-01-05" }, "confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestCtx(t).AppDB()
+			action := testCorporateAction("rename", "name_change", "AAPL")
+			action.NewSymbol, action.EffectiveDate = "NEW", "2026-01-02"
+			if _, _, err := dbUpsertCorporateAction(db, action); err != nil {
+				t.Fatal(err)
+			}
+			tc.revise(action)
+			action.PayloadSHA256 = "revised"
+			if _, _, err := dbUpsertCorporateAction(db, action); err != nil {
+				t.Fatal(err)
+			}
+			actions, err := dbListCorporateActions(db, tc.symbol, "name_change", "2026-01-01", "2026-01-31", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantStatus == "" {
+				if len(actions) != 0 {
+					t.Fatalf("expected no matching revision, got revision %d", actions[0].Revision)
+				}
+			} else if len(actions) != 1 || actions[0].Revision != 2 || actions[0].Status != tc.wantStatus {
+				t.Fatalf("expected only revision 2 with status %q, got %d results: %+v", tc.wantStatus, len(actions), actions)
+			}
+		})
+	}
+}
+
+func TestCorporateActionProjector_SkipsSupersededCachedAction(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Split book", []string{"equity"})
+	insertPosition(t, ctx, portfolioID, "AAPL", 10, 200)
+	if _, err := ctx.AppDB().Exec(`UPDATE position_history SET observed_at='2025-12-31T00:00:00Z' WHERE portfolio_id=?`, portfolioID); err != nil {
+		t.Fatal(err)
+	}
+	action := testCorporateAction("split", "forward_split", "AAPL")
+	action.RatioNumerator, action.RatioDenominator, action.EffectiveDate = 2, 1, "2026-01-01"
+	if _, _, err := dbUpsertCorporateAction(ctx.AppDB(), action); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := *action
+	cancelled.Status, cancelled.PayloadSHA256 = "cancelled", "revised"
+	if _, _, err := dbUpsertCorporateAction(ctx.AppDB(), &cancelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCorporateActionToPortfolio(ctx.AppDB(), mustPortfolio(t, ctx, portfolioID), action, "2026-01-02"); err != nil {
+		t.Fatal(err)
+	}
+	positions, err := dbListPositions(ctx.AppDB(), portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 1 || positions[0].Qty != 10 || positions[0].AvgCost != 200 {
+		t.Fatalf("superseded split changed positions: %+v", positions)
+	}
+}
+
 func TestCorporateActionProjector_AppliesSplitExactlyOnce(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Split book", []string{"equity"})
