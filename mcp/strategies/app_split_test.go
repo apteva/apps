@@ -7,6 +7,7 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestStrategiesAppHasTradingDependencyAndNoExecutionSurface(t *testing.T) {
@@ -134,5 +135,99 @@ func TestStrategySchedulerDoesNotRunInsideReplay(t *testing.T) {
 	}
 	if platform.orders != 0 {
 		t.Fatal("historical replay ran the normal execution scheduler")
+	}
+}
+
+func TestStrategySchedulerObservesOnlyPortfoliosWithWork(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	platform := ctx.PlatformAPI().(*fixtureTrading)
+	db := ctx.AppDB()
+	idlePortfolio := mustCreatePortfolio(t, ctx, "Already checked", []string{"crypto"})
+	duePortfolio := mustCreatePortfolio(t, ctx, "Due for a check", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Daily BTC", "BTC-USD", .1, "1d")
+	now := time.Date(2026, 7, 13, 15, 0, 0, 0, time.UTC)
+
+	for _, portfolioID := range []int64{idlePortfolio, duePortfolio} {
+		assignmentID, err := dbAssignStrategy(db, &StrategyAssignment{
+			ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+			StrategyVersion: 1, ControlMode: "strategy", Cadence: "1d",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The due assignment initializes its market clock, so it needs an
+		// observation without placing an order.
+		lastChecked := now
+		if portfolioID == duePortfolio {
+			lastChecked = now.AddDate(0, 0, -1)
+		}
+		if _, err := db.Exec(`
+			UPDATE portfolio_strategy_assignments SET last_checked_at=?,last_evaluated_at=? WHERE id=?`,
+			lastChecked.Format(time.RFC3339), lastChecked.Format(time.RFC3339), assignmentID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(platform.observedPortfolios, []int64{duePortfolio}) {
+		t.Fatalf("snapshot calls = %v, want only due portfolio %d", platform.observedPortfolios, duePortfolio)
+	}
+	assignment, err := dbActiveStrategyAssignment(db, "test-proj", duePortfolio)
+	if err != nil || assignment.LastMarketBarAt == "" {
+		t.Fatalf("due assignment did not initialize its market clock: %+v, %v", assignment, err)
+	}
+
+	// A pending rebalance needs a fresh snapshot even after the slot was checked.
+	pending, err := dbActiveStrategyAssignment(db, "test-proj", idlePortfolio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO strategy_rebalances(assignment_id,portfolio_id,strategy_id,strategy_version,targets_json)
+		VALUES(?,?,?,?, '[]')`, pending.ID, idlePortfolio, strategyID, 1); err != nil {
+		t.Fatal(err)
+	}
+	platform.observedPortfolios = nil
+	if _, err := evaluateLiveStrategyAssignments(globalEngine, ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(platform.observedPortfolios, []int64{idlePortfolio}) {
+		t.Fatalf("snapshot calls = %v, want only pending portfolio %d", platform.observedPortfolios, idlePortfolio)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM strategy_rebalances WHERE assignment_id=?`, pending.ID).Scan(&status); err != nil || status != "completed" {
+		t.Fatalf("pending rebalance status = %q, want completed, err = %v", status, err)
+	}
+}
+
+func TestResearchSnapshotUpdatesOnlyChangedSecurityMetadata(t *testing.T) {
+	ctx := newTestCtx(t)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		CREATE TRIGGER forbid_security_id_updates BEFORE UPDATE OF id ON securities
+		BEGIN SELECT RAISE(ABORT, 'security ID included in UPDATE'); END;
+		CREATE TRIGGER forbid_unchanged_security_updates BEFORE UPDATE ON securities
+		WHEN OLD.name IS NEW.name
+		BEGIN SELECT RAISE(ABORT, 'unchanged security updated'); END;`); err != nil {
+		t.Fatal(err)
+	}
+
+	security := map[string]any{"id": "security-1", "asset_class": "equity", "name": "Original", "source": "test"}
+	for _, name := range []string{"Original", "Original", "Renamed"} {
+		security["name"] = name
+		if err := writeResearchRows(tx, "securities", []map[string]any{security}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var name string
+	if err := tx.QueryRow(`SELECT name FROM securities WHERE id='security-1'`).Scan(&name); err != nil || name != "Renamed" {
+		t.Fatalf("security name = %q, want Renamed, err = %v", name, err)
 	}
 }

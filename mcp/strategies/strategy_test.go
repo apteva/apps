@@ -459,8 +459,8 @@ func TestStrategyAssignmentUpgradeInitializesBarClockWithoutTrading(t *testing.T
 		t.Fatal(err)
 	}
 
-	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 0 {
-		t.Fatalf("strategy orders = %d, want no upgrade-time trade", got)
+	if got, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil || got != 0 {
+		t.Fatalf("strategy orders = %d, want no upgrade-time trade, err = %v", got, err)
 	}
 	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
 	if err != nil {
@@ -499,8 +499,8 @@ func TestStrategyFullAllocationReservesFeesAndSlippage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 1 {
-		t.Fatalf("strategy orders = %d, want 1", got)
+	if got, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil || got != 1 {
+		t.Fatalf("strategy orders = %d, want 1, err = %v", got, err)
 	}
 	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
 	if err != nil {
@@ -545,8 +545,8 @@ func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 1 {
-		t.Fatalf("strategy orders = %d, want 1", got)
+	if got, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); err != nil || got != 1 {
+		t.Fatalf("strategy orders = %d, want 1, err = %v", got, err)
 	}
 	rejected, err := dbListOrders(ctx.AppDB(), portfolioID, "cancelled", 10)
 	if err != nil {

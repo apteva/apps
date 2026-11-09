@@ -63,27 +63,15 @@ const (
 	priceTolerance     = 1e-9
 )
 
-func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) int {
+func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) (int, error) {
 	assignments, err := dbActiveStrategyAssignments(e.db)
 	if err != nil {
-		e.logger.Warn("query strategy assignments failed", "err", err)
-		return 0
+		return 0, err
 	}
 	totalOrders := 0
 	for _, a := range assignments {
 		control := strings.ToLower(strings.TrimSpace(a.ControlMode))
 		if control != "" && control != "strategy" && control != "hybrid" {
-			continue
-		}
-		pf, err := dbGetPortfolioAnyProject(e.db, a.PortfolioID)
-		if err != nil {
-			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
-			continue
-		}
-		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) {
-			continue
-		}
-		if portfolioUsesBacktestPricing(e.db, pf.ID) {
 			continue
 		}
 		strategy, err := dbGetStrategyVersion(e.db, a.ProjectID, a.StrategyID, a.StrategyVersion)
@@ -92,9 +80,6 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			continue
 		}
 		if strategy.Status != "active" {
-			continue
-		}
-		if latest, err := dbGetStrategy(e.db, pf.ProjectID, strategy.ID); err != nil || latest.Version != strategy.Version {
 			continue
 		}
 		def, _, err := validateStrategyDefinition(strategy.Definition)
@@ -107,7 +92,39 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			continue
 		}
 		var pendingTargets string
-		if err := e.db.QueryRow(`SELECT targets_json FROM strategy_rebalances WHERE assignment_id=? AND strategy_version=? AND status='pending'`, a.ID, strategy.Version).Scan(&pendingTargets); err == nil {
+		err = e.db.QueryRow(`SELECT targets_json FROM strategy_rebalances WHERE assignment_id=? AND strategy_version=? AND status='pending'`, a.ID, strategy.Version).Scan(&pendingTargets)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			e.logger.Warn("pending rebalance lookup failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		hasPendingRebalance := err == nil
+		runtimeDef := strategyAssignmentDefinition(a, def)
+		checkSlot, ok := strategyAssignmentCheckSlot(runtimeDef, now)
+		if !hasPendingRebalance && (!ok || !strategyAssignmentCheckDue(a, checkSlot)) {
+			continue
+		}
+		if err := syncTradingPortfolio(app, a.ProjectID, a.PortfolioID); err != nil {
+			e.logger.Warn("Trading observation unavailable", "portfolio_id", a.PortfolioID, "err", err)
+			_, _ = e.db.Exec(`UPDATE portfolios SET status='paused' WHERE id=? AND project_id=? AND status IS NOT 'paused'`, a.PortfolioID, a.ProjectID)
+			continue
+		}
+		// An assignment can change while waiting for Trading's snapshot.
+		current, err := dbActiveStrategyAssignment(e.db, a.ProjectID, a.PortfolioID)
+		if err != nil || *current != *a {
+			continue
+		}
+		if latest, err := dbGetStrategy(e.db, a.ProjectID, strategy.ID); err != nil || latest.Status != "active" || latest.Version != strategy.Version {
+			continue
+		}
+		pf, err := dbGetPortfolio(e.db, a.ProjectID, a.PortfolioID)
+		if err != nil {
+			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) || portfolioUsesBacktestPricing(e.db, pf.ID) {
+			continue
+		}
+		if hasPendingRebalance {
 			var targets []StrategyAllocation
 			if json.Unmarshal([]byte(pendingTargets), &targets) == nil {
 				_, _, err := placeStrategyPaperOrders(e, app, pf, strategy, a, &StrategyEvaluation{TargetAllocations: targets, Decisions: []string{"Resume pending rebalance"}})
@@ -115,11 +132,6 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 					e.logger.Warn("rebalance pending", "assignment_id", a.ID, "err", err)
 				}
 			}
-			continue
-		}
-		runtimeDef := strategyAssignmentDefinition(a, def)
-		checkSlot, ok := strategyAssignmentCheckSlot(runtimeDef, now)
-		if !ok || !strategyAssignmentCheckDue(a, checkSlot) {
 			continue
 		}
 		if err := validateStrategyUniverseForPortfolio(e.db, pf, def); err != nil {
@@ -220,7 +232,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		})
 		totalOrders += len(created)
 	}
-	return totalOrders
+	return totalOrders, nil
 }
 
 func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Time) bool {
