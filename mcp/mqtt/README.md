@@ -141,8 +141,13 @@ must change that setting before this version will mount.
 TLS is the default. An upgrade from 0.4.0 must configure certificates and an
 advertised host, or explicitly choose restricted local plaintext mode. Missing
 or invalid TLS configuration fails mount; there is no plaintext fallback.
-Only one MQTT listener is started. Runtime port declarations expose 8883 (TLS)
-and 1883 (local), but the inactive port has no listener.
+MQTT starts one listener, on 8883 for TLS or 1883 for local mode. Starting with
+0.8.1, the local supervisor uses `/ready` to check the selected socket after
+broker recovery. Installation requires Apteva 0.87.4 or later for exclusive
+activation. The app binds the listener directly. Installations using the same
+mode on a shared host need distinct bind addresses. Operators configure public
+TCP forwarding. TLS enrollment waits for a usable certificate, including
+when ACME issuance continues after listener startup.
 
 For an existing certificate issuer:
 
@@ -219,8 +224,8 @@ It defaults to loopback port 1883. An explicit private bind IP and private
 advertised IP can expose a LAN endpoint. Public/wildcard bind addresses and
 public advertised hosts are rejected. Local mode's default advertised port is
 1883; do not set the TLS port unless a private TCP forward actually provides it.
-No TLS is claimed in local enrollment metadata. Ports other than the declared
-1883/8883 are rejected for managed listeners; port 0 is only for local tests.
+Local enrollment uses `mqtt://`. Managed listeners use their mode's standard
+port. Port 0 is reserved for local tests.
 
 Pending TLS handshakes and connections awaiting MQTT authentication are bounded
 by `tls_max_pending_handshakes` (default 128). Handshake/CONNECT waits are bounded

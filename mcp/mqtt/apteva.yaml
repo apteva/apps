@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.8.0
+version: 0.8.1
 description: |
   Ownership-scoped MQTT 3.1.1/5.0 broker with TLS by default, renewable
   certificate files or automatic ACME renewal, and validated public endpoints.
   Credentials require explicit topic permissions; client IDs belong to their
   authenticated credential identities.
+
+  Version 0.8.1 checks readiness on the listener selected by transport_mode.
 
   Version 0.8.0 adds complete, paginated retained-message reads with binary-safe
   payloads, MQTT properties, message IDs, expiry metadata, and signed scoped
@@ -37,7 +39,7 @@ icon_style: monochrome
 tags: [mqtt, iot, home-automation, broker, infrastructure]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.87.4"
 
 requires:
   permissions:
@@ -89,21 +91,13 @@ provides:
 
 runtime:
   kind: source
+  activation_strategy: exclusive
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: mqtt/v0.8.1
     entry: mcp/mqtt
   port: 8080
-  ports:
-    - name: mqtt
-      container_port: 1883
-      host_port: 1883
-      protocol: tcp
-    - name: mqtts
-      container_port: 8883
-      host_port: 8883
-      protocol: tcp
-  health_check: /health
+  health_check: /ready
 
 db:
   driver: sqlite

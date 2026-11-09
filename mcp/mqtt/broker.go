@@ -14,6 +14,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
@@ -26,6 +27,7 @@ type Broker struct {
 	startMu        sync.Mutex
 	closed         bool
 	server         *mqtt.Server
+	listener       *brokerListener
 	port           int
 	address        string
 	app            *App
@@ -33,6 +35,19 @@ type Broker struct {
 	certificates   *certificateService
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+// The socket is bound during AddListener. Track the selected accept loop
+// without opening a client connection each time the supervisor checks readiness.
+type brokerListener struct {
+	listeners.Listener
+	serving atomic.Bool
+}
+
+func (l *brokerListener) Serve(establish listeners.EstablishFn) {
+	l.serving.Store(true)
+	defer l.serving.Store(false)
+	l.Listener.Serve(establish)
 }
 
 // NewBroker constructs a server with hooks wired up and the TCP
@@ -106,53 +121,48 @@ func NewBroker(a *App) (*Broker, error) {
 		return nil, fmt.Errorf("retained storage hook: %w", err)
 	}
 
+	var listener listeners.Listener
 	if transport.mode == "tls" {
 		certificates, tlsConfig, err := newCertificateService(transport)
 		if err != nil {
 			return nil, err
 		}
 		br.certificates = certificates
-		listener, err := net.Listen("tcp", net.JoinHostPort(transport.bind, strconv.Itoa(transport.port)))
+		socket, err := net.Listen("tcp", net.JoinHostPort(transport.bind, strconv.Itoa(transport.port)))
 		if err != nil {
 			return nil, err
 		}
-		secure := &mqttTLSListener{listener: listener, config: tlsConfig, timeout: time.Duration(transport.handshakeSeconds) * time.Second, slots: make(chan struct{}, transport.maxHandshakes), conns: map[net.Conn]struct{}{}}
-		if err := server.AddListener(secure); err != nil {
-			listener.Close()
-			return nil, err
-		}
-		br.address = secure.Address()
-		_, actual, _ := net.SplitHostPort(br.address)
-		br.port, _ = strconv.Atoi(actual)
+		listener = &mqttTLSListener{listener: socket, config: tlsConfig, timeout: time.Duration(transport.handshakeSeconds) * time.Second, slots: make(chan struct{}, transport.maxHandshakes), conns: map[net.Conn]struct{}{}}
 	} else {
-		br.port, br.address, err = attachTCPListener(server, a, transport.port)
-		if err != nil {
-			_ = server.Close()
-			return nil, err
-		}
+		listener = listeners.NewTCP(listeners.Config{Type: "tcp", ID: "tcp1", Address: bindAddress(a, transport.port)})
+	}
+	owned = true
+	if err := br.attachListener(listener); err != nil {
+		_ = br.Close()
+		return nil, err
 	}
 	if br.transport.publicPort == 0 {
 		br.transport.publicPort = br.port
 	}
-	owned = true
 	return br, nil
 }
 
-func attachTCPListener(server *mqtt.Server, a *App, port int) (int, string, error) {
-	cfg := listeners.Config{Type: "tcp", ID: "tcp1", Address: bindAddress(a, port)}
-	tcpListener := listeners.NewTCP(cfg)
-	if err := server.AddListener(tcpListener); err != nil {
-		return 0, "", fmt.Errorf("add listener %s: %w", cfg.Address, err)
+func (b *Broker) attachListener(listener listeners.Listener) error {
+	b.listener = &brokerListener{Listener: listener}
+	if err := b.server.AddListener(b.listener); err != nil {
+		listener.Close(func(string) {})
+		return fmt.Errorf("add listener %s: %w", listener.Address(), err)
 	}
-	_, actualPort, err := net.SplitHostPort(tcpListener.Address())
+	b.address = listener.Address()
+	_, port, err := net.SplitHostPort(b.address)
 	if err != nil {
-		return 0, "", fmt.Errorf("resolve listener address %s: %w", tcpListener.Address(), err)
+		return fmt.Errorf("resolve listener address %s: %w", b.address, err)
 	}
-	resolved, err := strconv.Atoi(actualPort)
+	b.port, err = strconv.Atoi(port)
 	if err != nil {
-		return 0, "", fmt.Errorf("resolve listener port %s: %w", actualPort, err)
+		return fmt.Errorf("resolve listener port %s: %w", port, err)
 	}
-	return resolved, tcpListener.Address(), nil
+	return nil
 }
 
 func (b *Broker) Port() int       { return b.port }

@@ -254,8 +254,7 @@ func TestTLSBoundsUnauthenticatedConnectionsAndTimeout(t *testing.T) {
 	cfg["tls_handshake_timeout_seconds"] = "3"
 	app, _, _ := startTransportBroker(t, cfg)
 	u := scopedUser(t, app, "a", "pending-auth", []string{}, []string{})
-	listener, _ := app.broker.server.Listeners.Get("tls1")
-	secure := listener.(*mqttTLSListener)
+	secure := app.broker.listener.Listener.(*mqttTLSListener)
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(app.broker.Port()))
 	raw, err := net.Dial("tcp", address)
 	if err != nil {
@@ -476,5 +475,51 @@ func TestScopeLimitCoversHTTPMCPAndReconnects(t *testing.T) {
 	typ, body, err := wireRead(conn)
 	if err != nil || typ != packets.Disconnect || len(body) == 0 || body[0] != packets.ErrQuotaExceeded.Code {
 		t.Fatal("reconnect bypassed scope limit", typ, body, err)
+	}
+}
+
+func TestReadinessTracksSelectedListener(t *testing.T) {
+	configs := map[string]map[string]string{
+		"local": {"transport_mode": "local", "listen_port": "0", "ha_discovery_enabled": "false"},
+		"tls":   filesConfig(t, makeTestCA(t)),
+	}
+	for mode, config := range configs {
+		t.Run(mode, func(t *testing.T) {
+			app := &App{}
+			ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(config))
+			if err := app.OnMount(ctx); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = app.broker.Close() })
+			check := func(want int) {
+				t.Helper()
+				response := appRequest(t, app, http.MethodGet, "/ready", "", "")
+				if response.Code != want {
+					t.Fatalf("readiness status = %d, want %d", response.Code, want)
+				}
+			}
+			check(http.StatusServiceUnavailable)
+			run, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- app.broker.Serve(run) }()
+			t.Cleanup(func() {
+				cancel()
+				if err := <-done; err != nil {
+					t.Error(err)
+				}
+			})
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				if appRequest(t, app, http.MethodGet, "/ready", "", "").Code == http.StatusOK {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			check(http.StatusOK)
+			if err := app.broker.Close(); err != nil {
+				t.Fatal(err)
+			}
+			check(http.StatusServiceUnavailable)
+		})
 	}
 }

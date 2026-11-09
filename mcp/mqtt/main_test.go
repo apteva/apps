@@ -33,6 +33,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	"github.com/apteva/app-sdk/testkit"
 	mqtt "github.com/apteva/apps/mcp/mqtt/internal/broker"
+	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
@@ -165,7 +166,7 @@ func TestExplicitCredentialLifecycleKeepsPasswordAndACLSeparate(t *testing.T) {
 	}
 }
 
-// TestFixedPortConflictFails — a declared fixed port must never silently
+// TestFixedPortConflictFails — a configured fixed port must never silently
 // relocate, because clients and runtime metadata depend on it.
 func TestFixedPortConflictFails(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -174,13 +175,9 @@ func TestFixedPortConflictFails(t *testing.T) {
 	}
 	defer l.Close()
 	busy := l.Addr().(*net.TCPAddr).Port
-	ctx := testkit.NewAppCtx(t, "apteva.yaml",
-		testkit.WithProjectID("test"),
-		testkit.WithConfig(map[string]string{"transport_mode": "local", "listen_port": strconv.Itoa(busy)}),
-	)
-	app := &App{ctx: ctx}
-	server := mqtt.New(nil)
-	_, _, err = attachTCPListener(server, app, busy)
+	broker := &Broker{server: mqtt.New(nil)}
+	listener := listeners.NewTCP(listeners.Config{ID: "tcp1", Address: l.Addr().String()})
+	err = broker.attachListener(listener)
 	if err == nil {
 		t.Fatalf("NewBroker accepted busy fixed port %d", busy)
 	}
@@ -557,8 +554,8 @@ func TestManifestValidates(t *testing.T) {
 	if len(m.Provides.Publishes) != 4 || m.Provides.Publishes[0].Name != "mqtt.message" {
 		t.Fatalf("publishes=%#v", m.Provides.Publishes)
 	}
-	if len(m.Runtime.Ports) != 2 || m.Runtime.Ports[0].ContainerPort != 1883 {
-		t.Fatalf("embedded runtime ports=%#v", m.Runtime.Ports)
+	if len(m.Runtime.Ports) != 0 || m.Runtime.HealthCheck != "/ready" || m.Runtime.ActivationStrategy != sdk.ActivationExclusive {
+		t.Fatalf("embedded runtime activation and readiness=%#v", m.Runtime)
 	}
 	declaredTools := map[string]bool{}
 	for _, tool := range m.Provides.MCPTools {
@@ -581,8 +578,8 @@ func TestManifestValidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apteva.yaml invalid: %v", err)
 	}
-	if len(fileManifest.Runtime.Ports) != 2 || fileManifest.Runtime.Ports[0].ContainerPort != 1883 {
-		t.Fatalf("runtime ports=%#v", fileManifest.Runtime.Ports)
+	if len(fileManifest.Runtime.Ports) != 0 || fileManifest.Runtime.HealthCheck != "/ready" || fileManifest.Runtime.ActivationStrategy != sdk.ActivationExclusive {
+		t.Fatalf("file runtime activation and readiness=%#v", fileManifest.Runtime)
 	}
 }
 

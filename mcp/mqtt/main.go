@@ -16,6 +16,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,7 +159,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	for i := range routes {
 		routes[i].Handler = a.scopedHTTP(routes[i].Handler)
 	}
-	return routes
+	return append(routes, sdk.Route{Method: http.MethodGet, Pattern: "/ready", Handler: a.handleReady, NoAuth: true})
 }
 
 func (a *App) MCPTools() []sdk.Tool {

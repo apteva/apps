@@ -3,7 +3,26 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 )
+
+// The supervisor checks the socket selected by transport_mode through this
+// route. Enrollment tracks certificate availability separately so ACME can
+// use the listening socket while obtaining the initial certificate.
+func (a *App) handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if a.broker == nil || a.broker.listener == nil || !a.broker.listener.serving.Load() ||
+		a.durable == nil || !a.durable.ready.Load() || a.durable.failed.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
 
 func (b *Broker) endpointStatus() map[string]any {
 	ready := true
