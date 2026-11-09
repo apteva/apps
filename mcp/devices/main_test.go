@@ -30,6 +30,7 @@ type mqttStub struct {
 	consumerRecords []MQTTRecord
 	consumerAckFail bool
 	consumerAckHook func()
+	retainedPages   map[string]retainedDevicePage
 }
 
 func (s *mqttStub) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -69,6 +70,8 @@ func (s *mqttStub) CallAppResult(app, tool string, input map[string]any, out any
 			}
 		}
 
+	case "mqtt_retained_page":
+		value = s.retainedPages[str(input, "cursor")]
 	case "mqtt_clients_list", "mqtt_retained_list":
 		value = []map[string]any{}
 	case "mqtt_users_list":
@@ -151,10 +154,10 @@ func TestManifestAndRuntimeSurfaceMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Name != "devices" || m.Version != "0.3.0" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
+	if m.Name != "devices" || m.Version != "0.3.1" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
 		t.Fatalf("unexpected manifest identity/scope: %#v", m)
 	}
-	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "mqtt" || m.Requires.Apps[0].Version != ">=0.6.0" {
+	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "mqtt" || m.Requires.Apps[0].Version != ">=0.8.0" {
 		t.Fatalf("MQTT dependency = %#v", m.Requires.Apps)
 	}
 	if !reflect.DeepEqual(m.Requires.Apps[0].Events, []string{"mqtt.client.connected", "mqtt.client.disconnected"}) {

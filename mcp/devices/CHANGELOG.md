@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Recover retained device data from every MQTT retained page at startup, including empty advancing pages. Use complete page payloads without individual retained lookups.
+- Require MQTT 0.8.0 or newer for the retained paging API.
+
 ## 0.3.0 — 2026-11-08
 
 - Add device-only authenticated HTTP/HTTPS state and telemetry writes through the shared ingestion transaction, with exact acceptance/duplicate receipts.

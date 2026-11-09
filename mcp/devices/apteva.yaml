@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: devices
 display_name: Devices
-version: 0.3.0
+version: 0.3.1
 description: |
   Manage scoped device resources, arbitrary structured data, capability-described
   operations, recoverable enrollment, asynchronous commands, durable events and
@@ -24,8 +24,8 @@ requires:
     - platform.apps.call
   apps:
     - name: mqtt
-      version: ">=0.6.0"
-      reason: "Provides the project-scoped MQTT broker, per-device credentials and ACLs, retained state, and device event bridge."
+      version: ">=0.8.0"
+      reason: "Provides the project-scoped MQTT broker, per-device credentials and ACLs, paginated retained state, and durable message consumption."
       events:
         - mqtt.client.connected
         - mqtt.client.disconnected

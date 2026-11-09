@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/devices
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.115.0
+	github.com/apteva/app-sdk v0.115.1
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/google/uuid v1.6.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
