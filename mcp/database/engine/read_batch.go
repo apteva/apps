@@ -24,6 +24,8 @@ type concurrentReader interface {
 // request order fails the whole batch, and no operation starts once one has
 // failed or the responses exceed MaxBytes.
 func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
+	r.diag.begin()
+	pointOnly := true
 	for _, o := range r.Operations {
 		if o.Request.TimeoutMS != 0 {
 			return nil, Invalid("batch operations do not accept timeoutMs; set it on the batch")
@@ -31,12 +33,15 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 		if o.Request.Database != "" && o.Request.Database != r.Database {
 			return nil, Invalid("batch cannot span databases")
 		}
+		pointOnly = pointOnly && o.Op == "get"
 	}
 	n := len(r.Operations)
 	out, errs, sizes := make([]any, n), make([]error, n), make([]int, n)
 	tooLarge := fail("resource_limit", "read batch response exceeds 4 MiB")
 	workers := 1
-	if c, ok := tx.(concurrentReader); ok && c.concurrentReads() {
+	// The small batches admitted to the reserved lane do less work than
+	// setting up and scheduling a pool of read workers.
+	if c, ok := tx.(concurrentReader); ok && c.concurrentReads() && (!pointOnly || n > 8) {
 		workers = min(readBatchConcurrency, n)
 	}
 	ops := r.Operations
@@ -52,7 +57,22 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 		}
 	}
 	native := nativeBatchTx(tx)
-	groups := batchAggregateGroups(tx, ops, workers)
+	var decisions []*batchAggregateDecision
+	var trace *[]*batchAggregateDecision
+	if r.diag != nil {
+		trace = &decisions
+	}
+	groups := batchAggregateGroups(tx, ops, workers, trace)
+	complete := func(total int) map[string]any {
+		result := map[string]any{"results": out, "affected": total}
+		if r.diag != nil {
+			r.diag.end()
+			diagnostics := r.diag.timings()
+			diagnostics["aggregateGroups"] = decisions
+			result["diagnostics"] = diagnostics
+		}
+		return result
+	}
 	// A fused group can include later operations. Reserve all of its reducer
 	// budgets together so sharing never increases the batch's active work.
 	var work *semaphore.Weighted
@@ -70,6 +90,9 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 				options := native.backend.options
 				budget := len(group.members) * options.QueryWorkBytes
 				group.results = group.run(native.ctx, native.batchAggregateSource(group.collection, group.input), budget, options.AggregateMaxGroups)
+				if group.results == nil && group.decision != nil {
+					group.decision.Path, group.decision.Reason = "independent", "shared_execution_fallback"
+				}
 			})
 			if group.results != nil {
 				return group.results[i], nil
@@ -96,7 +119,7 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 			}
 			out[i] = v
 		}
-		return map[string]any{"results": out, "affected": total}, nil
+		return complete(total), nil
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -144,5 +167,5 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 			return nil, tooLarge
 		}
 	}
-	return map[string]any{"results": out, "affected": total}, nil
+	return complete(total), nil
 }
