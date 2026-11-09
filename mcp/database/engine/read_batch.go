@@ -3,6 +3,8 @@ package engine
 import (
 	"runtime"
 	"sync"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // readBatchConcurrency bounds how many reads of one batch run at once on a
@@ -37,10 +39,55 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 	if c, ok := tx.(concurrentReader); ok && c.concurrentReads() {
 		workers = min(readBatchConcurrency, n)
 	}
+	ops := r.Operations
+	if workers > 1 {
+		// Validation normalizes a request in place and operations may share
+		// filters, so each gets its own copy, decoded as from the wire.
+		ops = make([]Operation, n)
+		for i, o := range r.Operations {
+			ops[i].Op = o.Op
+			if e := decode(marshal(o.Request), &ops[i].Request); e != nil {
+				return nil, e
+			}
+		}
+	}
+	native := nativeBatchTx(tx)
+	groups := batchAggregateGroups(tx, ops, workers)
+	// A fused group can include later operations. Reserve all of its reducer
+	// budgets together so sharing never increases the batch's active work.
+	var work *semaphore.Weighted
+	if len(groups) > 0 {
+		work = semaphore.NewWeighted(int64(workers))
+	}
+	run := func(i int) (any, error) {
+		if group := groups[i]; group != nil {
+			group.once.Do(func() {
+				weight := int64(len(group.members))
+				if err := work.Acquire(native.ctx, weight); err != nil {
+					return
+				}
+				defer work.Release(weight)
+				options := native.backend.options
+				budget := len(group.members) * options.QueryWorkBytes
+				group.results = group.run(native.ctx, native.batchAggregateSource(group.collection, group.input), budget, options.AggregateMaxGroups)
+			})
+			if group.results != nil {
+				return group.results[i], nil
+			}
+		}
+		if work != nil {
+			if err := work.Acquire(native.ctx, 1); err != nil {
+				return nil, err
+			}
+			defer work.Release(1)
+		}
+		return execute(tx, ops[i].Op, ops[i].Request, cursorKey)
+	}
+
 	if workers <= 1 {
 		total := 0
-		for i, o := range r.Operations {
-			v, e := execute(tx, o.Op, o.Request, cursorKey)
+		for i := range n {
+			v, e := run(i)
 			if e != nil {
 				return nil, e
 			}
@@ -51,15 +98,6 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 		}
 		return map[string]any{"results": out, "affected": total}, nil
 	}
-	// Validation normalizes a request in place and operations may share
-	// filters, so each gets its own copy, decoded as from the wire.
-	ops := make([]Operation, n)
-	for i, o := range r.Operations {
-		ops[i].Op = o.Op
-		if e := decode(marshal(o.Request), &ops[i].Request); e != nil {
-			return nil, e
-		}
-	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	stopped, total := false, 0
@@ -67,7 +105,7 @@ func executeReads(tx transaction, r Request, cursorKey []byte) (any, error) {
 	for range workers {
 		wg.Go(func() {
 			for i := range next {
-				v, e := execute(tx, ops[i].Op, ops[i].Request, cursorKey)
+				v, e := run(i)
 				size := 0
 				if e == nil {
 					size = len(marshal(v))

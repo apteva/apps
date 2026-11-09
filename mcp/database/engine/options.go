@@ -8,7 +8,7 @@ type ManagerOptions struct {
 	SQLiteDurability           string
 	Apteva                     *AptevaOptions
 	AptevaCacheBudgetBytes     int64 // zero selects max(256 MiB, one configured cache)
-	MaxConcurrentAptevaQueries int   // zero selects two find/count/aggregate operations
+	MaxConcurrentAptevaQueries int   // zero selects three read slots, including one reserved slot
 }
 
 type AptevaOptions struct {

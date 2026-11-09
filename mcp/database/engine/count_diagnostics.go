@@ -11,12 +11,20 @@ import (
 type countDiagnostics struct {
 	started, queuedAt, snapshotAt, runStart time.Time
 	running                                 time.Duration
+	admissionWait                           time.Duration
+	admissionClass                          string
 	route                                   string
 	stats                                   *native.QueryStats
 	selectionProbes                         int64
 	selectionEntries                        int64
 	pageHeapBytes, scanBytes, pagePeakBytes int
 	pageDecodedBytes                        int
+}
+
+func (d *countDiagnostics) admission(class string, wait time.Duration) {
+	if d != nil {
+		d.admissionClass, d.admissionWait = class, wait
+	}
 }
 
 func (d *countDiagnostics) queued() {
@@ -67,6 +75,10 @@ func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists 
 	if !d.started.IsZero() {
 		out["queueMs"] = milliseconds(d.queuedAt.Sub(d.started))
 		out["snapshotMs"] = milliseconds(d.snapshotAt.Sub(d.queuedAt))
+	}
+	if d.admissionClass != "" {
+		out["admissionClass"] = d.admissionClass
+		out["admissionMs"] = milliseconds(d.admissionWait)
 	}
 	if d.selectionProbes > 0 {
 		out["indexSelection"] = map[string]any{"probes": d.selectionProbes, "indexEntriesExamined": d.selectionEntries}

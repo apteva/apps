@@ -42,13 +42,15 @@ AptevaDB tuning is available through app configuration or environment variables 
 | `aptevadb_max_groups` | `DATABASE_APTEVADB_MAX_GROUPS` | 1,048,576 | 1–16,777,216 |
 | `aptevadb_total_cache_mib` | `DATABASE_APTEVADB_TOTAL_CACHE_MIB` | max(256 MiB, one cache) | 0 (auto), or 1–8192 MiB; must cover one cache |
 | `aptevadb_memtable_mib` | `DATABASE_APTEVADB_MEMTABLE_MIB` | 0 (disabled) | 0–256 MiB |
-| `aptevadb_max_concurrent_queries` | `DATABASE_APTEVADB_MAX_CONCURRENT_QUERIES` | 2 | 1–64 |
+| `aptevadb_max_concurrent_queries` | `DATABASE_APTEVADB_MAX_CONCURRENT_QUERIES` | 3 | 1–64 |
 | `aptevadb_aggregate_workers` | `DATABASE_APTEVADB_AGGREGATE_WORKERS` | min(4, GOMAXPROCS); panel default 4 | 1–64 |
 | `aptevadb_query_memory_mib` | `DATABASE_APTEVADB_QUERY_MEMORY_MIB` | 16 | 1–256 MiB |
 
 The total cache setting bounds the sum of configured native cache targets across open handles. Least-recently-used idle native handles are closed without deleting their registry entries or files, and reopen on demand. Active requests and registered watches pin their handles; if all possible eviction candidates are pinned, opening another native database returns `resource_limit`. Explicit per-database cache=0 opts out of cache-target admission. File mappings, WAL, snapshots and other native allocations remain outside this target, so it is not an RSS cap. SQLite and Pebble handles are unchanged.
 
-Write buffering is separately opt-in: setting a finite cache no longer implicitly enables the engine's default half-cache memtable. Query slots are shared across native databases and acquired before creating read snapshots; queue time counts toward the query deadline. At most 64 additional queries may wait; excess requests return `resource_limit`. Point reads and watch polling without initial snapshots bypass this queue. The per-query 16 MiB work budget is unchanged.
+Write buffering is opt-in. Query slots are shared across native databases, and queue time counts toward the request deadline. The default three slots include two for bulk reads and one for interactive reads. A configured ceiling of two or more reserves one slot, and a ceiling of one uses a single queue. The interactive lane accepts simple `find` and `count` requests that bind a complete non-null primary or unique key in cached schema, plus read batches of up to eight bounded point operations. Bulk and interactive queues admit up to 64 and 16 waiters respectively. Requests acquire capacity before opening their read snapshots. Standalone `get` and watch polling without initial results bypass query admission.
+
+Compatible AptevaDB aggregates in a read batch can share one input scan over their common collection and normalized filter. The shared scan feeds independent native reducers, each with its own grouping, metric filters and distinct sets. A group reserves one batch worker credit per reducer and splits their combined work allowance between the reducers and a reusable input chunk. Unsupported plans and groups that exceed the shared allowance use the ordinary executor on the same snapshot.
 
 Complete-primary-key `COUNT(*)` groups use an ordered record query: each group has count one, including when the input is filtered. This preserves empty results, composite-key ordering, write overlays and the extra result used to report truncation. Partial-key groups and field counts keep aggregate evaluation. Count-only aggregates push their ordered result window into the native pipeline, preserving sort precedence and keeping only the requested output page; this does not remove the native hash group's memory requirement. Numeric aggregates retain validation across all groups so pagination cannot hide overflow. When native working state or materialized results exceed their budget, the adapter retries on the same snapshot through the native owned-result stream, with optional disk spill. It validates every completed group and retains only the best limit+1 rows. The stream reserves three quarters of the work budget for the native executor and one quarter for retained adapter results. The parallel executor remains in place for aggregates that fit, including filtered aggregates, whose filter is passed as a leading `$match` so the native planner can shard an index range or full scan; staged writes and uncertain integer reductions retain their checked portable fallback. Disk and group guards return resource_limit, with no partial response.
 
@@ -68,7 +70,7 @@ See [alpha.4 adapter/direct-driver comparisons](benchmarks/APTEVADB-ALPHA4.md) a
 
 ## Build and run
 
-Use Go 1.25.1 or newer. This module pins app-sdk v0.115.0, the latest published tag by commit topology at release preparation.
+Use Go 1.25.1 or newer. This module pins app-sdk v0.115.1, the latest published tag by commit topology at release preparation.
 
 ```sh
 cd apps/mcp/database
@@ -321,8 +323,11 @@ A multi-value `in` on the leading fields of an index, with an optional range on 
 {"count": "3356", "diagnostics": {"executed": true, "planSource": "execution", "strategy": "native-count",
   "plan": {"access": "index-count", "index": "by_region_at", "indexOnly": true, "equalityPrefix": 1, "ranges": 2},
   "indexOnly": true, "documentFetches": 0, "indexEntriesExamined": 3356, "examined": 3356, "returned": 3356,
-  "peakMemoryBytes": 212, "queueMs": 0.01, "snapshotMs": 0.02, "executionMs": 0.03}}
+  "peakMemoryBytes": 212, "admissionClass": "bulk", "admissionMs": 0.005,
+  "queueMs": 0.01, "snapshotMs": 0.02, "executionMs": 0.03}}
 ```
+
+For standalone native counts, `admissionMs` measures time waiting for a query slot. `queueMs` includes request setup before admission, and `executionMs` measures the count after the snapshot opens.
 
 `exists` and `not_exists` add `{"probes", "keySetsBuilt", "relatedRowsRead", "relatedDocumentsExamined", "keySetBytes"}`. Only AptevaDB reports engine statistics; Pebble and SQLite give timings and the planned access, marked `"planSource": "explain"`. A count inside a read batch omits `queueMs` and `snapshotMs`, which the batch shares. `explain` plans a `find` without running it and says `"executed": false`, so it is not evidence of what a count did. `find` and `aggregate` reject `diagnostics`.
 

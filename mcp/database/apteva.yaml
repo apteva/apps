@@ -130,10 +130,10 @@ config_schema:
     description: Zero disables write buffering. Positive values opt into native buffering independently of the cache target. Writes keep the selected synchronous durability.
   - name: aptevadb_max_concurrent_queries
     type: select
-    options: ["1", "2", "4", "8"]
-    default: "2"
+    options: ["1", "2", "3", "4", "8"]
+    default: "3"
     label: Concurrent AptevaDB queries
-    description: App-wide slots for find, count, aggregate and watch initial snapshots. Waiting uses the request deadline without retaining a native snapshot. Point gets are not queued here.
+    description: Total read slots across native databases. With two or more slots, one serves bounded interactive reads. Other reads and initial watch snapshots share the bulk slots. Waiting counts toward the request deadline.
   - name: aptevadb_aggregate_workers
     type: select
     options: ["1", "2", "4", "8"]
