@@ -1,3 +1,11 @@
+# Strategies v0.1.2
+
+- Fetch Trading portfolio snapshots when a strategy is due for a cadence check
+  or has a pending rebalance.
+- Skip unchanged snapshot rows and keep security IDs out of metadata updates
+  so SQLite avoids scanning backtest bars for foreign-key checks.
+- Pin the App SDK to v0.115.0.
+
 # Trading v0.14.0
 
 Realized and open P&L is now attributed to the strategy that traded it, and two dashboard widgets read that attribution.

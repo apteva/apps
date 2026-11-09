@@ -68,19 +68,8 @@ func (a *App) Workers() []sdk.Worker {
 		if sdk.CurrentEnvironmentID() != "" {
 			return nil
 		}
-		assignments, err := dbActiveStrategyAssignments(ctx.AppDB())
-		if err != nil {
-			return err
-		}
-
-		for _, assignment := range assignments {
-			if err := syncTradingPortfolio(ctx, assignment.ProjectID, assignment.PortfolioID); err != nil {
-				ctx.Logger().Warn("Trading observation unavailable", "portfolio_id", assignment.PortfolioID, "err", err)
-				_, _ = ctx.AppDB().Exec(`UPDATE portfolios SET status='paused' WHERE id=?`, assignment.PortfolioID)
-			}
-		}
-		evaluateLiveStrategyAssignments(globalEngine, ctx, time.Now().UTC())
-		return nil
+		_, err := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Now().UTC())
+		return err
 	}}}
 }
 

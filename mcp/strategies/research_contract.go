@@ -88,18 +88,31 @@ func writeResearchRows(tx *sql.Tx, table string, records []map[string]any) error
 		slots := []string{}
 		values := []any{}
 		updates := []string{}
+		changes := []string{}
 		for _, column := range columns {
 			if value, ok := record[column]; ok {
-				names = append(names, `"`+column+`"`)
+				name := `"` + column + `"`
+				names = append(names, name)
 				slots = append(slots, "?")
 				values = append(values, value)
-				updates = append(updates, `"`+column+`"=excluded."`+column+`"`)
+				// Updating the parent key makes SQLite check referencing rows,
+				// including the backtest bars, even when the ID stays the same.
+				if table == "securities" && column == "id" {
+					continue
+				}
+				updates = append(updates, name+"=excluded."+name)
+				changes = append(changes, `"`+table+`".`+name+" IS NOT excluded."+name)
 			}
 		}
 		if len(names) == 0 {
 			return fmt.Errorf("empty research record in %s", table)
 		}
-		query := `INSERT INTO "` + table + `" (` + strings.Join(names, ",") + `) VALUES (` + strings.Join(slots, ",") + `) ON CONFLICT DO UPDATE SET ` + strings.Join(updates, ",")
+		query := `INSERT INTO "` + table + `" (` + strings.Join(names, ",") + `) VALUES (` + strings.Join(slots, ",") + `) ON CONFLICT `
+		if len(updates) == 0 {
+			query += "DO NOTHING"
+		} else {
+			query += "DO UPDATE SET " + strings.Join(updates, ",") + " WHERE " + strings.Join(changes, " OR ")
+		}
 		if _, err = tx.Exec(query, values...); err != nil {
 			return fmt.Errorf("import %s: %w", table, err)
 		}
