@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.18.1
+version: 0.18.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -411,7 +411,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.18.1
+    ref: telephony/v0.18.2
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -512,6 +512,7 @@ type App struct {
 	dispatchCancel     context.CancelFunc
 	burstMu            sync.Mutex
 	dispatcher         *routingDispatcher
+	deliveryDispatcher *routingDispatcher
 	callChanges        callChangeHub
 	installID          int64
 	sip                sipRuntimeHolder

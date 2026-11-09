@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -258,5 +259,181 @@ func TestRoutingShutdownPreventsNewAdmission(t *testing.T) {
 	}
 	if platform.invoked.Load() != 0 || getDecision(t, a, "stopped").Status != "pending" {
 		t.Fatal("admitted work after shutdown")
+	}
+}
+
+type stalledDecisionCarrier struct {
+	decisionPlatform
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *stalledDecisionCarrier) ExecuteIntegrationToolContext(ctx context.Context, connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if tool == "answer_call" && input["call_control_id"] == "older" {
+		p.entered <- struct{}{}
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return p.answerPlatform.ExecuteIntegrationTool(connID, tool, input)
+}
+
+type routingTimingLogger struct {
+	sdk.Logger
+	secondCall chan map[string]any
+}
+
+func (l *routingTimingLogger) Info(message string, fields ...any) {
+	if message != "routing decision timing" {
+		return
+	}
+	values := make(map[string]any, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		values[fields[i].(string)] = fields[i+1]
+	}
+	if values["call_id"] == "second" {
+		l.secondCall <- values
+	}
+}
+
+func TestDecisionWhileOlderAIFallbackDeliveryStalls(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		hangup bool
+	}{{name: "offer_within_budget"}, {name: "hangup_before_commit", hangup: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, db, plan := decisionFixture(t)
+			var ex routingExecutionContext
+			if err := json.Unmarshal([]byte(plan.ContextJSON), &ex); err != nil {
+				t.Fatal(err)
+			}
+			ex.Definition.Nodes[0].Config["timeout_ms"] = 2000
+			ex.Definition.Nodes[1] = routingNode{ID: "end", Type: "destination", Config: map[string]any{"destination_id": "ai"}}
+			ex.Definition.Destinations["ai"] = routingDestinationRow{
+				ID: "ai", ProjectID: "p1", Kind: "ai", Enabled: true, ConfigJSON: `{"agent_id":7}`,
+			}
+			ex.Route.CarrierSlug = "telnyx"
+			ex.Route.CarrierConnectionID = 9
+			if err := db.insertRoute(ex.Route); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(ex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.ContextJSON = string(raw)
+
+			platform := &stalledDecisionCarrier{
+				decisionPlatform: decisionPlatform{started: make(chan struct{}, 4)},
+				entered:          make(chan struct{}, 4), release: make(chan struct{}),
+			}
+			logger := &routingTimingLogger{Logger: globalCtx.Logger(), secondCall: make(chan map[string]any, 4)}
+			ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, logger).WithProject("p1")
+			globalCtx = ctx
+			// These IDs shared a lock in the old striped registry.
+			older := testCall("older-263", "pending")
+			older.Direction, older.ProjectID, older.CarrierSID = "inbound", "p1", "older"
+			older.RouteID, older.CarrierSlug = ex.Route.ID, ex.Route.CarrierSlug
+			if _, _, err := db.insertInboundCallWithEvent(older, "", plan); err != nil {
+				t.Fatal(err)
+			}
+			first := getDecision(t, a, older.ID)
+			if err := a.completeDecision(first, decisionResponse{DecisionID: first.ID, Action: "fallback"}, ""); err != nil {
+				t.Fatal(err)
+			}
+			a.startRoutingDispatcher(ctx)
+			t.Cleanup(a.stopRoutingDispatcher)
+			t.Cleanup(func() { close(platform.release) })
+			db.afterCommit = a.routingCommitted
+			a.wakeRouting("p1")
+			receiveSoon(t, platform.entered)
+
+			// Hold the second call lock in the hangup case so the carrier
+			// transition is durably recorded before the result can commit.
+			if tc.hangup {
+				unlock := sync.OnceFunc(lockRoutingCall("second"))
+				defer unlock()
+				insertRingCall(t, db, plan, "second")
+				receiveSoon(t, platform.started)
+				if err := db.updateStatus("second", "completed", ""); err != nil {
+					t.Fatal(err)
+				}
+				unlock()
+			} else {
+				insertRingCall(t, db, plan, "second")
+			}
+			d := getDecision(t, a, "second")
+			deadline, err := time.Parse(time.RFC3339Nano, d.DeadlineAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for (d.Status == "pending" || d.Status == "running") && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				d = getDecision(t, a, "second")
+			}
+			if d.Status == "pending" || d.Status == "running" {
+				t.Fatal("second call missed its routing deadline while AI fallback was stalled")
+			}
+			fields := receiveSoon(t, logger.secondCall)
+			if fields["decision_id"] != d.ID || fields["call_id"] != d.CallID {
+				t.Fatalf("unmatched timing record: %v", fields)
+			}
+			var offers int
+			if err := db.db.QueryRow(`SELECT COUNT(*) FROM call_offers WHERE call_id='second'`).Scan(&offers); err != nil {
+				t.Fatal(err)
+			}
+			if tc.hangup {
+				if d.Status != "canceled" || offers != 0 || fields["offer_created_at"] != nil {
+					t.Fatalf("ended call got an offer: %s, count %d, timing %v", d.Status, offers, fields)
+				}
+				return
+			}
+			if d.Status != "accepted" || offers != 1 {
+				t.Fatalf("wanted one accepted offer, got %s and %d offers", d.Status, offers)
+			}
+			previous := d.StartedAt
+			for _, key := range []string{"response_received_at", "call_lock_acquired_at", "offer_created_at", "decision_committed_at"} {
+				at, _ := fields[key].(string)
+				if at == "" || at < previous || at >= d.DeadlineAt {
+					t.Fatalf("invalid %s for deadline %s: %v", key, d.DeadlineAt, fields)
+				}
+				previous = at
+			}
+			if getDecision(t, a, older.ID).Applied {
+				t.Fatal("older fallback delivery was no longer stalled")
+			}
+		})
+	}
+}
+
+func TestDecisionRPCDeadlineFreesSlot(t *testing.T) {
+	a, db, plan := decisionFixture(t)
+	platform := &decisionPlatform{deadline: make(chan time.Time, 1), release: make(chan struct{})}
+	defer close(platform.release)
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p1")
+	globalCtx = ctx
+	t.Cleanup(a.stopRoutingDispatcher)
+	insertRingCall(t, db, plan, "rpc-timeout")
+	deadline := time.Now().Add(250 * time.Millisecond)
+	if _, err := db.db.Exec(`UPDATE routing_decisions SET deadline_at=? WHERE call_id='rpc-timeout'`, ringTime(deadline)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.runDecisionTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := receiveSoon(t, platform.deadline); !got.Equal(deadline) {
+		t.Fatalf("RPC deadline %s, want %s", got, deadline)
+	}
+	until := deadline.Add(time.Second)
+	for len(decisionSlots) > 0 && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(decisionSlots) != 0 {
+		t.Fatal("expired RPC retained its worker slot")
+	}
+	if d := getDecision(t, a, "rpc-timeout"); d.Status != "timed_out" {
+		t.Fatalf("wanted timed_out, got %s", d.Status)
 	}
 }

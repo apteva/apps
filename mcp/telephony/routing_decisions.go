@@ -56,6 +56,9 @@ type decisionRecord struct {
 	NotBefore       string          `json:"not_before,omitempty"`
 	DispatchDelayMS int64           `json:"dispatch_delay_ms"`
 	DurationMS      int64           `json:"duration_ms"`
+
+	responseReceivedAt time.Time
+	callLockAcquiredAt time.Time
 }
 
 const decisionColumns = `id,call_id,project_id,flow_version_id,node_id,status,request_json,result_json,reason,created_at,deadline_at,completed_at,applied,plan_json,started_at,not_before`
@@ -461,70 +464,95 @@ func (a *App) decisionPlan(row *callRow, d decisionRecord, response decisionResp
 	return p, cap, nil
 }
 
-// Invocation admission is bounded even when a platform request outlives its
-// decision deadline. The worker expires durable work; a late result cannot apply.
 var decisionSlots = make(chan struct{}, 32)
 
-func (a *App) runDecisionTick(_ context.Context, ctx *sdk.AppCtx) error {
+func readDecisionRows(rows *sql.Rows, err error) ([]decisionRecord, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var decisions []decisionRecord
+	for rows.Next() {
+		d, err := scanDecision(rows)
+		if err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, d)
+	}
+	return decisions, rows.Err()
+}
+
+func (a *App) runDecisionTick(workerCtx context.Context, ctx *sdk.AppCtx) error {
 	project := ctx.CurrentProject()
 	if project == "" {
 		return nil
 	}
 	now := ringTime(time.Now())
-	rows, e := ctx.AppDB().Query(`SELECT `+decisionColumns+` FROM routing_decisions WHERE project_id=? AND (status IN ('pending','running') OR applied=0) AND (status<>'pending' OR not_before='' OR not_before<=? OR deadline_at<=?) ORDER BY created_at LIMIT 100`, project, now, now)
-	if e != nil {
-		return e
+	decisions, err := readDecisionRows(ctx.AppDB().QueryContext(workerCtx, `SELECT `+decisionColumns+` FROM routing_decisions
+		WHERE project_id=? AND status IN ('pending','running')
+			AND (deadline_at<=? OR (status='pending' AND (not_before='' OR not_before<=?)))
+		ORDER BY CASE WHEN status='pending' AND deadline_at>? THEN 0 ELSE 1 END, created_at LIMIT 100`, project, now, now, now))
+	if err != nil {
+		return err
 	}
-	ds := []decisionRecord{}
-	for rows.Next() {
-		d, e := scanDecision(rows)
-		if e != nil {
-			rows.Close()
-			return e
-		}
-		ds = append(ds, d)
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return e
-	}
-	for _, d := range ds {
-		if d.Status != "pending" && d.Status != "running" {
-			if e = a.deliverDecision(ctx, d); e != nil {
-				ctx.Logger().Warn("routing decision delivery", "decision", d.ID, "err", e)
-			}
+	var expired []decisionRecord
+	for _, d := range decisions {
+		deadline, _ := time.Parse(time.RFC3339Nano, d.DeadlineAt)
+		if !time.Now().Before(deadline) {
+			expired = append(expired, d)
 			continue
 		}
 		row, err := a.db().findCall(d.CallID)
 		if err != nil {
 			return err
 		}
-		deadline, _ := time.Parse(time.RFC3339Nano, d.DeadlineAt)
-		if row == nil || row.Status != "pending" || !time.Now().Before(deadline) {
-			if err = a.completeDecision(d, decisionResponse{}, "timed_out"); err != nil {
-				return err
-			}
+		if row == nil || row.Status != "pending" {
+			expired = append(expired, d)
 			continue
 		}
-		if d.Status == "running" {
-			continue
-		}
-		if d.NotBefore != "" && d.NotBefore > ringTime(time.Now()) {
-			continue
-		}
-		if err := a.dispatchDecision(ctx, d); err != nil {
+		if err := a.dispatchDecision(workerCtx, ctx, d); err != nil {
 			return err
 		}
 	}
-	return a.flushDecisionMarks(project)
+	for _, d := range expired {
+		// This call may still be finishing an older plan. Retry on the next
+		// deadline wake instead of waiting on its lock in the dispatch worker.
+		unlock := acquireRoutingCall(d.CallID, false)
+		if unlock == nil {
+			continue
+		}
+		d.callLockAcquiredAt = time.Now()
+		err := a.completeDecisionLocked(d, decisionResponse{}, "timed_out")
+		unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) runDecisionDelivery(workerCtx context.Context, ctx *sdk.AppCtx) error {
+	decisions, err := readDecisionRows(ctx.AppDB().QueryContext(workerCtx, `SELECT `+decisionColumns+` FROM routing_decisions
+		WHERE project_id=? AND applied=0 AND status NOT IN ('pending','running') ORDER BY created_at,id LIMIT 100`, ctx.CurrentProject()))
+	if err != nil {
+		return err
+	}
+	for _, d := range decisions {
+		if err := workerCtx.Err(); err != nil {
+			return err
+		}
+		if err := a.deliverDecision(ctx, d); err != nil {
+			ctx.Logger().Warn("routing decision delivery", "decision", d.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 // Serialize admission with shutdown so the final Wait cannot race a new Add.
-func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
+func (a *App) dispatchDecision(workerCtx context.Context, ctx *sdk.AppCtx, d decisionRecord) error {
 	a.dispatchMu.Lock()
 	defer a.dispatchMu.Unlock()
-	if a.decisionStopping {
+	if a.decisionStopping || workerCtx.Err() != nil {
 		return nil
 	}
 	select {
@@ -532,27 +560,37 @@ func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	default:
 		return nil
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE routing_decisions SET status='running',started_at=? WHERE id=? AND status='pending'`, ringTime(time.Now()), d.ID)
+	runtimeDone, runtimeErr := a.runtimeBegin(false)
+	if runtimeErr != nil {
+		<-decisionSlots
+		return runtimeErr
+	}
+	d.StartedAt = ringTime(time.Now())
+	res, err := ctx.AppDB().Exec(`UPDATE routing_decisions SET status='running',started_at=? WHERE id=? AND status='pending' AND deadline_at>?`, d.StartedAt, d.ID, d.StartedAt)
 	if err != nil {
+		runtimeDone()
 		<-decisionSlots
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		runtimeDone()
 		<-decisionSlots
 		return nil
-	}
-	runtimeDone, runtimeErr := a.runtimeBegin(false)
-	if runtimeErr != nil {
-		<-decisionSlots
-		return runtimeErr
 	}
 	a.decisionWG.Add(1)
 	go func(d decisionRecord) {
 		defer runtimeDone()
 		defer a.decisionWG.Done()
 		defer func() { <-decisionSlots; a.wakeRouting(d.ProjectID); a.routingCapacityReleased() }()
-		response, reason := a.invokeDecision(ctx, d)
+		deadline, _ := time.Parse(time.RFC3339Nano, d.DeadlineAt)
+		invokeCtx, cancel := context.WithDeadline(workerCtx, deadline)
+		response, reason, receivedAt := a.invokeDecision(invokeCtx, ctx, d)
+		cancel()
+		d.responseReceivedAt = receivedAt
+		if workerCtx.Err() != nil {
+			return
+		}
 		if err := a.completeDecision(d, response, reason); err != nil {
 			ctx.Logger().Warn("routing decision completion", "decision", d.ID, "err", err)
 		}
@@ -560,31 +598,39 @@ func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	return nil
 }
 
-func (a *App) invokeDecision(ctx *sdk.AppCtx, d decisionRecord) (decisionResponse, string) {
+func (a *App) invokeDecision(rpcCtx context.Context, ctx *sdk.AppCtx, d decisionRecord) (decisionResponse, string, time.Time) {
 	var raw string
-	if e := ctx.AppDB().QueryRow(`SELECT context_json FROM call_route_executions WHERE call_id=?`, d.CallID).Scan(&raw); e != nil {
-		return decisionResponse{}, "context_unavailable"
+	if e := ctx.AppDB().QueryRowContext(rpcCtx, `SELECT context_json FROM call_route_executions WHERE call_id=?`, d.CallID).Scan(&raw); e != nil {
+		return decisionResponse{}, "context_unavailable", time.Time{}
 	}
 	var ex routingExecutionContext
 	if json.Unmarshal([]byte(raw), &ex) != nil {
-		return decisionResponse{}, "context_unavailable"
+		return decisionResponse{}, "context_unavailable", time.Time{}
 	}
 	n, e := decisionNode(ex, d.NodeID)
 	if e != nil {
-		return decisionResponse{}, "context_unavailable"
+		return decisionResponse{}, "context_unavailable", time.Time{}
 	}
 	cfg, e := parseDecisionConfig(n)
 	if e != nil {
-		return decisionResponse{}, "invalid_config"
+		return decisionResponse{}, "invalid_config", time.Time{}
 	}
 	var out struct {
 		Status   string `json:"status"`
 		Response string `json:"response"`
 	}
-	if e = ctx.PlatformAPI().CallAppResult("functions", "functions_invoke", map[string]any{"id": cfg.FunctionID, "event": json.RawMessage(d.Request)}, &out); e != nil || out.Status != "ok" {
-		return decisionResponse{}, "function_failed"
+	if e = sdk.CallAppResultContext(rpcCtx, ctx.PlatformAPI(), "functions", "functions_invoke", map[string]any{"id": cfg.FunctionID, "event": json.RawMessage(d.Request)}, &out); e != nil {
+		return decisionResponse{}, "function_failed", time.Time{}
 	}
-	return decodeDecisionResponse(d.ID, out.Response)
+	receivedAt := time.Now()
+	// Keep receipt evidence even if the timeout worker commits before this result.
+	ctx.Logger().Info("routing decision response received", "decision_id", d.ID, "call_id", d.CallID,
+		"project_id", d.ProjectID, "response_received_at", ringTime(receivedAt), "deadline_at", d.DeadlineAt)
+	if out.Status != "ok" {
+		return decisionResponse{}, "function_failed", receivedAt
+	}
+	response, reason := decodeDecisionResponse(d.ID, out.Response)
+	return response, reason, receivedAt
 }
 func decodeDecisionResponse(id, raw string) (decisionResponse, string) {
 	var r decisionResponse
@@ -609,6 +655,11 @@ func decodeDecisionResponse(id, raw string) (decisionResponse, string) {
 }
 func (a *App) completeDecision(d decisionRecord, response decisionResponse, reason string) error {
 	defer lockRoutingCall(d.CallID)()
+	d.callLockAcquiredAt = time.Now()
+	return a.completeDecisionLocked(d, response, reason)
+}
+
+func (a *App) completeDecisionLocked(d decisionRecord, response decisionResponse, reason string) error {
 	row, e := a.db().findCall(d.CallID)
 	if e != nil {
 		return e
@@ -733,7 +784,12 @@ func (a *App) completeDecision(d decisionRecord, response decisionResponse, reas
 			return a.rejectDecision(d, response, "capacity_unavailable")
 		}
 	}
-	return a.finishDecisionTx(tx, d, response, status, reason, plan)
+	err := a.finishDecisionTx(tx, d, response, status, reason, plan)
+	if errors.Is(err, errDecisionExpired) {
+		tx.Rollback()
+		return a.rejectDecision(d, response, "timed_out")
+	}
+	return err
 }
 
 // Capacity failures take the same durable fallback path. No recursive call-lock.
@@ -796,6 +852,9 @@ func (a *App) rejectDecision(d decisionRecord, response decisionResponse, reason
 	}
 	return a.finishDecisionTx(tx, d, response, status, reason, plan)
 }
+
+var errDecisionExpired = errors.New("routing decision expired before commit")
+
 func (a *App) finishDecisionTx(tx *sql.Tx, d decisionRecord, response decisionResponse, status, reason string, plan *inboundRoutingPlan) error {
 	result, _ := json.Marshal(response)
 	raw, _ := json.Marshal(plan)
@@ -812,14 +871,39 @@ func (a *App) finishDecisionTx(tx *sql.Tx, d decisionRecord, response decisionRe
 			return e
 		}
 	}
+	var offerCreatedAt string
+	if status == "accepted" {
+		// The browser offer is visible as soon as this transaction commits.
+		_ = tx.QueryRow(`SELECT offered_at FROM call_offers WHERE call_id=? AND ring_group_id=? AND offered_at<>'' LIMIT 1`, d.CallID, d.ID).Scan(&offerCreatedAt)
+		deadline, _ := time.Parse(time.RFC3339Nano, d.DeadlineAt)
+		if !time.Now().Before(deadline) {
+			return errDecisionExpired
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	committedAt := time.Now()
 	a.routingCommitted(d.ProjectID)
+	if globalCtx != nil && globalCtx.Logger() != nil {
+		fields := []any{"decision_id", d.ID, "call_id", d.CallID, "project_id", d.ProjectID, "status", status,
+			"reason", reason, "started_at", d.StartedAt, "deadline_at", d.DeadlineAt, "call_lock_acquired_at", ringTime(d.callLockAcquiredAt), "decision_committed_at", ringTime(committedAt)}
+		if !d.responseReceivedAt.IsZero() {
+			fields = append(fields, "response_received_at", ringTime(d.responseReceivedAt))
+		}
+		if offerCreatedAt != "" {
+			fields = append(fields, "offer_created_at", offerCreatedAt)
+		}
+		globalCtx.Logger().Info("routing decision timing", fields...)
+	}
 	return nil
 }
 func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	defer lockRoutingCall(d.CallID)()
+	var applied bool
+	if err := ctx.AppDB().QueryRow(`SELECT applied FROM routing_decisions WHERE id=?`, d.ID).Scan(&applied); err != nil || applied {
+		return err
+	}
 	row, e := a.db().findCall(d.CallID)
 	if e != nil {
 		return e

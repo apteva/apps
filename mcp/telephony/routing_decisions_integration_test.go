@@ -4,13 +4,16 @@ package main
 
 import (
 	"encoding/json"
-	tk "github.com/apteva/app-sdk/testkit"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 // Real compiled Telephony, migrations, scheduler, MCP, signed Telnyx ingress and
@@ -35,6 +38,11 @@ func TestTier2RoutingDecision(t *testing.T) {
 		event, ok := request.Input["event"].(map[string]any)
 		if !ok {
 			http.Error(w, "missing event", 400)
+			return
+		}
+		deadline, err := time.Parse(time.RFC3339Nano, strArg(event, "deadline_at", ""))
+		if err != nil || r.Header.Get(sdk.HeaderAppCallDeadline) != strconv.FormatInt(deadline.UnixMilli(), 10) {
+			http.Error(w, "missing or mismatched RPC deadline", 400)
 			return
 		}
 		response, _ := json.Marshal(decisionResponse{DecisionID: event["decision_id"].(string), Action: "offer", DestinationID: "individual", ReservationID: "business-reservation"})
@@ -87,8 +95,12 @@ func TestTier2RoutingDecision(t *testing.T) {
 			t.Fatalf("ingress %d %s", response.StatusCode, raw)
 		}
 	}
-	if event := receiveSoon(t, notifications); event != `{"type":"calls.changed"}` {
-		t.Fatal(event)
+	var change struct {
+		Type string `json:"type"`
+	}
+	event := receiveSoon(t, notifications)
+	if err := json.Unmarshal([]byte(event), &change); err != nil || change.Type != "calls.changed" {
+		t.Fatalf("unexpected call notification: %s", event)
 	}
 	calls := tier2CallList(t, sc)
 	if len(calls) != 1 {
