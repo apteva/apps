@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -609,11 +608,6 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── /me ─────────────────────────────────────────────────────────────
-//
-// JWTs carry an `org` claim (slug) so we know which org's JWKS to
-// verify against. Iss is also org-prefixed but we don't trust strings
-// before signature check — the kid in the header is what selects the
-// pubkey, and the kid is per-org-unique because keys are per-org.
 
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -626,16 +620,11 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	org, user, ok := a.authenticatedBearerUser(w, r, ctx, pid)
+	session, ok := authenticatedBearerSession(w, r, ctx, pid)
 	if !ok {
 		return
 	}
-	authorization, err := dbAuthorizationContext(ctx.AppDB(), pid, org, user.ID)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	httpJSON(w, map[string]any{"user": user, "org": org.Slug, "authorization": authorization})
+	httpJSON(w, map[string]any{"user": session.user, "org": session.org.Slug, "authorization": session.authorization})
 }
 
 // ─── /me/metadata ───────────────────────────────────────────────────
@@ -651,10 +640,11 @@ func (a *App) handleMeMetadata(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	org, user, ok := a.authenticatedBearerUser(w, r, ctx, pid)
+	session, ok := authenticatedBearerSession(w, r, ctx, pid)
 	if !ok {
 		return
 	}
+	org, user := session.org, session.user
 	var body struct {
 		Metadata *json.RawMessage `json:"metadata"`
 	}
@@ -684,104 +674,6 @@ func (a *App) handleMeMetadata(w http.ResponseWriter, r *http.Request) {
 		"self_service": true,
 	})
 	httpJSON(w, map[string]any{"user": updated, "org": org.Slug})
-}
-
-func (a *App) authenticatedBearerUser(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string) (*Organization, *User, bool) {
-	authz := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(authz, prefix) {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "missing_bearer"})
-		return nil, nil, false
-	}
-	token := strings.TrimPrefix(authz, prefix)
-	if len(token) > 16000 {
-		httpErr(w, 401, "invalid_token")
-		return nil, nil, false
-	}
-
-	// Peek the org slug out of the unverified payload so we know which
-	// org's keys to load. Then verify against those keys — a token
-	// claiming "org": "acme" signed with internal's key won't validate.
-	orgSlug, err := peekJWTOrg(token)
-	if err != nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": err.Error()})
-		return nil, nil, false
-	}
-	if orgSlug == "" {
-		// Legacy v0.3.x token — no org claim. Resolve to default org for
-		// the deprecation window.
-		orgSlug = "default"
-	}
-	org, err := dbGetOrgBySlug(ctx.AppDB(), pid, orgSlug)
-	if err != nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": "unknown org"})
-		return nil, nil, false
-	}
-	keys, err := dbAllSigningKeys(ctx.AppDB(), pid, org.ID)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return nil, nil, false
-	}
-	claims, err := jwtVerify(token, func(kid string) (ed25519.PublicKey, bool) {
-		k, ok := keys[kid]
-		return k, ok
-	})
-	if err != nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": err.Error()})
-		return nil, nil, false
-	}
-	subRaw, _ := claims["sub"].(string)
-	uidParsed, _ := parseUint(subRaw)
-	if uidParsed == 0 {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-		return nil, nil, false
-	}
-	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uidParsed)
-	if err != nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-		return nil, nil, false
-	}
-	if user.Status != "active" {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "user_inactive"})
-		return nil, nil, false
-	}
-	if org.Status != "active" {
-		httpErr(w, 401, "organization_inactive")
-		return nil, nil, false
-	}
-	cid, _ := claims["azp"].(string)
-	sid, _ := claims["sid"].(string)
-	iss, _ := claims["iss"].(string)
-	aud, _ := claims["aud"].(string)
-	client, err := dbGetClientByClientID(ctx.AppDB(), pid, cid)
-	if err != nil || sid == "" || claims["token_use"] != "access" || iss != orgBaseURL(ctx, r, org) {
-		httpErr(w, 401, "invalid_token")
-		return nil, nil, false
-	}
-	expectedAud := client.JWTAudience
-	if expectedAud == "" {
-		expectedAud = cid
-	}
-	if aud != expectedAud || sessionEligibility(ctx, org, user, client) != nil {
-		httpErr(w, 401, "invalid_token")
-		return nil, nil, false
-	}
-	var active int
-	err = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM auth_session_families WHERE id=? AND project_id=? AND organization_id=? AND user_id=? AND client_id=? AND revoked_at IS NULL AND expires_at>?`, sid, pid, org.ID, user.ID, cid, rfc3339(time.Now())).Scan(&active)
-	if err != nil || active != 1 {
-		httpErr(w, 401, "session_revoked")
-		return nil, nil, false
-	}
-	tokenVersion, hasVersion := jwtInt64Claim(claims, "authorization_version")
-	if (hasVersion && tokenVersion != user.AuthorizationVersion) ||
-		!hasVersion {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{
-			"error":  "stale_authorization",
-			"detail": "refresh the session to receive current roles and permissions",
-		})
-		return nil, nil, false
-	}
-	return org, user, true
 }
 
 func (a *App) handleOrgPublic(w http.ResponseWriter, r *http.Request) {
@@ -994,7 +886,11 @@ func orgBaseURL(ctx *sdk.AppCtx, r *http.Request, org *Organization) string {
 	if org == nil {
 		return base
 	}
-	return base + "/orgs/" + org.Slug
+	return orgIssuerURL(base, org.Slug)
+}
+
+func orgIssuerURL(base, slug string) string {
+	return base + "/orgs/" + slug
 }
 
 // publicBaseURL — kept for tests and any caller that doesn't have an

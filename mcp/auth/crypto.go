@@ -255,11 +255,11 @@ func jwtVerify(token string, keyForKid func(kid string) (ed25519.PublicKey, bool
 		return nil, fmt.Errorf("header json: %w", err)
 	}
 	if h.Alg != "EdDSA" {
-		return nil, fmt.Errorf("unexpected alg %q", h.Alg)
+		return nil, errors.New("unexpected alg")
 	}
 	pub, ok := keyForKid(h.Kid)
 	if !ok {
-		return nil, fmt.Errorf("unknown kid %q", h.Kid)
+		return nil, errors.New("unknown kid")
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
