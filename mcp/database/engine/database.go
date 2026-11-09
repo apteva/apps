@@ -113,7 +113,7 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 	}
 	concurrency := options.MaxConcurrentAptevaQueries
 	if concurrency == 0 {
-		concurrency = 3
+		concurrency = DefaultMaxConcurrentAptevaQueries
 	}
 	if concurrency < 1 || concurrency > 64 {
 		return nil, Invalid("native query concurrency must be 1–64")

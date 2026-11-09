@@ -4,7 +4,7 @@ import "testing"
 
 func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 	defaults, err := managerOptions(nil, func(string) string { return "" })
-	if err != nil || defaults.Apteva.MappedCacheBytes != 64<<20 || defaults.Apteva.ManagedMemoryBytes != 0 || defaults.Apteva.AggregateDiskBytes != 1<<30 || defaults.Apteva.AggregateMaxGroups != 1<<20 || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 64<<20 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 || defaults.Apteva.MemtableBytes != 0 || defaults.AptevaCacheBudgetBytes != 256<<20 || defaults.MaxConcurrentAptevaQueries != 2 {
+	if err != nil || defaults.Apteva.MappedCacheBytes != 64<<20 || defaults.Apteva.ManagedMemoryBytes != 0 || defaults.Apteva.AggregateDiskBytes != 1<<30 || defaults.Apteva.AggregateMaxGroups != 1<<20 || defaults.Apteva.SyncMode != "full" || defaults.Apteva.CacheBytes != 64<<20 || defaults.Apteva.AggregateWorkers < 1 || defaults.Apteva.AggregateWorkers > 4 || defaults.Apteva.QueryWorkBytes != 16<<20 || defaults.Apteva.MemtableBytes != 0 || defaults.AptevaCacheBudgetBytes != 256<<20 || defaults.MaxConcurrentAptevaQueries != 3 {
 		t.Fatal(defaults, err)
 	}
 	getenv := func(name string) string {
@@ -19,8 +19,8 @@ func TestManagerConfigPrecedenceAndValidation(t *testing.T) {
 			t.Fatal("invalid configuration accepted", config)
 		}
 	}
-	bounded, e := managerOptions(map[string]string{"aptevadb_cache_mib": "128", "aptevadb_total_cache_mib": "512", "aptevadb_memtable_mib": "16", "aptevadb_max_concurrent_queries": "3"}, func(string) string { return "" })
-	if e != nil || bounded.Apteva.CacheBytes != 128<<20 || bounded.Apteva.MemtableBytes != 16<<20 || bounded.AptevaCacheBudgetBytes != 512<<20 || bounded.MaxConcurrentAptevaQueries != 3 {
+	bounded, e := managerOptions(map[string]string{"aptevadb_cache_mib": "128", "aptevadb_total_cache_mib": "512", "aptevadb_memtable_mib": "16", "aptevadb_max_concurrent_queries": "2"}, func(string) string { return "" })
+	if e != nil || bounded.Apteva.CacheBytes != 128<<20 || bounded.Apteva.MemtableBytes != 16<<20 || bounded.AptevaCacheBudgetBytes != 512<<20 || bounded.MaxConcurrentAptevaQueries != 2 {
 		t.Fatal(bounded, e)
 	}
 	for _, mode := range []string{"full", "barrier", "os"} {

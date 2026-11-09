@@ -2,6 +2,9 @@ package engine
 
 import "runtime"
 
+// DefaultMaxConcurrentAptevaQueries leaves two bulk slots and one reserved slot.
+const DefaultMaxConcurrentAptevaQueries = 3
+
 // ManagerOptions configures each owned database. Apteva cache is a per-database
 // target and query memory is a per-operation accounting budget, not an RSS cap.
 type ManagerOptions struct {
