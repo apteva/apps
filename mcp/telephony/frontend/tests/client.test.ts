@@ -54,29 +54,76 @@ function deferred() {
   return { promise, resolve };
 }
 
-test("answer prepares microphone and scripts before claiming a carrier call", async () => {
-  const f = fixture(), gate = deferred();
-  f.setPreflight(() => gate.promise);
+test("manual answer claims before offer expiry while audio preparation is pending", async () => {
+  const f = fixture(), audio = deferred(), claimReceived = deferred();
+  let expired = false;
+  f.setPreflight(() => audio.promise);
+  f.phone.observeCalls([{
+    id: "call-1", status: "pending", direction: "inbound", from_number: "", to_number: "", peer_kind: "human",
+    ring_offers: [{ id: "offer-1", kind: "browser", destination_id: "desk" }],
+  }]);
+  f.setResponse(async url => {
+    if (!url.pathname.includes("/answer/")) return { accepted: true };
+    expect(f.preflighted).toBe(1);
+    claimReceived.resolve();
+    return expired ? Response.json({ code: "offer_expired" }, { status: 409 }) : f.session;
+  });
   const pending = f.phone.answer("call-1");
-  await Bun.sleep(1);
-  expect(f.preflighted).toBe(1);
-  expect(f.requests).toHaveLength(0);
-  gate.resolve(); await pending;
+  await claimReceived.promise;
+  expired = true;
+  expect(f.started).toBe(0);
+  audio.resolve();
+  await pending;
+  expect(f.started).toBe(1);
   expect(f.requests[0].url.pathname).toEndWith("/answer/call-1");
+  const requestID = f.requests[0].headers.get("X-Request-ID");
+  expect(requestID).toMatch(/^tel-/);
+  const events = f.requests.filter(r => r.url.pathname.endsWith("/telemetry")).flatMap(r => r.body.events);
+  expect(events.map(event => event.stage)).toEqual(["answer_attempted", "answer_audio_started", "answer_audio_finished"]);
+  expect(events.every(event => event.request_id === requestID && event.offer_id === "offer-1")).toBe(true);
+  expect(events.map(event => Date.parse(event.occurred_at))).toEqual(
+    events.map(event => Date.parse(event.occurred_at)).sort((a, b) => a - b),
+  );
+  expect(events.at(-1)?.code).toBe("completed");
   f.phone.dispose();
 });
 
-test("failed or cancelled inbound preflight never claims the call", async () => {
-  const failed = fixture(); failed.setPreflight(async () => { throw new Error("permission denied"); });
-  await expect(failed.phone.answer("call-1")).rejects.toThrow("permission denied");
-  expect(failed.requests).toHaveLength(0); failed.phone.dispose();
-  const f = fixture(), gate = deferred(); f.setPreflight(() => gate.promise);
-  const pending = f.phone.answer("call-1").catch(error => error);
-  await f.phone.hangup();
-  expect((await pending).message).toContain("cancelled");
-  gate.resolve(); await Bun.sleep(1);
-  expect(f.requests).toHaveLength(0); f.phone.dispose();
-});
+for (const failure of ["permission denied", "cancelled", "disposed"]) {
+  test(`manual answer releases a claim received after audio setup is ${failure}`, async () => {
+    const f = fixture(), claim = deferred(), audio = deferred();
+    const preparationStopped = deferred();
+    let preparing = false;
+    f.setPreflight(async () => {
+      preparing = true;
+      await audio.promise;
+      if (failure === "permission denied") throw new Error(failure);
+    });
+    f.runtime.cancelPreparation = () => {
+      if (preparing) preparationStopped.resolve();
+    };
+    f.setResponse(async url => {
+      if (url.pathname.includes("/answer/")) await claim.promise;
+      return f.session;
+    });
+    const pending = f.phone.answer("call-1").catch(error => error);
+    expect(f.requests[0].url.pathname).toEndWith("/answer/call-1");
+    if (failure === "permission denied") audio.resolve();
+    else if (failure === "disposed") f.phone.dispose();
+    else await f.phone.hangup();
+    await preparationStopped.promise;
+    expect(f.requests).toHaveLength(1);
+    claim.resolve();
+    expect((await pending).message).toContain(failure === "disposed" ? "cancelled" : failure);
+    expect(f.requests).toHaveLength(2);
+    expect(f.requests[1].url.pathname).toEndWith("/release/call-1");
+    expect(f.requests[1].body).toEqual({ session_token: f.session.session_token });
+    audio.resolve();
+    await Bun.sleep(0);
+    expect(f.started).toBe(0);
+    expect(f.phone.getSnapshot()).toMatchObject({ busy: false, audioState: "idle" });
+    f.phone.dispose();
+  });
+}
 
 test("reconnect preparation keeps live audio and ownership until ready", async () => {
   const f = fixture(); await f.phone.answer("call-1");
@@ -294,10 +341,12 @@ describe("Telephony extension", () => {
     ]);
     expect(result.map(c => c.id)).toEqual(["human", "group"]);
   });
-  test("Answer exposes offer_expired as a stable error code", async () => {
+  test("Answer preserves request correlation on offer_expired", async () => {
     const f = fixture();
     f.setResponse(async () => Response.json({ code: "offer_expired", error: "call offer expired" }, { status: 409 }));
-    await expect(f.client.answer("call-1")).rejects.toMatchObject({ code: "offer_expired", status: 409 });
+    await expect(f.client.answer("call-1", {}, "tel-manual-claim")).rejects.toMatchObject({
+      code: "offer_expired", status: 409, requestId: "tel-manual-claim", clientRequestId: "tel-manual-claim",
+    });
   });
   test("watch cancellation suppresses late responses and overlapping requests", async () => {
     const f = fixture(), gate = deferred();
@@ -729,10 +778,18 @@ test("device/worklet stall after answer releases the claim and allows a fresh an
  }finally{timer.mockRestore();f.phone.dispose();}
 });
 
-test("answer request failure and cancelled preflight release prepared local devices",async()=>{
- const f=fixture();let cleaned=0;f.runtime.cancelPreparation=()=>{cleaned++;};
- f.setResponse(async()=>new Response("gone",{status:410}));await expect(f.phone.answer("call-1")).rejects.toThrow();
- expect(cleaned).toBeGreaterThanOrEqual(2);expect(f.started).toBe(0);
- const gate=deferred();f.setPreflight(()=>gate.promise);const starting=f.phone.answer("call-1").catch(e=>e);
- const before=cleaned;await f.phone.hangup();expect(cleaned).toBeGreaterThan(before);await starting;gate.resolve();f.phone.dispose();
+test("a rejected manual claim stops pending audio preparation", async () => {
+  const f = fixture(), audio = deferred();
+  let preparing = false, cancelled = false;
+  f.setPreflight(() => { preparing = true; return audio.promise; });
+  f.runtime.cancelPreparation = () => { if (preparing) cancelled = true; };
+  f.setResponse(async () => Response.json({ code: "offer_expired" }, { status: 409 }));
+  await expect(f.phone.answer("call-1")).rejects.toMatchObject({ code: "offer_expired" });
+  expect(cancelled).toBe(true);
+  expect(f.requests).toHaveLength(1);
+  audio.resolve();
+  await Bun.sleep(0);
+  expect(f.started).toBe(0);
+  expect(f.phone.getSnapshot().busy).toBe(false);
+  f.phone.dispose();
 });

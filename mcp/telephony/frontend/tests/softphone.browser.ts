@@ -81,12 +81,21 @@ test("installed headless client talks through real Telephony with host-owned UI"
   // Wait for the initial stream reconciliation, then require a later change.
   await expect.poll(() => page.evaluate(() => (window as any).watchSamples.some((s: any) => s.trigger === "push"))).toBe(true);
   await page.evaluate(() => {
-    const w=window as any, original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    w.answerDeviceOpens=0;w.restoreAnswerDevice=()=>{navigator.mediaDevices.getUserMedia=original;};
-    navigator.mediaDevices.getUserMedia=(constraints)=>{w.answerDeviceOpens++;return original(constraints);};
+    const w = window as any;
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    const permission = new Promise<void>(resolve => { w.finishAnswerPreparation = resolve; });
+    w.answerDeviceOpens = 0;
+    w.restoreAnswerDevice = () => { navigator.mediaDevices.getUserMedia = original; };
+    navigator.mediaDevices.getUserMedia = async constraints => {
+      w.answerDeviceOpens++;
+      await permission;
+      return original(constraints);
+    };
   });
   await page.click("#answer");
-  await expect.poll(() => page.evaluate(() => (window as any).watchCalls[0]?.status), { timeout: 1500 }).not.toBe("pending");
+  await expect.poll(() => page.evaluate(() => (window as any).watchCalls[0]?.status), { timeout: 1500 }).toBe("answering");
+  expect(await page.evaluate(() => (window as any).phone.getSnapshot().callId)).toBeUndefined();
+  await page.evaluate(() => (window as any).finishAnswerPreparation());
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);

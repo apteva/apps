@@ -1,4 +1,4 @@
-import {requestDiagnostic} from "./telemetry";
+import {diagnosticID, requestDiagnostic} from "./telemetry";
 import {AutomaticAnswer,type AutoAnswerSnapshot} from "./auto-answer";
 import {validateNetworkPolicy,type NetworkPolicy} from "./network-policy";
 import {withNetworkAbort,type NetworkCheckResult,type NetworkCheckOptions} from "./network-check";
@@ -293,17 +293,52 @@ export class HeadlessSoftphone {
   /** Hosts that disable polling feed the same complete permission-scoped call list. */
   observeCalls(calls:Call[]):void{this.observedOffers=new Map(calls.map(c=>[c.id,c]));for(const call of calls)this.observeCall(call);this.autoAnswer.observe(calls);}
   async answer(id: string, request: AnswerRequest = {}): Promise<void> {
+    const clickedAt = new Date().toISOString();
     if(!request.auto_answer_session)this.autoAnswer.cancel(id);
     const prepared=Boolean(request.auto_answer_session&&this.autoPrepared&&this.runtime.isPrepared?.()!==false);
     const generation = this.begin(true,prepared);
+    const signal = this.cancellation.signal;
+    const manualPickup = !request.auto_answer_session && !request.rejoin;
+    const requestID = manualPickup ? `tel-${diagnosticID()}` : undefined;
     const offer=this.observedOffers.get(id)?.ring_offers?.find(o=>o.kind==="browser"&&(!request.destination_id||o.destination_id===request.destination_id));
-    if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_attempted"}).catch(()=>{});
-    let answerRequested=false;
+    const offerEvidence = offer && { call_id: id, offer_id: offer.id, request_id: requestID };
+    let claim: Promise<CallSession> | undefined;
     let claimed: CallSession | undefined;
     let attached = false;
+    let preparationFailed = false;
+    const prepare = async () => {
+      const startedAt = new Date().toISOString();
+      let outcome = "completed";
+      try {
+        return await this.prepareAudio(generation, true);
+      } catch (error) {
+        preparationFailed = true;
+        outcome = signal.aborted ? "cancelled" : "failed";
+        throw error;
+      } finally {
+        if (manualPickup && offerEvidence) void this.client.reportOfferEvents([
+          { ...offerEvidence, stage: "answer_audio_started", occurred_at: startedAt },
+          { ...offerEvidence, stage: "answer_audio_finished", code: outcome },
+        ]).catch(() => {});
+      }
+    };
+    const requestClaim = async () => {
+      this.assertCurrent(generation);
+      claimed = await this.client.answer(id, request, requestID);
+      return claimed;
+    };
     try {
       this.assertCurrent(generation);
-      const setupEvents = prepared ? [] : await this.prepareAudio(generation, true);
+      // Start device preparation in the click's activation window. A manual
+      // claim reserves the offer while the operator grants access to audio.
+      const preparation = prepared ? Promise.resolve([]) : prepare();
+      if (manualPickup) claim = requestClaim();
+      if (offerEvidence) void this.client.reportOfferEvent({
+        ...offerEvidence, stage: "answer_attempted", occurred_at: clickedAt,
+      }).catch(() => {});
+      const setupEvents = claim
+        ? (await this.cancellable(Promise.all([preparation, claim]), generation))[0]
+        : await preparation;
       this.autoPrepared=false;
       this.automaticAnswerStartedAt=request.auto_answer_session?Date.now():undefined;
       if(this.automaticAnswerStartedAt){
@@ -311,16 +346,30 @@ export class HeadlessSoftphone {
         if(offered)setupEvents.push({timestamp:new Date(offered).toISOString(),action:"automatic_answer",outcome:"offer_received"});
         setupEvents.push({timestamp:new Date(this.automaticAnswerStartedAt).toISOString(),action:"automatic_answer",outcome:"answer_started",code:this.snapshot.autoAnswer?.source,duration_ms:offered?this.automaticAnswerStartedAt-offered:undefined});
       }
-      answerRequested=true;
-      claimed = await this.client.answer(id, request);
+      const session = claimed ?? await requestClaim();
       this.assertCurrent(generation);
       attached = true;
       this.outbound = false;
-      await this.attachAudio(claimed, generation, setupEvents);
+      await this.attachAudio(session, generation, setupEvents);
     } catch (error) {
-      if(offer)void this.client.reportOfferEvent({call_id:id,offer_id:offer.id,stage:"answer_failed",code:answerRequested?(requestDiagnostic(error).code??"answer_request_failed"):"audio_preflight_failed",request_id:requestDiagnostic(error).requestId}).catch(()=>{});
+      if (offerEvidence) {
+        const diagnostic = requestDiagnostic(error);
+        const code = signal.aborted ? "answer_cancelled" : preparationFailed ? "audio_preflight_failed"
+          : diagnostic.code ?? (attached ? "audio_attach_failed" : "answer_request_failed");
+        void this.client.reportOfferEvent({
+          ...offerEvidence, stage: "answer_failed", code, request_id: requestID ?? diagnostic.requestId,
+        }).catch(() => {});
+      }
+      if (!attached && this.current(generation)) {
+        this.cancellation.abort();
+        this.runtime.cancelPreparation?.();
+      }
+      // The server may have accepted a claim even after local preparation
+      // failed or was cancelled. Wait for its token and release only that claim.
+      if (claim && !claimed) await claim.catch(() => {});
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
-        await this.recoverStartup(claimed, generation, () => this.client.release(claimed!));
+        const session = claimed;
+        await this.recoverStartup(session, generation, () => this.client.release(session));
       }
       if (this.current(generation)) this.update({ detail: message(error) });
       throw error;

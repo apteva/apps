@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -46,9 +48,14 @@ func (w *telemetryStatusWriter) Write(data []byte) (int, error) {
 	return w.ResponseWriter.Write(data)
 }
 
+type answerRequestArrivalKey struct{}
+
 // HTTP correlation stays outside admission/auth wrappers, including rejected reads.
 func (a *App) deliveryRequestHTTP(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/softphone/answer/") {
+			r = r.WithContext(context.WithValue(r.Context(), answerRequestArrivalKey{}, time.Now()))
+		}
 		id := telemetryRequestID(r)
 		r.Header.Set("X-Request-ID", id)
 		w.Header().Set("X-Request-ID", id)
@@ -143,7 +150,7 @@ func (e browserOfferEvent) validate(receipt bool) error {
 		return errors.New("call, offer and event IDs required")
 	}
 	valid := false
-	for _, s := range []string{"warning_attempted", "warning_completed", "warning_failed", "auto_answer_canceled", "ui_displayed", "ui_hidden", "ui_failed", "ringtone_attempted", "ringtone_started", "ringtone_failed", "ringtone_stopped", "ringtone_suppressed", "answer_attempted", "answer_failed"} {
+	for _, s := range []string{"warning_attempted", "warning_completed", "warning_failed", "auto_answer_canceled", "ui_displayed", "ui_hidden", "ui_failed", "ringtone_attempted", "ringtone_started", "ringtone_failed", "ringtone_stopped", "ringtone_suppressed", "answer_attempted", "answer_audio_started", "answer_audio_finished", "answer_failed"} {
 		valid = valid || e.Stage == s
 	}
 	if receipt && e.Stage == "browser_acknowledged" {

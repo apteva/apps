@@ -129,7 +129,10 @@ export interface AnswerRequest { destination_id?: string; rejoin?: boolean; auto
 export class TelephonyOfferExpiredError extends Error {
   readonly code = "offer_expired";
   readonly status = 409;
-  constructor() { super("Call offer expired"); this.name = "TelephonyOfferExpiredError"; }
+  constructor(readonly requestId?: string, readonly clientRequestId?: string) {
+    super("Call offer expired");
+    this.name = "TelephonyOfferExpiredError";
+  }
 }
 export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | "peer_kind" | "answerable" | "routing_waiting" | "ring_offers">): boolean {
   return call.direction === "inbound" && call.status === "pending" && call.answerable !== false && !call.routing_waiting &&
@@ -324,17 +327,21 @@ export class TelephonyClient {
     return this.session(await this.mediaPost(this.path("/softphone/place"), request), undefined, "media", started);
   }
 
-  async answer(id: string, request: AnswerRequest = {}): Promise<CallSession> {
+  async answer(id: string, request: AnswerRequest = {}, requestID?: string): Promise<CallSession> {
     this.cancelNetworkChecks();
     const started = leaseClock();
     try {
-      return this.session(await this.mediaPost(this.path(`/softphone/answer/${callID(id)}`), request), id, "media", started);
+      const init = requestID ? { headers: { "X-Request-ID": requestID } } : undefined;
+      return this.session(await this.mediaPost(this.path(`/softphone/answer/${callID(id)}`), request, init), id, "media", started);
     } catch (error) {
       const response = error as { status?: number; body?: string };
       if (response.status === 409 && typeof response.body === "string") {
         let payload: { code?: string } | undefined;
         try { payload = JSON.parse(response.body); } catch { /* Other 409 responses retain their original error. */ }
-        if (payload?.code === "offer_expired") throw new TelephonyOfferExpiredError();
+        if (payload?.code === "offer_expired") {
+          const diagnostic = requestDiagnostic(error);
+          throw new TelephonyOfferExpiredError(diagnostic.requestId, diagnostic.clientRequestId);
+        }
       }
       throw error;
     }
@@ -346,8 +353,16 @@ export class TelephonyClient {
 
   /** Host UI/audio evidence; receipt ACKs never imply these stages. */
   reportOfferEvent(event:OfferBrowserEvent):Promise<{accepted:boolean}>{
-    const record={...event,event_id:event.event_id??diagnosticID(),occurred_at:event.occurred_at??new Date().toISOString()};
-    return boundedMediaRequest(signal=>this.post(this.path("/softphone/telemetry"),{browser_tab_id:this.browserTabId,browser_session_id:this.browserSessionId,events:[record],...(this.latestWatch?{watch:this.latestWatch}:{})},{signal}));
+    return this.reportOfferEvents([event]);
+  }
+  reportOfferEvents(events: OfferBrowserEvent[]): Promise<{accepted:boolean}> {
+    const records = events.map(event => ({
+      ...event, event_id: event.event_id ?? diagnosticID(), occurred_at: event.occurred_at ?? new Date().toISOString(),
+    }));
+    return boundedMediaRequest(signal => this.post(this.path("/softphone/telemetry"), {
+      browser_tab_id: this.browserTabId, browser_session_id: this.browserSessionId, events: records,
+      ...(this.latestWatch ? { watch: this.latestWatch } : {}),
+    }, { signal }));
   }
   offerDiagnostics(id:string):Promise<Record<string,unknown>>{return this.get(this.path(`/softphone/offer-telemetry/${callID(id)}`));}
   getWatchDiagnostics():Readonly<CallWatchDiagnostics>|undefined{return this.latestWatch?Object.freeze({...this.latestWatch,last_failure:this.latestWatch.last_failure?{...this.latestWatch.last_failure}:undefined}):undefined;}
