@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.5
+version: 0.24.6
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -127,6 +127,8 @@ provides:
     - { name: account_provider_sync_update, description: "Set provider synchronization to off, managed_only, or explicitly opted-in full_history without changing publishing access." }
     - { name: account_audience_capabilities, description: "Optional account audience capabilities; no provider calls." }
     - { name: account_membership_levels, description: "Optional cached tier discovery; refresh=true queries the existing integration connection." }
+    - { name: account_reconnect,          description: "Reauthorize the same native account on its existing Social connection." }
+    - { name: account_reconnect_status,   description: "Check or cancel reconnect and verify supported inbox access." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Revoke a social account." }
     - { name: post_create,                description: "Create with required explicit mode=draft|schedule|publish. Drafts are optional; direct scheduling and publishing remain first-class. Missing mode never publishes." }
@@ -231,7 +233,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.5
+    ref: social/v0.24.6
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -920,6 +922,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAccountProviderSyncUpdate,
 		},
 		{
+			Name:        "account_reconnect",
+			Description: "Start verified OAuth for the existing connection of a native Social account. Open authorize_url in a browser, then call account_reconnect_status.",
+			InputSchema: schemaObject(map[string]any{"social_account_id": map[string]any{"type": "integer"}}, []string{"social_account_id"}),
+			Handler:     a.toolAccountReconnect,
+		},
+		{
+			Name:        "account_reconnect_status",
+			Description: "Check or cancel an existing reconnect. After the original account is authorized, verify supported inbox access.",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_id": map[string]any{"type": "integer"},
+				"reconnect_id":      map[string]any{"type": "string"},
+				"cancel":            map[string]any{"type": "boolean"},
+			}, []string{"social_account_id", "reconnect_id"}),
+			Handler: a.toolAccountReconnectStatus,
+		},
+		{
 			Name: "account_check",
 			Description: "Check that a connected social account still works by calling the cheapest authenticated read endpoint for its platform. " +
 				"For Facebook/Instagram, also verifies that the selected page/IG account is still accessible and refreshes the stored page token when available. " +
@@ -1561,6 +1579,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	displayName, _ := args["name"].(string)
 	avatar := ""
 	pageCredsJSON := ""
+	nativeIdentity := ""
 	defaultDestination, defaultDestinationName := "", ""
 	if def.Platform == "pinterest" && pageID != "" {
 		selected, e := findDestination(ctx, destinationAccount{Platform: row.platform, Provider: "native", ConnID: row.connectionID}, pageID)
@@ -1615,6 +1634,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		}
 		if profile != nil {
 			avatar = profile.Avatar
+			nativeIdentity = profile.Identity
 		}
 	}
 	if displayName == "" {
@@ -1698,6 +1718,9 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if _, err := tx.Exec(`DELETE FROM inbox_cursors WHERE social_account_id=?`, existingID); err != nil {
 			return nil, err
 		}
+		if err := rememberReconnectIdentity(tx, existingID, pid, def.Platform, nativeIdentity); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -1725,6 +1748,9 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		}
 	}
 	if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
+		return nil, err
+	}
+	if err := rememberReconnectIdentity(tx, id, pid, def.Platform, nativeIdentity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1763,7 +1789,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	             COALESCE(last_check_error,''), COALESCE(last_check_details,''),
 	             COALESCE(provider_slug,'native'), COALESCE(provider_account_id,''),
 	             COALESCE(provider_profile_id,''), COALESCE(capabilities,''),
-	             COALESCE(provider_import_mode,'managed_only'),default_destination_id,default_destination_name,account_kind
+	             COALESCE(provider_import_mode,'managed_only'),default_destination_id,default_destination_name,account_kind,
+	             COALESCE((SELECT cursor FROM inbox_cursors c WHERE c.social_account_id=social_accounts.id AND c.kind='coverage'),'not_synced')
 	      FROM social_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -1789,14 +1816,14 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, connID, profID                                      int64
-			platform, externalID, name, avatar, status, createdAt   string
-			checkAt, checkStatus, checkError, checkDetails          string
-			providerSlug, providerAccountID, providerProfileID      string
-			capabilitiesRaw, providerImportMode                     string
-			defaultDestination, defaultDestinationName, accountKind string
+			id, connID, profID                                                     int64
+			platform, externalID, name, avatar, status, createdAt                  string
+			checkAt, checkStatus, checkError, checkDetails                         string
+			providerSlug, providerAccountID, providerProfileID                     string
+			capabilitiesRaw, providerImportMode                                    string
+			defaultDestination, defaultDestinationName, accountKind, inboxCoverage string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw, &providerImportMode, &defaultDestination, &defaultDestinationName, &accountKind); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw, &providerImportMode, &defaultDestination, &defaultDestinationName, &accountKind, &inboxCoverage); err != nil {
 			continue
 		}
 		var details any
@@ -1825,6 +1852,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"profile_id":               profID,
 			"last_check_at":            checkAt,
 			"last_check_status":        checkStatus,
+			"inbox_coverage":           inboxCoverage,
+			"reconnect_supported":      supportsAccountReconnect(platform, providerSlug, status, connID),
 			"last_check_error":         checkError,
 			"last_check_details":       details,
 			"provider_slug":            providerSlug,
@@ -1966,6 +1995,9 @@ func (a *App) checkAccount(ctx *sdk.AppCtx, pid string, accountID int64) account
 		result.Error = ""
 		result.Details["tool"] = def.ProfileTool
 		if profile := profileFromToolData(out.Data, def); profile != nil {
+			if externalID == "" || externalID == profile.Identity || platform == "pinterest" {
+				_ = rememberReconnectIdentity(ctx.AppDB(), accountID, pid, platform, profile.Identity)
+			}
 			name := strings.TrimSpace(profile.Name)
 			avatar := strings.TrimSpace(profile.Avatar)
 			if avatar != "" {
@@ -10217,6 +10249,14 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "reconnect" {
+		a.handleAccountReconnect(w, r, id, false)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "reconnect" && parts[2] == "status" {
+		a.handleAccountReconnect(w, r, id, true)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "oauth_status" && r.Method == http.MethodGet {
 		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
 		row, err := a.getPending(id)
@@ -11033,8 +11073,9 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 }
 
 type profileEntry struct {
-	Name   string
-	Avatar string
+	Name     string
+	Avatar   string
+	Identity string
 }
 
 func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*profileEntry, error) {
@@ -11075,8 +11116,9 @@ func profileFromToolData(data []byte, def platformDef) *profileEntry {
 		}
 	}
 	return &profileEntry{
-		Name:   toString(walkPath(raw, def.ProfileNameField)),
-		Avatar: toString(walkPath(raw, def.ProfileAvatarField)),
+		Name:     toString(walkPath(raw, def.ProfileNameField)),
+		Avatar:   toString(walkPath(raw, def.ProfileAvatarField)),
+		Identity: reconnectIdentityFromProfile(data, def.Platform),
 	}
 }
 

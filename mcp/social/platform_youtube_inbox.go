@@ -38,6 +38,7 @@ type youtubeInboxCreds struct {
 }
 
 type youtubeSyncReport struct {
+	CommentsRead   bool     `json:"comments_read"`
 	NewComments    int      `json:"new_comments"`
 	ThreadsRead    int      `json:"threads_read"`
 	RepliesFetched int      `json:"replies_fetched"`
@@ -114,7 +115,7 @@ func youtubeAPIError(tool string, res *sdk.ExecuteResult, err error) error {
 	case res != nil && res.Status == 404 && strings.Contains(body, "tool not found"):
 		return errors.New(youtubeErrPrefixCat + "this platform's YouTube integration has no " + tool + " tool yet; update the platform")
 	case reason == "insufficientPermissions" || strings.Contains(body, "access_token_scope_insufficient") || (res != nil && res.Status == 401):
-		return errors.New(youtubeErrPrefixPerm + "reconnect this YouTube channel in Integrations to grant the missing access")
+		return errors.New(youtubeErrPrefixPerm + "reconnect this YouTube channel from its Social account card to grant the missing access")
 	case reason == "quotaExceeded" || reason == "rateLimitExceeded" || reason == "dailyLimitExceeded":
 		return errors.New(youtubeErrPrefixQuota + "YouTube API quota is used up; sync resumes later")
 	case reason != "":
@@ -205,6 +206,7 @@ func syncYouTubeAccount(ctx *sdk.AppCtx, pid string, accountID int64, scheduled 
 			report.Warnings = append(report.Warnings, youtubeSyncWarning(ctx, accountID, err))
 			break
 		}
+		report.CommentsRead = true
 		reachedSeen := false
 		for _, thread := range threads {
 			published := youtubeTime(thread.Snippet.TopLevelComment.Snippet.PublishedAt)
@@ -290,13 +292,25 @@ func listYouTubeThreads(ctx *sdk.AppCtx, creds *youtubeInboxCreds, token string)
 		return nil, "", youtubeAPIError("list_channel_comment_threads", res, err)
 	}
 	var page struct {
-		Items         []youtubeThread `json:"items"`
+		Items         json.RawMessage `json:"items"`
 		NextPageToken string          `json:"nextPageToken"`
+		PageInfo      struct {
+			TotalResults *int `json:"totalResults"`
+		} `json:"pageInfo"`
 	}
 	if err := json.Unmarshal(res.Data, &page); err != nil {
 		return nil, "", fmt.Errorf("decode YouTube comment threads: %w", err)
 	}
-	return page.Items, page.NextPageToken, nil
+	if len(page.Items) == 0 && (page.PageInfo.TotalResults == nil || *page.PageInfo.TotalResults != 0 || page.NextPageToken != "") {
+		return nil, "", errors.New("YouTube comment response did not include a result")
+	}
+	var threads []youtubeThread
+	if len(page.Items) > 0 {
+		if err := json.Unmarshal(page.Items, &threads); err != nil {
+			return nil, "", fmt.Errorf("decode YouTube comment items: %w", err)
+		}
+	}
+	return threads, page.NextPageToken, nil
 }
 
 // recordYouTubeThread saves the top-level comment and every reply.
