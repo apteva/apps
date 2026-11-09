@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"os"
@@ -313,12 +314,25 @@ func TestDecisionFailedSetupExpiryAndConnectedOccupancy(t *testing.T) {
 
 type decisionPlatform struct {
 	answerPlatform
-	invoked atomic.Int32
-	started chan struct{}
-	release chan struct{}
+	invoked  atomic.Int32
+	started  chan struct{}
+	release  chan struct{}
+	deadline chan time.Time
 }
 
 func (p *decisionPlatform) CallAppResult(app, tool string, args map[string]any, out any) error {
+	return p.CallAppResultContext(context.Background(), app, tool, args, out)
+}
+
+func (p *decisionPlatform) CallAppContext(context.Context, string, string, map[string]any) (json.RawMessage, error) {
+	return nil, errors.New("unexpected raw app call")
+}
+
+func (p *decisionPlatform) CallAppBatchContext(context.Context, string, []sdk.AppCall, sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
+	return nil, errors.New("unexpected app batch")
+}
+
+func (p *decisionPlatform) CallAppResultContext(ctx context.Context, app, tool string, args map[string]any, out any) error {
 	if app != "functions" || tool != "functions_invoke" {
 		return fmt.Errorf("unexpected %s/%s", app, tool)
 	}
@@ -332,8 +346,16 @@ func (p *decisionPlatform) CallAppResult(app, tool string, args map[string]any, 
 	if p.started != nil {
 		p.started <- struct{}{}
 	}
+	if p.deadline != nil {
+		deadline, _ := ctx.Deadline()
+		p.deadline <- deadline
+	}
 	if p.release != nil {
-		<-p.release
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	response, _ := json.Marshal(decisionResponse{DecisionID: request["decision_id"].(string), Action: "offer", DestinationID: "alice"})
 	raw, _ = json.Marshal(map[string]any{"status": "ok", "response": string(response)})
@@ -412,7 +434,7 @@ func TestDecisionWorkerAcceptsAndRecoversDelivery(t *testing.T) {
 	}
 	fresh := &App{}
 	for range 2 {
-		if e := fresh.runDecisionTick(context.Background(), ctx); e != nil {
+		if e := fresh.runDecisionDelivery(context.Background(), ctx); e != nil {
 			t.Fatal(e)
 		}
 	}

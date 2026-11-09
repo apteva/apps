@@ -164,8 +164,37 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		}
 		return time.Time{}
 	})
-	deadlines := routingDeadlineTracker{}
+	decisionDeadlines := routingDeadlineTracker{}
 	a.dispatcher = newRoutingDispatcher(func(project string) time.Time {
+		done, admissionErr := a.runtimeBegin(false)
+		if admissionErr != nil {
+			return time.Time{}
+		}
+		defer done()
+		scoped := ctx.WithProject(project)
+		if workCtx.Err() != nil {
+			return time.Time{}
+		}
+		if err := a.runDecisionTick(workCtx, scoped); err != nil {
+			ctx.Logger().Warn("routing dispatch", "project", project, "err", err)
+		}
+		if err := a.flushDecisionMarks(project); err != nil {
+			ctx.Logger().Warn("routing outcomes", "project", project, "err", err)
+		}
+		a.wakeRoutingDelivery(project)
+		var raw string
+		var revision int64
+		err := ctx.AppDB().QueryRow(`SELECT
+			COALESCE((SELECT MIN(CASE WHEN status='pending' AND not_before<>'' THEN MIN(not_before,deadline_at) ELSE deadline_at END)
+				FROM routing_decisions WHERE project_id=? AND status IN ('pending','running')),''),
+			COALESCE((SELECT revision FROM telephony_read_versions WHERE project_id=?),0)`, project, project).Scan(&raw, &revision)
+		if err != nil {
+			return time.Now().Add(time.Second)
+		}
+		return decisionDeadlines.next(project, raw, revision, time.Now())
+	})
+	deadlines := routingDeadlineTracker{}
+	a.deliveryDispatcher = newRoutingDispatcher(func(project string) time.Time {
 		done, admissionErr := a.runtimeBegin(false)
 		if admissionErr != nil {
 			return time.Time{}
@@ -177,10 +206,8 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		}
 		var before int64
 		_ = scoped.AppDB().QueryRow(`SELECT revision FROM telephony_read_versions WHERE project_id=?`, project).Scan(&before)
-		// These use the same atomic claims as periodic recovery, including when a
-		// periodic worker runs concurrently with an immediate wake.
-		if err := a.runDecisionTick(workCtx, scoped); err != nil {
-			ctx.Logger().Warn("routing dispatch", "project", project, "err", err)
+		if err := a.runDecisionDelivery(workCtx, scoped); err != nil {
+			ctx.Logger().Warn("routing decision delivery", "project", project, "err", err)
 		}
 		if err := a.runRingGroupTick(workCtx, scoped); err != nil {
 			ctx.Logger().Warn("ring dispatch", "project", project, "err", err)
@@ -201,15 +228,10 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		if err := scoped.AppDB().QueryRow(`SELECT revision FROM telephony_read_versions WHERE project_id=?`, project).Scan(&after); err == nil && after != before {
 			a.callChanges.notify(project)
 		}
-		a.dispatchMu.Lock()
-		if a.eventDispatcher != nil {
-			a.eventDispatcher.wake(project)
-		}
-		a.dispatchMu.Unlock()
-
+		a.wakeRoutingEvents(project)
 		var raw string
 		err := ctx.AppDB().QueryRow(`SELECT COALESCE(MIN(deadline),'') FROM (
-   SELECT CASE WHEN status='pending' AND not_before<>'' THEN MIN(not_before,deadline_at) ELSE deadline_at END AS deadline FROM routing_decisions WHERE project_id=? AND status IN ('pending','running')
+   SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') AS deadline WHERE EXISTS(SELECT 1 FROM routing_decisions WHERE project_id=? AND applied=0 AND status NOT IN ('pending','running'))
    UNION ALL SELECT next_attempt_at FROM routing_effects WHERE project_id=? AND status='pending'
    UNION ALL SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') FROM call_ring_runs WHERE project_id=? AND status IN ('ringing','exhausted')
    UNION ALL SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') FROM call_legs INDEXED BY idx_call_legs_active WHERE project_id=? AND status NOT IN ('finished','canceled')
@@ -230,12 +252,17 @@ func (a *App) stopRoutingDispatcher() {
 		a.dispatchCancel = nil
 	}
 	d := a.dispatcher
+	delivery := a.deliveryDispatcher
 	events := a.eventDispatcher
 	a.dispatcher = nil
+	a.deliveryDispatcher = nil
 	a.eventDispatcher = nil
 	a.dispatchMu.Unlock()
 	if d != nil {
 		d.close()
+	}
+	if delivery != nil {
+		delivery.close()
 	}
 	if events != nil {
 		events.close()
@@ -250,6 +277,23 @@ func (a *App) wakeRouting(project string) {
 	}
 	a.dispatchMu.Unlock()
 }
+
+// Wake carrier work only after due function requests have been admitted.
+func (a *App) wakeRoutingDelivery(project string) bool {
+	a.wakeRoutingEvents(project)
+	a.dispatchMu.Lock()
+	defer a.dispatchMu.Unlock()
+	return a.deliveryDispatcher != nil && a.deliveryDispatcher.wake(project)
+}
+
+func (a *App) wakeRoutingEvents(project string) {
+	a.dispatchMu.Lock()
+	defer a.dispatchMu.Unlock()
+	if a.eventDispatcher != nil {
+		a.eventDispatcher.wake(project)
+	}
+}
+
 func (a *App) routingCommitted(project string) { a.callChanges.notify(project); a.wakeRouting(project) }
 func (c *callsDB) committed(project string) {
 	if c.afterCommit != nil {
@@ -298,6 +342,15 @@ func (a *App) runRoutingReconciliation(c context.Context, ctx *sdk.AppCtx) error
 		return nil
 	}
 	if err := a.runDecisionTick(c, ctx); err != nil {
+		return err
+	}
+	if err := a.flushDecisionMarks(ctx.CurrentProject()); err != nil {
+		return err
+	}
+	if a.wakeRoutingDelivery(ctx.CurrentProject()) {
+		return nil
+	}
+	if err := a.runDecisionDelivery(c, ctx); err != nil {
 		return err
 	}
 	if err := a.runRingGroupTick(c, ctx); err != nil {

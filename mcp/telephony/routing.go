@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -2923,14 +2922,48 @@ func (a *App) snapshotRoutingReferences(project string, def *routingDefinition) 
 	return nil
 }
 
-var routingCallLocks [128]sync.Mutex
+type routingCallLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var routingCallLocks = struct {
+	sync.Mutex
+	byID map[string]*routingCallLock
+}{byID: make(map[string]*routingCallLock)}
 
 func lockRoutingCall(id string) func() {
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(id))
-	lock := &routingCallLocks[hash.Sum32()%uint32(len(routingCallLocks))]
-	lock.Lock()
-	return lock.Unlock
+	return acquireRoutingCall(id, true)
+}
+
+// Slow carrier work on one call must never hold the lock for another call.
+func acquireRoutingCall(id string, wait bool) func() {
+	routingCallLocks.Lock()
+	lock := routingCallLocks.byID[id]
+	if lock == nil {
+		lock = &routingCallLock{}
+		routingCallLocks.byID[id] = lock
+	}
+	lock.refs++
+	routingCallLocks.Unlock()
+	release := func() {
+		routingCallLocks.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(routingCallLocks.byID, id)
+		}
+		routingCallLocks.Unlock()
+	}
+	if wait {
+		lock.mu.Lock()
+	} else if !lock.mu.TryLock() {
+		release()
+		return nil
+	}
+	return func() {
+		lock.mu.Unlock()
+		release()
+	}
 }
 
 // Capture legacy dependencies once at upgrade. Historical values before the
