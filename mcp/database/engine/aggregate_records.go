@@ -22,11 +22,12 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 	// Keep typed accumulators while scanning; format portable decimal strings
 	// once per output group, instead of allocating them for every input row.
 	type metricState struct {
-		count   int64
-		sum     float64
-		integer int64
-		value   any
-		seen    map[any]struct{} // count_distinct
+		count     int64
+		sum       float64
+		integer   int64
+		value     any
+		seen      map[any]struct{} // count_distinct
+		mergeSlot int
 	}
 	type groupState struct {
 		row     Record
@@ -100,15 +101,15 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 			fields = append(fields, m.Field)
 		}
 	}
-	if r.mergeComputedDistinct != nil {
-		fields = append(fields, c.PrimaryKey...)
-	}
 	if a != nil {
 		input.Where = a.pushed
 		fields = a.fields
 	}
 	vals := make([]any, len(r.GroupBy))
-	e := scan(input, fields, func(row Record, _ []byte) bool {
+	var storedBuckets []computedDistinctBucket
+	var storedResults []*metricState
+	e := scan(input, fields, func(row Record, physicalKey []byte) bool {
+		var ownedKey []byte
 		if a != nil {
 			if aggErr = a.enrich(row, cache); aggErr != nil {
 				return false
@@ -150,26 +151,25 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 					aggErr = Invalid("merge_distinct requires a direct aggregate on a computed collection")
 					return false
 				}
-				if state.seen == nil {
-					state.seen = map[any]struct{}{}
+				// The saved bucket count is from this same snapshot.
+				// An empty membership cannot change any union.
+				if row[m.Field] == "0" {
+					continue
 				}
-				err := r.mergeComputedDistinct(m.Field, row, func(identity []byte) bool {
-					if _, seen := state.seen[string(identity)]; seen {
-						return true
-					}
-					if aggErr = grow(80 + len(identity)); aggErr != nil {
+				if ownedKey == nil {
+					if aggErr = grow(32 + len(physicalKey)); aggErr != nil {
 						return false
 					}
-					state.seen[string(identity)] = struct{}{}
-					state.count++
-					return true
-				})
-				if err != nil {
-					aggErr = err
+					ownedKey = append([]byte(nil), physicalKey...)
 				}
-				if aggErr != nil {
+				if aggErr = grow(64); aggErr != nil {
 					return false
 				}
+				if state.mergeSlot == 0 {
+					state.mergeSlot = len(storedResults) + 1
+					storedResults = append(storedResults, state)
+				}
+				storedBuckets = append(storedBuckets, computedDistinctBucket{Key: ownedKey, Measure: m.Field, Result: state.mergeSlot - 1})
 				continue
 			}
 			v := row[m.Field]
@@ -231,6 +231,19 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 	}
 	if aggErr != nil {
 		return nil, aggErr
+	}
+	if len(storedBuckets) != 0 {
+		remaining := workLimit - workBytes
+		if remaining <= 0 {
+			return nil, fail("resource_limit", "no working memory left to merge computed memberships")
+		}
+		counts, err := r.mergeComputedDistinct(storedBuckets, len(storedResults), remaining)
+		if err != nil {
+			return nil, err
+		}
+		for i, state := range storedResults {
+			state.count = counts[i]
+		}
 	}
 	out := []Record{}
 	for _, group := range groups {

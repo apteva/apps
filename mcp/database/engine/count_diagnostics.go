@@ -15,6 +15,7 @@ type countDiagnostics struct {
 	admissionClass                          string
 	route                                   string
 	stats                                   *native.QueryStats
+	computedMerge                           *native.ComputedDistinctMergeStats
 	selectionProbes                         int64
 	selectionEntries                        int64
 	pageHeapBytes, scanBytes, pagePeakBytes int
@@ -90,6 +91,13 @@ func (d *countDiagnostics) report(tx transaction, c Collection, q Query, exists 
 	}
 	if d.route != "" {
 		out["strategy"] = d.route
+	}
+	if merge := d.computedMerge; merge != nil {
+		out["computedMerge"] = map[string]any{
+			"prefixes": merge.Prefixes, "seeks": merge.Seeks, "leaves": merge.Leaves,
+			"identities": merge.Identities, "singletonResults": merge.SingletonResults,
+			"peakMemoryBytes": merge.PeakMemoryBytes, "executionMs": milliseconds(merge.Duration),
+		}
 	}
 	if s := d.stats; s != nil {
 		out["planSource"] = "execution"

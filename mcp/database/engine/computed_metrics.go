@@ -286,6 +286,9 @@ func (b *aptevaBackend) runComputedBuilds(ctx context.Context) {
 				b.builds.step.Lock()
 				if _, failed := b.builds.failures.Load(name); !failed {
 					status, err := b.db.AdvanceComputedCollection(ctx, nativeCollectionName(name), 256)
+					if err == nil && status.Ready {
+						err = b.finalizeComputedIndexes(ctx, name)
+					}
 					switch {
 					case err == nil && !status.Ready:
 						pending = append(pending, name)
@@ -300,18 +303,45 @@ func (b *aptevaBackend) runComputedBuilds(ctx context.Context) {
 	}
 }
 
-func (b *aptevaBackend) describeComputedBuild(c Collection) (*ComputedBuild, error) {
-	b.builds.step.Lock()
-	defer b.builds.step.Unlock()
+// Runs under builds.step. Reload the schema after taking that lock so a
+// scheduled build cannot reconcile an older declaration after app DDL.
+func (b *aptevaBackend) finalizeComputedIndexes(ctx context.Context, name string) error {
+	data, found, err := b.db.Find(nativeSchemaKey(name), nil)
+	if err != nil || !found {
+		return err
+	}
+	var c Collection
+	if err = decode(data, &c); err != nil {
+		return err
+	}
+	if !c.onlineComputed() {
+		return nil
+	}
+	h, err := b.db.OpenCollection(nativeCollectionName(name))
+	if err != nil {
+		return err
+	}
+	if err = reconcileNativeIndexes(ctx, h, c); err != nil {
+		return err
+	}
+	return requireComputedIndexes(h, c)
+}
+
+func (t *aptevaTx) describeComputedBuild(c Collection) (*ComputedBuild, error) {
+	b := t.backend
 	status, err := b.db.ComputedCollectionBuild(nativeCollectionName(c.Name))
 	if err != nil {
 		return nil, nativeError(err)
 	}
 	out := &ComputedBuild{State: "building", Scanned: map[string]uint64{}}
-	if status.Ready {
-		out.State = "ready"
-	} else if reason, ok := b.builds.failures.Load(c.Name); ok {
+	if reason, ok := b.builds.failures.Load(c.Name); ok {
 		out.State, out.Error = "failed", reason.(string)
+	} else if status.Ready {
+		if _, err := t.readCollection(c); err == nil {
+			out.State = "ready"
+		} else if !errors.Is(err, native.ErrComputedCollectionBuilding) {
+			return nil, nativeError(err)
+		}
 	}
 	for _, input := range c.ComputedCollection.Sources {
 		out.Scanned[input.Collection] = status.Scanned[nativeCollectionName(input.Collection)]

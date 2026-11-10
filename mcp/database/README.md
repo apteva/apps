@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.17.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.17.1. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.17.0.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.17.1.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -171,9 +171,10 @@ integer sum and exact distinct count over scalar fields.
 
 Creation registers the definition and returns while the build advances.
 `db_collection_describe` reports `computedBuild.state` (`building`,
-`ready`, or `failed`) and the scanned row count per input. Reads during
-the build return `collection_building`. The worker resumes committed
-progress when the database is reopened. Source writes continue between
+`ready`, or `failed`) and the scanned row count per input. Reads return
+`collection_building` until the primary and declared indexes are ready.
+The worker resumes committed progress and reconciles indexes when the
+database is reopened. Source writes continue between
 bounded chunks. A chunk whose aggregate overflows an integer fails before
 publication. As for ordinary computed collections, drop the view before
 dropping an input.
@@ -181,7 +182,10 @@ dropping an input.
 Filter by date and authorised dimensions in `db_aggregate`. Sum the stored
 counts and use `merge_distinct` for a stored distinct measure. It unions
 identities across the selected buckets in the same snapshot as the totals.
-`db_get` on a single bucket returns its saved distinct cardinality. The
+AptevaDB merges the selected memberships in bulk, with a separate exact
+set for each output group and metric. A single selected bucket uses its
+saved cardinality. Direct aggregates with `diagnostics: true` report
+merge time, memory, membership prefixes, seeks, leaves and identities. The
 merge can return a resource-limit error when its exact set exceeds the
 configured query budget. Summing a stored distinct field is rejected by
 the direct aggregate API. Use ordinary read batches to request multiple
