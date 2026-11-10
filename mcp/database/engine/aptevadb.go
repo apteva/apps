@@ -16,12 +16,13 @@ func nativeSchemaKey(name string) []byte      { return []byte("schema/" + name) 
 func nativeCollectionName(name string) string { return "records_" + name }
 
 type aptevaBackend struct {
-	db      *native.DB
-	mu      sync.Mutex
-	handles map[string]*native.Collection
-	fatal   error // Unpublished schema changes require recovery before any access.
-	options AptevaOptions
-	builds  computedBuildWorker
+	readInstance *byte
+	db           *native.DB
+	mu           sync.Mutex
+	handles      map[string]*native.Collection
+	fatal        error // Unpublished schema changes require recovery before any access.
+	options      AptevaOptions
+	builds       computedBuildWorker
 }
 type nativeRowKey struct{ collection, primary string }
 type nativeUniqueKey struct{ collection, index, tuple string }
@@ -50,7 +51,7 @@ func openAptevaDBWithOptions(path string, options AptevaOptions) (backend, error
 	if e != nil {
 		return nil, e
 	}
-	b := &aptevaBackend{db: db, handles: map[string]*native.Collection{}, options: options}
+	b := &aptevaBackend{readInstance: new(byte), db: db, handles: map[string]*native.Collection{}, options: options}
 	if e = b.recoverDDL(); e != nil {
 		return nil, errors.Join(e, db.Close())
 	}

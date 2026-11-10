@@ -1,8 +1,28 @@
 # Database
 
-Independent Apteva sidecar app, version 0.17.1. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.18.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.17.1.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.18.0.md) · [Realtime API](REALTIME.md)
+
+## Shared aggregate batches
+
+Set `aggregate_reuse_mode` or `DATABASE_AGGREGATE_REUSE_MODE` to `off`
+(default), `coalesce`, or `cache`. On AptevaDB, concurrent identical
+authorized aggregate-only batches can share one execution. Cache mode also
+retains successful results for 30 seconds, up to 32 MiB per Database
+process and 512 KiB per result. Matching requires the same resolved
+database, ordered query, and data revision. Writes, schema changes and
+computed-view publication change the revision.
+
+Each request keeps its own deadline. Shared work has a server deadline of
+60 seconds and is canceled when its last waiter leaves. Batch diagnostics
+report `reuse` as `executed`, `inflight`, or `cache` and
+`aggregateExecutions` as 1 or 0. Joiners report `coalescedWaitMs`;
+execution and queue timings describe the caller that registered the work.
+The initial path covers ordinary stored-collection aggregates, including
+computed distinct merges. Batches with lookups, timezone buckets, exists
+predicates, child diagnostics, or mixed operation types run normally.
+
 
 ## Working in this version
 

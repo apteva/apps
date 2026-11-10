@@ -449,3 +449,43 @@ func TestRelationalReadsNeedOnlyReadAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregateCacheRechecksAppAccess(t *testing.T) {
+	opts := engine.DefaultAptevaOptions()
+	opts.SyncMode = "os"
+	m, err := engine.OpenWithConfig(t.TempDir(), engine.ManagerOptions{Apteva: &opts, AggregateReuseMode: "cache"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	a := &App{manager: m}
+	operator := &sdk.Caller{ProjectID: "p", AgentID: 1, DefaultEffect: "allow"}
+	client := &sdk.Caller{ProjectID: "p", AppInstallID: 7, AppName: "reporter", DefaultEffect: "allow"}
+	must := func(c *sdk.Caller, op string, args map[string]any) any {
+		t.Helper()
+		value, err := invoke(a, c, op, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	must(operator, "database_create", map[string]any{"database": "d", "adapter": "aptevadb"})
+	must(operator, "collection_create", map[string]any{"database": "d", "collection": "facts", "fields": []any{map[string]any{"name": "id", "type": "text"}}})
+	grant := map[string]any{"database": "d", "app": "reporter"}
+	must(operator, "access_grant", map[string]any{"database": "d", "app": "reporter", "access": "read"})
+	query := map[string]any{"database": "d", "scope": "project", "diagnostics": true, "operations": []any{
+		map[string]any{"op": "aggregate", "args": map[string]any{"collection": "facts", "metrics": []any{
+			map[string]any{"name": "n", "op": "count"},
+		}}},
+	}}
+	must(operator, "batch", query)
+	hit := must(client, "batch", query).(map[string]any)
+	if hit["diagnostics"].(map[string]any)["reuse"] != "cache" {
+		t.Fatal(hit)
+	}
+	must(operator, "access_revoke", grant)
+	var denied *engine.Error
+	if _, err := invoke(a, client, "batch", query); !errors.As(err, &denied) || denied.Code != "permission_denied" {
+		t.Fatalf("revoked app read a warm result: %v", err)
+	}
+}
