@@ -40,6 +40,11 @@ func (s *schemaCache) clear() { s.mu.Lock(); s.collections = nil; s.mu.Unlock() 
 func cloneCollection(c Collection) Collection {
 	c.Fields = append([]Field(nil), c.Fields...)
 	c.PrimaryKey = append([]string(nil), c.PrimaryKey...)
+	if c.ComputedCollection != nil {
+		var definition ComputedCollectionDefinition
+		_ = decode(marshal(c.ComputedCollection), &definition)
+		c.ComputedCollection = &definition
+	}
 	if c.Indexes != nil {
 		indexes := make([]Index, len(c.Indexes))
 		copy(indexes, c.Indexes)

@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.15.4. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.16.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.15.4.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.16.0.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -95,6 +95,45 @@ bun run scripts/build-panels.ts --app database
 ## Realtime
 
 AptevaDB supports opt-in native capture, resumable `db_changes` polls and `POST /realtime/watch` SSE. The dashboard can enable realtime and refresh the selected collection and submitted aggregates after commits. SQLite/Pebble capture is a later phase. See [API, permissions and limits](REALTIME.md) and [performance checks](benchmarks/REALTIME.md).
+
+## Computed collections
+
+On AptevaDB, use `db_collection_create` with a `computedCollection` definition
+in place of `fields` and `primaryKey`. For example:
+
+```json
+{
+  "database": "reporting",
+  "collection": "sales_by_day_centre",
+  "computedCollection": {
+    "source": "sales",
+    "where": {"field": "paid", "op": "eq", "value": true},
+    "groupBy": ["day", "centre_id"],
+    "metrics": [
+      {"name": "sales", "op": "count"},
+      {"name": "revenue_cents", "op": "sum", "field": "amount_cents"}
+    ]
+  }
+}
+```
+
+The source must be an ordinary collection in the same database. A projection
+can use `select` and must retain every source primary-key field. Omit both
+`select` and `groupBy` to retain all declared source fields. Filters accept
+conjunctions of scalar comparisons on stored source fields. A rollup uses 1–8 non-null
+scalar group fields as its primary key and 1–64 metrics. `count` with a field
+counts non-null values. `sum` requires a non-null integer source field.
+Exact distinct counts, joins, and per-metric filters remain available in
+read-time aggregation.
+
+Use ordinary `get`, `find`, `count`, `aggregate`, indexes, and read batches.
+`collection_describe` returns the inferred schema and definition. Computed
+records expose their declared fields without row timestamps or write versions.
+Creation and drop use the existing `database.manage` permission. A repeated
+identical definition is idempotent. Drop dependents before dropping a source.
+Backfill is synchronous and bounded by AptevaDB's 256 MiB staging limit.
+A failed backfill publishes no collection. Source changes maintain the
+computed rows atomically, and a rollup overflow aborts the source write.
 
 ## Example: multiple databases and collections
 

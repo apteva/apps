@@ -195,7 +195,7 @@ func (t *aptevaTx) find(c Collection, q Query, limit int) ([]Record, error) {
 		return nil, fail("query_too_expensive", "query requires a selective index")
 	}
 	evaluate := hasExists(q.Where)
-	if len(t.pending) > 0 || plan(c, q).Sort {
+	if len(t.pending) > 0 || c.computedGroup() || plan(c, q).Sort {
 		// Project before retaining a bounded top page; do not keep a second
 		// native heap of complete documents alongside the adapter's results.
 		return t.findPending(c, q, limit)

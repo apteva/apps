@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.15.4
+version: 0.16.0
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -33,7 +33,7 @@ provides:
     - {name: db_database_describe, description: Describe a database.}
     - {name: db_database_drop, description: Delete a database with explicit confirmation.}
     - {name: db_collections_list, description: List collections in a database.}
-    - {name: db_collection_create, description: Create a typed collection.}
+    - {name: db_collection_create, description: Create a typed or maintained computed collection.}
     - {name: db_collection_describe, description: Describe a collection schema.}
     - {name: db_collection_drop, description: Delete a collection with explicit confirmation.}
     - {name: db_indexes_list, description: List generic indexes.}
@@ -66,7 +66,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.15.4, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.16.0, entry: mcp/database}
   port: 8080
   health_check: /health
 db:

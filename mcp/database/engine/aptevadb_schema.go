@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,7 +42,20 @@ func (t *aptevaTx) stageDDL(before, after *Collection) error {
 	return nil
 }
 func (t *aptevaTx) createCollection(c Collection) error { return t.stageDDL(nil, &c) }
-func (t *aptevaTx) dropCollection(c Collection) error   { return t.stageDDL(&c, nil) }
+func (t *aptevaTx) dropCollection(c Collection) error {
+	if c.ComputedCollection == nil {
+		collections, err := t.collections()
+		if err != nil {
+			return err
+		}
+		for _, target := range collections {
+			if target.ComputedCollection != nil && target.ComputedCollection.Source == c.Name {
+				return fail("schema_conflict", "drop dependent computed collections first")
+			}
+		}
+	}
+	return t.stageDDL(&c, nil)
+}
 
 // nativeIndexBuildLimit is MaxNativeIndexBuildRecords; tests lower it.
 var nativeIndexBuildLimit int64 = MaxNativeIndexBuildRecords
@@ -117,28 +131,42 @@ func (b *aptevaBackend) commitDDL(ctx context.Context, intent nativeDDL) error {
 	}
 	e := b.reconcileSchema(ctx, intent.Before, intent.After)
 	if e != nil {
-		if health := b.db.Health(); health != nil {
-			return nativeError(health)
-		}
 		// Native operations reject cancellation before mutation. Compensate reversible
 		// index/creation steps if a later step fails. A completed drop is finalized
 		// below with an uncancelled catalog commit rather than abandoned halfway.
-		if rollback := b.reconcileSchema(context.Background(), intent.After, intent.Before); rollback != nil {
-			return b.poison(errors.Join(nativeError(e), fmt.Errorf("native schema rollback: %w", rollback)))
+		if rollback := b.rollbackDDL(intent, e); rollback != nil {
+			return rollback
 		}
-		if clear := b.db.Delete([]byte(nativeIntentKey)); clear != nil {
-			return b.poison(errors.Join(nativeError(e), clear))
-		}
-		b.invalidateSchema()
 		return nativeError(e)
 	}
 	return b.publishSchema(intent)
 }
 func (b *aptevaBackend) finishDDL(ctx context.Context, intent nativeDDL) error {
 	if e := b.reconcileSchema(ctx, intent.Before, intent.After); e != nil {
+		if intent.Before == nil && intent.After != nil && intent.After.ComputedCollection != nil &&
+			(errors.Is(e, native.ErrComputedCollection) || errors.Is(e, native.ErrComputedCollectionLimit) ||
+				errors.Is(e, native.ErrKeySize) || errors.Is(e, native.ErrIndexValue)) {
+			// An interrupted backfill can fail again after restart. Roll
+			// back its intent instead of blocking access to the source.
+			return b.rollbackDDL(intent, e)
+		}
 		return nativeError(e)
 	}
 	return b.publishSchema(intent)
+}
+
+func (b *aptevaBackend) rollbackDDL(intent nativeDDL, cause error) error {
+	if health := b.db.Health(); health != nil {
+		return nativeError(health)
+	}
+	if rollback := b.reconcileSchema(context.Background(), intent.After, intent.Before); rollback != nil {
+		return b.poison(errors.Join(nativeError(cause), fmt.Errorf("native schema rollback: %w", rollback)))
+	}
+	if clear := b.db.Delete([]byte(nativeIntentKey)); clear != nil {
+		return b.poison(errors.Join(nativeError(cause), clear))
+	}
+	b.invalidateSchema()
+	return nil
 }
 func (b *aptevaBackend) publishSchema(intent nativeDDL) error {
 	batch := b.db.NewBatch()
@@ -173,7 +201,13 @@ func (b *aptevaBackend) reconcileSchema(ctx context.Context, previous, target *C
 		}
 		return e
 	}
-	c, e := b.db.Collection(nativeCollectionName(target.Name))
+	var c *native.Collection
+	var e error
+	if target.ComputedCollection != nil {
+		c, e = b.openComputedCollection(ctx, *target)
+	} else {
+		c, e = b.db.Collection(nativeCollectionName(target.Name))
+	}
 	if e != nil {
 		return e
 	}
@@ -197,4 +231,39 @@ func (b *aptevaBackend) reconcileSchema(ctx context.Context, previous, target *C
 		}
 	}
 	return nil
+}
+
+func (b *aptevaBackend) openComputedCollection(ctx context.Context, target Collection) (*native.Collection, error) {
+	source := target.ComputedCollection.Source
+	data, found, err := b.db.Find(nativeSchemaKey(source), nil)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fail("not_found", "computed collection source does not exist")
+	}
+	var schema Collection
+	if err = decode(data, &schema); err != nil {
+		return nil, err
+	}
+	pipeline, err := computedNativePipeline(schema, target)
+	if err != nil {
+		return nil, err
+	}
+	name, sourceName := nativeCollectionName(target.Name), nativeCollectionName(source)
+	c, err := b.db.OpenCollection(name)
+	if errors.Is(err, native.ErrNoSuchCollection) {
+		return b.db.CreateComputedCollection(ctx, name, sourceName, pipeline)
+	}
+	if err != nil {
+		return nil, err
+	}
+	info, err := c.ComputedCollection()
+	if err != nil {
+		return nil, err
+	}
+	if info == nil || info.Source != sourceName || !bytes.Equal(info.Pipeline, pipeline) {
+		return nil, fail("schema_conflict", "physical computed collection differs from its catalog")
+	}
+	return c, nil
 }

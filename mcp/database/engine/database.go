@@ -479,6 +479,9 @@ func isWrite(op string) bool {
 	return true
 }
 func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error) {
+	if r.ComputedCollection != nil && op != "collection_create" {
+		return nil, Invalid("computedCollection is supported by collection_create")
+	}
 	if r.Diagnostics && op != "count" && op != "batch" {
 		return nil, Invalid("diagnostics is supported by count and read batches")
 	}
@@ -533,7 +536,13 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		return executeQuery(tx, r)
 	}
 	if op == "collection_create" {
-		c, e := newCollection(r)
+		var c Collection
+		var e error
+		if r.ComputedCollection == nil {
+			c, e = newCollection(r)
+		} else {
+			c, e = newComputedCollection(tx, r)
+		}
 		if e != nil {
 			return nil, e
 		}
@@ -740,6 +749,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 	}
 }
 func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
+	if c.ComputedCollection != nil {
+		return nil, fail("read_only", "computed collections are maintained by their source")
+	}
 	if r.IfVersion < 0 {
 		return nil, Invalid("ifVersion must be positive")
 	}
