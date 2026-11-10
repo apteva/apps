@@ -14,12 +14,16 @@ type store struct {
 }
 type scanner interface{ Scan(...any) error }
 
-const suiteColumns = `id,name,description,environment,archived,created_at,updated_at`
+const suiteColumns = `id,name,description,environment,archived,created_at,updated_at,release_config`
 const checkColumns = `id,suite_id,name,kind,enabled,definition`
-const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,error,created_at,started_at,finished_at`
+const runColumns = `id,suite_id,suite_name,environment,status,trigger,passed,failed,error,created_at,started_at,finished_at,release_record,cancel_requested`
 
 func scanSuite(row scanner) (s Suite, err error) {
-	err = row.Scan(&s.ID, &s.Name, &s.Description, &s.Environment, &s.Archived, &s.CreatedAt, &s.UpdatedAt)
+	var raw string
+	err = row.Scan(&s.ID, &s.Name, &s.Description, &s.Environment, &s.Archived, &s.CreatedAt, &s.UpdatedAt, &raw)
+	if err == nil {
+		err = json.Unmarshal([]byte(raw), &s.Release)
+	}
 	return
 }
 func scanCheck(row scanner) (c Check, err error) {
@@ -31,7 +35,11 @@ func scanCheck(row scanner) (c Check, err error) {
 	return
 }
 func scanRun(row scanner) (r Run, err error) {
-	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt)
+	var raw string
+	err = row.Scan(&r.ID, &r.SuiteID, &r.SuiteName, &r.Environment, &r.Status, &r.Trigger, &r.Passed, &r.Failed, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &raw, &r.CancelRequested)
+	if err == nil {
+		err = json.Unmarshal([]byte(raw), &r.Release)
+	}
 	return
 }
 func outbox(tx *sql.Tx, project, topic string, payload any) error {
@@ -52,7 +60,9 @@ func changed(res sql.Result, err error) error {
 	return nil
 }
 func (s store) suites() ([]Suite, error) {
-	rows, err := s.db.Query(`SELECT `+suiteColumns+` FROM test_suites WHERE project_id=? AND archived=0 ORDER BY id DESC LIMIT 500`, s.project)
+	// The full OpenAPI document is fetched only when editing one suite.
+	columns := strings.Replace(suiteColumns, "release_config", "json_remove(release_config,'$.openapi')", 1)
+	rows, err := s.db.Query(`SELECT `+columns+` FROM test_suites WHERE project_id=? AND archived=0 ORDER BY id DESC LIMIT 500`, s.project)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +78,11 @@ func (s store) suites() ([]Suite, error) {
 	return items, rows.Err()
 }
 func (s store) saveSuite(v Suite) (Suite, error) {
+	if v.Release != nil {
+		if err := v.Release.validate(); err != nil {
+			return v, err
+		}
+	}
 	v.Name = strings.TrimSpace(v.Name)
 	if v.Name == "" || len(v.Name) > 200 || len(v.Description) > 5000 || len(v.Environment) > 200 {
 		return v, errors.New("name (1–200 characters), description (up to 5000), and environment (up to 200) required")
@@ -81,13 +96,13 @@ func (s store) saveSuite(v Suite) (Suite, error) {
 	}
 	defer tx.Rollback()
 	if v.ID == 0 {
-		res, e := tx.Exec(`INSERT INTO test_suites(project_id,name,description,environment,created_at,updated_at) VALUES(?,?,?,?,?,?)`, s.project, v.Name, v.Description, v.Environment, now(), now())
+		res, e := tx.Exec(`INSERT INTO test_suites(project_id,name,description,environment,created_at,updated_at,release_config) VALUES(?,?,?,?,?,?,?)`, s.project, v.Name, v.Description, v.Environment, now(), now(), encode(v.Release))
 		if e != nil {
 			return v, e
 		}
 		v.ID, err = res.LastInsertId()
 	} else {
-		err = changed(tx.Exec(`UPDATE test_suites SET name=?,description=?,environment=?,updated_at=? WHERE project_id=? AND id=? AND archived=0`, v.Name, v.Description, v.Environment, now(), s.project, v.ID))
+		err = changed(tx.Exec(`UPDATE test_suites SET name=?,description=?,environment=?,updated_at=?,release_config=? WHERE project_id=? AND id=? AND archived=0`, v.Name, v.Description, v.Environment, now(), encode(v.Release), s.project, v.ID))
 	}
 	if err != nil {
 		return v, err
@@ -144,8 +159,11 @@ func (s store) saveCheck(c Check) (Check, error) {
 		return c, err
 	}
 	defer tx.Rollback()
-	var id int64
-	if err = tx.QueryRow(`SELECT id FROM test_suites WHERE project_id=? AND id=? AND archived=0`, s.project, c.SuiteID).Scan(&id); err != nil {
+	suite, err := scanSuite(tx.QueryRow(`SELECT `+suiteColumns+` FROM test_suites WHERE project_id=? AND id=? AND archived=0`, s.project, c.SuiteID))
+	if err != nil {
+		return c, err
+	}
+	if err = validateScenarioBinding(c, suite.Release); err != nil {
 		return c, err
 	}
 	if c.ID == 0 {
@@ -187,6 +205,10 @@ func (s store) deleteCheck(id int64) error {
 	return tx.Commit()
 }
 func (s store) queue(suite int64, trigger, key string) (Run, error) {
+	return s.queueRelease(suite, trigger, key, QueueOptions{}, environmentDefinition{})
+}
+
+func (s store) queueRelease(suite int64, trigger, key string, options QueueOptions, fixture environmentDefinition) (Run, error) {
 	if len(key) > 200 {
 		return Run{}, errors.New("request_key exceeds 200 characters")
 	}
@@ -199,10 +221,7 @@ func (s store) queue(suite int64, trigger, key string) (Run, error) {
 	if key != "" {
 		old, e := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM test_runs WHERE project_id=? AND request_key=?`, s.project, key))
 		if e == nil {
-			if old.SuiteID != suite {
-				return Run{}, errors.New("request_key already used for another suite")
-			}
-			return old, nil
+			return old, validateRetry(old, suite, options)
 		}
 		if !errors.Is(e, sql.ErrNoRows) {
 			return Run{}, e
@@ -245,7 +264,35 @@ func (s store) queue(suite int64, trigger, key string) (Run, error) {
 		requestKey = key
 	}
 	r := Run{SuiteID: suite, SuiteName: v.Name, Environment: v.Environment, Status: "queued", Trigger: trigger, CreatedAt: now()}
-	res, err := tx.Exec(`INSERT INTO test_runs(project_id,suite_id,suite_name,environment,status,trigger,request_key,snapshot,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, s.project, suite, v.Name, v.Environment, r.Status, trigger, requestKey, encode(checks), r.CreatedAt)
+	for _, check := range checks {
+		if err = validateScenarioBinding(check, v.Release); err != nil {
+			return r, err
+		}
+	}
+	snapshot := releaseSnapshot{}
+	if v.Release != nil {
+		if !digestPattern.MatchString(options.CandidateDigest) {
+			return r, errors.New("release run requires a lowercase SHA-256 candidate_digest")
+		}
+		if err = checkFixture(fixture, v.Release); err != nil {
+			return r, err
+		}
+		r.Release = &ReleaseRecord{
+			CandidateDigest: options.CandidateDigest, SuiteRevision: suiteRevision(v, checks),
+			FixtureRevision: canonicalDigest(fixture.Spec),
+		}
+		if options.SuiteRevision != "" && options.SuiteRevision != r.Release.SuiteRevision ||
+			options.FixtureRevision != "" && options.FixtureRevision != r.Release.FixtureRevision {
+			return r, errors.New("suite or fixture revision does not match the release request")
+		}
+		if len(v.Release.OpenAPI) > 0 {
+			r.Release.OpenAPIDigest = canonicalDigest(v.Release.OpenAPI)
+		}
+		snapshot = releaseSnapshot{Config: v.Release, Fixture: fixture.Spec}
+	} else if options != (QueueOptions{}) {
+		return r, errors.New("candidate and revision options require a release suite")
+	}
+	res, err := tx.Exec(`INSERT INTO test_runs(project_id,suite_id,suite_name,environment,status,trigger,request_key,snapshot,created_at,release_record,fixture_spec) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, s.project, suite, v.Name, v.Environment, r.Status, trigger, requestKey, encode(checks), r.CreatedAt, encode(r.Release), encode(snapshot))
 	if err != nil {
 		return r, err
 	}
@@ -330,6 +377,13 @@ func (s store) finish(id int64, message string) error {
 	var passed, failed int
 	if err = tx.QueryRow(`SELECT COALESCE(sum(status='passed'),0),COALESCE(sum(status!='passed'),0) FROM test_results WHERE project_id=? AND run_id=?`, s.project, id).Scan(&passed, &failed); err != nil {
 		return err
+	}
+	var cancelled bool
+	if err = tx.QueryRow(`SELECT cancel_requested FROM test_runs WHERE project_id=? AND id=?`, s.project, id).Scan(&cancelled); err != nil {
+		return err
+	}
+	if cancelled {
+		message = "run cancelled"
 	}
 	status := "passed"
 	if failed > 0 || message != "" || passed == 0 {

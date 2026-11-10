@@ -1,20 +1,12 @@
 # Tests
 
-Apteva sidecar for project test suites, function and HTTP checks, durable run
-history, and a native Tests panel. Version 0.1.0 uses app-sdk v0.76.0.
+Apteva sidecar for project test suites, multi-step scenarios, durable run
+history, and a native Tests panel. Version 0.2.0 uses app-sdk v0.115.1.
 
-## Scope
-
-Tests owns suites, assertions, queued runs, results, and evidence. Functions
-executes the active handler through `PlatformAPI().CallAppResult`. Jobs can
-schedule `tests_run`. Tests has no dependency on server internals.
-
-This release supports **function and HTTP checks**. Browser/UI runners,
-repository-backed test imports from Code, pre-activation function version
-testing, and environment provisioning are future extensions. The suite's
-environment is a label, not an isolation boundary: each check specifies the
-actual function or endpoint it will exercise. Agent behavior evaluations
-remain in the separate Evals app.
+Standalone suites keep the original HTTP and Function checks. Scenario checks
+can chain steps and capture values. An isolated release suite binds an
+Environments definition and produces a verdict for an exact candidate.
+Agent behavior evaluations remain in the Evals app.
 
 ## Installation
 
@@ -77,6 +69,113 @@ send all fields and the complete definition. Disabling/deleting a check or
 archiving its suite does not alter already queued runs. Suite history remains
 queryable with `tests_runs_list` even after archive.
 
+## Isolated release suites
+
+Bind Environments 0.8.0 or newer in the Tests install. Set up an Environments
+definition with explicit `network_mode: block`, `integration_mode: mock`,
+selected app installs, and a 60–900 second TTL. Use seeds and synthetic fixtures
+to provision the runtime. Tests rejects live connections, managed MCP servers,
+and outbound allowlists for release suites. The runtime edge blocks managed
+outbound HTTP. Use trusted app code in this runtime.
+
+Create a suite with a `release` configuration. Use the definition's ID and
+`spec_version`, the complete set of pinned runtime app versions including
+dependencies, and a public Gateway route prefix.
+
+```json
+{
+  "name": "Items release suite",
+  "release": {
+    "environment_id": "env_items",
+    "environment_revision": 3,
+    "app_versions": {"api": "0.8.1", "items": "1.2.0"},
+    "gateway_app": "api",
+    "gateway_path": "/gw/items/v1",
+    "candidate_probe": {"app": "items", "tool": "items_loaded_digest", "path": "/digest"},
+    "read_tools": {"items": ["items_loaded_digest", "items_find"]},
+    "identities": {
+      "writer": {
+        "app": "api", "tool": "api_key_create",
+        "input": {"api_slug": "items", "name": "scenario"},
+        "path": "/secret", "header": "X-API-Key"
+      }
+    }
+  }
+}
+```
+
+The fixture loader may reference `{{candidate_digest}}` in seed inputs to
+resolve a content-addressed candidate. The probe must independently measure
+the artifacts and configuration loaded in the runtime. Tests compares that
+measurement before and after execution. When using Deploy, have the probe
+return the same artifact digest as `deploy_candidate_digest`. Keep the loader
+and probe under release policy control.
+
+Named identities resolve inside the runtime. Use `Authorization` with an
+optional `Bearer ` prefix, `X-API-Key`, or `Cookie`. Bearer identities require
+the server's runtime public authorization forwarding support. The runner
+fails if the runtime Gateway cannot confirm that forwarding. Use fixture-only
+credentials and read-only tools in the reviewed `read_tools` allowlist.
+
+Save a check with `kind: scenario` and a definition such as this one.
+
+```json
+{
+  "steps": [
+    {
+      "id": "create",
+      "kind": "http",
+      "method": "POST",
+      "path": "/items",
+      "identity": "writer",
+      "json": {"name": "Synthetic item"},
+      "assertions": [
+        {"path": "/status_code", "op": "equals", "value": 201},
+        {"path": "/json/id", "op": "exists"}
+      ],
+      "capture": {"item_id": "/json/id"}
+    },
+    {
+      "id": "read",
+      "kind": "http",
+      "path": "/items/{{item_id}}",
+      "identity": "writer",
+      "assertions": [{"path": "/json/name", "op": "equals", "value": "Synthetic item"}],
+      "evidence": ["/json/name"]
+    }
+  ]
+}
+```
+
+- Use `function` with a Function name and event, or `app_tool` with an
+  allowlisted app, tool and input. Release steps address runtime apps only.
+- Capture a JSON pointer with `capture`. A whole-field reference in JSON or
+  tool input preserves its type. Capture response headers using lowercase keys
+  such as `/headers/location`. An absolute Location must belong to the same
+  runtime Gateway. Redirects are returned without following.
+- Use `poll_every_ms` on GET, HEAD or read-tool steps. Use a step with an ID
+  and a `parallel` array of 2–4 leaves to start competing requests together.
+  Siblings read prior captures and publish their own captures after the group.
+- Use `response_schema` for an inline JSON Schema of the decoded HTTP response.
+  External schema references are disabled. Select safe fields for evidence with
+  JSON pointers. Scenario evidence records step status, duration, request ID,
+  assertion outcomes and selected values. Credential fields and resolved
+  credential values are redacted.
+- Optional `release.openapi` accepts an OpenAPI 3 JSON document. Coverage
+  matches observed HTTP method and path to operation IDs. Only successful
+  responses in passing scenarios with a response assertion or schema count.
+  A 204 may instead be followed by a state assertion. Missing operations fail
+  the release suite.
+
+Queue with `tests_run` and the candidate's SHA-256 digest. Use
+`tests_release_spec` to get the current suite and fixture revisions for a
+deployment policy. Pass those pins to `tests_run` to require a specific
+revision. The queued run freezes its definitions and fixture. Inspect it with
+`tests_run_get` or cancel it with `tests_run_cancel`. A release controller
+queries `tests_release_verdict` with `suite_id`, `candidate_digest`,
+`suite_revision` and `fixture_revision`. Completion events are useful wakeups.
+The stored verdict governs promotion.
+
 ## Assertions and evidence
 
 Paths are JSON pointers: `/response/items/0/id`, `/json/healthy`, `/body`,
@@ -133,12 +232,13 @@ cannot be switched to a different project.
 The SDK runner worker claims a queued run atomically, then executes checks
 sequentially. Limits: 50 checks per suite, 50 assertions per check, 100 pending
 runs per project, 256 KiB definitions/runner responses, 100–30,000 ms per check,
-and a five-minute suite deadline. Runs interrupted by a sidecar restart are
+and a five-minute suite deadline. Scenarios allow 24 leaves per check and a
+120-second check deadline. Release suites accept up to 1 MiB of configuration. Runs interrupted by a sidecar restart are
 marked failed, not replayed, since a check may have side effects. Queued runs
-resume after restart. This assumes one sidecar process per installation.
+resume after restart. Environment teardown is retried after interruption, with
+the platform TTL as a fallback. This assumes one sidecar process per installation.
 
-The SDK's app-call API has no cancellation argument. A local function-check
-timeout therefore **does not terminate the downstream function**. Its own
+A standalone function-check timeout does not terminate the downstream function. Its own
 Functions timeout still applies. Outstanding calls remain bounded to four
 per sidecar until they complete. Avoid using test checks for uncontrolled
 production writes. No automatic retries are performed on failing checks.
@@ -153,7 +253,8 @@ to internal addresses and should be enabled only for trusted projects.
 Check headers, request bodies, and response evidence are persisted in the app
 database and visible to authorized project users. Prefer dedicated test data
 and credentials. History is retained until operator-managed database cleanup;
-automatic retention and cancellation are not included in v0.1.
+automatic retention is operator-managed. Scenario evidence uses field selection
+and redaction, with legacy checks retaining their original evidence format.
 
 ## HTTP and UI
 

@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.15
-description: Isolated environments with reliable voice finalization evidence, bounded silent connections, and unpaused simulated callers.
+version: 0.8.0
+description: Isolated environments with deterministic fixtures, disposable runs, runtime app endpoints, and voice simulation.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -37,6 +37,7 @@ provides:
     - { name: environment_start, description: "Start a defined environment and execute its seed plan." }
     - { name: environment_stop, description: "Stop an environment and destroy its runtime." }
     - { name: environment_run_create, description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions." }
+    - { name: environment_run_endpoint, description: "Resolve a running environment app’s HTTP endpoint." }
     - { name: environment_run_get, description: "Get a run and its live runtime state." }
     - { name: environment_clock_get, description: "Get a run clock and advancement history." }
     - { name: environment_clock_advance, description: "Advance a manual run clock." }
@@ -76,7 +77,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.15, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.8.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

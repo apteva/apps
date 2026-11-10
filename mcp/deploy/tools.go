@@ -161,6 +161,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_candidate_digest", Handler: a.toolCandidateDigest,
+			Description: "Read the verified artifact SHA-256 of a succeeded build for release tests.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"build_id": map[string]any{"type": "integer"}}, "required": []string{"build_id"}},
+		},
+		{
 			Name: "deploy_build_cancel", Handler: a.toolBuildCancel,
 			Description: "Cancel a pending or running cloud build. Args: build_id.",
 			InputSchema: map[string]any{

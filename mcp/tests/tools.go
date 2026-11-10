@@ -19,24 +19,30 @@ func field(kind string) map[string]any { return map[string]any{"type": kind} }
 func (a *App) MCPTools() []sdk.Tool {
 	id := map[string]any{"type": "integer", "minimum": 1}
 	str := field("string")
+	releaseArgs := map[string]any{"suite_id": id, "candidate_digest": str, "suite_revision": str, "fixture_revision": str}
 	assertion := object(map[string]any{"path": map[string]any{"type": "string", "description": "JSON pointer into runner output; /response/total for functions, /status_code or /json/total for HTTP. Empty selects the whole output."}, "op": map[string]any{"type": "string", "enum": []string{"equals", "not_equals", "exists", "contains", "lt", "lte", "gt", "gte"}}, "value": map[string]any{}}, "path", "op")
 	definition := object(map[string]any{
 		"function": str, "event": map[string]any{}, "url": str, "method": str, "headers": map[string]any{"type": "object", "additionalProperties": str}, "body": str,
 		"timeout_ms": map[string]any{"type": "integer", "minimum": 100, "maximum": 30000, "default": 10000},
 		"assertions": map[string]any{"type": "array", "items": assertion, "minItems": 1, "maxItems": 50},
-	}, "assertions")
+		"steps":      map[string]any{"type": "array", "items": field("object")},
+	})
 	specs := []struct {
 		name, description string
 		schema            map[string]any
 	}{
+		{"tests_suite_get", "Get a suite including its frozen release configuration and OpenAPI contract.", object(map[string]any{"id": id}, "id")},
 		{"tests_suites_list", "List active suites in the current project.", object(map[string]any{})},
-		{"tests_suite_save", "Create (omit id) or replace a suite's name, description and environment label. Environment is descriptive; targets belong to each check.", object(map[string]any{"id": id, "name": str, "description": str, "environment": str}, "name")},
+		{"tests_suite_save", "Create (omit id) or replace a suite's name, description and environment label. Optional release configuration binds a pinned environment and candidate probe.", object(map[string]any{"id": id, "name": str, "description": str, "environment": str, "release": map[string]any{"type": []string{"object", "null"}}}, "name")},
 		{"tests_suite_archive", "Archive a suite. Existing queued runs and history remain.", object(map[string]any{"id": id}, "id")},
 		{"tests_checks_list", "List all enabled and disabled checks in a suite.", object(map[string]any{"suite_id": id}, "suite_id")},
-		{"tests_check_save", "Create (omit id) or fully replace a check. Function checks invoke the active version; HTTP checks do not follow redirects. Requires at least one assertion.", object(map[string]any{"id": id, "suite_id": id, "name": str, "kind": map[string]any{"type": "string", "enum": []string{"function", "http"}}, "enabled": map[string]any{"type": "boolean", "default": true}, "definition": definition}, "suite_id", "name", "kind", "definition")},
+		{"tests_check_save", "Create (omit id) or fully replace a check or scenario. Standalone Function checks invoke the active version; HTTP checks do not follow redirects. Requires at least one assertion.", object(map[string]any{"id": id, "suite_id": id, "name": str, "kind": map[string]any{"type": "string", "enum": []string{"function", "http", "scenario"}}, "enabled": map[string]any{"type": "boolean", "default": true}, "definition": definition}, "suite_id", "name", "kind", "definition")},
 		{"tests_check_delete", "Delete a check. Prior runs retain their immutable definitions and results.", object(map[string]any{"id": id}, "id")},
-		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str}, "suite_id")},
+		{"tests_run", "Queue a suite run. Returns immediately; poll tests_run_get. Optional request_key deduplicates retries. Jobs may call this tool with suite_id.", object(map[string]any{"suite_id": id, "request_key": str, "candidate_digest": str, "suite_revision": str, "fixture_revision": str}, "suite_id")},
 		{"tests_runs_list", "List the most recent 100 runs, optionally filtered by suite_id.", object(map[string]any{"suite_id": id})},
+		{"tests_run_cancel", "Cancel a queued or running test.", object(map[string]any{"id": id}, "id")},
+		{"tests_release_spec", "Resolve the current suite and fixture digests for release policy configuration.", object(map[string]any{"suite_id": id}, "suite_id")},
+		{"tests_release_verdict", "Verify a stored verdict for an exact candidate and pinned suite and fixture revisions.", object(releaseArgs, "suite_id", "candidate_digest", "suite_revision", "fixture_revision")},
 		{"tests_run_get", "Get a run's status, check snapshots, assertion outcomes and saved evidence.", object(map[string]any{"id": id}, "id")},
 	}
 	tools := make([]sdk.Tool, 0, len(specs))
@@ -60,17 +66,21 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		ID         int64  `json:"id"`
 		SuiteID    int64  `json:"suite_id"`
 		RequestKey string `json:"request_key"`
+		QueueOptions
 	}
-	if err := decodeArgs(args, &ids); err != nil {
+	if err := decodeArgsLimit(args, &ids, maxSuitePayload); err != nil {
 		return nil, err
 	}
 	switch name {
 	case "tests_suites_list":
 		v, e := s.suites()
 		return map[string]any{"suites": v}, e
+	case "tests_suite_get":
+		v, e := s.getSuite(ids.ID)
+		return map[string]any{"suite": v}, e
 	case "tests_suite_save":
 		var v Suite
-		if e := decodeArgs(args, &v); e != nil {
+		if e := decodeArgsLimit(args, &v, maxSuitePayload); e != nil {
 			return nil, e
 		}
 		v, e := s.saveSuite(v)
@@ -96,8 +106,15 @@ func (a *App) dispatch(ctx context.Context, app *sdk.AppCtx, name string, args m
 		} else if c := sdk.CallerFrom(ctx); c != nil && c.ToolCallID != "" {
 			key = "tool:" + c.ToolCallID
 		}
-		v, e := s.queue(ids.SuiteID, "tool", key)
+		v, e := a.queue(ctx, app, ids.SuiteID, "tool", key, ids.QueueOptions)
 		return map[string]any{"run": v}, e
+	case "tests_run_cancel":
+		v, e := s.cancel(ids.ID)
+		return map[string]any{"run": v}, e
+	case "tests_release_spec":
+		return a.releaseSpec(ctx, app, ids.SuiteID)
+	case "tests_release_verdict":
+		return s.verdict(ids.SuiteID, ids.QueueOptions)
 	case "tests_runs_list":
 		v, e := s.runs(ids.SuiteID)
 		return map[string]any{"runs": v}, e

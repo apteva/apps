@@ -8,6 +8,7 @@ import (
 )
 
 type genericTargetConfig struct {
+	TestsGate     *testsReleaseGate     `json:"tests_gate,omitempty"`
 	Connections   map[string]int64      `json:"connections,omitempty"`
 	Pipeline      *commandPipeline      `json:"pipeline,omitempty"`
 	Publisher     *integrationPublisher `json:"publisher,omitempty"`
@@ -114,6 +115,9 @@ func validateBuildDestination(d *Deployment, b *Build) error {
 }
 
 func validateGenericTarget(t genericTargetConfig) error {
+	if err := t.TestsGate.validate(); err != nil {
+		return err
+	}
 	if t.Pipeline != nil {
 		if len(t.Pipeline.Outputs) == 0 {
 			return errors.New("pipeline requires artifact outputs")

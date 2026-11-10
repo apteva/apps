@@ -206,6 +206,11 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Res
 	return
 }
 
+type appRunContext struct {
+	ctx     *sdk.AppCtx
+	release *releaseSession
+}
+
 func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	if app.CurrentProject() == "" {
 		return nil
@@ -220,24 +225,80 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	go watchCancellation(runCtx, cancel, s, r.ID)
+	env := environmentClient{app.PlatformAPI()}
+	services := &appRunContext{ctx: app}
 	var message string
+	if r.Release != nil {
+		services.release, err = a.prepareRelease(runCtx, s, &r, env)
+		if err != nil {
+			message = err.Error()
+		}
+	}
+	covered := map[string]bool{}
 	for _, c := range r.Checks {
+		if message != "" {
+			break
+		}
 		if runCtx.Err() != nil {
 			message = runCtx.Err().Error()
 			break
 		}
-		result := a.execute(runCtx, app, c)
+		var result Result
+		if c.Kind == "scenario" {
+			result = a.runScenario(runCtx, c, services, covered)
+		} else {
+			result = a.execute(runCtx, app, c)
+		}
 		if err = s.saveResult(r.ID, result); err != nil {
 			message = "could not persist result: " + err.Error()
 			break
 		}
 	}
+	if runCtx.Err() != nil && message == "" {
+		message = runCtx.Err().Error()
+	}
+	if r.Release != nil && r.Release.EnvironmentRun != "" {
+		if services.release != nil {
+			services.release.setCoverage(r.Release, covered)
+			if message == "" {
+				if err = services.release.verifyCandidate(runCtx, r.Release); err != nil {
+					message = err.Error()
+				} else if len(r.Release.Missing) > 0 {
+					message = fmt.Sprintf("%d required OpenAPI operations have no passing success case", len(r.Release.Missing))
+				}
+			}
+		}
+		cleanup := stopEnvironment(ctx, env, r.Release.EnvironmentRun) != nil
+		if cleanup && message == "" {
+			message = "environment cleanup pending"
+		}
+		if err = s.saveReleaseRecord(r.ID, r.Release, cleanup); err != nil && message == "" {
+			message = "could not persist release evidence"
+		}
+	}
 	return s.finish(r.ID, message)
 }
 
+func watchCancellation(ctx context.Context, cancel context.CancelFunc, s store, id int64) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if s.cancelled(id) {
+			cancel()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func (a *App) invoke(ctx context.Context, app *sdk.AppCtx, d Definition) (map[string]any, error) {
-	// CallAppResult currently has no context argument. Bound outstanding calls
-	// even after a local deadline; timed-out downstream functions may still run.
+	// Bound outstanding standalone calls until the downstream function returns.
+	// Its execution is independent of the local check deadline.
 	select {
 	case a.functionSlots <- struct{}{}:
 	default:
