@@ -125,7 +125,7 @@ func TestMobileCalendarSummaryIsNativeReadyAndProjectScoped(t *testing.T) {
 	if got := summary.Events[0]; got.ID == "" || got.Title != "September campaign" || got.Detail != "Instagram · Planned" || got.BrandName != "Apteva" || got.KindLabel != "Release" || got.At != "2026-09-23T10:00:00Z" {
 		t.Fatalf("release is not native-ready: %+v", got)
 	}
-	if got := summary.Events[1]; got.ID != "item:"+strconv.FormatInt(article.ID, 10) || got.At != "2026-09-24T09:30:00+02:00" || got.Detail != "Article · Idea" || got.KindLabel != "Content" {
+	if got := summary.Events[1]; got.ID != "item:"+strconv.FormatInt(article.ID, 10) || got.At != "2026-09-24T09:30:00+02:00" || got.Detail != "Article · Idea" || got.Destinations != "Instagram" || got.KindLabel != "Content" {
 		t.Fatalf("content is not native-ready: %+v", got)
 	}
 	for _, event := range summary.Events {

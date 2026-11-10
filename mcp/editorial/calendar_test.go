@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -59,6 +60,25 @@ func TestCalendarWindowsItemsAndReleases(t *testing.T) {
 	events = calendar(t, a, c, map[string]any{"from": "2026-10-15", "to": "2026-10-15"})
 	if len(events) != 1 || events[0].Date != "2026-10-15" {
 		t.Fatalf("expected the timestamped item on its date, got %+v", events)
+	}
+}
+
+func TestCalendarItemsShowDestinationsOutsideTheSelectedDates(t *testing.T) {
+	a, c := testApp(t, nil)
+	item := create(t, a, c, map[string]any{"title": "Launch", "planned_at": "2026-10-10"})
+	for _, args := range []map[string]any{
+		{"item_id": item.ID, "channel": "Instagram", "planned_at": "2026-11-01"},
+		{"item_id": item.ID, "channel": "Instagram", "planned_at": "2026-11-03"},
+		{"item_id": item.ID, "channel": "Website"},
+		{"item_id": item.ID, "channel": "Newsletter", "archived": true},
+	} {
+		if _, err := a.dispatch(c, "releases_create", args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events := calendar(t, a, c, map[string]any{"from": "2026-10-10", "to": "2026-10-10", "include_releases": false})
+	if len(events) != 1 || !slices.Equal(events[0].Destinations, []string{"Instagram", "Website"}) {
+		t.Fatalf("expected unique, non-archived destinations on the item, got %+v", events)
 	}
 }
 

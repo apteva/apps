@@ -18,12 +18,13 @@ const (
 )
 
 type mobileCalendarEvent struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	At        string `json:"at"`
-	Detail    string `json:"detail"`
-	BrandName string `json:"brand_name"`
-	KindLabel string `json:"kind_label"`
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	At           string `json:"at"`
+	Detail       string `json:"detail"`
+	Destinations string `json:"destinations,omitempty"`
+	BrandName    string `json:"brand_name"`
+	KindLabel    string `json:"kind_label"`
 }
 
 type mobileCalendarSummary struct {
@@ -173,7 +174,8 @@ func (a *App) mobileCalendarSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, mobileCalendarEvent{
 			ID: id, Title: event.Title, At: mobileEventAt(event.At, loc, offset),
-			Detail: mobileEventDetail(event), BrandName: brandNames[event.BrandID], KindLabel: kindLabel,
+			Detail: mobileEventDetail(event), Destinations: strings.Join(event.Destinations, ", "),
+			BrandName: brandNames[event.BrandID], KindLabel: kindLabel,
 		})
 	}
 	respond(w, mobileCalendarSummary{Events: events, Truncated: truncated}, nil)

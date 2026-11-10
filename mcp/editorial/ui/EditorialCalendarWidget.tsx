@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { badgeStyles, DestinationBadges, destinationNames, StatusBadge, statusLabel } from "./EditorialBadges";
 
 type Props = {
   appName?: string;
@@ -23,6 +24,7 @@ export type CalendarEvent = {
   approval: string;
   owner: string;
   channel?: string;
+  destinations?: string[];
   url?: string;
 };
 
@@ -160,7 +162,11 @@ const css = `
 .ec-widget .ec-chip.release{border-left-color:var(--color-info,#5aa9e6)}
 .ec-widget .ec-chip:hover{background:var(--color-bg-hover,#1e1e1e)}
 .ec-widget .ec-chip-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;overflow:hidden;overflow-wrap:anywhere;font-size:11px;line-height:15px}
-.ec-widget .ec-chip em{display:block;overflow:hidden;text-overflow:ellipsis;font-style:normal;color:var(--color-text-muted,#aaa)}
+.ec-widget .ec-chip-meta{display:flex;flex-wrap:wrap;align-items:center;gap:3px;margin-top:3px}
+.ec-widget .ec-chip-meta .ed-destination{border:0;padding:1px}
+.ec-widget .ec-chip-meta .ed-status{max-width:100%;overflow:hidden}
+.ec-widget .ec-chip-meta .ed-status-name{overflow:hidden;text-overflow:ellipsis}
+.ec-widget .ec-chip-meta .multiple .ed-destination-name{position:absolute;clip-path:inset(50%);width:1px;height:1px}
 .ec-widget .ec-select{border:1px solid var(--color-border,#303030);background:var(--color-bg-card,#141414);color:inherit;border-radius:3px;padding:3px 6px;font-size:11px;line-height:18px;font-family:inherit;max-width:150px}
 .ec-widget .ec-select:hover{border-color:var(--color-accent,#ff8c36)}
 .ec-widget .ec-swatch{width:7px;height:7px;border-radius:2px;flex:0 0 7px;display:inline-block}
@@ -168,12 +174,14 @@ const css = `
 .ec-widget .ec-dayhead{display:flex;align-items:baseline;gap:8px;font-size:11px;color:var(--color-text-muted,#aaa);margin-bottom:6px}
 .ec-widget .ec-dayhead strong{font-size:12px;color:var(--color-text,#eceef2);font-weight:700}
 .ec-widget .ec-dayhead button{margin-left:auto}
-.ec-widget .ec-row{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;border:0;background:transparent;padding:4px 0;min-width:0}
+.ec-widget .ec-row{display:grid;grid-template-columns:3px minmax(0,1fr);gap:9px;text-align:left;padding:5px 0;min-width:0}
 .ec-widget .ec-row:hover .ec-title{color:var(--color-accent,#ff8c36)}
-.ec-widget .ec-mark{width:3px;align-self:stretch;border-radius:2px;background:var(--color-accent,#ff8c36);flex:0 0 3px}
+.ec-widget .ec-mark{width:3px;align-self:stretch;border-radius:2px;background:var(--color-accent,#ff8c36)}
 .ec-widget .ec-mark.release{background:var(--color-info,#5aa9e6)}
-.ec-widget .ec-title{font-size:12px;line-height:18px;overflow-wrap:anywhere;min-width:0;flex:1}
-.ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);overflow-wrap:anywhere;max-width:40%}
+.ec-widget .ec-title{display:block;font-size:12px;font-weight:600;line-height:18px;overflow-wrap:anywhere}
+.ec-widget .ec-row-meta{display:flex;flex-wrap:wrap;align-items:center;gap:5px 8px;margin-top:4px}
+.ec-widget .ec-row :is(.ed-destination,.ed-status){font-size:11px}
+.ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);overflow-wrap:anywhere}
 .ec-widget .ec-empty{padding:26px 16px;text-align:center;font-size:11px;color:var(--color-text-muted,#999)}
 .ec-widget .ec-error{padding:12px 16px;font-size:11px;color:var(--color-danger,#f08b8b)}
 .ec-widget .ec-note{padding:7px 16px;font-size:10px;color:var(--color-text-muted,#999);border-top:1px solid var(--color-border,#303030)}
@@ -182,20 +190,20 @@ const css = `
   .ec-widget .ec-cell{min-height:40px;padding:4px 3px}
   .ec-widget .ec-chip{border-block:0;border-right:0;padding:2px 3px}
   .ec-widget .ec-chip-title{display:block;white-space:nowrap;text-overflow:ellipsis;font-size:10px;line-height:14px}
-  .ec-widget .ec-chip em{display:none}
-  .ec-widget .ec-row{display:grid;grid-template-columns:3px minmax(0,1fr);gap:1px 8px}
-  .ec-widget .ec-mark{grid-row:span 2}
-  .ec-widget .ec-meta{max-width:none}
+  .ec-widget .ec-chip-meta .ed-destination-name,.ec-widget .ec-chip-meta .ed-status-name{position:absolute;clip-path:inset(50%);width:1px;height:1px}
+  .ec-widget .ec-chip-meta .ed-destination svg{width:10px;height:10px}
+  .ec-widget .ec-chip-meta .ed-status{background:none;padding:1px}
 }
 .ec-widget .ec-chip:focus-visible .ec-chip-title{display:block;white-space:normal}
 `;
 
 // Colour is not a label: screen readers and colour-blind viewers get the brand
 // name through the accessible title instead.
-const titleOf = (brands: Brand[], e: CalendarEvent) => {
-  const name = brandName(brands, e.brand_id);
-  return name ? `${e.title} — ${name}` : e.title;
-};
+const eventDestinations = (e: CalendarEvent) =>
+  e.kind === "release" ? (e.channel ? [e.channel] : []) : e.destinations || [];
+const titleOf = (brands: Brand[], e: CalendarEvent) =>
+  [e.title, brandName(brands, e.brand_id), destinationNames(eventDestinations(e)).join(", "), statusLabel(e.status)]
+    .filter(Boolean).join(" · ");
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const PANEL = "/apps/editorial/page";
@@ -338,7 +346,7 @@ export default function EditorialCalendarWidget(props: Props) {
 
   return (
     <section className="ec-widget" aria-label="Editorial calendar">
-      <style>{css}</style>
+      <style>{badgeStyles + css}</style>
       <header>
         <div style={{ minWidth: 0 }}>
           <h2>Editorial calendar</h2>
@@ -507,7 +515,10 @@ function Grid({
                 style={{ borderLeftColor: brandColor(brands, e.brand_id) || undefined }}
               >
                 <span className="ec-chip-title">{e.title}</span>
-                <em>{e.kind === "release" ? e.channel : label(e.status)}</em>
+                <span className="ec-chip-meta">
+                  <DestinationBadges channels={eventDestinations(e)} />
+                  <StatusBadge value={e.status} />
+                </span>
               </a>
             ))}
           </div>
@@ -575,10 +586,15 @@ function DayGroup({ brands, date, events, onClose }: { brands: Brand[]; date: st
               className={`ec-mark ${e.kind === "release" ? "release" : ""}`}
               style={{ background: brandColor(brands, e.brand_id) || undefined }}
             />
-            <span className="ec-title">{e.title || "Untitled"}</span>
-            <span className="ec-meta">
-              {brandName(brands, e.brand_id) && <span>{brandName(brands, e.brand_id)} · </span>}
-              {e.kind === "release" ? e.channel : label(e.status)}
+            <span>
+              <span className="ec-title">{e.title || "Untitled"}</span>
+              <span className="ec-row-meta">
+                <StatusBadge value={e.status} />
+                <DestinationBadges channels={eventDestinations(e)} />
+                <span className="ec-meta">
+                  {[e.kind === "release" ? "Release" : "", brandName(brands, e.brand_id)].filter(Boolean).join(" · ")}
+                </span>
+              </span>
             </span>
           </a>
         ))
