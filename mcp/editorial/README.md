@@ -10,9 +10,9 @@ The monochrome app icon is embedded in the sidecar and served independently of i
 
 ## Home widget
 
-**Editorial calendar** is a `dashboard.home` widget with Month, Week and List views. Operators add it from the Home widget gallery; `suggested` only ranks it there and never places it on its own. Half width defaults to the agenda and renders the grid as day numbers with per-entry dots, because one column of the dashboard's two-column layout cannot hold seven readable columns; full width defaults to the month grid. Clicking a compact day, or the "+n more" chip on a full cell, opens that day's entries underneath.
+**Editorial calendar** is a `dashboard.home` widget with Month, Week and List views. Operators add it from the Home widget gallery; `suggested` only ranks it there and never places it on its own. Half width defaults to List and full width defaults to Month. All three views share the same height and scroll inside the widget. Month and Week show every returned event in its date cell, with two lines for titles on wider cards and a one-line preview on narrower cards. Hover or focus a title to read it in full, or select the date to open its agenda. List and the day agenda wrap titles in full.
 
-The widget opens on **All brands**. When the project has brands, a picker in the toolbar filters to one brand or to Unassigned, and each entry is marked in its brand's colour — the chip's left border, the compact day dots and the agenda row mark — with the brand name in the agenda row and in every entry's accessible title, so colour is never the only carrier. Projects with no brands get no picker and keep the content/release colours. The selection is per widget instance and per viewer; the `brand_id` setting only chooses what the widget opens on.
+The widget opens on **All brands**. When the project has brands, a picker in the toolbar filters to one brand or to Unassigned, and each entry is marked in its brand's colour — the chip's left border and the agenda row mark — with the brand name in the agenda row and in every entry's accessible title, so colour is never the only carrier. Projects with no brands get no picker and keep the content/release colours. The selection is per widget instance and per viewer; the `brand_id` setting only chooses what the widget opens on.
 
 Per-instance settings cover default view, `planned_at` or `deadline` dates, the starting brand, whether channel releases appear, and the list horizon. The widget reads `GET /calendar` and `GET /settings` only; it never writes, and every entry links back into the panel. Releases with a saved URL link to that record instead.
 
@@ -102,7 +102,7 @@ bun run scripts/build-panels.ts --app editorial
 bun run test:editorial-ui
 ```
 
-Go 1.25.1+, app-sdk v0.85.0 (latest tag by ancestry when implemented). The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.
+Go 1.25.1+, app-sdk v0.115.1. The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.
 
 ### Compact worker reads and safe result updates (0.4.4)
 
@@ -126,3 +126,7 @@ Stale revisions fail without changing data; re-read and retry the intended
 small merge. Merge never changes publisher links, release state or external
 posts. Legacy `releases_update.patch.results` still replaces the full results
 object and should not be used for worker ledger updates.
+
+## Brand production profiles
+
+Brands can store an optional `persona_id` and a canonical `operating_profile` in project settings. Use it for audience, positioning, voice, visual rules, content pillars, destinations, approval policies and named `production_profiles`. Persona Studio remains the source of identity assets. A persona is optional; storing profile settings grants no publishing or execution authority.

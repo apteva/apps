@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.4.6
+version: 0.5.1
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -48,8 +48,7 @@ provides:
       icon: calendar
       entry: /ui/EditorialPanel.mjs
   ui_components:
-    # Half width cannot hold a readable month grid, so the widget carries three
-    # views and defaults by size: an agenda when narrow, the grid when wide.
+    # The configured size sets the default view. The grid adapts to its actual width.
     # Operators still add it to Home themselves; suggested only ranks it.
     - name: editorial-calendar
       label: Editorial calendar
@@ -92,7 +91,7 @@ provides:
     - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.4.6, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.5.1, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:

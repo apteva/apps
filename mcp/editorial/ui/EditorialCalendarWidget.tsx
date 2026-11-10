@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Props = {
   appName?: string;
@@ -62,8 +62,7 @@ export const eventDay = (e: CalendarEvent) => day(e.at || e.date);
 
 export const label = (s: string) => s.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
 
-// A month grid needs room for seven labelled columns; at half width the host
-// gives us one column of a two-column layout, where that is unreadable.
+// The configured size sets the default view. Grid density follows the actual width.
 export const resolveView = (preference: string, size: "half" | "full"): View => {
   if (preference === "month" || preference === "week" || preference === "list") return preference;
   return size === "full" ? "month" : "list";
@@ -130,7 +129,7 @@ export const groupByDay = (events: CalendarEvent[]): Record<string, CalendarEven
 };
 
 const css = `
-.ec-widget{color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;display:flex;flex-direction:column;height:100%;overflow:hidden}
+.ec-widget{container:editorial-calendar / inline-size;box-sizing:border-box;color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;display:flex;flex-direction:column;height:30rem;overflow:hidden}
 .ec-widget *{box-sizing:border-box}.ec-widget h2,.ec-widget p{margin:0}.ec-widget button{cursor:pointer;font-family:inherit;color:inherit}.ec-widget a{color:inherit;text-decoration:none}.ec-widget :is(button,a):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}
 .ec-widget header{display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}
 .ec-widget h2{font-size:14px;font-weight:700}.ec-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}
@@ -143,44 +142,52 @@ const css = `
 .ec-widget .ec-btn:hover{border-color:var(--color-accent,#ff8c36)}
 .ec-widget .ec-btn[aria-pressed=true]{background:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);color:var(--color-bg,#141414);font-weight:600}
 .ec-widget .ec-body{flex:1;min-height:0;overflow:auto}
-.ec-widget .ec-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}
-/* One week is a single row, so it stretches to fill the body instead of
-   leaving the rest of the widget empty. */
-.ec-widget .ec-grid.week{height:100%;grid-template-rows:auto minmax(0,1fr)}
+.ec-widget .ec-grid{display:grid;grid-template-columns:repeat(7,minmax(36px,1fr))}
+/* Fill the shared viewport for quiet weeks and let busy weeks scroll. */
+.ec-widget .ec-grid.week{min-height:100%;grid-template-rows:auto minmax(min-content,1fr)}
 .ec-widget .ec-weekday{padding:6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--color-text-muted,#999);border-bottom:1px solid var(--color-border,#303030);text-align:right}
 .ec-widget .ec-cell{min-height:74px;border-right:1px solid var(--color-border,#303030);border-bottom:1px solid var(--color-border,#303030);padding:5px;min-width:0}
-.ec-widget .ec-grid.compact .ec-cell{min-height:40px;padding:4px 3px}
 .ec-widget .ec-cell:nth-child(7n){border-right:0}
 .ec-widget .ec-cell.outside{background:color-mix(in srgb,var(--color-text-muted,#999) 6%,transparent);color:var(--color-text-dim,#777)}
 .ec-widget .ec-cell.picked{outline:1px solid var(--color-accent,#ff8c36);outline-offset:-1px}
 .ec-widget .ec-num{display:flex;justify-content:flex-end;font-size:10px;color:var(--color-text-muted,#999);margin-bottom:3px}
 .ec-widget .ec-num span{width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:3px;font-variant-numeric:tabular-nums}
 .ec-widget .ec-num .today{background:var(--color-accent,#ff8c36);color:var(--color-bg,#141414);font-weight:700}
+.ec-widget .ec-daybtn{width:100%;border:0;background:transparent;padding:0}
+.ec-widget .ec-daybtn:hover span{background:var(--color-bg-hover,#1e1e1e)}
+.ec-widget .ec-daybtn:hover .today{background:var(--color-accent,#ff8c36)}
 .ec-widget .ec-chip{display:block;width:100%;text-align:left;border:1px solid var(--color-border,#303030);border-left:2px solid var(--color-accent,#ff8c36);border-radius:3px;background:transparent;padding:3px 5px;margin-bottom:3px;font-size:10px;line-height:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ec-widget .ec-chip.release{border-left-color:var(--color-info,#5aa9e6)}
 .ec-widget .ec-chip:hover{background:var(--color-bg-hover,#1e1e1e)}
-.ec-widget .ec-chip em{font-style:normal;color:var(--color-text-muted,#aaa)}
-.ec-widget .ec-dots{display:flex;flex-wrap:wrap;gap:2px;justify-content:flex-end}
-.ec-widget .ec-dot{width:5px;height:5px;border-radius:50%;background:var(--color-accent,#ff8c36)}
-.ec-widget .ec-dot.release{background:var(--color-info,#5aa9e6)}
+.ec-widget .ec-chip-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;overflow:hidden;overflow-wrap:anywhere;font-size:11px;line-height:15px}
+.ec-widget .ec-chip em{display:block;overflow:hidden;text-overflow:ellipsis;font-style:normal;color:var(--color-text-muted,#aaa)}
 .ec-widget .ec-select{border:1px solid var(--color-border,#303030);background:var(--color-bg-card,#141414);color:inherit;border-radius:3px;padding:3px 6px;font-size:11px;line-height:18px;font-family:inherit;max-width:150px}
 .ec-widget .ec-select:hover{border-color:var(--color-accent,#ff8c36)}
 .ec-widget .ec-swatch{width:7px;height:7px;border-radius:2px;flex:0 0 7px;display:inline-block}
-.ec-widget .ec-daybtn{display:block;width:100%;height:100%;border:0;background:transparent;padding:0;text-align:right}
-.ec-widget .ec-agenda{border-top:1px solid var(--color-border,#303030)}
 .ec-widget .ec-daygroup{padding:9px 16px;border-bottom:1px solid var(--color-border,#303030)}
 .ec-widget .ec-dayhead{display:flex;align-items:baseline;gap:8px;font-size:11px;color:var(--color-text-muted,#aaa);margin-bottom:6px}
 .ec-widget .ec-dayhead strong{font-size:12px;color:var(--color-text,#eceef2);font-weight:700}
+.ec-widget .ec-dayhead button{margin-left:auto}
 .ec-widget .ec-row{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;border:0;background:transparent;padding:4px 0;min-width:0}
 .ec-widget .ec-row:hover .ec-title{color:var(--color-accent,#ff8c36)}
 .ec-widget .ec-mark{width:3px;align-self:stretch;border-radius:2px;background:var(--color-accent,#ff8c36);flex:0 0 3px}
 .ec-widget .ec-mark.release{background:var(--color-info,#5aa9e6)}
-.ec-widget .ec-title{font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
-.ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);white-space:nowrap}
+.ec-widget .ec-title{font-size:12px;line-height:18px;overflow-wrap:anywhere;min-width:0;flex:1}
+.ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);overflow-wrap:anywhere;max-width:40%}
 .ec-widget .ec-empty{padding:26px 16px;text-align:center;font-size:11px;color:var(--color-text-muted,#999)}
 .ec-widget .ec-error{padding:12px 16px;font-size:11px;color:var(--color-danger,#f08b8b)}
 .ec-widget .ec-note{padding:7px 16px;font-size:10px;color:var(--color-text-muted,#999);border-top:1px solid var(--color-border,#303030)}
-@media (max-width:560px){.ec-widget .ec-cell{min-height:52px}}
+@container editorial-calendar (width < 560px){
+  .ec-widget .ec-weekday{padding-inline:4px}
+  .ec-widget .ec-cell{min-height:40px;padding:4px 3px}
+  .ec-widget .ec-chip{border-block:0;border-right:0;padding:2px 3px}
+  .ec-widget .ec-chip-title{display:block;white-space:nowrap;text-overflow:ellipsis;font-size:10px;line-height:14px}
+  .ec-widget .ec-chip em{display:none}
+  .ec-widget .ec-row{display:grid;grid-template-columns:3px minmax(0,1fr);gap:1px 8px}
+  .ec-widget .ec-mark{grid-row:span 2}
+  .ec-widget .ec-meta{max-width:none}
+}
+.ec-widget .ec-chip:focus-visible .ec-chip-title{display:block;white-space:normal}
 `;
 
 // Colour is not a label: screen readers and colour-blind viewers get the brand
@@ -225,6 +232,7 @@ export default function EditorialCalendarWidget(props: Props) {
   const [view, setView] = useState<View>(() => resolveView(preference, size));
   const [anchor, setAnchor] = useState(() => new Date());
   const [picked, setPicked] = useState("");
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState("");
@@ -326,7 +334,6 @@ export default function EditorialCalendarWidget(props: Props) {
         ? `Week of ${startOfWeek(anchor).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
         : `Next ${horizonDays} days`;
 
-  const compact = size === "half";
   const fieldLabel = dateField === "deadline" ? "Editorial deadlines" : "Planned publications and releases";
 
   return (
@@ -407,29 +414,31 @@ export default function EditorialCalendarWidget(props: Props) {
         </div>
       </div>
 
-      <div className="ec-body">
+      <div className="ec-body" key={`${view}:${range.from}`} ref={bodyRef}>
         {error ? (
           <p className="ec-error">{error}</p>
         ) : view === "list" ? (
           <Agenda brands={brands} byDay={byDay} from={today} days={horizonDays} loading={loading} />
         ) : (
-          <Grid
-            brands={brands}
-            days={view === "month" ? monthGrid(anchor) : weekDays(anchor)}
-            month={view === "month" ? anchor.getMonth() : -1}
-            stretch={view === "week" && !picked}
-            byDay={byDay}
-            today={today}
-            compact={compact}
-            picked={picked}
-            onPick={setPicked}
-            loading={loading}
-          />
-        )}
-        {view !== "list" && picked && (
-          <div className="ec-agenda">
-            <DayGroup brands={brands} date={picked} events={byDay[picked] || []} />
-          </div>
+          <>
+            {picked && (
+              <DayGroup brands={brands} date={picked} events={byDay[picked] || []} onClose={() => setPicked("")} />
+            )}
+            <Grid
+              brands={brands}
+              days={view === "month" ? monthGrid(anchor) : weekDays(anchor)}
+              month={view === "month" ? anchor.getMonth() : -1}
+              stretch={view === "week" && !picked}
+              byDay={byDay}
+              today={today}
+              picked={picked}
+              onPick={(key) => {
+                setPicked(picked === key ? "" : key);
+                if (bodyRef.current && picked !== key) bodyRef.current.scrollTop = 0;
+              }}
+              loading={loading}
+            />
+          </>
         )}
       </div>
 
@@ -453,7 +462,6 @@ function Grid({
   month,
   byDay,
   today,
-  compact,
   picked,
   onPick,
   loading,
@@ -465,16 +473,15 @@ function Grid({
   stretch?: boolean;
   byDay: Record<string, CalendarEvent[]>;
   today: string;
-  compact: boolean;
   picked: string;
   onPick: (key: string) => void;
   loading: boolean;
 }) {
   return (
-    <div className={`ec-grid ${compact ? "compact" : ""} ${stretch ? "week" : ""}`} role="grid" aria-busy={loading}>
+    <div className={`ec-grid ${stretch ? "week" : ""}`} role="grid" aria-busy={loading}>
       {WEEKDAYS.map((d) => (
         <div className="ec-weekday" key={d}>
-          {compact ? d[0] : d}
+          {d}
         </div>
       ))}
       {days.map((d) => {
@@ -488,44 +495,21 @@ function Grid({
             role="gridcell"
             aria-label={key}
           >
-            {compact ? (
-              <button className="ec-daybtn" onClick={() => onPick(picked === key ? "" : key)}>
-                <span className="ec-num">
-                  <span className={key === today ? "today" : ""}>{d.getDate()}</span>
-                </span>
-                <span className="ec-dots">
-                  {dayEvents.slice(0, 6).map((e, n) => (
-                    <span
-                      className={`ec-dot ${e.kind === "release" ? "release" : ""}`}
-                      key={n}
-                      style={{ background: brandColor(brands, e.brand_id) || undefined }}
-                    />
-                  ))}
-                </span>
-              </button>
-            ) : (
-              <>
-                <div className="ec-num">
-                  <span className={key === today ? "today" : ""}>{d.getDate()}</span>
-                </div>
-                {dayEvents.slice(0, 3).map((e) => (
-                  <a
-                    className={`ec-chip ${e.kind}`}
-                    key={`${e.kind}${e.release_id || e.item_id}`}
-                    href={PANEL}
-                    title={titleOf(brands, e)}
-                    style={{ borderLeftColor: brandColor(brands, e.brand_id) || undefined }}
-                  >
-                    <em>{e.kind === "release" ? e.channel : label(e.format)}</em> {e.title}
-                  </a>
-                ))}
-                {dayEvents.length > 3 && (
-                  <button className="ec-chip" onClick={() => onPick(picked === key ? "" : key)}>
-                    +{dayEvents.length - 3} more
-                  </button>
-                )}
-              </>
-            )}
+            <button className="ec-num ec-daybtn" aria-label={`Agenda for ${key}`} aria-expanded={picked === key} onClick={() => onPick(key)}>
+              <span className={key === today ? "today" : ""}>{d.getDate()}</span>
+            </button>
+            {dayEvents.map((e) => (
+              <a
+                className={`ec-chip ${e.kind}`}
+                key={`${e.kind}${e.release_id || e.item_id}`}
+                href={PANEL}
+                title={titleOf(brands, e)}
+                style={{ borderLeftColor: brandColor(brands, e.brand_id) || undefined }}
+              >
+                <span className="ec-chip-title">{e.title}</span>
+                <em>{e.kind === "release" ? e.channel : label(e.status)}</em>
+              </a>
+            ))}
           </div>
         );
       })}
@@ -565,7 +549,7 @@ function Agenda({
   );
 }
 
-function DayGroup({ brands, date, events }: { brands: Brand[]; date: string; events: CalendarEvent[] }) {
+function DayGroup({ brands, date, events, onClose }: { brands: Brand[]; date: string; events: CalendarEvent[]; onClose?: () => void }) {
   const d = new Date(`${date}T12:00:00`);
   return (
     <div className="ec-daygroup">
@@ -574,6 +558,7 @@ function DayGroup({ brands, date, events }: { brands: Brand[]; date: string; eve
         <span>
           {events.length} {events.length === 1 ? "entry" : "entries"}
         </span>
+        {onClose && <button className="ec-btn" onClick={onClose}>Close agenda</button>}
       </div>
       {events.length === 0 ? (
         <p className="ec-meta">Nothing scheduled.</p>

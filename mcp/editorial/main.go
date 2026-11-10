@@ -120,6 +120,8 @@ func properties(keys []string) map[string]any {
 				"id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "color": map[string]any{"type": "string"}, "logo_url": map[string]any{"type": "string"},
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}},
 				"campaign_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}},
+				"persona_id":         map[string]any{"type": "integer", "minimum": 0, "description": "Optional Persona Studio identity; zero means no persona."},
+				"operating_profile":  map[string]any{"type": "object", "description": "Canonical brand audience, voice, destinations, enabled formats, production profiles and approval policy. Configuration grants no execution authority."},
 			}, "id", "name")}
 		case "fields", "results":
 			t = map[string]any{"type": "object"}
