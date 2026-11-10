@@ -246,7 +246,10 @@ func (b *aptevaBackend) openComputedCollection(ctx context.Context, target Colle
 	if err = decode(data, &schema); err != nil {
 		return nil, err
 	}
-	pipeline := computedNativePipeline(schema, target)
+	pipeline, err := computedNativePipeline(schema, target)
+	if err != nil {
+		return nil, err
+	}
 	name, sourceName := nativeCollectionName(target.Name), nativeCollectionName(source)
 	c, err := b.db.OpenCollection(name)
 	if errors.Is(err, native.ErrNoSuchCollection) {

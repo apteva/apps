@@ -53,7 +53,7 @@ func newComputedCollection(tx transaction, r Request) (Collection, error) {
 		return Collection{}, err
 	}
 	if !computedFilterSupported(source, definition.Where) {
-		return Collection{}, Invalid("computed collection filters require scalar comparisons on stored source fields")
+		return Collection{}, Invalid("computed collection filters require a conjunction of scalar comparisons on stored source fields")
 	}
 
 	if len(definition.GroupBy) == 0 {
@@ -120,6 +120,9 @@ func newComputedCollection(tx transaction, r Request) (Collection, error) {
 		return Collection{}, err
 	}
 	c.ComputedCollection = &definition
+	if _, err := computedNativePipeline(source, c); err != nil {
+		return Collection{}, err
+	}
 	return c, nil
 }
 
@@ -127,8 +130,11 @@ func computedFilterSupported(source Collection, f *Filter) bool {
 	if f == nil {
 		return true
 	}
-	if f.And != nil || f.Or != nil {
-		for _, child := range append(slices.Clone(f.And), f.Or...) {
+	if f.Or != nil {
+		return false
+	}
+	if f.And != nil {
+		for _, child := range f.And {
 			if !computedFilterSupported(source, &child) {
 				return false
 			}
@@ -146,18 +152,33 @@ func computedFilterSupported(source Collection, f *Filter) bool {
 	return false
 }
 
-func computedNativePipeline(source, target Collection) []byte {
+func computedNativePipeline(source, target Collection) ([]byte, error) {
 	d := target.ComputedCollection
 	stages := []any{}
+	// Native computed collections express conjunction as consecutive matches.
+	// Keep the portable null guards emitted by nativeFilter as separate stages.
+	var addMatch func(any)
+	addMatch = func(value any) {
+		if children, ok := value.(map[string]any)["$and"].([]any); ok {
+			for _, child := range children {
+				addMatch(child)
+			}
+			return
+		}
+		stages = append(stages, map[string]any{"$match": value})
+	}
 	if d.Where != nil {
-		stages = append(stages, map[string]any{"$match": nativeFilter(source, d.Where)})
+		addMatch(nativeFilter(source, d.Where))
+	}
+	if len(stages) > 15 {
+		return nil, Invalid("computed collection filter exceeds 15 native match stages")
 	}
 	if !target.computedGroup() {
 		projection := map[string]int{}
 		for _, f := range target.Fields {
 			projection[f.Name] = 1
 		}
-		return marshal(append(stages, map[string]any{"$project": projection}))
+		return marshal(append(stages, map[string]any{"$project": projection})), nil
 	}
 	keys := map[string]string{}
 	for _, name := range d.GroupBy {
@@ -174,7 +195,7 @@ func computedNativePipeline(source, target Collection) []byte {
 			group[metric.Name] = map[string]any{"$count": map[string]any{}}
 		}
 	}
-	return marshal(append(stages, map[string]any{"$group": group}))
+	return marshal(append(stages, map[string]any{"$group": group})), nil
 }
 
 func nativeReadKey(c Collection, r Record) ([]byte, error) {

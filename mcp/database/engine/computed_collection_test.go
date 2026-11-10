@@ -48,7 +48,10 @@ func TestComputedCollectionsThroughDatabase(t *testing.T) {
 		{"id": "c", "day": day, "centre": "east", "paid": false, "amount": "90"},
 		{"id": "d", "day": "9007199254740992", "centre": "east", "paid": true, "amount": "99"},
 	}})
-	where := &Filter{Field: "paid", Op: "eq", Value: true}
+	where := &Filter{And: []Filter{
+		{Field: "paid", Op: "eq", Value: true},
+		{Field: "amount", Op: "gte", Value: "0"},
+	}}
 	rollup := Request{Collection: "totals", ComputedCollection: &ComputedCollectionDefinition{
 		Source: "sales", Where: where, GroupBy: []string{"day", "centre"},
 		Metrics: []Metric{{Name: "total", Op: "sum", Field: "amount"}, {Name: "sales", Op: "count"}, {Name: "assigned", Op: "count", Field: "agent"}},
@@ -92,6 +95,9 @@ func TestComputedCollectionsThroughDatabase(t *testing.T) {
 	expectCode("update", Request{Collection: "totals", Key: east, Set: Record{"total": "0"}}, "read_only")
 	expectCode("collection_drop", Request{Collection: "sales", Confirm: true}, "schema_conflict")
 	expectCode("collection_create", Request{Collection: "chain", ComputedCollection: &ComputedCollectionDefinition{Source: "totals"}}, "invalid_argument")
+	expectCode("collection_create", Request{Collection: "disjunction", ComputedCollection: &ComputedCollectionDefinition{
+		Source: "sales", Where: &Filter{Or: []Filter{{Field: "paid", Op: "eq", Value: true}, {Field: "centre", Op: "eq", Value: "east"}}},
+	}}, "invalid_argument")
 	expectCode("collection_create", Request{Collection: "unique_sales", ComputedCollection: &ComputedCollectionDefinition{
 		Source: "sales", GroupBy: []string{"day"}, Metrics: []Metric{{Name: "n", Op: "count_distinct", Field: "agent"}},
 	}}, "invalid_argument")

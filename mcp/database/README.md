@@ -120,7 +120,7 @@ in place of `fields` and `primaryKey`. For example:
 The source must be an ordinary collection in the same database. A projection
 can use `select` and must retain every source primary-key field. Omit both
 `select` and `groupBy` to retain all declared source fields. Filters accept
-scalar comparisons on stored source fields. A rollup uses 1–8 non-null
+conjunctions of scalar comparisons on stored source fields. A rollup uses 1–8 non-null
 scalar group fields as its primary key and 1–64 metrics. `count` with a field
 counts non-null values. `sum` requires a non-null integer source field.
 Exact distinct counts, joins, and per-metric filters remain available in
