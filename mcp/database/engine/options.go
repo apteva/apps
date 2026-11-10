@@ -9,6 +9,7 @@ const DefaultMaxConcurrentAptevaQueries = 3
 // target and query memory is a per-operation accounting budget, not an RSS cap.
 type ManagerOptions struct {
 	SQLiteDurability           string
+	AggregateReuseMode         string // off (default), coalesce, or cache
 	Apteva                     *AptevaOptions
 	AptevaCacheBudgetBytes     int64 // zero selects max(256 MiB, one configured cache)
 	MaxConcurrentAptevaQueries int   // zero selects three read slots, including one reserved slot

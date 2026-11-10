@@ -18,6 +18,7 @@ func managerOptions(config map[string]string, getenv func(string) string) (engin
 	if options.SQLiteDurability == "" {
 		options.SQLiteDurability = "durable"
 	}
+	options.AggregateReuseMode = value("aggregate_reuse_mode", "DATABASE_AGGREGATE_REUSE_MODE")
 	native := engine.DefaultAptevaOptions()
 	if mode := value("aptevadb_sync_mode", "DATABASE_APTEVADB_SYNC_MODE"); mode != "" {
 		if mode != "full" && mode != "barrier" && mode != "os" {

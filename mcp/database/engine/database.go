@@ -75,6 +75,7 @@ type Manager struct {
 	nativeShortQueries    chan struct{}
 	nativeShortAdmissions chan struct{}
 	cacheClock            uint64
+	aggregateReads        *aggregateReuse
 }
 
 func Open(root string) (*Manager, error) {
@@ -89,6 +90,11 @@ func OpenWithOptions(root, durability string) (*Manager, error) {
 }
 
 func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
+	switch options.AggregateReuseMode {
+	case "", "off", "coalesce", "cache":
+	default:
+		return nil, Invalid("aggregate reuse mode must be off, coalesce or cache")
+	}
 	durability := options.SQLiteDurability
 	if durability == "" {
 		durability = "durable"
@@ -152,8 +158,12 @@ func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
+	if options.AggregateReuseMode == "coalesce" || options.AggregateReuseMode == "cache" {
+		m.aggregateReads = newAggregateReuse(options.AggregateReuseMode == "cache")
+	}
 	return m, nil
 }
+
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -161,6 +171,9 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
+	if m.aggregateReads != nil {
+		m.aggregateReads.close()
+	}
 	var errs []error
 	for _, d := range m.databases {
 		d.mu.Lock()
@@ -333,7 +346,17 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if e != nil {
 		return nil, e
 	}
+	if m.aggregateReads != nil && d.info.Adapter == "aptevadb" && op == "batch" && kind == "read_batch" {
+		if data := reusableAggregateBatch(r); data != nil {
+			return m.reuseAggregate(ctx, d, r, data, release)
+		}
+	}
 	defer release()
+	return m.executeDatabase(ctx, d, scope, op, kind, r)
+}
+
+func (m *Manager) executeDatabase(ctx context.Context, d *database, scope, op, kind string, r Request) (any, error) {
+	var e error
 	shortReadLocked := false
 	if d.info.Adapter == "aptevadb" && (kind == "find" || kind == "count" || kind == "aggregate" || kind == "read_batch") {
 		done, locked, err := m.admitNativeRead(ctx, d, op, r)
