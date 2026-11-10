@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -58,6 +60,22 @@ func reuseQuery(centre string) Request {
 	return q
 }
 
+func reuseMixedQuery(centre string) Request {
+	q := reuseQuery(centre)
+	q.Operations = append(q.Operations,
+		Operation{Op: "get", Request: Request{Collection: "facts", Key: Record{"id": "a"}}},
+		Operation{Op: "get", Request: Request{Collection: "facts", Key: Record{"id": "missing"}}},
+		Operation{Op: "find", Request: Request{Collection: "facts", Query: Query{
+			Where:   &Filter{Field: "centre", Op: "eq", Value: centre},
+			OrderBy: []Order{{Field: "day", Direction: "desc"}}, Limit: 10,
+		}}},
+		Operation{Op: "find", Request: Request{Collection: "facts", Query: Query{
+			Where: &Filter{Field: "id", Op: "eq", Value: "missing"},
+		}}},
+	)
+	return q
+}
+
 func waitForReuse(t *testing.T, condition func() bool) {
 	t.Helper()
 	until := time.Now().Add(3 * time.Second)
@@ -103,9 +121,9 @@ func reuseRow(v any, i int) Record {
 func reusePath(v any) any { return v.(map[string]any)["diagnostics"].(map[string]any)["reuse"] }
 
 func TestAggregateReuseModes(t *testing.T) {
-	var expected []any
 	for _, mode := range []string{"off", "coalesce", "cache"} {
 		t.Run(mode, func(t *testing.T) {
+			var expected []any
 			m := reuseFixture(t, mode)
 			unblock, err := m.acquireNativeQuery(context.Background())
 			checkErr(t, err)
@@ -113,7 +131,7 @@ func TestAggregateReuseModes(t *testing.T) {
 			t.Cleanup(func() { once.Do(unblock) })
 			var replies []<-chan reuseReply
 			for range 8 {
-				replies = append(replies, asyncReuse(m, context.Background(), reuseQuery("A")))
+				replies = append(replies, asyncReuse(m, context.Background(), reuseMixedQuery("A")))
 			}
 			waitForReuse(t, func() bool {
 				if mode == "off" {
@@ -148,7 +166,7 @@ func TestAggregateReuseModes(t *testing.T) {
 				t.Fatalf("executions=%d joins=%d", executions, joined)
 			}
 			for range 8 {
-				out := reuseCall(t, m, "p", "batch", reuseQuery("A"))
+				out := reuseCall(t, m, "p", "batch", reuseMixedQuery("A"))
 				if !reflect.DeepEqual(reuseRows(out), expected) {
 					t.Fatal(out)
 				}
@@ -256,7 +274,7 @@ func TestAggregateReuseIsolationAndFailure(t *testing.T) {
 	}
 	bad := reuseQuery("A")
 	bad.Operations[0].Request.Where.Or = []Filter{}
-	if reusableAggregateBatch(bad) != nil {
+	if data, reason := reusableAggregateBatch(bad, nil); data != nil || reason != "unsupported_query" {
 		t.Fatal("canonicalization must not erase an empty invalid branch")
 	}
 }
@@ -265,17 +283,104 @@ func TestAggregateResultCacheBounds(t *testing.T) {
 	s := newAggregateReuse(true)
 	defer s.close()
 	big := map[string]any{"results": []any{strings.Repeat("x", aggregateEntryBytes)}}
-	s.storeEntry(aggregateKey{}, big)
-	if len(s.entries) != 0 {
-		t.Fatal("oversize entry retained")
+	if packed, bytes, reason := encodeAggregateResult(big); packed != "" || bytes < aggregateEntryBytes || reason != "result_too_large" {
+		t.Fatalf("oversize entry accepted (%d bytes, %s)", bytes, reason)
 	}
 	value := map[string]any{"results": []any{strings.Repeat("x", aggregateEntryBytes/2)}}
+	packed, _, reason := encodeAggregateResult(value)
+	if reason != "stored" {
+		t.Fatal(reason)
+	}
 	for i := range 200 {
-		s.storeEntry(aggregateKey{revision: uint64(i)}, value)
+		s.storeEntry(aggregateKey{revision: uint64(i)}, packed)
 	}
 	if s.bytes > aggregateCacheBytes || s.entries[aggregateKey{}] != nil ||
 		s.entries[aggregateKey{revision: 199}] == nil {
 		t.Fatalf("cache eviction failed, retained %d bytes", s.bytes)
+	}
+}
+
+func TestAggregateResultCacheCompactMixedBatch(t *testing.T) {
+	m := reuseFixture(t, "cache")
+	fields := []Field{{Name: "id", Type: "text"}, {Name: "data", Type: "json"}, {Name: "score", Type: "number"}}
+	for i := range 16 {
+		fields = append(fields, Field{Name: fmt.Sprintf("metric_%d", i), Type: "integer"})
+	}
+	reuseCall(t, m, "p", "collection_create", Request{Database: "d", Collection: "wide", Fields: fields})
+	records := make([]Record, 430)
+	for i := range records {
+		row := Record{"id": fmt.Sprintf("%04d", i), "score": float64(i), "data": map[string]any{
+			"exact": json.Number("9007199254740993"), "empty": []any{}, "object": map[string]any{}, "null": nil,
+		}}
+		for _, field := range fields[3:] {
+			row[field.Name] = "12"
+		}
+		records[i] = row
+	}
+	reuseCall(t, m, "p", "insert", Request{Database: "d", Collection: "wide", Records: records})
+	q := reuseMixedQuery("A")
+	q.Operations = append(q.Operations, Operation{Op: "find", Request: Request{
+		Collection: "wide", Query: Query{Limit: len(records)},
+	}})
+	cold := reuseCall(t, m, "p", "batch", q).(map[string]any)
+	diag := cold["diagnostics"].(map[string]any)
+	if retainedBytes(reuseRows(cold)) < aggregateEntryBytes || diag["cacheStore"] != "stored" || diag["cacheResultBytes"].(int) >= aggregateEntryBytes {
+		t.Fatalf("compact fixture failed: decoded=%d diagnostics=%v", retainedBytes(reuseRows(cold)), diag)
+	}
+	warm := reuseCall(t, m, "p", "batch", q)
+	if reusePath(warm) != "cache" || !reflect.DeepEqual(reuseRows(cold), reuseRows(warm)) {
+		t.Fatal("compact cache changed the typed result")
+	}
+	picked := reuseRows(warm)[2].(map[string]any)["record"].(Record)
+	picked["centre"] = "changed"
+	if got := reuseCall(t, m, "p", "batch", q); !reflect.DeepEqual(reuseRows(cold), reuseRows(got)) {
+		t.Fatal("cached result was mutable")
+	}
+	reuseCall(t, m, "p", "update", Request{Database: "d", Collection: "wide", Key: Record{"id": "0000"},
+		Set: Record{"data": strings.Repeat("x", aggregateEntryBytes)},
+	})
+	for range 2 {
+		large := reuseCall(t, m, "p", "batch", q)
+		diag := large.(map[string]any)["diagnostics"].(map[string]any)
+		if diag["reuse"] != "executed" || diag["cacheStore"] != "result_too_large" || diag["cacheResultBytes"].(int) < aggregateEntryBytes {
+			t.Fatal(diag)
+		}
+	}
+}
+
+func TestAggregateReusePagedReadAndSkipReason(t *testing.T) {
+	m := reuseFixture(t, "cache")
+	q := reuseMixedQuery("A")
+	last := len(q.Operations) - 2
+	q.Operations[last].Request.Limit = 1
+	page := func(result any) map[string]any { return reuseRows(result)[last].(map[string]any) }
+	first := reuseCall(t, m, "p", "batch", q)
+	cursor := page(first)["nextCursor"].(string)
+	if cursor == "" || !reflect.DeepEqual(page(first), page(reuseCall(t, m, "p", "batch", q))) {
+		t.Fatal("warm page lost its cursor")
+	}
+	q.Operations[last].Request.Cursor = cursor
+	next := reuseCall(t, m, "p", "batch", q)
+	warm := reuseCall(t, m, "p", "batch", q)
+	if reusePath(next) != "executed" || reusePath(warm) != "cache" || !reflect.DeepEqual(page(next), page(warm)) ||
+		reflect.DeepEqual(page(next)["records"], page(first)["records"]) {
+		t.Fatal("cursor did not select a distinct cached page")
+	}
+	d, release, err := m.acquireDatabase(context.Background(), "p", "d", "", false)
+	checkErr(t, err)
+	defer release()
+	decoded, err := readCursor(cursor, d.key)
+	checkErr(t, err)
+	decoded.Expires = time.Now().Add(30 * time.Second).Unix()
+	q.Operations[last].Request.Cursor = signCursor(d.key, decoded)
+	skipped := reuseCall(t, m, "p", "batch", q).(map[string]any)["diagnostics"].(map[string]any)
+	if skipped["reuse"] != "skipped" || skipped["reuseReason"] != "cursor_validation" || skipped["aggregateExecutions"] != 1 {
+		t.Fatal(skipped)
+	}
+	q.Operations[last] = Operation{Op: "count", Request: Request{Collection: "facts"}}
+	skipped = reuseCall(t, m, "p", "batch", q).(map[string]any)["diagnostics"].(map[string]any)
+	if skipped["reuse"] != "skipped" || skipped["reuseReason"] != "unsupported_operation" {
+		t.Fatal(skipped)
 	}
 }
 

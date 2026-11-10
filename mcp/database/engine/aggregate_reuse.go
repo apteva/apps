@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/gob"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -29,17 +32,19 @@ type aggregateKey struct {
 }
 
 type aggregateFlight struct {
-	done    chan struct{}
-	cancel  context.CancelFunc
-	waiters int
-	result  map[string]any
-	trace   map[string]any
-	err     error
+	done             chan struct{}
+	cancel           context.CancelFunc
+	waiters          int
+	result           map[string]any
+	trace            map[string]any
+	cacheStore       string
+	cacheResultBytes int
+	err              error
 }
 
 type aggregateEntry struct {
 	key     aggregateKey
-	result  map[string]any
+	result  string
 	bytes   int
 	expires time.Time
 }
@@ -65,32 +70,63 @@ func newAggregateReuse(cache bool) *aggregateReuse {
 // Hash the parsed wire shape, conservatively preserving order and every
 // result-affecting field. The encoded copy also detaches worker input from
 // caller-owned filters, which the executor normalizes in place.
-func reusableAggregateBatch(r Request) []byte {
+func reusableAggregateBatch(r Request, cursorKey []byte) ([]byte, string) {
 	if r.ComputedCollection != nil {
-		return nil
+		return nil, "unsupported_query"
 	}
 	for _, op := range r.Operations {
 		child := op.Request
-		if op.Op != "aggregate" || child.Diagnostics || child.TimeoutMS != 0 || child.ComputedCollection != nil ||
-			(child.Database != "" && child.Database != r.Database) ||
-			QueryKind(op.Op, child) != "aggregate" || len(child.Lookups) != 0 || len(child.Buckets) != 0 {
-			return nil
+		switch op.Op {
+		case "get", "find", "aggregate":
+		default:
+			return nil, "unsupported_operation"
 		}
-		if _, err := planCoreRead(op.Op, child); err != nil || !reusableFilter(child.Where, 0) {
-			return nil
+		if child.Diagnostics || child.TimeoutMS != 0 || child.ComputedCollection != nil ||
+			(child.Database != "" && child.Database != r.Database) ||
+			QueryKind(op.Op, child) != op.Op || len(child.Lookups) != 0 || len(child.Buckets) != 0 {
+			return nil, "unsupported_query"
+		}
+		if op.Op == "get" {
+			for _, value := range child.Key {
+				if !reusableScalar(value) {
+					return nil, "unsupported_query"
+				}
+			}
+		} else if _, err := planCoreRead(op.Op, child); err != nil || !reusableFilter(child.Where, 0) {
+			return nil, "unsupported_query"
 		}
 		for _, metric := range child.Metrics {
 			if !reusableFilter(metric.Where, 0) {
-				return nil
+				return nil, "unsupported_query"
+			}
+		}
+		if op.Op == "find" && child.Cursor != "" {
+			cursor, err := readCursor(child.Cursor, cursorKey)
+			// A caller can wait up to the worker deadline. Let the normal path
+			// validate cursors that could expire before the shared work finishes.
+			if err != nil || cursor.Expires < time.Now().Add(aggregateWorkLimit).Unix() {
+				return nil, "cursor_validation"
 			}
 		}
 	}
 	r.TimeoutMS, r.Diagnostics = 0, false
 	data, err := json.Marshal(r)
-	if err != nil || len(data) > aggregateKeyBytes {
-		return nil
+	if err != nil {
+		return nil, "request_encoding"
 	}
-	return data
+	if len(data) > aggregateKeyBytes {
+		return nil, "request_too_large"
+	}
+	return data, ""
+}
+
+func (m *Manager) executeUnsharedReadBatch(ctx context.Context, d *database, r Request, reason string) (any, error) {
+	result, err := m.executeDatabase(ctx, d, "", "batch", "read_batch", r)
+	if err == nil && r.Diagnostics {
+		diag := result.(map[string]any)["diagnostics"].(map[string]any)
+		diag["reuse"], diag["reuseReason"], diag["aggregateExecutions"] = "skipped", reason, 1
+	}
+	return result, err
 }
 
 func reusableFilter(f *Filter, depth int) bool {
@@ -175,7 +211,16 @@ func (m *Manager) reuseAggregate(ctx context.Context, d *database, r Request, da
 		if time.Now().Before(entry.expires) {
 			reuse.lru.MoveToFront(element)
 			reuse.mu.Unlock()
-			return aggregateResponse(ctx, r.Diagnostics, entry.result, nil, "cache", 0)
+			var result map[string]any
+			if err := gob.NewDecoder(strings.NewReader(entry.result)).Decode(&result); err != nil {
+				reuse.mu.Lock()
+				if reuse.entries[key] == element {
+					reuse.removeEntry(element)
+				}
+				reuse.mu.Unlock()
+				return m.executeUnsharedReadBatch(ctx, d, r, "cache_decoding")
+			}
+			return aggregateResponse(ctx, r.Diagnostics, result, nil, "cache", 0)
 		}
 		reuse.removeEntry(element)
 	}
@@ -190,7 +235,7 @@ func (m *Manager) reuseAggregate(ctx context.Context, d *database, r Request, da
 	} else {
 		if reuse.active >= maxAggregateFlights {
 			reuse.mu.Unlock()
-			return m.executeDatabase(ctx, d, "", "batch", "read_batch", r)
+			return m.executeUnsharedReadBatch(ctx, d, r, "inflight_limit")
 		}
 		work, cancel := context.WithTimeout(reuse.ctx, aggregateWorkLimit)
 		flight = &aggregateFlight{done: make(chan struct{}), cancel: cancel, waiters: 1}
@@ -208,7 +253,7 @@ func (m *Manager) reuseAggregate(ctx context.Context, d *database, r Request, da
 		if flight.err != nil {
 			return nil, flight.err
 		}
-		return aggregateResponse(ctx, r.Diagnostics, flight.result, flight.trace, path, time.Since(started))
+		return aggregateResponse(ctx, r.Diagnostics, flight.result, flight, path, time.Since(started))
 	case <-ctx.Done():
 		reuse.mu.Lock()
 		if reuse.flights[key] == flight {
@@ -229,16 +274,23 @@ func (m *Manager) runAggregateFlight(ctx context.Context, d *database, data []by
 	actual := lookup
 	result, err := m.executeAggregateFlight(ctx, d, data, &actual)
 	reuse := m.aggregateReads
-	reuse.mu.Lock()
-	defer reuse.mu.Unlock()
 	if result != nil {
 		flight.trace, _ = result["diagnostics"].(map[string]any)
 		delete(result, "diagnostics")
 	}
+	var packed string
+	if err == nil && ctx.Err() == nil {
+		flight.cacheStore = "disabled"
+		if reuse.cache {
+			packed, flight.cacheResultBytes, flight.cacheStore = encodeAggregateResult(result)
+		}
+	}
+	reuse.mu.Lock()
+	defer reuse.mu.Unlock()
 	if reuse.flights[lookup] == flight {
 		delete(reuse.flights, lookup)
-		if err == nil && ctx.Err() == nil && reuse.cache {
-			reuse.storeEntry(actual, result)
+		if packed != "" && ctx.Err() == nil {
+			reuse.storeEntry(actual, packed)
 		}
 	}
 	flight.result, flight.err = result, err
@@ -252,14 +304,15 @@ func (m *Manager) executeAggregateFlight(ctx context.Context, d *database, data 
 		return nil, err
 	}
 	r.diag = &countDiagnostics{started: time.Now()}
-	done, err := m.acquireNativeQuery(ctx)
+	done, locked, err := m.admitNativeRead(ctx, d, "batch", r)
 	if err != nil {
 		return nil, err
 	}
 	defer done()
-	r.diag.admission("bulk", time.Since(r.diag.started))
 	r.diag.queued()
-	d.mu.RLock()
+	if !locked {
+		d.mu.RLock()
+	}
 	defer d.mu.RUnlock()
 	if d.closed {
 		return nil, fail("not_found", "database is closed")
@@ -295,11 +348,8 @@ func (s *aggregateReuse) removeEntry(e *list.Element) {
 	s.lru.Remove(e)
 }
 
-func (s *aggregateReuse) storeEntry(key aggregateKey, result map[string]any) {
-	n := 256 + retainedBytes(result)
-	if n > aggregateEntryBytes {
-		return
-	}
+func (s *aggregateReuse) storeEntry(key aggregateKey, result string) {
+	n := aggregateEntryOverhead + len(result)
 	if old := s.entries[key]; old != nil {
 		s.removeEntry(old)
 	}
@@ -311,48 +361,132 @@ func (s *aggregateReuse) storeEntry(key aggregateKey, result map[string]any) {
 	s.bytes += n
 }
 
-func aggregateResponse(ctx context.Context, diagnostics bool, result, trace map[string]any, path string, wait time.Duration) (any, error) {
+func aggregateResponse(ctx context.Context, diagnostics bool, result map[string]any, flight *aggregateFlight, path string, wait time.Duration) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	out := cloneAggregateValue(result).(map[string]any)
+	out := cloneAggregateValue(result, false).(map[string]any)
 	if diagnostics {
 		diag := map[string]any{"executed": false, "reuse": path, "aggregateExecutions": 0}
 		if path == "executed" {
-			diag = cloneAggregateValue(trace).(map[string]any)
+			diag = cloneAggregateValue(flight.trace, false).(map[string]any)
 			diag["reuse"], diag["aggregateExecutions"] = path, 1
 		} else if path == "inflight" {
 			diag["coalescedWaitMs"] = milliseconds(wait)
+		}
+		if flight != nil {
+			diag["cacheStore"] = flight.cacheStore
+			if flight.cacheResultBytes != 0 {
+				diag["cacheResultBytes"] = flight.cacheResultBytes
+			}
 		}
 		out["diagnostics"] = diag
 	}
 	return out, nil
 }
 
-func cloneAggregateValue(value any) any {
+const aggregateEntryOverhead = 256 // entry, LRU element and amortized map overhead
+
+type aggregateContainer uint8
+
+const (
+	nilAggregateRecord aggregateContainer = iota
+	nilAggregateMap
+	nilAggregateRows
+	emptyAggregateRows
+	nilAggregateArray
+	emptyAggregateArray
+)
+
+var aggregateCodec sync.Once
+
+func encodeAggregateResult(result map[string]any) (string, int, string) {
+	aggregateCodec.Do(func() {
+		gob.RegisterName("database.record", Record{})
+		gob.RegisterName("database.rows", []Record{})
+		gob.RegisterName("database.object", map[string]any{})
+		gob.RegisterName("database.array", []any{})
+		gob.RegisterName("database.number", json.Number(""))
+		gob.RegisterName("database.container", aggregateContainer(0))
+	})
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(cloneAggregateValue(result, true)); err != nil {
+		return "", 0, "encode_failed"
+	}
+	size := buf.Len()
+	if aggregateEntryOverhead+size > aggregateEntryBytes {
+		return "", size, "result_too_large"
+	}
+	return buf.String(), size, "stored"
+}
+
+// The binary encoding preserves Go scalar types, including exact JSON numbers.
+// Mark nil maps and empty slices explicitly because gob conflates those shapes.
+func cloneAggregateValue(value any, packing bool) any {
 	switch v := value.(type) {
 	case map[string]any:
+		if v == nil {
+			if packing {
+				return nilAggregateMap
+			}
+			return v
+		}
 		out := make(map[string]any, len(v)+1)
 		for k, item := range v {
-			out[k] = cloneAggregateValue(item)
+			out[k] = cloneAggregateValue(item, packing)
 		}
 		return out
+	case Record:
+		if v == nil && packing {
+			return nilAggregateRecord
+		}
+		return Record(cloneAggregateValue(map[string]any(v), packing).(map[string]any))
 	case []any:
+		if v == nil {
+			if packing {
+				return nilAggregateArray
+			}
+			return v
+		}
+		if packing && len(v) == 0 {
+			return emptyAggregateArray
+		}
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = cloneAggregateValue(item)
+			out[i] = cloneAggregateValue(item, packing)
 		}
 		return out
 	case []Record:
 		if v == nil {
+			if packing {
+				return nilAggregateRows
+			}
 			return v
+		}
+		if packing && len(v) == 0 {
+			return emptyAggregateRows
 		}
 		out := make([]Record, len(v))
 		for i, record := range v {
-			out[i] = Record(cloneAggregateValue(map[string]any(record)).(map[string]any))
+			// Result rows are never nil.
+			out[i] = cloneAggregateValue(record, packing).(Record)
 		}
 		return out
-	default:
-		return value
+	case aggregateContainer:
+		switch v {
+		case nilAggregateRecord:
+			return Record(nil)
+		case nilAggregateMap:
+			return map[string]any(nil)
+		case nilAggregateRows:
+			return []Record(nil)
+		case emptyAggregateRows:
+			return []Record{}
+		case nilAggregateArray:
+			return []any(nil)
+		case emptyAggregateArray:
+			return []any{}
+		}
 	}
+	return value
 }
