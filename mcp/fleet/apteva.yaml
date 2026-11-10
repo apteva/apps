@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.13
+version: 0.11.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -60,6 +60,11 @@ description: |
   v0.10.12 adds stable-host deployment and recovery, durable startup/deployment
   progress, serving-version and active-slot verification, and compatibility-gated
   rollback while preserving legacy tenant startup. Uses app-sdk v0.107.0.
+
+  v0.11.0 adds opt-in updates for existing connected Apteva tenants. Fleet
+  tracks the tenant's update job across restarts and verifies the running
+  version. This feature requires a compatible Apteva server and CLI on the
+  client host, with a separately issued and revocable update credential.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -219,7 +224,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.13
+    ref: fleet/v0.11.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

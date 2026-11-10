@@ -774,6 +774,15 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if retained != nil {
 		return nil, errors.New("tenant has a retained migration source; run tenant_migrate_finalize before deleting the tenant")
 	}
+	if t.Kind == KindRemote {
+		op, err := a.store.connectedUpdate(id)
+		if err != nil {
+			return nil, err
+		}
+		if op != nil && !op.Done {
+			return nil, errors.New("finish or reconcile the pending update before disconnecting this tenant")
+		}
+	}
 
 	if t.Kind == KindLocal {
 		port, _ := portFromBaseURL(t.BaseURL)

@@ -33,9 +33,15 @@ async function setup(
     hostOperation?: boolean;
     setupPending?: boolean;
     toolError?: boolean;
+    connectedTenant?: boolean;
   } = {},
 ) {
   const calls: any[] = [];
+  const listed = opts.connectedTenant
+    ? [tenants[0], { ...tenants[1], kind: "remote", base_url: "https://beta.example.com" }]
+    : tenants;
+  let enrolled = false;
+  let pending = false;
   await page.route("**/api/apps/fleet/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -50,7 +56,22 @@ async function setup(
       };
     else if (path.endsWith("/maintenance"))
       data = { free_bytes: 100 * 2 ** 30, candidates: [] };
-    else if (path.endsWith("/tenants")) data = { tenants, has_more: false };
+    else if (path.endsWith("/tenants")) data = { tenants: listed, has_more: false };
+    else if (path.endsWith("/connected-update")) {
+      const method = route.request().method();
+      if (method === "PUT") enrolled = true;
+      if (method === "POST") {
+        calls.push({ name: "connected-update", arguments: route.request().postDataJSON() });
+        pending = true;
+      }
+      data = {
+        configured: enrolled,
+        supported: enrolled,
+        current_version: "0.41.0",
+        available_version: enrolled ? "0.41.2" : undefined,
+        operation: pending ? { request_id: "fixture", phase: "restarting", version: "0.41.2", done: false } : undefined,
+      };
+    }
     else if (path.endsWith("/mcp")) {
       const body = route.request().postDataJSON();
       calls.push(body.params);
@@ -80,7 +101,7 @@ async function setup(
         });
     } else {
       const id = path.split("/").at(-1);
-      const tenant = tenants.find((t) => t.id === id);
+      const tenant = listed.find((t) => t.id === id);
       if (opts.delayAlpha && id === "a")
         await new Promise((r) => setTimeout(r, 350));
       data = {
@@ -139,6 +160,23 @@ test("update submits the displayed pending target", async ({ page }) => {
       () => calls.find((c) => c.name === "tenant_update")?.arguments.version,
     )
     .toBe("0.41.1");
+});
+test("a connected tenant enrolls and confirms the exact Apteva update", async ({ page }) => {
+  const calls = await setup(page, { connectedTenant: true });
+  await page.getByRole("button").filter({ hasText: "beta" }).first().click();
+  await page.getByRole("button", { name: "Enable Fleet updates" }).click();
+  await page.getByLabel("Update credential").fill("fup_" + "a".repeat(64));
+  await page.getByRole("button", { name: "Save credential" }).click();
+  await page.getByRole("button", { name: "Update to 0.41.2" }).click();
+  await expect(page.getByLabel("Running agents")).toHaveValue("preserve");
+  await page.getByRole("button", { name: "Confirm update" }).click();
+  await expect(page.getByRole("status")).toHaveText("Restarting · 0.41.2");
+  expect(calls.find(call => call.name === "connected-update")?.arguments).toEqual({
+    version: "0.41.2",
+    agent_policy: "preserve",
+    confirm: true,
+  });
+  await expect(page.getByRole("button", { name: "Update to 0.41.2" })).toHaveCount(0);
 });
 test("clone rehearsal next step is visible", async ({ page }) => {
   await setup(page);
