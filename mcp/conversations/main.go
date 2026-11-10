@@ -232,13 +232,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "report",
 			Description: "Main-thread global output only: file a substantive report into an operator conversation. " +
 				"Conversation threads and generic workers report results to their parent/main instead. Keep one " +
-				"standing Reports conversation and reuse it.",
+				"standing Reports conversation and reuse it. Name what happened in the title, such as 'Help center update published'. " +
+				"Use summary as the Inbox preview: one or two plain-text sentences about the outcome. Aim for 25 words. " +
+				"When using sections, write one sentence about the current state. Keep incident causes, recovery steps, " +
+				"measurements, and verification details in optional sections ({title, body}). Use short paragraphs or bullets " +
+				"and labeled Markdown links in section bodies. Use period when the report covers a meaningful time window.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
-				"title":           map[string]any{"type": "string"},
-				"summary":         map[string]any{"type": "string"},
-				"period":          map[string]any{"type": "string"},
-				"sections":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"title":           map[string]any{"type": "string", "description": "A short headline that names the outcome."},
+				"summary":         map[string]any{"type": "string", "description": "One or two plain-text sentences with the outcome and its impact. Aim for 25 words. Leave supporting details to the sections."},
+				"period":          map[string]any{"type": "string", "description": "The reporting window, when it adds context."},
+				"sections":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Optional supporting details. Use a short title and a body with short paragraphs, bullets, or labeled Markdown links."},
 			}, []string{"conversation_id", "title", "summary"}),
 			HandlerCtx: a.toolReport,
 		},
@@ -246,11 +250,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "alert",
 			Description: "Raise a global alert from main, or a conversation-local urgent alert from the originating " +
 				"conversation thread using its exact id. Generic workers report problems to their parent. Alerts are " +
-				"severity-ranked in the inbox.",
+				"severity-ranked in the inbox. Set severity explicitly: error for failures, warn for degraded operation, " +
+				"and info for advisories. Omitting severity creates an info alert.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
-				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}},
+				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}, "description": "Use error for failures, warn for degradation, and info for advisories. Omission defaults to info."},
 			}, []string{"conversation_id", "text"}),
 			HandlerCtx: a.toolAlert,
 		},

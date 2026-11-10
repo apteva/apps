@@ -206,9 +206,14 @@ for (const surface of ["dashboard", "external", "panel"] as const) {
 
 for(const host of ["dashboard","external"]){
  test(`${host}: inbox displays report sections and resolves approvals`,async({page})=>{
+  await page.setViewportSize({width:390,height:844});
   await page.goto(`/?host=${host}&surface=inbox`);
-  await expect(page.getByText("Daily report",{exact:true})).toBeVisible();
-  await page.getByRole("button",{name:"Open",exact:true}).click();
+  const title=page.getByText("Daily report",{exact:true});
+  const open=page.getByRole("button",{name:"Open",exact:true});
+  await expect(title).toBeVisible();
+  await expect(open).toBeVisible();
+  expect((await open.boundingBox())!.y).toBeGreaterThan((await title.boundingBox())!.y+(await title.boundingBox())!.height);
+  await open.click();
   await expect(page.getByText("All systems healthy",{exact:true})).toBeVisible();
   await page.getByRole("button",{name:"Close",exact:true}).last().click();
   await page.getByRole("button",{name:"Review",exact:true}).click();

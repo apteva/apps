@@ -67,6 +67,27 @@
 
 }
 
+.apteva-conversations .conversations-inbox {container:conversations-inbox / inline-size;}
+@container conversations-inbox (max-width: 460px) {
+  .apteva-conversations .inbox-widget-row {
+    display:grid;
+    grid-template-columns:auto minmax(0,1fr);
+    grid-template-areas:"rail copy" "rail actions";
+    height:auto;
+    row-gap:.5rem;
+  }
+  .apteva-conversations .inbox-widget-rail {grid-area:rail;}
+  .apteva-conversations .inbox-widget-copy {grid-area:copy;}
+  .apteva-conversations .inbox-widget-actions {grid-area:actions;justify-content:flex-end;flex-wrap:wrap;}
+  .apteva-conversations .inbox-widget-title {
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
+    white-space:normal;
+    overflow-wrap:anywhere;
+  }
+}
+
 .apteva-conversations {
 .chat-md { display: flow-root; min-width: 0; overflow-wrap: anywhere; }
 .chat-md > *:first-child { margin-top: 0; }

@@ -184,6 +184,44 @@ other than `pending` or `resolved`. Styles are `primary`, `secondary`, or
 `danger`. Put the proposed action first and the alternative second; without
 styles the first gets an accent outline and the others stay neutral.
 
+### Writing readable reports
+
+Write the title as a headline that names the outcome. The Inbox uses the
+summary as a preview, so give it one or two plain-text sentences with
+the outcome and its impact. Aim for 25 words. A brief report can end there.
+
+When the reader needs more detail, use optional `sections` with a short
+`title` and a `body`. Use headings that fit the work, such as Results,
+Verification, or Follow-up. Use short paragraphs or bullets for evidence,
+metrics, blockers, and next steps. Put labeled Markdown links in section
+bodies, where they are clickable. The summary displays as plain text.
+When you use sections, give the current state in one sentence. For a
+recovered incident, the summary can be “Service is back online, and no
+customer data was lost.” Put the cause, the fix, any measurements,
+verification steps, and the follow-up owner in the sections.
+Include internal IDs only when the reader needs them to find or verify something.
+Use `period` when the reporting window helps the reader interpret the result.
+
+Example `conversations_report` input:
+
+```json
+{
+  "conversation_id": "<operator conversation ID>",
+  "title": "Help center update published",
+  "summary": "The new setup guide is live and available from the help center.",
+  "sections": [
+    {
+      "title": "Verification",
+      "body": "- Checked the [published guide](https://example.com/setup).\n- Confirmed it opens from the help center navigation."
+    },
+    {
+      "title": "Follow-up",
+      "body": "Review search traffic next week to see whether readers can find the new guide."
+    }
+  ]
+}
+```
+
 ## Approvals block until answered
 
 The verdict arrives later as an `approval.result` event on the thread

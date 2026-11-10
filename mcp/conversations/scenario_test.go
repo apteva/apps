@@ -1005,20 +1005,61 @@ func TestScenario_ApprovalRoundTrip(t *testing.T) {
 	t.Log("approval card mutated and the agent acknowledged the verdict")
 }
 
-// TestScenario_ReportFlow: a scheduler event produces a report that
-// is pending in the inbox AND visible in its conversation's
-// transcript (the 0.5.1 guarantee).
+// TestScenario_ReportFlow checks that the agent turns detailed source notes
+// into a readable report and that both views show the same message.
 func TestScenario_ReportFlow(t *testing.T) {
 	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
-	c.injectEvent(agentID, "[scheduler] Weekly reporting cycle is due. File your "+
-		"weekly report per your conversations skill. This week: 2 monitor errors on "+
-		"build-server handled, no other activity.")
+	const verificationURL = "https://example.com/ops/backup-verification"
+	c.injectEvent(agentID, "[scheduler] File this week's backup operations report for 2–8 November. "+
+		"Two build-server backups failed with rsync exit 23 when the target disk reached 98%. "+
+		"Both succeeded after the archive rotation freed 120 GB. The newest archive passed an isolated "+
+		"restore check and the recovered file checksums matched. The restore evidence is at "+verificationURL+". "+
+		"No data was lost. The only follow-up is for Infrastructure to review the disk-space warning "+
+		"threshold before Friday. Include the verification evidence and the open follow-up.")
 
 	item := c.pollInbox(agentID, "report", 180*time.Second)
 	defer c.deleteConversation(item.Message.ConversationID)
+
+	if len(item.Message.Components) != 1 || item.Message.Components[0].Name != "report-card" {
+		t.Fatalf("expected one report card, got %+v", item.Message.Components)
+	}
+	props := item.Message.Components[0].Props
+	t.Logf("generated report: %+v", props)
+	title, _ := props["title"].(string)
+	summary, _ := props["summary"].(string)
+	words := len(strings.Fields(summary))
+	if strings.TrimSpace(title) == "" || strings.Contains(summary, "\n") || words == 0 || words > 40 {
+		t.Fatalf("expected a headline and a short summary, got %q and %q", title, summary)
+	}
+	if strings.Contains(summary, verificationURL) {
+		t.Fatal("verification URL should be a clickable link in a section")
+	}
+	period, _ := props["period"].(string)
+	if strings.TrimSpace(period) == "" {
+		t.Fatal("weekly report omitted its reporting period")
+	}
+	sections, _ := props["sections"].([]any)
+	evidenceLink := false
+	followUp := false
+	for _, raw := range sections {
+		section, _ := raw.(map[string]any)
+		heading, _ := section["title"].(string)
+		body, _ := section["body"].(string)
+		if strings.TrimSpace(heading) == "" || strings.TrimSpace(body) == "" {
+			t.Fatalf("expected a named section with a body, got %+v", raw)
+		}
+		evidenceLink = evidenceLink || strings.Contains(body, "]("+verificationURL+")")
+		followUp = followUp || strings.Contains(strings.ToLower(body), "threshold")
+	}
+	if !evidenceLink {
+		t.Fatal("report sections are missing a labeled link to the restore evidence")
+	}
+	if !followUp {
+		t.Fatal("report sections are missing the warning threshold follow-up")
+	}
 
 	var transcript []struct {
 		ID            int64  `json:"id"`
@@ -1577,6 +1618,24 @@ func TestScenario_InteractiveComponents(t *testing.T) {
 	if status := c.do("POST", "/api/apps/conversations/message-action", body, nil); status < 400 {
 		t.Fatal("conflicting answer overwrote saved decision")
 	}
+	count := 0
+	for _, m := range rows() {
+		if m.Role == "agent" && m.Phase == "final" && strings.Contains(m.Content, "LATE_ANSWER_DETAILED") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("late result delivered more than once: %d", count)
+	}
+
+	// Start the form in its own conversation so this check does not depend
+	// on whether the agent finishes or keeps the completed question thread.
+	conv.ID = ""
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Blocking form lifecycle"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create blocking form conversation: %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	path = "/api/apps/conversations/messages?chat_id=" + conv.ID
 	send(`Send exactly one blocking form using conversations_send phase=final with text="Please choose before I continue.", components=[{"id":"required-choice","version":1,"app":"conversations","name":"form-card","props":{"title":"Required preference"},"interaction":{"blocking":true,"inbox":true,"fields":[{"id":"choice","label":"Required preference","type":"text","required":true}]}}]. Then call pace to wait. Do not do more work until component.result arrives. On choice=blue, send phase=final containing BLOCKING_ANSWER_BLUE.`, "interactive-blocking")
 	deadline := time.Now().Add(150 * time.Second)
 	var blocked Message
@@ -1597,19 +1656,13 @@ func TestScenario_InteractiveComponents(t *testing.T) {
 		t.Fatal("blocking form missing")
 	}
 	idle()
+	if item := c.pollInbox(agent, kindInteractive, 15*time.Second); item.Message.ID != blocked.ID {
+		t.Fatalf("blocking form missing from inbox, got message %d", item.Message.ID)
+	}
 	if status := c.do("POST", "/api/apps/conversations/message-action", map[string]any{"message_id": blocked.ID, "component_id": "required-choice", "action_id": "submit", "values": map[string]any{"choice": "blue"}}, nil); status != 200 {
 		t.Fatalf("blocking answer %d", status)
 	}
 	waitFinal("BLOCKING_ANSWER_BLUE")
 	idle()
-	count := 0
-	for _, m := range rows() {
-		if m.Role == "agent" && m.Phase == "final" && strings.Contains(m.Content, "LATE_ANSWER_DETAILED") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("late result delivered more than once: %d", count)
-	}
 	t.Log("optional question survived completion, late answer resumed its owner, retries were safe, blocking form waited and resumed")
 }

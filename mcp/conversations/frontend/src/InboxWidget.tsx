@@ -1,7 +1,6 @@
 import { MessageComponents } from "./messageComponents";
 import type { Message } from "./types";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
-import { reportSectionsText } from "./messageContent";
 // InboxWidget — the conversations app's dashboard.home widget, a
 // faithful recreation of the dashboard's AptevaInbox (the operator's
 // favorite): tone-coded rows (blue approvals, red/yellow alerts, left
@@ -133,20 +132,28 @@ function card(message: InboxMessage, name: string): Record<string, unknown> {
   return message.components.find((c) => c.name === name)?.props ?? {};
 }
 
+function inboxInteraction(message: InboxMessage) {
+  return message.components?.find(c => c.interaction?.status === "pending" && c.interaction.inbox !== false);
+}
+
+function alertText(message: InboxMessage): string {
+  return String(card(message, "alert-card").text ?? message.content).trim();
+}
+
 function itemTitle(message: InboxMessage): string {
   const kind = message.component_kind;
-  if (kind === "interactive") return String(message.components.find(c=>c.interaction)?.props.title ?? message.content);
+  if (kind === "interactive") return String(inboxInteraction(message)?.props.title ?? message.content);
   if (kind === "approval") return String(card(message, "approval-card").title ?? message.content);
   if (kind === "report") return String(card(message, "report-card").title ?? message.content);
-  return String(card(message, "alert-card").text ?? message.content);
+  return alertText(message).split("\n", 1)[0];
 }
 
 function itemBody(message: InboxMessage): string {
   const kind = message.component_kind;
-  if (kind === "interactive") return String(message.components.find(c=>c.interaction)?.props.body ?? "");
+  if (kind === "interactive") return String(inboxInteraction(message)?.props.body ?? "");
   if (kind === "approval") return String(card(message, "approval-card").body ?? "");
-  if (kind === "report") return [String(card(message, "report-card").summary ?? ""),reportSectionsText(card(message,"report-card").sections)].filter(Boolean).join("\n\n");
-  return String(card(message, "alert-card").text ?? "");
+  if (kind === "report") return String(card(message, "report-card").summary ?? "");
+  return alertText(message).split("\n").slice(1).join("\n");
 }
 
 // ─── overlay (lightweight Modal port, same as the panel's) ───────────
@@ -223,13 +230,17 @@ function InboxRow({
   const kind = m.component_kind || "report";
   const severity = m.severity || "";
   const tone = inboxTone(kind, severity);
-  const label = kind === "interactive" ? t("component.question") : kind === "approval" ? t("card.approval") : kind === "report" ? t("card.report") : t("card.alert");
+  const interaction = inboxInteraction(m);
+  const label = kind === "interactive"
+    ? t(interaction?.name === "form-card" ? "component.form" : "component.question")
+    : kind === "approval" ? t("card.approval") : kind === "report" ? t("card.report") : t("card.alert");
   const meta =
-    kind === "interactive" ? "pending" : kind === "approval"
-      ? String(card(m, "approval-card").status ?? "pending")
+    kind === "interactive" ? t(interaction?.interaction?.blocking ? "inbox.answerNeeded" : "inbox.optional")
+    : kind === "approval"
+      ? statusLabel(String(card(m, "approval-card").status ?? "pending"))
       : kind === "report"
-        ? String(card(m, "report-card").period ?? "") || "report"
-        : severity || "alert";
+        ? String(card(m, "report-card").period ?? "")
+        : statusLabel(severity || "alert");
   const createdAt = parseTime(m.created_at);
   const preview = flattenPreview(itemBody(m));
 
@@ -243,17 +254,17 @@ function InboxRow({
   return (
     <>
       <article
-        className={`h-[78px] rounded-md border px-3 py-2 flex items-center gap-3 overflow-hidden ${tone.row}`}
+        className={`inbox-widget-row h-[78px] rounded-md border px-3 py-2 flex items-center gap-3 overflow-hidden ${tone.row}`}
       >
-        <div className={`w-1.5 h-10 rounded-full shrink-0 ${tone.rail}`} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-text-dim">
+        <div className={`inbox-widget-rail w-1.5 h-10 rounded-full shrink-0 ${tone.rail}`} />
+        <div className="inbox-widget-copy min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-text-dim">
             <span className={`rounded border px-1.5 py-0.5 font-bold ${tone.badge}`}>{label}</span>
             {meta && (
-              <span className="text-text-muted normal-case tracking-normal truncate">{kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}</span>
+              <span className="text-text-muted normal-case tracking-normal truncate">{meta}</span>
             )}
           </div>
-          <div className="mt-0.5 text-xs text-text truncate">{itemTitle(m)}</div>
+          <div className="inbox-widget-title mt-0.5 text-xs text-text truncate">{itemTitle(m)}</div>
           <div className="mt-0.5 flex items-center gap-2 text-[10px] text-text-dim min-w-0">
             <span className="shrink-0">{agentName}</span>
             {projectName && (
@@ -270,7 +281,7 @@ function InboxRow({
             )}
           </div>
         </div>
-        <div className="shrink-0 flex items-center gap-3">
+        <div className="inbox-widget-actions shrink-0 flex items-center gap-3">
           <time
             dateTime={createdAt?.toISOString() || m.created_at}
             title={createdAt ? dateTime(createdAt) : m.created_at}
@@ -370,7 +381,7 @@ export default function InboxWidget(props: HostProps) {
     item.agent_name || (item.message.agent_id && agents.get(item.message.agent_id)) || (item.message.agent_id ? t("inbox.agentName", { id: String(item.message.agent_id) }) : t("common.app"));
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
+    <section className="conversations-inbox flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.3 — 2026-11-10
+
+- Answer single-choice questions with one click. Skip stays available, and custom answers send with Enter.
+- Guide agents to write concise report summaries and use optional sections for evidence and follow-up.
+- Give Inbox headlines more room on narrow screens, remove duplicate alert previews, and show which questions and forms need an answer.
+- Guide agents to set alert severity explicitly so failures appear at the right priority.
+- Pin App SDK v0.115.1.
+
 ## 0.25.2 — 2026-11-06
 
 - Keep typing responsive in long conversations by reusing rendered message rows during draft edits. Live messages and tool updates still render as they arrive.

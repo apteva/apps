@@ -112,7 +112,7 @@ export function ApprovalCard({
             placeholder={t("approval.notePlaceholder")}
             className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs text-text"
           />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {actions.map((a, index) => (
               <button
                 key={a.id}
@@ -145,6 +145,7 @@ export function ReportCard({ message }: { message: Message }) {
   const { t } = useConversationLocalization();
   const card = message.components.find((c) => c.name === "report-card");
   if (!card) return null;
+  const sections = reportSectionsText(card.props.sections);
   return (
     <div className="rounded-md border border-border bg-bg-card p-3">
       <div className="flex items-center gap-2 text-xs text-text-muted">
@@ -158,7 +159,9 @@ export function ReportCard({ message }: { message: Message }) {
       <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">
         {String(card.props.summary ?? "")}
       </p>
-      <div className="chat-md" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(reportSectionsText(card.props.sections))}} />
+      {sections && (
+        <div className="chat-md mt-3" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(sections)}} />
+      )}
     </div>
   );
 }
