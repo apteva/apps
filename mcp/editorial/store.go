@@ -66,12 +66,14 @@ type Release struct {
 	UpdatedAt string `json:"updated_at"`
 }
 type Brand struct {
-	ID               string  `json:"id"`
-	Name             string  `json:"name"`
-	Color            string  `json:"color"`
-	LogoURL          string  `json:"logo_url"`
-	SocialAccountIDs []int64 `json:"social_account_ids"`
-	CampaignIDs      []int64 `json:"campaign_ids"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Color            string         `json:"color"`
+	LogoURL          string         `json:"logo_url"`
+	SocialAccountIDs []int64        `json:"social_account_ids"`
+	CampaignIDs      []int64        `json:"campaign_ids"`
+	PersonaID        int64          `json:"persona_id,omitempty"`
+	OperatingProfile map[string]any `json:"operating_profile,omitempty"`
 }
 
 func findBrand(s Settings, id string) *Brand {
@@ -631,6 +633,9 @@ func saveSettings(db *sql.DB, pid string, args map[string]any) (Settings, error)
 	ids, names := map[string]bool{}, map[string]bool{}
 	for n := range s.Brands {
 		b := &s.Brands[n]
+		if e := validateBrandProfile(*b); e != nil {
+			return s, e
+		}
 		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,80}$`).MatchString(b.ID) || b.ID == "unassigned" || ids[b.ID] {
 			return s, invalid("brand IDs must be unique stable identifiers")
 		}

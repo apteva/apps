@@ -166,6 +166,33 @@ test("full width renders a month grid with weekday headers", async () => {
   expect(host.textContent).toContain("Launch article");
 });
 
+test("half-width widgets show every title in Month and Week and can open a day agenda", async () => {
+  const today = dateKey(new Date());
+  const events = Array.from({ length: 5 }, (_, n) =>
+    event({ item_id: n + 1, at: today, date: today, title: `Launch article ${n + 1}` }),
+  );
+  const { host } = await mount(
+    { widgetSize: "half" },
+    { events },
+  );
+  expect(host.querySelector(".ec-grid")).toBeNull();
+
+  for (const view of ["Month", "Week"]) {
+    const toggle = [...host.querySelectorAll<HTMLButtonElement>(".ec-views button")]
+      .find((button) => button.textContent === view)!;
+    await act(async () => toggle.click());
+    expect([...host.querySelectorAll(".ec-grid .ec-chip-title")].map((chip) => chip.textContent))
+      .toEqual(events.map((entry) => entry.title));
+  }
+  const date = host.querySelector<HTMLButtonElement>(`button[aria-label="Agenda for ${today}"]`)!;
+  await act(async () => date.click());
+  expect(date.getAttribute("aria-expanded")).toBe("true");
+  expect(host.querySelectorAll(".ec-daygroup .ec-title")).toHaveLength(events.length);
+  const close = host.querySelector<HTMLButtonElement>(".ec-dayhead button")!;
+  await act(async () => close.click());
+  expect(date.getAttribute("aria-expanded")).toBe("false");
+});
+
 test("a failed load explains itself instead of rendering an empty calendar", async () => {
   globalThis.fetch = (async () => ({
     ok: false,
