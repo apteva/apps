@@ -367,7 +367,7 @@ func httpResult(w http.ResponseWriter, v any, e error) {
 				status = 403
 			case "not_found":
 				status = 404
-			case "unique_conflict", "version_conflict", "schema_conflict", "resume_invalid", "cardinality_violation":
+			case "unique_conflict", "version_conflict", "schema_conflict", "resume_invalid", "cardinality_violation", "collection_building":
 				status = 409
 			case "history_expired":
 				status = 410
@@ -389,7 +389,7 @@ func inputSchema(s toolSpec) map[string]any {
 	obj := func() map[string]any { return map[string]any{"type": "object"} }
 	arr := func(items any) map[string]any { return map[string]any{"type": "array", "items": items} }
 	order := map[string]any{"type": "object", "properties": map[string]any{"field": str(), "direction": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}}, "required": []string{"field"}}
-	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate", "query"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "count_distinct", "merge_distinct", "sum", "avg", "min", "max"}}, "field": str(), "where": obj()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert", "get", "find", "count", "aggregate", "query"}}, "args": obj()}, "required": []string{"op", "args"}})}
 	pipelineFields := queryInputProperties()
 	all["pipeline"] = map[string]any{"type": "object", "properties": map[string]any{"version": map[string]any{"type": "integer", "enum": []int{1}}, "nodes": pipelineFields["nodes"], "from": str()}, "required": []string{"version", "nodes", "from"}, "additionalProperties": false}
 	all["limits"] = pipelineFields["limits"]
@@ -405,8 +405,14 @@ func inputSchema(s toolSpec) map[string]any {
 	all["as"] = map[string]any{"type": "string", "description": "Alias of the root collection in joined names; default root."}
 	all["joins"] = arr(obj())
 	all["computed"] = map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "object", "description": "{name,type?,expr}; expr is one of field, const, coalesce, nullIfEmpty, trim, strip+chars, concat+separator, json+path, if+then+else, or numeric op+args (add, subtract, multiply, safe_divide, comparisons, min, max, round, if, and/or/not)."}}
+	computedInput := map[string]any{"type": "object", "additionalProperties": false,
+		"required": []string{"collection", "metrics"}, "properties": map[string]any{
+			"collection": str(), "where": obj(), "metrics": all["metrics"],
+			"groupFields": map[string]any{"type": "object", "additionalProperties": str()},
+		}}
 	all["computedCollection"] = map[string]any{"type": "object", "additionalProperties": false,
-		"required": []string{"source"}, "properties": map[string]any{"source": str(),
+		"oneOf": []any{map[string]any{"required": []string{"source"}}, map[string]any{"required": []string{"sources", "groupBy"}}},
+		"properties": map[string]any{"source": str(), "sources": arr(computedInput),
 			"where": all["where"], "select": all["select"], "groupBy": all["groupBy"], "metrics": all["metrics"]}}
 	all["filter"] = map[string]any{"type": "object", "description": "Filter over joined rows, using alias.field names and computed names."}
 	all["distinct"] = map[string]any{"type": "array", "items": str(), "description": "Aliases (physical records) or fields whose combination appears once."}

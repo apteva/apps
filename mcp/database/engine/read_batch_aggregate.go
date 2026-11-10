@@ -239,7 +239,7 @@ func shareableAggregate(c Collection, r Request) bool {
 	}
 	for _, metric := range r.Metrics {
 		f, _ := c.field(metric.Field)
-		if metric.Op == "avg" || f.Type == "json" || f.Type == "number" || hasExists(metric.Where) {
+		if metric.Op == "avg" || metric.Op == "merge_distinct" || f.Type == "json" || f.Type == "number" || hasExists(metric.Where) {
 			return false
 		}
 	}

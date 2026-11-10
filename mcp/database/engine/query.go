@@ -488,7 +488,13 @@ func validateAggregate(c Collection, r *Request) (Collection, error) {
 		if e := validateFilter(c, m.Where, 0, &n); e != nil {
 			return c, e
 		}
-		if m.Op == "count" {
+		if m.Op == "merge_distinct" {
+			if !c.computedDistinct(m.Field) {
+				return c, Invalid("merge_distinct requires a stored distinct measure")
+			}
+		} else if m.Op == "sum" && c.computedDistinct(m.Field) {
+			return c, Invalid("use merge_distinct on stored distinct measures")
+		} else if m.Op == "count" {
 			if m.Field != "" {
 				if _, e := c.field(m.Field); e != nil {
 					return c, e

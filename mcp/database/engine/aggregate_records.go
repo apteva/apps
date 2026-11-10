@@ -100,6 +100,9 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 			fields = append(fields, m.Field)
 		}
 	}
+	if r.mergeComputedDistinct != nil {
+		fields = append(fields, c.PrimaryKey...)
+	}
 	if a != nil {
 		input.Where = a.pushed
 		fields = a.fields
@@ -141,8 +144,35 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 			if m.Where != nil && !matches(view, row, m.Where) {
 				continue
 			}
-			v := row[m.Field]
 			state := &group.metrics[i]
+			if m.Op == "merge_distinct" {
+				if r.mergeComputedDistinct == nil {
+					aggErr = Invalid("merge_distinct requires a direct aggregate on a computed collection")
+					return false
+				}
+				if state.seen == nil {
+					state.seen = map[any]struct{}{}
+				}
+				err := r.mergeComputedDistinct(m.Field, row, func(identity []byte) bool {
+					if _, seen := state.seen[string(identity)]; seen {
+						return true
+					}
+					if aggErr = grow(80 + len(identity)); aggErr != nil {
+						return false
+					}
+					state.seen[string(identity)] = struct{}{}
+					state.count++
+					return true
+				})
+				if err != nil {
+					aggErr = err
+				}
+				if aggErr != nil {
+					return false
+				}
+				continue
+			}
+			v := row[m.Field]
 			if v == nil && !(m.Op == "count" && m.Field == "") {
 				continue
 			}
@@ -210,7 +240,7 @@ func aggregateRecordsSharedBudget(ctx context.Context, c Collection, r Request, 
 		for i, m := range r.Metrics {
 			state := group.metrics[i]
 			var v any
-			if m.Op == "count" || m.Op == "count_distinct" {
+			if m.Op == "count" || m.Op == "count_distinct" || m.Op == "merge_distinct" {
 				v = strconv.FormatInt(state.count, 10)
 			} else if state.count > 0 {
 				switch m.Op {

@@ -21,6 +21,7 @@ type aptevaBackend struct {
 	handles map[string]*native.Collection
 	fatal   error // Unpublished schema changes require recovery before any access.
 	options AptevaOptions
+	builds  computedBuildWorker
 }
 type nativeRowKey struct{ collection, primary string }
 type nativeUniqueKey struct{ collection, index, tuple string }
@@ -53,6 +54,7 @@ func openAptevaDBWithOptions(path string, options AptevaOptions) (backend, error
 	if e = b.recoverDDL(); e != nil {
 		return nil, errors.Join(e, db.Close())
 	}
+	b.startComputedBuilds()
 	return b, nil
 }
 
@@ -79,7 +81,11 @@ func nativeAptevaOptions(options AptevaOptions) native.Options {
 	}
 	return durable
 }
-func (b *aptevaBackend) close() error { return b.db.Close() }
+func (b *aptevaBackend) close() error {
+	b.builds.cancel()
+	<-b.builds.done
+	return b.db.Close()
+}
 func (b *aptevaBackend) health() error {
 	b.mu.Lock()
 	e := b.fatal
@@ -130,6 +136,10 @@ func nativeError(e error) error {
 		return fail("not_found", "native database object does not exist")
 	case errors.Is(e, native.ErrConflict):
 		return fail("storage_error", "unexpected concurrent native database writer")
+	case errors.Is(e, native.ErrComputedCollectionBuilding):
+		return fail("collection_building", "computed collection is building; inspect collection_describe")
+	case errors.Is(e, native.ErrComputedCollectionExists):
+		return fail("schema_conflict", "physical computed collection differs from its catalog")
 	case errors.Is(e, native.ErrComputedCollectionDependency):
 		return fail("schema_conflict", "drop dependent computed collections first")
 	case errors.Is(e, native.ErrComputedCollectionReadOnly):
@@ -209,7 +219,11 @@ func (t *aptevaTx) collection(name string) (Collection, error) {
 	return c, e
 }
 func (t *aptevaTx) readCollection(c Collection) (*native.Collection, error) {
-	return t.snapshot.Collection(nativeCollectionName(c.Name))
+	h, err := t.snapshot.Collection(nativeCollectionName(c.Name))
+	if c.onlineComputed() && errors.Is(err, native.ErrNoSuchCollection) {
+		return nil, native.ErrComputedCollectionBuilding
+	}
+	return h, err
 }
 func (t *aptevaTx) get(c Collection, pk string) (Record, error) {
 	if e := t.ctx.Err(); e != nil {
