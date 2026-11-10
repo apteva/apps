@@ -148,6 +148,7 @@ var environmentSpecSchema = strictObject(map[string]any{
 })
 
 var environmentRunCreateSchema = strictObject(map[string]any{
-	"kind": map[string]any{"type": "string"},
-	"spec": environmentSpecSchema,
+	"request_id": map[string]any{"type": "string", "description": "Optional unique run_ identifier, reserved before startup."},
+	"kind":       map[string]any{"type": "string"},
+	"spec":       environmentSpecSchema,
 }, "spec")

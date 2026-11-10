@@ -23,6 +23,7 @@ var manifestYAML []byte
 type App struct {
 	ctx           *sdk.AppCtx
 	client        *http.Client
+	runtimeHTTP   *http.Client
 	functionSlots chan struct{}
 	publish       func(context.Context, *sdk.AppCtx, string, map[string]any) error
 }
@@ -43,6 +44,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if a.client == nil {
 		a.client = httpClient(os.Getenv("APTEVA_TESTS_ALLOW_PRIVATE_NETWORK") == "true")
 	}
+	a.runtimeHTTP = httpClient(true)
 	a.functionSlots = make(chan struct{}, 4)
 	if a.publish == nil {
 		a.publish = publishEvent
@@ -81,11 +83,19 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	if a.client != nil {
 		a.client.CloseIdleConnections()
 	}
+	if a.runtimeHTTP != nil {
+		a.runtimeHTTP.CloseIdleConnections()
+	}
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "runner", Schedule: "@every 1s", Run: a.work}, {Name: "events", Schedule: "@every 2s", Run: a.flushEvents}}
+	return []sdk.Worker{{Name: "runner", Schedule: "@every 1s", Run: a.work}, {Name: "events", Schedule: "@every 2s", Run: a.flushEvents}, {Name: "cleanup", Schedule: "@every 20s", Run: func(worker context.Context, app *sdk.AppCtx) error {
+		if app.CurrentProject() != "" {
+			a.reconcileEnvironmentCleanup(worker, app)
+		}
+		return nil
+	}}}
 }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{{Event: "tests.run.requested", Handler: func(ctx *sdk.AppCtx, e sdk.Event) error {
@@ -97,6 +107,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		}
 		var args struct {
 			SuiteID int64 `json:"suite_id"`
+			QueueOptions
 		}
 		if err := decodeArgs(e.Data, &args); err != nil {
 			return err
@@ -105,7 +116,9 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		if e.DeliveryID != "" {
 			key = "event:" + e.DeliveryID
 		}
-		_, err := (store{ctx.AppDB(), e.ProjectID}).queue(args.SuiteID, "event", key)
+		request, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := a.queue(request, ctx.WithProject(e.ProjectID), args.SuiteID, "event", key, args.QueueOptions)
 		return err
 	}}}
 }
@@ -200,7 +213,7 @@ func (a *App) httpTool(w http.ResponseWriter, r *http.Request) {
 		Tool string         `json:"tool"`
 		Args map[string]any `json:"args"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPayload+1024))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSuitePayload+1024))
 	if err := dec.Decode(&body); err != nil {
 		fail(400, err)
 		return

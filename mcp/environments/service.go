@@ -120,7 +120,11 @@ func (s *service) startDefinition(id string) (*Run, error) {
 	return run, startErr
 }
 
-func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *Run, err error) {
+func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (*Run, error) {
+	return s.startWithID(environmentID, kind, spec, "run_"+token(12))
+}
+
+func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, id string) (run *Run, err error) {
 	if err = validateSpec(spec); err != nil {
 		return nil, err
 	}
@@ -136,7 +140,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 		}
 	}
 	runtimeID := "rt_env_" + token(12)
-	run = &Run{ID: "run_" + token(12), EnvironmentID: environmentID, RuntimeID: runtimeID, Kind: kind, Status: "starting", StartedAt: time.Now().UTC()}
+	run = &Run{ID: id, EnvironmentID: environmentID, RuntimeID: runtimeID, Kind: kind, Status: "starting", StartedAt: time.Now().UTC()}
 	if err = s.db.createRun(run); err != nil {
 		return nil, err
 	}

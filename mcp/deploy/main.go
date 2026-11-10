@@ -837,9 +837,6 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	if !buildArtifactAvailable(b) {
 		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
 	}
-	if err := a.stopSupersededCandidates(d); err != nil {
-		return nil, err
-	}
 	fresh, err := a.refreshDeployment(d)
 	if err != nil {
 		return nil, err
@@ -849,6 +846,16 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	}
 	if d.RecoveryReleaseID > 0 && !a.recoveryAllowed(d, d.RecoveryReleaseID) {
 		return nil, errors.New("recovery superseded by operator action")
+	}
+	target, err := genericTarget(fresh.TargetConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	if err = checkTestsGate(fresh, b, target.TestsGate, true); err != nil {
+		return nil, err
+	}
+	if err = a.stopSupersededCandidates(d); err != nil {
+		return nil, err
 	}
 	d.CurrentReleaseID = fresh.CurrentReleaseID
 	previousID := int64(0)
@@ -1214,6 +1221,32 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 		// supervisor path that set the terminal state wins.
 		return
 	}
+	d, err := a.deploymentForRelease(rel)
+	if err != nil || d == nil {
+		return
+	}
+	target, err := genericTarget(d.TargetConfigJSON)
+	if err != nil {
+		return
+	}
+	frozen, err := genericTarget(a.releaseConfiguration(d, rel.ID).TargetConfigJSON)
+	if err != nil {
+		return
+	}
+	if frozen.TestsGate != nil && (target.TestsGate == nil || *target.TestsGate != *frozen.TestsGate) {
+		globalCtx.Logger().Warn("release test policy changed while candidate was starting", "release_id", rel.ID)
+		return
+	}
+	if target.TestsGate != nil {
+		build, err := dbGetBuild(globalCtx.AppDB(), rel.BuildID)
+		if err != nil {
+			return
+		}
+		if err := checkTestsGate(d, build, target.TestsGate, false); err != nil {
+			globalCtx.Logger().Warn("service promotion blocked by release test gate", "release_id", rel.ID, "error", err)
+			return
+		}
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status": "live",
 		"pid":    pid, "port": port,
@@ -1229,8 +1262,7 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID, "release_id": releaseID, "port": port, "pid": pid,
 	})
 
-	d, _ := a.deploymentForRelease(rel)
-	if d != nil && d.Domain != "" {
+	if d.Domain != "" {
 		if err := registerRouteForDeployment(globalCtx, a, d); err != nil {
 			return
 		}

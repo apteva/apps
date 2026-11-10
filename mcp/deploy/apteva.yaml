@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.30.11
+version: 0.31.0
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,7 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.31.0 supports optional candidate-specific release gates from the Tests app.
   v0.30.11 accepts pending developer releases for Apple's manual release action,
   preserves Apple-held release states, and shows the release button only for
   eligible versions. Sync older approved_pending_release aliases before release.
@@ -79,6 +80,8 @@ requires:
     - platform.ingress.write
     - platform.connections.execute
     - platform.connections.read_credentials
+  apps:
+    - { name: tests, version: ">=0.2.0", optional: true, reason: "Bind Tests v0.2.0 or newer to enforce environment test verdicts before release." }
   integrations:
     - role: code
       kind: app
@@ -148,6 +151,8 @@ provides:
       description: Archive a non-production environment.
     - name: deploy_build
       description: Build a service artifact, Android AAB, iOS IPA, or macOS PKG.
+    - name: deploy_candidate_digest
+      description: Read the verified artifact SHA-256 of a succeeded build.
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
     - name: deploy_artifact_download
@@ -225,7 +230,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.30.11
+    ref: deploy/v0.31.0
     entry: mcp/deploy
   port: 8080
   health_check: /health

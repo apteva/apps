@@ -122,6 +122,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_start", Description: "Start a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStart},
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
 		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
+		{Name: "environment_run_endpoint", Description: "Resolve a running environment app’s HTTP endpoint for a test or fixture.", InputSchema: requiredSchema("run_id", "app"), Handler: a.toolRunEndpoint},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_clock_get", Description: "Read a run's server-owned clock and advancement history.", InputSchema: requiredSchema("run_id"), Handler: a.toolClockGet},
 		{Name: "environment_clock_advance", Description: "Advance a manual run clock to an RFC3339 time.", InputSchema: requiredSchema("run_id", "to"), Handler: a.toolClockAdvance},
@@ -201,8 +202,9 @@ func (a *App) toolRunCreate(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("environment_run_create creates runtime infrastructure only; prompts, cases, suites and assertions must be executed through Evals")
 	}
 	var in struct {
-		Kind string           `json:"kind"`
-		Spec *EnvironmentSpec `json:"spec"`
+		Kind      string           `json:"kind"`
+		Spec      *EnvironmentSpec `json:"spec"`
+		RequestID string           `json:"request_id"`
 	}
 	if err := decodeStrictArgs(args, &in); err != nil {
 		return nil, err
@@ -213,8 +215,25 @@ func (a *App) toolRunCreate(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if in.Kind == "" {
 		in.Kind = "eval"
 	}
+	if in.RequestID != "" {
+		if !validID(in.RequestID) || len(in.RequestID) > 80 || !strings.HasPrefix(in.RequestID, "run_") {
+			return nil, errors.New("request_id must be a unique run_ identifier")
+		}
+		return a.svc.startWithID("", in.Kind, *in.Spec, in.RequestID)
+	}
 	return a.svc.start("", in.Kind, *in.Spec)
 }
+func (a *App) toolRunEndpoint(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	run, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	if run.Status != "running" {
+		return nil, errors.New("environment run is not running")
+	}
+	return a.svc.runtime().GetRuntimeAppEndpoint(run.RuntimeID, str(args, "app"))
+}
+
 func (a *App) toolRunGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
 	if err != nil {

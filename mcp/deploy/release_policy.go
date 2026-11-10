@@ -103,6 +103,9 @@ func checkReleasePolicy(d *Deployment, b *Build, opts releaseOptions, ignoreAppr
 	if e != nil {
 		return "", e
 	}
+	if e = checkTestsGate(d, b, t.TestsGate, !ignoreApproval); e != nil {
+		return "", e
+	}
 	// A pipeline's integrity gate applies independently of an optional
 	// promotion policy. Every native release still needs matching evidence.
 	buildPipeline, e := pipelineConfig(b.TargetConfigJSON)

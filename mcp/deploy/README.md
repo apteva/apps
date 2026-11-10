@@ -18,6 +18,30 @@ or GitHub Actions.
   succeeded, failed, cancelled}`, `deploy.release.{live, stopped, crashed,
   failed}`, `deploy.destroyed`
 
+## Isolated release tests
+
+Bind Tests 0.2.0 or newer and add `tests_gate` to the target environment's
+target configuration. Pin the suite and fixture revisions returned by
+`tests_release_spec`.
+
+```json
+{
+  "tests_gate": {
+    "suite_id": 42,
+    "suite_revision": "<suite SHA-256>",
+    "fixture_revision": "<fixture SHA-256>"
+  }
+}
+```
+
+Deploy reads the sealed build digest and asks Tests for an exact verdict. A
+release request queues a missing run and returns its ID. Retry promotion after
+the run passes. An interrupted, failed or mismatched verdict blocks release.
+Service promotion checks the verdict again before marking the candidate live.
+Use `deploy_candidate_digest` to inspect a succeeded build's verified digest.
+An Environments fixture loader and independently measured candidate probe
+connect the exact retained artifact to its isolated test runtime.
+
 ## Source kinds (pluggable)
 
 | Kind     | `source_ref`                       | Status        |

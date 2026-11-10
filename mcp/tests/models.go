@@ -11,15 +11,17 @@ import (
 
 const maxChecks = 50
 const maxPayload = 256 << 10
+const maxSuitePayload = 1 << 20
 
 type Suite struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Environment string `json:"environment"`
-	Archived    bool   `json:"archived"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID          int64          `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Environment string         `json:"environment"`
+	Release     *ReleaseConfig `json:"release,omitempty"`
+	Archived    bool           `json:"archived"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
 }
 
 // Definition is versioned by copying the whole check into the queued run.
@@ -32,7 +34,8 @@ type Definition struct {
 	Headers    map[string]string `json:"headers,omitempty"`
 	Body       string            `json:"body,omitempty"`
 	TimeoutMS  int               `json:"timeout_ms"`
-	Assertions []Assertion       `json:"assertions"`
+	Assertions []Assertion       `json:"assertions,omitempty"`
+	Steps      []Step            `json:"steps,omitempty"`
 }
 type Assertion struct {
 	Path  string `json:"path"`
@@ -48,20 +51,22 @@ type Check struct {
 	Definition Definition `json:"definition"`
 }
 type Run struct {
-	ID          int64    `json:"id"`
-	SuiteID     int64    `json:"suite_id"`
-	SuiteName   string   `json:"suite_name"`
-	Environment string   `json:"environment"`
-	Status      string   `json:"status"`
-	Trigger     string   `json:"trigger"`
-	Passed      int      `json:"passed"`
-	Failed      int      `json:"failed"`
-	Error       string   `json:"error"`
-	CreatedAt   string   `json:"created_at"`
-	StartedAt   string   `json:"started_at"`
-	FinishedAt  string   `json:"finished_at"`
-	Checks      []Check  `json:"checks,omitempty"`
-	Results     []Result `json:"results,omitempty"`
+	ID              int64          `json:"id"`
+	SuiteID         int64          `json:"suite_id"`
+	SuiteName       string         `json:"suite_name"`
+	Environment     string         `json:"environment"`
+	Status          string         `json:"status"`
+	Trigger         string         `json:"trigger"`
+	Passed          int            `json:"passed"`
+	Failed          int            `json:"failed"`
+	Error           string         `json:"error"`
+	CreatedAt       string         `json:"created_at"`
+	StartedAt       string         `json:"started_at"`
+	FinishedAt      string         `json:"finished_at"`
+	Checks          []Check        `json:"checks,omitempty"`
+	Results         []Result       `json:"results,omitempty"`
+	Release         *ReleaseRecord `json:"release,omitempty"`
+	CancelRequested bool           `json:"cancel_requested,omitempty"`
 }
 type AssertionResult struct {
 	Assertion
@@ -83,12 +88,16 @@ type Result struct {
 func now() string         { return time.Now().UTC().Format(time.RFC3339Nano) }
 func encode(v any) string { b, _ := json.Marshal(v); return string(b) }
 func decodeArgs(args map[string]any, dst any) error {
+	return decodeArgsLimit(args, dst, maxPayload)
+}
+
+func decodeArgsLimit(args map[string]any, dst any, limit int) error {
 	b, err := json.Marshal(args)
 	if err != nil {
 		return err
 	}
-	if len(b) > maxPayload {
-		return errors.New("definition exceeds 256 KiB")
+	if len(b) > limit {
+		return fmt.Errorf("definition exceeds %d KiB", limit>>10)
 	}
 	return json.Unmarshal(b, dst)
 }
@@ -98,6 +107,15 @@ func validateCheck(c *Check) error {
 		return errors.New("suite_id and name (1–200 characters) required")
 	}
 	d := &c.Definition
+	if c.Kind == "scenario" {
+		if d.TimeoutMS == 0 {
+			d.TimeoutMS = 60000
+		}
+		if d.TimeoutMS < 100 || d.TimeoutMS > 120000 {
+			return errors.New("scenario timeout_ms must be 100–120000")
+		}
+		return validateSteps(d.Steps)
+	}
 	if d.TimeoutMS == 0 {
 		d.TimeoutMS = 10000
 	}
@@ -129,12 +147,16 @@ func validateCheck(c *Check) error {
 			}
 		}
 	default:
-		return errors.New("kind must be function or http")
+		return errors.New("kind must be function, http, or scenario")
 	}
-	if len(d.Assertions) == 0 || len(d.Assertions) > 50 {
+	return validateAssertions(d.Assertions)
+}
+
+func validateAssertions(assertions []Assertion) error {
+	if len(assertions) == 0 || len(assertions) > 50 {
 		return errors.New("provide 1–50 assertions")
 	}
-	for _, a := range d.Assertions {
+	for _, a := range assertions {
 		if a.Path != "" && !strings.HasPrefix(a.Path, "/") {
 			return errors.New("assertion path must be a JSON pointer, e.g. /response/total")
 		}
