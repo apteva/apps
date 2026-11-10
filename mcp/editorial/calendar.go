@@ -17,18 +17,19 @@ type CalendarEvent struct {
 	// Date is the server-side bucket used for windowing; At is the value as
 	// stored. A client that renders in the viewer's timezone buckets on At and
 	// pads its window by a day, which is what the panel already does.
-	Date      string `json:"date"`
-	At        string `json:"at"`
-	ItemID    int64  `json:"item_id"`
-	ReleaseID int64  `json:"release_id,omitempty"`
-	Title     string `json:"title"`
-	BrandID   string `json:"brand_id"`
-	Format    string `json:"format"`
-	Status    string `json:"status"`
-	Approval  string `json:"approval"`
-	Owner     string `json:"owner"`
-	Channel   string `json:"channel,omitempty"`
-	URL       string `json:"url,omitempty"`
+	Date         string   `json:"date"`
+	At           string   `json:"at"`
+	ItemID       int64    `json:"item_id"`
+	ReleaseID    int64    `json:"release_id,omitempty"`
+	Title        string   `json:"title"`
+	BrandID      string   `json:"brand_id"`
+	Format       string   `json:"format"`
+	Status       string   `json:"status"`
+	Approval     string   `json:"approval"`
+	Owner        string   `json:"owner"`
+	Channel      string   `json:"channel,omitempty"`
+	Destinations []string `json:"destinations,omitempty"`
+	URL          string   `json:"url,omitempty"`
 }
 
 // A window wider than this is a client bug, not a calendar. Bounding it keeps a
@@ -119,7 +120,13 @@ func calendarEvents(db *sql.DB, pid string, args map[string]any) (any, error) {
 	}
 
 	events := []CalendarEvent{}
-	itemSQL := "SELECT id,data FROM editorial_items WHERE project_id=? AND json_extract(data,'$.archived')=?" +
+	itemSQL := `SELECT i.id,i.data,(
+			SELECT json_group_array(DISTINCT trim(json_extract(r.data,'$.channel')))
+			FROM editorial_releases r
+			WHERE r.project_id=i.project_id AND r.item_id=i.id
+				AND COALESCE(json_extract(r.data,'$.archived'),0)=0
+				AND trim(json_extract(r.data,'$.channel'))<>''
+		) FROM editorial_items i WHERE i.project_id=? AND json_extract(i.data,'$.archived')=?` +
 		" AND substr(COALESCE(json_extract(data,'$." + field + "'),''),1,10) BETWEEN ? AND ?"
 	params := []any{pid, false, from, to}
 	if brandWhere != "" {
@@ -132,8 +139,8 @@ func calendarEvents(db *sql.DB, pid string, args map[string]any) (any, error) {
 	}
 	for rows.Next() {
 		var id int64
-		var raw string
-		if e = rows.Scan(&id, &raw); e != nil {
+		var raw, rawDestinations string
+		if e = rows.Scan(&id, &raw, &rawDestinations); e != nil {
 			rows.Close()
 			return nil, e
 		}
@@ -142,12 +149,18 @@ func calendarEvents(db *sql.DB, pid string, args map[string]any) (any, error) {
 			rows.Close()
 			return nil, e
 		}
+		var destinations []string
+		if e = json.Unmarshal([]byte(rawDestinations), &destinations); e != nil {
+			rows.Close()
+			return nil, e
+		}
+		sort.Strings(destinations)
 		date := d.PlannedAt
 		if field == "deadline" {
 			date = d.Deadline
 		}
 		events = append(events, CalendarEvent{Kind: "item", Date: dayPart(date), At: date, ItemID: id, Title: d.Title,
-			BrandID: d.BrandID, Format: d.Format, Status: d.Status, Approval: d.Approval, Owner: d.Owner})
+			BrandID: d.BrandID, Format: d.Format, Status: d.Status, Approval: d.Approval, Owner: d.Owner, Destinations: destinations})
 	}
 	e = rows.Err()
 	rows.Close()

@@ -8,6 +8,7 @@ import {
   type ButtonHTMLAttributes,
 } from "react";
 import { AppIcon, Avatar } from "@apteva/ui-kit";
+import { badgeStyles, DestinationBadges, itemDestinations, StatusBadge as Pill } from "./EditorialBadges";
 
 type Props = { appName: string; installId: number; projectId: string };
 type Brand = {
@@ -172,9 +173,15 @@ const pick = <T extends object>(value: T, keys: readonly (keyof T)[]) =>
 // Panels are independently bundled. Use the host's runtime tokens directly,
 // matching CRM/Social without requiring new Tailwind utilities in the host build.
 const styles = `
+.editorial .editorial-event-title{display:block;font-weight:600;overflow-wrap:anywhere}
+.editorial .editorial-event-meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:4px 0}
+.editorial .editorial-event-detail{display:flex;flex-wrap:wrap;align-items:center;gap:2px 5px}
+.editorial .editorial-event-meta .multiple .ed-destination-name{position:absolute;clip-path:inset(50%);width:1px;height:1px}
+.editorial .editorial-event-meta .ed-status{max-width:100%;overflow:hidden}
+.editorial .editorial-event-meta .ed-status-name{overflow:hidden;text-overflow:ellipsis}
 .editorial{height:100%;min-height:0;position:relative;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:inherit;font-size:12px;line-height:1.5}
 .editorial *{box-sizing:border-box}.editorial button,.editorial input,.editorial select,.editorial textarea{font:inherit;color:inherit}.editorial button{cursor:pointer}.editorial button:disabled{opacity:.45;cursor:default}.editorial h1,.editorial h2,.editorial h3,.editorial p{margin:0}.editorial h1,.editorial h2{font-size:14px;font-weight:600}.editorial h3{font-size:12px;font-weight:600}.editorial a{color:var(--accent)}.editorial :focus-visible{outline:2px solid var(--accent);outline-offset:2px}.editorial .muted{color:var(--text-muted)}.editorial .dim{color:var(--text-dim)}.editorial .small{font-size:11px}.editorial .row{display:flex;align-items:center;gap:8px}.editorial .wrap{flex-wrap:wrap}.editorial .between{justify-content:space-between}.editorial .grow{flex:1;min-width:0}.editorial .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.editorial .shell-header{display:flex;align-items:center;gap:12px;min-height:45px;padding:0 16px;border-bottom:1px solid var(--border);flex-shrink:0}.editorial .identity{display:flex;gap:7px;align-items:center;font-weight:600}.editorial .identity-divider{height:20px;width:1px;background:var(--border)}.editorial .tabs{display:flex;align-self:stretch;gap:4px;align-items:stretch}.editorial .tab{padding:10px 12px 8px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);white-space:nowrap}.editorial .tab:hover{color:var(--text);background:var(--bg-hover)}.editorial .tab.selected{color:var(--accent);border-bottom-color:var(--accent)}.editorial .actions{margin-left:auto;display:flex;align-items:center;gap:8px}.editorial .button{border:1px solid var(--border);border-radius:4px;background:transparent;padding:5px 10px;white-space:nowrap}.editorial .button:hover{background:var(--bg-hover)}.editorial .primary{background:var(--accent);color:var(--bg);border-color:transparent;font-weight:600}.editorial .primary:hover{background:var(--accent-hover)}.editorial .quiet{border-color:transparent;color:var(--text-muted)}.editorial .link-button{padding:0;border:0;background:transparent;color:var(--accent);text-align:left}.editorial .icon-button{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0}.editorial .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0}.editorial .search{width:230px}.editorial input,.editorial select,.editorial textarea{min-width:0;max-width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text)}.editorial input::placeholder,.editorial textarea::placeholder{color:var(--text-dim)}.editorial textarea{resize:vertical}.editorial .summary{display:flex;gap:16px;align-items:center;padding:7px 16px;border-bottom:1px solid var(--border);color:var(--text-muted);font-size:11px}.editorial .summary strong{color:var(--text);font-weight:500}.editorial .workspace{display:flex;flex:1;min-height:0;overflow:hidden}.editorial .main{flex:1;min-width:0;overflow:auto}.editorial .pad{padding:16px}.editorial .pill{display:inline-flex;align-items:center;border-radius:4px;padding:2px 6px;font-size:10px;white-space:nowrap;background:var(--bg-hover);color:var(--text-muted)}.editorial .pill[data-tone=accent]{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.editorial .pill[data-tone=success]{background:color-mix(in srgb,var(--success) 12%,transparent);color:var(--success)}.editorial .pill[data-tone=error]{background:color-mix(in srgb,var(--error) 12%,transparent);color:var(--error)}.editorial .pill[data-tone=warn]{background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--text)}.editorial .error{padding:8px 12px;border:1px solid color-mix(in srgb,var(--error) 40%,var(--border));background:color-mix(in srgb,var(--error) 8%,var(--bg));color:var(--error);margin:10px 16px;border-radius:4px}.editorial .empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;text-align:center;padding:64px 24px;color:var(--text-muted)}.editorial .empty h2{color:var(--text)}
+.editorial .shell-header{display:flex;align-items:center;gap:12px;min-height:45px;padding:0 16px;border-bottom:1px solid var(--border);flex-shrink:0}.editorial .identity{display:flex;gap:7px;align-items:center;font-weight:600}.editorial .identity-divider{height:20px;width:1px;background:var(--border)}.editorial .tabs{display:flex;align-self:stretch;gap:4px;align-items:stretch}.editorial .tab{padding:10px 12px 8px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);white-space:nowrap}.editorial .tab:hover{color:var(--text);background:var(--bg-hover)}.editorial .tab.selected{color:var(--accent);border-bottom-color:var(--accent)}.editorial .actions{margin-left:auto;display:flex;align-items:center;gap:8px}.editorial .button{border:1px solid var(--border);border-radius:4px;background:transparent;padding:5px 10px;white-space:nowrap}.editorial .button:hover{background:var(--bg-hover)}.editorial .primary{background:var(--accent);color:var(--bg);border-color:transparent;font-weight:600}.editorial .primary:hover{background:var(--accent-hover)}.editorial .quiet{border-color:transparent;color:var(--text-muted)}.editorial .link-button{padding:0;border:0;background:transparent;color:var(--accent);text-align:left}.editorial .icon-button{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0}.editorial .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0}.editorial .search{width:230px}.editorial input,.editorial select,.editorial textarea{min-width:0;max-width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text)}.editorial input::placeholder,.editorial textarea::placeholder{color:var(--text-dim)}.editorial textarea{resize:vertical}.editorial .summary{display:flex;gap:16px;align-items:center;padding:7px 16px;border-bottom:1px solid var(--border);color:var(--text-muted);font-size:11px}.editorial .summary strong{color:var(--text);font-weight:500}.editorial .workspace{display:flex;flex:1;min-height:0;overflow:hidden}.editorial .main{flex:1;min-width:0;overflow:auto}.editorial .pad{padding:16px}.editorial .pill{display:inline-flex;align-items:center;border-radius:4px;padding:2px 6px;font-size:10px;white-space:nowrap;background:var(--bg-hover);color:var(--text-muted)}.editorial .error{padding:8px 12px;border:1px solid color-mix(in srgb,var(--error) 40%,var(--border));background:color-mix(in srgb,var(--error) 8%,var(--bg));color:var(--error);margin:10px 16px;border-radius:4px}.editorial .empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;text-align:center;padding:64px 24px;color:var(--text-muted)}.editorial .empty h2{color:var(--text)}
 .editorial .month-header{padding:12px 16px;display:flex;gap:8px;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:1;background:var(--bg);border-bottom:1px solid var(--border)}.editorial .calendar{display:grid;grid-template-columns:repeat(7,minmax(95px,1fr));min-width:665px}.editorial .weekday{padding:7px 10px;font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--border);text-align:right}.editorial .calendar-day{min-height:100px;border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:6px}.editorial .calendar-day:nth-child(7n){border-right:0}.editorial .outside{background:var(--bg-card);color:var(--text-dim)}.editorial .day-number{display:flex;justify-content:flex-end;margin-bottom:5px}.editorial .day-number span{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px}.editorial .day-number .today{background:var(--accent);color:var(--bg);font-weight:600}.editorial .event{display:block;width:100%;text-align:left;border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:3px;background:var(--bg-card);padding:5px 6px;margin-bottom:4px;font-size:11px}.editorial .event:hover{background:var(--bg-hover)}.editorial .event.release-event{border-left-color:var(--info)}.editorial .event.chosen{outline:1px solid var(--accent)}.editorial .unscheduled{padding:16px;border-top:1px solid var(--border)}.editorial .unscheduled-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.editorial .board{display:flex;align-items:flex-start;gap:12px;padding:16px;min-height:100%}.editorial .column{width:240px;min-width:240px}.editorial .column-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;color:var(--text-muted)}.editorial .content-card{border:1px solid var(--border);border-radius:6px;background:var(--bg-card);padding:12px;margin-bottom:8px}.editorial .content-card.chosen{border-color:var(--accent)}.editorial .card-title{display:block;width:100%;text-align:left;border:0;background:transparent;padding:8px 0;color:var(--text);font-weight:500}.editorial .card-footer{display:flex;justify-content:space-between;align-items:center;margin-top:10px;color:var(--text-muted);font-size:11px}.editorial table{width:100%;border-collapse:collapse;white-space:nowrap}.editorial th{text-align:left;font-size:11px;font-weight:500;color:var(--text-muted);background:var(--bg-card);position:sticky;top:0}.editorial th,.editorial td{padding:10px 12px;border-bottom:1px solid var(--border)}.editorial tbody tr:hover{background:var(--bg-hover)}.editorial tr.chosen{background:color-mix(in srgb,var(--accent) 8%,var(--bg))}.editorial .record-title{border:0;background:transparent;text-align:left;padding:0;font-weight:500;max-width:340px;display:block;color:var(--text)}.editorial .backlog-list{max-width:840px;margin:0 auto}.editorial .backlog-row{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center}.editorial .backlog-row:hover{background:var(--bg-hover)}
 .editorial .inspector{width:440px;max-width:100%;flex-shrink:0;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)}.editorial .inspector-header{padding:12px 16px;border-bottom:1px solid var(--border)}.editorial .inspector-title{width:100%;font-size:16px;font-weight:600;margin-top:10px}.editorial .inspector-tabs{display:flex;gap:2px;padding:0 12px;border-bottom:1px solid var(--border)}.editorial .inspector-body{flex:1;overflow:auto;padding:16px}.editorial .inspector-footer{padding:10px 16px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg-card)}.editorial .field{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--text-muted);min-width:0}.editorial .field input,.editorial .field select,.editorial .field textarea{color:var(--text);font-size:12px}.editorial .fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.editorial .wide{grid-column:1/-1}.editorial .stack{display:flex;flex-direction:column;gap:14px}.editorial .section{padding-top:16px;margin-top:16px;border-top:1px solid var(--border)}.editorial .brief{width:100%;min-height:300px;line-height:1.7}.editorial .key-value{display:grid;grid-template-columns:1fr 1.4fr 28px;gap:6px}.editorial .release-card{border:1px solid var(--border);border-radius:5px;margin-top:10px;background:var(--bg-card)}.editorial .release-card summary{padding:10px 12px;cursor:pointer;list-style:none}.editorial .release-form{padding:12px;border-top:1px solid var(--border)}.editorial .history-row{padding:10px 0;border-bottom:1px solid var(--border)}.editorial .history-row summary{cursor:pointer}.editorial pre{font-size:11px;white-space:pre-wrap;word-break:break-word;color:var(--text-muted);padding:8px;background:var(--bg-input);border-radius:4px}.editorial .settings{padding:24px;max-width:900px;margin:auto}.editorial .settings-section{display:grid;grid-template-columns:220px 1fr;gap:24px;padding:20px 0;border-bottom:1px solid var(--border)}.editorial .settings-section textarea{width:100%}.editorial .connection{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}.editorial .date-picker{border:1px solid var(--border);border-radius:4px;padding:8px;margin-top:5px;background:var(--bg-card)}.editorial .date-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:6px}.editorial .date-cell{border:0;background:transparent;padding:5px 0;text-align:center;border-radius:3px;font-size:11px}.editorial .date-cell:hover{background:var(--bg-hover)}.editorial .date-cell.selected{background:var(--accent);color:var(--bg)}.editorial .discard{padding:12px;background:var(--bg-card);border-bottom:1px solid var(--border)}
 @media(max-width:1000px){.editorial .identity span.app-title{display:none}.editorial .shell-header{gap:6px;padding:0 12px}.editorial .tab{padding-left:8px;padding-right:8px}.editorial .inspector{width:380px}}@media(max-width:760px){.editorial .shell-header{flex-wrap:wrap;padding:8px 12px}.editorial .tabs{order:3;width:100%;overflow:auto}.editorial .identity span.app-title{display:inline}.editorial .identity-divider{display:none}.editorial .inspector{position:absolute;right:0;top:0;bottom:0;z-index:5;width:min(440px,100%);box-shadow:-12px 0 24px var(--bg-overlay)}.editorial .settings-section{grid-template-columns:1fr;gap:10px}.editorial .toolbar .search{width:100%}}
@@ -196,22 +203,6 @@ function Button({
     >
       {children}
     </button>
-  );
-}
-function Pill({ value }: { value: string }) {
-  const tone = ["approved", "published"].includes(value)
-    ? "success"
-    : ["failed", "changes_requested"].includes(value)
-      ? "error"
-      : ["pending", "review"].includes(value)
-        ? "warn"
-        : ["scheduled", "ready", "in_progress"].includes(value)
-          ? "accent"
-          : "neutral";
-  return (
-    <span className="pill" data-tone={tone}>
-      {label(value)}
-    </span>
   );
 }
 function Field({
@@ -393,6 +384,7 @@ function Planner({ appName, installId, projectId }: Props) {
   );
   const iconParams = new URLSearchParams({ project_id: projectId, v: "0.2.0" });
   if (installId) iconParams.set("install_id", String(installId));
+  const destinationsByItem = useMemo(() => itemDestinations(releases), [releases]);
   const card = (i: Item) => (
     <article
       key={i.id}
@@ -406,6 +398,7 @@ function Planner({ appName, installId, projectId }: Props) {
         {i.title}
       </button>
       <BrandBadge brands={settings?.brands || []} id={i.brand_id} />
+      <DestinationBadges channels={destinationsByItem.get(i.id)} />
       {i.campaign && <p className="small muted truncate">{i.campaign}</p>}
       <div className="card-footer">
         <Owner name={i.owner} />
@@ -415,7 +408,7 @@ function Planner({ appName, installId, projectId }: Props) {
   );
   return (
     <div className="editorial">
-      <style>{styles}</style>
+      <style>{badgeStyles + styles}</style>
       <header className="shell-header">
         <div className="identity">
           <AppIcon
@@ -653,6 +646,7 @@ function Planner({ appName, installId, projectId }: Props) {
                     brands={settings?.brands || []}
                     items={filtered}
                     releases={releases}
+                    destinationsByItem={destinationsByItem}
                     field={dateField}
                     selected={selected?.id}
                     onOpen={open}
@@ -683,7 +677,7 @@ function Planner({ appName, installId, projectId }: Props) {
                   {settings?.statuses.map((s) => (
                     <section className="column" key={s}>
                       <div className="column-header">
-                        <h3>{label(s)}</h3>
+                        <h3><Pill value={s} /></h3>
                         <span className="pill">
                           {filtered.filter((i) => i.status === s).length}
                         </span>
@@ -738,6 +732,7 @@ function Planner({ appName, installId, projectId }: Props) {
                             />
                             {i.campaign && ` · ${i.campaign}`}
                           </span>
+                          <div><DestinationBadges channels={destinationsByItem.get(i.id)} /></div>
                         </td>
                         <td>
                           <Pill value={i.status} />
@@ -782,6 +777,7 @@ function Planner({ appName, installId, projectId }: Props) {
                           brands={settings?.brands || []}
                           id={i.brand_id}
                         />
+                        <DestinationBadges channels={destinationsByItem.get(i.id)} />
                         {i.campaign && (
                           <span className="small muted">{i.campaign}</span>
                         )}
@@ -847,6 +843,7 @@ function Calendar({
   month,
   items,
   releases,
+  destinationsByItem,
   field,
   selected,
   onOpen,
@@ -855,6 +852,7 @@ function Calendar({
   month: Date;
   items: Item[];
   releases: Release[];
+  destinationsByItem: Map<number, string[]>;
   field: "planned_at" | "deadline";
   selected?: number;
   onOpen: (i: Item) => void;
@@ -900,9 +898,15 @@ function Calendar({
                     key={`i${i.id}`}
                     onClick={() => onOpen(i)}
                   >
-                    <span className="small dim">{label(i.format)}</span>
-                    <div>{i.title}</div>
-                    <BrandBadge brands={brands} id={i.brand_id} />
+                    <span className="editorial-event-title">{i.title}</span>
+                    <span className="editorial-event-meta">
+                      <DestinationBadges channels={destinationsByItem.get(i.id)} />
+                      <Pill value={i.status} />
+                    </span>
+                    <span className="editorial-event-detail">
+                      <span className="small dim">{label(i.format)}</span>
+                      <BrandBadge brands={brands} id={i.brand_id} />
+                    </span>
                   </button>
                 ))}
               {field === "planned_at" &&
@@ -919,8 +923,11 @@ function Calendar({
                       key={`r${r.id}`}
                       onClick={() => onOpen(byId.get(r.item_id)!)}
                     >
-                      <span className="small muted">{r.channel}</span>
-                      <div>{byId.get(r.item_id)!.title}</div>
+                      <span className="editorial-event-title">{byId.get(r.item_id)!.title}</span>
+                      <span className="editorial-event-meta">
+                        <DestinationBadges channels={[r.channel]} />
+                        <Pill value={r.status} />
+                      </span>
                       <BrandBadge
                         brands={brands}
                         id={byId.get(r.item_id)!.brand_id}
@@ -1549,7 +1556,7 @@ function ReleaseEditor({
     <details className="release-card" open={!release.id}>
       <summary>
         <div className="row between">
-          <strong>{r.channel || "New release"}</strong>
+          {r.channel ? <DestinationBadges channels={[r.channel]} /> : <strong>New release</strong>}
           <Pill value={r.archived ? "archived" : r.status} />
         </div>
         <div className="small muted">

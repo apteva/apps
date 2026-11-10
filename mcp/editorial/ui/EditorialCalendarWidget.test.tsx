@@ -208,6 +208,20 @@ test("a failed load explains itself instead of rendering an empty calendar", asy
   expect(host.textContent).toContain("database is locked");
 });
 
+test("calendar displays parent destinations and keeps release status distinct", async () => {
+  const today = dateKey(new Date());
+  const { host } = await mount({ widgetSize: "half" }, { events: [
+    event({ at: today, date: today, status: "scheduled", destinations: ["Instagram", " instagram ", "Website"] }),
+    event({ at: today, date: today, kind: "release", release_id: 2, channel: "LinkedIn", status: "published" }),
+  ] });
+  const rows = host.querySelectorAll(".ec-row");
+  expect([...rows[0].querySelectorAll(".ed-destination-name")].map((node) => node.textContent))
+    .toEqual(["Instagram", "Website"]);
+  expect(rows[0].querySelector(".ed-status")?.getAttribute("data-tone")).toBe("info");
+  expect(rows[1].querySelector(".ed-destination-name")?.textContent).toBe("LinkedIn");
+  expect(rows[1].querySelector(".ed-status")?.getAttribute("data-tone")).toBe("success");
+});
+
 test("a truncated range says so rather than quietly hiding work", async () => {
   const today = dateKey(new Date());
   const { host } = await mount(
@@ -302,7 +316,7 @@ test("entries carry their brand's colour, and unbranded ones keep the kind colou
   expect((marks[0] as HTMLElement).style.background).toBeTruthy();
   expect((marks[1] as HTMLElement).style.background).toBe("");
   // Colour is never the only carrier of the brand.
-  expect(host.querySelector('[title="Branded — Acme"]')).toBeTruthy();
+  expect(host.querySelector('[title="Branded · Acme · Brief"]')).toBeTruthy();
   expect(host.textContent).toContain("Acme");
 });
 

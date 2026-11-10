@@ -1,7 +1,7 @@
 {
   "schema": "apteva-native-surface/v1",
   "id": "editorial-calendar",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "title": "Editorial calendar",
   "description": "Upcoming publications, deadlines, and channel releases",
   "icon": "calendar",
@@ -38,6 +38,7 @@
         "subtitle": [
           {"value": "{item.at}", "format": "date_time"},
           {"value": "{item.detail}"},
+          {"value": "{item.destinations}"},
           {"value": "{item.brand_name}", "fallback": "{item.kind_label}"}
         ],
         "badge": {"value": "{item.kind_label}"}
