@@ -86,7 +86,7 @@ func TestFailedTradingSyncBacksOffWithoutConsumingStrategyCadence(t *testing.T) 
 	}
 }
 
-func TestOversizedTradingSnapshotBlocksOnlyTheSameRequest(t *testing.T) {
+func TestOversizedLegacyTradingSnapshotBacksOffAndRecovers(t *testing.T) {
 	ctx := newTestCtx(t)
 	db := ctx.AppDB()
 	platform := ctx.PlatformAPI().(*fixtureTrading)
@@ -96,9 +96,9 @@ func TestOversizedTradingSnapshotBlocksOnlyTheSameRequest(t *testing.T) {
 	if err := syncTradingPortfolio(ctx, "test-proj", portfolioID); !errors.Is(err, platform.snapshotErr) {
 		t.Fatalf("first sync error = %v", err)
 	}
-	var retryAt sql.NullInt64
-	if err := db.QueryRow(`SELECT retry_at FROM trading_observation_failures WHERE portfolio_id=?`, portfolioID).Scan(&retryAt); err != nil || retryAt.Valid {
-		t.Fatalf("oversized response has a retry deadline: %+v, %v", retryAt, err)
+	var delay int64
+	if err := db.QueryRow(`SELECT retry_at-failed_at FROM trading_observation_failures WHERE portfolio_id=?`, portfolioID).Scan(&delay); err != nil || delay != tradingRetryMax.Milliseconds() {
+		t.Fatalf("oversized legacy response has incorrect retry delay: %d, %v", delay, err)
 	}
 
 	platform.snapshotErr = nil
@@ -108,13 +108,20 @@ func TestOversizedTradingSnapshotBlocksOnlyTheSameRequest(t *testing.T) {
 	if err := syncTradingPortfolio(ctx, "test-proj", otherPortfolioID); err != nil {
 		t.Fatalf("unrelated snapshot was blocked: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE trading_observation_failures SET request_key='previous-protocol' WHERE portfolio_id=?`, portfolioID); err != nil {
+	if _, err := db.Exec(`UPDATE trading_observation_failures SET retry_at=0 WHERE portfolio_id=?`, portfolioID); err != nil {
 		t.Fatal(err)
 	}
 	if err := syncTradingPortfolio(ctx, "test-proj", portfolioID); err != nil {
-		t.Fatalf("updated protocol was blocked: %v", err)
+		t.Fatalf("upgraded Trading was blocked after the retry deadline: %v", err)
 	}
 	if err := db.QueryRow(`SELECT 1 FROM trading_observation_failures WHERE portfolio_id=?`, portfolioID).Scan(new(int)); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("updated protocol did not clear previous failure: %v", err)
+		t.Fatalf("upgraded Trading did not clear the previous failure: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO trading_observation_failures(project_id,portfolio_id,request_key,failures,failed_at,last_error)
+		VALUES ('test-proj',?,'portfolio_research_snapshot/v1:legacy',1,0,'app response too large')`, portfolioID); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncTradingPortfolio(ctx, "test-proj", portfolioID); err != nil {
+		t.Fatalf("paged protocol inherited a permanent failure from v1: %v", err)
 	}
 }

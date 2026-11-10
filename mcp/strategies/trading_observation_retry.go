@@ -13,29 +13,36 @@ import (
 
 const (
 	tradingSnapshotTool    = "portfolio_research_snapshot"
-	tradingSnapshotVersion = 1
+	tradingSnapshotVersion = 3
 	tradingRetryBase       = 30 * time.Second
 	tradingRetryMax        = 15 * time.Minute
 )
 
 var errTradingObservationDeferred = errors.New("Trading observation is stale")
 
-func syncTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64) error {
+func syncTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64, requests ...map[string]any) error {
 	tradingObservationMu.Lock()
 	defer tradingObservationMu.Unlock()
-	return syncTradingPortfolioLocked(ctx, pid, id)
+	return syncTradingPortfolioLocked(ctx, pid, id, requests...)
 }
 
 // syncTradingPortfolioLocked requires tradingObservationMu.
-func syncTradingPortfolioLocked(ctx *sdk.AppCtx, pid string, id int64) error {
-	args := map[string]any{"_project_id": pid, "portfolio_id": id}
+func syncTradingPortfolioLocked(ctx *sdk.AppCtx, pid string, id int64, requests ...map[string]any) error {
+	db := ctx.AppDB()
+	var request map[string]any
+	if len(requests) > 0 {
+		request = requests[0]
+	}
+	args, err := tradingObservationArgs(db, pid, id, request)
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return err
 	}
 	// A different tool, request, or protocol version gets a fresh attempt.
 	requestKey := fmt.Sprintf("%s/v%d:%s", tradingSnapshotTool, tradingSnapshotVersion, raw)
-	db := ctx.AppDB()
 	var previousKey, lastError string
 	var failures int
 	var retryAt sql.NullInt64
@@ -62,11 +69,13 @@ func syncTradingPortfolioLocked(ctx *sdk.AppCtx, pid string, id int64) error {
 	if err = refreshTradingPortfolio(ctx, pid, id, args); err != nil {
 		failures++
 		failedAt := time.Now()
-		var nextRetry any
-		if !tradingSnapshotTooLarge(err) {
-			delay := min(tradingRetryBase<<min(failures-1, 5), tradingRetryMax)
-			nextRetry = failedAt.Add(delay).UnixMilli()
+		delay := min(tradingRetryBase<<min(failures-1, 5), tradingRetryMax)
+		if tradingSnapshotTooLarge(err) {
+			// An older Trading sidecar can ignore pagination and exceed the
+			// gateway cap. Re-probe after a rollout without retrying each tick.
+			delay = tradingRetryMax
 		}
+		nextRetry := failedAt.Add(delay).UnixMilli()
 		if _, saveErr := db.Exec(`
 			INSERT INTO trading_observation_failures(project_id,portfolio_id,request_key,failures,failed_at,retry_at,last_error)
 			VALUES(?,?,?,?,?,?,?)

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
@@ -11,7 +12,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,7 +22,10 @@ import (
 // A small gateway supplies the same authenticated app identity as Server.
 // Both applications run their production binaries with separate SQLite files.
 func TestSeparateAppsStrategyExecutesThroughTrading(t *testing.T) {
-	trading := tk.SpawnSidecar(t, "../trading", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "11"), tk.WithConfig(map[string]string{"pricing_provider": "mock", "bootstrap_demo": "false", "tick_seconds": "1"}))
+	tradingDB := filepath.Join(t.TempDir(), "trading.db")
+	strategiesDB := filepath.Join(t.TempDir(), "strategies.db")
+	var continuations atomic.Int64
+	trading := tk.SpawnSidecar(t, "../trading", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "11"), tk.WithEnv("DB_PATH", tradingDB), tk.WithConfig(map[string]string{"pricing_provider": "mock", "bootstrap_demo": "false", "tick_seconds": "1"}))
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/apps/trading/call") {
 			http.Error(w, "unexpected callback "+r.URL.Path, 404)
@@ -32,6 +38,9 @@ func TestSeparateAppsStrategyExecutesThroughTrading(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
+		}
+		if body.Tool == tradingSnapshotTool && strArg(body.Input, "revision") != "" {
+			continuations.Add(1)
 		}
 		rpc, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": body.Tool, "arguments": body.Input}})
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, trading.URL()+"/mcp", bytes.NewReader(rpc))
@@ -49,12 +58,18 @@ func TestSeparateAppsStrategyExecutesThroughTrading(t *testing.T) {
 			return
 		}
 		defer resp.Body.Close()
+		const gatewayCap = 16 << 20
+		payload, err := io.ReadAll(io.LimitReader(resp.Body, gatewayCap+1))
+		if err != nil || len(payload) > gatewayCap {
+			http.Error(w, "app response too large", http.StatusBadGateway)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write(payload)
 	}))
 	defer gateway.Close()
-	strategies := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "10"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	strategies := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_INSTALL_ID", "10"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL), tk.WithEnv("DB_PATH", strategiesDB))
 	portfolio := trading.MCP("portfolio_create", map[string]any{"name": "Team portfolio", "allowed_classes": []string{"crypto"}, "starting_cash": 100000})
 	id := portfolio["portfolio_id"].(float64)
 	definition := map[string]any{"universe": []string{"BTC-USD"}, "cadence": "1d", "rules": []any{map[string]any{"allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": .01}}}}}
@@ -95,6 +110,38 @@ func TestSeparateAppsStrategyExecutesThroughTrading(t *testing.T) {
 		if entry.(map[string]any)["name"] == "strategy_create" {
 			t.Fatal("Trading advertises strategy authoring")
 		}
+	}
+
+	// Use a separate portfolio so the scheduled strategy's order cannot make
+	// the assertion pass. These three archived rows require multiple pages.
+	book := trading.MCP("portfolio_create", map[string]any{"name": "Paged book", "allowed_classes": []string{"crypto"}})
+	bookID := int64(book["portfolio_id"].(float64))
+	writer, err := sql.Open("sqlite", "file:"+tradingDB+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	rationale := strings.Repeat("x", 1500000)
+	for i := 0; i < 3; i++ {
+		if _, err := writer.Exec(`INSERT INTO orders(id,project_id,portfolio_id,symbol,asset_class,side,type,qty,status,rationale,source)
+			VALUES (?,'test-proj',?,'BTC-USD','crypto','buy','limit',1,'cancelled',?,'fixture')`, fmt.Sprintf("paged-%d", i), bookID, rationale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resp := strategies.GET(fmt.Sprintf("/portfolios/%d/backtests", bookID), nil); resp.Status != 200 {
+		t.Fatalf("Strategies could not apply the multi-page snapshot: %d %s", resp.Status, resp.Body)
+	}
+	reader, err := sql.Open("sqlite", "file:"+strategiesDB+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var count, size int
+	if err := reader.QueryRow(`SELECT COUNT(*), COALESCE(SUM(length(rationale)),0) FROM orders WHERE portfolio_id=?`, bookID).Scan(&count, &size); err != nil {
+		t.Fatal(err)
+	}
+	if continuations.Load() == 0 || count != 3 || size != 3*len(rationale) {
+		t.Fatalf("multi-page observation incomplete: continuations=%d orders=%d rationale_bytes=%d", continuations.Load(), count, size)
 	}
 }
 

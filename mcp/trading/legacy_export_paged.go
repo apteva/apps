@@ -12,6 +12,21 @@ import (
 // foreign keys. The source's legacy research is immutable after the split.
 var legacyTableOrder = []string{"strategies", "strategy_versions", "portfolio_strategy_assignments", "strategy_scorecard_policies", "backtest_runs", "backtest_events", "backtest_snapshots", "backtest_market_bars", "backtest_simulations", "backtest_simulation_outputs", "backtest_agent_decisions", "strategy_scorecard_evaluations", "strategy_run_events", "strategy_rebalances", "validation_suites", "validation_cases"}
 
+// A legacy replay bar may reference a historical security that is absent from
+// every current portfolio observation. Carry those exact parents with the bars.
+func legacyBarSecurities(db researchQueryer, bars []map[string]any) ([]map[string]any, error) {
+	ids := map[string]bool{}
+	for _, bar := range bars {
+		if id := strArg(bar, "security_id"); id != "" {
+			ids[id] = true
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return readResearchRows(db, `SELECT * FROM securities WHERE id IN (SELECT value FROM json_each(?))`, observationSetJSON(ids))
+}
+
 func exportLegacyPage(ctx *sdk.AppCtx, pid string, install int64, queries map[string]string, args map[string]any) (*researchSnapshot, error) {
 	out := &researchSnapshot{Version: 2, SourceInstallID: install, ProjectID: pid, Tables: map[string][]map[string]any{}}
 	switch strArg(args, "phase") {
@@ -57,6 +72,16 @@ func exportLegacyPage(ctx *sdk.AppCtx, pid string, install int64, queries map[st
 		if err != nil {
 			return nil, err
 		}
+		refs := map[string]map[string]any{}
+		if table == "backtest_market_bars" {
+			securities, err := legacyBarSecurities(ctx.AppDB(), rows)
+			if err != nil {
+				return nil, err
+			}
+			for _, security := range securities {
+				refs[strArg(security, "id")] = security
+			}
+		}
 		selected := []map[string]any{}
 		size := 0
 		out.NextRowID = cursor
@@ -68,14 +93,29 @@ func exportLegacyPage(ctx *sdk.AppCtx, pid string, install int64, queries map[st
 			if err != nil {
 				return nil, err
 			}
-			if len(b) > 4<<20 {
+			id := strArg(row, "security_id")
+			security := refs[id]
+			rowBytes := len(b) + 1
+			if security != nil {
+				encoded, err := json.Marshal(security)
+				if err != nil {
+					return nil, err
+				}
+				rowBytes += len(encoded) + 1
+			}
+			const budget = (4 << 20) - 2048
+			if rowBytes > budget {
 				return nil, fmt.Errorf("legacy %s row %d exceeds 4 MiB transfer limit", table, next)
 			}
-			if size+len(b) > 4<<20 {
+			if size+rowBytes > budget {
 				out.Done = false
 				break
 			}
-			size += len(b)
+			if security != nil {
+				out.LegacySecurities = append(out.LegacySecurities, security)
+				delete(refs, id)
+			}
+			size += rowBytes
 			selected = append(selected, row)
 			out.NextRowID = next
 		}

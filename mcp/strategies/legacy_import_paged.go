@@ -123,6 +123,12 @@ func (a *App) importLegacyResearchPaged(ctx *sdk.AppCtx, args map[string]any) (a
 		if err != nil {
 			return nil, err
 		}
+		if table == "backtest_market_bars" && len(page.LegacySecurities) > 0 {
+			if err := writeResearchRows(tx, "securities", page.LegacySecurities); err != nil {
+				tx.Rollback()
+				return nil, err
+			}
+		}
 		if err = writeResearchRows(tx, table, rows); err == nil {
 			_, err = tx.Exec("UPDATE legacy_import_progress SET table_index=?,row_cursor=?,rows_imported=rows_imported+? WHERE source_install_id=? AND project_id=?", nextIndex, nextCursor, len(rows), manifest.SourceInstallID, pid)
 		}
