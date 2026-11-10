@@ -104,8 +104,9 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			continue
 		}
 		if err := syncTradingPortfolio(app, a.ProjectID, a.PortfolioID); err != nil {
-			e.logger.Warn("Trading observation unavailable", "portfolio_id", a.PortfolioID, "err", err)
-			_, _ = e.db.Exec(`UPDATE portfolios SET status='paused' WHERE id=? AND project_id=? AND status IS NOT 'paused'`, a.PortfolioID, a.ProjectID)
+			if !errors.Is(err, errTradingObservationDeferred) {
+				e.logger.Warn("Trading observation unavailable", "portfolio_id", a.PortfolioID, "err", err)
+			}
 			continue
 		}
 		// An assignment can change while waiting for Trading's snapshot.
