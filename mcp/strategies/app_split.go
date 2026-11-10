@@ -109,7 +109,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				return nil, err
 			}
 			if id := int64Arg(cloned, "portfolio_id", 0); id > 0 {
-				if err = syncTradingPortfolio(ctx, pid, id); err != nil {
+				cloned["_observation_history"] = strings.Contains(name, "backtest") && strings.HasSuffix(name, "create")
+				err = syncTradingPortfolio(ctx, pid, id, cloned)
+				delete(cloned, "_observation_history")
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -154,7 +157,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// between the pre-order refresh and submission.
 	tradingObservationMu.Lock()
 	defer tradingObservationMu.Unlock()
-	if err = syncTradingPortfolioLocked(ctx, pid, portfolioID); err != nil {
+	if err = syncTradingPortfolioLocked(ctx, pid, portfolioID, args); err != nil {
 		return nil, err
 	}
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
@@ -212,7 +215,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 
 	if fmt.Sprint(out["status"]) != "rejected" {
-		if err = syncTradingPortfolioLocked(ctx, pid, portfolioID); err != nil {
+		if err = syncTradingPortfolioLocked(ctx, pid, portfolioID, args); err != nil {
 			return nil, fmt.Errorf("order submitted; refresh Trading observation before retry: %w", err)
 		}
 	}
@@ -220,17 +223,11 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func refreshTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64, args map[string]any) error {
-	var snap researchSnapshot
-	if err := callTrading(ctx, tradingSnapshotTool, args, &snap); err != nil {
+	pages, err := fetchTradingObservation(ctx, pid, id, args)
+	if err != nil {
 		return err
 	}
-	if snap.Version != tradingSnapshotVersion || snap.ProjectID != pid || len(snap.Tables["portfolios"]) != 1 {
-		return errors.New("invalid Trading portfolio observation")
-	}
-	pf := snap.Tables["portfolios"][0]
-	if int64Arg(pf, "id", 0) != id || strArg(pf, "project_id") != pid {
-		return errors.New("Trading observation belongs to a different portfolio")
-	}
+	sourceID := pages[0].SourceInstallID
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return err
@@ -242,45 +239,49 @@ func refreshTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64, args map[str
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	if err == nil && source != snap.SourceInstallID {
+	if err == nil && source != sourceID {
 		return errors.New("Trading binding changed; use a new Strategies installation to preserve research portfolio identities")
 	}
-	if _, err = tx.Exec(`INSERT INTO trading_observation_sources(project_id,source_install_id) VALUES(?,?) ON CONFLICT DO NOTHING`, pid, snap.SourceInstallID); err != nil {
+	if _, err = tx.Exec(`INSERT INTO trading_observation_sources(project_id,source_install_id) VALUES(?,?) ON CONFLICT DO NOTHING`, pid, sourceID); err != nil {
 		return err
 	}
 	var legacyImported int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM research_imports WHERE project_id=? AND source_install_id=?`, pid, snap.SourceInstallID).Scan(&legacyImported); err != nil {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM research_imports WHERE project_id=? AND source_install_id=?`, pid, sourceID).Scan(&legacyImported); err != nil {
 		return err
 	}
 
 	tables := []string{"portfolios", "securities", "security_identifiers", "security_listings", "exchange_sessions", "universe_memberships", "marks", "instruments", "venue_execution_profiles", "portfolio_risk_policies", "portfolio_risk_state", "portfolio_universe_policies", "positions", "orders", "fills", "execution_costs", "position_accounting", "watchlist", "day_baselines"}
+	localInstall, _ := strconv.ParseInt(os.Getenv("APTEVA_INSTALL_ID"), 10, 64)
 	for _, table := range tables {
-		records := snap.Tables[table]
 		if table == "positions" || table == "watchlist" || table == "day_baselines" {
 			if _, err = tx.Exec(`DELETE FROM "`+table+`" WHERE portfolio_id=?`, id); err != nil {
 				return err
 			}
 		}
-		if table == "orders" {
-			for _, order := range records {
-
-				localInstall, _ := strconv.ParseInt(os.Getenv("APTEVA_INSTALL_ID"), 10, 64)
-				oldStrategy := order["strategy_id"]
-				order["strategy_id"] = 0
-				oldVersion := order["strategy_version"]
-				order["strategy_version"] = 0
-				if legacyImported > 0 && strArg(order, "origin_app") == "" {
-					order["strategy_id"] = oldStrategy
-					order["strategy_version"] = oldVersion
+		for _, page := range pages {
+			rawRows := page.Tables[table]
+			if len(rawRows) == 0 {
+				continue
+			}
+			records := make([]map[string]any, len(rawRows))
+			for i, raw := range rawRows {
+				if err := json.Unmarshal(raw, &records[i]); err != nil {
+					return fmt.Errorf("decode Trading observation %s: %w", table, err)
 				}
-				if strArg(order, "origin_app") == "strategies" && int64Arg(order, "origin_install_id", 0) == localInstall {
-					order["strategy_id"] = order["external_strategy_id"]
-					order["strategy_version"] = order["external_strategy_version"]
+				if table == "orders" {
+					order := records[i]
+					if legacyImported == 0 || strArg(order, "origin_app") != "" {
+						order["strategy_id"], order["strategy_version"] = 0, 0
+					}
+					if strArg(order, "origin_app") == "strategies" && int64Arg(order, "origin_install_id", 0) == localInstall {
+						order["strategy_id"] = order["external_strategy_id"]
+						order["strategy_version"] = order["external_strategy_version"]
+					}
 				}
 			}
-		}
-		if err = writeResearchRows(tx, table, records); err != nil {
-			return err
+			if err = writeResearchRows(tx, table, records); err != nil {
+				return err
+			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -353,7 +354,13 @@ func (a *App) handleResearchPortfolio(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "Use Trading for portfolio operations")
 		return
 	}
-	if err = syncTradingPortfolio(globalCtx, pid, id); err != nil {
+	request, err := observationHTTPRequest(w, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	request["_observation_history"] = r.Method == http.MethodPost
+	if err = syncTradingPortfolio(globalCtx, pid, id, request); err != nil {
 		httpErr(w, 502, err.Error())
 		return
 	}
@@ -424,6 +431,11 @@ func (a *App) importLegacyResearch(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 
 	for _, table := range []string{"strategies", "strategy_versions", "portfolio_strategy_assignments", "strategy_scorecard_policies", "backtest_runs", "backtest_events", "backtest_snapshots", "backtest_market_bars", "backtest_simulations", "backtest_simulation_outputs", "backtest_agent_decisions", "strategy_scorecard_evaluations", "strategy_run_events", "strategy_rebalances", "validation_suites", "validation_cases"} {
+		if table == "backtest_market_bars" && len(snap.LegacySecurities) > 0 {
+			if err := writeResearchRows(tx, "securities", snap.LegacySecurities); err != nil {
+				return nil, err
+			}
+		}
 		records := snap.Tables[table]
 		for _, row := range records {
 			if table == "portfolio_strategy_assignments" {
@@ -479,23 +491,13 @@ func (a *App) observeResearchHTTP(next http.HandlerFunc) http.HandlerFunc {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		id, _ := strconv.ParseInt(r.URL.Query().Get("portfolio_id"), 10, 64)
-		if r.Method != "GET" && r.Body != nil {
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 128<<20))
-			if err != nil {
-				httpErr(w, 400, err.Error())
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(raw))
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
-				if n := int64Arg(body, "portfolio_id", 0); n > 0 {
-					id = n
-				}
-			}
+		request, err := observationHTTPRequest(w, r)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
 		}
-		if id > 0 {
-			if err = syncTradingPortfolio(globalCtx, pid, id); err != nil {
+		if id := int64Arg(request, "portfolio_id", 0); id > 0 {
+			if err = syncTradingPortfolio(globalCtx, pid, id, request); err != nil {
 				httpErr(w, 502, err.Error())
 				return
 			}
@@ -515,4 +517,35 @@ func (a *App) observeResearchHTTP(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func observationHTTPRequest(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	request := map[string]any{}
+	for _, key := range []string{"portfolio_id", "strategy_id", "backtest_id", "start_at", "end_at"} {
+		if value := r.URL.Query().Get(key); value != "" {
+			request[key] = value
+		}
+	}
+	if r.Method != http.MethodGet && r.Body != nil {
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 128<<20))
+		if err != nil {
+			return nil, err
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var body map[string]any
+		if json.Unmarshal(raw, &body) == nil {
+			for key, value := range body {
+				if key != "portfolio_id" || int64Arg(body, key, 0) > 0 {
+					request[key] = value
+				}
+			}
+		}
+	}
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/strategies/"); ok {
+		segment, _, _ := strings.Cut(rest, "/")
+		if id, err := strconv.ParseInt(segment, 10, 64); err == nil && id > 0 {
+			request["strategy_id"] = id
+		}
+	}
+	return request, nil
 }

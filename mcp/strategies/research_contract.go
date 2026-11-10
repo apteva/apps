@@ -11,15 +11,16 @@ import (
 // Execution rows are read-only observations in Strategies. Trading remains
 // authoritative and never reads Strategies' database.
 type researchSnapshot struct {
-	Version         int                         `json:"version"`
-	SourceInstallID int64                       `json:"source_install_id"`
-	ProjectID       string                      `json:"project_id"`
-	Tables          map[string][]map[string]any `json:"tables"`
-	TableNames      []string                    `json:"table_names,omitempty"`
-	PortfolioIDs    []int64                     `json:"portfolio_ids,omitempty"`
-	RowCounts       map[string]int64            `json:"row_counts,omitempty"`
-	NextRowID       int64                       `json:"next_row_id,omitempty"`
-	Done            bool                        `json:"done,omitempty"`
+	Version          int                         `json:"version"`
+	SourceInstallID  int64                       `json:"source_install_id"`
+	ProjectID        string                      `json:"project_id"`
+	Tables           map[string][]map[string]any `json:"tables"`
+	TableNames       []string                    `json:"table_names,omitempty"`
+	PortfolioIDs     []int64                     `json:"portfolio_ids,omitempty"`
+	RowCounts        map[string]int64            `json:"row_counts,omitempty"`
+	NextRowID        int64                       `json:"next_row_id,omitempty"`
+	Done             bool                        `json:"done,omitempty"`
+	LegacySecurities []map[string]any            `json:"legacy_securities,omitempty"`
 }
 
 type researchQueryer interface {

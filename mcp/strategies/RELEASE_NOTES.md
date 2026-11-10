@@ -1,3 +1,8 @@
+# Strategies v0.1.4
+
+- Request symbol-scoped Trading observations and apply a complete revision in one transaction.
+- Back off oversized responses from older Trading releases during rollout.
+
 # Strategies v0.1.3
 
 - Persist Trading snapshot failures separately from the evaluation schedule.

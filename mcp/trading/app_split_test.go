@@ -106,14 +106,14 @@ func TestTradingResearchExportIsProjectScopedAndAppOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := exportResearchSnapshot(ctx, map[string]any{}, true)
+	snap, err := exportLegacyResearchSnapshot(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(snap.Tables["strategies"]) != 1 || len(snap.Tables["strategy_versions"]) != 1 || len(snap.Tables["portfolio_strategy_assignments"]) != 1 {
 		t.Fatalf("incomplete or cross-project export: %#v", snap.Tables)
 	}
-	if _, err = exportResearchSnapshot(ctx, map[string]any{"portfolio_id": id}, false); err != nil {
+	if _, err = exportPortfolioObservation(context.Background(), ctx, map[string]any{"portfolio_id": id}, 11); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"portfolio_research_snapshot", "research_legacy_export", "market_bars_capture"} {
