@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.18.0
+version: 0.18.1
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -66,7 +66,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.18.0, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.18.1, entry: mcp/database}
   port: 8080
   health_check: /health
 db:
@@ -84,8 +84,8 @@ config_schema:
     type: select
     options: [off, coalesce, cache]
     default: off
-    label: Aggregate batch reuse
-    description: Coalesce identical AptevaDB aggregate batches, optionally retaining successful results in a bounded cache.
+    label: Read batch reuse
+    description: Coalesce identical AptevaDB batches of direct get, find and aggregate reads, optionally retaining successful results in a bounded cache.
   - name: aptevadb_sync_mode
     type: select
     options: [full, barrier, os]

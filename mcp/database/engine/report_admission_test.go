@@ -10,7 +10,7 @@ import (
 )
 
 func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
-	m, err := OpenWithConfig(t.TempDir(), ManagerOptions{MaxConcurrentAptevaQueries: 3})
+	m, err := OpenWithConfig(t.TempDir(), ManagerOptions{MaxConcurrentAptevaQueries: 3, AggregateReuseMode: "cache"})
 	checkErr(t, err)
 	t.Cleanup(func() { checkErr(t, m.Close()) })
 	resourceDatabase(t, m, "lab")
@@ -48,7 +48,7 @@ func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
 		checkErr(t, err)
 		batch := v.(map[string]any)
 		diagnostics := batch["diagnostics"].(map[string]any)
-		if diagnostics["admissionClass"] != "interactive" || diagnostics["admissionMs"].(float64) >= 100 ||
+		if diagnostics["admissionClass"] != "interactive" || diagnostics["reuse"] != "executed" || diagnostics["admissionMs"].(float64) >= 100 ||
 			diagnostics["queueMs"].(float64) < diagnostics["admissionMs"].(float64) {
 			t.Fatal(diagnostics)
 		}
@@ -61,6 +61,9 @@ func TestNativeAdmissionReservesBoundedReads(t *testing.T) {
 		}
 	}
 	getPermissions([]any{"a", "b"})
+	if warm := call(t, m, "p", "batch", permissions); reusePath(warm) != "cache" {
+		t.Fatal(warm)
+	}
 	call(t, m, "p", "update", Request{Database: "lab", Collection: "actor_access", Key: Record{"id": "known"},
 		Set: Record{"centres": []any{"a"}}})
 	getPermissions([]any{"a"})

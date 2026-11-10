@@ -346,10 +346,21 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if e != nil {
 		return nil, e
 	}
-	if m.aggregateReads != nil && d.info.Adapter == "aptevadb" && op == "batch" && kind == "read_batch" {
-		if data := reusableAggregateBatch(r); data != nil {
+	if op == "batch" && kind == "read_batch" {
+		if m.aggregateReads == nil {
+			defer release()
+			return m.executeUnsharedReadBatch(ctx, d, r, "disabled")
+		}
+		if d.info.Adapter != "aptevadb" {
+			defer release()
+			return m.executeUnsharedReadBatch(ctx, d, r, "unsupported_adapter")
+		}
+		data, reason := reusableAggregateBatch(r, d.key)
+		if data != nil {
 			return m.reuseAggregate(ctx, d, r, data, release)
 		}
+		defer release()
+		return m.executeUnsharedReadBatch(ctx, d, r, reason)
 	}
 	defer release()
 	return m.executeDatabase(ctx, d, scope, op, kind, r)
