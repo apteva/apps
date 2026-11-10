@@ -1,3 +1,11 @@
+# Strategies v0.1.3
+
+- Persist Trading snapshot failures separately from the evaluation schedule.
+  Transient failures back off from 30 seconds to 15 minutes.
+- Block an oversized snapshot request until its arguments or protocol version
+  change. A fresh snapshot clears the failure and allows order submission.
+- Pin the App SDK to v0.115.1.
+
 # Strategies v0.1.2
 
 - Fetch Trading portfolio snapshots when a strategy is due for a cadence check

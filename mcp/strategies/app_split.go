@@ -150,7 +150,11 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("automated order requires a strategy")
 	}
 
-	if err = syncTradingPortfolio(ctx, pid, portfolioID); err != nil {
+	// Keep another snapshot attempt from marking the observation stale
+	// between the pre-order refresh and submission.
+	tradingObservationMu.Lock()
+	defer tradingObservationMu.Unlock()
+	if err = syncTradingPortfolioLocked(ctx, pid, portfolioID); err != nil {
 		return nil, err
 	}
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
@@ -208,21 +212,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 
 	if fmt.Sprint(out["status"]) != "rejected" {
-		if err = syncTradingPortfolio(ctx, pid, portfolioID); err != nil {
+		if err = syncTradingPortfolioLocked(ctx, pid, portfolioID); err != nil {
 			return nil, fmt.Errorf("order submitted; refresh Trading observation before retry: %w", err)
 		}
 	}
 	return out, nil
 }
 
-func syncTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64) error {
-	tradingObservationMu.Lock()
-	defer tradingObservationMu.Unlock()
+func refreshTradingPortfolio(ctx *sdk.AppCtx, pid string, id int64, args map[string]any) error {
 	var snap researchSnapshot
-	if err := callTrading(ctx, "portfolio_research_snapshot", map[string]any{"_project_id": pid, "portfolio_id": id}, &snap); err != nil {
+	if err := callTrading(ctx, tradingSnapshotTool, args, &snap); err != nil {
 		return err
 	}
-	if snap.Version != 1 || snap.ProjectID != pid || len(snap.Tables["portfolios"]) != 1 {
+	if snap.Version != tradingSnapshotVersion || snap.ProjectID != pid || len(snap.Tables["portfolios"]) != 1 {
 		return errors.New("invalid Trading portfolio observation")
 	}
 	pf := snap.Tables["portfolios"][0]

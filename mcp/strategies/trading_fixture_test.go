@@ -15,6 +15,7 @@ type fixtureTrading struct {
 	ctx                *sdk.AppCtx
 	orderRequests      []map[string]any
 	observedPortfolios []int64
+	snapshotErr        error
 }
 
 func (p *fixtureTrading) CallAppResult(app, tool string, args map[string]any, out any) error {
@@ -29,6 +30,9 @@ func (p *fixtureTrading) CallAppResult(app, tool string, args map[string]any, ou
 		}
 		id := int64Arg(args, "portfolio_id", 0)
 		p.observedPortfolios = append(p.observedPortfolios, id)
+		if p.snapshotErr != nil {
+			return p.snapshotErr
+		}
 		snap := researchSnapshot{Version: 1, SourceInstallID: 11, ProjectID: pid, Tables: map[string][]map[string]any{}}
 		for _, table := range []string{"portfolios", "positions", "orders", "fills", "portfolio_risk_policies", "portfolio_risk_state", "portfolio_universe_policies", "watchlist", "day_baselines"} {
 			query := "SELECT * FROM " + table + " WHERE portfolio_id=?"
