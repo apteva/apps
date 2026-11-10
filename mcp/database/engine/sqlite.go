@@ -291,6 +291,9 @@ func sqlType(f Field) string {
 }
 func v2(c Collection) bool { return c.StorageVersion >= 2 }
 func allFields(c Collection) []Field {
+	if c.ComputedCollection != nil {
+		return append([]Field(nil), c.Fields...)
+	}
 	return append(append([]Field{}, c.Fields...), Field{Name: "_created_at", Type: "datetime"}, Field{Name: "_updated_at", Type: "datetime"}, Field{Name: "_version", Type: "integer"})
 }
 func (t *sqliteTx) save(c Collection) error {

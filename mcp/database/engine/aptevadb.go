@@ -124,12 +124,18 @@ func nativeError(e error) error {
 	switch {
 	case errors.Is(e, native.ErrKeyExists), errors.Is(e, native.ErrDuplicateKey):
 		return fail("unique_conflict", "primary or unique index constraint violated")
-	case errors.Is(e, native.ErrKeySize), errors.Is(e, native.ErrValueSize), errors.Is(e, native.ErrTransactionTooLarge), errors.Is(e, native.ErrLimit), errors.Is(e, native.ErrDiskLimit), errors.Is(e, native.ErrMemoryPressure):
+	case errors.Is(e, native.ErrKeySize), errors.Is(e, native.ErrValueSize), errors.Is(e, native.ErrTransactionTooLarge), errors.Is(e, native.ErrLimit), errors.Is(e, native.ErrDiskLimit), errors.Is(e, native.ErrMemoryPressure), errors.Is(e, native.ErrComputedCollectionLimit):
 		return fail("resource_limit", "native database resource limit: %v", e)
 	case errors.Is(e, native.ErrNoSuchCollection), errors.Is(e, native.ErrNotFound):
 		return fail("not_found", "native database object does not exist")
 	case errors.Is(e, native.ErrConflict):
 		return fail("storage_error", "unexpected concurrent native database writer")
+	case errors.Is(e, native.ErrComputedCollectionDependency):
+		return fail("schema_conflict", "drop dependent computed collections first")
+	case errors.Is(e, native.ErrComputedCollectionReadOnly):
+		return fail("read_only", "computed collections are maintained by their source")
+	case errors.Is(e, native.ErrComputedCollection):
+		return Invalid("native computed collection rejected the definition or source value: %v", e)
 	}
 	return e
 }
@@ -239,7 +245,7 @@ func (b *aptevaBackend) pointGet(ctx context.Context, c Collection, key Record, 
 	if e := b.health(); e != nil {
 		return nil, e
 	}
-	physical, _, e := indexTuple(c, primaryIndex(c), key)
+	physical, e := nativeReadKey(c, key)
 	if e != nil {
 		return nil, e
 	}
@@ -438,6 +444,9 @@ func decodeNativeRecord(c Collection, data []byte) (Record, error) {
 		return nil, e
 	}
 	r := Record(values)
+	if c.computedGroup() {
+		delete(r, "_id")
+	}
 	for _, f := range allFields(c) {
 		v, exists := values[f.Name]
 		if !exists {
@@ -477,8 +486,7 @@ func nativeKeyFromCanonical(c Collection, pk string) ([]byte, error) {
 	for i, p := range c.PrimaryKey {
 		r[p] = values[i]
 	}
-	key, _, e := indexTuple(c, primaryIndex(c), r)
-	return key, e
+	return nativeReadKey(c, r)
 }
 
 // A read transaction is a snapshot and its context; native snapshots serve

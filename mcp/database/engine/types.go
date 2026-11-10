@@ -33,6 +33,8 @@ type Collection struct {
 	PrimaryKey []string `json:"primaryKey"`
 	Indexes    []Index  `json:"indexes"`
 	Version    int64    `json:"version"`
+
+	ComputedCollection *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
 	// StorageVersion is internal SQLite physical-layout metadata. It is not
 	// part of the portable collection schema or cursor hash.
 	StorageVersion int `json:"-"`
@@ -68,6 +70,8 @@ type Query struct {
 	RequireIndex bool     `json:"requireIndex,omitempty"`
 }
 type Request struct {
+	ComputedCollection *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
+
 	Pipeline         *ReadPipeline `json:"pipeline,omitempty"`
 	Version          int           `json:"version,omitempty"`
 	Nodes            []QueryNode   `json:"nodes,omitempty"`
@@ -165,6 +169,9 @@ func (c Collection) field(n string) (Field, error) {
 		if f.Name == n {
 			return f, nil
 		}
+	}
+	if c.ComputedCollection != nil {
+		return Field{}, Invalid("unknown field %q", n)
 	}
 	switch n {
 	case "_created_at", "_updated_at":
@@ -398,13 +405,16 @@ func primary(c Collection, r Record) (string, error) {
 		vals = append(vals, v)
 	}
 	b := marshal(vals)
-	if len(b) > 2048 {
+	if len(b) > 2048 && !c.computedGroup() {
 		return "", Invalid("primary key exceeds 2048 bytes")
 	}
 	return string(b), nil
 }
 
 func primaryNormalized(c Collection, r Record) (string, error) {
+	if c.computedGroup() {
+		return primary(c, r)
+	}
 	if len(c.PrimaryKey) == 1 {
 		p := c.PrimaryKey[0]
 		f, _ := c.field(p)

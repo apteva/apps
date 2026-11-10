@@ -74,7 +74,7 @@ var specs = []toolSpec{
 	{"database_describe", "Describe a named database.", nil, nil},
 	{"database_drop", "Permanently delete one database and all collections; confirm=true is required.", []string{"confirm"}, []string{"database", "confirm"}},
 	{"collections_list", "List collections in a database.", nil, nil},
-	{"collection_create", "Create a collection with explicit typed fields and optional composite primaryKey; defaults to UUID id.", []string{"fields", "primaryKey"}, []string{"collection", "fields"}},
+	{"collection_create", "Create a typed collection, or a maintained read-only computedCollection on AptevaDB.", []string{"fields", "primaryKey", "computedCollection"}, []string{"collection"}},
 	{"collection_describe", "Describe fields, primary key, indexes and schema version.", nil, []string{"collection"}},
 	{"collection_drop", "Permanently delete a collection and records; confirm=true is required.", []string{"confirm"}, []string{"collection", "confirm"}},
 	{"indexes_list", "List generic secondary indexes on a collection.", nil, []string{"collection"}},
@@ -272,6 +272,9 @@ func parseArgs(args map[string]any, s toolSpec) (engine.Request, error) {
 	if e = d.Decode(&r); e != nil {
 		return r, engine.Invalid("invalid request: %v", e)
 	}
+	if s.op == "collection_create" && r.ComputedCollection == nil && r.Fields == nil {
+		return r, engine.Invalid("fields is required for an ordinary collection")
+	}
 	if s.op == "find" || s.op == "aggregate" {
 		if e := engine.ValidateCoreRead(s.op, r); e != nil {
 			return r, e
@@ -402,6 +405,9 @@ func inputSchema(s toolSpec) map[string]any {
 	all["as"] = map[string]any{"type": "string", "description": "Alias of the root collection in joined names; default root."}
 	all["joins"] = arr(obj())
 	all["computed"] = map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "object", "description": "{name,type?,expr}; expr is one of field, const, coalesce, nullIfEmpty, trim, strip+chars, concat+separator, json+path, if+then+else, or numeric op+args (add, subtract, multiply, safe_divide, comparisons, min, max, round, if, and/or/not)."}}
+	all["computedCollection"] = map[string]any{"type": "object", "additionalProperties": false,
+		"required": []string{"source"}, "properties": map[string]any{"source": str(),
+			"where": all["where"], "select": all["select"], "groupBy": all["groupBy"], "metrics": all["metrics"]}}
 	all["filter"] = map[string]any{"type": "object", "description": "Filter over joined rows, using alias.field names and computed names."}
 	all["distinct"] = map[string]any{"type": "array", "items": str(), "description": "Aliases (physical records) or fields whose combination appears once."}
 	all["pick"] = obj()
@@ -429,6 +435,9 @@ func inputSchema(s toolSpec) map[string]any {
 		props[k] = all[k]
 	}
 	schema := map[string]any{"type": "object", "properties": props, "required": s.required, "additionalProperties": false}
+	if s.op == "collection_create" {
+		schema["oneOf"] = []any{map[string]any{"required": []string{"fields"}}, map[string]any{"required": []string{"computedCollection"}}}
+	}
 	if s.op == "find" || s.op == "aggregate" {
 		sources := []any{map[string]any{"required": []string{"collection"}}, map[string]any{"required": []string{"pipeline"}}}
 		if s.op == "aggregate" {
