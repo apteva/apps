@@ -286,6 +286,41 @@ func TestTriggerSyncFailureVisibleAndRetried(t *testing.T) {
 		t.Fatal(tr)
 	}
 }
+
+func TestTriggerTickReadsOnlyChangedConfigAndParentStatus(t *testing.T) {
+	a, f, p, tr := triggerSetup(t)
+	sibling := addAssignment(t, a, p, "Other assignment", 7, "agent", nil, nil)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tick := func() sdk.AppEventSubscription {
+		t.Helper()
+		if err := a.tickTriggers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return f.subscriptions[tr.ID]
+	}
+	// Invalid JSON makes an unintended decode fail the tick.
+	exec(`UPDATE process_versions SET body_json='invalid' WHERE process_id=?`, p.ID)
+	exec(`UPDATE process_triggers SET config_json='invalid' WHERE id=?`, tr.ID)
+	if sub := tick(); !sub.Enabled || sub.Revision != tr.SubscriptionRevision {
+		t.Fatalf("idle tick changed the subscription: %+v", sub)
+	}
+	exec(`UPDATE process_triggers SET config_json=? WHERE id=?`, jsonText(tr.Config), tr.ID)
+	exec(`UPDATE process_assignments SET sync_pending=1 WHERE id=?`, sibling.ID)
+	disabled := tick()
+	if disabled.Enabled || disabled.Revision <= tr.SubscriptionRevision {
+		t.Fatalf("pending sibling sync did not disable the subscription: %+v", disabled)
+	}
+	exec(`UPDATE process_assignments SET sync_pending=0 WHERE id=?`, sibling.ID)
+	if sub := tick(); !sub.Enabled || sub.Revision <= disabled.Revision {
+		t.Fatalf("settled sibling sync did not re-enable the subscription: %+v", sub)
+	}
+}
+
 func TestEventFilterTypesAndExistence(t *testing.T) {
 	root := map[string]any{"data": map[string]any{
 		"n":        12.0,

@@ -21,10 +21,13 @@ func (a *App) cleanupWorkers(ctx context.Context, now time.Time, scope ...string
 	// finishing step_update or producing lifecycle callbacks at the same time.
 	a.cleanupMu.Lock()
 	defer a.cleanupMu.Unlock()
-	rows, err := a.db.Query(`SELECT c.run_id,c.agent_id,c.thread_id,c.attempts FROM process_worker_cleanup c
- JOIN process_runs r ON r.id=c.run_id JOIN processes p ON p.id=r.process_id
+	// Keep the pending queue first in join order so idle polls skip run history.
+	rows, err := a.db.QueryContext(ctx, `SELECT c.run_id,c.agent_id,c.thread_id,c.attempts
+ FROM process_worker_cleanup c INDEXED BY process_worker_cleanup_pending
+ CROSS JOIN process_runs r ON r.id=c.run_id CROSS JOIN processes p ON p.id=r.process_id
  WHERE p.project_id=? AND r.state IN ('completed','failed','cancelled') AND c.completed_at=''
- AND (c.next_attempt_at='' OR c.next_attempt_at<=?) ORDER BY c.next_attempt_at,c.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339Nano))
+ AND c.next_attempt_at<=? AND rtrim(c.next_attempt_at,'Z')<=?
+ ORDER BY c.next_attempt_at,c.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339), deadlineKey(now))
 	if err != nil {
 		return err
 	}
@@ -88,7 +91,12 @@ func (a *App) workerRunActive(run string) error {
 // Killing the worker can beat native done and its parent notification. The
 // coordinator receives one stable, compact event independently of shutdown.
 func (a *App) notifyTerminalRuns(ctx context.Context, now time.Time, project string) error {
-	rows, err := a.db.Query(`SELECT n.run_id,r.process_id,n.target_thread_id,n.attempts FROM process_run_terminal_events n JOIN process_runs r ON r.id=n.run_id JOIN processes p ON p.id=r.process_id WHERE p.project_id=? AND r.state IN ('completed','failed','cancelled') AND n.delivered_at='' AND (n.next_attempt_at='' OR n.next_attempt_at<=?) ORDER BY n.next_attempt_at,n.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339Nano))
+	rows, err := a.db.QueryContext(ctx, `SELECT n.run_id,r.process_id,n.target_thread_id,n.attempts
+ FROM process_run_terminal_events n INDEXED BY process_run_terminal_events_pending
+ CROSS JOIN process_runs r ON r.id=n.run_id CROSS JOIN processes p ON p.id=r.process_id
+ WHERE p.project_id=? AND r.state IN ('completed','failed','cancelled') AND n.delivered_at=''
+ AND n.next_attempt_at<=? AND rtrim(n.next_attempt_at,'Z')<=?
+ ORDER BY n.next_attempt_at,n.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339), deadlineKey(now))
 	if err != nil {
 		return err
 	}

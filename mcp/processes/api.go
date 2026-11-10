@@ -275,6 +275,16 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		}
 		return a.overview(project)
 	}
+	// A failed response can follow a successful commit (e.g. failed delivery).
+	// Signal after the action and its lock have finished in either case.
+	switch action {
+	case "create", "update", "patch", "activate", "pause", "draft", "archive", "start",
+		"assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive",
+		"run_advance", "run_cancel", "run_update", "step_claim", "step_update", "step_evidence_save",
+		"summary_update", "memory_upsert", "run_rate", "review_update",
+		"trigger_create", "trigger_update", "trigger_activate", "trigger_pause", "trigger_archive", "trigger_test_run", "trigger_event_retry":
+		defer a.wakeDispatch(project)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if strings.HasPrefix(action, "trigger_") || action == "triggers" {

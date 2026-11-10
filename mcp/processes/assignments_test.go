@@ -150,6 +150,29 @@ func TestSchedulesOverlapPerAssignmentAndPauseAll(t *testing.T) {
 		t.Fatal("parent pause ignored")
 	}
 }
+
+func TestScheduleTickSelectsOnlyDueAssignments(t *testing.T) {
+	a, f, p := directSetup(t)
+	s := &Schedule{Kind: "interval", Every: "1m"}
+	due := enableAssignment(t, a, p, addAssignment(t, a, p, "Due", 7, "agent", s, nil))
+	future := enableAssignment(t, a, p, addAssignment(t, a, p, "Future", 8, "agent", s, nil))
+	deadline := time.Now().UTC().Truncate(time.Second)
+	if _, err := a.db.Exec(`UPDATE process_assignments SET next_run_at=? WHERE id=?`, deadline.Format(time.RFC3339Nano), due.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A decode of the assignment due later in the same second would fail.
+	if _, err := a.db.Exec(`UPDATE process_assignments SET next_run_at=?,body_json='invalid' WHERE id=?`, deadline.Add(900*time.Millisecond).Format(time.RFC3339Nano), future.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.tickDirect(context.Background(), deadline.Add(100*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	r := savedRun(t, a, p)
+	if r.AssignmentID != due.ID || len(f.events) != 1 || f.events[0].SourceEventID != "processes:"+r.ID {
+		t.Fatalf("due assignment was not scheduled and dispatched: %+v, %+v", r, f.events)
+	}
+}
+
 func TestTasksSchedulesAreIsolatedAndPinned(t *testing.T) {
 	t.Skip("legacy Tasks schedules removed in Processes 0.14")
 	a, f := setup(t)

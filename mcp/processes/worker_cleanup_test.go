@@ -114,6 +114,39 @@ func TestWorkerCleanupBackoffRestartAndScope(t *testing.T) {
 	}
 }
 
+func TestWorkerCleanupOrdersDueRetries(t *testing.T) {
+	a, f, p := directSetup(t)
+	now := time.Now().UTC()
+	overdue := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	for _, item := range []struct{ id, retryAt string }{
+		{"run-b", overdue},
+		{"run-a", overdue},
+		{"run-new", ""},
+		{"run-future", now.Add(time.Minute).Format(time.RFC3339Nano)},
+	} {
+		if _, err := a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,created_at,state)
+ VALUES(?,?,?,'manual',?,?,'completed')`, item.id, p.ID, p.Version, item.id, timestamp()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.Exec(`INSERT INTO process_worker_cleanup(run_id,agent_id,thread_id,next_attempt_at)
+ VALUES(?,7,?,?)`, item.id, "worker-"+item.id, item.retryAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.cleanupWorkers(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"worker-run-new", "worker-run-a", "worker-run-b"}
+	if len(f.kills) != len(want) {
+		t.Fatalf("cleanup attempts: %+v", f.kills)
+	}
+	for i, thread := range want {
+		if f.kills[i].ThreadID != thread {
+			t.Fatalf("cleanup order: %+v, want %v", f.kills, want)
+		}
+	}
+}
+
 func TestTerminalWorkerRejectsLateEventsAndDelivery(t *testing.T) {
 	a, f, p, r := workflowSetup(t)
 	s := stepBy(t, a, r, "research")

@@ -268,21 +268,32 @@ func (a *App) saveTrigger(project, process, assignment, id string, expected int,
 	}
 	return t, e
 }
+
+// The procedure's sync state includes pending syncs on all its assignments.
+const triggerShouldEnable = `(t.status='active' AND p.status='active' AND x.status='active' AND p.sync_pending=0
+ AND NOT EXISTS(SELECT 1 FROM process_assignments pending WHERE pending.process_id=p.id AND pending.sync_pending<>0))`
+const triggerStatusJoin = ` FROM process_triggers t
+ JOIN processes p ON p.id=t.process_id AND p.project_id=t.project_id
+ JOIN process_assignments x ON x.id=t.assignment_id AND x.process_id=p.id`
+
 func (a *App) syncTrigger(t *Trigger) error {
-	p, e := a.get(t.ProjectID, t.ProcessID)
-	if e != nil {
-		return e
+	var enabled bool
+	err := a.db.QueryRow(`SELECT `+triggerShouldEnable+triggerStatusJoin+` WHERE t.project_id=? AND t.id=?`, t.ProjectID, t.ID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errNotFound
 	}
-	x, e := a.assignment(t.ProjectID, t.ProcessID, t.AssignmentID)
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
-	enabled := t.Status == "active" && p.Status == "active" && x.Status == "active" && !p.SyncPending && !x.SyncPending
+	return a.syncTriggerSubscription(t, enabled)
+}
+
+func (a *App) syncTriggerSubscription(t *Trigger, enabled bool) error {
 	if enabled != t.SubscriptionEnabled {
 		t.SubscriptionEnabled = enabled
 		t.SubscriptionRevision++
 		t.SyncPending = true
-		_, e = a.db.Exec(`UPDATE process_triggers SET subscription_revision=?,subscription_enabled=?,sync_pending=1 WHERE id=?`, t.SubscriptionRevision, enabled, t.ID)
+		_, e := a.db.Exec(`UPDATE process_triggers SET subscription_revision=?,subscription_enabled=?,sync_pending=1 WHERE id=?`, t.SubscriptionRevision, enabled, t.ID)
 		if e != nil {
 			return e
 		}
@@ -290,6 +301,7 @@ func (a *App) syncTrigger(t *Trigger) error {
 	if !t.SyncPending {
 		return nil
 	}
+	var e error
 	api := a.ctx.EventBusAPI()
 	if api == nil {
 		e = errors.New("event subscriptions require the updated platform and SDK")
@@ -311,30 +323,39 @@ func (a *App) tickTriggers(ctx context.Context, scope ...string) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, e := a.db.Query(`SELECT `+triggerColumns+` FROM process_triggers WHERE project_id=?`, project)
+	rows, e := a.db.QueryContext(ctx, `WITH states AS (
+ SELECT t.id,t.process_id,t.sync_pending,t.subscription_enabled,`+triggerShouldEnable+` AS enabled`+triggerStatusJoin+`
+ WHERE t.project_id=?
+ )
+ SELECT id,process_id,enabled FROM states WHERE sync_pending<>0 OR subscription_enabled<>enabled`, project)
 	if e != nil {
 		return e
 	}
-	ts := []Trigger{}
-	for rows.Next() {
-		t, e := scanTrigger(rows)
-		if e != nil {
-			rows.Close()
-			return e
-		}
-		ts = append(ts, t)
+	type target struct {
+		id, process string
+		enabled     bool
 	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
+	var targets []target
+	for rows.Next() {
+		var t target
+		if e = rows.Scan(&t.id, &t.process, &t.enabled); e != nil {
+			break
+		}
+		targets = append(targets, t)
+	}
+	if e = errors.Join(e, rows.Err(), rows.Close()); e != nil {
 		return e
 	}
 	var errs []error
-	for i := range ts {
+	for _, target := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if e = a.syncTrigger(&ts[i]); e != nil {
+		t, e := a.trigger(project, target.process, target.id)
+		if e == nil {
+			e = a.syncTriggerSubscription(&t, target.enabled)
+		}
+		if e != nil {
 			errs = append(errs, e)
 		}
 	}
@@ -377,14 +398,15 @@ func (a *App) setTriggerStatus(project, process, id, status string, expected int
 // Receive and reserve the run in one transaction. Agent notification happens
 // after commit; the existing run worker retries delivery after a crash.
 func (a *App) receiveTriggerEvent(_ *sdk.AppCtx, event sdk.Event) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if event.Name() != sdk.AppBusDeliveryEvent || event.DeliveryID == "" || event.ProjectID == "" {
 		return errors.New("durable app event envelope required")
 	}
 	if fixed := a.ctx.CurrentProject(); fixed != "" && fixed != event.ProjectID {
 		return errors.New("event project mismatch")
 	}
+	defer a.wakeDispatch(event.ProjectID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	key := str(event.Data, "subscription_key")
 	var process string
 	if e := a.db.QueryRow(`SELECT process_id FROM process_triggers WHERE id=? AND project_id=?`, key, event.ProjectID).Scan(&process); e == sql.ErrNoRows {

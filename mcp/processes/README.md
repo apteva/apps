@@ -245,8 +245,11 @@ Migration 013 freezes the complete delivery envelope and worker provisioning
 request before network calls. Retries replay exactly the same agent, thread,
 event identity, message, and provisioning request after a lost acknowledgement
 or restart, even if deadlines, dependencies, or app-generated context changed.
-Unchanged reconciliation produces no row mutations or WAL writes. Global worker
-callbacks only process the SDK-dispatched project, not all projects per call.
+After a mutation, the dispatcher checks the affected project for committed work.
+It also wakes at the next saved deadline and recovers pending work on startup.
+When idle, it waits for a signal or the one-minute repair sweep. Global
+installations dispatch only for projects visible to the app. Unchanged
+reconciliation produces no row mutations or WAL writes.
 
 ## HTTP
 

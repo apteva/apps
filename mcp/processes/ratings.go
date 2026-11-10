@@ -929,7 +929,12 @@ func ratingRequest(q *QualityConfig, process, run, state string) string {
 }
 
 func (a *App) notifyRatingRequests(ctx context.Context, now time.Time, project string) error {
-	rows, err := a.db.Query(`SELECT q.run_id,r.process_id,q.agent_id,q.attempts FROM process_rating_requests q JOIN process_runs r ON r.id=q.run_id JOIN processes p ON p.id=r.process_id WHERE p.project_id=? AND q.delivered_at='' AND (q.next_attempt_at='' OR q.next_attempt_at<=?) ORDER BY q.next_attempt_at,q.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339Nano))
+	rows, err := a.db.QueryContext(ctx, `SELECT q.run_id,r.process_id,q.agent_id,q.attempts
+ FROM process_rating_requests q INDEXED BY process_rating_requests_pending
+ CROSS JOIN process_runs r ON r.id=q.run_id CROSS JOIN processes p ON p.id=r.process_id
+ WHERE p.project_id=? AND q.delivered_at=''
+ AND q.next_attempt_at<=? AND rtrim(q.next_attempt_at,'Z')<=?
+ ORDER BY q.next_attempt_at,q.run_id LIMIT 100`, project, now.UTC().Format(time.RFC3339), deadlineKey(now))
 	if err != nil {
 		return err
 	}

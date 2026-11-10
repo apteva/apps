@@ -201,7 +201,7 @@ func (a *App) retryPending(ctx context.Context, scope ...string) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT p.project_id,p.id FROM processes p WHERE p.project_id=? AND (p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1)) LIMIT 100`, project)
+	rows, err := a.db.QueryContext(ctx, `SELECT p.project_id,p.id FROM processes p WHERE p.project_id=? AND (p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1)) LIMIT 100`, project)
 	if err != nil {
 		return err
 	}

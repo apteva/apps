@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -157,39 +158,55 @@ func (a *App) recordStepDeliveryError(s StepRun, err error) error {
 	return errors.Join(err, saveErr)
 }
 
+const openRunsInProject = `r.process_id IN (SELECT id FROM processes WHERE project_id=:project)
+ AND r.state NOT IN ('completed','failed','cancelled')`
+const runAwaitsDelivery = `r.workflow=0 AND r.backend='agent' AND r.delivered_at='' AND r.delivery_suspended=0`
+const stepAwaitsDelivery = `s.state IN ('ready','running','waiting','blocked') AND s.delivered_at='' AND s.delivery_suspended=0
+ AND json_extract(s.executor_json,'$.kind')='agent'`
+const stepAwaitsClaim = `s.state='ready' AND s.delivered_at<>'' AND s.claimed_at='' AND s.delivery_suspended=0
+ AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id)
+ AND NOT EXISTS(SELECT 1 FROM process_step_runs active WHERE active.run_id=r.id AND active.target_thread_id=s.target_thread_id AND active.state IN ('running','waiting','blocked'))`
+const stepAwaitsReminder = `s.state='running' AND s.delivered_at<>'' AND s.delivery_suspended=0
+ AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id)`
+
 // Unlike history views, workers never load terminal run history or retry
 // direct deliveries still in backoff/suspended for operator repair.
-func (a *App) pendingRuns(process string, now time.Time) ([]Run, error) {
+func (a *App) pendingRuns(ctx context.Context, project string, now time.Time) ([]Run, error) {
 	// Step updates reconcile immediately. Ticks are only needed for first
 	// initialization, newly ready/timed work, due delivery retries, stale-worker
 	// reminders, and a delivery warning changed by a lifecycle acknowledgement.
-	rows, err := a.db.Query(`SELECT `+runColumns+` FROM process_runs r WHERE process_id=? AND state NOT IN ('completed','failed','cancelled') AND (
-	 (workflow=0 AND backend='agent' AND delivered_at='' AND delivery_suspended=0 AND (next_attempt_at='' OR next_attempt_at<=?)) OR
+	rows, err := a.db.QueryContext(ctx, `SELECT `+runColumns+` FROM process_runs r WHERE `+openRunsInProject+` AND (
+	 (`+runAwaitsDelivery+` AND rtrim(r.next_attempt_at,'Z')<=:now) OR
 	 (workflow=1 AND (
 	  delivered_at='' OR state='queued' OR
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state IN ('failed','cancelled')) OR
 	  NOT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state<>'completed') OR
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND (
-	   (s.state='ready' AND s.delivered_at<>'' AND s.claimed_at='' AND s.delivery_suspended=0 AND s.delivered_at<=? AND (s.claim_next_at='' OR s.claim_next_at<=?) AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id) AND NOT EXISTS(SELECT 1 FROM process_step_runs active WHERE active.run_id=r.id AND active.target_thread_id=s.target_thread_id AND active.state IN ('running','waiting','blocked'))) OR
-	   (s.state IN ('pending','scheduled') AND (s.state='pending' OR s.start_at='' OR s.start_at<=?) AND NOT EXISTS(SELECT 1 FROM json_each(s.definition_json,'$.depends_on') dep WHERE NOT EXISTS(SELECT 1 FROM process_step_runs ancestor WHERE ancestor.run_id=r.id AND ancestor.step_key=dep.value AND ancestor.state='completed'))) OR
-	   (s.state IN ('ready','running','waiting','blocked') AND s.delivered_at='' AND s.delivery_suspended=0 AND json_extract(s.executor_json,'$.kind')='agent' AND (s.next_attempt_at='' OR s.next_attempt_at<=?)) OR
-	   (s.state='running' AND s.delivered_at<>'' AND s.delivery_suspended=0 AND s.updated_at<=? AND (s.next_attempt_at='' OR s.next_attempt_at<=?) AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id))
+	   (`+stepAwaitsClaim+` AND rtrim(s.delivered_at,'Z')<=:claim_cutoff AND rtrim(s.claim_next_at,'Z')<=:now AND rtrim(s.next_attempt_at,'Z')<=:now) OR
+	   (s.state IN ('pending','scheduled') AND (s.state='pending' OR rtrim(s.start_at,'Z')<=:now) AND NOT EXISTS(SELECT 1 FROM json_each(s.definition_json,'$.depends_on') dep WHERE NOT EXISTS(SELECT 1 FROM process_step_runs ancestor WHERE ancestor.run_id=r.id AND ancestor.step_key=dep.value AND ancestor.state='completed'))) OR
+	   (`+stepAwaitsDelivery+` AND rtrim(s.next_attempt_at,'Z')<=:now) OR
+	   (`+stepAwaitsReminder+` AND rtrim(s.updated_at,'Z')<=:reminder_cutoff AND rtrim(s.next_attempt_at,'Z')<=:now)
 	  )) OR
 	  (delivery_warning='' AND EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','failed','cancelled') AND s.delivery_warning<>'')) OR
 	  (delivery_warning<>'' AND NOT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','failed','cancelled') AND s.delivery_warning<>''))
 	 ))
-	) ORDER BY created_at,id`, process, now.Format(time.RFC3339Nano), now.Add(-unclaimedStepAfter).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(-staleStepReminderAfter).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	) ORDER BY process_id,created_at,id`,
+		sql.Named("project", project), sql.Named("now", deadlineKey(now)),
+		sql.Named("claim_cutoff", deadlineKey(now.Add(-unclaimedStepAfter))),
+		sql.Named("reminder_cutoff", deadlineKey(now.Add(-staleStepReminderAfter))))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Run{}
+	var out []Run
+	var failures []error
 	for rows.Next() {
 		r, err := scanRun(rows)
 		if err != nil {
-			return nil, err
+			failures = append(failures, err)
+			continue
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, errors.Join(append(failures, rows.Err())...)
 }

@@ -91,17 +91,9 @@ func totalChanges(t *testing.T, a *App) int {
 	return n
 }
 
-func TestGlobalWorkersOnlyTouchTheirDispatchedProject(t *testing.T) {
+func TestRunPassOnlyTouchesItsDispatchedProject(t *testing.T) {
 	a, _, _ := directSetup(t)
-	workers := a.Workers()
-	var runWorker sdk.Worker
-	for _, w := range workers {
-		if w.Name == "process-runs" {
-			runWorker = w
-		}
-	}
-	// Ten project callbacks must initialize exactly ten runs, not scan all ten
-	// projects on each callback. Human work is intentionally idle after init.
+	// Human work is intentionally idle after initialization.
 	targets := make([]*Process, 10)
 	for i := range targets {
 		project := fmt.Sprintf("project-%d", i)
@@ -119,7 +111,7 @@ func TestGlobalWorkersOnlyTouchTheirDispatchedProject(t *testing.T) {
 	}
 	t.Setenv("APTEVA_PROJECT_ID", "") // actual global install dispatch
 	for i, p := range targets {
-		if err := runWorker.Run(context.Background(), a.ctx.WithProject(p.ProjectID)); err != nil {
+		if err := a.tickDirect(context.Background(), time.Now(), p.ProjectID); err != nil {
 			t.Fatal(err)
 		}
 		for j, target := range targets {
@@ -134,7 +126,7 @@ func TestGlobalWorkersOnlyTouchTheirDispatchedProject(t *testing.T) {
 	}
 	before := totalChanges(t, a)
 	for _, p := range targets {
-		if err := runWorker.Run(context.Background(), a.ctx.WithProject(p.ProjectID)); err != nil {
+		if err := a.tickDirect(context.Background(), time.Now(), p.ProjectID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -142,11 +134,31 @@ func TestGlobalWorkersOnlyTouchTheirDispatchedProject(t *testing.T) {
 		t.Fatalf("idle scoped tick made %d row changes", n)
 	}
 	// An unscoped global callback must do nothing, not fall back to all data.
-	if err := runWorker.Run(context.Background(), a.ctx.WithProject("")); err != nil {
+	if err := a.tickDirect(context.Background(), time.Now(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := totalChanges(t, a) - before; n != 0 {
 		t.Fatalf("empty scope wrote %d rows", n)
+	}
+}
+
+func TestRunTickDispatchesNewlyReadyWorkflowStep(t *testing.T) {
+	a, f, _, r := workflowSetup(t)
+	first := stepBy(t, a, r, "research")
+	// Simulate a restart after the dependency update commits, before the
+	// normal synchronous reconciliation has a chance to dispatch its successor.
+	if err := a.writeStep(first, "completed", 100, "research notes", "", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE process_assignments SET body_json='invalid' WHERE id=?`, r.AssignmentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.tickDirect(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	next := stepBy(t, a, r, "write")
+	if next.DeliveredAt == "" || len(f.events) != 2 || f.events[1].SourceEventID != next.DeliveryEventID {
+		t.Fatalf("ready step was not dispatched from the frozen run: %+v, %+v", next, f.events)
 	}
 }
 
@@ -168,7 +180,7 @@ func TestUnchangedBlockedWorkflowHasZeroWrites(t *testing.T) {
 	if n := totalChanges(t, a) - before; n != 0 {
 		t.Fatalf("unchanged blocked run wrote %d rows", n)
 	}
-	pending, err := a.pendingRuns(p.ID, time.Now())
+	pending, err := a.pendingRuns(context.Background(), p.ProjectID, time.Now())
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("idle blocked run selected: %v %+v", err, pending)
 	}

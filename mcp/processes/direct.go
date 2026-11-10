@@ -285,6 +285,43 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 	}
 	return tx.Commit()
 }
+func (a *App) scheduleDueAssignments(ctx context.Context, project string, now time.Time) error {
+	// Use the index through the current second, then compare without the UTC
+	// suffix so whole seconds sort before fractional times in that second.
+	rows, err := a.db.QueryContext(ctx, `SELECT `+assignmentColumns+` FROM process_assignments
+ WHERE process_id IN (SELECT id FROM processes WHERE project_id=? AND status='active')
+ AND status='active' AND sync_pending=0 AND next_run_at<>'' AND next_run_at<=?
+ AND rtrim(next_run_at,'Z')<=? ORDER BY process_id,created_at,id`, project,
+		now.Format(time.RFC3339), deadlineKey(now))
+	if err != nil {
+		return err
+	}
+	var assignments []Assignment
+	var failures []error
+	for rows.Next() {
+		x, err := scanAssignment(rows)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		assignments = append(assignments, x)
+	}
+	failures = append(failures, rows.Err(), rows.Close())
+	for _, x := range assignments {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		p, e := a.assigned(&Process{ID: x.ProcessID, ProjectID: project, Status: "active"}, x)
+		if e == nil {
+			e = a.dueDirect(p, now)
+		}
+		if e != nil {
+			failures = append(failures, e)
+		}
+	}
+	return errors.Join(failures...)
+}
+
 func (a *App) tickDirect(ctx context.Context, now time.Time, scope ...string) error {
 	project := a.workerProject(scope)
 	if project == "" {
@@ -292,68 +329,30 @@ func (a *App) tickDirect(ctx context.Context, now time.Time, scope ...string) er
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT id,project_id FROM processes p WHERE project_id=? AND (EXISTS(SELECT 1 FROM process_runs r WHERE r.process_id=p.id AND r.state NOT IN ('completed','failed','cancelled')) OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.status='active' AND x.next_run_at<>'' AND x.next_run_at<=?))`, project, now.Format(time.RFC3339Nano))
-	if err != nil {
-		return err
-	}
-	type target struct{ id, project string }
-	targets := []target{}
-	for rows.Next() {
-		var t target
-		if err = rows.Scan(&t.id, &t.project); err != nil {
-			rows.Close()
-			return err
-		}
-		targets = append(targets, t)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	var failures []error
-	for _, t := range targets {
+	now = now.UTC()
+
+	// Schedule first so newly recorded occurrences can dispatch in this tick.
+	scheduleErr := a.scheduleDueAssignments(ctx, project, now)
+	runs, runErr := a.pendingRuns(ctx, project, now)
+	failures := []error{scheduleErr, runErr}
+	for i := range runs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		p, e := a.get(t.project, t.id)
-		if e != nil {
-			failures = append(failures, e)
-			continue
-		}
-		for _, x := range p.Assignments {
-			v, e := a.assigned(p, x)
-			if e == nil {
-				e = a.dueDirect(v, now)
-			}
-			if e != nil {
+		r := &runs[i]
+		// The handlers load the run's frozen procedure version.
+		p := &Process{ID: r.ProcessID, ProjectID: project}
+		if r.Workflow {
+			if e := a.reconcileWorkflowAt(p, r, now); e != nil {
 				failures = append(failures, e)
 			}
-		}
-		runs, e := a.pendingRuns(p.ID, now)
-		if e != nil {
-			failures = append(failures, e)
 			continue
 		}
-		for i := range runs {
-			r := &runs[i]
-			if r.Workflow {
-				if !terminal(r.State) {
-					if e = a.reconcileWorkflowAt(p, r, now); e != nil {
-						failures = append(failures, e)
-					}
-				}
-				continue
-			}
-			if r.Backend != "agent" || r.DeliveredAt != "" || terminal(r.State) {
-				continue
-			}
-			if next, e := time.Parse(time.RFC3339Nano, r.NextAttemptAt); e == nil && next.After(now) {
-				continue
-			}
-			if e = a.dispatchAgent(p, r); e != nil {
-				failures = append(failures, e)
-			}
+		if next, e := time.Parse(time.RFC3339Nano, r.NextAttemptAt); e == nil && next.After(now) {
+			continue
+		}
+		if e := a.dispatchAgent(p, r); e != nil {
+			failures = append(failures, e)
 		}
 	}
 	return errors.Join(failures...)
@@ -369,11 +368,13 @@ func (a *App) lifecycleHandlers() []sdk.EventHandler {
 			return err
 		}
 		if strings.HasPrefix(lifecycle.SourceEventID, "process-step:") {
+			defer a.wakeDispatch(event.ProjectID)
 			return a.stepLifecycle(event, lifecycle)
 		}
 		if !strings.HasPrefix(lifecycle.SourceEventID, "processes:") {
 			return nil
 		}
+		defer a.wakeDispatch(event.ProjectID)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		id := strings.TrimPrefix(lifecycle.SourceEventID, "processes:")

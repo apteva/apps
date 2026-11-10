@@ -529,10 +529,8 @@ func scanRun(row scanner) (Run, error) {
 	return r, err
 }
 func (a *App) getRun(project, process, id string) (Run, error) {
-	if _, err := a.get(project, process); err != nil {
-		return Run{}, err
-	}
-	r, err := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE process_id=? AND id=?`, process, id))
+	r, err := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs r WHERE process_id=? AND id=?
+ AND EXISTS(SELECT 1 FROM processes p WHERE p.id=r.process_id AND p.project_id=?)`, process, id, project))
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}

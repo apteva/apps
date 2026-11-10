@@ -22,7 +22,7 @@ func (a *App) drainEvents(ctx context.Context, scope ...string) error {
 	if api == nil {
 		return errors.New("app event publisher unavailable")
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT sequence,event_id,project_id,topic,payload_json,occurred_at,attempts,next_attempt_at FROM process_event_outbox e WHERE e.project_id=? AND NOT EXISTS (SELECT 1 FROM process_event_outbox earlier WHERE earlier.project_id=e.project_id AND earlier.sequence<=e.sequence AND earlier.next_attempt_at>?) ORDER BY sequence LIMIT 200`, project, time.Now().UTC().Format(time.RFC3339Nano))
+	rows, err := a.db.QueryContext(ctx, `SELECT sequence,event_id,project_id,topic,payload_json,occurred_at,attempts,next_attempt_at FROM process_event_outbox e WHERE e.project_id=? AND NOT EXISTS (SELECT 1 FROM process_event_outbox earlier WHERE earlier.project_id=e.project_id AND earlier.sequence<=e.sequence AND rtrim(earlier.next_attempt_at,'Z')>?) ORDER BY sequence LIMIT 200`, project, deadlineKey(time.Now()))
 	if err != nil {
 		return err
 	}

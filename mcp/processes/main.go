@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	_ "embed"
 	"errors"
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 	"sync"
-	"time"
 )
 
 //go:embed apteva.yaml
@@ -18,11 +16,13 @@ var manifestYAML string
 var skillBody string
 
 type App struct {
-	ctx       *sdk.AppCtx
-	db        *sql.DB
-	mu        sync.Mutex
-	eventMu   sync.Mutex
-	cleanupMu sync.Mutex
+	ctx           *sdk.AppCtx
+	db            *sql.DB
+	mu            sync.Mutex
+	eventMu       sync.Mutex
+	cleanupMu     sync.Mutex
+	asyncDispatch bool
+	dispatcher    *processDispatcher
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -42,26 +42,28 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.ctx = ctx
 	a.db = ctx.AppDB()
+	if a.asyncDispatch {
+		a.dispatcher = newProcessDispatcher(a)
+		go a.dispatcher.run()
+	}
 	return nil
 }
-func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
-func (a *App) Channels() []sdk.ChannelFactory { return nil }
-
-func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "worker-cleanup", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
-		return a.cleanupWorkers(ctx, time.Now().UTC(), app.CurrentProject())
-	}}, {Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx, app.CurrentProject()) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx, app.CurrentProject()) }}, {Name: "process-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
-		return a.tickDirect(ctx, time.Now().UTC(), app.CurrentProject())
-	}}, {Name: "process-reconciliation", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx, app.CurrentProject()) }}}
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.dispatcher != nil {
+		a.dispatcher.cancel()
+		<-a.dispatcher.done
+	}
+	return nil
 }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
 
-// The SDK dispatches global workers once per visible project. Never turn an
-// empty scope into an installation-wide scan. Optional scope is for internal
-// callers on project installations, not a bypass of project isolation.
+// Dispatch always supplies a visible project. An empty scope must never turn
+// into an installation-wide scan.
 func (a *App) workerProject(scope []string) string {
 	if len(scope) > 0 {
 		return scope[0]
 	}
 	return a.ctx.CurrentProject()
 }
-func main() { sdk.Run(&App{}) }
+func main() { sdk.Run(&App{asyncDispatch: true}) }
