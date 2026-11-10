@@ -222,6 +222,28 @@ test("calendar displays parent destinations and keeps release status distinct", 
   expect(rows[1].querySelector(".ed-status")?.getAttribute("data-tone")).toBe("success");
 });
 
+test("the list pages upcoming entries in order without dropping the remainder", async () => {
+  const today = dateKey(new Date());
+  const events = Array.from({ length: 8 }, (_, index) =>
+    event({ item_id: index + 1, title: `Entry ${index + 1}`, date: today, at: today }),
+  );
+  const { host, calendarCalls } = await mount({ widgetSize: "half" }, { events });
+  const titles = () => [...host.querySelectorAll(".ec-list .ec-title")].map((entry) => entry.textContent);
+  const next = host.querySelector<HTMLButtonElement>('button[aria-label="Next entries"]')!;
+  const previous = host.querySelector<HTMLButtonElement>('button[aria-label="Previous entries"]')!;
+  expect(titles()).toEqual(events.slice(0, 6).map((entry) => entry.title));
+  expect(previous.disabled).toBe(true);
+  expect(host.querySelector("time")?.getAttribute("datetime")).toBe(today);
+
+  await act(async () => next.click());
+  expect(titles()).toEqual(["Entry 7", "Entry 8"]);
+  expect(next.disabled).toBe(true);
+  expect(calendarCalls()).toHaveLength(1);
+
+  await act(async () => previous.click());
+  expect(titles()[0]).toBe("Entry 1");
+});
+
 test("a truncated range says so rather than quietly hiding work", async () => {
   const today = dateKey(new Date());
   const { host } = await mount(

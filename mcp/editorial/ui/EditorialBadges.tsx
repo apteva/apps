@@ -41,14 +41,16 @@ export function DestinationBadges({ channels }: { channels?: readonly string[] }
     <span className={`ed-destinations ${names.length > 1 ? "multiple" : ""}`}>
       {names.map((name) => {
         const key = destinationKey(name);
-        const Icon = icons.get(key) || Send;
+        const Icon = icons.get(key);
+        const isX = key === "x" || key === "x (twitter)";
+        const Glyph = Icon || Send;
         return (
-          <span className="ed-destination" key={key} title={name}>
-            {key === "x" || key === "x (twitter)" ? (
+          <span className="ed-destination" data-known-icon={Icon || isX ? "" : undefined} key={key} title={name}>
+            {isX ? (
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
                 <path d="M4 3h4l12 18h-4L4 3Zm16 0L4 21" />
               </svg>
-            ) : <Icon aria-hidden="true" strokeWidth={1.8} />}
+            ) : <Glyph aria-hidden="true" strokeWidth={1.8} />}
             <span className="ed-destination-name">{name}</span>
           </span>
         );
