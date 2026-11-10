@@ -70,33 +70,72 @@ func TestNativeComputedMetricsFixture(t *testing.T) {
 	create := Request{Collection: "metrics", ComputedCollection: def}
 	call("collection_create", create)
 	call("collection_create", create)
-	status := func() *ComputedBuild {
-		return call("collection_describe", Request{Collection: "metrics"}).(Collection).ComputedBuild
+	status := func(name string) *ComputedBuild {
+		return call("collection_describe", Request{Collection: name}).(Collection).ComputedBuild
 	}
-	if status().State != "building" {
-		t.Fatal(status())
+	if status("metrics").State != "building" {
+		t.Fatal(status("metrics"))
 	}
 	expectError("find", Request{Collection: "metrics", Query: Query{Limit: 1}}, "collection_building")
 	expectError("collection_drop", Request{Collection: "sales", Confirm: true}, "schema_conflict")
 	if _, err := b.db.AdvanceComputedCollection(ctx, nativeCollectionName("metrics"), 1); err != nil {
 		t.Fatal(err)
 	}
-	if status().Scanned["calls"] != 1 {
-		t.Fatal(status())
+	if status("metrics").Scanned["calls"] != 1 {
+		t.Fatal(status("metrics"))
 	}
 	// A write behind the persisted cursor updates the view immediately,
 	// while the view itself is still hidden from all read snapshots.
 	call("insert", Request{Collection: "calls", Records: []Record{row("A", "Tue", "B", "Y")}})
+	// Recreate the 0.17.0 state: backfill has completed natively, but
+	// the app has not built the indexes its planner already expects.
+	const gap = "metrics_index_gap"
+	call("collection_create", Request{Collection: gap, ComputedCollection: def})
+	for {
+		native, err := b.db.AdvanceComputedCollection(ctx, nativeCollectionName(gap), 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if native.Ready {
+			break
+		}
+	}
+	if status(gap).State != "building" {
+		t.Fatal(status(gap))
+	}
+	day := Query{Where: &Filter{Field: "day", Op: "gte", Value: "Tue"}, RequireIndex: true}
+	merge := Request{Collection: gap, Query: day, Metrics: []Metric{{Name: "callers", Op: "merge_distinct", Field: "unique_callers"}}}
+	point := Request{Collection: gap, Key: Record{"day": "Tue", "centre": "A"}}
+	expectError("get", point, "collection_building")
+	expectError("find", Request{Collection: gap, Query: day}, "collection_building")
+	expectError("count", Request{Collection: gap, Query: day}, "collection_building")
+	expectError("aggregate", merge, "collection_building")
+	expectError("batch", Request{Operations: []Operation{{Op: "get", Request: point}, {Op: "aggregate", Request: merge}}}, "collection_building")
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
 	m = open()
-	deadline := time.Now().Add(5 * time.Second)
-	for state := status(); state.State != "ready"; state = status() {
-		if state.State == "failed" || time.Now().After(deadline) {
-			t.Fatal(state)
+	waitReady := func(name string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for state := status(name); state.State != "ready"; state = status(name) {
+			if state.State == "failed" || time.Now().After(deadline) {
+				t.Fatal(state)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
+	}
+	for _, name := range []string{"metrics", gap} {
+		waitReady(name)
+		result := call("find", Request{Collection: name, Query: day}).(map[string]any)
+		if got := result["records"].([]Record); len(got) != 2 {
+			t.Fatal(got)
+		}
+		merge.Collection = name
+		result = call("aggregate", merge).(map[string]any)
+		if !reflect.DeepEqual(result["rows"], []Record{{"callers": "2"}}) {
+			t.Fatal(result)
+		}
 	}
 	metrics := []Metric{{Name: "calls", Op: "sum", Field: "calls"}, {Name: "sales", Op: "sum", Field: "sales"}, {Name: "unique_callers", Op: "merge_distinct", Field: "unique_callers"}}
 	query := Request{Collection: "metrics", Metrics: metrics}
@@ -119,6 +158,18 @@ func TestNativeComputedMetricsFixture(t *testing.T) {
 	grouped := query
 	grouped.GroupBy = []string{"centre"}
 	check(grouped, []Record{{"centre": "A", "calls": "3", "sales": "0", "unique_callers": "1"}, {"centre": "B", "calls": "2", "sales": "1", "unique_callers": "2"}})
+	diagnosed := call("aggregate", Request{Collection: "metrics", Diagnostics: true, Metrics: []Metric{
+		{Name: "at_a", Op: "merge_distinct", Field: "unique_callers", Where: &Filter{Field: "centre", Op: "eq", Value: "A"}},
+		{Name: "at_b", Op: "merge_distinct", Field: "unique_callers", Where: &Filter{Field: "centre", Op: "eq", Value: "B"}},
+	}}).(map[string]any)
+	if !reflect.DeepEqual(diagnosed["rows"], []Record{{"at_a": "1", "at_b": "2"}}) {
+		t.Fatal(diagnosed)
+	}
+	diag := diagnosed["diagnostics"].(map[string]any)
+	mergeStats := diag["computedMerge"].(map[string]any)
+	if diag["strategy"] != "computed-distinct-bulk" || mergeStats["singletonResults"] != int64(1) {
+		t.Fatal(diag)
+	}
 	batch := call("batch", Request{Operations: []Operation{{Op: "aggregate", Request: query}, {Op: "aggregate", Request: scoped}}}).(map[string]any)
 	if got := batch["results"].([]any); len(got) != 2 ||
 		!reflect.DeepEqual(got[0].(map[string]any)["rows"], rows(query)) ||
@@ -134,5 +185,6 @@ func TestNativeComputedMetricsFixture(t *testing.T) {
 	call("delete", Request{Collection: "sales", Key: Record{"id": "s"}})
 	check(query, []Record{{"calls": "3", "sales": "0", "unique_callers": "2"}})
 	call("collection_drop", Request{Collection: "metrics", Confirm: true})
+	call("collection_drop", Request{Collection: gap, Confirm: true})
 	call("collection_drop", Request{Collection: "sales", Confirm: true})
 }

@@ -220,8 +220,13 @@ func (t *aptevaTx) collection(name string) (Collection, error) {
 }
 func (t *aptevaTx) readCollection(c Collection) (*native.Collection, error) {
 	h, err := t.snapshot.Collection(nativeCollectionName(c.Name))
-	if c.onlineComputed() && errors.Is(err, native.ErrNoSuchCollection) {
-		return nil, native.ErrComputedCollectionBuilding
+	if c.onlineComputed() {
+		if errors.Is(err, native.ErrNoSuchCollection) {
+			return nil, native.ErrComputedCollectionBuilding
+		}
+		if err == nil {
+			err = requireComputedIndexes(h, c)
+		}
 	}
 	return h, err
 }
@@ -264,6 +269,9 @@ func (b *aptevaBackend) pointGet(ctx context.Context, c Collection, key Record, 
 		return nil, e
 	}
 	h, e := b.handle(c)
+	if e == nil && c.onlineComputed() {
+		e = requireComputedIndexes(h, c)
+	}
 	if e != nil {
 		return nil, nativeError(e)
 	}

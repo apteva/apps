@@ -371,6 +371,10 @@ func (t *aptevaTx) findPending(c Collection, q Query, limit int) ([]Record, erro
 // and contributes staged records, so filtered writes/upserts see earlier batch
 // operations without repeatedly rebuilding an optimistic transaction's batch.
 func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume func(Record, []byte) bool, offer func(Record, int) error) error {
+	return t.scanFieldsWithKey(c, q, fields, func(row Record, _, data []byte) bool { return consume(row, data) }, offer)
+}
+
+func (t *aptevaTx) scanFieldsWithKey(c Collection, q Query, fields []string, consume func(Record, []byte, []byte) bool, offer func(Record, int) error) error {
 	if q.RequireIndex && !plan(c, q).IndexedLookup {
 		return fail("query_too_expensive", "query requires a selective index")
 	}
@@ -401,7 +405,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	decoder := newNativeScanDecoder(c, fields, q.Where)
 	var consumeErr error
 	stopped := false
-	visit := func(data []byte) bool {
+	visit := func(key, data []byte) bool {
 		if consumeErr = t.ctx.Err(); consumeErr != nil {
 			return false
 		}
@@ -425,7 +429,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 			consumeErr = offer(r, scanBytes)
 			return consumeErr == nil
 		}
-		stopped = !consume(r, data)
+		stopped = !consume(r, key, data)
 		return !stopped
 	}
 	eachNativeScanFilter(c, stream, func(where *Filter) bool {
@@ -433,7 +437,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 			if _, changed := t.pending[nativeRowKey{c.Name, string(key)}]; changed {
 				return true
 			}
-			return visit(data)
+			return visit(key, data)
 		})
 		if total != nil {
 			total.DocumentFetches += stats.DocumentFetches
@@ -456,7 +460,7 @@ func (t *aptevaTx) scanFields(c Collection, q Query, fields []string, consume fu
 	if !stopped {
 		for key, data := range t.pending {
 			if key.collection == c.Name && data != nil {
-				if !visit(data) {
+				if !visit([]byte(key.primary), data) {
 					break
 				}
 			}
@@ -486,27 +490,35 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	p.IndexedLookup = p.IndexedLookup && np.Index != ""
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "mappedCacheBytes": t.backend.options.MappedCacheBytes, "managedMemoryBytes": t.backend.options.ManagedMemoryBytes, "aggregateDiskBytes": t.backend.options.AggregateDiskBytes, "aggregateMaxGroups": t.backend.options.AggregateMaxGroups, "aggregateStrategy": "parallel-then-bounded-stream", "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
+
+type computedDistinctBucket = native.ComputedDistinctBucket
+
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
 	for _, m := range r.Metrics {
 		if m.Op != "merge_distinct" {
 			continue
 		}
-		if r.analytics != nil || len(t.pending) != 0 {
+		if r.analytics.derived() || len(t.pending) != 0 {
 			return nil, Invalid("merge_distinct requires a direct read snapshot on a computed collection")
 		}
 		h, err := t.readCollection(c)
 		if err != nil {
 			return nil, nativeError(err)
 		}
-		r.mergeComputedDistinct = func(field string, row Record, yield func([]byte) bool) error {
-			key, err := nativeReadKey(c, row)
-			if err != nil {
-				return nativeError(err)
+		r.mergeComputedDistinct = func(buckets []computedDistinctBucket, results, budget int) ([]int64, error) {
+			opts := native.ComputedDistinctMergeOptions{MaxMemoryBytes: int64(budget)}
+			if r.diag != nil {
+				r.diag.strategy("computed-distinct-bulk")
+				r.diag.computedMerge = &native.ComputedDistinctMergeStats{}
+				opts.Stats = r.diag.computedMerge
 			}
-			return nativeError(h.ScanComputedDistinct(t.ctx, key, field, yield))
+			counts, err := h.MergeComputedDistinct(t.ctx, buckets, results, opts)
+			return counts, nativeError(err)
 		}
-		r.diag.strategy("computed-distinct")
-		return t.aggregatePortable(c, r, outSchema)
+		return aggregateRecordsWithBudget(t.ctx, c, r, outSchema, t.backend.options.QueryWorkBytes, func(q Query, fields []string, consume func(Record, []byte) bool) error {
+			q.diag = r.diag
+			return t.scanFieldsWithKey(c, q, fields, func(row Record, key, _ []byte) bool { return consume(row, key) }, nil)
+		})
 	}
 	if hasExists(r.Where) {
 		// Exists nodes probe from each candidate on this snapshot.

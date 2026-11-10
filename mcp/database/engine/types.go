@@ -71,7 +71,7 @@ type Query struct {
 	RequireIndex bool     `json:"requireIndex,omitempty"`
 }
 type Request struct {
-	mergeComputedDistinct func(string, Record, func([]byte) bool) error
+	mergeComputedDistinct func([]computedDistinctBucket, int, int) ([]int64, error)
 	ComputedCollection    *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
 
 	Pipeline         *ReadPipeline `json:"pipeline,omitempty"`

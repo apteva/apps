@@ -302,7 +302,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 		return m.pollChanges(ctx, scope, r)
 	}
 	kind := QueryKind(op, r)
-	if r.Diagnostics && (op == "count" || kind == "read_batch") {
+	if r.Diagnostics && (op == "count" || op == "aggregate" || kind == "read_batch") {
 		r.diag = &countDiagnostics{started: time.Now()}
 	}
 	timeout, err := OperationTimeout(kind, r.TimeoutMS)
@@ -482,8 +482,8 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 	if r.ComputedCollection != nil && op != "collection_create" {
 		return nil, Invalid("computedCollection is supported by collection_create")
 	}
-	if r.Diagnostics && op != "count" && op != "batch" {
-		return nil, Invalid("diagnostics is supported by count and read batches")
+	if r.Diagnostics && op != "count" && op != "aggregate" && op != "batch" {
+		return nil, Invalid("diagnostics is supported by count, aggregate and read batches")
 	}
 	r.diag.snapshotted()
 	if op == "collections_list" {
@@ -498,7 +498,7 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			return executeReads(tx, r, cursorKey)
 		}
 		if r.Diagnostics {
-			return nil, Invalid("diagnostics is supported by count and read batches")
+			return nil, Invalid("diagnostics is supported by count, aggregate and read batches")
 		}
 		out := []any{}
 		total := 0
@@ -580,7 +580,7 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 				inner = cached.transaction
 			}
 			if nativeTx, ok := inner.(*aptevaTx); ok {
-				out.ComputedBuild, e = nativeTx.backend.describeComputedBuild(c)
+				out.ComputedBuild, e = nativeTx.describeComputedBuild(c)
 				if e != nil {
 					return nil, e
 				}
@@ -710,6 +710,9 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 		r.Limit = 1
 		fallthrough
 	case "aggregate":
+		if r.Diagnostics && r.diag == nil {
+			r.diag = &countDiagnostics{}
+		}
 		view := c
 		if needsAnalytics(r) {
 			if e := prepareAnalytics(tx, c, &r); e != nil {
@@ -747,7 +750,11 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 			}
 			return out, nil
 		}
-		return finishAggregate(rows, r.Limit, r.Derived)
+		result, err := finishAggregate(rows, r.Limit, r.Derived)
+		if err == nil && r.diag != nil {
+			result.(map[string]any)["diagnostics"] = r.diag.report(tx, c, r.Query, exists)
+		}
+		return result, err
 
 	case "insert", "upsert", "update", "delete":
 		return mutate(tx, c, op, r)

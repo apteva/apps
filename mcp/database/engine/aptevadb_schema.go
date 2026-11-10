@@ -89,6 +89,11 @@ func (t *aptevaTx) createIndex(c Collection, i Index) error {
 	return t.stageDDL(&before, &c)
 }
 func (t *aptevaTx) dropIndex(c Collection, name string) error {
+	if c.onlineComputed() {
+		if _, err := t.readCollection(c); err != nil {
+			return err
+		}
+	}
 	before := cloneCollection(c)
 	out := make([]Index, 0, len(c.Indexes))
 	found := false
@@ -243,24 +248,46 @@ func (b *aptevaBackend) reconcileSchema(ctx context.Context, previous, target *C
 	if e != nil {
 		return e
 	}
-	desired := nativeIndexes(*target)
+	return reconcileNativeIndexes(ctx, c, *target)
+}
+
+func (s nativeIndexSpec) matches(index native.IndexInfo) bool {
+	return reflect.DeepEqual(index.Fields, s.fields) && index.Unique == s.options.Unique &&
+		index.NullsDistinct == s.options.NullsDistinct && index.Sparse == s.options.Sparse
+}
+
+func reconcileNativeIndexes(ctx context.Context, c *native.Collection, target Collection) error {
+	missing := nativeIndexes(target)
 	for _, existing := range c.ListIndexes() {
-		spec, wanted := desired[existing.Name]
-		if wanted && reflect.DeepEqual(existing.Fields, spec.fields) && existing.Unique == spec.options.Unique && existing.NullsDistinct == spec.options.NullsDistinct {
+		spec, wanted := missing[existing.Name]
+		if wanted && spec.matches(existing) {
+			delete(missing, existing.Name)
 			continue
 		}
-		if e = c.DropIndex(ctx, existing.Name); e != nil {
-			return e
+		if err := c.DropIndex(ctx, existing.Name); err != nil {
+			return err
 		}
 	}
-	existing := c.Indexes()
-	for name, spec := range desired {
-		if _, found := existing[name]; found {
-			continue
+	for name, spec := range missing {
+		if err := c.CreateCompoundIndex(ctx, name, spec.fields, spec.options); err != nil {
+			return err
 		}
-		if e = c.CreateCompoundIndex(ctx, name, spec.fields, spec.options); e != nil {
-			return e
+	}
+	return nil
+}
+
+// A snapshot can contain a completed native rollup while its app indexes
+// are still being built. Check the indexes in that same snapshot, so even
+// an already-running batch cannot mix pre- and post-publication reads.
+func requireComputedIndexes(h *native.Collection, c Collection) error {
+	missing := nativeIndexes(c)
+	for _, index := range h.ListIndexes() {
+		if spec, wanted := missing[index.Name]; wanted && spec.matches(index) {
+			delete(missing, index.Name)
 		}
+	}
+	if len(missing) != 0 {
+		return native.ErrComputedCollectionBuilding
 	}
 	return nil
 }
