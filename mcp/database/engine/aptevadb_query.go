@@ -487,6 +487,27 @@ func (t *aptevaTx) explain(c Collection, q Query) (any, error) {
 	return map[string]any{"adapter": "aptevadb", "plan": p, "nativePlan": np, "candidateLimit": nil, "maxRetainedBytes": t.backend.options.QueryWorkBytes, "aggregateWorkers": t.backend.options.AggregateWorkers, "cacheBytes": t.backend.options.CacheBytes, "mappedCacheBytes": t.backend.options.MappedCacheBytes, "managedMemoryBytes": t.backend.options.ManagedMemoryBytes, "aggregateDiskBytes": t.backend.options.AggregateDiskBytes, "aggregateMaxGroups": t.backend.options.AggregateMaxGroups, "aggregateStrategy": "parallel-then-bounded-stream", "syncMode": t.backend.options.SyncMode, "synchronousWrites": true, "executionBound": "deadline"}, nil
 }
 func (t *aptevaTx) aggregate(c Collection, r Request, outSchema Collection) ([]Record, error) {
+	for _, m := range r.Metrics {
+		if m.Op != "merge_distinct" {
+			continue
+		}
+		if r.analytics != nil || len(t.pending) != 0 {
+			return nil, Invalid("merge_distinct requires a direct read snapshot on a computed collection")
+		}
+		h, err := t.readCollection(c)
+		if err != nil {
+			return nil, nativeError(err)
+		}
+		r.mergeComputedDistinct = func(field string, row Record, yield func([]byte) bool) error {
+			key, err := nativeReadKey(c, row)
+			if err != nil {
+				return nativeError(err)
+			}
+			return nativeError(h.ScanComputedDistinct(t.ctx, key, field, yield))
+		}
+		r.diag.strategy("computed-distinct")
+		return t.aggregatePortable(c, r, outSchema)
+	}
 	if hasExists(r.Where) {
 		// Exists nodes probe from each candidate on this snapshot.
 		return t.aggregatePortable(c, r, outSchema)

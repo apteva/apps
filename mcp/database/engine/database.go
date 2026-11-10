@@ -573,7 +573,20 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 	}
 	switch op {
 	case "collection_describe":
-		return cloneCollection(c), nil
+		out := cloneCollection(c)
+		if c.onlineComputed() {
+			inner := tx
+			if cached, ok := inner.(cachedSchemaTx); ok {
+				inner = cached.transaction
+			}
+			if nativeTx, ok := inner.(*aptevaTx); ok {
+				out.ComputedBuild, e = nativeTx.backend.describeComputedBuild(c)
+				if e != nil {
+					return nil, e
+				}
+			}
+		}
+		return out, nil
 	case "collection_drop":
 		if !r.Confirm {
 			return nil, Invalid("confirm=true is required")

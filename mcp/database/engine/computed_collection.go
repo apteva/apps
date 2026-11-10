@@ -10,11 +10,12 @@ import (
 // ComputedCollectionDefinition describes a maintained projection or rollup
 // over one ordinary collection in the same database.
 type ComputedCollectionDefinition struct {
-	Source  string   `json:"source"`
-	Where   *Filter  `json:"where,omitempty"`
-	Select  []string `json:"select,omitempty"`
-	GroupBy []string `json:"groupBy,omitempty"`
-	Metrics []Metric `json:"metrics,omitempty"`
+	Source  string          `json:"source,omitempty"`
+	Sources []ComputedInput `json:"sources,omitempty"`
+	Where   *Filter         `json:"where,omitempty"`
+	Select  []string        `json:"select,omitempty"`
+	GroupBy []string        `json:"groupBy,omitempty"`
+	Metrics []Metric        `json:"metrics,omitempty"`
 }
 
 func (c Collection) computedGroup() bool {
@@ -34,6 +35,9 @@ func newComputedCollection(tx transaction, r Request) (Collection, error) {
 	var definition ComputedCollectionDefinition
 	if err := decode(marshal(r.ComputedCollection), &definition); err != nil {
 		return Collection{}, Invalid("invalid computed collection definition")
+	}
+	if r.ComputedCollection.Sources != nil {
+		return newComputedMetrics(tx, r, definition)
 	}
 	if err := nameOK(definition.Source); err != nil {
 		return Collection{}, err

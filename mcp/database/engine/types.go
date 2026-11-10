@@ -35,6 +35,7 @@ type Collection struct {
 	Version    int64    `json:"version"`
 
 	ComputedCollection *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
+	ComputedBuild      *ComputedBuild                `json:"computedBuild,omitempty"`
 	// StorageVersion is internal SQLite physical-layout metadata. It is not
 	// part of the portable collection schema or cursor hash.
 	StorageVersion int `json:"-"`
@@ -70,7 +71,8 @@ type Query struct {
 	RequireIndex bool     `json:"requireIndex,omitempty"`
 }
 type Request struct {
-	ComputedCollection *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
+	mergeComputedDistinct func(string, Record, func([]byte) bool) error
+	ComputedCollection    *ComputedCollectionDefinition `json:"computedCollection,omitempty"`
 
 	Pipeline         *ReadPipeline `json:"pipeline,omitempty"`
 	Version          int           `json:"version,omitempty"`

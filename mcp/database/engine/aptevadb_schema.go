@@ -49,8 +49,16 @@ func (t *aptevaTx) dropCollection(c Collection) error {
 			return err
 		}
 		for _, target := range collections {
-			if target.ComputedCollection != nil && target.ComputedCollection.Source == c.Name {
+			if target.ComputedCollection == nil {
+				continue
+			}
+			if target.ComputedCollection.Source == c.Name {
 				return fail("schema_conflict", "drop dependent computed collections first")
+			}
+			for _, input := range target.ComputedCollection.Sources {
+				if input.Collection == c.Name {
+					return fail("schema_conflict", "drop dependent computed collections first")
+				}
 			}
 		}
 	}
@@ -123,6 +131,8 @@ func (b *aptevaBackend) recoverDDL() error {
 	return b.finishDDL(context.Background(), intent)
 }
 func (b *aptevaBackend) commitDDL(ctx context.Context, intent nativeDDL) error {
+	b.builds.step.Lock()
+	defer b.builds.step.Unlock()
 	if e := ctx.Err(); e != nil {
 		return e
 	}
@@ -139,7 +149,17 @@ func (b *aptevaBackend) commitDDL(ctx context.Context, intent nativeDDL) error {
 		}
 		return nativeError(e)
 	}
-	return b.publishSchema(intent)
+	if err := b.publishSchema(intent); err != nil {
+		return err
+	}
+	if intent.After != nil && intent.After.onlineComputed() {
+		b.builds.failures.Delete(intent.After.Name)
+		b.wakeComputedBuilds()
+	}
+	if intent.After == nil && intent.Before.onlineComputed() {
+		b.builds.failures.Delete(intent.Before.Name)
+	}
+	return nil
 }
 func (b *aptevaBackend) finishDDL(ctx context.Context, intent nativeDDL) error {
 	if e := b.reconcileSchema(ctx, intent.Before, intent.After); e != nil {
@@ -203,7 +223,19 @@ func (b *aptevaBackend) reconcileSchema(ctx context.Context, previous, target *C
 	}
 	var c *native.Collection
 	var e error
-	if target.ComputedCollection != nil {
+	if target.onlineComputed() {
+		status, err := b.beginComputedMetrics(ctx, *target)
+		if err != nil {
+			return err
+		}
+		if !status.Ready {
+			if len(target.Indexes) != 0 {
+				return native.ErrComputedCollectionBuilding
+			}
+			return nil
+		}
+		c, e = b.db.OpenCollection(nativeCollectionName(target.Name))
+	} else if target.ComputedCollection != nil {
 		c, e = b.openComputedCollection(ctx, *target)
 	} else {
 		c, e = b.db.Collection(nativeCollectionName(target.Name))

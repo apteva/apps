@@ -1,8 +1,8 @@
 # Database
 
-Independent Apteva sidecar app, version 0.16.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.17.0. SQLite, Pebble and the optional experimental AptevaDB adapter implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
-[Release notes](docs/release-0.16.0.md) · [Realtime API](REALTIME.md)
+[Release notes](docs/release-0.17.0.md) · [Realtime API](REALTIME.md)
 
 ## Working in this version
 
@@ -134,6 +134,58 @@ identical definition is idempotent. Drop dependents before dropping a source.
 Backfill is synchronous and bounded by AptevaDB's 256 MiB staging limit.
 A failed backfill publishes no collection. Source changes maintain the
 computed rows atomically, and a rollup overflow aborts the source write.
+
+### Online rollups over multiple sources
+
+Use `sources` in place of `source` for an online rollup. Each ordinary input
+supplies the same non-null scalar group fields. Use `groupFields` to map an
+output group field to a differently named source field. Each input declares
+its own measures and may supply a `where` filter. Measures may also have a
+`where` filter. Inputs can contribute to the same measure if their reducers
+and input types agree. Supported reducers are row count, non-null count,
+integer sum and exact distinct count over scalar fields.
+
+```json
+{
+  "database": "reporting",
+  "collection": "metrics",
+  "computedCollection": {
+    "groupBy": ["day", "centre_id"],
+    "sources": [
+      {
+        "collection": "calls",
+        "metrics": [
+          {"name": "calls", "op": "count"},
+          {"name": "unique_callers", "op": "count_distinct", "field": "caller_id"}
+        ]
+      },
+      {
+        "collection": "sales",
+        "groupFields": {"day": "sale_day"},
+        "metrics": [{"name": "sales", "op": "count"}]
+      }
+    ]
+  }
+}
+```
+
+Creation registers the definition and returns while the build advances.
+`db_collection_describe` reports `computedBuild.state` (`building`,
+`ready`, or `failed`) and the scanned row count per input. Reads during
+the build return `collection_building`. The worker resumes committed
+progress when the database is reopened. Source writes continue between
+bounded chunks. A chunk whose aggregate overflows an integer fails before
+publication. As for ordinary computed collections, drop the view before
+dropping an input.
+
+Filter by date and authorised dimensions in `db_aggregate`. Sum the stored
+counts and use `merge_distinct` for a stored distinct measure. It unions
+identities across the selected buckets in the same snapshot as the totals.
+`db_get` on a single bucket returns its saved distinct cardinality. The
+merge can return a resource-limit error when its exact set exceeds the
+configured query budget. Summing a stored distinct field is rejected by
+the direct aggregate API. Use ordinary read batches to request multiple
+windows in one snapshot.
 
 ## Example: multiple databases and collections
 
