@@ -181,10 +181,10 @@ const css = `
 .ec-widget .ec-row :is(.ed-destination,.ed-status){font-size:11px}
 .ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);overflow-wrap:anywhere}
 .ec-widget .ec-list{padding:3px 0}
-.ec-widget .ec-list .ec-row{gap:8px;padding:6px 14px}
+.ec-widget .ec-list .ec-row{gap:8px;padding:8px 14px}
 .ec-widget .ec-list .ec-row + .ec-row{border-top:1px solid var(--color-border,#303030)}
 .ec-widget .ec-list .ec-row:hover{background:var(--color-bg-hover,#1e1e1e)}
-.ec-widget .ec-list .ec-row-content{display:grid;grid-template-columns:5rem minmax(0,1fr);column-gap:8px;row-gap:2px;align-items:center}
+.ec-widget .ec-list .ec-row-content{display:grid;grid-template-columns:5rem minmax(0,1fr);column-gap:8px;row-gap:3px;align-items:center}
 .ec-widget .ec-list-date{color:var(--color-text-muted,#999);font-size:10px}
 .ec-widget .ec-list :is(.ec-title,.ec-list-date,.ec-meta,.ed-status-name){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ec-widget .ec-list .ec-row-meta{grid-column:2;flex-wrap:nowrap;gap:5px;margin-top:0;overflow:clip}
