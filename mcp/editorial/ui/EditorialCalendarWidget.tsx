@@ -131,24 +131,22 @@ export const groupByDay = (events: CalendarEvent[]): Record<string, CalendarEven
 };
 
 const css = `
-.ec-widget{container:editorial-calendar / inline-size;box-sizing:border-box;color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;display:flex;flex-direction:column;height:30rem;overflow:hidden}
+.ec-widget{container:editorial-calendar / inline-size;box-sizing:border-box;color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;overflow:clip}
 .ec-widget *{box-sizing:border-box}.ec-widget h2,.ec-widget p{margin:0}.ec-widget button{cursor:pointer;font-family:inherit;color:inherit}.ec-widget a{color:inherit;text-decoration:none}.ec-widget :is(button,a):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}
-.ec-widget header{display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}
+.ec-widget header{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--color-border,#303030)}
 .ec-widget h2{font-size:14px;font-weight:700}.ec-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}
 .ec-widget .ec-open{margin-left:auto;font-size:11px;color:var(--color-text-muted,#aaa);text-decoration:none;white-space:nowrap;padding-top:2px}.ec-widget .ec-open:hover{color:var(--color-text,#eceef2)}
-.ec-widget .ec-bar{display:flex;align-items:center;gap:6px;padding:9px 16px;border-bottom:1px solid var(--color-border,#303030);flex-wrap:wrap}
+.ec-widget .ec-bar{display:flex;align-items:center;gap:6px;padding:6px 14px;border-bottom:1px solid var(--color-border,#303030);flex-wrap:wrap}
 .ec-widget .ec-period{font-size:12px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ec-widget .ec-nav{display:flex;gap:4px}
 .ec-widget .ec-views{margin-left:auto;display:flex;gap:4px}
 .ec-widget .ec-btn{border:1px solid var(--color-border,#303030);background:transparent;border-radius:3px;padding:3px 8px;font-size:11px;line-height:18px}
 .ec-widget .ec-btn:hover{border-color:var(--color-accent,#ff8c36)}
 .ec-widget .ec-btn[aria-pressed=true]{background:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);color:var(--color-bg,#141414);font-weight:600}
-.ec-widget .ec-body{flex:1;min-height:0;overflow:auto}
-.ec-widget .ec-grid{display:grid;grid-template-columns:repeat(7,minmax(36px,1fr))}
-/* Fill the shared viewport for quiet weeks and let busy weeks scroll. */
-.ec-widget .ec-grid.week{min-height:100%;grid-template-rows:auto minmax(min-content,1fr)}
+.ec-widget .ec-calendar-body{display:flex;flex-direction:column;min-height:14rem}
+.ec-widget .ec-grid{display:grid;flex:1;grid-template-columns:repeat(7,minmax(0,1fr));grid-template-rows:min-content}
 .ec-widget .ec-weekday{padding:6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--color-text-muted,#999);border-bottom:1px solid var(--color-border,#303030);text-align:right}
-.ec-widget .ec-cell{min-height:74px;border-right:1px solid var(--color-border,#303030);border-bottom:1px solid var(--color-border,#303030);padding:5px;min-width:0}
+.ec-widget .ec-cell{min-height:42px;border-right:1px solid var(--color-border,#303030);border-bottom:1px solid var(--color-border,#303030);padding:4px;min-width:0}
 .ec-widget .ec-cell:nth-child(7n){border-right:0}
 .ec-widget .ec-cell.outside{background:color-mix(in srgb,var(--color-text-muted,#999) 6%,transparent);color:var(--color-text-dim,#777)}
 .ec-widget .ec-cell.picked{outline:1px solid var(--color-accent,#ff8c36);outline-offset:-1px}
@@ -182,6 +180,21 @@ const css = `
 .ec-widget .ec-row-meta{display:flex;flex-wrap:wrap;align-items:center;gap:5px 8px;margin-top:4px}
 .ec-widget .ec-row :is(.ed-destination,.ed-status){font-size:11px}
 .ec-widget .ec-meta{font-size:10px;color:var(--color-text-muted,#999);overflow-wrap:anywhere}
+.ec-widget .ec-list{padding:3px 0}
+.ec-widget .ec-list .ec-row{gap:8px;padding:6px 14px}
+.ec-widget .ec-list .ec-row + .ec-row{border-top:1px solid var(--color-border,#303030)}
+.ec-widget .ec-list .ec-row:hover{background:var(--color-bg-hover,#1e1e1e)}
+.ec-widget .ec-list .ec-row-content{display:grid;grid-template-columns:5rem minmax(0,1fr);column-gap:8px;row-gap:2px;align-items:center}
+.ec-widget .ec-list-date{color:var(--color-text-muted,#999);font-size:10px}
+.ec-widget .ec-list :is(.ec-title,.ec-list-date,.ec-meta,.ed-status-name){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ec-widget .ec-list .ec-row-meta{grid-column:2;flex-wrap:nowrap;gap:5px;margin-top:0;overflow:clip}
+.ec-widget .ec-list :is(.ed-status,.ed-destination){font-size:10px;padding:1px 4px}
+.ec-widget .ec-list .ed-status{min-width:0;max-width:35%}
+.ec-widget .ec-list .ed-destinations{flex-wrap:nowrap;gap:4px}
+.ec-widget .ec-list .ed-destination svg{width:11px;height:11px}
+.ec-widget .ec-list .ec-meta{min-width:0}
+.ec-widget .ec-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 12px 8px;color:var(--color-text-muted,#999);font-size:11px}
+.ec-widget .ec-pager button:disabled{opacity:.45;cursor:default}
 .ec-widget .ec-empty{padding:26px 16px;text-align:center;font-size:11px;color:var(--color-text-muted,#999)}
 .ec-widget .ec-error{padding:12px 16px;font-size:11px;color:var(--color-danger,#f08b8b)}
 .ec-widget .ec-note{padding:7px 16px;font-size:10px;color:var(--color-text-muted,#999);border-top:1px solid var(--color-border,#303030)}
@@ -193,6 +206,9 @@ const css = `
   .ec-widget .ec-chip-meta .ed-destination-name,.ec-widget .ec-chip-meta .ed-status-name{position:absolute;clip-path:inset(50%);width:1px;height:1px}
   .ec-widget .ec-chip-meta .ed-destination svg{width:10px;height:10px}
   .ec-widget .ec-chip-meta .ed-status{background:none;padding:1px}
+  .ec-widget .ec-list .ec-row-meta{grid-column:1/-1}
+  .ec-widget .ec-list .multiple [data-known-icon]{flex:none}
+  .ec-widget .ec-list .multiple [data-known-icon] .ed-destination-name{position:absolute;clip-path:inset(50%);width:1px;height:1px}
 }
 .ec-widget .ec-chip:focus-visible .ec-chip-title{display:block;white-space:normal}
 `;
@@ -240,7 +256,6 @@ export default function EditorialCalendarWidget(props: Props) {
   const [view, setView] = useState<View>(() => resolveView(preference, size));
   const [anchor, setAnchor] = useState(() => new Date());
   const [picked, setPicked] = useState("");
-  const bodyRef = useRef<HTMLDivElement>(null);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState("");
@@ -422,11 +437,12 @@ export default function EditorialCalendarWidget(props: Props) {
         </div>
       </div>
 
-      <div className="ec-body" key={`${view}:${range.from}`} ref={bodyRef}>
+      <div className={view === "list" ? undefined : "ec-calendar-body"}>
         {error ? (
           <p className="ec-error">{error}</p>
         ) : view === "list" ? (
-          <Agenda brands={brands} byDay={byDay} from={today} days={horizonDays} loading={loading} />
+          <Agenda key={`${props.projectId}:${props.installId}:${brand}:${dateField}:${showReleases}:${range.to}`}
+            brands={brands} byDay={byDay} from={today} days={horizonDays} loading={loading} />
         ) : (
           <>
             {picked && (
@@ -436,14 +452,10 @@ export default function EditorialCalendarWidget(props: Props) {
               brands={brands}
               days={view === "month" ? monthGrid(anchor) : weekDays(anchor)}
               month={view === "month" ? anchor.getMonth() : -1}
-              stretch={view === "week" && !picked}
               byDay={byDay}
               today={today}
               picked={picked}
-              onPick={(key) => {
-                setPicked(picked === key ? "" : key);
-                if (bodyRef.current && picked !== key) bodyRef.current.scrollTop = 0;
-              }}
+              onPick={(key) => setPicked(picked === key ? "" : key)}
               loading={loading}
             />
           </>
@@ -473,12 +485,10 @@ function Grid({
   picked,
   onPick,
   loading,
-  stretch,
 }: {
   brands: Brand[];
   days: Date[];
   month: number;
-  stretch?: boolean;
   byDay: Record<string, CalendarEvent[]>;
   today: string;
   picked: string;
@@ -486,7 +496,7 @@ function Grid({
   loading: boolean;
 }) {
   return (
-    <div className={`ec-grid ${stretch ? "week" : ""}`} role="grid" aria-busy={loading}>
+    <div className="ec-grid" role="grid" aria-busy={loading}>
       {WEEKDAYS.map((d) => (
         <div className="ec-weekday" key={d}>
           {d}
@@ -541,62 +551,92 @@ function Agenda({
   days: number;
   loading: boolean;
 }) {
+  const [requestedPage, setPage] = useState(0);
+
   const start = new Date(`${from}T12:00:00`);
-  const keys = Array.from({ length: days + 1 }, (_, n) => {
+  const entries = Array.from({ length: days + 1 }, (_, n) => {
     const d = new Date(start);
     d.setDate(d.getDate() + n);
     return dateKey(d);
-  }).filter((key) => (byDay[key] || []).length > 0);
-
-  if (!keys.length) {
-    return <p className="ec-empty">{loading ? "Loading…" : "Nothing scheduled in this range."}</p>;
-  }
+  }).flatMap((key) => byDay[key] || []);
+  const pageSize = 6;
+  const lastPage = Math.max(0, Math.ceil(entries.length / pageSize) - 1);
+  const page = Math.min(requestedPage, lastPage);
+  const first = page * pageSize;
+  const last = Math.min(first + pageSize, entries.length);
   return (
     <div aria-busy={loading}>
-      {keys.map((key) => (
-        <DayGroup key={key} brands={brands} date={key} events={byDay[key]} />
-      ))}
+      {entries.length ? (
+        <div className="ec-list">
+          {entries.slice(first, last).map((e) => (
+            <AgendaEntry key={`${e.kind}${e.release_id || e.item_id}`} brands={brands} event={e} date={eventDay(e)} />
+          ))}
+        </div>
+      ) : (
+        <p className="ec-empty">{loading ? "Loading…" : "Nothing scheduled in this range."}</p>
+      )}
+      {lastPage > 0 && (
+        <div className="ec-pager" role="group" aria-label="List pages">
+          <span aria-live="polite">{first + 1}–{last} of {entries.length}</span>
+          <button className="ec-btn" type="button" disabled={page === 0}
+            aria-label="Previous entries" onClick={() => setPage(page - 1)}>‹</button>
+          <button className="ec-btn" type="button" disabled={page === lastPage}
+            aria-label="Next entries" onClick={() => setPage(page + 1)}>›</button>
+        </div>
+      )}
     </div>
   );
 }
 
-function DayGroup({ brands, date, events, onClose }: { brands: Brand[]; date: string; events: CalendarEvent[]; onClose?: () => void }) {
-  const d = new Date(`${date}T12:00:00`);
+const agendaDate = (date: string) =>
+  new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+
+function AgendaEntry({ brands, event: e, date }: { brands: Brand[]; event: CalendarEvent; date?: string }) {
   return (
-    <div className="ec-daygroup">
+    <a
+      className="ec-row"
+      href={e.url || PANEL}
+      title={titleOf(brands, e)}
+      {...(e.url ? { target: "_blank", rel: "noreferrer" } : {})}
+    >
+      <span
+        className={`ec-mark ${e.kind === "release" ? "release" : ""}`}
+        style={{ background: brandColor(brands, e.brand_id) || undefined }}
+      />
+      <span className="ec-row-content">
+        {date && <time className="ec-list-date" dateTime={date} title={agendaDate(date)}>{agendaDate(date)}</time>}
+        <span className="ec-title">{e.title || "Untitled"}</span>
+        <span className="ec-row-meta">
+          <StatusBadge value={e.status} />
+          <DestinationBadges channels={eventDestinations(e)} />
+          <span className="ec-meta">
+            {[e.kind === "release" ? "Release" : "", brandName(brands, e.brand_id)].filter(Boolean).join(" · ")}
+          </span>
+        </span>
+      </span>
+    </a>
+  );
+}
+
+function DayGroup({ brands, date, events, onClose }: { brands: Brand[]; date: string; events: CalendarEvent[]; onClose: () => void }) {
+  const agendaRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    agendaRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [date]);
+  return (
+    <div className="ec-daygroup" ref={agendaRef}>
       <div className="ec-dayhead">
-        <strong>{d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</strong>
+        <strong>{agendaDate(date)}</strong>
         <span>
           {events.length} {events.length === 1 ? "entry" : "entries"}
         </span>
-        {onClose && <button className="ec-btn" onClick={onClose}>Close agenda</button>}
+        <button className="ec-btn" onClick={onClose}>Close agenda</button>
       </div>
       {events.length === 0 ? (
         <p className="ec-meta">Nothing scheduled.</p>
       ) : (
         events.map((e) => (
-          <a
-            className="ec-row"
-            key={`${e.kind}${e.release_id || e.item_id}`}
-            href={e.url || PANEL}
-            title={titleOf(brands, e)}
-            {...(e.url ? { target: "_blank", rel: "noreferrer" } : {})}
-          >
-            <span
-              className={`ec-mark ${e.kind === "release" ? "release" : ""}`}
-              style={{ background: brandColor(brands, e.brand_id) || undefined }}
-            />
-            <span>
-              <span className="ec-title">{e.title || "Untitled"}</span>
-              <span className="ec-row-meta">
-                <StatusBadge value={e.status} />
-                <DestinationBadges channels={eventDestinations(e)} />
-                <span className="ec-meta">
-                  {[e.kind === "release" ? "Release" : "", brandName(brands, e.brand_id)].filter(Boolean).join(" · ")}
-                </span>
-              </span>
-            </span>
-          </a>
+          <AgendaEntry key={`${e.kind}${e.release_id || e.item_id}`} brands={brands} event={e} />
         ))
       )}
     </div>
