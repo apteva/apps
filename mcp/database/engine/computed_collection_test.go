@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -120,5 +121,71 @@ func TestComputedCollectionsThroughDatabase(t *testing.T) {
 		other := rollup
 		other.Database = adapter
 		expectCode("collection_create", other, "unsupported_capability")
+	}
+}
+
+func TestComputedCollectionJournalRecovery(t *testing.T) {
+	ctx := context.Background()
+	for _, scenario := range []string{"intent", "physical", "overflow"} {
+		t.Run(scenario, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "native")
+			opened, err := openAptevaDB(path)
+			checkErr(t, err)
+			b := opened.(*aptevaBackend)
+			source, err := newCollection(Request{Collection: "sales", Fields: []Field{{Name: "centre", Type: "text"}, {Name: "amount", Type: "integer"}}})
+			checkErr(t, err)
+			checkErr(t, b.commitDDL(ctx, nativeDDL{After: &source}))
+			var target Collection
+			checkErr(t, b.transaction(ctx, true, func(tx transaction) error {
+				amount := "10"
+				if scenario == "overflow" {
+					amount = "9223372036854775807"
+				}
+				for _, id := range []string{"a", "b"} {
+					if err := tx.insert(source, string(marshal([]string{id})), Record{"id": id, "centre": "east", "amount": amount,
+						"_created_at": "2026-11-10T00:00:00.000000Z", "_updated_at": "2026-11-10T00:00:00.000000Z", "_version": "1"}); err != nil {
+						return err
+					}
+				}
+				var err error
+				target, err = newComputedCollection(tx, Request{Collection: "rollup", ComputedCollection: &ComputedCollectionDefinition{
+					Source: "sales", GroupBy: []string{"centre"}, Metrics: []Metric{{Name: "total", Op: "sum", Field: "amount"}},
+				}})
+				return err
+			}))
+			intent := nativeDDL{After: &target}
+			checkErr(t, b.db.Upsert([]byte(nativeIntentKey), marshal(intent)))
+			if scenario == "physical" {
+				checkErr(t, b.reconcileSchema(ctx, nil, &target))
+			}
+			checkErr(t, b.close())
+			opened, err = openAptevaDB(path)
+			checkErr(t, err)
+			b = opened.(*aptevaBackend)
+			defer func() { checkErr(t, b.close()) }()
+			_, pending, err := b.db.Find([]byte(nativeIntentKey), nil)
+			checkErr(t, err)
+			if pending {
+				t.Fatal("DDL intent was not cleared")
+			}
+			checkErr(t, b.transaction(ctx, false, func(tx transaction) error {
+				if _, err := tx.collection("sales"); err != nil {
+					return err
+				}
+				got, err := tx.collection("rollup")
+				if scenario == "overflow" {
+					expectCode(t, err, "not_found")
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				row, err := tx.get(got, `["east"]`)
+				if err == nil && row["total"] != "20" {
+					t.Fatal(row)
+				}
+				return err
+			}))
+		})
 	}
 }
