@@ -27,10 +27,11 @@ type App struct {
 	// procs tracks PIDs of locally-spawned tenants in memory. Lost on
 	// fleet restart — the OnMount reconciler reattaches by probing
 	// each local tenant's port instead of trying to recover PIDs.
-	procMu     sync.Mutex
-	procs      map[string]*tenantProc
-	opMu       sync.Mutex
-	operations map[string]string
+	procMu            sync.Mutex
+	procs             map[string]*tenantProc
+	opMu              sync.Mutex
+	operations        map[string]string
+	connectedUpdateMu sync.Mutex
 
 	// publicHost is the host name shown to operators in API responses
 	// and the panel. Determined once at OnMount via detectPublicHost
@@ -154,6 +155,8 @@ func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDetachDomain(w, r)
 	case "update":
 		a.httpUpdate(w, r)
+	case "connected-update":
+		a.httpConnectedUpdate(w, r, id)
 	case "migrate":
 		a.httpMigrate(w, r)
 	case "reveal-api-key":
@@ -748,6 +751,7 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "startup_reconcile", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.reconcileOnBoot(ctx) }},
 		{Name: "log_retention", Schedule: "@every 60s", Run: a.runLogRetention},
 		{Name: "health_poller", Schedule: "@every 60s", Run: a.runHealthPoller},
+		{Name: "connected_updates", Schedule: "@every 10s", Run: a.runConnectedUpdates},
 		{Name: "a2a_reconcile_on_mount", Run: a.runA2AReconciler},
 		{Name: "a2a_reconcile", Schedule: a2aReconcileEvery, Run: a.runA2AReconciler},
 	}

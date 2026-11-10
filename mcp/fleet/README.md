@@ -6,6 +6,37 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 **Fleet v0.10.12** supports the stable host lifecycle and pins **app-sdk v0.107.0**, verified as a descendant of the previous SDK release. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the earlier changes, validation and rollout requirements.
 
+### Updating a connected client installation (v0.11.0)
+
+Use **Connect remote** with the tenant's reachable HTTPS URL, Apteva admin API
+key, and owner email. This registers an existing Apteva installation in Fleet.
+The ordinary tenant API credential continues to be used for management.
+
+For updates, first install an Apteva server and CLI release that supports the
+Fleet update grant on the client host. The installation must use Apteva's
+versioned release layout and a supported Linux systemd service.
+
+1. As the Apteva service owner, run `apteva update fleet-grant issue` with the
+   service's `APTEVA_HOME`. Share the resulting update credential securely.
+2. In the connected tenant's **Apteva version** section, choose **Enable Fleet
+   updates** and enter that credential.
+3. Review the offered version and agent policy. **Keep agents on their current
+   Core** is the default. Fleet keeps tracking the request after the panel closes
+   or either side restarts.
+
+Running `apteva update fleet-grant revoke` on the host stops future Fleet
+requests. An already accepted job may finish. The grant policy keeps dashboard
+updates disabled after revocation so a management key or support session cannot
+bypass it. The client can still use the local Apteva CLI. Use `issue` again to
+rotate the credential and **Replace update credential** in Fleet to reconnect.
+
+For an interrupted update, inspect `platform-update.log` on the client host.
+After recovering a healthy previous or requested release, run
+`apteva update fleet-grant reconcile <request-id>` using the ID shown in Fleet.
+Fleet then verifies the served version before completing its record.
+If the host never accepted the request, the same command records a cancellation
+that prevents a late retry from starting it.
+
 ### Stable host lifecycle
 
 Fleet detects the tenant's private `host/control.sock` and `host/state.json`.
@@ -104,7 +135,7 @@ The allowlists are generic A2A agent selectors, not Fleet-specific exposure tier
 - `a2a_main_agents_json` controls parent agents visible to tenants.
 - `a2a_tenant_agents_json` controls tenant agents visible to the parent.
 
-Both default to `["*"]`. Parent agents still have to be deliberately attached to the parent A2A install. Fleet does not modify instances registered with `tenant_connect`, because it does not own their lifecycle.
+Both default to `["*"]`. Parent agents still have to be deliberately attached to the parent A2A install. Automatic A2A pairing applies to Fleet-supervised tenants.
 
 Tenant environments use an allowlist and a dedicated DNS capability endpoint; they do not receive Fleet's install token or master key.
 

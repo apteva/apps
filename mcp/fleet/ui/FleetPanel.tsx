@@ -641,6 +641,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         operation={visibleDetail?.operation}
         setupComplete={visibleDetail?.setup_complete}
         tenant={selected}
+        connectedUpdateEndpoint={selected ? `${API}/tenants/${encodeURIComponent(selected.id)}/connected-update?${withParams()}` : ""}
         events={visibleDetail?.events ?? null}
         hosts={visibleDetail?.hosts ?? []}
         retainedSource={visibleDetail?.retained_source ?? null}
@@ -1128,6 +1129,7 @@ function TenantDetail({
   setupComplete,
   operation,
   tenant,
+  connectedUpdateEndpoint,
   events,
   hosts,
   retainedSource,
@@ -1149,6 +1151,7 @@ function TenantDetail({
   setupComplete?: boolean;
   operation?: GetResp["operation"];
   tenant: Tenant | null;
+  connectedUpdateEndpoint: string;
   events: FleetEvent[] | null;
   hosts: TenantHost[];
   retainedSource: GetResp["retained_source"] | null;
@@ -1268,7 +1271,9 @@ function TenantDetail({
             <span className="font-mono text-[11px]">
               {tenant.base_url}
               {" · "}
-              {onParentHost
+              {!isLocal
+                ? "connected remote"
+                : onParentHost
                 ? "local"
                 : hostInstance
                   ? `on ${hostInstance.name}`
@@ -1598,6 +1603,9 @@ function TenantDetail({
               latest={meta?.apteva_latest}
               onUpdate={() => onOpenUpdate(tenant)}
             />
+          )}
+          {!isSetupPending && !isLocal && (
+            <ConnectedUpdateBlock endpoint={connectedUpdateEndpoint} tenant={tenant} />
           )}
 
           {!isSetupPending && (
@@ -3129,6 +3137,165 @@ function TenantHostsBlock({
 }
 
 // ─── Version block ──────────────────────────────────────────────────
+
+type ConnectedUpdateView = {
+  configured: boolean;
+  supported?: boolean;
+  current_version?: string;
+  available_version?: string;
+  reason?: string;
+  retryable?: boolean;
+  operation?: { request_id: string; version: string; phase: string; notice?: string; done: boolean };
+};
+
+const CONNECTED_UPDATE_PHASES: Record<string, string> = {
+  queued: "Queued",
+  submitting: "Submitting",
+  preparing: "Preparing",
+  downloading: "Downloading",
+  verifying: "Verifying",
+  preflight: "Checking compatibility",
+  activating: "Activating",
+  restarting: "Restarting",
+  rolling_back: "Rolling back",
+  succeeded: "Updated",
+  failed: "Update failed",
+  rejected: "Update declined",
+  rolled_back: "Rolled back",
+  recovery_required: "Recovery required",
+  reconciled: "Recovered and verified",
+  canceled: "Canceled on the host",
+};
+
+function ConnectedUpdateBlock({ endpoint, tenant }: { endpoint: string; tenant: Tenant }) {
+  const [view, setView] = useState<ConnectedUpdateView>();
+  const [error, setError] = useState("");
+  const [dialog, setDialog] = useState<"credential" | "update" | "retry">();
+  const [credential, setCredential] = useState("");
+  const [target, setTarget] = useState("");
+  const [policy, setPolicy] = useState("preserve");
+  const [busy, setBusy] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      let poll = false;
+      try {
+        const response = await fetch(endpoint, { credentials: "same-origin", signal: controller.signal });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.error || "Could not check Fleet update access.");
+        }
+        const next: ConnectedUpdateView = await response.json();
+        if (!controller.signal.aborted) {
+          setView(next);
+          setError("");
+          poll = !!next.operation && !next.operation.done;
+        }
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError((err as Error).message);
+          poll = true;
+        }
+      }
+      if (poll && !controller.signal.aborted) timer = setTimeout(load, 5000);
+    };
+    void load();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [endpoint, refresh]);
+
+  const close = () => { setDialog(undefined); setCredential(""); setError(""); };
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    const method = dialog === "credential" ? "PUT" : dialog === "retry" ? "PATCH" : "POST";
+    const body = dialog === "credential" ? { credential: credential.trim() }
+      : dialog === "retry" ? { request_id: view?.operation?.request_id, confirm: true }
+        : { version: target, agent_policy: policy, confirm: true };
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        throw new Error(result?.error || "Fleet could not confirm the request.");
+      }
+      close();
+      setRefresh(value => value + 1);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const op = view?.operation;
+  const pending = !!op && !op.done;
+  const canStart = !!view?.supported && !!view.available_version && tenant.status === "active" && !pending;
+  return (
+    <section aria-label="Connected Apteva updates" className="px-4 py-3 border-b border-border space-y-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold">Apteva version</span>
+        <span className="font-mono text-xs">{view?.current_version || tenant.current_version || "Unknown"}</span>
+        {view && <ActionButton
+          label={view.configured ? "Replace update credential" : "Enable Fleet updates"}
+          onClick={() => { setError(""); setDialog("credential"); }}
+        />}
+        {view?.configured && !pending && <ActionButton label="Check for updates" onClick={() => setRefresh(value => value + 1)} />}
+        {canStart && <ActionButton label={`Update to ${view.available_version}`} onClick={() => {
+          setError(""); setTarget(view.available_version!); setPolicy("preserve"); setDialog("update");
+        }} />}
+        {view?.retryable && <ActionButton label="Retry same request" onClick={() => {
+          setError(""); setDialog("retry");
+        }} />}
+      </div>
+      {view?.reason && <p className="text-xs text-text-dim">{view.reason}</p>}
+      {view?.supported && !view.available_version && !pending && <p className="text-xs text-text-dim">No newer release offered.</p>}
+      {op && <p role="status" className="text-xs">
+        {pending && op.phase === "succeeded" ? "Verifying served version"
+          : pending && op.phase === "rolled_back" ? "Verifying rollback"
+          : pending && op.phase === "failed" ? "Verifying previous version"
+          : CONNECTED_UPDATE_PHASES[op.phase] ?? op.phase} · {op.version}
+        {op.notice && <span className="block text-text-dim mt-1">{op.notice}</span>}
+      </p>}
+      {error && !dialog && <p role="alert" className="text-xs text-error">{error}</p>}
+      {dialog && <DialogFrame
+        title={dialog === "credential" ? "Authorize Fleet updates" : dialog === "retry" ? "Retry the same update" : `Update ${tenant.slug} to ${target}`}
+        onClose={() => { if (!busy) close(); }}
+      >
+        {dialog === "credential" ? <>
+          <p className="text-xs text-text-dim">Run <code>apteva update fleet-grant issue</code> on the client server as the Apteva service owner. To revoke access, run <code>apteva update fleet-grant revoke</code>.</p>
+          <Label text="Update credential">
+            <input type="password" autoComplete="off" value={credential} onChange={event => setCredential(event.target.value)}
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card" />
+          </Label>
+        </> : dialog === "retry" ? (
+          <p className="text-xs text-text-dim">Fleet will check for the original job before retrying this exact request.</p>
+        ) : <>
+          <p className="text-xs text-text-dim">Apteva at {tenant.base_url} may briefly disconnect during activation.</p>
+          <Label text="Running agents">
+            <select value={policy} onChange={event => setPolicy(event.target.value)} className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card">
+              <option value="preserve">Keep agents on their current Core</option>
+              <option value="rolling">Update agents gradually</option>
+              <option value="restart">Restart agents with the new Core</option>
+            </select>
+          </Label>
+        </>}
+        {error && <p role="alert" className="text-xs text-error">{error}</p>}
+        <DialogActions>
+          <ActionButton label="Cancel" disabled={busy} onClick={close} />
+          <ActionButton label={dialog === "credential" ? "Save credential" : dialog === "retry" ? "Retry request" : "Confirm update"}
+            busy={busy} disabled={dialog === "credential" && !credential.trim()} onClick={() => void submit()} />
+        </DialogActions>
+      </DialogFrame>}
+    </section>
+  );
+}
 
 function VersionBlock({
   tenant,
