@@ -17,7 +17,7 @@ sdk_dir=$(cd "$apps_dir/tests" && GOWORK=off go list -m -f '{{.Dir}}' github.com
 ln -s "$sdk_dir" "$smoke_dir/app-sdk"
 cp "$APTEVA_SERVER_SOURCE/go.mod" "$smoke_dir/server.mod"
 cp "$APTEVA_SERVER_SOURCE/go.sum" "$smoke_dir/server.sum"
-go mod edit -modfile="$smoke_dir/server.mod" -replace="github.com/apteva/app-sdk=$sdk_dir"
+(cd "$APTEVA_SERVER_SOURCE" && GOWORK=off go mod edit -modfile="$smoke_dir/server.mod" -replace="github.com/apteva/app-sdk=$sdk_dir")
 # Overlay adds one test without changing the server checkout.
 SMOKE_DIR="$smoke_dir" FIXTURE_DIR="$fixture_dir" python3 - <<'PY'
 import os,json
