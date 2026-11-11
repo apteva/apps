@@ -802,6 +802,9 @@ func (e *actorExecution) gotoURL(target string) error {
 		if mode := normalizedActorProxyMode(e.definition.Browser.ProxyMode); mode != "" {
 			args["proxy_mode"] = mode
 		}
+		if e.definition.Browser.ProxyEndpoint != "" {
+			args["proxy_endpoint"] = e.definition.Browser.ProxyEndpoint
+		}
 		if e.definition.Browser.ProxyProfile != "" {
 			args["proxy_profile"] = e.definition.Browser.ProxyProfile
 		}
@@ -821,6 +824,11 @@ func (e *actorExecution) gotoURL(target string) error {
 			e.app.closeBrowser(e.ctx, session.SessionID)
 			e.session = nil
 			return fmt.Errorf("computer returned backend %q, expected %q", session.Backend, e.definition.Browser.Backend)
+		}
+		if expected := e.definition.Browser.ProxyEndpoint; expected != "" && session.ProxyEndpoint != expected {
+			e.app.closeBrowser(e.ctx, session.SessionID)
+			e.session = nil
+			return errors.New("Computer did not confirm the requested Proxy endpoint")
 		}
 		if err := e.validateResolvedProxy(session.Proxy); err != nil {
 			e.app.closeBrowser(e.ctx, session.SessionID)
@@ -968,6 +976,9 @@ func (e *actorExecution) assertURL(step actorStep) error {
 func (e *actorExecution) validateResolvedProxy(proxy browserProxyState) error {
 	browser := e.definition.Browser
 	expectedMode := normalizedActorProxyMode(browser.ProxyMode)
+	if browser.ProxyEndpoint != "" {
+		expectedMode = ""
+	}
 	if expectedMode != "" && proxy.Mode != expectedMode {
 		return fmt.Errorf("computer returned proxy mode %q, expected %q", proxy.Mode, expectedMode)
 	}

@@ -50,15 +50,16 @@ type actorDefinition struct {
 }
 
 type actorBrowser struct {
-	ContextID    string         `json:"context_id,omitempty"`
-	Backend      string         `json:"backend,omitempty"`
-	ProxyMode    string         `json:"proxy_mode,omitempty"`
-	ProxyProfile string         `json:"proxy_profile,omitempty"`
-	ProxyCountry string         `json:"proxy_country,omitempty"`
-	ProxySticky  string         `json:"proxy_sticky,omitempty"`
-	Persist      bool           `json:"persist,omitempty"`
-	Viewport     map[string]any `json:"viewport,omitempty"`
-	Environment  map[string]any `json:"environment,omitempty"`
+	ContextID     string         `json:"context_id,omitempty"`
+	Backend       string         `json:"backend,omitempty"`
+	ProxyMode     string         `json:"proxy_mode,omitempty"`
+	ProxyEndpoint string         `json:"proxy_endpoint,omitempty"`
+	ProxyProfile  string         `json:"proxy_profile,omitempty"`
+	ProxyCountry  string         `json:"proxy_country,omitempty"`
+	ProxySticky   string         `json:"proxy_sticky,omitempty"`
+	Persist       bool           `json:"persist,omitempty"`
+	Viewport      map[string]any `json:"viewport,omitempty"`
+	Environment   map[string]any `json:"environment,omitempty"`
 }
 
 type actorLimits struct {
@@ -328,6 +329,14 @@ func validateActorDefinition(def actorDefinition) error {
 		case "local", "browserbase", "steel", "browser-engine", "service":
 		default:
 			return fmt.Errorf("definition.browser.backend %q is unsupported", backend)
+		}
+	}
+	if def.Browser.ProxyEndpoint != "" {
+		if def.Browser.ProxyProfile != "" || def.Browser.ProxyCountry != "" || def.Browser.ProxySticky != "" || (def.Browser.ProxyMode != "" && def.Browser.ProxyMode != "auto") {
+			return errors.New("definition.browser.proxy_endpoint cannot be combined with other proxy selectors")
+		}
+		if def.Browser.Backend != "" && def.Browser.Backend != "local" && def.Browser.Backend != "steel" {
+			return errors.New("definition.browser.proxy_endpoint requires local or steel")
 		}
 	}
 	mode := normalizedActorProxyMode(def.Browser.ProxyMode)

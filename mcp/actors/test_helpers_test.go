@@ -24,6 +24,7 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	proxyEndpointOverride    string
 	crawlHTMLMinimumLimit    int
 	crawlHTMLAlwaysTruncated bool
 	tk.BasePlatformClient
@@ -126,12 +127,13 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			proxy["sticky_scope"] = sticky
 		}
 		return map[string]any{
-			"session_id":  "sess_1",
-			"backend":     backend,
-			"current_url": in["url"],
-			"width":       1280,
-			"height":      720,
-			"proxy":       proxy,
+			"session_id":     "sess_1",
+			"proxy_endpoint": firstNonEmpty(p.proxyEndpointOverride, stringFromAny(in["proxy_endpoint"])),
+			"backend":        backend,
+			"current_url":    in["url"],
+			"width":          1280,
+			"height":         720,
+			"proxy":          proxy,
 		}
 	case "computer.browser_extract":
 		if p.crawlHTMLMinimumLimit > 0 || p.crawlHTMLAlwaysTruncated {

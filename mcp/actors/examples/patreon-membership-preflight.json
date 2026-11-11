@@ -1,0 +1,556 @@
+{
+  "operations": {
+    "create_tier_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{new_tier_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "text": "{{tier_name}}",
+          "action": "fill",
+          "locator": {
+            "selector": "#tier-title-name"
+          }
+        },
+        {
+          "text": "{{tier_description}}",
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"textbox\"]"
+          }
+        },
+        {
+          "text": "{{monthly_price}}",
+          "action": "fill",
+          "locator": {
+            "selector": "input[name=\"product-price\"]"
+          }
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "button[role=\"switch\"]"
+          },
+          "checked": "{{free_trial}}"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^\\Q{{free_trial}}\\E$"
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{monthly_price}}\\E$"
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^\\Q{{tier_description}}\\E$"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{tier_name}}\\E$"
+            }
+          },
+          "readability": false
+        },
+        {
+          "direction": "down",
+          "amount": 900,
+          "action": "scroll",
+          "locator": {}
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cancel",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 1500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Leave",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Paid membership tiers"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 15000
+        }
+      ],
+      "output_schema": {}
+    },
+    "edit_tier_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tier_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{expected_current_price}}\\E$"
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^\\Q{{expected_current_description}}\\E$"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value"
+            }
+          },
+          "readability": false
+        },
+        {
+          "text": "{{tier_name}}",
+          "action": "fill",
+          "locator": {
+            "selector": "#tier-title-name"
+          }
+        },
+        {
+          "text": "{{tier_description}}",
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"textbox\"]"
+          }
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "button[role=\"switch\"]"
+          },
+          "checked": "{{free_trial}}"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text",
+              "required": true
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^\\Q{{free_trial}}\\E$"
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{expected_current_price}}\\E$"
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "^\\Q{{tier_description}}\\E$"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{tier_name}}\\E$"
+            }
+          },
+          "readability": false
+        },
+        {
+          "direction": "down",
+          "amount": 900,
+          "action": "scroll",
+          "locator": {}
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cancel",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 1500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Leave",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Paid membership tiers"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 15000
+        }
+      ],
+      "output_schema": {}
+    },
+    "get_tier": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tier_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value"
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": {}
+    },
+    "list_tiers": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tiers_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Paid membership tiers"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 15000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "creator_heading": {
+              "selector": "h1",
+              "type": "text"
+            },
+            "creator_name": {
+              "selector": "input[name=\"name\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "page_text": {
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "a[href*=\"/membership/\"]:not([href*=\"/membership/new\"])",
+          "fields": {
+            "edit_url": {
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "tier_id": {
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/membership/([0-9]+)"
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": {}
+    },
+    "price_change_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tier_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{expected_current_price}}\\E$"
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit price",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 1000
+        },
+        {
+          "text": "{{monthly_price}}",
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"] input[name=\"product-price\"], [aria-modal=\"true\"] input[name=\"product-price\"]"
+          }
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "selector": "input[type=\"radio\"][value=\"{{price_change_scope}}\"]"
+          },
+          "checked": true
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"] input[type=\"radio\"][value=\"{{price_change_scope}}\"]:checked"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "[role=\"dialog\"], [aria-modal=\"true\"]",
+          "fields": {
+            "dialog_text": {
+              "type": "text",
+              "required": true
+            },
+            "new_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{monthly_price}}\\E$"
+            },
+            "selected_scope": {
+              "selector": "input[type=\"radio\"][value=\"{{price_change_scope}}\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{price_change_scope}}\\E$"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Cancel",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 1000
+        }
+      ],
+      "output_schema": {}
+    }
+  },
+  "schema_version": 1,
+  "defaults": {},
+  "browser": {
+    "context_id": "{{context_id}}",
+    "backend": "browserbase",
+    "persist": true,
+    "viewport": {
+      "height": 1000,
+      "width": 1600
+    }
+  },
+  "allowed_hosts": [
+    "www.patreon.com",
+    "patreon.com"
+  ],
+  "limits": {
+    "max_pages": 20,
+    "max_items": 500,
+    "max_duration_seconds": 240,
+    "step_retries": 0
+  },
+  "description": "Optional Patreon membership exploration example. Requires context_id and site URLs as runtime inputs. Creation, editing and price-change preflights verify form controls and discard changes; no save, price confirmation, publish or delete action. Description readback normalizes HTML text-node whitespace and may reject rich formatting. Tested locally with Actors 0.2.8; saved mutations have not been tested."
+}

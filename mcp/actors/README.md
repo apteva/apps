@@ -101,3 +101,7 @@ Web's search, extraction, crawl, map, research and snapshot tools remain indepen
 Semantic `set_checked`, `select_option`, and `set_temporal` support access toggles, dropdowns and schedule fields. Use `readability: false` on extract/assert steps when controls live outside the primary content. An extracted field may supply `pattern` to capture a labelled value before type conversion.
 
 For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknowledged consequential click. Reservations persist across run retries, restarts and actor revisions. The same actor operation cannot attempt that key again, even if its prior outcome is uncertain. Inspect the referenced original run before deliberately issuing a new key. This guards duplicate attempts; it does not provide exactly-once execution on an external site.
+
+## Proxy endpoints
+
+Set `browser.proxy_endpoint` to a project-owned Proxy endpoint ID with `backend: "local"` or `"steel"`. Computer must be bound to Proxy with endpoint-scoped `proxy.use`. Computer obtains an expiring credential lease and revokes it on session cleanup. Actors requires Computer to confirm the selected endpoint in its session response and stops if it receives a different endpoint. Other proxy selectors cannot be combined with this field; an empty or `auto` proxy mode is allowed. Public HTTPS publication uses Domains DNS and native Apteva server TLS. See [Proxy setup](../proxy/README.md).

@@ -58,6 +58,7 @@ var manifestYAML []byte
 var globalCtx *sdk.AppCtx
 
 type browserSession struct {
+	ProxyEndpoint    string            `json:"proxy_endpoint,omitempty"`
 	SessionID        string            `json:"session_id"`
 	Backend          string            `json:"backend"`
 	RequestedBackend *string           `json:"requested_backend"`
@@ -188,7 +189,7 @@ func (a *App) openBrowser(callCtx context.Context, ctx *sdk.AppCtx, target strin
 		requestedBackend = b
 		openArgs["backend"] = b
 	}
-	for _, key := range []string{"viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
+	for _, key := range []string{"viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_endpoint", "proxy_profile", "proxy_country", "proxy_sticky"} {
 		if v, ok := args[key]; ok {
 			openArgs[key] = v
 		}

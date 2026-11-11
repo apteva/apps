@@ -1,0 +1,3777 @@
+{
+  "schema_version": 1,
+  "description": "Patreon Quips example for the English creator UI. Supply a saved authenticated Computer context and runtime content. No personal account, media, or post is configured. Requires Actors 0.2.9 and Computer 0.7.93 or newer.",
+  "defaults": {
+    "quip_list_pages": 5,
+    "quips_url": "https://www.patreon.com/library/quips",
+    "quip_reply_permission": "No one",
+    "quip_media_filename": "",
+    "quip_media_mime_type": "",
+    "quip_scheduled_row_selector": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:nth-of-type(2)"
+  },
+  "browser": {
+    "context_id": "{{context_id}}",
+    "backend": "browserbase",
+    "persist": true,
+    "viewport": {
+      "width": 1600,
+      "height": 800
+    }
+  },
+  "allowed_hosts": [
+    "www.patreon.com",
+    "patreon.com"
+  ],
+  "limits": {
+    "max_pages": 100,
+    "max_items": 500,
+    "max_duration_seconds": 360,
+    "step_retries": 0
+  },
+  "operations": {
+    "quip_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Discard Quip",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Share",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Share",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:share"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "verify_quip": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quip_url}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "update_quip": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quip_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "previous_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_expected_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Update",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Update",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:update"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_quips": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "assert_url",
+          "host": "www.patreon.com",
+          "path_prefix": "/library/quips"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Publish date"
+            },
+            {
+              "type": "text_present",
+              "value": "No quips yet"
+            }
+          ],
+          "match": "any",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]",
+          "fields": {
+            "content_summary": {
+              "type": "text",
+              "required": true,
+              "pattern": "^(.*?)\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4}(?: Scheduled)?$"
+            },
+            "status": {
+              "type": "text",
+              "required": false,
+              "pattern": "(Scheduled)$"
+            },
+            "published_date": {
+              "type": "text",
+              "required": true,
+              "pattern": "((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4})(?: Scheduled)?$"
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "paginate",
+          "locator": {
+            "text": "Go To Next Page",
+            "exact": true,
+            "som_only": true
+          },
+          "max_pages": "{{quip_list_pages}}"
+        },
+        {
+          "action": "assert_url",
+          "host": "www.patreon.com",
+          "path_prefix": "/library/quips"
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_image_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "Add media",
+            "exact": true,
+            "som_only": true
+          },
+          "base64": "{{quip_media_base64}}",
+          "filename": "{{quip_media_filename}}",
+          "mime_type": "{{quip_media_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]",
+          "fields": {
+            "verified_image_url": {
+              "type": "url",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Share",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Share",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:share"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"Edit Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]",
+          "fields": {
+            "verified_image_url": {
+              "type": "url",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_image_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "Add media",
+            "exact": true,
+            "som_only": true
+          },
+          "base64": "{{quip_media_base64}}",
+          "filename": "{{quip_media_filename}}",
+          "mime_type": "{{quip_media_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]",
+          "fields": {
+            "verified_image_url": {
+              "type": "url",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Discard Quip",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_image_url_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "Add media",
+            "exact": true,
+            "som_only": true
+          },
+          "filename": "{{quip_media_filename}}",
+          "mime_type": "{{quip_media_mime_type}}",
+          "source_url": "{{quip_media_source_url}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"New Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]",
+          "fields": {
+            "verified_image_url": {
+              "type": "url",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Share",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Share",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:share"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"Edit Quip\"] img[alt=\"Image preview\"][class*=\"__imgLoaded\"][src*=\"/post/\"]",
+          "fields": {
+            "verified_image_url": {
+              "type": "url",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_quip_stats": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quip_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "show more insights",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Post performance"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "impressions": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Impressions (.*?) Seen"
+            },
+            "seen": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Seen (.*?) Conversions"
+            },
+            "total_revenue": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Total revenue (.*?) New memberships"
+            },
+            "new_memberships": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "New memberships (.*?) Revenue from purchases"
+            },
+            "purchase_revenue": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Revenue from purchases (.*?) New free members"
+            },
+            "new_free_members": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "New free members (.*?) Activity"
+            },
+            "likes": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Likes (.*?) Comments"
+            },
+            "comments": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Comments (.*?) Reshares"
+            },
+            "reshares": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Per-Post Insights\"]",
+              "pattern": "Reshares (.*?) View all post insights"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_absent",
+              "value": "Post performance"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "schedule_quip_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "set_temporal",
+          "locator": {
+            "text": "Publish date",
+            "exact": true,
+            "som_only": true
+          },
+          "value": "{{quip_publish_date}}"
+        },
+        {
+          "action": "set_temporal",
+          "locator": {
+            "text": "Publish time",
+            "exact": true,
+            "som_only": true
+          },
+          "value": "{{quip_publish_time}}"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Save scheduled date",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Save scheduled date",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Discard Quip",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "inspect_quips_composer": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_video_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "Add media",
+            "exact": true,
+            "som_only": true
+          },
+          "base64": "{{quip_media_base64}}",
+          "filename": "{{quip_media_filename}}",
+          "mime_type": "{{quip_media_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] video[class*=\"Video-module\"][src]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"New Quip\"] video[class*=\"Video-module\"][src]",
+          "fields": {
+            "verified_video_source": {
+              "type": "text",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Video uploaded"
+            }
+          ],
+          "timeout_ms": 60000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "video_upload_state": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "pattern": "\\b(Video uploaded)\\b"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Share",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Share",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:share"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] video[class*=\"Video-module\"][src]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"Edit Quip\"] video[class*=\"Video-module\"][src]",
+          "fields": {
+            "verified_video_source": {
+              "type": "text",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "quip_video_url_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "text": "Add media",
+            "exact": true,
+            "som_only": true
+          },
+          "filename": "{{quip_media_filename}}",
+          "mime_type": "{{quip_media_mime_type}}",
+          "source_url": "{{quip_media_source_url}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] video[class*=\"Video-module\"][src]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"New Quip\"] video[class*=\"Video-module\"][src]",
+          "fields": {
+            "verified_video_source": {
+              "type": "text",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Video uploaded"
+            }
+          ],
+          "timeout_ms": 60000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "video_upload_state": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "pattern": "\\b(Video uploaded)\\b"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Share",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Share",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "quip:{{quip_request_id}}:share"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "url_contains",
+              "value": "/posts/"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "More actions",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit post",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] video[class*=\"Video-module\"][src]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "[role=\"dialog\"][aria-label=\"Edit Quip\"] video[class*=\"Video-module\"][src]",
+          "fields": {
+            "verified_video_source": {
+              "type": "text",
+              "required": true,
+              "attribute": "src"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "verify_scheduled_quip": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "scheduled_row": {
+              "type": "text",
+              "required": true,
+              "selector": "{{quip_scheduled_row_selector}}",
+              "pattern": "^\\Q{{quip_body}}\\E \\Q{{quip_publish_date_label}}\\E Scheduled$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "{{quip_scheduled_row_selector}} button[aria-label=\"Action menu with additional operations to perform on single post or collection\"]"
+          },
+          "expected_text": "Action menu with additional operations to perform on single post or collection"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit quip",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    },
+    "schedule_quip": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{quips_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Create post",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait",
+          "duration_ms": 500
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Quip",
+            "exact": false,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "OK",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]"
+          },
+          "text": "{{quip_body}}"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{quip_reply_permission}}",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitemradio"
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "set_temporal",
+          "locator": {
+            "text": "Publish date",
+            "exact": true,
+            "som_only": true
+          },
+          "value": "{{quip_publish_date}}"
+        },
+        {
+          "action": "set_temporal",
+          "locator": {
+            "text": "Publish time",
+            "exact": true,
+            "som_only": true
+          },
+          "value": "{{quip_publish_time}}"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Save scheduled date",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Save scheduled date",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^New Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule",
+            "exact": true,
+            "som_only": true,
+            "role": "button"
+          },
+          "expected_text": "Schedule",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit",
+          "once_key": "quip:{{quip_request_id}}:schedule"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"New Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "key",
+          "key": "F5"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "scheduled_row": {
+              "type": "text",
+              "required": true,
+              "selector": "{{quip_scheduled_row_selector}}",
+              "pattern": "^\\Q{{quip_body}}\\E \\Q{{quip_publish_date_label}}\\E Scheduled$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "{{quip_scheduled_row_selector}} button[aria-label=\"Action menu with additional operations to perform on single post or collection\"]"
+          },
+          "expected_text": "Action menu with additional operations to perform on single post or collection"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Edit quip",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "saved_body": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"] [role=\"textbox\"]",
+              "pattern": "^\\Q{{quip_body}}\\E$"
+            },
+            "composer": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]",
+              "attribute": "aria-label",
+              "pattern": "^Edit Quip$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Allow replies from",
+            "exact": true,
+            "som_only": true,
+            "role": "menuitem"
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "verified_reply_permission": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"menuitemradio\"][aria-checked=\"true\"]",
+              "pattern": "^\\Q{{quip_reply_permission}}\\E$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "key",
+          "key": "ESC"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Schedule quip",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Schedule quip",
+          "expected_effect": "scheduled_external_commit",
+          "confirm_consequence": "scheduled_external_commit"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "date": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"date\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_date}}\\E$"
+            },
+            "time": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"] input[type=\"time\"]",
+              "attribute": "value",
+              "pattern": "^\\Q{{quip_publish_time}}\\E$"
+            },
+            "timezone": {
+              "type": "text",
+              "required": true,
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]",
+              "pattern": "Publish time (\\Q{{quip_timezone_label}}\\E) Clear Save$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Schedule quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Close Dialog",
+            "exact": true,
+            "som_only": true
+          }
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_absent",
+              "selector": "[role=\"dialog\"][aria-label=\"Edit Quip\"]"
+            }
+          ],
+          "timeout_ms": 30000
+        }
+      ],
+      "output_schema": {}
+    }
+  }
+}
