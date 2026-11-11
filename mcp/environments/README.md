@@ -234,3 +234,12 @@ policy to voice targets. The existing startup pause is instance-wide and would
 also freeze delegated work. Main can therefore run during a voice test; the
 harness does not claim main is frozen or issue a manual global resume. Explicit
 startup pauses for text workflows keep their existing instance-wide semantics.
+
+## Named runtime targets (0.9.0)
+
+`EnvironmentSpec.targets` maps names such as `frontend`, `api`, and `auth` to
+`{app,path}` public route prefixes. `environment_run_targets` resolves them from
+the running runtime and the run's persisted target snapshot. Later definition
+edits do not change active run targets. Seeds can use `{"$target":"frontend"}`
+to inject the new URL, alongside earlier-seed `$ref` syntax. Unknown target
+references and path traversal are rejected before startup.

@@ -209,6 +209,8 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, c Check) (result Res
 type appRunContext struct {
 	ctx     *sdk.AppCtx
 	release *releaseSession
+	runID   int64
+	browser *browserCheckSession
 }
 
 func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
@@ -227,7 +229,7 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 	defer cancel()
 	go watchCancellation(runCtx, cancel, s, r.ID)
 	env := environmentClient{app.PlatformAPI()}
-	services := &appRunContext{ctx: app}
+	services := &appRunContext{ctx: app, runID: r.ID}
 	var message string
 	if r.Release != nil {
 		services.release, err = a.prepareRelease(runCtx, s, &r, env)
@@ -245,7 +247,7 @@ func (a *App) work(ctx context.Context, app *sdk.AppCtx) error {
 			break
 		}
 		var result Result
-		if c.Kind == "scenario" {
+		if c.Kind == "scenario" || c.Kind == "browser" {
 			result = a.runScenario(runCtx, c, services, covered)
 		} else {
 			result = a.execute(runCtx, app, c)

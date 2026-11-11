@@ -18,6 +18,11 @@ func redactValue(v any, release *releaseSession) any {
 	switch value := v.(type) {
 	case string:
 		if release != nil {
+			for _, credential := range release.browserValues {
+				if credential != "" && strings.Contains(value, credential) {
+					return "[redacted]"
+				}
+			}
 			for name, credential := range release.identities {
 				token := strings.TrimPrefix(credential, release.config.Identities[name].Prefix)
 				if token != "" && strings.Contains(value, token) {
@@ -52,6 +57,12 @@ func redactValue(v any, release *releaseSession) any {
 
 func sanitizeStep(result *StepResult, output any, selected []string, release *releaseSession) {
 	allowed := map[string]bool{"/status_code": true}
+	if result.Kind == "browser" {
+		// The protocol omits sensitive element values and redacts registered secrets.
+		for _, path := range []string{"/count", "/visible", "/enabled", "/checked", "/target", "/path", "/text", "/value", "/action_dispatched"} {
+			allowed[path] = true
+		}
+	}
 	for _, path := range selected {
 		if path == "/body" {
 			continue

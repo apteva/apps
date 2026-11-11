@@ -8,6 +8,7 @@ import (
 )
 
 type EnvironmentSpec struct {
+	Targets             map[string]RuntimeTarget        `json:"targets,omitempty"`
 	Version             int                             `json:"version"`
 	TTLSeconds          int                             `json:"ttl_seconds,omitempty"`
 	Clock               *sdk.RuntimeClockSpec           `json:"clock,omitempty"`

@@ -1,7 +1,7 @@
 # Tests
 
 Apteva sidecar for project test suites, multi-step scenarios, durable run
-history, and a native Tests panel. Version 0.2.0 uses app-sdk v0.115.1.
+history, and a native Tests panel. Version 0.3.0 uses app-sdk v0.115.1.
 
 Standalone suites keep the original HTTP and Function checks. Scenario checks
 can chain steps and capture values. An isolated release suite binds an
@@ -282,3 +282,94 @@ bun run scripts/build-panels.ts --app tests
 For a local sidecar, set `APTEVA_PROJECT_ID`, `DB_PATH`, `APTEVA_APP_PORT`,
 `APTEVA_GATEWAY_URL`, and the app token supplied by the platform. No credentials
 are stored in this repository.
+
+## Browser checks (0.3.0)
+
+Bind optional **Computer >=0.9.0** and **Environments >=0.9.0** to Tests.
+Computer needs Chromium/Chrome installed on its host (`CHROME_BIN` can select
+an executable). The initial backend runs local headless Chromium, one check
+at a time, with a fresh profile per check. Evidence includes the actual browser
+engine, viewport, locale and timezone. Recordings are not enabled in protocol v1.
+
+Add named public paths to the pinned EnvironmentSpec:
+
+```json
+{"targets":{"frontend":{"app":"site","path":"/ui"},"api":{"app":"api","path":"/gw/test"},"auth":{"app":"auth","path":"/login"}}}
+```
+
+Seeds may use `{"$target":"api"}` to inject the freshly provisioned URL and
+`{"$ref":"2.client_id"}` to use earlier seed results. Seed users and data in
+the isolated runtime. All UI assets, API calls and Auth routes must resolve
+under the named runtime paths; use a runtime-scoped or data-URL favicon too.
+The forward proxy denies traffic outside these paths, including redirects,
+frames, WebSockets, service workers and other runtime/management endpoints.
+Targets currently use the server's local HTTP runtime endpoints.
+
+Add a browser configuration to the existing release suite:
+
+```json
+{"browser":{"width":1280,"height":720,"locale":"en-US","timezone":"UTC","value_refs":{"operator.email":{"app":"fixture","tool":"credentials","path":"/email"},"operator.password":{"app":"fixture","tool":"credentials","path":"/password"}}}}
+```
+
+Value references resolve against seeded runtime apps and are redacted from
+evidence. Keep credentials out of suite definitions. The release candidate
+probe should measure a bundle manifest covering UI, API and configuration
+artifacts. The verdict also pins suite/fixture revisions and runtime app
+versions. Changing pinned inputs requires a new passing run.
+
+Create a browser check or mix browser and backend steps in a scenario:
+
+```json
+{"name":"Sign in and dashboard","kind":"browser","suite_id":1,"definition":{"timeout_ms":60000,"steps":[
+  {"id":"open","browser":{"action":"navigate","target":"frontend","path":"/login"}},
+  {"id":"email","browser":{"action":"fill","locator":{"test_id":"email"},"value_ref":"operator.email"}},
+  {"id":"password","browser":{"action":"fill","locator":{"test_id":"password"},"value_ref":"operator.password"}},
+  {"id":"submit","browser":{"action":"click","locator":{"role":"button","name":"Sign in"}}},
+  {"id":"dashboard","poll_every_ms":100,"browser":{"action":"observe","locator":{"role":"heading","name":"Dashboard"}},"assertions":[{"path":"/visible","op":"equals","value":true}]}
+]}}
+```
+
+In a `scenario`, give these steps `"kind":"browser"`. Actions are `navigate`,
+`reload`, `fill`, `click`, `select`, `check`, `upload` and `observe`. Locators
+accept one `test_id`, accessible `role`/`name`, or exact `text`. Observations
+expose `count`, `text`, `value`, `visible`, `enabled`, `checked`, `target` and
+relative `path`; password and sensitive values are omitted. Assertions use the
+existing JSON-pointer operators. Input waits for one visible enabled element,
+then dispatches once. Only observations may poll. Parallel browser steps are
+rejected. Use `checked` for checkboxes and `upload_ref` referencing a named
+`{name,mime,base64}` fixture in `release.browser.uploads` for uploads.
+
+Failures retain masked PNG evidence owned by Tests, served through the
+authenticated project-scoped artifact route. Inputs, sensitive elements and
+known secret text are masked. Use synthetic fixture data for application content.
+`artifact_retention_days` accepts 1–90 (default 7); run history stays available.
+Page exceptions, console errors, attempted out-of-boundary page requests or
+incomplete diagnostics fail the check. Chromium's own denied background
+requests are recorded separately as `boundary_denied`. HTTP error statuses
+remain assertable, including permission-denied acceptance cases.
+
+Browser failures, missing capabilities, timeouts and cancellations prevent a
+passing verdict. Each run attempt creates a fresh environment and each browser
+check gets a fresh profile. Persisted session IDs, TTL expiry and restart
+reconciliation ensure browser cleanup.
+
+Run real local Chrome boundary and input tests with:
+
+```sh
+cd mcp/computer
+RUN_BROWSER_TESTS=1 GOWORK=off go test -count=1 ./internal/browser/testbrowser
+```
+
+The complete local sidecar smoke test uses real Auth/API/Environments/Tests/
+Computer and Chromium, an isolated SQLite fixture and a measured UI/backend
+source digest. It covers login, save, retry without duplicates, reload,
+backend read assertions, a failing screenshot/verdict and cancellation cleanup:
+
+```sh
+APTEVA_SERVER_SOURCE=/absolute/path/to/server mcp/tests/testdata/local-browser/run.sh
+```
+
+The server checkout needs runtime public proxy authorization preservation
+(server commit `4cf671114d0b2d935ee1fb5a211913bb21398289` or newer). The script
+uses a temporary Go overlay and temporary server/app databases; it does not
+connect to a running instance.

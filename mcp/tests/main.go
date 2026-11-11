@@ -92,7 +92,13 @@ func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{Name: "runner", Schedule: "@every 1s", Run: a.work}, {Name: "events", Schedule: "@every 2s", Run: a.flushEvents}, {Name: "cleanup", Schedule: "@every 20s", Run: func(worker context.Context, app *sdk.AppCtx) error {
 		if app.CurrentProject() != "" {
+			if err := a.reconcileBrowserCleanup(worker, app); err != nil {
+				return err
+			}
 			a.reconcileEnvironmentCleanup(worker, app)
+			if err := pruneBrowserArtifacts(app); err != nil {
+				return err
+			}
 		}
 		return nil
 	}}}
@@ -169,7 +175,7 @@ func publishEvent(ctx context.Context, app *sdk.AppCtx, topic string, payload ma
 	return app.EmitWithProjectAck(ctx, topic, app.CurrentProject(), payload)
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/tools/call", Handler: a.httpTool}}
+	return []sdk.Route{{Pattern: "/tools/call", Handler: a.httpTool}, {Pattern: "/artifacts/", Handler: a.httpBrowserArtifact}}
 }
 
 func scoped(ctx context.Context, app *sdk.AppCtx, requested string) (*sdk.AppCtx, error) {

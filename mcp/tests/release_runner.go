@@ -38,6 +38,18 @@ func (a *App) queue(ctx context.Context, app *sdk.AppCtx, suite int64, trigger, 
 			return r, err
 		}
 	}
+	checks, err := s.checks(suite)
+	if err != nil {
+		return Run{}, err
+	}
+	for _, check := range checks {
+		if check.Enabled && hasBrowser(check) {
+			if err = a.browserCapabilities(ctx, app); err != nil {
+				return Run{}, err
+			}
+			break
+		}
+	}
 	v, err := s.getSuite(suite)
 	if err != nil {
 		return Run{}, err
@@ -87,13 +99,15 @@ func (a *App) releaseSpec(ctx context.Context, app *sdk.AppCtx, suite int64) (ma
 }
 
 type releaseSession struct {
-	env        environmentClient
-	id         string
-	runtimeID  string
-	config     *ReleaseConfig
-	gateway    *url.URL
-	contract   contract
-	identities map[string]string
+	env           environmentClient
+	id            string
+	runtimeID     string
+	config        *ReleaseConfig
+	gateway       *url.URL
+	contract      contract
+	identities    map[string]string
+	targets       map[string]string
+	browserValues map[string]string
 }
 
 func (s *releaseSession) invoke(ctx context.Context, app, tool string, input map[string]any) (any, error) {
@@ -200,8 +214,47 @@ func (a *App) prepareRelease(ctx context.Context, s store, r *Run, env environme
 		return nil, err
 	}
 	r.Release.AppVersions = versions
-	session.gateway = endpoints[frozen.Config.GatewayApp]
+	gatewayCopy := *endpoints[frozen.Config.GatewayApp]
+	session.gateway = &gatewayCopy
 	session.gateway.Path += strings.TrimSuffix(frozen.Config.GatewayPath, "/")
+	if frozen.Config.Browser != nil {
+		var resolved struct {
+			RuntimeID string            `json:"runtime_id"`
+			Targets   map[string]string `json:"targets"`
+		}
+		if err = env.call(ctx, "environment_run_targets", map[string]any{"run_id": session.id}, &resolved); err != nil || resolved.RuntimeID != session.runtimeID {
+			return nil, errors.New("could not resolve the isolated browser targets")
+		}
+		var fixture struct {
+			Targets map[string]struct {
+				App  string `json:"app"`
+				Path string `json:"path"`
+			} `json:"targets"`
+		}
+		if err = json.Unmarshal(frozen.Fixture, &fixture); err != nil || len(fixture.Targets) == 0 || len(fixture.Targets) != len(resolved.Targets) {
+			return nil, errors.New("browser target snapshot is unavailable")
+		}
+		for name, target := range fixture.Targets {
+			base, ok := endpoints[target.App]
+			if !ok || validateGatewayPath(target.Path) != nil || target.Path == "" || target.Path == "/" {
+				return nil, errors.New("invalid bound browser target")
+			}
+			copy := *base
+			copy.Path += strings.TrimSuffix(target.Path, "/")
+			if copy.String() != resolved.Targets[name] {
+				return nil, errors.New("browser target does not match the frozen runtime")
+			}
+		}
+		session.targets = resolved.Targets
+		session.browserValues = map[string]string{}
+		for name, probe := range frozen.Config.Browser.ValueRefs {
+			value, err := session.probe(ctx, probe)
+			if err != nil {
+				return nil, errors.New("could not resolve a browser value reference")
+			}
+			session.browserValues[name] = value
+		}
+	}
 	if len(frozen.Config.OpenAPI) > 0 {
 		session.contract, err = parseContract(frozen.Config.OpenAPI)
 		if err != nil {

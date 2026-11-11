@@ -1,20 +1,21 @@
 schema: apteva-app/v1
 name: tests
 display_name: Tests
-version: 0.2.0
-description: Versioned scenarios, isolated environment runs, OpenAPI coverage, and candidate-specific release verdicts.
+version: 0.3.0
+description: Browser and backend scenarios, isolated runtime tests, owned failure evidence, and candidate-specific release verdicts.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tests
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [tests, checks, quality, functions]
+tags: [tests, checks, quality, browser, functions]
 scopes: [project, global]
 min_apteva_version: "0.27.6"
 requires:
   permissions: [db.write.app, platform.apps.call, net.egress]
   apps:
     - { name: functions, optional: true, reason: "Select Functions to enable function checks; omit for HTTP-only suites." }
-    - { name: environments, version: ">=0.8.0", optional: true, reason: "Bind Environments v0.8.0 or newer for isolated release scenarios." }
+    - { name: environments, version: ">=0.9.0", optional: true, reason: "Bind Environments v0.9.0 or newer for isolated release scenarios." }
+    - { name: computer, version: ">=0.9.0", optional: true, reason: "Bind Computer for isolated local Chromium test steps." }
 provides:
   http_routes:
     - prefix: /
@@ -24,7 +25,7 @@ provides:
     - { name: tests_suite_save, description: Create or update a suite. }
     - { name: tests_suite_archive, description: Archive a suite while retaining its history. }
     - { name: tests_checks_list, description: List a suite's checks. }
-    - { name: tests_check_save, description: Create or replace a function or HTTP check with assertions. }
+    - { name: tests_check_save, description: "Create or replace an HTTP, Function, scenario or browser check." }
     - { name: tests_check_delete, description: Delete a check while retaining historical run snapshots. }
     - { name: tests_run, description: Queue a suite run and return its id immediately. }
     - { name: tests_runs_list, description: List recent suite runs. }
@@ -47,11 +48,13 @@ provides:
     - { name: tests.run.completed, description: A run finished with passed or failed status and result counts. }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: tests/v0.2.0, entry: mcp/tests }
+  source: { repo: github.com/apteva/apps, ref: tests/v0.3.0, entry: mcp/tests }
   port: 8080
   health_check: /health
 db:
   driver: sqlite
   path: /data/tests.db
   migrations: migrations/
+config_schema:
+  - { name: artifact_retention_days, type: text, label: Screenshot retention days, default: "7", required: false }
 upgrade_policy: auto-patch

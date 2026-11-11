@@ -1,0 +1,312 @@
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestBrowserReleaseLocalSmoke(t *testing.T) {
+	root := os.Getenv("APTEVA_BROWSER_SMOKE")
+	if root == "" {
+		t.Skip("local browser fixture required")
+	}
+	t.Chdir(root)
+	s := newBrowserSmokeServer(t)
+	s.appBus = NewAppEventBus()
+	s.localApps = NewLocalSupervisor(filepath.Join(root, "cache"))
+	source := map[string]string{"ui-fixture": "fixture", "api": "api", "auth": "auth", "tests": "tests", "environments": "environments", "computer": "computer"}
+	s.environments.ResolveEnvironmentSource = func(_ string, name, _ string) (string, error) {
+		dir, ok := source[name]
+		if !ok {
+			return "", fmt.Errorf("unexpected dependency %s", name)
+		}
+		return filepath.Join(root, dir), nil
+	}
+	const project = "ui-browser-smoke"
+	if _, err := s.store.db.Exec(`INSERT INTO projects(id,user_id,name) VALUES(?,1,'UI Browser Smoke'); INSERT INTO project_members(project_id,user_id,role,added_by) VALUES(?,1,'owner',1)`, project, project); err != nil {
+		t.Fatal(err)
+	}
+	install := func(dir string, bindings map[string]any) *localInstall {
+		t.Helper()
+		inst, err := s.installLocalSource(filepath.Join(root, dir), project, 1, nil, "", bindings, func(stage string) { t.Logf("%s: %s", dir, stage) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.deleteEnvironmentInstall(inst.InstallID) })
+		if _, err = s.store.db.Exec(`UPDATE app_installs SET source='git' WHERE id=?`, inst.InstallID); err != nil {
+			t.Fatal(err)
+		}
+		return inst
+	}
+	auth := install("auth", nil)
+	fixture := install("fixture", map[string]any{"auth": auth.InstallID})
+	gateway := install("api", map[string]any{"ui-fixture": fixture.InstallID, "auth": auth.InstallID})
+	environments := install("environments", nil)
+	computer := install("computer", nil)
+	tests := install("tests", map[string]any{"environments": environments.InstallID, "computer": computer.InstallID})
+	for _, inst := range []*localInstall{auth, fixture, gateway} {
+		link := filepath.Join(root, "cache", "_local", inst.AppName, "src")
+		_ = os.Remove(link)
+		if err := os.Symlink(filepath.Join(root, source[inst.AppName]), link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rpc := func(app *localInstall, name string, args map[string]any) map[string]any {
+		t.Helper()
+		token, err := s.appInstallToken(app.InstallID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if app.AppName == "environments" {
+			raw, err := callAppMCPTool(app.SidecarURL+"/mcp", token, name, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reply struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if json.Unmarshal(raw, &reply) != nil || reply.IsError {
+				t.Fatalf("%s: %s", name, raw)
+			}
+			var out map[string]any
+			if len(reply.Content) == 0 || json.Unmarshal([]byte(reply.Content[0].Text), &out) != nil {
+				t.Fatalf("%s decode: %s", name, raw)
+			}
+			return out
+		}
+		body, _ := json.Marshal(map[string]any{"tool": name, "args": args})
+		req, _ := http.NewRequest("POST", app.SidecarURL+"/tools/call?project_id="+project, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		var out map[string]any
+		if resp.StatusCode >= 300 || json.Unmarshal(raw, &out) != nil {
+			t.Fatalf("%s: %d %s", name, resp.StatusCode, raw)
+		}
+		return out
+	}
+	origin := s.localGatewayURL()
+	seeds := []map[string]any{
+		{"app": "auth", "tool": "auth_orgs_create", "input": map[string]any{"slug": "lab", "name": "Lab"}},
+		{"app": "auth", "tool": "auth_users_create", "input": map[string]any{"organization_slug": "lab", "email": "operator@fixture.invalid", "password": "SyntheticPassword123!"}},
+		{"app": "auth", "tool": "auth_clients_create", "input": map[string]any{"organization_slug": "lab", "name": "Browser fixture", "type": "spa", "allowed_origins": []string{origin}}},
+		{"app": "api", "tool": "api_create", "input": map[string]any{"slug": "lab", "name": "Browser lab", "dns_mode": "skipped", "allow_http": true, "cors": map[string]any{"origins": []string{origin}}, "auth": map[string]any{"kind": "public"}}},
+		{"app": "api", "tool": "api_route_add", "input": map[string]any{"api_slug": "lab", "method": "GET", "path_pattern": "/records", "target_kind": "app", "target_ref": "ui-fixture"}},
+		{"app": "api", "tool": "api_route_add", "input": map[string]any{"api_slug": "lab", "method": "POST", "path_pattern": "/records", "target_kind": "app", "target_ref": "ui-fixture"}},
+		{"app": "ui-fixture", "tool": "fixture_configure", "input": map[string]any{"api": map[string]any{"$target": "api"}, "auth": map[string]any{"$target": "auth"}, "client_id": map[string]any{"$ref": "2.client_id"}}},
+	}
+	rpc(environments, "environment_create", map[string]any{"id": "browser-release", "name": "Browser release fixture", "spec": map[string]any{
+		"version": 1, "ttl_seconds": 300, "network_mode": "block", "integration_mode": "mock", "app_install_ids": []int64{fixture.InstallID, gateway.InstallID, auth.InstallID},
+		"targets": map[string]any{"frontend": map[string]any{"app": "ui-fixture", "path": "/ui"}, "api": map[string]any{"app": "api", "path": "/gw/lab"}, "auth": map[string]any{"app": "auth", "path": "/login"}}, "seeds": seeds,
+	}})
+	version := func(dir string) string {
+		raw, _ := os.ReadFile(filepath.Join(root, dir, "apteva.yaml"))
+		m, err := parseServerAppManifest(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Version
+	}
+	config := map[string]any{
+		"environment_id": "browser-release", "environment_revision": 1, "gateway_app": "api", "gateway_path": "/gw/lab",
+		"app_versions":    map[string]string{"api": version("api"), "auth": version("auth"), "ui-fixture": "1.0.0"},
+		"candidate_probe": map[string]any{"app": "ui-fixture", "tool": "fixture_digest", "path": "/digest"},
+		"read_tools":      map[string][]string{"ui-fixture": {"fixture_digest", "fixture_count"}},
+		"browser": map[string]any{"value_refs": map[string]any{
+			"operator.email":    map[string]any{"app": "ui-fixture", "tool": "fixture_credentials", "path": "/email"},
+			"operator.password": map[string]any{"app": "ui-fixture", "tool": "fixture_credentials", "path": "/password"},
+		}},
+	}
+	suite := rpc(tests, "tests_suite_save", map[string]any{"name": "Browser and database", "release": config})["suite"].(map[string]any)
+	suiteID := suite["id"]
+	definition := json.RawMessage(`{"timeout_ms":120000,"steps":[
+ {"id":"open","kind":"browser","browser":{"action":"navigate","target":"frontend","path":"/"}},
+ {"id":"email","kind":"browser","browser":{"action":"fill","locator":{"test_id":"email"},"value_ref":"operator.email"}},
+ {"id":"password","kind":"browser","browser":{"action":"fill","locator":{"test_id":"password"},"value_ref":"operator.password"}},
+ {"id":"login","kind":"browser","browser":{"action":"click","locator":{"role":"button","name":"Sign in"}}},
+ {"id":"dashboard","kind":"browser","poll_every_ms":100,"browser":{"action":"observe","locator":{"role":"heading","name":"Dashboard"}},"assertions":[{"path":"/visible","op":"equals","value":true}]},
+ {"id":"name","kind":"browser","browser":{"action":"fill","locator":{"test_id":"name"},"value":"Synthetic record"}},
+ {"id":"save","kind":"browser","browser":{"action":"click","locator":{"role":"button","name":"Save"}}},
+ {"id":"saved","kind":"browser","poll_every_ms":100,"browser":{"action":"observe","locator":{"test_id":"saved"}},"assertions":[{"path":"/text","op":"equals","value":"1"}]},
+ {"id":"retry","kind":"browser","browser":{"action":"click","locator":{"role":"button","name":"Retry save"}}},
+ {"id":"reload","kind":"browser","browser":{"action":"reload"}},
+ {"id":"reloaded","kind":"browser","poll_every_ms":100,"browser":{"action":"observe","locator":{"test_id":"saved"}},"assertions":[{"path":"/text","op":"equals","value":"1"}]},
+ {"id":"persisted","kind":"app_tool","app":"ui-fixture","tool":"fixture_count","assertions":[{"path":"/count","op":"equals","value":1}]}
+ ]}`)
+	check := rpc(tests, "tests_check_save", map[string]any{"suite_id": suiteID, "name": "Sign in, save, retry and reload", "kind": "scenario", "definition": definition})["check"].(map[string]any)
+	raw, _ := os.ReadFile(filepath.Join(root, "fixture", "main.go"))
+	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
+	wait := func(id any, want string) map[string]any {
+		t.Helper()
+		for deadline := time.Now().Add(4 * time.Minute); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+			run := rpc(tests, "tests_run_get", map[string]any{"id": id})["run"].(map[string]any)
+			if run["status"] == "passed" || run["status"] == "failed" {
+				if run["status"] != want {
+
+					t.Fatalf("want %s: %s", want, mustBrowserJSON(run))
+				}
+				return run
+			}
+		}
+		t.Fatal("browser run timed out")
+		return nil
+	}
+	start := func() any {
+		return rpc(tests, "tests_run", map[string]any{"suite_id": suiteID, "candidate_digest": digest})["run"].(map[string]any)["id"]
+	}
+	passed := wait(start(), "passed")
+	os.WriteFile(filepath.Join(root, "passed.json"), []byte(mustBrowserJSON(passed)), 0600)
+	if strings.Contains(mustBrowserJSON(passed), "SyntheticPassword123!") {
+		t.Fatal("credential leaked to evidence")
+	}
+	if n := countRows(t, fixture.DBPath, "SELECT count(*) FROM records"); n != 0 {
+		t.Fatalf("write reached the source fixture: %d", n)
+	}
+	rec := passed["release"].(map[string]any)
+	if _, ok := s.environments.Get(rec["runtime_id"].(string)); ok {
+		t.Fatal("runtime leaked after passing")
+	}
+	t.Log("Real Auth sign-in, Gateway save/retry/reload and isolated persistence passed")
+	badDef := strings.Replace(string(definition), `"value":"1"`, `"value":"99"`, 1)
+	rpc(tests, "tests_check_save", map[string]any{"id": check["id"], "suite_id": suiteID, "name": "Intentional UI failure", "kind": "scenario", "definition": json.RawMessage(badDef)})
+	failed := wait(start(), "failed")
+	os.WriteFile(filepath.Join(root, "failed.json"), []byte(mustBrowserJSON(failed)), 0600)
+	var artifacts int
+	for _, row := range failed["results"].([]any) {
+		steps := row.(map[string]any)["output"].(map[string]any)["steps"].([]any)
+		for _, raw := range steps {
+			if raw.(map[string]any)["artifact_id"] != nil {
+				artifacts++
+				artifactID := raw.(map[string]any)["artifact_id"]
+				token, _ := s.appInstallToken(tests.InstallID)
+				req, _ := http.NewRequest("GET", fmt.Sprintf("%s/artifacts/%v?project_id=%s", tests.SidecarURL, artifactID, project), nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				image, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 || len(image) < 8 {
+					t.Fatalf("artifact unavailable: %d", resp.StatusCode)
+				}
+				os.WriteFile(filepath.Join(root, "failure.png"), image, 0600)
+
+			}
+		}
+	}
+	if artifacts != 1 {
+		t.Fatalf("missing failure screenshot: %s", mustBrowserJSON(failed))
+	}
+	failedRelease := failed["release"].(map[string]any)
+	verdict := rpc(tests, "tests_release_verdict", map[string]any{"suite_id": suiteID, "candidate_digest": digest, "suite_revision": failedRelease["suite_revision"], "fixture_revision": failedRelease["fixture_revision"]})
+	if verdict["allowed"] != false {
+		t.Fatal("failing browser passed the release gate")
+	}
+	cancelDef := json.RawMessage(`{"steps":[{"id":"open","kind":"browser","browser":{"action":"navigate","target":"frontend","path":"/"}},{"id":"wait","kind":"browser","poll_every_ms":100,"timeout_ms":30000,"browser":{"action":"observe","locator":{"test_id":"never"}},"assertions":[{"path":"/visible","op":"equals","value":true}]}]}`)
+	rpc(tests, "tests_check_save", map[string]any{"id": check["id"], "suite_id": suiteID, "name": "Cancellation", "kind": "scenario", "definition": cancelDef})
+	id := start()
+	time.Sleep(5 * time.Second)
+	rpc(tests, "tests_run_cancel", map[string]any{"id": id})
+	cancelled := wait(id, "failed")
+	if cancelled["cancel_requested"] != true {
+		t.Fatal("cancel was lost")
+	}
+	db, err := sql.Open("sqlite", computer.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var active int
+	if err = db.QueryRow("SELECT count(*) FROM computer_test_sessions WHERE state IN ('starting','active')").Scan(&active); err != nil || active != 0 {
+		t.Fatalf("active browser leak %d %v", active, err)
+	}
+	t.Log("Intentional failure blocked the verdict, retained a screenshot and cancellation removed the browser")
+}
+func mustBrowserJSON(v any) string { raw, _ := json.Marshal(v); return string(raw) }
+
+func newBrowserSmokeServer(t *testing.T) *Server {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	dataDir := t.TempDir()
+	store, err := NewStore(filepath.Join(dataDir, "server.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	secret := make([]byte, 32)
+	_, _ = rand.Read(secret)
+
+	s := &Server{
+		store:   store,
+		secret:  secret,
+		port:    strconv.Itoa(port),
+		dataDir: dataDir,
+		agents:  NewAgentManager(filepath.Join(dataDir, "agents"), ""),
+		// Stable cache OUTSIDE t.TempDir: Go's module cache is written
+		// read-only, which breaks TempDir's RemoveAll cleanup; keeping it
+		// here also reuses the build cache across runs. Per-install data
+		// dirs under it are removed by Environment.Stop.
+		localApps:      NewLocalSupervisor(filepath.Join(os.TempDir(), "apteva-environment-test-appcache")),
+		installedApps:  NewInstalledAppsRegistry(),
+		broadcaster:    NewTelemetryBroadcaster(),
+		instanceSecret: "environment-e2e-secret",
+		environments:   NewEnvironmentManager(environmentDataRoot(dataDir)),
+	}
+	s.environments.server = s
+
+	// A catalog with a synthetic twitter-api app so the integration callback
+	// can resolve the app + tool. The per-environment interceptor short-circuits
+	// before any real request is built, so a minimal tool def suffices.
+	cat := NewAppCatalog()
+	cat.apps["twitter-api"] = &AppTemplate{
+		Slug:  "twitter-api",
+		Name:  "Twitter",
+		Tools: []AppToolDef{{Name: "post_tweet", Method: "POST", Path: "/2/tweets"}},
+	}
+	s.catalog = cat
+
+	// A user so the dev-token callback (installed_by → user) resolves to a
+	// real owner the seeded connection belongs to.
+	if _, err := store.CreateUser("environment-e2e@example.com", "x"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// Mount the app-callback route so in-environment sidecars' platform calls
+	// (ExecuteIntegrationTool → /api/apps/callback/integrations/:id/execute)
+	// reach the real handler → the per-environment interceptor.
+	apiMux := http.NewServeMux()
+	s.registerAppRuntimeRoutes(apiMux)
+	apiMux.HandleFunc("/environment-app-public/", s.handleEnvironmentAppPublicGateway)
+	mux := http.NewServeMux()
+	mux.Handle("/api/", http.StripPrefix("/api", apiMux))
+	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go httpServer.Serve(listener) //nolint:errcheck
+	t.Cleanup(func() { _ = httpServer.Close() })
+	return s
+}

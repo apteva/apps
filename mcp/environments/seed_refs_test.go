@@ -208,3 +208,31 @@ func TestJSONPathLookupSeparatesMissFromNull(t *testing.T) {
 		t.Fatalf("jsonPath kept its nil-on-miss behaviour? got %#v", got)
 	}
 }
+
+func TestNamedTargetsResolveInsideSeeds(t *testing.T) {
+	input := map[string]any{"frontend": map[string]any{"$target": "frontend"}}
+	out, err := resolveSeedRefs(input, nil, map[string]string{"frontend": "http://127.0.0.1:1234/runtime/ui"})
+	if err != nil || out["frontend"] != "http://127.0.0.1:1234/runtime/ui" {
+		t.Fatal(out, err)
+	}
+	if input["frontend"].(map[string]any)["$target"] != "frontend" {
+		t.Fatal("seed input mutated")
+	}
+	if _, err = resolveSeedRefs(input, nil); err == nil {
+		t.Fatal("unknown target accepted")
+	}
+	spec := EnvironmentSpec{Version: 1, Targets: map[string]RuntimeTarget{"frontend": {App: "site", Path: "/ui"}}, Seeds: []SeedStep{{App: "site", Tool: "configure", Input: map[string]any{"base": map[string]any{"$target": "missing"}}}}}
+	if err = validateSpec(spec); err == nil {
+		t.Fatal("unknown target accepted at save time")
+	}
+	spec.Seeds[0].Input["base"] = map[string]any{"$target": "frontend"}
+	if err = validateSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	if containsPseudoEvaluationArgs(map[string]any{"spec": map[string]any{"targets": map[string]any{"frontend": map[string]any{"app": "site", "path": "/ui"}}}}) {
+		t.Fatal("runtime targets mistaken for evaluation targets")
+	}
+	if !containsPseudoEvaluationArgs(map[string]any{"targets": []any{"evaluation"}}) {
+		t.Fatal("top-level evaluation targets accepted")
+	}
+}

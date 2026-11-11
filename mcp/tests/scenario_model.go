@@ -13,6 +13,7 @@ import (
 const maxScenarioSteps = 24
 
 type Step struct {
+	Browser     *BrowserAction    `json:"browser,omitempty"`
 	ID          string            `json:"id"`
 	Kind        string            `json:"kind,omitempty"`
 	Path        string            `json:"path,omitempty"`
@@ -49,6 +50,8 @@ type StepResult struct {
 	Assertions        []AssertionResult `json:"assertions,omitempty"`
 	Evidence          map[string]any    `json:"evidence,omitempty"`
 	Parallel          []StepResult      `json:"parallel,omitempty"`
+	ArtifactID        int64             `json:"artifact_id,omitempty"`
+	ActionDispatched  bool              `json:"action_dispatched,omitempty"`
 	coverageQualified bool
 }
 
@@ -72,6 +75,9 @@ func validateSteps(steps []Step) error {
 		}
 		ids[s.ID] = true
 		for j := range s.Parallel {
+			if s.Parallel[j].Kind == "browser" {
+				return errors.New("browser steps must execute sequentially")
+			}
 			if err := validateStep(&s.Parallel[j], ids, names); err != nil {
 				return err
 			}
@@ -97,6 +103,10 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 		return fmt.Errorf("invalid timing for step %s", s.ID)
 	}
 	switch s.Kind {
+	case "browser":
+		if err := s.validateBrowser(); err != nil {
+			return err
+		}
 	case "http":
 		if s.Method == "" {
 			s.Method = http.MethodGet
@@ -159,7 +169,7 @@ func validateStep(s *Step, ids, names map[string]bool) error {
 }
 
 func validateScenarioBinding(c Check, release *ReleaseConfig) error {
-	if c.Kind != "scenario" {
+	if c.Kind != "scenario" && c.Kind != "browser" {
 		if release != nil {
 			return errors.New("release suites require bound scenario checks")
 		}
@@ -172,6 +182,9 @@ func validateScenarioBinding(c Check, release *ReleaseConfig) error {
 		}
 		for _, step := range group {
 			if release == nil {
+				if step.Kind == "browser" {
+					return errors.New("browser steps require an isolated release environment")
+				}
 				if step.Kind == "app_tool" || (step.Identity != "" && step.Identity != "anonymous") {
 					return errors.New("app-tool steps and named identities require a release environment")
 				}
@@ -182,6 +195,21 @@ func validateScenarioBinding(c Check, release *ReleaseConfig) error {
 					}
 				}
 				continue
+			}
+			if step.Kind == "browser" {
+				if release.Browser == nil {
+					return errors.New("release browser configuration is required")
+				}
+				if ref := step.Browser.ValueRef; ref != "" {
+					if _, ok := release.Browser.ValueRefs[ref]; !ok {
+						return errors.New("unknown browser value_ref")
+					}
+				}
+				if ref := step.Browser.UploadRef; ref != "" {
+					if _, ok := release.Browser.Uploads[ref]; !ok {
+						return errors.New("unknown browser upload_ref")
+					}
+				}
 			}
 			if step.Kind == "app_tool" && !release.allowsRead(step.App, step.Tool) {
 				return fmt.Errorf("step %s is outside the release read-tool allowlist", step.ID)
