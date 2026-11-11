@@ -162,3 +162,11 @@ func TestLocalBrowserIsolationInputAndCancellation(t *testing.T) {
 	}
 	t.Logf("local Chromium isolated cookies, handled inputs and blocked %d foreign requests", fresh.Diagnostics().Blocked)
 }
+
+func TestDiagnosticsRedactSecretsFromRequestedOrigins(t *testing.T) {
+	b := &Browser{boundary: &boundary{requests: []Request{{Origin: "https://seeded-secret.invalid", Method: "GET", Status: 403}}}}
+	b.RegisterSecret("seeded-secret")
+	if got := b.Diagnostics().Requests[0].Origin; strings.Contains(got, "seeded-secret") {
+		t.Fatal("secret leaked through origin", got)
+	}
+}

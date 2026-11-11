@@ -102,6 +102,7 @@ func New(request context.Context, opts Options) (*Browser, error) {
 					b.stateMu.Lock()
 					b.deniedPages++
 					b.stateMu.Unlock()
+					b.boundary.record(Request{Method: e.Request.Method, Origin: safeOrigin(u), Status: 403})
 				}
 			}
 
@@ -165,6 +166,10 @@ func (b *Browser) Diagnostics() Diagnostics {
 	d.Errors = make([]string, len(raw))
 	for i, text := range raw {
 		d.Errors[i] = b.clean(text)
+	}
+	for i := range d.Requests {
+		d.Requests[i].Origin = b.clean(d.Requests[i].Origin)
+		d.Requests[i].Method = b.clean(d.Requests[i].Method)
 	}
 	return d
 }
