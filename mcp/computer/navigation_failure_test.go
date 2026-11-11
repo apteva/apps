@@ -33,6 +33,9 @@ func TestNavigationExhaustionBlocksWritesAndKeepsMCPError(t *testing.T) {
 	if !ok || !result.IsError || result.StructuredContent["coverage_incomplete"] != true || result.StructuredContent["retryable"] != false || result.StructuredContent["retry_exhausted"] != true {
 		t.Fatalf("unsafe MCP result: %#v", out)
 	}
+	if index := strings.Index(result.Content[0].Text, "net::ERR_HTTP2_SERVER_REFUSED_STREAM"); index < 0 || index > 100 {
+		t.Fatal("legacy clients would lose the network error in truncated text")
+	}
 	for _, action := range []string{"click", "upload_file", "type", "key", "batch", "prepare_upload", "set_text"} {
 		out, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_nav", "action": action})
 		if err != nil {

@@ -21,7 +21,15 @@ func (a *App) toolComputerUseMCP(callCtx context.Context, ctx *sdk.AppCtx, args 
 	out, err := a.toolComputerUseCaller(callCtx, ctx, args)
 	if result, ok := out.(map[string]any); err == nil && ok && result["navigation_failure"] == true {
 		body, _ := json.Marshal(result)
-		return sdk.MCPResult{IsError: true, StructuredContent: result, Content: []sdk.MCPContent{{Type: "text", Text: stringArg(result, "error_code") + ": " + stringArg(result, "error") + "\n" + string(body)}}}, nil
+		message := stringArg(result, "error")
+		if diagnostic, ok := result["navigation"].(*api.NavigationDiagnostics); ok && len(diagnostic.Attempts) > 0 {
+			if browserError := diagnostic.Attempts[len(diagnostic.Attempts)-1].Error; browserError != "" {
+				// Legacy app clients truncate text errors. Keep the browser error
+				// ahead of the explanation and the complete structured evidence.
+				message = browserError + "; " + message
+			}
+		}
+		return sdk.MCPResult{IsError: true, StructuredContent: result, Content: []sdk.MCPContent{{Type: "text", Text: stringArg(result, "error_code") + ": " + message + "\n" + string(body)}}}, nil
 	}
 	return out, err
 }
