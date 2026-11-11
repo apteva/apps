@@ -1,0 +1,34 @@
+name: Browser test checks
+on:
+  pull_request:
+    paths: ["mcp/tests/**", "mcp/computer/**", "mcp/environments/**", ".github/workflows/browser-tests.yml"]
+  push:
+    branches: [main]
+    paths: ["mcp/tests/**", "mcp/computer/**", "mcp/environments/**", ".github/workflows/browser-tests.yml"]
+permissions:
+  contents: read
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        app: [tests, computer, environments]
+    defaults:
+      run:
+        working-directory: mcp/${{ matrix.app }}
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: mcp/${{ matrix.app }}/go.sum
+      - run: go test -race ./... -count=1
+      - run: go vet ./...
+      - if: matrix.app == 'computer'
+        uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - if: matrix.app == 'computer'
+        run: RUN_BROWSER_TESTS=1 CHROME_BIN='${{ steps.chrome.outputs.chrome-path }}' go test -race -count=1 ./internal/browser/testbrowser

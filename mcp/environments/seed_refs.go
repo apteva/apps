@@ -18,15 +18,36 @@ type seedRefResolver func(ref string) (any, error)
 // resolveSeedRefs returns a copy of input with every reference replaced by the
 // value it points at. results holds the outputs of the seeds that already ran,
 // in spec order.
-func resolveSeedRefs(input map[string]any, results []any) (map[string]any, error) {
-	return walkSeedRefs(input, func(ref string) (any, error) { return lookupSeedRef(ref, results) })
+func resolveSeedRefs(input map[string]any, results []any, targets ...map[string]string) (map[string]any, error) {
+	return walkSeedRefs(input, func(ref string) (any, error) {
+		if name, ok := strings.CutPrefix(ref, "target:"); ok {
+			if len(targets) > 0 {
+				if value, ok := targets[0][name]; ok {
+					return value, nil
+				}
+			}
+			return nil, fmt.Errorf("unknown runtime target %q", name)
+		}
+		return lookupSeedRef(ref, results)
+	})
 }
 
 // validateSeedRefs rejects references the seed at index can never resolve, so a
 // malformed or forward reference surfaces when the definition is written rather
 // than part-way through a start.
-func validateSeedRefs(input map[string]any, index int) error {
+func validateSeedRefs(input map[string]any, index int, targets ...map[string]RuntimeTarget) error {
 	_, err := walkSeedRefs(input, func(ref string) (any, error) {
+		if name, ok := strings.CutPrefix(ref, "target:"); ok {
+			if !validID(name) {
+				return nil, fmt.Errorf("invalid runtime target %q", name)
+			}
+			if len(targets) > 0 {
+				if _, exists := targets[0][name]; !exists {
+					return nil, fmt.Errorf("unknown runtime target %q", name)
+				}
+			}
+			return nil, nil
+		}
 		target, _, err := parseSeedRef(ref)
 		if err != nil {
 			return nil, err
@@ -57,6 +78,13 @@ func walkSeedRefs(input map[string]any, resolve seedRefResolver) (map[string]any
 func resolveSeedRefValue(value any, resolve seedRefResolver) (any, error) {
 	switch typed := value.(type) {
 	case map[string]any:
+		if raw, ok := typed["$target"]; ok {
+			name, ok := raw.(string)
+			if !ok || len(typed) != 1 {
+				return nil, fmt.Errorf("$target requires one named runtime target")
+			}
+			return resolve("target:" + name)
+		}
 		if raw, ok := typed[seedRefKey]; ok {
 			if len(typed) > 1 {
 				return nil, fmt.Errorf("%s object must not carry other keys", seedRefKey)

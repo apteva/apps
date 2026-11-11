@@ -25,6 +25,9 @@ func anyObjectSchema() map[string]any {
 }
 
 var environmentSpecSchema = strictObject(map[string]any{
+	"targets": map[string]any{"type": "object", "additionalProperties": strictObject(map[string]any{
+		"app": map[string]any{"type": "string"}, "path": map[string]any{"type": "string"},
+	}, "app", "path")},
 	"version":     map[string]any{"type": "integer", "minimum": 1},
 	"ttl_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
 	"clock": strictObject(map[string]any{

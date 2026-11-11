@@ -107,12 +107,22 @@ func validateCheck(c *Check) error {
 		return errors.New("suite_id and name (1–200 characters) required")
 	}
 	d := &c.Definition
-	if c.Kind == "scenario" {
+	if c.Kind == "scenario" || c.Kind == "browser" {
 		if d.TimeoutMS == 0 {
 			d.TimeoutMS = 60000
 		}
 		if d.TimeoutMS < 100 || d.TimeoutMS > 120000 {
 			return errors.New("scenario timeout_ms must be 100–120000")
+		}
+		if c.Kind == "browser" {
+			for i := range d.Steps {
+				if d.Steps[i].Kind == "" {
+					d.Steps[i].Kind = "browser"
+				}
+				if d.Steps[i].Kind != "browser" {
+					return errors.New("browser checks require browser steps")
+				}
+			}
 		}
 		return validateSteps(d.Steps)
 	}

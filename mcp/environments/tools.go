@@ -105,7 +105,7 @@ func containsPseudoEvaluationArgs(args map[string]any) bool {
 	}
 	spec, _ := args["spec"].(map[string]any)
 	for _, field := range pseudoEvaluationFields {
-		if _, found := spec[field]; found {
+		if _, found := spec[field]; found && field != "targets" {
 			return true
 		}
 	}
@@ -122,6 +122,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_start", Description: "Start a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStart},
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
 		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
+		{Name: "environment_run_targets", Description: "Resolve named frontend, API and Auth targets inside a running environment.", InputSchema: requiredSchema("run_id"), Handler: a.toolRunTargets},
 		{Name: "environment_run_endpoint", Description: "Resolve a running environment app’s HTTP endpoint for a test or fixture.", InputSchema: requiredSchema("run_id", "app"), Handler: a.toolRunEndpoint},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_clock_get", Description: "Read a run's server-owned clock and advancement history.", InputSchema: requiredSchema("run_id"), Handler: a.toolClockGet},

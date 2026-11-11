@@ -1,0 +1,24 @@
+schema: apteva-app/v1
+name: ui-fixture
+display_name: UI Fixture
+version: 1.0.0
+description: Synthetic isolated UI acceptance fixture.
+scopes: [project]
+requires:
+  permissions: [db.write.app, platform.apps.call]
+  apps: [{name: auth, optional: true}]
+provides:
+  http_routes:
+    - {prefix: /ui/, no_auth: true}
+    - {prefix: /records}
+  mcp_tools:
+    - {name: fixture_configure, description: Configure runtime endpoints.}
+    - {name: fixture_digest, description: Measure loaded candidate.}
+    - {name: fixture_credentials, description: Resolve synthetic credentials.}
+    - {name: fixture_count, description: Read persisted record count.}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/ui-fixture}
+  port: 8080
+  health_check: /health
+db: {driver: sqlite, path: /data/fixture.db, migrations: migrations/}

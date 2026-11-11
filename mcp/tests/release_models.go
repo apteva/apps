@@ -11,6 +11,7 @@ import (
 )
 
 type ReleaseConfig struct {
+	Browser             *BrowserConfig      `json:"browser,omitempty"`
 	EnvironmentID       string              `json:"environment_id"`
 	EnvironmentRevision int                 `json:"environment_revision"`
 	AppVersions         map[string]string   `json:"app_versions"`
@@ -109,6 +110,11 @@ func validProbe(p ToolProbe) bool {
 }
 
 func (r *ReleaseConfig) validate() error {
+	if r.Browser != nil {
+		if err := r.Browser.validate(); err != nil {
+			return err
+		}
+	}
 	if !slugPattern.MatchString(r.EnvironmentID) || r.EnvironmentRevision < 1 ||
 		!slugPattern.MatchString(r.GatewayApp) || !validProbe(r.IdentityProbe) ||
 		!r.allowsRead(r.IdentityProbe.App, r.IdentityProbe.Tool) {

@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.8.0
+version: 0.9.0
 description: |
+  v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
   Mobile startup retries preparation within a bounded window
   and reports explicit user authorization/setup states without replaying input.
@@ -71,6 +72,10 @@ provides:
     - prefix: /
 
   mcp_tools:
+    - { name: browser_test_capabilities, description: Inspect the isolated local browser testing protocol. }
+    - { name: browser_test_session, description: Manage an ephemeral restricted test browser. }
+    - { name: browser_test_step, description: Execute a browser test action or structured observation. }
+    - { name: browser_test_capture, description: Capture masked failure evidence for Tests. }
     - name: browser_session
       description: |
         Open browser or Mobile sessions through the same lifecycle. Use
@@ -554,7 +559,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.8.0
+    ref: computer/v0.9.0
     entry: mcp/computer
   port: 8080
   health_check: /health

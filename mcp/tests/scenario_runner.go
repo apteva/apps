@@ -213,6 +213,8 @@ func (a *App) scenarioHTTP(ctx context.Context, step Step, values map[string]any
 
 func (a *App) scenarioStepOutput(ctx context.Context, step Step, values map[string]any, app *appRunContext, result *StepResult) (any, error) {
 	switch step.Kind {
+	case "browser":
+		return a.executeBrowserStep(ctx, step, values, app, result)
 	case "http":
 		return a.scenarioHTTP(ctx, step, values, app.release, result)
 	case "function":
@@ -346,9 +348,18 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result := Result{CheckID: check.ID, Name: check.Name, Kind: check.Kind, Status: "passed", Assertions: []AssertionResult{}}
+	app.browser = nil
+	if hasBrowser(check) {
+		if _, err := a.openBrowserCheck(ctx, check, app); err != nil {
+			result.Status, result.Error = "error", safeBrowserError(err)
+		}
+	}
 	values := map[string]any{}
 	var steps []StepResult
 	for _, step := range check.Definition.Steps {
+		if result.Status != "passed" {
+			break
+		}
 		if ctx.Err() != nil {
 			result.Status, result.Error = "error", "scenario deadline exceeded"
 			break
@@ -368,11 +379,41 @@ func (a *App) runScenario(ctx context.Context, check Check, app *appRunContext, 
 			break
 		}
 	}
+	var browserEvidence *BrowserEvidence
+	if app.browser != nil {
+		var status struct {
+			Diagnostics BrowserDiagnostics `json:"diagnostics"`
+		}
+		statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		statusErr := callComputer(statusCtx, app.ctx, "browser_test_session", map[string]any{"action": "status", "id": app.browser.id}, &status)
+		statusCancel()
+		if statusErr != nil || len(status.Diagnostics.Errors) > 0 || status.Diagnostics.Blocked > 0 || status.Diagnostics.Truncated {
+			result.Status, result.Error = "error", "browser diagnostics reported an execution failure"
+		}
+		if result.Status != "passed" {
+			stepID := "startup"
+			if len(steps) > 0 {
+				stepID = steps[len(steps)-1].ID
+			}
+			if id, err := a.captureBrowserFailure(ctx, app.browser, stepID); err == nil && len(steps) > 0 {
+				steps[len(steps)-1].ArtifactID = id
+			}
+		}
+		evidence, err := a.closeBrowserCheck(ctx, app.browser)
+		browserEvidence = &evidence
+		if err != nil {
+			result.Status, result.Error = "error", safeBrowserError(err)
+		}
+		app.browser = nil
+	}
 	if result.Status == "passed" {
 		markScenarioCoverage(covered, steps)
 	}
 	result.DurationMS = time.Since(start).Milliseconds()
 	result.Output = map[string]any{"steps": steps}
+	if browserEvidence != nil {
+		result.Output.(map[string]any)["browser"] = redactValue(browserEvidence, app.release)
+	}
 	return result
 }
 

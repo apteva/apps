@@ -161,6 +161,13 @@ func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, 
 			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
 		}
 	}()
+	targetsJSON, marshalErr := json.Marshal(spec.Targets)
+	if marshalErr != nil {
+		return run, marshalErr
+	}
+	if _, err = s.db.db.Exec(`UPDATE environment_runs SET targets_json=? WHERE id=?`, string(targetsJSON), run.ID); err != nil {
+		return run, err
+	}
 	if err = s.createWebFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create web fixtures: %w", err)
 	}
@@ -174,12 +181,16 @@ func (s *service) startWithID(environmentID, kind string, spec EnvironmentSpec, 
 	}
 	// Seed results stay addressable so a later seed can reference what an
 	// earlier one created, through {"$ref": "<index>.<path>"} in its input.
+	targets, targetErr := s.resolveTargets(runtimeID, spec.Targets)
+	if targetErr != nil {
+		return run, targetErr
+	}
 	results := make([]any, 0, len(spec.Seeds))
 	for i, seed := range spec.Seeds {
 		if strings.TrimSpace(seed.App) == "" || strings.TrimSpace(seed.Tool) == "" {
 			return run, fmt.Errorf("seed %d: app and tool required", i)
 		}
-		input, refErr := resolveSeedRefs(seed.Input, results)
+		input, refErr := resolveSeedRefs(seed.Input, results, targets)
 		if refErr != nil {
 			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, refErr)
 		}
@@ -579,6 +590,9 @@ func (s *service) liveMap() (map[string]*sdk.RuntimeSummary, error) {
 	return out, nil
 }
 func validateSpec(spec EnvironmentSpec) error {
+	if err := validateTargets(spec.Targets); err != nil {
+		return err
+	}
 	if spec.Clock != nil {
 		if spec.Clock.Mode != "real" && spec.Clock.Mode != "manual" {
 			return errors.New("clock mode must be real or manual")
@@ -597,7 +611,7 @@ func validateSpec(spec EnvironmentSpec) error {
 		return errors.New("mcp_server_ids may contain at most 16 entries")
 	}
 	for i, seed := range spec.Seeds {
-		if err := validateSeedRefs(seed.Input, i); err != nil {
+		if err := validateSeedRefs(seed.Input, i, spec.Targets); err != nil {
 			return fmt.Errorf("seed %d: %w", i, err)
 		}
 	}

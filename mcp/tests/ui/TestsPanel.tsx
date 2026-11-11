@@ -4,29 +4,35 @@ type Props = { projectId: string; installId: number; appName?: string };
 type Suite = { id: number; name: string; description: string; environment: string; release?: Record<string, unknown> };
 type Assertion = { path: string; op: string; value?: unknown };
 type Definition = { function?: string; event?: unknown; url?: string; method?: string; body?: string; headers?: Record<string, string>; timeout_ms: number; assertions?: Assertion[]; steps?: Record<string, unknown>[] };
-type Check = { id?: number; suite_id: number; name: string; kind: "function" | "http" | "scenario"; enabled: boolean; definition: Definition };
+type Check = { id?: number; suite_id: number; name: string; kind: "function" | "http" | "scenario" | "browser"; enabled: boolean; definition: Definition };
 type Result = { check_id: number; name: string; kind: string; status: string; duration_ms: number; error: string; output: unknown; assertions: (Assertion & { passed: boolean; actual: unknown; exists: boolean })[] };
 type Run = { id: number; suite_id: number; suite_name: string; environment: string; status: string; passed: number; failed: number; error: string; created_at: string; checks?: Check[]; results?: Result[]; cancel_requested?: boolean; release?: ReleaseRecord };
 type ReleaseRecord = { candidate_digest: string; observed_digest?: string; suite_revision: string; fixture_revision: string; environment_run_id?: string; openapi_digest?: string; covered_operations?: string[]; missing_operations?: string[] };
-type StepResult = { id: string; kind: string; status: string; duration_ms: number; attempts?: number; error?: string; method?: string; path?: string; http_status?: number; operation_id?: string; correlation_id?: string; assertions?: Result["assertions"]; evidence?: Record<string, unknown>; parallel?: StepResult[] };
+type StepResult = { id: string; kind: string; status: string; duration_ms: number; attempts?: number; error?: string; method?: string; path?: string; http_status?: number; operation_id?: string; correlation_id?: string; assertions?: Result["assertions"]; evidence?: Record<string, unknown>; parallel?: StepResult[]; artifact_id?: number; action_dispatched?: boolean };
 const input = "w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-text focus:outline-none focus:ring-1 focus:ring-accent";
 const button = "rounded-lg border border-border px-3 py-2 text-sm hover:bg-surface-2 disabled:opacity-40 disabled:cursor-not-allowed";
 const primary = `${button} bg-accent text-white`;
 const pretty = (v: unknown) => JSON.stringify(v, null, 2) ?? "null";
-const sample = (kind: Check["kind"], bound = false): Definition => kind === "scenario"
+const sample = (kind: Check["kind"], bound = false): Definition => kind === "browser"
+  ? { timeout_ms: 60000, steps: [
+      {id:"open",kind:"browser",browser:{action:"navigate",target:"frontend",path:"/"}},
+      {id:"ready",kind:"browser",poll_every_ms:100,browser:{action:"observe",locator:{test_id:"ready"}},assertions:[{path:"/visible",op:"equals",value:true}]}
+    ] }
+  : kind === "scenario"
   ? { timeout_ms: 60000, steps: [{ id: "health", kind: "http", method: "GET", path: bound ? "/health" : "https://example.com/health", assertions: [{ path: "/status_code", op: "equals", value: 200 }] }] }
   : kind === "function"
   ? { function: "calculate-price", event: { quantity: 2 }, timeout_ms: 10000, assertions: [{ path: "/response/total", op: "equals", value: 120 }] }
   : { url: "https://example.com/health", method: "GET", timeout_ms: 10000, assertions: [{ path: "/status_code", op: "equals", value: 200 }] };
-function ScenarioEvidence({ steps }: { steps: StepResult[] }) {
+function ScenarioEvidence({ steps, artifactURL }: { steps: StepResult[]; artifactURL: (id: number) => string }) {
   return <div className="mt-3 space-y-2">{steps.map(step => <details key={step.id} open={step.status !== "passed"} className="rounded-lg border border-border p-3">
     <summary className="cursor-pointer flex flex-wrap items-center gap-2 text-sm"><Badge value={step.status} />{step.id}<span className="text-xs text-text-dim">{step.kind} · {step.duration_ms} ms{step.attempts && step.attempts > 1 ? ` · ${step.attempts} attempts` : ""}</span></summary>
     {step.method && <p className="mt-2 break-all text-xs"><code>{step.method} {step.path}</code> {step.http_status}</p>}
     {(step.operation_id || step.correlation_id) && <p className="mt-2 break-all text-xs text-text-dim">{[step.operation_id, step.correlation_id].filter(Boolean).join(" · ")}</p>}
     {step.error && <p className="mt-2 text-sm" style={{ color: "#dc2626" }}>{step.error}</p>}
-    {step.assertions?.map((a, i) => <p key={i} className="mt-2 text-xs"><Badge value={a.passed ? "passed" : "failed"} /> <code>{a.path || "/"} {a.op}</code>{!a.exists && " · path missing"}</p>)}
+    {step.assertions?.map((a, i) => <p key={i} className="mt-2 text-xs"><Badge value={a.passed ? "passed" : "failed"} /> <code>{a.path || "/"} {a.op}</code>{!a.exists && " · path missing"}{a.exists && a.actual !== null && <span className="ml-2">Expected {pretty(a.value)} · actual {pretty(a.actual)}</span>}</p>)}
     {step.evidence && Object.keys(step.evidence).length > 0 && <pre className="mt-2 overflow-auto rounded bg-surface-2 p-2 text-xs">{pretty(step.evidence)}</pre>}
-    {step.parallel && <ScenarioEvidence steps={step.parallel} />}
+    {step.artifact_id && <a href={artifactURL(step.artifact_id)} target="_blank" rel="noreferrer"><img className="mt-3 max-h-80 rounded border border-border" src={artifactURL(step.artifact_id)} alt={`Masked failure screenshot for ${step.id}`} /></a>}
+    {step.parallel && <ScenarioEvidence steps={step.parallel} artifactURL={artifactURL} />}
   </details>)}</div>;
 }
 const runLabel = (run: Run) => run.cancel_requested ? run.status === "failed" ? "cancelled" : "cancelling" : run.status;
@@ -99,10 +105,11 @@ function Panel({ projectId, installId }: Props) {
   function editSuite(s: Partial<Suite>) { setSuiteForm(s); setReleaseForm(s.release ? pretty(s.release) : ""); }
   function editCheck(c: Check) { setEdit(c); setDefinition(pretty(c.definition)); }
   const last = runs[0];
+  const artifactURL = (id: number) => `/api/apps/tests/artifacts/${id}?${new URLSearchParams({project_id: projectId, install_id: String(installId)})}`;
 
   return <div className="h-full overflow-auto bg-surface text-text p-5" style={{ minHeight: 500 }}>
     <header className="flex flex-wrap items-center justify-between gap-3 mb-5">
-      <div><h1 className="text-xl font-semibold">Tests</h1><p className="text-sm text-text-dim mt-1">Check your functions and endpoints. Keep the evidence from every run.</p></div>
+      <div><h1 className="text-xl font-semibold">Tests</h1><p className="text-sm text-text-dim mt-1">Run backend and browser scenarios. Keep the evidence from every run.</p></div>
       <button className={primary} disabled={busy} onClick={() => editSuite({ name: "", environment: "test", description: "" })}>+ New suite</button>
     </header>
     {error && <div role="alert" className="mb-4 rounded-lg border p-3 text-sm" style={{ borderColor: "#dc262655", color: "#dc2626" }}>{error}</div>}
@@ -140,9 +147,9 @@ function Panel({ projectId, installId }: Props) {
         {edit && <form className="rounded-xl border border-border p-4 space-y-3" onSubmit={e => { e.preventDefault(); act(async () => { const parsed = JSON.parse(definition); await rpc("tests_check_save", { ...edit, definition: parsed }); setEdit(null); await loadDetails(); }); }}>
           <h2 className="font-semibold">{edit.id ? "Edit check" : "New check"}</h2>
           <label className="block text-sm">Name<input className={input} required maxLength={200} value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="Returns the expected total" /></label>
-          <label className="block text-sm">Runner<select className={input} value={edit.kind} onChange={e => { const kind = e.target.value as Check["kind"]; setEdit({ ...edit, kind }); setDefinition(pretty(sample(kind, !!suite?.release))); }}>{!suite?.release && <><option value="function">Function</option><option value="http">HTTP</option></>}<option value="scenario">Scenario</option></select></label>
+          <label className="block text-sm">Runner<select className={input} value={edit.kind} onChange={e => { const kind = e.target.value as Check["kind"]; setEdit({ ...edit, kind }); setDefinition(pretty(sample(kind, !!suite?.release))); }}>{!suite?.release && <><option value="function">Function</option><option value="http">HTTP</option></>}<option value="scenario">Scenario</option>{suite?.release && <option value="browser">Browser</option>}</select></label>
           <label className="block text-sm">Definition and assertions<textarea spellCheck={false} className={`${input} font-mono text-xs mt-1`} style={{ minHeight: 290 }} required value={definition} onChange={e => setDefinition(e.target.value)} /></label>
-          <p className="text-xs text-text-dim">{edit.kind === "scenario" ? "Use HTTP, Function, or bound app-tool steps. Capture values and reference them as {{name}}. Select safe JSON pointers for saved evidence." : edit.kind === "function" ? "Invokes the active function version in this project. Assert on /response/field. A timeout here does not stop the function itself." : "Assert on /status_code, /body, or /json/field. Redirects are not followed. Private targets require an operator setting."} Operators: equals, not_equals, exists, contains, lt, lte, gt, gte.</p>
+          <p className="text-xs text-text-dim">{edit.kind === "scenario" || edit.kind === "browser" ? "Use HTTP, Function, browser, or bound app-tool steps. Browser checks use isolated runtime targets. Capture values and reference them as {{name}}. Select safe JSON pointers for saved evidence." : edit.kind === "function" ? "Invokes the active function version in this project. Assert on /response/field. A timeout here does not stop the function itself." : "Assert on /status_code, /body, or /json/field. Redirects are not followed. Private targets require an operator setting."} Operators: equals, not_equals, exists, contains, lt, lte, gt, gte.</p>
           <div className="flex gap-2"><button className={primary} disabled={busy}>Save check</button><button className={button} type="button" onClick={() => setEdit(null)}>Cancel</button></div>
         </form>}
         <details className="text-sm text-text-dim pt-5"><summary className="cursor-pointer">Suite management</summary><p className="my-3">Archiving hides this suite. Existing queued runs and history remain.</p><button className={button} disabled={busy} onClick={() => act(async () => { await rpc("tests_suite_archive", { id: selected }); await loadSuites(); })}>Archive suite</button></details>
@@ -164,7 +171,8 @@ function Panel({ projectId, installId }: Props) {
           {run.results?.map(r => <details key={r.check_id} className="rounded-lg border border-border p-3" open={r.status !== "passed"}><summary className="cursor-pointer flex items-center gap-3"><Badge value={r.status} /><span className="font-medium">{r.name}</span><span className="text-xs text-text-dim ml-auto">{r.duration_ms} ms</span></summary>
             {r.error && <p className="text-sm mt-3" style={{ color: "#dc2626" }}>{r.error}</p>}
             {r.assertions.map((a, i) => <div key={i} className="border-t border-border mt-3 pt-3 text-xs"><Badge value={a.passed ? "passed" : "failed"} /> <code>{a.path || "/ (root)"} {a.op} {a.op === "exists" ? "" : pretty(a.value)}</code><p className="text-text-dim mt-1 break-all">Actual: {a.exists ? pretty(a.actual) : "path is missing"}</p></div>)}
-            {r.kind === "scenario" ? <ScenarioEvidence steps={(r.output as { steps?: StepResult[] })?.steps ?? []} /> : <><p className="text-xs font-medium mt-4 mb-2">Saved output</p><pre className="bg-surface-2 rounded p-3 text-xs overflow-auto" style={{ maxHeight: 280 }}>{pretty(r.output)}</pre></>}
+            {(r.output as any)?.browser && <details className="mt-3 text-xs"><summary>Browser environment and diagnostics</summary><pre className="mt-2 overflow-auto rounded bg-surface-2 p-3">{pretty((r.output as any).browser)}</pre></details>}
+            {(r.kind === "scenario" || r.kind === "browser") ? <ScenarioEvidence steps={(r.output as { steps?: StepResult[] })?.steps ?? []} artifactURL={artifactURL} /> : <><p className="text-xs font-medium mt-4 mb-2">Saved output</p><pre className="bg-surface-2 rounded p-3 text-xs overflow-auto" style={{ maxHeight: 280 }}>{pretty(r.output)}</pre></>}
           </details>)}
           {run.checks && <details className="text-xs text-text-dim"><summary className="cursor-pointer">Definitions used for this run</summary><pre className="mt-3 overflow-auto" style={{ maxHeight: 320 }}>{pretty(run.checks)}</pre></details>}
         </section>}

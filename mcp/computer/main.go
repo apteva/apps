@@ -62,8 +62,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.8.0
+version: 0.9.0
 description: |
+  v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
   Mobile startup retries preparation within a bounded window
   and reports explicit user authorization/setup states without replaying input.
@@ -122,6 +123,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: browser_test_capabilities, description: Inspect the isolated local browser testing protocol. }
+    - { name: browser_test_session, description: Manage an ephemeral restricted test browser. }
+    - { name: browser_test_step, description: Execute a browser test action or structured observation. }
+    - { name: browser_test_capture, description: Capture masked failure evidence for Tests. }
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
@@ -279,7 +284,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.8.0
+    ref: computer/v0.9.0
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -514,6 +519,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
+	browserTests      *testBrowserManager
 	providerCleanupMu sync.Mutex
 	reg               *registry
 }
@@ -536,6 +542,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("computer requires a db block")
 	}
+	if err := a.recoverBrowserTests(ctx); err != nil {
+		return err
+	}
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx
 	if err := recoverLegacyProviderLeases(ctx); err != nil {
@@ -554,6 +563,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	a.closeAllBrowserTests(ctx)
 	// Best-effort close on shutdown. We don't lock for the whole sweep
 	// — each session is serialized with in-flight actions.
 	if a.reg == nil {
@@ -644,7 +654,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append(a.browserTestTools(), []sdk.Tool{
 		{
 			Name: "browser_session",
 			Description: "Session lifecycle for browser and Mobile targets; tab control is browser-only. backend=mobile accepts device_id or target (kind, device_id, platform, physical, mode, app_id). Saved Mobile contexts bind the exact device and project; they reuse shared device app data without isolation or snapshot restore. Results report capabilities; only use supported actions. Mobile timeout is a renewable lease of 30..3600 seconds (default 900). Actions: open, status, close, tabs, switch_tab, close_tab. " +
@@ -933,7 +943,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserClose,
 		},
-	}
+	}...)
 }
 
 // ─── Tool handlers ─────────────────────────────────────────────────
