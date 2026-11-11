@@ -443,7 +443,7 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	} else if runErr != nil {
 		status = "failed"
 	}
-	if runCtx.Err() == nil && exec.session != nil && !exec.secretInputUsed {
+	if runCtx.Err() == nil && exec.session != nil && !exec.secretInputUsed && !exec.definition.PrivateScreen {
 		if shot, shotErr := exec.storeCurrentScreenshot("final browser state"); shotErr == nil {
 			exec.screenshot = shot
 		} else {
@@ -814,7 +814,7 @@ func (e *actorExecution) runStep(step actorStep) error {
 	switch step.Action {
 	case "open":
 		return e.gotoURL("")
-	case "tap", "swipe", "home", "launch_app", "stop_app":
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_type_secret", "native_type_private":
 		return e.screenInteract(step)
 	case "prepare_upload":
 		return e.prepareUpload(step)
@@ -1131,6 +1131,9 @@ func (e *actorExecution) gotoURL(target string) error {
 			remainingSeconds = maxInt64(60, remainingSeconds)
 		}
 		args := map[string]any{"persist": e.definition.Browser.Persist, "timeout": remainingSeconds}
+		if e.definition.PrivateScreen {
+			args["extraction_only"] = true
+		}
 		mobile := e.definition.Browser.Backend == "mobile"
 		if mobile {
 			args["persist"] = true

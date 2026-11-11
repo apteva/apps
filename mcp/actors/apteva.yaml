@@ -176,8 +176,8 @@ config_schema:
     description: Maximum concurrent queued actor runs per installation (1 to 32). Runs sharing a saved browser context, Mobile device or continuation still run in order.
   - name: browser_secrets
     type: secret
-    label: Browser secret references
-    description: "Operator-managed JSON map of project ID to secret references. Each entry requires value, context_id, exact HTTPS host and expires_at (RFC3339). Stored in encrypted install settings; never put raw credentials in actor definitions or run input."
+    label: Actor secret references
+    description: "Encrypted JSON map of project IDs to secret references. Each entry requires value, context_id, expires_at (RFC3339), and either host for HTTPS or native_app for a private Mobile operation. Use references in definitions and run inputs."
   - name: allow_private_networks
     type: bool
     default: false
