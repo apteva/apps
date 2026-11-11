@@ -20,8 +20,9 @@ import (
 )
 
 type testBrowserManager struct {
-	mu       sync.Mutex
-	sessions map[string]*testBrowserLease
+	mu          sync.Mutex
+	sessions    map[string]*testBrowserLease
+	recoveryErr error
 }
 type testBrowserLease struct {
 	browser *testbrowser.Browser
@@ -54,12 +55,15 @@ func (a *App) browserTestTools() []sdk.Tool {
 			if _, _, err := testBrowserOwner(ctx, app); err != nil {
 				return nil, err
 			}
+			if name != "browser_test_capabilities" && !a.browserTestsReady() {
+				return nil, errors.New("browser testing is unavailable until interrupted test sessions are recovered")
+			}
 			return handler(ctx, app, args)
 		}}
 	}
 	return []sdk.Tool{
 		wrap("browser_test_capabilities", "Read the versioned local browser testing contract.", func(context.Context, *sdk.AppCtx, map[string]any) (any, error) {
-			return map[string]any{"protocol": testbrowser.Protocol, "backend": "local", "available": testbrowser.Available(), "fresh_context": true, "runtime_network_boundary": true,
+			return map[string]any{"protocol": testbrowser.Protocol, "backend": "local", "available": a.browserTestsReady() && testbrowser.Available(), "fresh_context": true, "runtime_network_boundary": true,
 				"network_schemes": []string{"http"}, "recording": false, "screenshots": true, "concurrency": 1,
 				"actions": []string{"navigate", "reload", "observe", "click", "fill", "select", "check", "upload"}}, nil
 		}),
@@ -67,6 +71,11 @@ func (a *App) browserTestTools() []sdk.Tool {
 		wrap("browser_test_step", "Execute one deterministic browser action or return structured element observations.", a.browserTestStep),
 		wrap("browser_test_capture", "Capture a masked failure screenshot for immediate storage by Tests.", a.browserTestCapture),
 	}
+}
+
+// Failure in this optional subsystem must not disable normal Computer tools.
+func (a *App) browserTestsReady() bool {
+	return a.browserTests != nil && a.browserTests.recoveryErr == nil
 }
 func decodeBrowserArgs(args map[string]any, out any) error {
 	raw, err := json.Marshal(args)

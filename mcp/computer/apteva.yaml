@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.9.0
+version: 0.9.1
 description: |
   v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
@@ -559,7 +559,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.0
+    ref: computer/v0.9.1
     entry: mcp/computer
   port: 8080
   health_check: /health
