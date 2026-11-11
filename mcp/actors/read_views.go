@@ -491,15 +491,17 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		return errors.New("current-page inspection requires an existing browser session")
 	}
 	if e.readResume == nil && !c.UseCurrentPage {
-		if err := e.gotoURL(c.EntryURL); err != nil {
-			if !strings.Contains(err.Error(), "net::ERR_HTTP2_SERVER_REFUSED_STREAM") {
+		if err := e.gotoReadOnlyURL(c.EntryURL); err != nil {
+			// Computer 0.9.2+ reports structured navigation_failed results and
+			// owns the retry for read-only navigations; never stack another.
+			if !strings.Contains(err.Error(), "net::ERR_HTTP2_SERVER_REFUSED_STREAM") || strings.Contains(err.Error(), "navigation_failed") {
 				return err
 			}
 			e.addTrace("inspect_views.navigation", "retry", "HTTP/2 stream refused; retrying read-only entry navigation once", nil)
 			if err := e.checkpoint(); err != nil {
 				return err
 			}
-			if err := e.gotoURL(c.EntryURL); err != nil {
+			if err := e.gotoReadOnlyURL(c.EntryURL); err != nil {
 				return err
 			}
 		}
@@ -544,7 +546,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 				return err
 			}
 			target := stringFromAny(targetAny)
-			if err := e.gotoURL(target); err != nil {
+			if err := e.gotoReadOnlyURL(target); err != nil {
 				return err
 			}
 		}

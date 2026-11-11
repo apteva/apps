@@ -1,8 +1,13 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.5.0
+version: 0.5.1
 description: |
+  v0.5.1 marks inspect_views navigations read_only so Computer 0.9.2+ can
+  retry a transient Browserbase failure once in a fresh page, and treats a
+  success=false or failed=true navigation result as a failed, incomplete read
+  that never continues into writes. Actors does not add its own HTTP/2 retry
+  on top of a structured Computer navigation failure.
   v0.5.0 adds a compact run receipt: actors_run_get detail=summary and
   run_summary on the final dataset page of a finished run carry status,
   revision, dataset count and read coverage without snapshots or previews.
@@ -167,7 +172,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.5.0
+    ref: actors/v0.5.1
     entry: mcp/actors
   port: 8080
   health_check: /health

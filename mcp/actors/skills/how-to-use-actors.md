@@ -45,6 +45,10 @@ truncated, stalled or budget-limited scan preserves partial rows and incomplete
 coverage. An empty partial list never authorizes a new write. Reconcile any
 existing exact record URLs and prior accepted write runs independently. Never
 switch contexts or use a generic run to bypass a failed inspection.
+Since 0.5.1, `inspect_views` navigations are sent to Computer as `read_only`
+(Computer 0.9.2+ may retry a transient Browserbase failure once in a fresh
+page). A navigation that still fails ends the run with incomplete coverage;
+inspect it instead of re-running a write.
 
 Read that coverage from the compact receipt. The final `actors_dataset_read`
 page of a finished run (`has_more=false`) includes `run_summary`, and

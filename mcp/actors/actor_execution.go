@@ -1123,7 +1123,14 @@ func actorValuesEqual(left, right any, tolerance float64) bool {
 	return strings.EqualFold(strings.TrimSpace(stringFromAny(left)), strings.TrimSpace(stringFromAny(right)))
 }
 
-func (e *actorExecution) gotoURL(target string) error {
+func (e *actorExecution) gotoURL(target string) error { return e.gotoURLMode(target, false) }
+
+// gotoReadOnlyURL asserts a read-only GET to Computer (0.9.2+), which may then
+// retry a transient Browserbase failure once in a fresh page. Older Computer
+// versions ignore the flag.
+func (e *actorExecution) gotoReadOnlyURL(target string) error { return e.gotoURLMode(target, true) }
+
+func (e *actorExecution) gotoURLMode(target string, readOnly bool) error {
 	if target != "" && !hostAllowed(target, e.definition.AllowedHosts) {
 		return fmt.Errorf("URL host is not in allowed_hosts: %s", target)
 	}
@@ -1209,16 +1216,25 @@ func (e *actorExecution) gotoURL(target string) error {
 		}
 		e.persistProgress("browser opened")
 		if mobile && target != "" {
-			return e.gotoURL(target)
+			return e.gotoURLMode(target, readOnly)
 		}
 		return nil
 	}
 	if target == "" {
 		return nil
 	}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target}
+	if readOnly {
+		args["read_only"] = true
+	}
 	var out map[string]any
-	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target}), &out); err != nil {
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err
+	}
+	// A structured failure is never a successful navigation, even when the
+	// client did not surface Computer's MCP error bit.
+	if out["success"] == false || out["failed"] == true {
+		return fmt.Errorf("Computer navigation failed: %s", firstNonEmpty(stringFromAny(out["error"]), "coverage incomplete; inspect before retrying"))
 	}
 	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), target)
 	e.persistProgress("navigated")
