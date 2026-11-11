@@ -62,8 +62,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.9.1
+version: 0.9.2
 description: |
+  v0.9.2 adds structured Browserbase navigation diagnostics and one bounded
+  fresh-page retry for explicitly read-only navigation. Exhausted reads and
+  uncertain input outcomes require inspection before further writes.
   v0.9.0 adds optional, runtime-restricted local Chromium testing for Tests.
   v0.8.0 adds physical Mobile sessions through the existing session tools.
   Mobile startup retries preparation within a bounded window
@@ -284,7 +287,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: computer/v0.9.1
+    ref: computer/v0.9.2
     entry: mcp/computer
   port: 8080
   health_check: /health

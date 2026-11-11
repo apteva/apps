@@ -133,6 +133,9 @@ func TestBrowserbaseHTTP2ReadOnlyRecovery(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			endpoint, refuse, resets := refusedStreamPeer(t)
 			options := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.Flag("headless", true), chromedp.Flag("ignore-certificate-errors", true), chromedp.Flag("no-sandbox", true), chromedp.UserDataDir(t.TempDir()))
+			if executable := os.Getenv("CHROME_BIN"); executable != "" {
+				options = append(options, chromedp.ExecPath(executable))
+			}
 			alloc, stop := chromedp.NewExecAllocator(context.Background(), options...)
 			defer stop()
 			ctx, cancel := chromedp.NewContext(alloc)

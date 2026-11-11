@@ -35,6 +35,10 @@ func TestObservedNavigationRedirectsAndRedaction(t *testing.T) {
 		t.Skip("set RUN_NAVIGATION_BROWSER_TESTS=1")
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/never" {
+			<-r.Context().Done()
+			return
+		}
 		if r.URL.Path == "/start" {
 			http.Redirect(w, r, "/performers?token=second-secret", 302)
 			return
@@ -43,7 +47,11 @@ func TestObservedNavigationRedirectsAndRedaction(t *testing.T) {
 		w.Write([]byte("<body>performers</body>"))
 	}))
 	defer server.Close()
-	alloc, stop := chromedp.NewExecAllocator(context.Background(), append(chromedp.DefaultExecAllocatorOptions[:], chromedp.UserDataDir(t.TempDir()))...)
+	options := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.UserDataDir(t.TempDir()))
+	if executable := os.Getenv("CHROME_BIN"); executable != "" {
+		options = append(options, chromedp.ExecPath(executable))
+	}
+	alloc, stop := chromedp.NewExecAllocator(context.Background(), options...)
 	defer stop()
 	ctx, cancel := chromedp.NewContext(alloc)
 	defer cancel()
@@ -60,5 +68,10 @@ func TestObservedNavigationRedirectsAndRedaction(t *testing.T) {
 	encoded, _ := json.Marshal(a)
 	if strings.Contains(string(encoded), "secret") {
 		t.Fatalf("query secret leaked: %s", encoded)
+	}
+	// A previous usable URL must not turn a timed-out request with no
+	// response into verified coverage.
+	if attempt, err := Observed(ctx, "navigate", server.URL+"/never", 100*time.Millisecond); err == nil {
+		t.Fatalf("unanswered navigation incorrectly succeeded: %+v", attempt)
 	}
 }

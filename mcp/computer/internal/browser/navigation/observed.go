@@ -133,6 +133,15 @@ func Observed(parent context.Context, action, rawURL string, timeout time.Durati
 	defer mu.Unlock()
 	a.FinalURL = SafeURL(current)
 	a.DurationMS = time.Since(started).Milliseconds()
+	// Run's legacy timeout recovery accepts a usable location. That location
+	// may still belong to the previous page, so network evidence takes
+	// precedence before this navigation can be treated as verified.
+	if err == nil && a.Error != "" {
+		err = errors.New(a.Error)
+	}
+	if err == nil && len(a.Requests) > 0 && a.Requests[len(a.Requests)-1].Status == 0 {
+		err = errors.New("navigation response not verified")
+	}
 	if err != nil && a.Error == "" {
 		a.Error = strings.ReplaceAll(err.Error(), rawURL, SafeURL(rawURL))
 		if len(a.Error) > 512 {
