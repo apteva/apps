@@ -4017,6 +4017,14 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		"instagramAccountId": j.extID,
 	}
 	if first.IsVideo() {
+		if first.Source.streamingEligible() {
+			prepared, err := a.prepareVideoSource(ctx, j, first, "PULL_FROM_URL")
+			if err != nil {
+				return "", "", err
+			}
+			defer prepared.Close()
+			first.URL = prepared.URL
+		}
 		containerInput["video_url"] = first.URL
 		containerInput["media_type"] = "REELS"
 		if thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID); err != nil {
@@ -4857,29 +4865,6 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 			name = meta.File.Name
 		}
 
-		// Signed URL — separate call because files_get_url is the
-		// canonical way to mint a TTL'd link.
-		var signed struct {
-			URL string `json:"url"`
-		}
-		urlArgs := map[string]any{
-			"id":          id,
-			"ttl_seconds": 3600,
-			"delivery":    "apteva",
-		}
-		if projectID != "" {
-			urlArgs["_project_id"] = projectID
-		}
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", urlArgs, &signed); err != nil {
-			return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
-		}
-		rel := signed.URL
-		if rel == "" {
-			return nil, fmt.Errorf("storage files_get_url(%d) returned no url", id)
-		}
-		fullURL := absoluteStorageURL(rel)
-		ctx.Logger().Info("resolveMedia: item",
-			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
 		checksum := meta.SHA256
 		if checksum == "" {
 			checksum = meta.File.SHA256
@@ -4892,6 +4877,44 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		if source == nil {
 			source = meta.File.Source
 		}
+		item := mediaItem{ID: id, Mime: mime, Name: name, Bytes: size, SHA256: checksum, StorageInstallID: storageID, MediaProjectID: projectID, Source: source}
+		// Pin provider-fetch URLs as well as direct byte uploaders to the
+		// verified version. Legacy Storage keeps its existing URL behavior.
+		expected := (*storageVideoSource)(nil)
+		if item.IsVideo() && source.streamingEligible() {
+			project := projectID
+			if project == "" {
+				project = projectScope(ctx)
+			}
+			if !source.validFor(item, project, storageID) {
+				return nil, &sourceDeliveryError{Code: "source_changed", Reason: "Storage descriptor differs from the selected media"}
+			}
+			expected = source
+		}
+		var fullURL string
+		if expected != nil {
+			var err error
+			fullURL, err = mintVideoSourceURL(ctx, item, expected.ProjectID, "apteva", expected)
+			if err != nil {
+				return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
+			}
+		} else {
+			var signed struct {
+				URL string `json:"url"`
+			}
+			urlArgs := map[string]any{"id": id, "ttl_seconds": 3600, "delivery": "apteva"}
+			if projectID != "" {
+				urlArgs["_project_id"] = projectID
+			}
+			if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", urlArgs, &signed); err != nil {
+				return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
+			}
+			if signed.URL == "" {
+				return nil, fmt.Errorf("storage files_get_url(%d) returned no url", id)
+			}
+			fullURL = absoluteStorageURL(signed.URL)
+		}
+		ctx.Logger().Info("resolveMedia: item", "id", id, "mime", mime, "is_video", item.IsVideo())
 		out = append(out, mediaItem{Source: source, ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size, SHA256: checksum, StorageInstallID: storageID, MediaProjectID: projectID})
 	}
 	return out, nil

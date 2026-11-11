@@ -37,6 +37,11 @@ type storageVideoSource struct {
 	Checksum         storageVideoChecksum `json:"checksum"`
 }
 
+func (s *storageVideoSource) streamingEligible() bool {
+	return s != nil && s.Schema == "storage-source/v1" &&
+		s.Checksum.Status == "verified" && s.Checksum.Algorithm == "sha256"
+}
+
 func (s storageVideoSource) validFor(item mediaItem, project string, install int64) bool {
 	return s.Schema == "storage-source/v1" && s.StorageInstallID > 0 && s.StorageInstallID == install &&
 		s.ProjectID == project && s.FileID == item.ID && validContentRevision(s.ContentRevision) &&

@@ -527,3 +527,32 @@ func TestStorageStreamingRejectsSourceChangeAfterRecoveryAuthorization(t *testin
 		t.Fatalf("changed authorized object was accepted: %v", err)
 	}
 }
+
+func TestStorageStreamingInstagramReceivesBoundVideoURL(t *testing.T) {
+	f := newRangeVideoFixture(t, 24)
+	f.platform.executeResponses[platforms["instagram"].PostTool] = graphOK(`{"id":"ig-container"}`)
+	f.platform.executeResponses["get_container_status"] = graphOK(`{"status_code":"FINISHED"}`)
+	f.platform.executeResponses[platforms["instagram"].PublishTool] = graphOK(`{"id":"ig-video"}`)
+	app := &App{}
+	media, err := app.resolveMedia(f.ctx, []int64{7}, "test-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := app.publishInstagram(f.ctx, platforms["instagram"], publishJob{platform: "instagram", connID: 42, extID: "ig-account", media: media, mediaProjectID: "test-proj"})
+	if err != nil || id != "ig-video" {
+		t.Fatalf("Instagram bound-source delivery: %s %v", id, err)
+	}
+	if f.gets.Load() != 1 {
+		t.Fatal("Instagram video container was not validated")
+	}
+	for _, call := range f.platform.callAppCalls {
+		if call.Tool == "files_get_url" && call.Input["expected_content_revision"] != "approved-v1" {
+			t.Fatal("provider-fetch URL lost the source version")
+		}
+	}
+	for _, call := range f.platform.executeCalls {
+		if call.Tool == platforms["instagram"].PostTool && call.Input["video_url"] != f.server.URL {
+			t.Fatal("Instagram received another source URL")
+		}
+	}
+}

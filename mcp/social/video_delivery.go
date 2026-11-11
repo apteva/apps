@@ -436,8 +436,7 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			p.Close()
 		}
 	}()
-	if item.Source != nil && item.Source.Schema == "storage-source/v1" &&
-		item.Source.Checksum.Status == "verified" && item.Source.Checksum.Algorithm == "sha256" {
+	if item.Source.streamingEligible() {
 		streamed, err := a.prepareStorageVideo(ctx, j, item, &d)
 		if err != nil {
 			d.LocalDiagnostic = err.Error()
