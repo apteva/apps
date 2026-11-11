@@ -253,8 +253,12 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	}
 	defer p.Close()
 	e["source_sha256"], e["source_bytes"] = p.SHA256, p.Size
+	e["source"] = p.Diagnostics.Source
 	e["storage_install_id"] = p.Diagnostics.StorageInstallID
 	sourceProof := fmt.Sprintf("%s:%d:%s:%d", p.SHA256, p.Diagnostics.StorageInstallID, p.Diagnostics.MediaProjectID, p.Diagnostics.SourceFileID)
+	if p.Diagnostics.Source != nil {
+		sourceProof += ":" + p.Diagnostics.Source.ContentRevision
+	}
 	if e["recovery_kind"] == "expired_zero_byte_upload" {
 		receipt, err := loadUploadReceipt(ctx, r)
 		if err != nil || receipt.SourceSHA256 != p.SHA256 {

@@ -70,6 +70,13 @@ requires:
       label: "Social provider (optional)"
       hint: "Import and publish through a unified social API for platforms that are hard to connect directly."
 
+config_schema:
+  - name: video_source_chunk_mb
+    type: text
+    default: "4"
+    label: Video source buffer (MiB)
+    description: Maximum Storage range buffer per video. Set an integer from 1 to 16. Concurrent video preparations are limited to two.
+
 provides:
   http_routes:
     - prefix: /

@@ -7,6 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 	"syscall"
 
 	sdk "github.com/apteva/app-sdk"
@@ -24,7 +28,7 @@ func sourceErrorCode(err error) string {
 
 func isSourceDeliveryFailure(code string) bool {
 	switch code {
-	case "source_delivery", "local_staging_full", "local_staging_unavailable", "source_truncated", "source_changed", "checksum_mismatch":
+	case "source_delivery", "local_staging_full", "local_staging_unavailable", "source_truncated", "invalid_source_range", "source_changed", "checksum_mismatch":
 		return true
 	}
 	return false
@@ -53,6 +57,7 @@ func (a *App) videoStagingDirectory(ctx *sdk.AppCtx, size int64) (string, error)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", &sourceDeliveryError{Code: "local_staging_unavailable", Reason: "the install's video staging path must be a directory"}
 	}
+	pruneVideoStaging(directory)
 	probe := a.stagingSpace
 	if probe == nil {
 		probe = videoStagingSpace
@@ -97,4 +102,42 @@ func stageVideoBody(destination io.Writer, source io.Reader, limit int64) (int64
 		return n, "", &sourceDeliveryError{Code: "source_truncated", Reason: "source download ended before its declared size", Transient: true}
 	}
 	return n, hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// Only old, owned files with no live uploader holding their lock are removed.
+func pruneVideoStaging(directory string) {
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "social-video-") || !strings.HasSuffix(entry.Name(), ".spool") || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			continue
+		}
+		if unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil {
+			current, statErr := os.Lstat(path)
+			if statErr == nil && os.SameFile(info, current) {
+				_ = os.Remove(path)
+			}
+		}
+		_ = file.Close()
+	}
+}
+
+func lockVideoStaging(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 }

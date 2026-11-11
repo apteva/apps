@@ -100,6 +100,13 @@ requires:
       required: false
       label: "Social provider (optional)"
       hint: "Import and publish through a unified social API for platforms that are hard to connect directly."
+config_schema:
+  - name: video_source_chunk_mb
+    type: text
+    default: "4"
+    label: Video source buffer (MiB)
+    description: Maximum Storage range buffer per video. Set an integer from 1 to 16. Concurrent video preparations are limited to two.
+
 provides:
   http_routes:
     - prefix: /
@@ -753,6 +760,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("social requires a db block")
 	}
 	globalCtx = ctx
+	if directory := ctx.DataDir(); directory != "" {
+		pruneVideoStaging(filepath.Join(directory, "video-staging"))
+	}
 	ctx.Logger().Info("social mounted")
 	return nil
 }
@@ -4764,6 +4774,7 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) ([]int64, string) {
 // return size_bytes (older storage versions); strategies that need
 // it should error out clearly rather than guess.
 type mediaItem struct {
+	Source           *storageVideoSource
 	SHA256           string
 	StorageInstallID int64
 	MediaProjectID   string
@@ -4816,17 +4827,19 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		// (image → /feed; video → /videos for FB; REELS for IG).
 		var meta struct {
 			File struct {
-				SHA256      string  `json:"sha256"`
-				ContentType string  `json:"content_type"`
-				Name        string  `json:"name"`
-				SizeBytes   int64   `json:"size_bytes"`
-				Duration    float64 `json:"duration_seconds"`
+				Source      *storageVideoSource `json:"source"`
+				SHA256      string              `json:"sha256"`
+				ContentType string              `json:"content_type"`
+				Name        string              `json:"name"`
+				SizeBytes   int64               `json:"size_bytes"`
+				Duration    float64             `json:"duration_seconds"`
 			} `json:"file"`
-			SHA256      string  `json:"sha256"`
-			ContentType string  `json:"content_type"`
-			Name        string  `json:"name"`
-			SizeBytes   int64   `json:"size_bytes"`
-			Duration    float64 `json:"duration_seconds"`
+			Source      *storageVideoSource `json:"source"`
+			SHA256      string              `json:"sha256"`
+			ContentType string              `json:"content_type"`
+			Name        string              `json:"name"`
+			SizeBytes   int64               `json:"size_bytes"`
+			Duration    float64             `json:"duration_seconds"`
 		}
 		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", storageArgs, &meta); err != nil {
 			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
@@ -4875,7 +4888,11 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		if bound := ctx.IntegrationFor("storage"); bound != nil {
 			storageID = bound.InstallID
 		}
-		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size, SHA256: checksum, StorageInstallID: storageID, MediaProjectID: projectID})
+		source := meta.Source
+		if source == nil {
+			source = meta.File.Source
+		}
+		out = append(out, mediaItem{Source: source, ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size, SHA256: checksum, StorageInstallID: storageID, MediaProjectID: projectID})
 	}
 	return out, nil
 }

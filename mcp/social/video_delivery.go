@@ -37,6 +37,7 @@ type deliveryEvent struct {
 	Result     string `json:"result,omitempty"`
 }
 type deliveryDiagnostics struct {
+	Source *storageVideoSource `json:"source,omitempty"`
 	// In-memory CAS binding captured before any provider/network call.
 	bound                           bool
 	boundAttempt                    int
@@ -234,6 +235,7 @@ func (e *sourceDeliveryError) Error() string {
 }
 
 type preparedVideo struct {
+	source      *storageVideoReader
 	File        *os.File
 	URL         string
 	Size        int64
@@ -247,6 +249,10 @@ func (p *preparedVideo) Close() {
 	if p == nil {
 		return
 	}
+	if p.source != nil {
+		_ = p.source.Close()
+		p.source = nil
+	}
 	if p.File != nil {
 		name := p.File.Name()
 		_ = p.File.Close()
@@ -258,16 +264,51 @@ func (p *preparedVideo) Close() {
 		p.release = nil
 	}
 }
+func (p *preparedVideo) readerAt() io.ReaderAt {
+	if p.source != nil {
+		return p.source
+	}
+	return p.File
+}
+
+func (p *preparedVideo) sourceReadError() error {
+	if p.source != nil {
+		return p.source.Err()
+	}
+	return nil
+}
+
 func freshVideoURL(ctx *sdk.AppCtx, item mediaItem, project, route string) (string, error) {
+	return mintVideoSourceURL(ctx, item, project, route, nil)
+}
+
+func mintVideoSourceURL(ctx *sdk.AppCtx, item mediaItem, project, route string, expected *storageVideoSource) (string, error) {
 	if item.ID <= 0 {
 		return "", errors.New("video source needs a Storage file identity")
 	}
 	args := map[string]any{"id": item.ID, "_project_id": project, "ttl_seconds": 7200, "delivery": route}
+	if expected != nil {
+		args["expected_content_revision"] = expected.ContentRevision
+	}
 	var signed struct {
-		URL string `json:"url"`
+		URL    string              `json:"url"`
+		FileID int64               `json:"file_id"`
+		Source *storageVideoSource `json:"source"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &signed); err != nil {
+		if expected != nil {
+			if strings.Contains(err.Error(), "source_changed") {
+				return "", &sourceDeliveryError{Code: "source_changed", Reason: "Storage rejected the approved content revision"}
+			}
+			return "", &sourceDeliveryError{Reason: "Storage could not renew the approved source URL", Transient: true}
+		}
 		return "", errors.New("Storage could not mint a delivery URL")
+	}
+	if expected != nil && (signed.Source == nil || *signed.Source != *expected || signed.FileID != item.ID) {
+		return "", &sourceDeliveryError{Code: "source_changed", Reason: "renewed Storage URL differs from the approved object identity"}
+	}
+	if signed.FileID > 0 && signed.FileID != item.ID {
+		return "", &sourceDeliveryError{Code: "source_changed", Reason: "Storage returned a different file"}
 	}
 	if signed.URL == "" {
 		return "", errors.New("Storage returned no delivery URL")
@@ -372,6 +413,17 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 	if item.Bytes < 0 || item.Bytes > maxPreparedVideoBytes {
 		return nil, &sourceDeliveryError{Reason: "video exceeds temporary source limit", Transient: false}
 	}
+	if previous.OperationID != "" &&
+		(previous.SourceFileID > 0 && previous.SourceFileID != item.ID ||
+			previous.StorageInstallID > 0 && previous.StorageInstallID != d.StorageInstallID ||
+			previous.MediaProjectID != "" && previous.MediaProjectID != project ||
+			previous.SourceSHA256 != "" && item.SHA256 != "" && !strings.EqualFold(previous.SourceSHA256, item.SHA256)) {
+		return nil, &sourceDeliveryError{Code: "source_changed", Reason: "the existing operation belongs to another source object"}
+	}
+	if previous.Source != nil && previous.OperationID != "" &&
+		(item.Source == nil || *item.Source != *previous.Source) {
+		return nil, &sourceDeliveryError{Code: "source_changed", Reason: "the existing upload belongs to another immutable source version"}
+	}
 	select {
 	case videoSpoolSlots <- struct{}{}:
 	case <-time.After(30 * time.Second):
@@ -384,6 +436,19 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			p.Close()
 		}
 	}()
+	if item.Source != nil && item.Source.Schema == "storage-source/v1" &&
+		item.Source.Checksum.Status == "verified" && item.Source.Checksum.Algorithm == "sha256" {
+		streamed, err := a.prepareStorageVideo(ctx, j, item, &d)
+		if err != nil {
+			d.LocalDiagnostic = err.Error()
+			_ = d.event(ctx, j.targetID, deliveryEvent{Stage: "source_fetch", Result: sourceErrorCode(err)})
+			return nil, err
+		}
+		streamed.release = p.release
+		p.release = nil
+		success = true
+		return streamed, nil
+	}
 	if item.Bytes > 0 {
 		if _, err := a.videoStagingDirectory(ctx, item.Bytes); err != nil {
 			d.LocalDiagnostic = err.Error()
@@ -468,6 +533,12 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			_ = d.event(ctx, j.targetID, event)
 			return nil, err
 		}
+		if err := lockVideoStaging(file); err != nil {
+			response.Body.Close()
+			file.Close()
+			os.Remove(file.Name())
+			return nil, localStagingError(err)
+		}
 		limit := maxPreparedVideoBytes
 		if item.Bytes > 0 {
 			limit = item.Bytes
@@ -500,21 +571,10 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			last = &sourceDeliveryError{Code: "source_changed", Reason: "source body exceeds its declared size"}
 			break
 		}
-		if method != "RECOVERY_VALIDATION" && j.targetID > 0 {
-			var proof string
-			err := ctx.AppDB().QueryRow(`SELECT r.evidence FROM delivery_recovery_requests r JOIN post_targets t ON t.id=r.target_id JOIN posts p ON p.id=t.post_id WHERE r.project_id=? AND r.target_id=? AND r.status='consumed' AND r.decision IN ('retry','resume') AND r.revision=p.revision AND r.source_attempt=t.attempts-1`, projectScope(ctx), j.targetID).Scan(&proof)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if method != "RECOVERY_VALIDATION" {
+			if err := verifyRecoveryVideoSource(ctx, j, hash, nil); err != nil {
 				cleanup()
 				return nil, err
-			}
-			if err == nil {
-				var evidence struct {
-					SHA string `json:"source_sha256"`
-				}
-				if json.Unmarshal([]byte(proof), &evidence) != nil || evidence.SHA == "" || evidence.SHA != hash {
-					cleanup()
-					return nil, &sourceDeliveryError{Code: "source_changed", Reason: "source changed after recovery authorization"}
-				}
 			}
 		}
 		if item.SHA256 != "" && !strings.EqualFold(hash, item.SHA256) {

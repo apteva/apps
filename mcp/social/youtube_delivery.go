@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -17,12 +18,61 @@ var youtubeVideoUploadClient = &http.Client{Timeout: 30 * time.Minute, CheckRedi
 
 func youtubeSessionKey(session string) string { return "youtube-session:" + imageSHA([]byte(session)) }
 func videoUploadFingerprint(p *preparedVideo, conn int64, input map[string]any) string {
-	d := sha256.New()
-	_, _ = io.Copy(d, io.NewSectionReader(p.File, 0, p.Size))
-	meta, _ := json.Marshal(input)
-	fmt.Fprintf(d, "\n%d\n%s", conn, meta)
-	return hex.EncodeToString(d.Sum(nil))
+	raw, _ := json.Marshal(struct {
+		SHA256           string
+		Size             int64
+		Connection       int64
+		Input            map[string]any
+		StorageInstallID int64
+		MediaProjectID   string
+		SourceFileID     int64
+	}{p.SHA256, p.Size, conn, input, p.Diagnostics.StorageInstallID, p.Diagnostics.MediaProjectID, p.Diagnostics.SourceFileID})
+	return "v2:" + imageSHA(raw)
 }
+
+// Older sessions hashed the complete byte stream followed by metadata.
+// Verify that format once, then promote the same session to the source digest
+// format so subsequent resumes do not need another whole-file read.
+func prepareYouTubeFingerprint(ctx *sdk.AppCtx, j publishJob, p *preparedVideo, input map[string]any, session, stored string) (string, error) {
+	current := videoUploadFingerprint(p, j.connID, input)
+	if session == "" {
+		return current, nil
+	}
+	if !validYouTubeSession(session) {
+		return "", errors.New("stored upload origin is invalid; verify the remote outcome")
+	}
+	if stored == current {
+		return current, nil
+	}
+	if stored == "" || strings.HasPrefix(stored, "v2:") {
+		return "", errors.New("stored upload does not match this source or connection; verify the remote outcome")
+	}
+	digest := sha256.New()
+	n, err := io.Copy(digest, io.NewSectionReader(p.readerAt(), 0, p.Size))
+	if err != nil {
+		return "", err
+	}
+	if n != p.Size {
+		return "", &sourceDeliveryError{Code: "source_truncated", Reason: "legacy session source could not be fully verified"}
+	}
+	metadata, _ := json.Marshal(input)
+	fmt.Fprintf(digest, "\n%d\n%s", j.connID, metadata)
+	if hex.EncodeToString(digest.Sum(nil)) != stored {
+		return "", errors.New("stored upload does not match this video; verify the remote outcome")
+	}
+	if j.targetID > 0 {
+		result, err := ctx.AppDB().Exec(`UPDATE post_targets SET youtube_upload_fingerprint=? WHERE id=? AND youtube_upload_session=? AND youtube_upload_fingerprint=?
+			AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, current, j.targetID, session, stored, projectScope(ctx))
+		if err != nil {
+			return "", err
+		}
+		if n, err := result.RowsAffected(); err != nil || n != 1 {
+			return "", errors.New("upload session changed during source verification")
+		}
+	}
+	return current, nil
+}
+
 func (a *App) uploadPreparedYouTube(ctx *sdk.AppCtx, def platformDef, j publishJob, p *preparedVideo, input map[string]any) (string, error) {
 	d := p.Diagnostics
 	d.Method = "FILE_UPLOAD"
@@ -35,9 +85,9 @@ func (a *App) uploadPreparedYouTube(ctx *sdk.AppCtx, def platformDef, j publishJ
 	if until, err := time.Parse(time.RFC3339Nano, retryAt); err == nil && time.Now().Before(until) {
 		return "", uploadRetry("YouTube asked to retry after " + retryAt)
 	}
-	actual := videoUploadFingerprint(p, j.connID, input)
-	if session != "" && (fingerprint != actual || !validYouTubeSession(session)) {
-		return "", errors.New("stored upload does not match this video; verify the remote outcome before retrying")
+	actual, err := prepareYouTubeFingerprint(ctx, j, p, input, session, fingerprint)
+	if err != nil {
+		return "", err
 	}
 	if session == "" {
 		d.OperationState = "unknown"
@@ -94,20 +144,25 @@ func (a *App) uploadPreparedYouTube(ctx *sdk.AppCtx, def platformDef, j publishJ
 			return id, nil
 		}
 		offset = next
+		d.AcknowledgedBytes = bytePointer(next)
 	}
 	const chunkSize int64 = 4 << 20
 	for offset < p.Size {
 		n := min(chunkSize, p.Size-offset)
-		req, err := http.NewRequest(http.MethodPut, session, io.NewSectionReader(p.File, offset, n))
+		req, err := http.NewRequest(http.MethodPut, session, io.NewSectionReader(p.readerAt(), offset, n))
 		if err != nil {
 			return "", err
 		}
 		req.ContentLength = n
 		req.Header.Set("Content-Type", p.MIME)
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+n-1, p.Size))
+		d.AttemptedBytes = bytePointer(offset + n)
 		d.event(ctx, j.targetID, deliveryEvent{Stage: "upload", Bytes: offset, Result: "chunk_started"})
 		resp, err := youtubeVideoUploadClient.Do(req)
 		if err != nil {
+			if sourceErr := p.sourceReadError(); sourceErr != nil {
+				return "", sourceErr
+			}
 			return "", uploadRetry("Upload interrupted; existing session retained for probing")
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -123,6 +178,8 @@ func (a *App) uploadPreparedYouTube(ctx *sdk.AppCtx, def platformDef, j publishJ
 				return "", uploadRetry("Upload progress uncertain; probe the retained session before retrying")
 			}
 			offset = next
+			d.AcknowledgedBytes = bytePointer(next)
+			_ = d.save(ctx, j.targetID)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -137,6 +194,7 @@ func (a *App) uploadPreparedYouTube(ctx *sdk.AppCtx, def platformDef, j publishJ
 		}
 		d.OperationState = "published"
 		d.ProviderStatus = "complete"
+		d.AcknowledgedBytes = bytePointer(p.Size)
 		d.event(ctx, j.targetID, deliveryEvent{Stage: "processing", Result: "published"})
 		return resource.ID, nil
 	}
