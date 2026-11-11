@@ -25,6 +25,9 @@ jobs:
         with:
           go-version: "1.26"
           cache-dependency-path: mcp/${{ matrix.app }}/go.sum
+      - if: matrix.app == 'computer'
+        name: Enable Chromium's namespace sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: go test -race ./... -count=1
       - run: go vet ./...
       - if: matrix.app == 'computer'
