@@ -5,10 +5,14 @@ set -eu
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 apps_dir=$(CDPATH= cd -- "$fixture_dir/../../.." && pwd)
 smoke_dir=$(mktemp -d /tmp/apteva-browser-smoke.XXXXXX)
-cleanup() { chmod -R u+w "$smoke_dir"; rm -rf -- "$smoke_dir"; }
+cleanup() { rm -rf -- "$smoke_dir"; }
 trap cleanup EXIT INT TERM
 for app in tests computer environments api auth; do cp -R "$apps_dir/$app" "$smoke_dir/$app"; done
 cp -R "$fixture_dir/fixture" "$smoke_dir/fixture"
+# Reuse normal Go caches; the fixture never owns or deletes their contents.
+mkdir -p "$smoke_dir/cache/.gobuild"
+ln -s "$(go env GOMODCACHE)" "$smoke_dir/cache/.gobuild/gomodcache"
+ln -s "$(go env GOCACHE)" "$smoke_dir/cache/.gobuild/gocache"
 sdk_dir=$(cd "$apps_dir/tests" && GOWORK=off go list -m -f '{{.Dir}}' github.com/apteva/app-sdk)
 ln -s "$sdk_dir" "$smoke_dir/app-sdk"
 cp "$APTEVA_SERVER_SOURCE/go.mod" "$smoke_dir/server.mod"
