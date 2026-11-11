@@ -965,11 +965,7 @@ func actorValuesEqual(left, right any, tolerance float64) bool {
 	return strings.EqualFold(strings.TrimSpace(stringFromAny(left)), strings.TrimSpace(stringFromAny(right)))
 }
 
-func (e *actorExecution) gotoURL(target string) error { return e.gotoURLMode(target, false) }
-
-func (e *actorExecution) gotoReadOnlyURL(target string) error { return e.gotoURLMode(target, true) }
-
-func (e *actorExecution) gotoURLMode(target string, readOnly bool) error {
+func (e *actorExecution) gotoURL(target string) error {
 	if !hostAllowed(target, e.definition.AllowedHosts) {
 		return fmt.Errorf("URL host is not in allowed_hosts: %s", target)
 	}
@@ -1030,11 +1026,8 @@ func (e *actorExecution) gotoURLMode(target string, readOnly bool) error {
 		return nil
 	}
 	var out map[string]any
-	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target, "read_only": readOnly}), &out); err != nil {
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "navigate", "url": target}), &out); err != nil {
 		return err
-	}
-	if out["success"] == false || out["failed"] == true {
-		return fmt.Errorf("Computer navigation failed: %s", firstNonEmpty(stringFromAny(out["error"]), "coverage incomplete; inspect before retrying"))
 	}
 	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), target)
 	e.persistProgress("navigated")
