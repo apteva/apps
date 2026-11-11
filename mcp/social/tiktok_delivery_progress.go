@@ -402,6 +402,21 @@ func (a *App) handleTargetDeliveryAction(w http.ResponseWriter, r *http.Request,
 		} else {
 			handler = a.toolPostDeliveryRecover
 		}
+	case "options":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", 405)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		for _, key := range []string{"expected_revision", "expected_options_revision", "options", "reason"} {
+			args[key] = body[key]
+		}
+		args["_caller"] = "panel"
+		handler = a.toolPostTargetOptionsUpdate
 	default:
 		http.Error(w, "not found", 404)
 		return

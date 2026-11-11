@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.7
+version: 0.24.8
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -150,6 +150,7 @@ provides:
     - { name: post_delivery_inspect, description: "Inspect one target and native operation without resubmitting." }
     - { name: post_delivery_revalidate, description: "Audit source and remote state; prepare an expiring recovery decision." }
     - { name: post_delivery_recover, description: "Explicitly consume one audited recovery decision for one target." }
+    - { name: post_target_options_update, description: "Correct one failed target's options using parent and target revision guards; reconcile first and retry only that target separately." }
     - { name: post_retry,                 description: "Retry transient failures only; deterministic duplicates fail once and return the existing post id." }
     - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
@@ -240,7 +241,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.7
+    ref: social/v0.24.8
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -1103,11 +1104,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolPostDeliveryRecover,
 		},
 		{
-			Name:        "post_retry",
-			Description: "Re-attempt failed delivery. Pass target_id to retry only that destination; published and other targets are preserved. Known TikTok operations are reconciled before retry. Omit target_id for existing post-wide retry or failed-schedule recovery. Args: post_id, target_id?.",
+			Name:        "post_target_options_update",
+			Description: "Correct a failed destination without editing successful siblings or publishing. Pass an options patch (null removes an optional key), reason, expected_revision from post_get and expected_options_revision from the target. Reconciles existing operations first; uncertain or in-flight uploads and reviewed publications are blocked. TikTok privacy must be explicitly selected from current creator choices. Account, media, audience and destination stay fixed. Returns arguments for a separate target-only post_retry.",
 			InputSchema: schemaObject(map[string]any{
-				"post_id":   map[string]any{"type": "integer"},
-				"target_id": map[string]any{"type": "integer", "minimum": 1},
+				"post_id":                   map[string]any{"type": "integer", "minimum": 1},
+				"target_id":                 map[string]any{"type": "integer", "minimum": 1},
+				"expected_revision":         map[string]any{"type": "integer", "minimum": 1},
+				"expected_options_revision": map[string]any{"type": "integer", "minimum": 1},
+				"options":                   map[string]any{"type": "object", "minProperties": 1},
+				"reason":                    map[string]any{"type": "string", "minLength": 1},
+			}, []string{"post_id", "target_id", "expected_revision", "expected_options_revision", "options", "reason"}),
+			Handler: a.toolPostTargetOptionsUpdate,
+		},
+		{
+			Name:        "post_retry",
+			Description: "Re-attempt failed delivery. Pass target_id to retry only that destination; published and other targets are preserved. Corrected targets require target_id and expected_options_revision and are excluded from bulk retry. Known TikTok operations are reconciled before retry. Omit target_id for existing post-wide retry or failed-schedule recovery. Args: post_id, target_id?, expected_options_revision?.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":                   map[string]any{"type": "integer"},
+				"target_id":                 map[string]any{"type": "integer", "minimum": 1},
+				"expected_options_revision": map[string]any{"type": "integer", "minimum": 1},
 			}, []string{"post_id"}),
 			Handler: a.toolPostRetry,
 		},
@@ -5670,7 +5685,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision, t.youtube_thumbnail_state, t.youtube_thumbnail_error, COALESCE(t.facebook_page_post_id,'')
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics, t.delivery_diagnostics, COALESCE(t.publish_operation_id,''),t.submitted_at,t.provider_accepted_at,t.provider_reported_published_at,t.delivery_recorded_at,t.native_uploaded_at,t.publication_observed_at,t.publication_time_source,t.legacy_published_at,t.publication_revision, t.youtube_thumbnail_state, t.youtube_thumbnail_error, COALESCE(t.facebook_page_post_id,''),t.options_revision,t.retry_target_only
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5689,11 +5704,12 @@ func loadTargetsFrom(db interface {
 			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider, deliveryRaw string
 			videoRaw, operationID, thumbnailStatus, thumbnailError, facebookPagePostID      string
 			attempts                                                                        int
+			optionsRevision, retryTargetOnly                                                int
 			retryable                                                                       int64
 			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision, &thumbnailStatus, &thumbnailError, &facebookPagePostID); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw, &videoRaw, &operationID, &facts.SubmittedAt, &facts.ProviderAcceptedAt, &facts.ProviderPublishedAt, &facts.DeliveryRecordedAt, &facts.UploadedAt, &facts.ObservedAt, &facts.TimeSource, &facts.LegacyPublishedAt, &facts.Revision, &thumbnailStatus, &thumbnailError, &facebookPagePostID, &optionsRevision, &retryTargetOnly); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5732,6 +5748,8 @@ func loadTargetsFrom(db interface {
 			"last_error":                  redactDeliverySecrets(lastErr),
 			"published_at":                pubAt,
 			"options":                     options,
+			"options_revision":            optionsRevision,
+			"retry_target_only":           retryTargetOnly != 0,
 			"failure_code":                failureCode,
 			"retryable":                   retryable != 0,
 			"upstream_status":             upstreamStatus,
@@ -5824,6 +5842,13 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if targetID > 0 {
+		var selectedOnly, optionsRevision int
+		if err := ctx.AppDB().QueryRow(`SELECT retry_target_only,options_revision FROM post_targets WHERE id=? AND post_id=?`, targetID, postID).Scan(&selectedOnly, &optionsRevision); err != nil {
+			return mcpError("target not found in this post/project"), nil
+		}
+		if selectedOnly != 0 && intArg(args, "expected_options_revision", 0) != optionsRevision {
+			return mcpError("corrected target requires its current expected_options_revision; inspect it before retrying"), nil
+		}
 		if out, done, err := a.reconcileSelectedRetry(ctx, postID, targetID); done {
 			return out, err
 		}
@@ -5837,17 +5862,27 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		`UPDATE post_targets
 		    SET status='pending', last_error=NULL, failure_code='',
 		        upstream_status=0, existing_post_id=''
-		  WHERE post_id=? AND (?=0 OR id=?) AND (
+		  WHERE post_id=? AND ((?=0 AND retry_target_only=0) OR id=?) AND (
 		        (status='failed' AND retryable=1)
 		      )
+		    AND (retry_target_only=0 OR options_revision=?)
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
-		postID, targetID, targetID, pid,
+		postID, targetID, targetID, intArg(args, "expected_options_revision", 0), pid,
 	)
 	if err != nil {
 		return nil, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		if targetID == 0 {
+			var corrected int
+			if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND status='failed' AND retry_target_only=1`, postID).Scan(&corrected); err != nil {
+				return nil, err
+			}
+			if corrected > 0 {
+				return mcpError("corrected targets require target_id and expected_options_revision; bulk retry does not publish them"), nil
+			}
+		}
 		var code, existingID, lastError string
 		var terminal int
 		_ = ctx.AppDB().QueryRow(
@@ -9269,7 +9304,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		if r.ExtPostID == "" {
 			out.Status = "skipped"
-			out.Reason = "target was never published"
+			out.Reason = "target was never published; use post_target_options_update to correct a failed target without changing successful siblings"
 			outcomes = append(outcomes, out)
 			continue
 		}
@@ -10541,7 +10576,8 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
 		var body struct {
-			TargetID int64 `json:"target_id"`
+			TargetID        int64 `json:"target_id"`
+			OptionsRevision int   `json:"expected_options_revision"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			http.Error(w, "invalid json", 400)
@@ -10552,6 +10588,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			args["target_id"] = body.TargetID
 		}
 		args["post_id"] = id
+		args["expected_options_revision"] = body.OptionsRevision
 		out, err := a.toolPostRetry(globalCtx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

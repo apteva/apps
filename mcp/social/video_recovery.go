@@ -65,6 +65,11 @@ func (a *App) toolPostDeliveryInspect(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	evidence["targets"] = a.loadTargets(ctx, post)
+	corrections, err := loadTargetOptionsCorrections(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	evidence["options_corrections"] = corrections
 	evidence["delivery_diagnostics"] = loadDeliveryDiagnostics(ctx, target)
 	ledger, err := deliveryRecordingHistory(ctx, target, int64(intArg(args, "history_after_id", 0)), intArg(args, "history_limit", 50))
 	if err != nil {
