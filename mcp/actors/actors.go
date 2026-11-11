@@ -38,6 +38,7 @@ const (
 )
 
 type actorDefinition struct {
+	PrivateScreen          bool                      `json:"private_screen,omitempty"`
 	RequiredExplicitInputs []string                  `json:"required_explicit_inputs,omitempty"`
 	RecoveryOnly           bool                      `json:"recovery_only,omitempty"`
 	ReadOnly               bool                      `json:"read_only,omitempty"`
@@ -76,6 +77,9 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	NativeApp          string                `json:"native_app,omitempty"`
+	NativeRequired     []string              `json:"native_required,omitempty"`
+	NativeTarget       string                `json:"native_target,omitempty"`
 	X                  any                   `json:"x,omitempty"`
 	Y                  any                   `json:"y,omitempty"`
 	ToX                any                   `json:"to_x,omitempty"`
@@ -365,6 +369,7 @@ func validateActorDefinition(def actorDefinition) error {
 			selected := def
 			selected.Operations = nil
 			selected.ReadOnly = selected.ReadOnly || operation.ReadOnly
+			selected.PrivateScreen = selected.PrivateScreen || operation.PrivateScreen
 			selected.RecoveryOnly = operation.RecoveryOnly
 			if operation.Limits != nil {
 				selected.Limits = *operation.Limits
@@ -475,8 +480,8 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
 			}
 		}
-		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" {
-			return fmt.Errorf("steps[%d].secret_ref requires fill_secret or goto_secret", i)
+		if step.SecretRef != "" && step.Action != "fill_secret" && step.Action != "goto_secret" && !nativeSecretAction(step.Action) {
+			return fmt.Errorf("steps[%d].secret_ref requires a secret action", i)
 		}
 		if step.ConfirmConsequence == "navigation_only" {
 			return errors.New("navigation_only is not an irreversible consequence acknowledgement")
@@ -711,11 +716,14 @@ func validateActorDefinition(def actorDefinition) error {
 			if err := validateWaitStep(step); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
-		case "open", "tap", "swipe", "home", "launch_app", "stop_app":
+		case "open", "tap", "swipe", "home", "launch_app", "stop_app", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_type_secret", "native_type_private":
 			if err := validateScreenStep(step, true); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
 		case "wait", "screenshot":
+			if step.Action == "screenshot" && def.PrivateScreen {
+				return errors.New("private_screen operations cannot save screenshots")
+			}
 		default:
 			return fmt.Errorf("steps[%d].action %q is unsupported", i, step.Action)
 		}

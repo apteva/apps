@@ -30,7 +30,7 @@ type actorCapabilities struct {
 
 func screenInputAction(action string) bool {
 	switch action {
-	case "tap", "swipe", "home", "launch_app", "stop_app":
+	case "tap", "swipe", "home", "launch_app", "stop_app", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_type_secret", "native_type_private":
 		return true
 	}
 	return false
@@ -46,6 +46,37 @@ func screenCoordinate(v any, templates bool) (int, error) {
 	return int(n), nil
 }
 func validateScreenStep(step actorStep, templates bool) error {
+	keypadSecret := step.Action == "native_type_private" && step.Mode == "keypad"
+	switch step.Action {
+	case "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace", "native_type_secret", "native_type_private":
+		if strings.TrimSpace(step.NativeApp) == "" || len(step.NativeRequired) == 0 || len(step.NativeRequired) > 12 {
+			return errors.New("native screen requires native_app and 1–12 native_required markers")
+		}
+		for _, marker := range step.NativeRequired {
+			if strings.TrimSpace(marker) == "" || len(marker) > 500 {
+				return errors.New("native screen marker must contain 1–500 bytes")
+			}
+		}
+		if step.Action != "native_assert" && step.Action != "native_wait" && !keypadSecret && strings.TrimSpace(step.NativeTarget) == "" {
+			return errors.New("native input requires an exact native_target")
+		}
+		if step.Action == "native_type_private" && step.Mode != "" && (!keypadSecret || step.NativeTarget != "") {
+			return errors.New("private input mode must be keypad with screen markers and no native_target")
+		}
+		if (step.Action == "native_type" || step.Action == "native_replace") && (step.Text == "" || len(step.Text) > 256 || strings.ContainsAny(step.Text, "\r\n\t\b")) {
+			return errors.New("native text input requires 1–256 bytes of single-line text")
+		}
+		if step.Action == "native_wait" {
+			n, ok := actorNumber(step.Duration)
+			if !ok || n < 1 || n > 28000 || n != math.Trunc(n) || step.Text != "" || step.NativeTarget != "" {
+				return errors.New("native_wait requires 1–28000 duration_ms and screen markers only")
+			}
+		}
+		if nativeSecretAction(step.Action) && (strings.TrimSpace(step.SecretRef) == "" || step.Text != "" || step.Value != "" || step.Optional) {
+			return errors.New("native secret input requires secret_ref and disallows literal input or optional")
+		}
+	}
+
 	if step.Action == "tap" || step.Action == "swipe" {
 		values := []any{step.X, step.Y}
 		if step.Action == "swipe" {
@@ -69,7 +100,7 @@ func validateMobileActor(def actorDefinition, templates bool) error {
 			return errors.New("browser.target and device_id require backend=mobile")
 		}
 		for _, s := range def.Steps {
-			if s.Action == "open" || screenInputAction(s.Action) {
+			if s.Action == "open" || s.Action == "native_assert" || s.Action == "native_wait" || screenInputAction(s.Action) {
 				return errors.New("screen actions require backend=mobile")
 			}
 		}
@@ -103,7 +134,11 @@ func validateMobileActor(def actorDefinition, templates bool) error {
 			return errors.New("Mobile session opening and capability checks cannot be optional")
 		}
 		switch s.Action {
-		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs":
+		case "open", "goto", "tap", "swipe", "home", "launch_app", "stop_app", "type", "key", "scroll", "wait", "screenshot", "assert_inputs", "native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_replace":
+		case "native_type_secret", "native_type_private":
+			if !def.PrivateScreen || strings.TrimSpace(b.ContextID) == "" {
+				return errors.New("native secret input requires private_screen and a saved context_id")
+			}
 		default:
 			return fmt.Errorf("steps[%d]: Mobile does not support %s; DOM, SoM, form controls and uploads are unavailable", i, s.Action)
 		}
@@ -205,8 +240,8 @@ func (e *actorExecution) lockMobileDevice() error {
 	}
 	return nil
 }
-func mobileComputerAction(action string) string {
-	switch action {
+func mobileComputerAction(step actorStep) string {
+	switch step.Action {
 	case "open":
 		return ""
 	case "goto":
@@ -215,8 +250,15 @@ func mobileComputerAction(action string) string {
 		return "click"
 	case "assert_inputs":
 		return ""
+	case "native_type_secret":
+		return "native_type_secure"
+	case "native_type_private":
+		if step.Mode == "keypad" {
+			return "native_tap"
+		}
+		return "native_type"
 	}
-	return action
+	return step.Action
 }
 func hasCapability(values []string, value string) bool {
 	for _, v := range values {
@@ -235,7 +277,7 @@ func validateMobileCapabilities(def actorDefinition, session *browserSession) er
 		return errors.New("Computer opened an unexpected Mobile device")
 	}
 	for _, s := range def.Steps {
-		if action := mobileComputerAction(s.Action); action != "" && !hasCapability(c.Actions, action) {
+		if action := mobileComputerAction(s); action != "" && !hasCapability(c.Actions, action) {
 			return fmt.Errorf("Mobile does not support action %s", s.Action)
 		}
 		if s.Action == "key" && !hasCapability(c.Keys, s.Key) {
@@ -251,7 +293,10 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 	if err := validateScreenStep(step, false); err != nil {
 		return err
 	}
-	args := map[string]any{"session_id": e.session.SessionID, "action": mobileComputerAction(step.Action)}
+	if step.Action == "native_type_private" && step.Mode == "keypad" {
+		return e.enterNativeSecretOnKeypad(step)
+	}
+	args := map[string]any{"session_id": e.session.SessionID, "action": mobileComputerAction(step)}
 	if step.Action == "tap" || step.Action == "swipe" {
 		x, _ := screenCoordinate(step.X, false)
 		y, _ := screenCoordinate(step.Y, false)
@@ -262,14 +307,66 @@ func (e *actorExecution) screenInteract(step actorStep) error {
 			args["to_x"], args["to_y"] = x, y
 		}
 	}
+	if step.Action == "native_assert" || step.Action == "native_wait" || step.Action == "native_tap" || step.Action == "native_tap_badged" || step.Action == "native_tap_if_present" || step.Action == "native_type" || step.Action == "native_replace" || nativeSecretAction(step.Action) {
+		args["native_app"] = step.NativeApp
+		args["native_required"] = step.NativeRequired
+		if step.Action == "native_wait" {
+			args["duration"] = templateInt(step.Duration)
+		}
+		if step.NativeTarget != "" {
+			args["native_target"] = step.NativeTarget
+		}
+		if step.Text != "" {
+			args["text"] = step.Text
+		}
+		if nativeSecretAction(step.Action) {
+			value, err := e.nativeSecret(step)
+			if err != nil {
+				return err
+			}
+			args["text"] = value
+			args["observation"] = "none"
+		}
+	}
 	if step.AppID != "" {
 		args["app_id"] = step.AppID
 	}
 	var out map[string]any
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		if nativeSecretAction(step.Action) {
+			return errors.New("secret-backed native input failed; inspect the screen privately")
+		}
 		return err
 	}
 	return finishScreenInteraction(out)
+}
+
+func (e *actorExecution) enterNativeSecretOnKeypad(step actorStep) error {
+	value, err := e.nativeSecret(step)
+	if err != nil {
+		return err
+	}
+	if len(value) > 12 || strings.Trim(value, "0123456789") != "" {
+		return errors.New("private keypad input requires 1–12 digits")
+	}
+	for _, digit := range value {
+		if err := e.checkpoint(); err != nil {
+			return err
+		}
+		args := map[string]any{
+			"session_id": e.session.SessionID, "action": "native_tap",
+			"native_app": step.NativeApp, "native_required": step.NativeRequired,
+			"native_target": string(digit), "observation": "none",
+		}
+		var out map[string]any
+		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+			return errors.New("private keypad input failed; inspect the screen privately")
+		}
+		if err := finishScreenInteraction(out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func finishScreenInteraction(out map[string]any) error {

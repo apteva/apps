@@ -206,7 +206,7 @@ func (a *App) openBrowser(callCtx context.Context, ctx *sdk.AppCtx, target strin
 		requestedBackend = b
 		openArgs["backend"] = b
 	}
-	for _, key := range []string{"device_id", "target", "viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
+	for _, key := range []string{"device_id", "target", "viewport", "environment", "context_id", "persist", "timeout", "extraction_only", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
 		if v, ok := args[key]; ok {
 			openArgs[key] = v
 		}

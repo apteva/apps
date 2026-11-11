@@ -12,26 +12,55 @@ type actorBrowserSecret struct {
 	Value     string `json:"value"`
 	ContextID string `json:"context_id"`
 	Host      string `json:"host"`
+	NativeApp string `json:"native_app"`
 	ExpiresAt string `json:"expires_at"`
 }
 
-func resolveActorBrowserSecret(raw, project, ref, contextID, target string, now time.Time) (string, error) {
+func loadActorSecret(raw, project, ref string, now time.Time) (actorBrowserSecret, error) {
 	var projects map[string]map[string]actorBrowserSecret
 	if json.Unmarshal([]byte(raw), &projects) != nil {
-		return "", errors.New("browser secret configuration is unavailable")
+		return actorBrowserSecret{}, errors.New("secret configuration is unavailable")
 	}
 	secret, ok := projects[project][ref]
 	if !ok || secret.Value == "" {
-		return "", errors.New("browser secret reference is unavailable for this project")
+		return actorBrowserSecret{}, errors.New("secret reference is unavailable for this project")
 	}
 	expiry, err := time.Parse(time.RFC3339, secret.ExpiresAt)
 	if err != nil || !now.Before(expiry) {
-		return "", errors.New("browser secret reference has expired or has no valid expiry")
+		return actorBrowserSecret{}, errors.New("secret reference has expired or has no valid expiry")
+	}
+	return secret, nil
+}
+
+func resolveActorBrowserSecret(raw, project, ref, contextID, target string, now time.Time) (string, error) {
+	secret, err := loadActorSecret(raw, project, ref, now)
+	if err != nil {
+		return "", err
 	}
 	u, err := url.Parse(target)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Host != u.Hostname() || secret.Host == "" || !strings.EqualFold(u.Hostname(), secret.Host) || secret.ContextID == "" || secret.ContextID != contextID {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Host != u.Hostname() || secret.NativeApp != "" || secret.Host == "" || !strings.EqualFold(u.Hostname(), secret.Host) || secret.ContextID == "" || secret.ContextID != contextID {
 		return "", errors.New("browser secret is not bound to this context and HTTPS host")
 	}
+	return secret.Value, nil
+}
+
+func nativeSecretAction(action string) bool {
+	return action == "native_type_secret" || action == "native_type_private"
+}
+
+func (e *actorExecution) nativeSecret(step actorStep) (string, error) {
+	contextID := e.definition.Browser.ContextID
+	if !e.definition.PrivateScreen || e.session == nil || contextID == "" || e.session.AppContextID != contextID {
+		return "", errors.New("native secret input requires a private operation on the exact saved Computer context")
+	}
+	secret, err := loadActorSecret(configString(e.ctx, "browser_secrets"), projectID(e.ctx), step.SecretRef, time.Now())
+	if err != nil {
+		return "", err
+	}
+	if secret.ContextID != contextID || secret.Host != "" || secret.NativeApp != step.NativeApp {
+		return "", errors.New("secret is not bound to this context and native app")
+	}
+	e.secretInputUsed = true
 	return secret.Value, nil
 }
 

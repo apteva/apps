@@ -40,6 +40,7 @@ func (e *actorExecution) releaseContextLock(keep bool) {
 }
 
 type actorOperation struct {
+	PrivateScreen          bool                 `json:"private_screen,omitempty"`
 	Browser                *actorBrowser        `json:"browser,omitempty"`
 	RequiredExplicitInputs []string             `json:"required_explicit_inputs,omitempty"`
 	RecoveryOnly           bool                 `json:"recovery_only,omitempty"`
@@ -63,6 +64,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	}
 	def.Operations = nil
 	def.ReadOnly = def.ReadOnly || op.ReadOnly
+	def.PrivateScreen = def.PrivateScreen || op.PrivateScreen
 	def.RecoveryOnly = op.RecoveryOnly
 	if op.Limits != nil {
 		def.Limits = *op.Limits
@@ -161,6 +163,9 @@ func (e *actorExecution) interact(step actorStep) error {
 	case "scroll":
 		args["direction"] = step.Direction
 		args["amount"] = boundedInt(step.Amount, 300, 1, 10000)
+		if e.definition.PrivateScreen && e.session.Backend == "mobile" {
+			args["observation"] = "none"
+		}
 		if step.TargetID != "" {
 			shot, err := e.readScrollSnapshot()
 			if err != nil {
