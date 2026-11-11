@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +202,11 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	} else if r.Operation == "" && r.Status == "failed" && r.Failure != "outcome_unknown" {
 		d := loadDeliveryDiagnostics(ctx, r.TargetID)
 		switch {
+		case legacyMetadataFailureRecoverable(ctx.AppDB(), r, d):
+			decision = "retry"
+			e["recovery_kind"] = "storage_metadata_compatibility"
+			e["historical_failure"] = map[string]any{"failure_code": r.Failure, "last_error": redactDeliverySecrets(r.LastError)}
+			e["reason"] = "legacy Storage provenance decoding failed before provider initialization; unchanged source requires full revalidation"
 		case isSourceDeliveryFailure(r.Failure) && d.OperationState == "not_started":
 			decision = "retry"
 			e["reason"] = "source failed before provider initialization"
@@ -233,7 +239,29 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	media, err := a.resolveMedia(ctx, ids, r.MediaProject)
 	if err != nil || len(media) != 1 || !media[0].IsVideo() {
 		e["reason"] = "stored video could not be resolved"
+		if err != nil {
+			e["source_error"] = redactDeliverySecrets(err.Error())
+		}
 		return e, "", nil
+	}
+	originalDigest := ""
+	if e["recovery_kind"] == "storage_metadata_compatibility" {
+		previous := loadDeliveryDiagnostics(ctx, r.TargetID)
+		originalDigest = previous.SourceSHA256
+		project := r.MediaProject
+		if project == "" {
+			project = projectScope(ctx)
+		}
+		if previous.SourceFileID > 0 && previous.SourceFileID != media[0].ID || previous.ExpectedBytes > 0 && previous.ExpectedBytes != media[0].Bytes || previous.StorageInstallID > 0 && previous.StorageInstallID != media[0].StorageInstallID || previous.MediaProjectID != "" && previous.MediaProjectID != project || previous.SourceSHA256 != "" && media[0].SHA256 != "" && !strings.EqualFold(previous.SourceSHA256, media[0].SHA256) || previous.Source != nil && (media[0].Source == nil || *previous.Source != *media[0].Source) {
+			e["decision"] = "blocked"
+			e["reason"] = "resolved source differs from the original delivery evidence"
+			return e, "", nil
+		}
+		// Missing legacy checksum metadata still requires a whole-file match
+		// against any digest already established for this original delivery.
+		if originalDigest != "" && media[0].SHA256 == "" {
+			media[0].SHA256 = originalDigest
+		}
 	}
 	var options map[string]any
 	if json.Unmarshal([]byte(r.Options), &options) != nil {
@@ -257,6 +285,11 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 		return e, "", nil
 	}
 	defer p.Close()
+	if originalDigest != "" && !strings.EqualFold(originalDigest, p.SHA256) {
+		e["decision"] = "blocked"
+		e["reason"] = "verified source checksum differs from the original delivery evidence"
+		return e, "", nil
+	}
 	e["source_sha256"], e["source_bytes"] = p.SHA256, p.Size
 	e["source"] = p.Diagnostics.Source
 	e["storage_install_id"] = p.Diagnostics.StorageInstallID
@@ -325,6 +358,22 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	}
 	e["decision"] = decision
 	return e, sourceProof, nil
+}
+
+var legacyStorageSourceFailure = regexp.MustCompile(`^attached media could not be resolved: storage files_get\(([1-9][0-9]*)\): json: cannot unmarshal string into Go struct field \.?(?:file\.)?source of type main\.storageVideoSource$`)
+
+func legacyMetadataFailureRecoverable(db recoveryQueryer, r recoveryTarget, d deliveryDiagnostics) bool {
+	if r.Failure != "validation_error" || r.Operation != "" || r.Session != "" || r.PublicID != "" || (d.OperationState != "" && d.OperationState != "not_started") {
+		return false
+	}
+	match := legacyStorageSourceFailure.FindStringSubmatch(r.LastError)
+	var ids []int64
+	if len(match) != 2 || json.Unmarshal([]byte(r.MediaIDs), &ids) != nil || len(ids) != 1 || match[1] != strconv.FormatInt(ids[0], 10) {
+		return false
+	}
+	var unsafe int
+	err := db.QueryRow(`SELECT COUNT(*) FROM post_targets t WHERE t.id=? AND (COALESCE(t.provider_post_id,'')!='' OR COALESCE(t.facebook_page_post_id,'')!='' OR COALESCE(t.existing_post_id,'')!='' OR COALESCE(t.submitted_at,'')!='' OR COALESCE(t.provider_accepted_at,'')!='' OR EXISTS(SELECT 1 FROM delivery_upload_operations o WHERE o.target_id=t.id) OR EXISTS(SELECT 1 FROM social_delivery_recordings h WHERE h.target_id=t.id AND h.status IN ('published','awaiting_audience_setup')))`, r.TargetID).Scan(&unsafe)
+	return err == nil && unsafe == 0
 }
 
 func facebookFetchRejected(message string) bool {
@@ -461,6 +510,15 @@ func (a *App) toolPostDeliveryRecover(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	if current.fingerprint(source) != r.fingerprint(source) {
 		return mcpError("target changed during validation; no recovery executed"), nil
+	}
+	if e["recovery_kind"] == "storage_metadata_compatibility" {
+		var raw string
+		if err := tx.QueryRow(`SELECT delivery_diagnostics FROM post_targets WHERE id=?`, target).Scan(&raw); err != nil {
+			return nil, err
+		}
+		if !legacyMetadataFailureRecoverable(tx, current, decodeDeliveryDiagnostics(raw, current.Platform, current.LastError)) {
+			return mcpError("nonpublication evidence changed during validation; no recovery executed"), nil
+		}
 	}
 	if reviewExpired {
 		// A poll can finish between revalidation and the transaction. Do not
