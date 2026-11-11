@@ -630,30 +630,34 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_transcribe",
-			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?.",
+			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?, require_word_timings?. Completed transcripts remain readable while upgrades run and after failure.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":      map[string]any{"type": "string"},
-				"force":        map[string]any{"type": "boolean"},
-				"prepare_only": map[string]any{"type": "boolean"},
+				"file_id":              map[string]any{"type": "string"},
+				"force":                map[string]any{"type": "boolean"},
+				"prepare_only":         map[string]any{"type": "boolean"},
+				"require_word_timings": map[string]any{"type": "boolean", "description": "Safely upgrade a completed transcript missing validated word timings; retain the previous completed transcript on failure."},
 			}, []string{"file_id"}),
 			Handler: a.toolTranscribe,
 		},
 		{
 			Name:        "media_get_transcript",
-			Description: "Fetch one file's transcript (status, language, full text, segments).",
-			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}}, []string{"file_id"}),
+			Description: "Fetch a transcript with persisted words and timing readiness. view=summary/text/segments/words/full; word and segment views support windows, channel/speaker filters, revision-bound pagination, and phrase query/occurrence. Full is the compatible default.",
+			InputSchema: transcriptReadSchema(),
 			Handler:     a.toolGetTranscript,
 		},
 		{
 			Name:        "media_set_transcript",
-			Description: "Upsert an externally-produced transcript (e.g. uploaded captions, third-party tool). Bypasses the auto pipeline. Args: file_id, text, language?, segments? (array of {start_ms, end_ms, text, speaker?, words?: [{start_ms,end_ms,text}]}), provider?.",
+			Description: "Upsert an externally-produced transcript (e.g. uploaded captions, third-party tool). Args: file_id, text, language?, segments? (array of {start_ms, end_ms, text, speaker?, words?: [{start_ms,end_ms,text,confidence?,speaker?,channel?}]}), provider?, source_sha256?. Alternatively import a saved deepgram_response with source_sha256 and transcription_audio_file_id; its provider hash must match Media validated audio. Retains previous versions.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":  map[string]any{"type": "string"},
-				"text":     map[string]any{"type": "string"},
-				"language": map[string]any{"type": "string"},
-				"segments": map[string]any{"type": "array", "description": "Timed sentences, optionally with words: [{start_ms,end_ms,text}] for precise audio redaction."},
-				"provider": map[string]any{"type": "string"},
-			}, []string{"file_id", "text"}),
+				"file_id":                     map[string]any{"type": "string"},
+				"text":                        map[string]any{"type": "string"},
+				"language":                    map[string]any{"type": "string"},
+				"segments":                    map[string]any{"type": "array", "description": "Timed sentences, optionally with words: [{start_ms,end_ms,text}] for precise audio redaction."},
+				"provider":                    map[string]any{"type": "string"},
+				"source_sha256":               map[string]any{"type": "string", "description": "Expected original source hash; required for saved Deepgram response import."},
+				"deepgram_response":           map[string]any{"type": "object", "description": "Saved provider response. Import requires provider metadata.sha256 matching Media validated audio and transcription_audio_file_id; unverifiable responses must be retranscribed."},
+				"transcription_audio_file_id": map[string]any{"type": "integer"},
+			}, []string{"file_id"}),
 			Handler: a.toolSetTranscript,
 		},
 		{
@@ -982,9 +986,10 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	force, _ := args["force"].(bool)
 	prepareOnly, _ := args["prepare_only"].(bool)
+	requireWords, _ := args["require_word_timings"].(bool)
 	if prepareOnly {
-		if force {
-			return nil, errors.New("prepare_only cannot be combined with force")
+		if force || requireWords {
+			return nil, errors.New("prepare_only cannot be combined with force or require_word_timings")
 		}
 		media, err := getMedia(ctx.AppDB(), pid, fid)
 		if err != nil {
@@ -992,9 +997,6 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		if !media.HasAudio {
 			return nil, errors.New("source has no audio")
-		}
-		if !media.HasVideo {
-			return map[string]any{"file_id": fid, "prepared": false, "reason": "audio source is sent directly", "transcript_changed": false}, nil
 		}
 		id, err := strconv.ParseInt(fid, 10, 64)
 		if err != nil {
@@ -1010,20 +1012,11 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		return map[string]any{"file_id": fid, "prepared": true, "audio_preparation": evidence, "transcript_changed": false}, nil
 	}
-	if force {
-		// Wipe any existing row so insertPendingTranscript treats this
-		// as a fresh queue entry. The auto-policy uses ON CONFLICT to
-		// avoid disturbing in-flight rows; manual force is the explicit
-		// override.
-		if _, err := ctx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=? AND status != 'running'`, pid, fid); err != nil {
-			return nil, err
-		}
-	}
-	if err := insertPendingTranscript(ctx.AppDB(), pid, fid, "manual"); err != nil {
+	if err := queueTranscript(ctx.AppDB(), pid, fid, "manual", force, requireWords); err != nil {
 		return nil, err
 	}
 	notifyTranscriber(pid, fid)
-	queued, err := getTranscript(ctx.AppDB(), pid, fid)
+	queued, err := getTranscriptAttempt(ctx.AppDB(), pid, fid)
 	if err != nil {
 		return nil, err
 	}
@@ -1046,7 +1039,7 @@ func (a *App) toolGetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		return nil, err
 	}
-	return map[string]any{"found": true, "transcript": t}, nil
+	return transcriptReadResponse(ctx, t, args)
 }
 
 // toolSetTranscript installs a pre-made transcript without going
@@ -1061,39 +1054,11 @@ func (a *App) toolSetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if fid == "" {
 		return nil, errors.New("file_id required")
 	}
-	text, _ := args["text"].(string)
-	if text == "" {
-		return nil, errors.New("text required")
+	t, err := transcriptImportFromArgs(ctx, pid, fid, args)
+	if err != nil {
+		return nil, err
 	}
-	provider, _ := args["provider"].(string)
-	if provider == "" {
-		provider = "imported"
-	}
-	t := &TranscriptRow{
-		FileID:     fid,
-		ProjectID:  pid,
-		Status:     "ok",
-		Text:       text,
-		Provider:   provider,
-		SourceKind: "imported",
-	}
-	if v, ok := args["language"].(string); ok {
-		t.Language = v
-	}
-	// Segments come over the wire as []any of map[string]any; round-
-	// trip through json so the persisted JSON matches our shape.
-	if raw, ok := args["segments"]; ok && raw != nil {
-		bb, err := json.Marshal(raw)
-		if err == nil && len(bb) > 0 {
-			t.Segments = bb
-		}
-	}
-	// Snapshot media duration when we can — keeps the row coherent
-	// with the catalog without forcing the caller to provide it.
-	if media, mErr := getMedia(ctx.AppDB(), pid, fid); mErr == nil {
-		t.DurationMs = media.DurationMs
-		t.SourceSHA256 = media.SourceSHA256
-	}
+
 	if err := upsertTranscript(ctx.AppDB(), t); err != nil {
 		return nil, err
 	}
@@ -1751,43 +1716,26 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"found": true, "transcript": tr})
+		response, err := transcriptReadResponse(globalCtx, tr, transcriptReadArgs(r.URL.Query()))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, response)
 	case tail == "transcript" && r.Method == http.MethodPut:
 		// Imported / manual transcript upload. Same partial-update
 		// shape as media_set_transcript MCP tool.
-		var body struct {
-			Text     string              `json:"text"`
-			Language string              `json:"language"`
-			Provider string              `json:"provider"`
-			Segments []TranscriptSegment `json:"segments"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		var args map[string]any
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&args); err != nil {
+			http.Error(w, "invalid transcript JSON", http.StatusBadRequest)
 			return
 		}
-		if body.Text == "" {
-			http.Error(w, "text required", http.StatusBadRequest)
+		t, err := transcriptImportFromArgs(globalCtx, pid, fid, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		t := &TranscriptRow{
-			FileID: fid, ProjectID: pid,
-			Text:       body.Text,
-			Language:   body.Language,
-			Provider:   firstNonEmpty(body.Provider, "imported"),
-			SourceKind: "imported",
-		}
-		if len(body.Segments) > 0 {
-			segsJSON, err := formatSegments(body.Segments)
-			if err != nil {
-				http.Error(w, "segments: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			t.Segments = segsJSON
-		}
-		if media, mErr := getMedia(globalCtx.AppDB(), pid, fid); mErr == nil {
-			t.DurationMs = media.DurationMs
-			t.SourceSHA256 = media.SourceSHA256
-		}
+
 		if err := upsertTranscript(globalCtx.AppDB(), t); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1799,16 +1747,11 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 	case tail == "transcribe" && r.Method == http.MethodPost:
 		// Queue a transcript (or force-requeue when ?force=true).
 		// Mirrors the media_transcribe MCP tool.
-		if r.URL.Query().Get("force") == "true" {
-			if _, err := globalCtx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=? AND status != 'running'`, pid, fid); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		if err := insertPendingTranscript(globalCtx.AppDB(), pid, fid, "manual"); err != nil {
+		if err := queueTranscript(globalCtx.AppDB(), pid, fid, "manual", r.URL.Query().Get("force") == "true", r.URL.Query().Get("require_word_timings") == "true"); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		notifyTranscriber(pid, fid)
 		w.WriteHeader(http.StatusAccepted)
 		writeJSON(w, map[string]any{"file_id": fid, "status": "pending"})
 	case tail == "description" && r.Method == http.MethodPut:

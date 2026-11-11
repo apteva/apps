@@ -21,7 +21,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -290,6 +289,8 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		"url":          signedURL,
 		"model":        model,
 		"smart_format": true,
+		"paragraphs":   true,
+		"utterances":   true,
 	}
 	if language == "auto" {
 		args["detect_language"] = true
@@ -333,7 +334,24 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		_ = markFailure(fmt.Sprintf("transcript_provider_duration_mismatch: provider=%dms validated_audio=%dms request_id=%s", parsed.ProviderDurationMs, audioEvidence.Validation.DurationMs, parsed.RequestID))
 		return
 	}
-	diagnostics, _ := json.Marshal(map[string]any{"status_semantics": "provider_response_parsed", "speech_coverage": "unverified", "provider_metadata": parsed.Metadata, "provider_duration_ms": parsed.ProviderDurationMs, "word_count": parsed.WordCount, "last_word_end_ms": parsed.LastWordEndMs, "audio_preparation": audioEvidence})
+	timing, err := buildTranscriptTiming(ctx, app, sc, media, audioEvidence, parsed)
+	if err != nil {
+		_ = markFailure("validate transcript timing: " + err.Error())
+		return
+	}
+	requireWords := transcriptRequiresWords(db, row)
+	if previous, readErr := getTranscript(db, row.ProjectID, row.FileID); readErr == nil && previous.Status == "ok" {
+		requireWords = requireWords || transcriptHasWords(previous)
+		if strings.TrimSpace(previous.Text) != "" && strings.TrimSpace(parsed.Text) == "" {
+			_ = markFailure("transcript_empty_upgrade: provider returned no text; previous transcript retained")
+			return
+		}
+	}
+	if requireWords && parsed.WordCount == 0 {
+		_ = markFailure("word_timing_unavailable: provider returned speech without word timestamps")
+		return
+	}
+	diagnostics, _ := json.Marshal(map[string]any{"status_semantics": "provider_response_parsed", "speech_coverage": "unverified", "provider_metadata": parsed.Metadata, "provider_duration_ms": parsed.ProviderDurationMs, "word_count": parsed.WordCount, "last_word_end_ms": parsed.LastWordEndMs, "audio_preparation": audioEvidence, "timing": timing})
 	// Persist.
 	final := &TranscriptRow{
 		FileID:             row.FileID,
@@ -351,10 +369,15 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		RequireSourceMatch: true,
 	}
 	if len(parsed.Segments) > 0 {
-		segsJSON, _ := formatSegments(parsed.Segments)
+		segsJSON, segErr := formatSegments(parsed.Segments)
+		if segErr != nil {
+			_ = markFailure(segErr.Error())
+			return
+		}
 		final.Segments = segsJSON
 	}
 	if err := transcriptMarkOk(db, final); err != nil {
+		failedTranscriptCommit(db, row, err)
 		log.Error("transcript mark ok failed", "file_id", row.FileID, "err", err)
 		return
 	}
@@ -377,137 +400,6 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	// fires here. If it IS bound, the describer's tail-call will
 	// win instead.
 	maybeEmitMediaCompleted(app, row.ProjectID, row.FileID)
-}
-
-// ─── Deepgram response parsing ─────────────────────────────────────
-
-// parsedTranscript is the lifted subset of Deepgram's response we
-// care about. Deepgram returns a deeply-nested envelope (results →
-// channels[] → alternatives[]); we walk it once and lift only the
-// fields we persist.
-type parsedTranscript struct {
-	Text               string
-	Language           string
-	Segments           []TranscriptSegment
-	Metadata           json.RawMessage
-	ProviderDurationMs int64
-	RequestID          string
-	WordCount          int
-	LastWordEndMs      int64
-}
-
-// parseDeepgramResponse handles Deepgram's listen response shape.
-// Doc: https://developers.deepgram.com/reference/pre-recorded
-//
-// Shape (simplified):
-//
-//	{
-//	  "metadata": { "detected_language": "en" },
-//	  "results": {
-//	    "channels": [
-//	      {
-//	        "detected_language": "en",
-//	        "alternatives": [
-//	          { "transcript": "...", "paragraphs": { "paragraphs": [...] }, "words": [...] }
-//	        ]
-//	      }
-//	    ]
-//	  }
-//	}
-//
-// We grab channels[0].alternatives[0].transcript for the plain text,
-// and walk paragraphs[].sentences[] when present for timed segments
-// (the segment shape we expose to callers). Preserve provider word boundaries
-// inside segments for deterministic audio editing; never infer them from text.
-func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
-	var env struct {
-		Metadata struct {
-			DetectedLanguage string  `json:"detected_language"`
-			Duration         float64 `json:"duration"`
-			RequestID        string  `json:"request_id"`
-		} `json:"metadata"`
-		Results struct {
-			Channels []struct {
-				DetectedLanguage string `json:"detected_language"`
-				Alternatives     []struct {
-					Transcript string `json:"transcript"`
-					Words      []struct {
-						End   float64 `json:"end"`
-						Start float64 `json:"start"`
-						Word  string  `json:"word"`
-					} `json:"words"`
-					Paragraphs struct {
-						Paragraphs []struct {
-							Sentences []struct {
-								Text  string  `json:"text"`
-								Start float64 `json:"start"`
-								End   float64 `json:"end"`
-							} `json:"sentences"`
-						} `json:"paragraphs"`
-					} `json:"paragraphs"`
-				} `json:"alternatives"`
-			} `json:"channels"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, fmt.Errorf("decode envelope: %w", err)
-	}
-	if len(env.Results.Channels) == 0 || len(env.Results.Channels[0].Alternatives) == 0 {
-		return nil, errors.New("deepgram response has no channels/alternatives")
-	}
-	alt := env.Results.Channels[0].Alternatives[0]
-
-	out := &parsedTranscript{
-		Text:               strings.TrimSpace(alt.Transcript),
-		Language:           env.Metadata.DetectedLanguage,
-		ProviderDurationMs: int64(math.Round(env.Metadata.Duration * 1000)),
-		RequestID:          env.Metadata.RequestID,
-		WordCount:          len(alt.Words),
-	}
-	var meta map[string]json.RawMessage
-	if json.Unmarshal(data, &meta) == nil {
-		out.Metadata = meta["metadata"]
-	}
-	for _, w := range alt.Words {
-		if n := int64(math.Round(w.End * 1000)); n > out.LastWordEndMs {
-			out.LastWordEndMs = n
-		}
-	}
-	if out.Language == "" {
-		out.Language = env.Results.Channels[0].DetectedLanguage
-	}
-	for _, p := range alt.Paragraphs.Paragraphs {
-		for _, s := range p.Sentences {
-			out.Segments = append(out.Segments, TranscriptSegment{
-				StartMs: int64(s.Start * 1000),
-				EndMs:   int64(s.End * 1000),
-				Text:    s.Text,
-			})
-		}
-	}
-	// Keep each provider word once, even when sentence boundaries round differently.
-	var words []TranscriptWord
-	for _, w := range alt.Words {
-		if w.Word != "" {
-			words = append(words, TranscriptWord{int64(math.Round(w.Start * 1000)), int64(math.Round(w.End * 1000)), w.Word})
-		}
-	}
-	if len(words) > 0 {
-		if len(out.Segments) == 0 {
-			out.Segments = []TranscriptSegment{{StartMs: words[0].StartMs, EndMs: words[len(words)-1].EndMs, Text: out.Text}}
-		}
-		for _, w := range words {
-			index := len(out.Segments) - 1
-			for i, s := range out.Segments {
-				if w.StartMs < s.EndMs {
-					index = i
-					break
-				}
-			}
-			out.Segments[index].Words = append(out.Segments[index].Words, w)
-		}
-	}
-	return out, nil
 }
 
 // ─── helpers ────────────────────────────────────────────────────────

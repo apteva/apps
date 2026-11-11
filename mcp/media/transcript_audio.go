@@ -50,10 +50,7 @@ func deepgramInput(ctx context.Context, app *sdk.AppCtx, sc *storageClient, medi
 	if err != nil {
 		return "", nil, fmt.Errorf("file_id not numeric: %w", err)
 	}
-	if !media.HasVideo {
-		url, err := sc.GetSignedURL(ctx, media.ProjectID, fileID, 30*60)
-		return url, nil, err
-	}
+
 	evidence, err := ensureTranscriptAudioEvidence(ctx, app, sc, media, fileID)
 	if err != nil {
 		return "", nil, err
@@ -63,12 +60,16 @@ func deepgramInput(ctx context.Context, app *sdk.AppCtx, sc *storageClient, medi
 }
 
 func ensureTranscriptAudioEvidence(ctx context.Context, app *sdk.AppCtx, sc *storageClient, media *MediaRow, sourceFileID int64) (*transcriptAudioEvidence, error) {
+	expectedDuration, err := transcriptionAudioExpectedDuration(media)
+	if err != nil {
+		return nil, err
+	}
 	kind := transcriptAudioKind(media.SourceSHA256)
 	if d, ok := findTranscriptAudioDerivation(app.AppDB(), media.ProjectID, media.FileID, kind); ok {
 		var raw string
 		if app.AppDB().QueryRow(`SELECT evidence FROM transcript_audio_checks WHERE project_id=? AND file_id=? AND kind=? AND storage_file_id=?`, media.ProjectID, media.FileID, kind, d.StorageFileID).Scan(&raw) == nil {
 			var e transcriptAudioEvidence
-			if json.Unmarshal([]byte(raw), &e) == nil && strconv.FormatInt(e.StorageFileID, 10) == d.StorageFileID && e.Validation.check(media.DurationMs) == nil && transcriptAudioStorageExists(ctx, sc, media.ProjectID, d.StorageFileID) {
+			if json.Unmarshal([]byte(raw), &e) == nil && strconv.FormatInt(e.StorageFileID, 10) == d.StorageFileID && e.Validation.check(expectedDuration) == nil && transcriptAudioStorageExists(ctx, sc, media.ProjectID, d.StorageFileID) {
 				return &e, nil
 			}
 		}
@@ -80,14 +81,14 @@ func ensureTranscriptAudioEvidence(ctx context.Context, app *sdk.AppCtx, sc *sto
 	var evidence *transcriptAudioEvidence
 	hostID := componentExecutionID(app)
 	if hostID > 0 {
-		evidence, err = prepareTranscriptAudioRemote(ctx, app, media.ProjectID, hostID, sourceURL, media.FileID, media.DurationMs)
+		evidence, err = prepareTranscriptAudioRemote(ctx, app, media.ProjectID, hostID, sourceURL, media.FileID, expectedDuration)
 	} else {
-		evidence, err = prepareTranscriptAudioLocal(ctx, app, sc, media.ProjectID, sourceURL, media.FileID, media.DurationMs)
+		evidence, err = prepareTranscriptAudioLocal(ctx, app, sc, media.ProjectID, sourceURL, media.FileID, expectedDuration)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err = evidence.Validation.check(media.DurationMs); err != nil {
+	if err = evidence.Validation.check(expectedDuration); err != nil {
 		return nil, err
 	}
 	tx, err := app.AppDB().Begin()

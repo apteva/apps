@@ -339,13 +339,13 @@ func TestToolTranscribe_ForceRequeuesOk(t *testing.T) {
 	if tr.Status != "ok" {
 		t.Errorf("non-force flipped ok row: %v", tr.Status)
 	}
-	// With force: row resets to pending.
+	// With force: queue a candidate, retaining the completed transcript.
 	app.toolTranscribe(ctx, map[string]any{
 		"_project_id": testProj, "file_id": "1", "force": true,
 	})
 	tr, _ = getTranscript(ctx.AppDB(), testProj, "1")
-	if tr.Status != "pending" {
-		t.Errorf("force didn't requeue: %v", tr.Status)
+	if tr.Status != "ok" || tr.Text != "old" || tr.LastAttempt == nil || tr.LastAttempt.Status != "pending" {
+		t.Fatalf("force removed active transcript or failed to queue: %+v", tr)
 	}
 }
 

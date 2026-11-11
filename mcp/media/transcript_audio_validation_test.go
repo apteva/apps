@@ -154,7 +154,7 @@ func TestTranscriptAudioFullLengthProductionSignal(t *testing.T) {
 }
 
 func TestDeepgramDiagnosticsPersistActualMetadataWithoutClaimingCoverage(t *testing.T) {
-	raw := json.RawMessage(`{"metadata":{"duration":599.652,"request_id":"request-1","sha256":"proxy-sha","model_info":{"m":{"name":"general-nova-3","version":"2025-07-31.0"}}},"results":{"channels":[{"alternatives":[{"transcript":"late speech","words":[{"end":5},{"end":575.95}]}]}]}}`)
+	raw := json.RawMessage(`{"metadata":{"duration":599.652,"request_id":"request-1","sha256":"proxy-sha","model_info":{"m":{"name":"general-nova-3","version":"2025-07-31.0"}}},"results":{"channels":[{"alternatives":[{"transcript":"late speech","words":[{"word":"late","start":4.5,"end":5},{"word":"speech","start":575,"end":575.95}]}]}]}}`)
 	p, err := parseDeepgramResponse(raw)
 	if err != nil {
 		t.Fatal(err)

@@ -28,7 +28,7 @@ func redactionParamsForTest(t *testing.T, method string, preview bool) map[strin
 }
 
 func TestAudioRedactionSelectionsAndGuards(t *testing.T) {
-	words := []TranscriptWord{{100, 300, "Hello"}, {350, 600, "world!"}, {700, 900, "hello"}, {950, 1200, "world"}}
+	words := []TranscriptWord{{StartMs: 100, EndMs: 300, Text: "Hello"}, {StartMs: 350, EndMs: 600, Text: "world!"}, {StartMs: 700, EndMs: 900, Text: "hello"}, {StartMs: 950, EndMs: 1200, Text: "world"}}
 	p := audioRedactParams{Method: "mute", Selections: []audioSelection{{Text: "HELLO world", Occurrence: 2}}}
 	plan, err := makeAudioRedactionPlan(p, words, 5000, "hash")
 	if err != nil {
@@ -78,7 +78,7 @@ func TestAudioRedactionToolQueuesSourceBoundPlan(t *testing.T) {
 	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleAudioProbe(), "source-hash", "", "source.wav"); err != nil {
 		t.Fatal(err)
 	}
-	segs, _ := json.Marshal([]TranscriptSegment{{StartMs: 0, EndMs: 5000, Text: "hide this", Words: []TranscriptWord{{2000, 2400, "hide"}, {2500, 3000, "this"}}}})
+	segs, _ := json.Marshal([]TranscriptSegment{{StartMs: 0, EndMs: 5000, Text: "hide this", Words: []TranscriptWord{{StartMs: 2000, EndMs: 2400, Text: "hide"}, {StartMs: 2500, EndMs: 3000, Text: "this"}}}})
 	if err := upsertTranscript(ctx.AppDB(), &TranscriptRow{FileID: "42", ProjectID: testProj, SourceSHA256: "source-hash", Text: "hide this", Segments: segs}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,10 +129,10 @@ func TestDeepgramWordTimingPersistsForRedaction(t *testing.T) {
 	if err != nil || len(parsed.Segments) != 1 || len(parsed.Segments[0].Words) != 2 {
 		t.Fatalf("parsed=%+v err=%v", parsed, err)
 	}
-	if parsed.Segments[0].Words[0] != (TranscriptWord{250, 500, "hello"}) {
+	if parsed.Segments[0].Words[0].StartMs != 250 || parsed.Segments[0].Words[0].EndMs != 500 || parsed.Segments[0].Words[0].Text != "hello" {
 		t.Fatalf("words=%+v", parsed.Segments[0].Words)
 	}
-	if err := validateTranscriptWords([]TranscriptWord{{20, 10, "bad"}}, 5000); err == nil {
+	if err := validateTranscriptWords([]TranscriptWord{{StartMs: 20, EndMs: 10, Text: "bad"}}, 5000); err == nil {
 		t.Fatal("invalid alignment accepted")
 	}
 }
@@ -376,7 +376,7 @@ func TestAudioRedactionDelayedAudioUsesSourceTimeline(t *testing.T) {
 	if err := upsertMedia(ctx.AppDB(), testProj, "42", probe, "source-hash", "", "delayed.mov"); err != nil {
 		t.Fatal(err)
 	}
-	segs := redactionRaw(t, []TranscriptSegment{{StartMs: 0, EndMs: 4500, Text: "hide", Words: []TranscriptWord{{1500, 2500, "hide"}}}})
+	segs := redactionRaw(t, []TranscriptSegment{{StartMs: 0, EndMs: 4500, Text: "hide", Words: []TranscriptWord{{StartMs: 1500, EndMs: 2500, Text: "hide"}}}})
 	if err := upsertTranscript(ctx.AppDB(), &TranscriptRow{FileID: "42", ProjectID: testProj, SourceSHA256: "source-hash", Provider: "deepgram", Text: "hide", Segments: segs}); err != nil {
 		t.Fatal(err)
 	}

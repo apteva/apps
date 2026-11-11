@@ -3,10 +3,51 @@
 Media owns its catalog, transcripts, processing requests, API, UI, provider
 connections and durable render outcomes. Local processing remains the default.
 
+## Transcript timing (v0.15.6)
+
+Refresh the Deepgram integration catalog before installing this release. Media
+keeps its existing `listen` binding; that tool now preserves provider words and
+audio/request identity. Large provider payloads stay inside the transcription
+pipeline; callers can retrieve only the data they need:
+
+```json
+{"file_id":"27706","view":"summary"}
+{"file_id":"27706","view":"words","start_ms":450000,"end_ms":482580,"limit":100}
+{"file_id":"27706","view":"words","query":"mind control","occurrence":2}
+```
+
+`full` remains the default; `text`, `segments` and `words` are optional views.
+Word/segment/match pages default to 200 rows and allow at most 1000. Repeat the
+same filters with `cursor=next_cursor` while `has_more=true`. A changed revision
+invalidates its cursors. `word_count` always describes the complete transcript;
+`matched_count` and `returned_count` describe the filtered page. Phrase queries
+return `matches` containing exact word indexes, intervals and occurrence numbers;
+channel streams are never mixed into an artificial phrase. Windows use overlap
+semantics. Segment views keep sentence text/bounds; speaker filters select
+sentences containing that speaker. Nested words are included only when
+`include_words=true`. Words support `channel` and `speaker` filters directly.
+
+Timing stays in the stored timebase (Deepgram: `transcript_audio`). Request
+`timebase="source"` to apply the recorded, source-matched mapping exactly once.
+Summaries include the mapping, word timing status, source match and redaction
+readiness. These fields do not establish complete recognition of all speech.
+Text redaction rejects missing timings and ambiguous multichannel selection.
+
+Request `media_transcribe({file_id,require_word_timings:true})` to safely upgrade
+an existing transcript. Read `last_attempt` to track a candidate while the
+previous completed transcript stays available. Failed attempts preserve that
+version. No migration automatically retranscribes completed files. Verified saved
+provider responses can use `media_set_transcript` with `deepgram_response`,
+`source_sha256` and `transcription_audio_file_id`; a matching provider audio hash
+and Media's validated audio evidence are required. Unverifiable responses must be
+regenerated through Media. REST `/media/:id/transcript` exposes the same views
+and filters, and POST `/media/:id/transcribe?require_word_timings=true` queues an
+upgrade. Original media files remain unchanged.
+
 ## Executor component (v0.15.0)
 
 Offloaded processing uses the private `executor` component and
-`apteva.media-executor/v1`. Media uses App SDK v0.110.0; the pinned worker uses
+`apteva.media-executor/v1`. Media uses App SDK v0.115.1; the pinned worker uses
 v0.109.0. A Server supporting owned components and managed runtime backends is required; older
 strict manifest parsers cannot install this release.
 

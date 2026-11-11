@@ -255,6 +255,7 @@ func TestTranscriberSweep_BoundHappyPath_PersistsTranscript(t *testing.T) {
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
+	seedTranscriptAudio(t, ctx, "1", "sha", 9001, 5000)
 
 	transcriberSweep(ctx)
 
@@ -368,6 +369,7 @@ func TestTranscriberSweep_DeepgramNon2xx_MarkedFailed(t *testing.T) {
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
+	seedTranscriptAudio(t, ctx, "1", "sha", 9001, 5000)
 
 	transcriberSweep(ctx)
 
@@ -386,6 +388,7 @@ func TestTranscriberSweep_DeepgramNetworkError_MarkedFailed(t *testing.T) {
 	stub.executeErr = errors.New("connection reset by peer")
 	ctx := newTestCtxWithPlatform(t, stub)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
+	seedTranscriptAudio(t, ctx, "1", "sha", 9001, 5000)
 
 	transcriberSweep(ctx)
 
@@ -408,6 +411,7 @@ func TestTranscriberSweep_MalformedDeepgramResponse_MarkedFailed(t *testing.T) {
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
+	seedTranscriptAudio(t, ctx, "1", "sha", 9001, 5000)
 
 	transcriberSweep(ctx)
 
@@ -459,6 +463,7 @@ func TestTranscriberSweep_DiarizeFlagPropagates(t *testing.T) {
 	globalCtx = ctx
 
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
+	seedTranscriptAudio(t, ctx, "1", "sha", 9001, 5000)
 	transcriberSweep(ctx)
 
 	if len(stub.ExecuteCalls) != 1 {

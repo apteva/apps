@@ -18,12 +18,16 @@ import (
 // follow the OpenAI/Whisper convention; Deepgram's response is
 // normalised into this shape by the worker before persisting.
 type TranscriptWord struct {
-	StartMs int64  `json:"start_ms"`
-	EndMs   int64  `json:"end_ms"`
-	Text    string `json:"text"`
+	StartMs    int64    `json:"start_ms"`
+	EndMs      int64    `json:"end_ms"`
+	Text       string   `json:"text"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Speaker    *int     `json:"speaker,omitempty"`
+	Channel    *int     `json:"channel,omitempty"`
 }
 
 type TranscriptSegment struct {
+	Channel *int             `json:"channel,omitempty"`
 	Words   []TranscriptWord `json:"words,omitempty"`
 	StartMs int64            `json:"start_ms"`
 	EndMs   int64            `json:"end_ms"`
@@ -32,24 +36,25 @@ type TranscriptSegment struct {
 }
 
 type TranscriptRow struct {
-	RequireSourceMatch bool            `json:"-"`
-	FileID             string          `json:"file_id"`
-	ProjectID          string          `json:"project_id"`
-	SourceSHA256       string          `json:"source_sha256,omitempty"`
-	Status             string          `json:"status"`
-	Language           string          `json:"language,omitempty"`
-	Text               string          `json:"text,omitempty"`
-	Segments           json.RawMessage `json:"segments,omitempty"`
-	Diagnostics        json.RawMessage `json:"diagnostics,omitempty"`
-	Provider           string          `json:"provider,omitempty"`
-	Model              string          `json:"model,omitempty"`
-	DurationMs         int64           `json:"duration_ms,omitempty"`
-	CostCents          float64         `json:"cost_cents,omitempty"`
-	Error              string          `json:"error,omitempty"`
-	SourceKind         string          `json:"source_kind,omitempty"`
-	CreatedAt          string          `json:"created_at,omitempty"`
-	StartedAt          string          `json:"started_at,omitempty"`
-	CompletedAt        string          `json:"completed_at,omitempty"`
+	LastAttempt        *transcriptAttemptStatus `json:"last_attempt,omitempty"`
+	RequireSourceMatch bool                     `json:"-"`
+	FileID             string                   `json:"file_id"`
+	ProjectID          string                   `json:"project_id"`
+	SourceSHA256       string                   `json:"source_sha256,omitempty"`
+	Status             string                   `json:"status"`
+	Language           string                   `json:"language,omitempty"`
+	Text               string                   `json:"text,omitempty"`
+	Segments           json.RawMessage          `json:"segments,omitempty"`
+	Diagnostics        json.RawMessage          `json:"diagnostics,omitempty"`
+	Provider           string                   `json:"provider,omitempty"`
+	Model              string                   `json:"model,omitempty"`
+	DurationMs         int64                    `json:"duration_ms,omitempty"`
+	CostCents          float64                  `json:"cost_cents,omitempty"`
+	Error              string                   `json:"error,omitempty"`
+	SourceKind         string                   `json:"source_kind,omitempty"`
+	CreatedAt          string                   `json:"created_at,omitempty"`
+	StartedAt          string                   `json:"started_at,omitempty"`
+	CompletedAt        string                   `json:"completed_at,omitempty"`
 }
 
 // insertPendingTranscript creates a transcripts row in pending state.
@@ -57,26 +62,7 @@ type TranscriptRow struct {
 // stepping on running rows — the WHERE in claimNextPendingTranscript
 // guards against double-claim.
 func insertPendingTranscript(db *sql.DB, projectID, fileID, sourceKind string) error {
-	if projectID == "" || fileID == "" {
-		return errors.New("project_id and file_id required")
-	}
-	if sourceKind == "" {
-		sourceKind = "auto"
-	}
-	_, err := db.Exec(`
-		INSERT INTO transcripts (file_id, project_id, status, source_kind)
-		VALUES (?, ?, 'pending', ?)
-		ON CONFLICT(file_id) DO UPDATE SET
-			status='pending', source_kind=excluded.source_kind, source_sha256='',
-			language='', text='', segments='[]', diagnostics='{}', error='', started_at=NULL, completed_at=NULL
-		WHERE transcripts.project_id = excluded.project_id
-		  AND (transcripts.status IN ('failed','skipped') OR
-		       (transcripts.status='ok' AND transcripts.source_sha256 != COALESCE(
-		         (SELECT source_sha256 FROM media WHERE project_id=excluded.project_id AND file_id=excluded.file_id),
-		         transcripts.source_sha256)))`,
-		fileID, projectID, sourceKind,
-	)
-	return err
+	return queueTranscript(db, projectID, fileID, sourceKind, false, false)
 }
 
 // upsertTranscript installs a complete row at status=ok. Used for
@@ -86,12 +72,33 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 	if t.FileID == "" || t.ProjectID == "" {
 		return errors.New("file_id and project_id required")
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if t.RequireSourceMatch {
+		var sha string
+		if err = tx.QueryRow(`SELECT source_sha256 FROM media WHERE project_id=? AND file_id=?`, t.ProjectID, t.FileID).Scan(&sha); err != nil {
+			return err
+		}
+		if sha == "" || sha != t.SourceSHA256 {
+			return errors.New("transcript_source_mismatch")
+		}
+	}
+	old, readErr := getTranscriptAttempt(tx, t.ProjectID, t.FileID)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	if err = snapshotTranscript(tx, old); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	segs := string(t.Segments)
 	if segs == "" {
 		segs = "[]"
 	}
-	_, err := db.Exec(`
+	res, err := tx.Exec(`
 		INSERT INTO transcripts (
 			file_id, project_id, source_sha256, status, language, text, segments,
 			provider, model, duration_ms, cost_cents, raw, error, source_kind,
@@ -111,11 +118,22 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 			error         = '',
 			source_kind   = excluded.source_kind,
 			completed_at  = excluded.completed_at,
-			diagnostics = excluded.diagnostics`,
+			diagnostics = excluded.diagnostics
+ WHERE transcripts.project_id=excluded.project_id`,
 		t.FileID, t.ProjectID, t.SourceSHA256, t.Language, t.Text, segs,
 		t.Provider, t.Model, t.DurationMs, t.CostCents, t.SourceKind, now, transcriptDiagnosticsJSON(t),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("transcript project mismatch")
+	}
+	return tx.Commit()
 }
 
 // claimNextPendingTranscript atomically claims the oldest pending
@@ -220,7 +238,7 @@ func transcriptMarkSkipped(db *sql.DB, projectID, fileID, reason string, attempt
 	return err
 }
 
-func getTranscript(db *sql.DB, projectID, fileID string) (*TranscriptRow, error) {
+func getTranscriptAttempt(db transcriptQuerier, projectID, fileID string) (*TranscriptRow, error) {
 	row := db.QueryRow(`
 		SELECT file_id, project_id, source_sha256, status, language, text, segments,
 		       provider, model, COALESCE(duration_ms,0), COALESCE(cost_cents,0),

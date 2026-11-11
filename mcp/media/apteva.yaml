@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.15.5
+version: 0.15.6
 description: |
+  v0.15.6 preserves provider word timestamps from channel alternatives and
+  utterances, with audio identity and source-timeline mapping. Transcript tools
+  expose timing readiness, bounded word/segment retrieval and phrase matches.
+  Safe timing upgrades retain the previous completed transcript on failure.
   v0.15.5 resolves cached-video pose and model paths inside the executor workspace
   after decoding. Sanitized FFmpeg failures retain exit, timeout and decoder details.
   v0.15.4 pins an executor with authenticated generation-scoped runtime status,
@@ -497,11 +501,11 @@ provides:
 
     # Transcripts — speech-to-text for audio + video (Deepgram-powered).
     - name: media_transcribe
-      description: Queue a transcription. force=true re-queues already-ok rows. Returns immediately; transcriber drains the queue async.
+      description: Queue transcription or safely upgrade missing timings with require_word_timings=true. force=true re-queues completed rows without deleting their active version. Failures retain previous text and segments. prepare_only=true validates transcription audio without provider calls.
     - name: media_get_transcript
-      description: Status / language / text / segments for one file's transcript.
+      description: Fetch persisted words, counts, timing granularity and redaction readiness. Views full (default), summary, text, segments and words support bounded retrieval, time windows, channel/speaker filters, phrase query/occurrence and revision-bound cursors.
     - name: media_set_transcript
-      description: Upsert a hand-supplied transcript (imported / manual). Bypasses the auto pipeline entirely.
+      description: Import text and optional validated timed words. Saved deepgram_response imports require expected source_sha256, transcription_audio_file_id and provider audio hash matching Media validated audio; unverifiable responses must be retranscribed.
 
     # Auto-description — generates 2-3 sentence descriptions via the LLM integration.
     - name: media_describe
@@ -719,7 +723,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.15.5
+    ref: media/v0.15.6
     entry: mcp/media
   port: 8080
   health_check: /health

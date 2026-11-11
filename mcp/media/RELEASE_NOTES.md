@@ -1,3 +1,12 @@
+## 0.15.6 — preserved Deepgram words and safe timing upgrades
+
+Both channel-alternative and utterance word timestamps now survive parsing,
+storage and retrieval, with audio identity and explicit timeline mapping.
+Transcript views support bounded word/segment pages, windows and phrase
+occurrences. Failed upgrades retain the completed transcript. The existing
+Deepgram `listen` integration definition must also be refreshed.
+See [release details](RELEASE-v0.15.6.md).
+
 ## 0.14.41 — transcript-driven audio redaction
 
 Adds `media_redact_audio` using the existing asynchronous render queue and

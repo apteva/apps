@@ -70,6 +70,13 @@ func resolveAudioSelections(selections []audioSelection, words []TranscriptWord,
 			if len(needle) == 0 || len(needle) > 100 {
 				return nil, redactionError("invalid_audio_selection", "text must contain 1..100 words")
 			}
+			channels := map[int]bool{}
+			for _, w := range words {
+				channels[transcriptChannel(w)] = true
+			}
+			if len(channels) > 1 {
+				return nil, redactionError("ambiguous_audio_selection", "multichannel text redaction requires explicit source timestamps")
+			}
 			if len(words) == 0 {
 				return nil, redactionError("word_timing_unavailable", "transcript has no word timing; retranscribe, import timed words, or provide timestamps")
 			}
@@ -237,20 +244,8 @@ func prepareAudioRedactionSubmission(app *sdk.AppCtx, project, op string, source
 		if len(tr.Segments) == 0 {
 			return nil, redactionError("word_timing_unavailable", "transcript has no timed words; retranscribe or provide timestamps")
 		}
-		var segments []TranscriptSegment
-		if err := json.Unmarshal(tr.Segments, &segments); err != nil {
-			return nil, err
-		}
-		for _, s := range segments {
-			words = append(words, s.Words...)
-		}
-		if tr.Provider == "deepgram" {
-			for i := range words {
-				words[i].StartMs += audioStart
-				words[i].EndMs += audioStart
-			}
-		}
-		if err := validateTranscriptWords(words, media.DurationMs); err != nil {
+		words, err = transcriptSourceWords(tr, media)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -270,12 +265,20 @@ func validateTranscriptWords(words []TranscriptWord, duration int64) error {
 	if len(words) > 100000 {
 		return redactionError("invalid_word_timing", "too many timed words")
 	}
-	var previous int64
-	for i, w := range words {
-		if strings.TrimSpace(w.Text) == "" || w.StartMs < 0 || w.EndMs <= w.StartMs || (duration > 0 && w.EndMs > duration) || (i > 0 && w.StartMs < previous) {
+	for _, w := range words {
+		if w.Channel != nil && *w.Channel < 0 || w.Speaker != nil && *w.Speaker < 0 || w.Confidence != nil && (math.IsNaN(*w.Confidence) || math.IsInf(*w.Confidence, 0) || *w.Confidence < 0 || *w.Confidence > 1) {
+			return redactionError("invalid_word_timing", "invalid word channel, speaker, or confidence")
+		}
+	}
+	previous := map[int]int64{}
+	seen := map[int]bool{}
+	for _, w := range words {
+		channel := transcriptChannel(w)
+		if strings.TrimSpace(w.Text) == "" || w.StartMs < 0 || w.EndMs <= w.StartMs || (duration > 0 && w.EndMs > duration) || (seen[channel] && w.StartMs < previous[channel]) {
 			return redactionError("invalid_word_timing", "words must have nonempty text and ordered, valid source intervals")
 		}
-		previous = w.StartMs
+		previous[channel] = w.StartMs
+		seen[channel] = true
 	}
 	return nil
 }
