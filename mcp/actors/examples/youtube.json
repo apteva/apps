@@ -1,0 +1,1826 @@
+{
+  "schema_version": 1,
+  "allowed_hosts": [
+    "www.youtube.com",
+    "youtube.com",
+    "studio.youtube.com"
+  ],
+  "browser": {
+    "context_id": "{{context_id}}",
+    "persist": true
+  },
+  "defaults": {
+    "context_id": "YOUR_SAVED_COMPUTER_CONTEXT",
+    "channel_url": "https://www.youtube.com/@YOUR_HANDLE",
+    "channel_handle": "@YOUR_HANDLE",
+    "channel_id": "UCxxxxxxxxxxxxxxxxxxxxxx",
+    "visibility_label": "Public",
+    "expected_feed_badge": ""
+  },
+  "limits": {
+    "max_items": 5000,
+    "max_pages": 200,
+    "max_duration_seconds": 600,
+    "step_retries": 0
+  },
+  "operations": {
+    "observe_posts_page": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "studio_link": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "url",
+              "attribute": "href"
+            },
+            "composer_placeholder": {
+              "selector": "ytd-backstage-post-dialog-renderer #placeholder-area",
+              "type": "text"
+            },
+            "first_post_text": {
+              "selector": "ytd-backstage-post-thread-renderer #content-text",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        }
+      ],
+      "output_schema": {}
+    },
+    "observe_studio_video": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://studio.youtube.com/video/{{video_id}}/edit?hl=en"
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "channel_link": {
+              "selector": "a[href*=\"/channel/UC\"]",
+              "type": "url",
+              "attribute": "href"
+            },
+            "visibility": {
+              "selector": "ytcp-video-metadata-visibility #select-button",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_posts": {
+      "read_only": true,
+      "limits": {
+        "max_pages": 200,
+        "max_items": 5000,
+        "max_duration_seconds": 900,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "inspect_views",
+          "locator": {},
+          "read_views": {
+            "entry_url": "{{channel_url}}/posts?hl=en",
+            "identity_url": "{{channel_url}}/posts?hl=en",
+            "identity": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            },
+            "views": [
+              {
+                "name": "posts",
+                "covers": [
+                  "published"
+                ],
+                "use_entry_page": true,
+                "url_pattern": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$",
+                "ready_selector": "ytd-section-list-renderer",
+                "empty_selector": "ytd-section-list-renderer #message",
+                "empty_text_pattern": "(?i)^.*(no posts|hasn't posted).*$",
+                "loading_selector": "ytd-continuation-item-renderer tp-yt-paper-spinner[active],[aria-busy=\"true\"]",
+                "error_selector": "yt-alert-renderer,[role=\"alertdialog\"]",
+                "items": "ytd-backstage-post-thread-renderer",
+                "fields": {
+                  "id": {
+                    "selector": "a[href*=\"/post/\"]",
+                    "attribute": "href",
+                    "required": true,
+                    "pattern": "/post/([A-Za-z0-9_-]+)(?:[/?]|$)"
+                  },
+                  "post_url": {
+                    "selector": "a[href*=\"/post/\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "text": {
+                    "selector": "#content-text",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "trim_line_edges": true
+                  },
+                  "published": {
+                    "selector": "#published-time-text",
+                    "type": "text"
+                  },
+                  "members_badge": {
+                    "selector": "ytd-sponsors-only-badge-renderer",
+                    "type": "text"
+                  },
+                  "likes": {
+                    "selector": "#vote-count-middle",
+                    "type": "text"
+                  }
+                },
+                "key_field": "id",
+                "pagination": {
+                  "mode": "scroll",
+                  "scroll_target_name": "Document",
+                  "amount": 5000,
+                  "max_pages": 100,
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_videos": {
+      "read_only": true,
+      "limits": {
+        "max_pages": 200,
+        "max_items": 10000,
+        "max_duration_seconds": 900,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "inspect_views",
+          "locator": {},
+          "read_views": {
+            "entry_url": "{{channel_url}}/videos?hl=en",
+            "identity_url": "{{channel_url}}/posts?hl=en",
+            "identity": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            },
+            "views": [
+              {
+                "name": "videos",
+                "covers": [
+                  "public"
+                ],
+                "use_entry_page": true,
+                "url_pattern": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/videos(?:\\?.*)?$",
+                "ready_selector": "ytd-rich-grid-renderer",
+                "empty_selector": "ytd-browse #contents ytd-message-renderer",
+                "empty_text_pattern": "(?i)^.*no content.*$",
+                "loading_selector": "ytd-continuation-item-renderer tp-yt-paper-spinner[active],[aria-busy=\"true\"]",
+                "error_selector": "yt-alert-renderer,[role=\"alertdialog\"]",
+                "items": "ytd-rich-item-renderer:has(a.ytLockupMetadataViewModelTitle)",
+                "fields": {
+                  "id": {
+                    "selector": "a.ytLockupMetadataViewModelTitle",
+                    "attribute": "href",
+                    "required": true,
+                    "pattern": "[?&]v=([A-Za-z0-9_-]{11})(?:&|$)"
+                  },
+                  "url": {
+                    "selector": "a.ytLockupMetadataViewModelTitle",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "title": {
+                    "selector": "a.ytLockupMetadataViewModelTitle",
+                    "type": "text",
+                    "required": true
+                  },
+                  "metadata": {
+                    "selector": "yt-content-metadata-view-model",
+                    "type": "text"
+                  },
+                  "duration": {
+                    "selector": "yt-thumbnail-badge-view-model",
+                    "type": "text"
+                  },
+                  "badges": {
+                    "selector": "yt-lockup-metadata-view-model badge-shape",
+                    "type": "text",
+                    "all": true,
+                    "separator": "\n"
+                  }
+                },
+                "key_field": "id",
+                "pagination": {
+                  "mode": "scroll",
+                  "scroll_target_name": "Document",
+                  "amount": 5000,
+                  "max_pages": 100,
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_studio_content": {
+      "read_only": true,
+      "limits": {
+        "max_pages": 200,
+        "max_items": 10000,
+        "max_duration_seconds": 900,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "inspect_views",
+          "locator": {},
+          "read_views": {
+            "entry_url": "https://studio.youtube.com/channel/{{channel_id}}/videos/upload?hl=en",
+            "identity_url": "https://studio.youtube.com/channel/{{channel_id}}/videos/upload?hl=en",
+            "identity": {
+              "selector": "a[href*=\"/channel/UC\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            },
+            "views": [
+              {
+                "name": "studio_videos",
+                "covers": [
+                  "public",
+                  "unlisted",
+                  "private",
+                  "members",
+                  "draft"
+                ],
+                "use_entry_page": true,
+                "url_pattern": "^https://studio\\.youtube\\.com/channel/\\Q{{channel_id}}\\E/videos(?:/upload)?(?:\\?.*)?$",
+                "ready_selector": "ytcp-video-section-content",
+                "empty_selector": "ytcp-video-section-content #empty-state",
+                "empty_text_pattern": "(?i)^.*no content.*$",
+                "loading_selector": "tp-yt-paper-spinner[active],ytcp-video-row[loading]",
+                "error_selector": "ytcp-error-section,[role=\"alertdialog\"]",
+                "items": "ytcp-video-row",
+                "fields": {
+                  "id": {
+                    "selector": "a[href*=\"/video/\"]",
+                    "attribute": "href",
+                    "required": true,
+                    "pattern": "/video/([A-Za-z0-9_-]{11})(?:[/?]|$)"
+                  },
+                  "title": {
+                    "selector": "#video-title",
+                    "type": "text",
+                    "required": true
+                  },
+                  "visibility": {
+                    "selector": ".tablecell-visibility",
+                    "type": "text",
+                    "required": true
+                  },
+                  "restrictions": {
+                    "selector": ".tablecell-restrictions",
+                    "type": "text"
+                  },
+                  "date": {
+                    "selector": ".tablecell-date",
+                    "type": "text"
+                  },
+                  "views": {
+                    "selector": ".tablecell-views",
+                    "type": "text"
+                  }
+                },
+                "key_field": "id",
+                "pagination": {
+                  "mode": "next",
+                  "next": {
+                    "text": "Next page",
+                    "role": "button",
+                    "exact": true,
+                    "som_only": true,
+                    "selector": "ytcp-table-footer #navigate-after:not([disabled])"
+                  },
+                  "end_when_next_absent": true,
+                  "max_pages": 100,
+                  "stable_rounds": 2,
+                  "settle_ms": 1500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "set_video_visibility": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://studio.youtube.com/video/{{video_id}}/edit?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytcp-video-metadata-editor"
+            },
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://studio\\.youtube\\.com/video/\\Q{{video_id}}\\E/edit(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytcp-video-metadata-visibility #select-button"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytcp-video-visibility-select tp-yt-paper-radio-button"
+            }
+          ]
+        },
+        {
+          "action": "set_checked",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "role": "radio",
+            "exact": true,
+            "som_only": true
+          },
+          "checked": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Done",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "pending_visibility": {
+              "selector": "ytcp-video-metadata-visibility #select-button",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "pending_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Save",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Save",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "{{request_id}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "key",
+          "key": "CTRL+R"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytcp-video-metadata-visibility #select-button"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "saved_visibility": {
+              "selector": "ytcp-video-metadata-visibility #select-button",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "saved_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "text_post_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "text_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Post",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Post",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "{{request_id}}",
+          "once_scope": "community_post"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-thread-renderer #content-text"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "post_id": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/post/([A-Za-z0-9_-]+)(?:[/?]|$)"
+            },
+            "post_url": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "post_text": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) #content-text",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "feed_badge": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) ytd-sponsors-only-badge-renderer",
+              "type": "text",
+              "required": false
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "post_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "feed_badge": {
+              "equals_exact": "{{expected_feed_badge}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {},
+      "recovery": {
+        "inspection_operation": "fetch_posts",
+        "required_views": [
+          "published"
+        ],
+        "match_fields": {
+          "text": "post_body"
+        }
+      }
+    },
+    "image_post_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Image",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer input[type=\"file\"]"
+          },
+          "source_url": "{{image_url}}",
+          "filename": "{{image_filename}}",
+          "mime_type": "{{image_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-image-renderer img[src]"
+            }
+          ]
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            },
+            "image_preview": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-image-renderer img",
+              "type": "url",
+              "attribute": "src",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "image_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Image",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "upload_file",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer input[type=\"file\"]"
+          },
+          "source_url": "{{image_url}}",
+          "filename": "{{image_filename}}",
+          "mime_type": "{{image_mime_type}}"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-image-renderer img[src]"
+            }
+          ]
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            },
+            "image_preview": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-image-renderer img",
+              "type": "url",
+              "attribute": "src",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Post",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Post",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "{{request_id}}",
+          "once_scope": "community_post"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-thread-renderer #content-text"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "post_id": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/post/([A-Za-z0-9_-]+)(?:[/?]|$)"
+            },
+            "post_url": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "post_text": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) #content-text",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "feed_badge": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) ytd-sponsors-only-badge-renderer",
+              "type": "text",
+              "required": false
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "post_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "feed_badge": {
+              "equals_exact": "{{expected_feed_badge}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {},
+      "recovery": {
+        "inspection_operation": "fetch_posts",
+        "required_views": [
+          "published"
+        ],
+        "match_fields": {
+          "text": "post_body"
+        }
+      }
+    },
+    "poll_post_preflight": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Poll",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer input[aria-label=\"Add option\"]"
+            }
+          ]
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(1) input"
+          },
+          "text": "{{poll_option_1}}"
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(2) input"
+          },
+          "text": "{{poll_option_2}}"
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            },
+            "poll_option_1": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(1) input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "poll_option_2": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(2) input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            },
+            "poll_option_1": {
+              "equals_exact": "{{poll_option_1}}"
+            },
+            "poll_option_2": {
+              "equals_exact": "{{poll_option_2}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "poll_post": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "studio_channel_id": {
+              "selector": "a[href*=\"studio.youtube.com/channel/UC\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/channel/(UC[A-Za-z0-9_-]{22})(?:[/?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "studio_channel_id": {
+              "equals_exact": "{{channel_id}}"
+            },
+            "current_url": {
+              "matches": "^https://www\\.youtube\\.com/\\Q{{channel_handle}}\\E/posts(?:\\?.*)?$"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #placeholder-area"
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root[contenteditable=\"true\"]"
+            }
+          ]
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": ""
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Poll",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-dialog-renderer input[aria-label=\"Add option\"]"
+            }
+          ]
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(1) input"
+          },
+          "text": "{{poll_option_1}}"
+        },
+        {
+          "action": "fill",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(2) input"
+          },
+          "text": "{{poll_option_2}}"
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root"
+          },
+          "text": "{{post_body}}",
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "ytd-backstage-post-dialog-renderer #visibility-button"
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{visibility_label}}",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_effect": "open_configuration",
+          "optional": true
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "composer_text": {
+              "selector": "ytd-backstage-post-dialog-renderer #contenteditable-root",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "composer_visibility": {
+              "selector": "ytd-backstage-post-dialog-renderer #visibility-button",
+              "type": "text",
+              "required": false
+            },
+            "poll_option_1": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(1) input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "poll_option_2": {
+              "selector": "ytd-backstage-post-dialog-renderer ytd-backstage-poll-option-renderer:nth-of-type(2) input",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "composer_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "composer_visibility": {
+              "equals_exact": "{{visibility_label}}"
+            },
+            "poll_option_1": {
+              "equals_exact": "{{poll_option_1}}"
+            },
+            "poll_option_2": {
+              "equals_exact": "{{poll_option_2}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Post",
+            "role": "button",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Post",
+          "expected_effect": "immediate_external_commit",
+          "confirm_consequence": "immediate_external_commit",
+          "once_key": "{{request_id}}",
+          "once_scope": "community_post"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "goto",
+          "url": "{{channel_url}}/posts?hl=en"
+        },
+        {
+          "action": "wait_for",
+          "match": "all",
+          "timeout_ms": 30000,
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "ytd-backstage-post-thread-renderer #content-text"
+            }
+          ]
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "post_id": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "/post/([A-Za-z0-9_-]+)(?:[/?]|$)"
+            },
+            "post_url": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) a[href*=\"/post/\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "post_text": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) #content-text",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "trim_line_edges": true
+            },
+            "feed_badge": {
+              "selector": "ytd-backstage-post-thread-renderer:not(:has([id*=\"pinned\"])) ytd-sponsors-only-badge-renderer",
+              "type": "text",
+              "required": false
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "post_text": {
+              "equals_exact": "{{post_body}}"
+            },
+            "feed_badge": {
+              "equals_exact": "{{expected_feed_badge}}"
+            }
+          }
+        }
+      ],
+      "output_schema": {},
+      "recovery": {
+        "inspection_operation": "fetch_posts",
+        "required_views": [
+          "published"
+        ],
+        "match_fields": {
+          "text": "post_body"
+        }
+      }
+    }
+  }
+}
