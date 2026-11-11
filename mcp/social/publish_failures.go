@@ -32,7 +32,11 @@ func classifyPublishFailure(err error) publishFailure {
 	failure := publishFailure{Code: "upstream_error", Retryable: true}
 	var source *sourceDeliveryError
 	if errors.As(err, &source) {
-		return publishFailure{Code: "source_delivery", Retryable: source.Transient}
+		code := source.Code
+		if code == "" {
+			code = "source_delivery"
+		}
+		return publishFailure{Code: code, Retryable: source.Transient}
 	}
 	var resumable *youtubeUploadRetryError
 	if errors.As(err, &resumable) {

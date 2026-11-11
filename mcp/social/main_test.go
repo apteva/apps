@@ -212,6 +212,7 @@ func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string
 
 func newSocialCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	t.Helper()
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
 	rec := tk.NewEmitRecorder()
 	opts := []tk.Option{
 		tk.WithProjectID("test-proj"),

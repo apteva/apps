@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.24.6
+version: 0.24.7
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -233,7 +233,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: social/v0.24.6
+    ref: social/v0.24.7
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -735,7 +735,10 @@ var platforms = map[string]platformDef{
 
 var globalCtx *sdk.AppCtx
 
-type App struct{ avatarClient *http.Client }
+type App struct {
+	avatarClient *http.Client
+	stagingSpace func(string) (uint64, bool, error)
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -4469,7 +4472,7 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	}
 	defer prepared.Close()
 	if prepared.Size != first.Bytes {
-		return "", "", &sourceDeliveryError{"video size differs from upload metadata", false}
+		return "", "", &sourceDeliveryError{Code: "source_changed", Reason: "video size differs from upload metadata"}
 	}
 	d := prepared.Diagnostics
 	d.ProgressVersion = 1

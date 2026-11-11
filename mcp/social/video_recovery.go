@@ -196,7 +196,7 @@ func (a *App) deliveryRecoveryDecision(ctx *sdk.AppCtx, r recoveryTarget, valida
 	} else if r.Operation == "" && r.Status == "failed" && r.Failure != "outcome_unknown" {
 		d := loadDeliveryDiagnostics(ctx, r.TargetID)
 		switch {
-		case r.Failure == "source_delivery" && d.OperationState == "not_started":
+		case isSourceDeliveryFailure(r.Failure) && d.OperationState == "not_started":
 			decision = "retry"
 			e["reason"] = "source failed before provider initialization"
 		case r.Platform == "facebook" && facebookFetchRejected(r.LastError):
