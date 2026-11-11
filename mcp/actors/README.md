@@ -1,6 +1,6 @@
 # Actors
 
-Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
+Actors v0.4.1 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run) and bounds saved pagination ID lists. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
 
 Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
 
@@ -29,7 +29,9 @@ After saving it:
 {"actor_id": 1, "operation": "read", "input": {"url": "https://example.com"}}
 ```
 
-Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows.
+Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows. Pass `"detail": "summary"` to `actors_run_get` for the compact terminal receipt (status, operation, revision, timings, `dataset_count`, failure/effect evidence and compact read coverage) without the definition snapshot, input, previews, traces or per-round pagination IDs. The final dataset page of a finished run (`has_more: false`) includes the same receipt as `run_summary`.
+
+Saved read-pagination evidence records `before_count`, `after_count` and `new_count` for every round. ID lists longer than 50 keep their first and last 25 IDs and set `ids_truncated`; the run dataset holds every observed record.
 
 Set the Actors installation’s `worker_limit` to control concurrent runs (default 4, range 1–32). Runs for the same saved browser context or read continuation wait for each other. Independent runs can use the other slots. Run details report `wait_reason` while queued, plus separate `queue_wait_ms` and `execution_ms` timings. The actor’s `max_duration_seconds` budget begins at execution. If a timed-out run may have changed external state, its result sets `reconciliation_required` and disables Retry for that run. Reconcile the outcome before explicitly queuing another run.
 
@@ -78,7 +80,7 @@ Routes are relative to the server's authenticated app mount, normally `/api/apps
 | GET | `/actors/{id}?revision=N` | Retrieve an exact immutable definition and operation names |
 | DELETE | `/actors/{id}` | Delete an actor after removing tasks and schedules |
 | POST | `/actors/run` | Queue a run; same input as `actors_run` |
-| GET | `/runs`, `/runs/{id}` | History and run detail |
+| GET | `/runs`, `/runs/{id}?detail=full\|summary` | History and run detail |
 | POST | `/runs/{id}/cancel`, `/runs/{id}/retry` | Cancel / explicitly repeat the snapshot |
 | POST | `/runs/{id}/recover` | Recover with a reviewed revision and fresh duplicate inspection |
 | GET | `/runs/{id}/dataset?after=0&limit=50` | Committed items |

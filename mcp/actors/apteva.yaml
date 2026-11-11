@@ -1,8 +1,12 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.4.0
+version: 0.4.1
 description: |
+  v0.4.1 adds a compact run receipt: actors_run_get detail=summary and
+  run_summary on the final dataset page of a finished run carry status,
+  revision, dataset count and read coverage without snapshots or previews.
+  Saved pagination evidence keeps counts and bounds long ID lists.
   v0.4.0 adds Computer Mobile targets, saved device contexts, screenshot and
   screen-input workflows, capability preflight, and per-device queue locks.
   Requires Computer 0.8.0. Mobile reuses shared device data; DOM/form/upload
@@ -108,7 +112,7 @@ provides:
     - name: actors_run
       description: Queue a named operation with optional revision, preset, input and idempotency key.
     - name: actors_run_get
-      description: Get run status, bounded output, immutable snapshot and export references.
+      description: Get run status, bounded output, immutable snapshot and export references; detail=summary returns the compact terminal receipt with read coverage.
     - name: actors_run_cancel
       description: Cancel queued work or request cancellation of an active run.
     - name: actors_run_retry
@@ -130,7 +134,7 @@ provides:
     - name: actors_task_delete
       description: Delete a saved task.
     - name: actors_dataset_read
-      description: Read a run dataset with cursor pagination, including partial results.
+      description: Read a run dataset with cursor pagination, including partial results; the final page of a finished run includes its compact run_summary receipt.
     - name: actors_crawl_save
       description: Create or update a schema version 2 crawl actor with routes and datasets.
     - name: actors_crawl_run
@@ -160,7 +164,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.4.0
+    ref: actors/v0.4.1
     entry: mcp/actors
   port: 8080
   health_check: /health

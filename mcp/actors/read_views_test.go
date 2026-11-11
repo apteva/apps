@@ -134,6 +134,7 @@ func TestReadViewsCoverage(t *testing.T) {
 			if mode == "inaccessible" && intFromAny(out["item_count"]) != 4 {
 				t.Fatal("partial dataset lost")
 			}
+			assertRunSummaryReceipt(t, ctx, app, r)
 			for _, call := range plat.callsSnapshot() {
 				if call.tool == "browser_extract" && call.args["readability"] != false {
 					t.Fatal("readability enabled")

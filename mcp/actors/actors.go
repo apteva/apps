@@ -256,8 +256,8 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"actor_id"}), Handler: a.toolActorRun,
 		},
 		{
-			Name: "actors_run_get", Description: "Get one Actors run, including actor snapshot metadata, bounded output, and artifacts.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorRunGet,
+			Name: "actors_run_get", Description: "Get one Actors run. detail=full (default) includes the definition snapshot, input, bounded output, previews, traces and artifacts. detail=summary returns the compact terminal receipt: status, operation, revision, timings, dataset_count, failure/effect evidence and compact read coverage.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "detail": map[string]any{"type": "string", "enum": []string{"full", "summary"}, "default": "full"}}, []string{"id"}), Handler: a.toolActorRunGet,
 		},
 		{
 			Name: "actors_run_cancel", Description: "Request cancellation of a queued or running actor run.",
@@ -1204,7 +1204,7 @@ func (a *App) handleRunItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	out, err := a.toolActorRunGet(ctx, map[string]any{"id": actorHTTPID(r)})
+	out, err := a.toolActorRunGet(ctx, map[string]any{"id": actorHTTPID(r), "detail": r.URL.Query().Get("detail")})
 	writeJSON(w, out, err)
 }
 

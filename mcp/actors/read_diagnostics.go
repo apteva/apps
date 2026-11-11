@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/andybalholm/cascadia"
@@ -26,6 +27,40 @@ type actorReadDiagnostic struct {
 	ErrorText         string         `json:"error_text,omitempty"`
 	Status            string         `json:"status"`
 	StopReason        string         `json:"stop_reason,omitempty"`
+}
+
+const maxReadDiagnosticIDs = 50
+
+// MarshalJSON bounds saved pagination evidence. Pages that accumulate rows
+// (infinite scroll) repeat every loaded ID in each round, so whole lists grow
+// with rounds × items. Each list keeps its count, and lists longer than
+// maxReadDiagnosticIDs keep only their first and last IDs; the run dataset
+// holds every record. Execution still compares the full in-memory lists.
+func (d actorReadDiagnostic) MarshalJSON() ([]byte, error) {
+	type plain actorReadDiagnostic
+	out := struct {
+		plain
+		BeforeCount  int  `json:"before_count"`
+		AfterCount   int  `json:"after_count"`
+		NewCount     int  `json:"new_count"`
+		IDsTruncated bool `json:"ids_truncated,omitempty"`
+	}{plain: plain(d), BeforeCount: len(d.BeforeIDs), AfterCount: len(d.AfterIDs), NewCount: len(d.NewIDs)}
+	var before, after, added bool
+	out.BeforeIDs, before = boundReadDiagnosticIDs(d.BeforeIDs)
+	out.AfterIDs, after = boundReadDiagnosticIDs(d.AfterIDs)
+	out.NewIDs, added = boundReadDiagnosticIDs(d.NewIDs)
+	out.IDsTruncated = before || after || added
+	return json.Marshal(out)
+}
+
+func boundReadDiagnosticIDs(ids []string) ([]string, bool) {
+	if len(ids) <= maxReadDiagnosticIDs {
+		return ids, false
+	}
+	half := maxReadDiagnosticIDs / 2
+	out := make([]string, 0, maxReadDiagnosticIDs)
+	out = append(out, ids[:half]...)
+	return append(out, ids[len(ids)-half:]...), true
 }
 
 func sortedReadIDs(ids map[string]bool) []string {

@@ -253,9 +253,18 @@ func (a *App) toolActorRunGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
+	detail, err := actorRunDetail(args)
+	if err != nil {
+		return nil, err
+	}
 	run, err := getActorRun(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if run != nil && detail == "summary" {
+		if run, err = summarizeActorRun(ctx, run); err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{"run": run, "found": run != nil}, nil
 }

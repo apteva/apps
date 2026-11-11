@@ -396,7 +396,7 @@ func (a *App) platformTools() []sdk.Tool {
 		{Name: "actors_task_list", Description: "List saved tasks in the current project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolTaskList},
 		{Name: "actors_task_run", Description: "Queue a saved task using its pinned revision and inputs.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskRun},
 		{Name: "actors_task_delete", Description: "Delete a saved task; actor definitions and historical runs remain.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskDelete},
-		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
+		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page. The last page (has_more=false) of a finished run includes run_summary: the compact terminal receipt with status, revision, dataset_count and read coverage.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
 	}
 }
 
@@ -631,7 +631,23 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cursor = rowID
 		size += len(raw)
 	}
-	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	out := map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}
+	// The last page of a finished run carries its compact receipt, so a reader
+	// that consumes every row also gets the coverage needed to trust them.
+	if !more && terminalActorRunStatus(status) {
+		run, err := getActorRun(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if out["run_summary"], err = summarizeActorRun(ctx, run); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (a *App) platformRoutes() []sdk.Route {
