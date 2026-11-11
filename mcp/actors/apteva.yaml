@@ -1,12 +1,15 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.4.1
+version: 0.5.0
 description: |
-  v0.4.1 adds a compact run receipt: actors_run_get detail=summary and
+  v0.5.0 adds a compact run receipt: actors_run_get detail=summary and
   run_summary on the final dataset page of a finished run carry status,
   revision, dataset count and read coverage without snapshots or previews.
-  Saved pagination evidence keeps counts and bounds long ID lists.
+  Saved pagination evidence keeps counts and bounds long ID lists. It also
+  adds private native Mobile steps guarded by on-screen markers, with secret
+  references bound to a saved context and native app; they need a Computer
+  release that supports native input.
   v0.4.0 adds Computer Mobile targets, saved device contexts, screenshot and
   screen-input workflows, capability preflight, and per-device queue locks.
   Requires Computer 0.8.0. Mobile reuses shared device data; DOM/form/upload
@@ -164,7 +167,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.4.1
+    ref: actors/v0.5.0
     entry: mcp/actors
   port: 8080
   health_check: /health

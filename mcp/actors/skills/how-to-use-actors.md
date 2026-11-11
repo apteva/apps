@@ -184,3 +184,14 @@ queued, execution fails before opening a session. Failed cleanup quarantines the
 device until its existing lease expires. Mobile itself also owns device leases
 across other callers. Run details show the resolved device and normal queue and
 execution timing. Closing a session preserves device app data.
+
+Native Mobile steps (0.5.0) act on accessibility elements, not coordinates:
+`native_assert`, `native_wait`, `native_tap`, `native_tap_badged`,
+`native_tap_if_present`, `native_type`, `native_replace`,
+`native_type_secret` and keypad `native_type_private`. Every step names
+`native_app` and 1–12 `native_required` on-screen markers; input steps need an
+exact `native_target`. Secret steps need `private_screen: true`, a saved
+`browser.context_id`, and a `browser_secrets` entry bound to that context and
+`native_app` (no host). Private operations save no screenshots. Computer must
+report the native actions in its Mobile capabilities or the run fails before
+input.

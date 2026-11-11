@@ -1,6 +1,6 @@
 # Actors
 
-Actors v0.4.1 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run) and bounds saved pagination ID lists. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
+Actors v0.5.0 adds a compact run receipt (`actors_run_get` with `detail: "summary"`, and `run_summary` on the final dataset page of a finished run), bounds saved pagination ID lists, and adds private native Mobile screen steps. Actors v0.4.0 adds Mobile screen workflows through Computer 0.8.0, with capability checks and device-aware scheduling. It retains durable schema version 2 crawls, URL fan-out, resumable frontier state, keyed datasets, and guarded browser workflows. Computer owns browser and Mobile sessions.
 
 Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
 
@@ -501,3 +501,27 @@ queued, execution fails before opening a session. Failed cleanup quarantines the
 device until its existing lease expires. Mobile itself also owns device leases
 across other callers. Run details show the resolved device and normal queue and
 execution timing. Closing a session preserves device app data.
+
+### Native screen steps (v0.5.0)
+
+Native steps act on accessibility elements of the foreground app instead of
+pixel coordinates. Each one names `native_app` and 1–12 `native_required`
+markers that must all be on screen before Computer acts:
+
+- `native_assert` and `native_wait` (`duration_ms`, 1–28000) only check markers.
+- `native_tap`, `native_tap_badged` and `native_tap_if_present` tap the exact
+  `native_target`.
+- `native_type` and `native_replace` enter 1–256 bytes of single-line `text`
+  into `native_target`.
+- `native_type_secret` enters a `secret_ref` into `native_target`;
+  `native_type_private` with `mode: "keypad"` taps a numeric secret digit by
+  digit.
+
+Secret steps require `private_screen: true` on the operation and a saved
+`browser.context_id`. A private operation opens the session extraction-only,
+saves no screenshots and requests no observations after input. Its
+`browser_secrets` entry must name the same `context_id` and `native_app` and no
+`host`; browser `fill_secret` rejects native-bound entries. Literal text and
+optional secret steps are rejected. These steps need a Computer release that
+reports the native actions in its Mobile capabilities; otherwise the
+capability preflight fails the run before any input.
