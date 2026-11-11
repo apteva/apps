@@ -139,6 +139,9 @@ provides:
         proxy_mode=direct to explicitly disable proxies.
     - name: computer_use
       description: |
+        For explicitly read-only navigation, pass read_only=true to allow one
+        Browserbase fresh-page retry. Failed navigation returns structured
+        diagnostics and incomplete coverage. Never replay uncertain writes.
         Drive an app-owned session. Mobile uses screenshots and pixel
         coordinates, swipe with to_x/to_y, home, key=home|enter (Android also
         back), launch_app/stop_app with app_id, type, scroll and navigate.

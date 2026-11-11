@@ -473,7 +473,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		return errors.New("current-page inspection requires an existing browser session")
 	}
 	if e.readResume == nil && !c.UseCurrentPage {
-		if err := e.gotoURL(c.EntryURL); err != nil {
+		if err := e.gotoReadOnlyURL(c.EntryURL); err != nil {
 			return err
 		}
 	}
@@ -507,7 +507,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			return err
 		}
 		target := stringFromAny(targetAny)
-		if err := e.gotoURL(target); err != nil {
+		if err := e.gotoReadOnlyURL(target); err != nil {
 			return err
 		}
 	}

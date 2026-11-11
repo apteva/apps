@@ -30,7 +30,6 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
-	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/scrolltarget"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
@@ -99,6 +98,7 @@ type Options struct {
 }
 
 type Computer struct {
+	lastNavigation   *computer.NavigationDiagnostics
 	tabManager       *cdptabs.Manager
 	tabTrackers      map[string]*stability.Tracker
 	apiKey           string
@@ -487,7 +487,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "navigate", "back", "reload":
-		if err := navigation.Run(c.ctx, action.Type, action.URL, navigateActionTimeout); err != nil {
+		if err := c.executeNavigation(action); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
