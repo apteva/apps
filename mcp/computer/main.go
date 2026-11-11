@@ -44,6 +44,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
+	"github.com/apteva/apps/mcp/computer/internal/browser/mobile"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
@@ -719,7 +720,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"native_assert", "native_wait", "native_tap", "native_tap_badged", "native_tap_if_present", "native_type", "native_type_secure", "native_replace", "swipe", "home", "launch_app", "stop_app", "screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "prepare_upload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
@@ -727,6 +728,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"url":                 map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
 				"tab_id":              map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
+				"native_app":          map[string]any{"type": "string", "description": "Exact foreground iOS app label for a native screen action."},
+				"native_required":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact visible accessibility markers required before native input."},
+				"native_target":       map[string]any{"type": "string", "description": "Exact iOS accessibility label or identifier. native_tap_badged also accepts a button with this exact base followed by a comma, a space, and badge text. native_tap_if_present skips when a required screen marker is absent."},
 				"coordinate":          map[string]any{"type": "string"},
 				"label":               map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
 				"target_id":           map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
@@ -2644,6 +2648,36 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 	}
 	if err := validateBackendAction(sess.comp, args); err != nil {
 		return nil, err
+	}
+	if action == "native_wait" {
+		native, ok := sess.comp.(interface {
+			NativeWait(string, []string, int) error
+		})
+		if !ok {
+			return nil, errors.New("native_wait requires a Mobile session")
+		}
+		if err := native.NativeWait(stringArg(args, "native_app"), stringSliceArg(args, "native_required"), intArg(args, "duration")); err != nil {
+			return nil, err
+		}
+		return map[string]any{"success": true, "session_id": id}, nil
+	}
+	if action == "native_assert" || action == "native_tap" || action == "native_tap_badged" || action == "native_tap_if_present" || action == "native_type" || action == "native_type_secure" || action == "native_replace" {
+		if action == "native_type_secure" && (!sess.extractionOnly || (stringArg(args, "observation") != "" && stringArg(args, "observation") != "none")) {
+			return nil, errors.New("native secure input requires a private session without observation")
+		}
+		native, ok := sess.comp.(interface {
+			NativeScreen(string, string, []string, string, string) error
+		})
+		if !ok {
+			return nil, errors.New("native screen actions require a Mobile session")
+		}
+		if err := native.NativeScreen(action, stringArg(args, "native_app"), stringSliceArg(args, "native_required"), stringArg(args, "native_target"), stringArg(args, "text")); err != nil {
+			if action == "native_tap_if_present" && errors.Is(err, mobile.ErrNativeScreenMarkerAbsent) {
+				return map[string]any{"success": true, "skipped": true, "session_id": id}, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"success": true, "session_id": id}, nil
 	}
 	if action == "prepare_upload" {
 		return sess.prepareUpload(args, ctx.DataDir())
