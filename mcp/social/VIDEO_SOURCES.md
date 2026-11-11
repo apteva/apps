@@ -12,8 +12,13 @@ ETag alone does not enable the streaming shortcut.
 
 ## Streaming contract
 
-Storage can enable bounded streaming by returning `source` from `files_get`,
-at the top level or inside `file`.
+Storage's existing `file.source` string is provenance (for example `human` or
+`media-render`). Social leaves provenance unchanged and uses full disk staging
+for strings, absent fields and null values. A `source` object is accepted only
+as the explicit `storage-source/v1` contract below, at the top level or inside
+`file`. Malformed, incomplete or conflicting advertised objects fail explicitly
+instead of silently downgrading. URL minting, renewal and metadata refresh use
+the same compatibility decoder.
 
 ```json
 {
@@ -66,3 +71,14 @@ Revalidation fetches metadata and container bytes rather than downloading the
 whole verified source. Sources without the descriptor retain full staging and
 checksum verification. Existing account, audience, revision and duplicate
 guards continue to gate execution.
+
+Legacy failures caused specifically by trying to decode a Storage provenance
+string as a descriptor can use `post_delivery_revalidate` and
+`post_delivery_recover` on their original target. Eligibility requires the exact
+historical error for the unchanged source ID, no native operation/session or
+publication identity, no submitted/accepted request or upload receipt, and
+nonpublication diagnostics. Source metadata is resolved afresh and all bytes,
+checksum and container are verified before granting recovery. The target,
+revision, source proof and nonpublication evidence are checked again before the
+one-target retry. The historical failure stays in the audit and attempt ledger.
+Other validation failures are not made retryable by this compatibility path.

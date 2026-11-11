@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -16,6 +17,47 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+// Storage's legacy source is provenance, not a delivery descriptor. Keep the
+// wire decoder separate from persisted recovery proofs, which are always typed.
+type storageSourceField struct{ Descriptor *storageVideoSource }
+
+type storageVideoURLResponse struct {
+	URL    string             `json:"url"`
+	FileID int64              `json:"file_id"`
+	Source storageSourceField `json:"source"`
+	File   struct {
+		Source storageSourceField `json:"source"`
+	} `json:"file"`
+}
+
+func (s *storageSourceField) UnmarshalJSON(raw []byte) error {
+	s.Descriptor = nil
+	raw = bytes.TrimSpace(raw)
+	if bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	if len(raw) > 0 && raw[0] == '"' {
+		var provenance string
+		return json.Unmarshal(raw, &provenance)
+	}
+	var source storageVideoSource
+	if len(raw) == 0 || raw[0] != '{' || json.Unmarshal(raw, &source) != nil || !source.validDescriptor() {
+		return &sourceDeliveryError{Code: "invalid_source_descriptor", Reason: "Storage advertised an invalid storage-source/v1 descriptor"}
+	}
+	s.Descriptor = &source
+	return nil
+}
+
+func storageResponseSource(top, nested storageSourceField) (*storageVideoSource, error) {
+	if top.Descriptor != nil && nested.Descriptor != nil && *top.Descriptor != *nested.Descriptor {
+		return nil, &sourceDeliveryError{Code: "source_changed", Reason: "Storage returned conflicting source descriptors"}
+	}
+	if top.Descriptor != nil {
+		return top.Descriptor, nil
+	}
+	return nested.Descriptor, nil
+}
 
 type storageVideoChecksum struct {
 	Algorithm string `json:"algorithm"`
@@ -35,6 +77,12 @@ type storageVideoSource struct {
 	SizeBytes        int64                `json:"size_bytes"`
 	ContentType      string               `json:"content_type"`
 	Checksum         storageVideoChecksum `json:"checksum"`
+}
+
+func (s storageVideoSource) validDescriptor() bool {
+	return s.Schema == "storage-source/v1" && s.StorageInstallID > 0 && strings.TrimSpace(s.ProjectID) != "" && s.FileID > 0 && validContentRevision(s.ContentRevision) &&
+		s.SizeBytes > 0 && s.SizeBytes <= maxPreparedVideoBytes && strings.HasPrefix(canonicalVideoMIME(s.ContentType), "video/") &&
+		s.Checksum.Algorithm == "sha256" && s.Checksum.Status == "verified" && validSHA256(s.Checksum.Value)
 }
 
 func (s *storageVideoSource) streamingEligible() bool {
@@ -245,17 +293,21 @@ func (a *App) prepareStorageVideo(ctx *sdk.AppCtx, j publishJob, item mediaItem,
 	// Refresh the descriptor before trusting cached media metadata. Byte reads
 	// are then bound by Storage to this same immutable content revision.
 	var metadata struct {
-		Source *storageVideoSource `json:"source"`
+		Source storageSourceField `json:"source"`
 		File   struct {
-			Source *storageVideoSource `json:"source"`
+			Source storageSourceField `json:"source"`
 		} `json:"file"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": item.ID, "_project_id": d.MediaProjectID}, &metadata); err != nil {
+		var sourceError *sourceDeliveryError
+		if errors.As(err, &sourceError) {
+			return nil, err
+		}
 		return nil, &sourceDeliveryError{Reason: "Storage source identity could not be refreshed", Transient: true}
 	}
-	fresh := metadata.Source
-	if fresh == nil {
-		fresh = metadata.File.Source
+	fresh, err := storageResponseSource(metadata.Source, metadata.File.Source)
+	if err != nil {
+		return nil, err
 	}
 	if fresh == nil || *fresh != source {
 		return nil, &sourceDeliveryError{Code: "source_changed", Reason: "Storage source identity changed during preparation"}

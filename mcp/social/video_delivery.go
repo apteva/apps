@@ -290,12 +290,12 @@ func mintVideoSourceURL(ctx *sdk.AppCtx, item mediaItem, project, route string, 
 	if expected != nil {
 		args["expected_content_revision"] = expected.ContentRevision
 	}
-	var signed struct {
-		URL    string              `json:"url"`
-		FileID int64               `json:"file_id"`
-		Source *storageVideoSource `json:"source"`
-	}
+	var signed storageVideoURLResponse
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &signed); err != nil {
+		var sourceError *sourceDeliveryError
+		if errors.As(err, &sourceError) {
+			return "", err
+		}
 		if expected != nil {
 			if strings.Contains(err.Error(), "source_changed") {
 				return "", &sourceDeliveryError{Code: "source_changed", Reason: "Storage rejected the approved content revision"}
@@ -304,8 +304,15 @@ func mintVideoSourceURL(ctx *sdk.AppCtx, item mediaItem, project, route string, 
 		}
 		return "", errors.New("Storage could not mint a delivery URL")
 	}
-	if expected != nil && (signed.Source == nil || *signed.Source != *expected || signed.FileID != item.ID) {
+	source, err := storageResponseSource(signed.Source, signed.File.Source)
+	if err != nil {
+		return "", err
+	}
+	if expected != nil && (source == nil || *source != *expected || signed.FileID != item.ID) {
 		return "", &sourceDeliveryError{Code: "source_changed", Reason: "renewed Storage URL differs from the approved object identity"}
+	}
+	if expected == nil && source != nil && !source.validFor(item, project, item.StorageInstallID) {
+		return "", &sourceDeliveryError{Code: "source_changed", Reason: "Storage URL descriptor differs from selected media"}
 	}
 	if signed.FileID > 0 && signed.FileID != item.ID {
 		return "", &sourceDeliveryError{Code: "source_changed", Reason: "Storage returned a different file"}
@@ -375,6 +382,9 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 		}
 	}
 	d := deliveryDiagnostics{bound: previous.bound, boundAttempt: previous.boundAttempt, boundOperation: previous.boundOperation, CorrelationID: randomDeliveryID(), SourceFileID: item.ID, MediaProjectID: project, ExpectedBytes: item.Bytes, Method: method, Stage: "source_fetch", OperationState: "not_started", Events: []deliveryEvent{}}
+	if method == "RECOVERY_VALIDATION" {
+		d.SourceSHA256 = previous.SourceSHA256
+	}
 	if b := ctx.IntegrationFor("storage"); b != nil {
 		d.StorageInstallID = b.InstallID
 	}
@@ -506,6 +516,13 @@ func (a *App) prepareVideoSource(ctx *sdk.AppCtx, j publishJob, item mediaItem, 
 			event.Result = "invalid_content_type"
 			d.event(ctx, j.targetID, event)
 			last = &sourceDeliveryError{Reason: "source response is not a video", Transient: false}
+			break
+		}
+		if item.Mime != "" && canonicalVideoMIME(mediaType) != canonicalVideoMIME(item.Mime) {
+			response.Body.Close()
+			event.Result = "source_changed"
+			d.event(ctx, j.targetID, event)
+			last = &sourceDeliveryError{Code: "source_changed", Reason: "source response media type differs from Storage metadata"}
 			break
 		}
 		if response.ContentLength > maxPreparedVideoBytes || item.Bytes > 0 && response.ContentLength >= 0 && response.ContentLength != item.Bytes {
