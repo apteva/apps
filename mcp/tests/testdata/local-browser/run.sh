@@ -22,6 +22,10 @@ cp "$APTEVA_SERVER_SOURCE/go.sum" "$smoke_dir/server.sum"
 SMOKE_DIR="$smoke_dir" FIXTURE_DIR="$fixture_dir" python3 - <<'PY'
 import os,json
 root=os.environ['SMOKE_DIR']
+# The synthetic backend is a test-only optional Gateway app dependency.
+p=root+'/api/apteva.yaml'
+s=open(p).read().replace('  apps:\n','  apps:\n    - {name: ui-fixture, optional: true, reason: Synthetic UI acceptance fixture.}\n',1)
+open(p,'w').write(s)
 json.dump({'Replace':{os.path.join(os.environ['APTEVA_SERVER_SOURCE'],'codex_browser_smoke_test.go'):os.path.join(os.environ['FIXTURE_DIR'],'server_smoke_test.go.txt')}},open(root+'/overlay.json','w'))
 PY
 cd "$APTEVA_SERVER_SOURCE"
