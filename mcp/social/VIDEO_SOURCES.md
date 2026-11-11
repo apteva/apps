@@ -38,6 +38,10 @@ immutable object version. Storage must enforce that binding during delivery.
 Social passes `expected_content_revision` to `files_get_url`. The mint response
 must include the identical `source`, `file_id`, and a signed `url`. Renewals and
 proxy fallback must preserve this descriptor. Bound delivery must not redirect.
+The signed URL must enforce the content revision for provider fetches that do
+not send Social's expectation header. Provider-fetch video URLs are minted
+with the expected revision, and Instagram validates the bound container
+before creating a Reel.
 
 Every Range GET includes `X-Storage-Expected-Content-Revision`. Storage must
 enforce the version, return 206 with the exact Content-Range and body length, and
